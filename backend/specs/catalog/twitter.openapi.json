@@ -12,43 +12,6 @@
     }
   ],
   "paths": {
-    "/users/me": {
-      "get": {
-        "operationId": "get_me",
-        "summary": "Get the authenticated user",
-        "x-aevatar-tool": {
-          "name": "get_me",
-          "description": "Get the authenticated X user profile.",
-          "readOnly": true,
-          "destructive": false,
-          "requiresApproval": false
-        },
-        "parameters": [
-          {
-            "name": "user.fields",
-            "in": "query",
-            "required": false,
-            "description": "Comma-separated extra user fields.",
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "User profile",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/tweets/search/recent": {
       "get": {
         "operationId": "search_recent_tweets",
@@ -99,57 +62,6 @@
         "responses": {
           "200": {
             "description": "Search results page",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "additionalProperties": true
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/tweets": {
-      "post": {
-        "operationId": "create_tweet",
-        "summary": "Create a post",
-        "x-aevatar-tool": {
-          "name": "create_tweet",
-          "description": "Publish an X post as the authenticated user.",
-          "readOnly": false,
-          "destructive": false,
-          "requiresApproval": true
-        },
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "additionalProperties": true,
-                "properties": {
-                  "text": {
-                    "type": "string",
-                    "description": "Post text (required unless media/poll only)."
-                  },
-                  "reply": {
-                    "type": "object",
-                    "description": "Reply target settings.",
-                    "additionalProperties": true
-                  },
-                  "quote_tweet_id": {
-                    "type": "string"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Created post",
             "content": {
               "application/json": {
                 "schema": {

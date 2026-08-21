@@ -42,6 +42,14 @@ pub struct EndpointUpdate {
     pub is_active: Option<bool>,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum EndpointSyncActivation {
+    /// Admin-initiated reconcile: re-adding an endpoint reactivates it.
+    ForceActive,
+    /// Background/startup sync: preserve an operator's explicit activation choice.
+    PreserveExisting,
+}
+
 /// Validate a request content type value for storage on an endpoint.
 pub fn validate_request_content_type(content_type: &str) -> AppResult<()> {
     if content_type.trim().is_empty() {
@@ -273,7 +281,16 @@ pub async fn bulk_upsert_endpoints(
 
     for input in inputs {
         upserted_names.push(input.name.clone());
-        result_endpoints.push(upsert_one_endpoint(&coll, service_id, input, now).await?);
+        result_endpoints.push(
+            upsert_one_endpoint(
+                &coll,
+                service_id,
+                input,
+                now,
+                EndpointSyncActivation::ForceActive,
+            )
+            .await?,
+        );
     }
 
     // Soft-delete endpoints for this service that were not in the upsert list
@@ -311,7 +328,16 @@ pub async fn upsert_endpoints_additive(
 
     let mut result_endpoints: Vec<ServiceEndpoint> = Vec::with_capacity(inputs.len());
     for input in inputs {
-        result_endpoints.push(upsert_one_endpoint(&coll, service_id, input, now).await?);
+        result_endpoints.push(
+            upsert_one_endpoint(
+                &coll,
+                service_id,
+                input,
+                now,
+                EndpointSyncActivation::PreserveExisting,
+            )
+            .await?,
+        );
     }
     Ok(result_endpoints)
 }
@@ -322,6 +348,7 @@ async fn upsert_one_endpoint(
     service_id: &str,
     input: EndpointInput,
     now: chrono::DateTime<Utc>,
+    activation: EndpointSyncActivation,
 ) -> AppResult<ServiceEndpoint> {
     let existing = coll
         .find_one(doc! { "service_id": service_id, "name": &input.name })
@@ -333,9 +360,11 @@ async fn upsert_one_endpoint(
             "description": input.description.as_deref(),
             "method": input.method.to_uppercase(),
             "path": &input.path,
-            "is_active": true,
             "updated_at": bson::DateTime::from_chrono(now),
         };
+        if activation == EndpointSyncActivation::ForceActive {
+            set_doc.insert("is_active", true);
+        }
 
         if let Some(ref params) = input.parameters {
             let bson_val = bson::to_bson(params)
@@ -403,7 +432,10 @@ async fn upsert_one_endpoint(
             response,
             risk: input.risk,
             supports_idempotency_key: input.supports_idempotency_key,
-            is_active: true,
+            is_active: match activation {
+                EndpointSyncActivation::ForceActive => true,
+                EndpointSyncActivation::PreserveExisting => existing.is_active,
+            },
             created_at: existing.created_at,
             updated_at: now,
         };
@@ -643,5 +675,78 @@ mod tests {
         assert!(active_names.contains(&"ep_d"));
         assert!(!active_names.contains(&"ep_b"));
         assert!(!active_names.contains(&"ep_c"));
+    }
+
+    #[tokio::test]
+    async fn bulk_upsert_reactivates_on_admin_reconcile() {
+        let Some(db) = connect_test_database("svc_endpoint_bulk_reactivate").await else {
+            return;
+        };
+        let service_id = Uuid::new_v4().to_string();
+        let endpoint = create_endpoint(&db, &service_id, make_input("reactivate", "get", "/old"))
+            .await
+            .unwrap();
+
+        db.collection::<ServiceEndpoint>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &endpoint.id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+
+        let results = bulk_upsert_endpoints(
+            &db,
+            &service_id,
+            vec![make_input("reactivate", "get", "/updated")],
+        )
+        .await
+        .unwrap();
+        assert!(results[0].is_active);
+
+        let stored = db
+            .collection::<ServiceEndpoint>(COLLECTION_NAME)
+            .find_one(doc! { "_id": &endpoint.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.is_active);
+    }
+
+    #[tokio::test]
+    async fn preserve_existing_returns_stored_activation() {
+        let Some(db) = connect_test_database("svc_endpoint_preserve_activation").await else {
+            return;
+        };
+        let service_id = Uuid::new_v4().to_string();
+        let endpoint = create_endpoint(&db, &service_id, make_input("preserve", "get", "/old"))
+            .await
+            .unwrap();
+
+        db.collection::<ServiceEndpoint>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &endpoint.id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+
+        let results = upsert_endpoints_additive(
+            &db,
+            &service_id,
+            vec![make_input("preserve", "get", "/refreshed")],
+        )
+        .await
+        .unwrap();
+        assert!(!results[0].is_active);
+
+        let stored = db
+            .collection::<ServiceEndpoint>(COLLECTION_NAME)
+            .find_one(doc! { "_id": &endpoint.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!stored.is_active);
+        assert_eq!(stored.path, "/refreshed");
     }
 }

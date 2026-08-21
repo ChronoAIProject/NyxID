@@ -447,4 +447,121 @@ mod tests {
             .expect("list endpoints again");
         assert_eq!(endpoints.len(), after.len());
     }
+
+    #[tokio::test]
+    async fn additive_sync_preserves_operator_deactivation() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("catalog_spec_sync_deactivation").await
+        else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = crate::test_utils::test_encryption_keys();
+        crate::services::provider_service::seed_default_providers(&db, &enc)
+            .await
+            .expect("seed providers");
+        crate::services::provider_service::seed_default_services(&db, &enc)
+            .await
+            .expect("seed services");
+
+        sync_seeded_service_endpoints(&db)
+            .await
+            .expect("initial endpoint sync");
+        let service = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "slug": "api-twitter" })
+            .await
+            .expect("query service")
+            .expect("api-twitter seeded");
+        let endpoint = db
+            .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+                crate::models::service_endpoint::COLLECTION_NAME,
+            )
+            .find_one(doc! {
+                "service_id": &service.id,
+                "name": "search_recent_tweets",
+            })
+            .await
+            .expect("query endpoint")
+            .expect("search endpoint seeded");
+
+        let old_updated_at = chrono::Utc::now() - chrono::Duration::days(1);
+        db.collection::<crate::models::service_endpoint::ServiceEndpoint>(
+            crate::models::service_endpoint::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! { "_id": &endpoint.id },
+            doc! {
+                "$set": {
+                    "is_active": false,
+                    "path": "/operator-stale-definition",
+                    "updated_at": mongodb::bson::DateTime::from_chrono(old_updated_at),
+                }
+            },
+        )
+        .await
+        .expect("deactivate endpoint");
+
+        sync_seeded_service_endpoints(&db)
+            .await
+            .expect("second endpoint sync");
+        let refreshed = db
+            .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+                crate::models::service_endpoint::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": &endpoint.id })
+            .await
+            .expect("query refreshed endpoint")
+            .expect("refreshed endpoint");
+        assert!(!refreshed.is_active);
+        assert_eq!(refreshed.path, "/tweets/search/recent");
+        assert!(refreshed.updated_at > old_updated_at);
+    }
+
+    #[test]
+    fn trimmed_overlays_exclude_retired_operations() {
+        let cases = [
+            (
+                "api-twitter",
+                &["create_tweet", "get_me"][..],
+                &[
+                    "search_recent_tweets",
+                    "get_user_by_username",
+                    "get_user_tweets",
+                    "delete_tweet",
+                ][..],
+            ),
+            (
+                "api-firecrawl",
+                &["agent", "agent_status", "map_site"][..],
+                &["scrape", "search"][..],
+            ),
+            (
+                "api-elevenlabs",
+                &["list_voices"][..],
+                &["text_to_speech", "text_to_speech_stream", "list_models"][..],
+            ),
+        ];
+
+        for (slug, retired, retained) in cases {
+            let inputs = seeded_endpoint_inputs(slug).expect("overlay parses");
+            let names: Vec<&str> = inputs.iter().map(|input| input.name.as_str()).collect();
+            for operation in retired {
+                assert!(
+                    !names.contains(operation),
+                    "retired operation '{operation}' remains in {slug} overlay"
+                );
+            }
+            for operation in retained {
+                assert!(
+                    names.contains(operation),
+                    "retained operation '{operation}' missing from {slug} overlay"
+                );
+            }
+            assert!(
+                names.iter().all(|name| !name.contains("convai")),
+                "retired convai operation remains in {slug} overlay"
+            );
+        }
+    }
 }

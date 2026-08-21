@@ -2566,7 +2566,7 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
             "Firecrawl uses bearer API keys. Paste the raw `fc-...` key; NyxID adds the `Bearer` prefix.",
         ),
         known_limitations: Some(
-            "The NyxID-hosted OpenAPI overlay currently annotates the asynchronous agent submit and poll operations for Aevatar typed tool discovery.",
+            "The NyxID-hosted OpenAPI overlay covers the scrape and search operations for Aevatar typed tool discovery; other Firecrawl operations remain available through the generic proxy.",
         ),
     },
     DefaultServiceSeed {
