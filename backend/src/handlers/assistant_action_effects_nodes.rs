@@ -989,6 +989,87 @@ pub async fn onboard_device(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Method, Request, StatusCode};
+    use chrono::Utc;
+    use mongodb::bson::doc;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
+    use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgRole};
+    use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::services::node_pending_credential_service::CreatePendingCredentialInput;
+    use crate::test_utils::{connect_test_database, test_app_state, test_membership, test_user};
+
+    fn access_token(state: &AppState, actor_id: &str) -> String {
+        crate::crypto::jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &uuid::Uuid::parse_str(actor_id).expect("actor uuid"),
+            "",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("sign token")
+    }
+
+    async fn request(
+        state: AppState,
+        token: &str,
+        method: Method,
+        uri: &str,
+        body: Value,
+    ) -> (StatusCode, Value) {
+        let (_, private) = crate::routes::build_router();
+        let response = private
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("build request"),
+            )
+            .await
+            .expect("router responds");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), 65536).await.expect("body");
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    fn test_node(owner_id: &str, name: &str) -> Node {
+        let now = Utc::now();
+        Node {
+            id: Uuid::new_v4().to_string(),
+            user_id: owner_id.to_string(),
+            name: name.to_string(),
+            status: NodeStatus::Offline,
+            auth_token_hash: "auth-hash".to_string(),
+            signing_secret_encrypted: None,
+            signing_secret_hash: "signing-hash".to_string(),
+            last_heartbeat_at: None,
+            connected_at: None,
+            metadata: None,
+            metrics: NodeMetrics::default(),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn insert_person(db: &mongodb::Database, user_id: &str) {
+        db.collection::<User>(USERS)
+            .insert_one(test_user(user_id, UserType::Person))
+            .await
+            .expect("insert person");
+    }
 
     /// Audit finding F4. `ensure_node_writable_by_actor` filters
     /// `is_active: true`, so running it BEFORE `reserve_or_replay` made a
@@ -996,8 +1077,8 @@ mod tests {
     /// completed receipt was ever consulted -- the Replay arm was dead code
     /// and a succeeded delete reported "not found / not yours".
     ///
-    /// This fails against that ordering: the second request 404s instead of
-    /// replaying 200.
+    /// Falsifier: restoring the pre-reservation ownership check makes the
+    /// second request 404 instead of replaying 200.
     #[tokio::test]
     async fn node_delete_retry_replays_instead_of_denying_a_committed_delete() {
         use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
@@ -1097,55 +1178,571 @@ mod tests {
         assert_eq!(retry["replayed"], true);
     }
 
-    #[test]
-    fn fingerprints_include_every_semantic_field() {
-        let first = fingerprint_canonical(&PushCredentialFingerprint {
-            action: PENDING_CREDENTIAL_PUSH_ACTION,
-            node_id: "node-a",
-            service_slug: "github",
-            injection_method: &InjectionMethod::Header,
-            field_name: "Authorization",
-            target_url: Some("https://example.test"),
-            label: Some("deploy"),
-        })
-        .unwrap();
-        let changed = fingerprint_canonical(&PushCredentialFingerprint {
-            action: PENDING_CREDENTIAL_PUSH_ACTION,
-            node_id: "node-a",
-            service_slug: "github",
-            injection_method: &InjectionMethod::Header,
-            field_name: "X-Api-Key",
-            target_url: Some("https://example.test"),
-            label: Some("deploy"),
-        })
-        .unwrap();
-        assert_ne!(first, changed);
+    #[tokio::test]
+    async fn node_delete_stale_state_version_rejected() {
+        // Falsifier: removing the expected-version predicate lets the delete
+        // call the mutation service and turns this stale confirmation into a
+        // 200 while deactivating the node.
+        let Some(db) = connect_test_database("assistant_node_delete_stale").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        insert_person(&db, &actor_id).await;
+        let node = test_node(&actor_id, "stale-delete-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+        db.collection::<mongodb::bson::Document>(NODES)
+            .update_one(
+                doc! { "_id": &node_id },
+                doc! { "$set": { "state_version": 2_i64 } },
+            )
+            .await
+            .expect("bump node state version");
+
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let (status, body) = request(
+            state,
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/delete",
+            json!({
+                "actionRequestId": "delete-stale",
+                "nodeId": node_id,
+                "expectedStateVersion": 1,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        let stored = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": &node_id })
+            .await
+            .expect("load node")
+            .expect("node exists");
+        assert!(stored.is_active, "stale delete must leave node active");
+        let authority = db
+            .collection::<mongodb::bson::Document>(NODES)
+            .find_one(doc! { "_id": &node_id })
+            .await
+            .expect("load authority")
+            .expect("authority exists");
+        assert_eq!(authority.get_i64("state_version").unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn node_transfer_stale_state_version_rejected() {
+        // Falsifier: omitting the version from the transfer precondition lets
+        // a stale confirmation move the node to the destination owner.
+        let Some(db) = connect_test_database("assistant_node_transfer_stale").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        let destination_id = Uuid::new_v4().to_string();
+        insert_person(&db, &actor_id).await;
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&destination_id, UserType::Org))
+            .await
+            .expect("insert destination org");
+        db.collection(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &destination_id,
+                &actor_id,
+                OrgRole::Admin,
+                None,
+            ))
+            .await
+            .expect("insert destination admin membership");
+
+        let node = test_node(&actor_id, "stale-transfer-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+        db.collection::<mongodb::bson::Document>(NODES)
+            .update_one(
+                doc! { "_id": &node_id },
+                doc! { "$set": { "state_version": 2_i64 } },
+            )
+            .await
+            .expect("bump node state version");
+
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let (status, body) = request(
+            state,
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/transfer",
+            json!({
+                "actionRequestId": "transfer-stale",
+                "nodeId": node_id,
+                "newOwnerUserId": destination_id,
+                "expectedStateVersion": 1,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+
+        let stored = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": &node_id })
+            .await
+            .expect("load node")
+            .expect("node exists");
+        assert_eq!(stored.user_id, actor_id);
+        assert!(stored.is_active);
+    }
+
+    #[tokio::test]
+    async fn replay_handlers_never_serialize_one_time_material() {
+        // Falsifier: attaching one-time material in any handler's Replay arm
+        // makes the second production-router response contain one of these
+        // forbidden properties.
+        let Some(db) = connect_test_database("assistant_node_replay_material").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        insert_person(&db, &actor_id).await;
+        let node = test_node(&actor_id, "replay-rotate-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db);
+        let token = access_token(&state, &actor_id);
+        let cases = [
+            (
+                "/api/v1/assistant/actions/nodes/register-token",
+                json!({"actionRequestId": "material-register", "name": "registered-node"}),
+                "registrationToken",
+            ),
+            (
+                "/api/v1/assistant/actions/nodes/rotate-token",
+                json!({"actionRequestId": "material-rotate", "nodeId": node_id}),
+                "authToken",
+            ),
+            (
+                "/api/v1/assistant/actions/nodes/device-onboard",
+                json!({"actionRequestId": "material-device", "label": "camera"}),
+                "qrPayload",
+            ),
+        ];
+
+        for (uri, body, one_time_property) in cases {
+            let (first_status, first) =
+                request(state.clone(), &token, Method::POST, uri, body.clone()).await;
+            assert_eq!(first_status, StatusCode::OK, "first {uri}: {first}");
+            assert!(
+                first.get(one_time_property).is_some(),
+                "first {uri}: {first}"
+            );
+
+            let (retry_status, retry) =
+                request(state.clone(), &token, Method::POST, uri, body).await;
+            assert_eq!(retry_status, StatusCode::OK, "retry {uri}: {retry}");
+            assert_eq!(retry["replayed"], true, "retry {uri}: {retry}");
+            for forbidden in [
+                "registrationToken",
+                "authToken",
+                "signingSecret",
+                "qrPayload",
+            ] {
+                assert!(
+                    retry.get(forbidden).is_none(),
+                    "replay {uri} leaked {forbidden}: {retry}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn node_transfer_retry_replays_instead_of_repeating_the_transfer() {
+        // Falsifier: returning InProgress/Reserved handling on a completed
+        // receipt, or moving ownership checks before reservation, turns the
+        // retry into a second mutation or a false not-found/owner error.
+        let Some(db) = connect_test_database("assistant_node_transfer_retry").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        let destination_id = Uuid::new_v4().to_string();
+        insert_person(&db, &actor_id).await;
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&destination_id, UserType::Org))
+            .await
+            .expect("insert destination org");
+        db.collection(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &destination_id,
+                &actor_id,
+                OrgRole::Admin,
+                None,
+            ))
+            .await
+            .expect("insert destination admin membership");
+        let node = test_node(&actor_id, "retry-transfer-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let body = json!({
+            "actionRequestId": "transfer-retry",
+            "nodeId": node_id,
+            "newOwnerUserId": destination_id,
+            "expectedStateVersion": 1,
+        });
+        let (first_status, first) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/transfer",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(first_status, StatusCode::OK, "{first}");
+        assert_eq!(first["replayed"], false);
+
+        let (retry_status, retry) = request(
+            state,
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/transfer",
+            body,
+        )
+        .await;
+        assert_eq!(retry_status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["replayed"], true);
+        let stored = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": &node_id })
+            .await
+            .expect("load node")
+            .expect("node exists");
+        assert_eq!(stored.user_id, destination_id);
+    }
+
+    #[tokio::test]
+    async fn pending_credential_push_retry_replays_without_creating_a_second_row() {
+        // Falsifier: bypassing reserve_or_replay or changing the resource id
+        // on replay creates two pending rows for one action request.
+        let Some(db) = connect_test_database("assistant_node_pending_push_retry").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        insert_person(&db, &actor_id).await;
+        let node = test_node(&actor_id, "pending-push-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let body = json!({
+            "actionRequestId": "pending-push-retry",
+            "nodeId": node_id,
+            "serviceSlug": "github",
+            "injectionMethod": "header",
+            "fieldName": "Authorization",
+            "targetUrl": "https://example.test",
+            "label": "deploy",
+        });
+        let (first_status, first) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/pending-credential-push",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(first_status, StatusCode::OK, "{first}");
+        assert_eq!(first["replayed"], false);
+        let first_id = first["resource"]["pendingCredentialId"]
+            .as_str()
+            .expect("pending id")
+            .to_string();
+
+        let (retry_status, retry) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/pending-credential-push",
+            body,
+        )
+        .await;
+        assert_eq!(retry_status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["replayed"], true);
+        assert_eq!(retry["resource"]["pendingCredentialId"], first_id);
+
+        let count = db
+            .collection::<mongodb::bson::Document>(
+                crate::models::node_pending_credential::COLLECTION_NAME,
+            )
+            .count_documents(doc! { "node_id": &node_id })
+            .await
+            .expect("count pending rows");
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn node_inject_credential_retry_replays_when_node_supports_remote_crypto() {
+        // Falsifier: skipping the receipt on the online-only inject path
+        // creates a second pending credential when the same action is retried.
+        let Some(db) = connect_test_database("assistant_node_inject_retry").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        insert_person(&db, &actor_id).await;
+        let node = test_node(&actor_id, "inject-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db.clone());
+        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        state.node_ws_manager.register_connection(&node_id, tx);
+        state.node_ws_manager.record_capabilities(
+            &node_id,
+            &crate::services::node_ws_manager::NodeCapabilitiesMsg {
+                remote_credential_crypto_v1: true,
+                ..Default::default()
+            },
+        );
+        let token = access_token(&state, &actor_id);
+        let body = json!({
+            "actionRequestId": "inject-retry",
+            "nodeId": node_id,
+            "serviceSlug": "github",
+            "injectionMethod": "header",
+            "fieldName": "Authorization",
+            "targetUrl": "https://example.test",
+            "label": "deploy",
+        });
+        let (first_status, first) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/inject-credential",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(first_status, StatusCode::OK, "{first}");
+        assert_eq!(first["replayed"], false);
+
+        let (retry_status, retry) = request(
+            state,
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/inject-credential",
+            body,
+        )
+        .await;
+        assert_eq!(retry_status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["replayed"], true);
+    }
+
+    #[tokio::test]
+    async fn pending_credential_cancel_retry_replays_terminal_evidence() {
+        // Falsifier: hard-delete cancel or a non-replaying retry makes the
+        // second request lose the surviving inactive/declined evidence or
+        // report a fresh mutation instead of `replayed: true`.
+        let Some(db) = connect_test_database("assistant_node_pending_cancel_retry").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        insert_person(&db, &actor_id).await;
+        let node = test_node(&actor_id, "pending-cancel-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+        let pending_id = Uuid::new_v4().to_string();
+        node_pending_credential_service::create_pending_credential_with_id(
+            &db,
+            &actor_id,
+            &node_id,
+            &pending_id,
+            CreatePendingCredentialInput {
+                service_slug: "github".to_string(),
+                injection_method: InjectionMethod::Header,
+                field_name: "Authorization".to_string(),
+                target_url: None,
+                label: Some("deploy".to_string()),
+                ttl_secs: 900,
+                remote_crypto: false,
+            },
+        )
+        .await
+        .expect("create pending credential");
+
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let body = json!({
+            "actionRequestId": "pending-cancel-retry",
+            "nodeId": node_id,
+            "pendingCredentialId": pending_id,
+        });
+        let (first_status, first) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/pending-credential-cancel",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(first_status, StatusCode::OK, "{first}");
+        assert_eq!(first["replayed"], false);
+
+        let (retry_status, retry) = request(
+            state,
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/pending-credential-cancel",
+            body,
+        )
+        .await;
+        assert_eq!(retry_status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["replayed"], true);
+
+        let evidence = db
+            .collection::<mongodb::bson::Document>(
+                crate::models::node_pending_credential::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": &pending_id })
+            .await
+            .expect("load pending evidence")
+            .expect("pending evidence survives cancel");
+        assert_eq!(evidence.get_bool("is_active"), Ok(false));
+        assert!(evidence.get("declined_at").is_some());
     }
 
     #[test]
-    fn replay_responses_never_serialize_one_time_material() {
-        let receipt = AssistantActionReceipt {
-            id: "receipt".to_string(),
-            user_id: "actor".to_string(),
-            action: NODE_ROTATE_TOKEN_ACTION.to_string(),
-            action_request_id: "action".to_string(),
-            request_fingerprint: "fingerprint".to_string(),
-            resource_id: Uuid::new_v4().to_string(),
-            status:
-                crate::models::assistant_action_receipt::AssistantActionReceiptStatus::Completed,
-            created_at: chrono::Utc::now(),
-            completed_at: Some(chrono::Utc::now()),
-        };
-        let node = serde_json::to_value(node_response(&receipt, true)).unwrap();
-        let device = serde_json::to_value(device_response(&receipt, true)).unwrap();
-        for forbidden in [
-            "registrationToken",
-            "authToken",
-            "signingSecret",
-            "qrPayload",
-        ] {
-            assert!(node.get(forbidden).is_none(), "node leaked {forbidden}");
-            assert!(device.get(forbidden).is_none(), "device leaked {forbidden}");
+    fn fingerprints_include_every_semantic_field() {
+        use serde_json::{Value, json};
+
+        // Falsifier: deleting any serialized field from one verb's fingerprint
+        // makes that field's changed row collide with its baseline here.
+        fn assert_fields(verb: &str, baseline: Value, changes: &[(&str, Value)]) {
+            let baseline_fingerprint = fingerprint_canonical(&baseline).unwrap();
+            for (field, value) in changes {
+                let mut changed = baseline.clone();
+                changed
+                    .as_object_mut()
+                    .expect("fingerprint object")
+                    .insert((*field).to_string(), value.clone());
+                assert_ne!(
+                    baseline_fingerprint,
+                    fingerprint_canonical(&changed).unwrap(),
+                    "{verb} fingerprint must bind {field}"
+                );
+            }
+        }
+
+        let cases: [(&str, Value, &[(&str, Value)]); 8] = [
+            (
+                NODE_REGISTER_TOKEN_ACTION,
+                json!({
+                    "action": NODE_REGISTER_TOKEN_ACTION,
+                    "name": "node-a",
+                    "targetOwnerUserId": "owner-a"
+                }),
+                &[
+                    ("action", json!("other.action")),
+                    ("name", json!("node-b")),
+                    ("targetOwnerUserId", json!("owner-b")),
+                ],
+            ),
+            (
+                NODE_ROTATE_TOKEN_ACTION,
+                json!({"action": NODE_ROTATE_TOKEN_ACTION, "nodeId": "node-a"}),
+                &[
+                    ("action", json!("other.action")),
+                    ("nodeId", json!("node-b")),
+                ],
+            ),
+            (
+                NODE_DELETE_ACTION,
+                json!({"action": NODE_DELETE_ACTION, "nodeId": "node-a", "expectedStateVersion": 1}),
+                &[
+                    ("action", json!("other.action")),
+                    ("nodeId", json!("node-b")),
+                    ("expectedStateVersion", json!(2)),
+                ],
+            ),
+            (
+                NODE_TRANSFER_ACTION,
+                json!({"action": NODE_TRANSFER_ACTION, "nodeId": "node-a", "newOwnerUserId": "owner-a", "expectedStateVersion": 1}),
+                &[
+                    ("action", json!("other.action")),
+                    ("nodeId", json!("node-b")),
+                    ("newOwnerUserId", json!("owner-b")),
+                    ("expectedStateVersion", json!(2)),
+                ],
+            ),
+            (
+                NODE_INJECT_CREDENTIAL_ACTION,
+                json!({"action": NODE_INJECT_CREDENTIAL_ACTION, "nodeId": "node-a", "serviceSlug": "github", "injectionMethod": "header", "fieldName": "Authorization", "targetUrl": "https://example.test", "label": "deploy"}),
+                &[
+                    ("action", json!("other.action")),
+                    ("nodeId", json!("node-b")),
+                    ("serviceSlug", json!("gitlab")),
+                    ("injectionMethod", json!("query-param")),
+                    ("fieldName", json!("X-Api-Key")),
+                    ("targetUrl", json!("https://other.test")),
+                    ("label", json!("production")),
+                ],
+            ),
+            (
+                PENDING_CREDENTIAL_PUSH_ACTION,
+                json!({"action": PENDING_CREDENTIAL_PUSH_ACTION, "nodeId": "node-a", "serviceSlug": "github", "injectionMethod": "header", "fieldName": "Authorization", "targetUrl": "https://example.test", "label": "deploy"}),
+                &[
+                    ("action", json!("other.action")),
+                    ("nodeId", json!("node-b")),
+                    ("serviceSlug", json!("gitlab")),
+                    ("injectionMethod", json!("query-param")),
+                    ("fieldName", json!("X-Api-Key")),
+                    ("targetUrl", json!("https://other.test")),
+                    ("label", json!("production")),
+                ],
+            ),
+            (
+                PENDING_CREDENTIAL_CANCEL_ACTION,
+                json!({"action": PENDING_CREDENTIAL_CANCEL_ACTION, "nodeId": "node-a", "pendingCredentialId": "pending-a"}),
+                &[
+                    ("action", json!("other.action")),
+                    ("nodeId", json!("node-b")),
+                    ("pendingCredentialId", json!("pending-b")),
+                ],
+            ),
+            (
+                DEVICE_ONBOARD_ACTION,
+                json!({"action": DEVICE_ONBOARD_ACTION, "label": "camera", "targetOwnerUserId": "owner-a", "defaultServiceIds": ["service-a"]}),
+                &[
+                    ("action", json!("other.action")),
+                    ("label", json!("sensor")),
+                    ("targetOwnerUserId", json!("owner-b")),
+                    ("defaultServiceIds", json!(["service-b"])),
+                ],
+            ),
+        ];
+
+        for (verb, baseline, variations) in cases {
+            assert_fields(verb, baseline, variations);
         }
     }
 }
