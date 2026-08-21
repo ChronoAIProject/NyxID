@@ -231,6 +231,11 @@ export const AdminIntegrityPage = lazy(() =>
     default: m.AdminIntegrityPage,
   })),
 );
+export const AdminCreditsPage = lazy(() =>
+  import("@/pages/admin-credits").then((m) => ({
+    default: m.AdminCreditsPage,
+  })),
+);
 export const SshTerminalPage = lazy(() =>
   import("@/pages/ssh-terminal").then((m) => ({
     default: m.SshTerminalPage,
