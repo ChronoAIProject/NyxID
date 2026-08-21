@@ -16,7 +16,7 @@ use mongodb::{Database, bson::doc};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use crate::errors::AppError;
@@ -270,6 +270,76 @@ impl PerAgentRateLimiter {
 }
 
 pub type SharedPerAgentRateLimiter = Arc<PerAgentRateLimiter>;
+
+/// Per-(platform service, user) token bucket guarding shared master
+/// credentials. The keyed bucket is deliberately separate from API-key
+/// limiting so browser-session callers receive the same protection.
+pub struct PlatformUserRateLimiter {
+    inner: PerAgentRateLimiter,
+    per_second: u32,
+    burst: u32,
+}
+
+impl PlatformUserRateLimiter {
+    pub fn new(per_second: u32, burst: u32) -> Self {
+        Self {
+            inner: PerAgentRateLimiter::new(),
+            per_second,
+            burst,
+        }
+    }
+
+    /// Check a request for the given platform service and user.
+    /// Returns true if allowed, false if rate limited.
+    pub fn check(&self, service_id: &str, user_id: &str) -> bool {
+        self.inner.check(
+            &format!("{service_id}:{user_id}"),
+            self.per_second,
+            self.burst,
+        )
+    }
+
+    pub fn cleanup(&self) {
+        self.inner.cleanup();
+    }
+}
+
+static PLATFORM_USER_LIMITER: OnceLock<PlatformUserRateLimiter> = OnceLock::new();
+
+/// Install the process-wide platform per-user limiter. A zero sustained rate
+/// disables limiting, and initialization is intentionally one-shot.
+pub fn init_platform_user_rate_limiter(per_second: u32, burst: u32) {
+    if per_second == 0 {
+        return;
+    }
+    let _ = PLATFORM_USER_LIMITER.set(PlatformUserRateLimiter::new(per_second, burst));
+}
+
+pub fn platform_user_rate_limiter() -> Option<&'static PlatformUserRateLimiter> {
+    PLATFORM_USER_LIMITER.get()
+}
+
+pub fn cleanup_platform_user_rate_limiter() {
+    if let Some(limiter) = platform_user_rate_limiter() {
+        limiter.cleanup();
+    }
+}
+
+/// Enforce a platform per-user limit through an explicit limiter seam so the
+/// authorization path can be tested without initializing the global OnceLock.
+pub fn enforce_platform_user_limit(
+    limiter: Option<&PlatformUserRateLimiter>,
+    service_id: &str,
+    user_id: &str,
+) -> Result<(), crate::errors::AppError> {
+    if let Some(limiter) = limiter
+        && !limiter.check(service_id, user_id)
+    {
+        tracing::warn!(service_id, "Platform per-user rate limit exceeded");
+        return Err(crate::errors::AppError::RateLimited);
+    }
+    Ok(())
+}
 
 /// Per-device-code rate limiter keyed by Ed25519 public key bytes.
 ///
@@ -957,6 +1027,27 @@ mod tests {
         assert!(limiter.check("agent-burst", 1, 2));
         assert!(limiter.check("agent-burst", 1, 2));
         assert!(!limiter.check("agent-burst", 1, 2));
+    }
+
+    #[test]
+    fn platform_user_buckets_are_isolated() {
+        let limiter = PlatformUserRateLimiter::new(1, 2);
+        assert!(limiter.check("S", "A"));
+        assert!(limiter.check("S", "A"));
+        assert!(!limiter.check("S", "A"));
+        assert!(limiter.check("S", "B"));
+        assert!(limiter.check("T", "A"));
+    }
+
+    #[test]
+    fn enforce_platform_user_limit_maps_to_rate_limited() {
+        let limiter = PlatformUserRateLimiter::new(1, 1);
+        assert!(enforce_platform_user_limit(Some(&limiter), "S", "A").is_ok());
+        assert!(matches!(
+            enforce_platform_user_limit(Some(&limiter), "S", "A"),
+            Err(crate::errors::AppError::RateLimited)
+        ));
+        assert!(enforce_platform_user_limit(None, "S", "A").is_ok());
     }
 
     #[test]
