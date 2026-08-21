@@ -520,9 +520,10 @@ pub async fn create_pending_credential_with_id(
     Ok(pending)
 }
 
-/// Minimal authority state for assistant postcondition reads. Cancel removes
-/// its row, so the same projection returns causal 404 absence for that verb;
-/// consumed and declined rows remain readable as terminal evidence.
+/// Minimal authority state for assistant postcondition reads. Cancel softly
+/// deactivates its row, so the surviving `is_active: false` plus
+/// `declined_at` fields remain terminal evidence; consumed and declined rows
+/// remain readable as well.
 pub async fn get_pending_credential_authorization_state(
     db: &mongodb::Database,
     actor_user_id: &str,

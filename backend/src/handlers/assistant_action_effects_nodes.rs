@@ -9,7 +9,7 @@ use axum::{
     extract::State,
     routing::{get, post},
 };
-use mongodb::bson::doc;
+use mongodb::bson::{Document, doc};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -20,6 +20,7 @@ use crate::handlers::{devices, node_admin};
 use crate::models::assistant_action_receipt::{
     AssistantActionReceipt, COLLECTION_NAME as ASSISTANT_ACTION_RECEIPTS,
 };
+use crate::models::node::COLLECTION_NAME as NODES;
 use crate::models::node_pending_credential::InjectionMethod;
 use crate::mw::auth::AuthUser;
 use crate::services::assistant_action_receipts::{
@@ -86,10 +87,19 @@ pub struct NodeIdentityRequest {
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DeleteNodeRequest {
+    pub action_request_id: String,
+    pub node_id: String,
+    pub expected_state_version: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TransferNodeRequest {
     pub action_request_id: String,
     pub node_id: String,
     pub new_owner_user_id: String,
+    pub expected_state_version: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,10 +202,19 @@ struct NodeIdentityFingerprint<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct DeleteNodeFingerprint<'a> {
+    action: &'static str,
+    node_id: &'a str,
+    expected_state_version: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct TransferNodeFingerprint<'a> {
     action: &'static str,
     node_id: &'a str,
     new_owner_user_id: &'a str,
+    expected_state_version: i64,
 }
 
 #[derive(Serialize)]
@@ -275,6 +294,40 @@ async fn ensure_owner_writable(
     if !access.can_write() {
         return Err(AppError::Forbidden(
             "You must be the owner or an org admin".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_expected_state_version(expected_state_version: i64) -> AppResult<i64> {
+    if expected_state_version <= 0 {
+        return Err(AppError::ValidationError(
+            "expectedStateVersion must be a positive integer".to_string(),
+        ));
+    }
+    Ok(expected_state_version)
+}
+
+/// Read the authority projection's version after a receipt is reserved. The
+/// node model intentionally remains backward-compatible with rows that predate
+/// the projection; those rows are treated as version one, matching the public
+/// authorization endpoint. The mutation service still performs the write, so
+/// this check prevents a stale confirmation from entering that path.
+async fn ensure_expected_node_state_version(
+    state: &AppState,
+    node_id: &str,
+    expected_state_version: i64,
+) -> AppResult<()> {
+    let authority = state
+        .db
+        .collection::<Document>(NODES)
+        .find_one(doc! { "_id": node_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NodeNotFound("Node not found".to_string()))?;
+    let current_state_version = authority.get_i64("state_version").unwrap_or(1).max(1);
+    if current_state_version != expected_state_version {
+        return Err(AppError::Conflict(
+            "the node changed since this action was prepared".to_string(),
         ));
     }
     Ok(())
@@ -520,12 +573,13 @@ pub async fn rotate_node_token(
 pub async fn delete_node(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Json(body): Json<NodeIdentityRequest>,
+    Json(body): Json<DeleteNodeRequest>,
 ) -> AppResult<Json<AssistantNodeEffectResponse>> {
     auth_user.ensure_write_scope()?;
     let actor = auth_user.user_id.to_string();
     let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let node_id = normalize_action_request_id(body.node_id)?;
+    let expected_state_version = validate_expected_state_version(body.expected_state_version)?;
     // Ownership is checked AFTER the reservation, not before. `ensure_node_
     // writable_by_actor` filters `is_active: true`, so running it first made a
     // retry of an already-committed delete return NotFound before the completed
@@ -533,9 +587,10 @@ pub async fn delete_node(
     // succeeded delete reported "not found". Reserving first keeps replay
     // working; a caller with no claim to the node has its pending receipt
     // released immediately, so nothing is leaked or left behind.
-    let fingerprint = fingerprint_canonical(&NodeIdentityFingerprint {
+    let fingerprint = fingerprint_canonical(&DeleteNodeFingerprint {
         action: NODE_DELETE_ACTION,
         node_id: &node_id,
+        expected_state_version,
     })?;
     match assistant_action_receipts::reserve_or_replay(
         &state.db,
@@ -552,6 +607,12 @@ pub async fn delete_node(
         ReceiptOutcome::Reserved(receipt) => {
             if let Err(error) =
                 node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await
+            {
+                release_pending_receipt(&state, &receipt).await;
+                return Err(error);
+            }
+            if let Err(error) =
+                ensure_expected_node_state_version(&state, &node_id, expected_state_version).await
             {
                 release_pending_receipt(&state, &receipt).await;
                 return Err(error);
@@ -590,6 +651,7 @@ pub async fn transfer_node(
     let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let node_id = normalize_action_request_id(body.node_id)?;
     let new_owner_user_id = normalize_action_request_id(body.new_owner_user_id)?;
+    let expected_state_version = validate_expected_state_version(body.expected_state_version)?;
     // Same ordering rule as delete: the pre-checks move into the Reserved arm
     // so a retry of a committed transfer replays instead of failing with
     // "node already belongs to that owner" -- which is the success condition,
@@ -598,6 +660,7 @@ pub async fn transfer_node(
         action: NODE_TRANSFER_ACTION,
         node_id: &node_id,
         new_owner_user_id: &new_owner_user_id,
+        expected_state_version,
     })?;
     match assistant_action_receipts::reserve_or_replay(
         &state.db,
@@ -626,6 +689,12 @@ pub async fn transfer_node(
                     release_pending_receipt(&state, &receipt).await;
                     return Err(error);
                 }
+            }
+            if let Err(error) =
+                ensure_expected_node_state_version(&state, &node_id, expected_state_version).await
+            {
+                release_pending_receipt(&state, &receipt).await;
+                return Err(error);
             }
             if let Err(error) = ensure_owner_writable(&state, &actor, &new_owner_user_id).await {
                 release_pending_receipt(&state, &receipt).await;
@@ -985,7 +1054,11 @@ mod tests {
         )
         .expect("sign token");
 
-        let body = json!({ "actionRequestId": "node-delete-retry", "nodeId": node_id });
+        let body = json!({
+            "actionRequestId": "node-delete-retry",
+            "nodeId": node_id,
+            "expectedStateVersion": 1,
+        });
         let send = |st: AppState| {
             let token = token.clone();
             let body = body.clone();
