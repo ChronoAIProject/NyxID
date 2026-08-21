@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use axum::{
     Json,
     extract::{Path, Query, State},

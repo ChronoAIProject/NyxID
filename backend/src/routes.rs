@@ -465,6 +465,14 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/me", get(handlers::users::get_me))
         .route("/me", put(handlers::users::update_me))
         .route("/me", delete(handlers::users::delete_me))
+        // Assistant postcondition evidence. These MUST be mounted on the
+        // production router: a browser journey that proves success by a 404
+        // cannot distinguish "resource absent" from "route absent", so an
+        // unmounted evidence route makes every absence proof vacuous.
+        .route(
+            "/me/authorization",
+            get(handlers::users::get_account_authorization),
+        )
         .route(
             "/me/onboarding/complete",
             post(handlers::users::complete_onboarding),
@@ -478,6 +486,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             delete(handlers::broker_bindings::revoke_my_broker_binding),
         )
         .route("/me/consents", get(handlers::consent::list_my_consents))
+        .route(
+            "/me/consents/{client_id}/authorization",
+            get(handlers::consent::get_my_consent_authorization),
+        )
         .route(
             "/me/consents/{client_id}",
             delete(handlers::consent::revoke_my_consent),
@@ -970,6 +982,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         )
         .route("/grants", get(handlers::approvals::list_grants))
         .route(
+            "/grants/{grant_id}/authorization",
+            get(handlers::approvals::get_grant_authorization),
+        )
+        .route(
             "/grants/{grant_id}",
             delete(handlers::approvals::revoke_grant),
         )
@@ -981,6 +997,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/service-configs/{service_id}",
             put(handlers::approvals::set_service_config)
                 .delete(handlers::approvals::delete_service_config),
+        )
+        .route(
+            "/service-configs/{service_id}/authorization",
+            get(handlers::approvals::get_service_config_authorization),
         );
 
     let node_registration_routes = Router::new().route(

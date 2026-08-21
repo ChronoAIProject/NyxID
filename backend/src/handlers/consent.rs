@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use axum::{
     Json,
     extract::{Path, State},
@@ -455,5 +453,55 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["message"], "Consent revoked");
+    }
+}
+
+#[cfg(test)]
+mod assistant_evidence_mount_tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    /// Assistant journeys prove destructive success by a 404 on an evidence
+    /// route. A route that is not mounted returns the SAME 404, so an
+    /// unmounted evidence route makes every absence proof pass vacuously --
+    /// including when the underlying operation failed. That is exactly what
+    /// happened to the four Wave-4 evidence handlers, which sat unreferenced
+    /// behind a crate-level `allow(dead_code)`.
+    ///
+    /// This asserts each evidence path is REACHABLE on the production router.
+    /// Unauthenticated requests must be rejected by auth (401/403), never
+    /// answered with the router's own 404 -- that distinction is the whole
+    /// point, so a future unmounting fails the build instead of silently
+    /// re-arming the defect.
+    #[tokio::test]
+    async fn wave4_evidence_routes_are_mounted_on_the_production_router() {
+        let paths = [
+            "/api/v1/users/me/authorization",
+            "/api/v1/users/me/consents/client-1/authorization",
+            "/api/v1/approvals/grants/grant-1/authorization",
+            "/api/v1/approvals/service-configs/svc-1/authorization",
+        ];
+
+        for path in paths {
+            let state = crate::test_utils::test_app_state_no_db().await;
+            let (_, private) = crate::routes::build_router();
+            let app = private.with_state(state);
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .body(Body::empty())
+                        .expect("build request"),
+                )
+                .await
+                .expect("router responds");
+
+            assert_ne!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "evidence route is not mounted, so absence proofs are vacuous: {path}"
+            );
+        }
     }
 }

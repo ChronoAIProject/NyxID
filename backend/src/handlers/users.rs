@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use axum::{Json, extract::State, http::HeaderMap};
 use chrono::Utc;
 use mongodb::bson::{self, doc};
