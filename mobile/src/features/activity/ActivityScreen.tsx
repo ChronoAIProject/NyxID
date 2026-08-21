@@ -31,6 +31,7 @@ import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tansta
 import { ScreenContainer } from "../../components/ScreenContainer";
 
 import { ToastOverlay, type ToastState } from "../../components/ToastOverlay";
+import { setActiveChallengeId } from "../../lib/notifications/pushNotifications";
 import { SegmentControl } from "../../components/SegmentControl";
 import { ChallengeCard } from "../../components/ChallengeCard";
 import { GrantCard } from "../../components/GrantCard";
@@ -291,6 +292,15 @@ export function ActivityScreen() {
   const [toast, setToast] = useState<ToastState | null>(null);
   const [mutatingIds, setMutatingIds] = useState<Set<string>>(new Set());
   const [detailChallenge, setDetailChallenge] = useState<ChallengeDetail | null>(null);
+
+  // Tell the push layer which approval is on screen, so a push for THIS
+  // challenge does not raise an in-app toast over the sheet the user is
+  // already acting on. Cleared on unmount so an unmounted screen never
+  // keeps suppressing.
+  useEffect(() => {
+    setActiveChallengeId(detailChallenge?.id ?? null);
+    return () => setActiveChallengeId(null);
+  }, [detailChallenge?.id]);
   // Track when the approval-detail sheet was opened so we can report
   // both the view duration on abandonment and the view->tap latency on
   // decision emission.
