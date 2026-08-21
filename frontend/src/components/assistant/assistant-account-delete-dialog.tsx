@@ -5,7 +5,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api-client";
 import { actionControlIdentitySchema } from "@/schemas/assistant-actions";
-import { errorMessage, isNotFound } from "./assistant-action-dialog-utils";
+import { assertSecretFreeReadBack, errorMessage, isNotFound } from "./assistant-action-dialog-utils";
 
 const paramsSchema = z.object({}).strict();
 const responseSchema = z.object({ resource: z.object({ userId: actionControlIdentitySchema }).strict(), replayed: z.boolean() }).strict();
@@ -33,6 +33,8 @@ export function AssistantAccountDeleteDialog({
       const profile = await api.get<{ email: string }>("/users/me");
       setAccountEmail(profile.email);
       if (confirmEmail.trim().toLowerCase() !== profile.email.trim().toLowerCase()) throw new Error("Type your account email exactly to continue.");
+      const before = await api.get<unknown>("/users/me/authorization");
+      assertSecretFreeReadBack(before);
       const response = responseSchema.parse(await api.post<unknown>("/assistant/actions/org/account/delete", { actionRequestId }));
       try { await api.get(`/users/me/authorization`); throw new Error("The account still exists after deletion."); }
       catch (caught) { if (!isNotFound(caught)) throw caught; }

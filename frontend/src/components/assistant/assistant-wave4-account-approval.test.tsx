@@ -54,7 +54,7 @@ describe("Wave 4 account journeys", () => {
 
   it("requires body-free absence evidence for consent revoke", async () => {
     mockPost.mockResolvedValue({ resource: { userId: IDS.user }, replayed: false });
-    mockGet.mockRejectedValue(new MockApiError(404));
+    mockGet.mockResolvedValueOnce({ id: IDS.client, granted_scopes: ["openid"] }).mockRejectedValueOnce(new MockApiError(404));
     const onComplete = vi.fn();
     renderDialog(<AssistantAccountRevokeConsentDialog open onOpenChange={vi.fn()} actionRequestId="consent-1" params={{ clientId: IDS.client }} onComplete={onComplete} />);
     await userEvent.click(screen.getByRole("button", { name: "Revoke consent" }));
@@ -63,7 +63,7 @@ describe("Wave 4 account journeys", () => {
   });
 
   it("requires the account email on every destructive delete", async () => {
-    mockGet.mockResolvedValueOnce({ email: "owner@example.com" }).mockRejectedValueOnce(new MockApiError(404));
+    mockGet.mockResolvedValueOnce({ email: "owner@example.com" }).mockResolvedValueOnce(accountEvidence()).mockRejectedValueOnce(new MockApiError(404));
     mockPost.mockResolvedValue({ resource: { userId: IDS.user }, replayed: false });
     renderDialog(<AssistantAccountDeleteDialog open onOpenChange={vi.fn()} actionRequestId="delete-1" onComplete={vi.fn()} />);
     await userEvent.type(screen.getByLabelText("Account email"), "owner@example.com");

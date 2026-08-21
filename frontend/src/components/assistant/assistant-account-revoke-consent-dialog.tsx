@@ -31,6 +31,10 @@ export function AssistantAccountRevokeConsentDialog({
     submittingRef.current = true; setSubmitting(true); setError(null);
     try {
       const expected = paramsSchema.parse(params);
+      const before = await api.get<unknown>(
+        `/users/me/consents/${encodeURIComponent(expected.clientId)}/authorization`,
+      );
+      assertSecretFreeReadBack(before);
       const response = responseSchema.parse(await api.post<unknown>("/assistant/actions/org/account/revoke-consent", { actionRequestId, clientId: expected.clientId }));
       try {
         const evidence = await api.get<unknown>(`/users/me/consents/${encodeURIComponent(expected.clientId)}/authorization`);
