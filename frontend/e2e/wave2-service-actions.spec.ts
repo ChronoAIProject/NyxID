@@ -25,10 +25,11 @@ const EVIDENCE = {
 async function stubServiceApis(
   page: Page,
   options: { deleteConflictOnce?: boolean } = {},
-): Promise<void> {
+): Promise<unknown[]> {
   let deleteCalls = 0;
   let serviceStateVersion = EVIDENCE.state_version;
   let deleted = false;
+  const requestBodies: unknown[] = [];
   await page.route("**/api/v1/assistant/actions/services/**", async (route) => {
     const url = route.request().url();
     const method = route.request().method();
@@ -36,6 +37,7 @@ async function stubServiceApis(
       await route.continue();
       return;
     }
+    requestBodies.push(route.request().postDataJSON());
     if (url.includes("/delete") && options.deleteConflictOnce && deleteCalls === 0) {
       deleteCalls += 1;
       await route.fulfill({
@@ -78,6 +80,7 @@ async function stubServiceApis(
       body: JSON.stringify({ ...EVIDENCE, state_version: serviceStateVersion }),
     });
   });
+  return requestBodies;
 }
 
 async function mountDialog(
@@ -132,8 +135,10 @@ async function mountDialog(
 }
 
 test("wave2_service_update_dialog_ui_contract", async ({ page }) => {
+  // Falsifier: remove any semantic field or actionRequestId from the dialog POST;
+  // the request-body assertion fails even though the stub still returns 200.
   await openAssistant(page);
-  await stubServiceApis(page);
+  const requestBodies = await stubServiceApis(page);
   await mountDialog(
     page,
     "/src/components/assistant/assistant-service-update-dialog.tsx",
@@ -152,6 +157,14 @@ test("wave2_service_update_dialog_ui_contract", async ({ page }) => {
     page.getByRole("heading", { name: "Update connected service" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Update service" }).click();
+  await expect.poll(() => requestBodies).toEqual([
+    {
+      actionRequestId: "act-e2e-update",
+      userServiceId: SERVICE_ID,
+      name: "Example",
+      endpointUrl: "https://api.example.com",
+    },
+  ]);
   await expect(
     page.getByText("Authorization evidence verified."),
   ).toBeVisible();
@@ -160,8 +173,12 @@ test("wave2_service_update_dialog_ui_contract", async ({ page }) => {
 });
 
 test("wave2_service_delete_dialog_ui_contract", async ({ page }) => {
+  // Falsifier: omit cascadeGrant or cascadeSiblings on the confirmation retry;
+  // the request-body assertion fails even though the stub still returns 200.
   await openAssistant(page);
-  await stubServiceApis(page, { deleteConflictOnce: true });
+  const requestBodies = await stubServiceApis(page, {
+    deleteConflictOnce: true,
+  });
   await mountDialog(
     page,
     "/src/components/assistant/assistant-service-delete-dialog.tsx",
@@ -182,5 +199,19 @@ test("wave2_service_delete_dialog_ui_contract", async ({ page }) => {
   await page.getByRole("button", { name: "Delete service" }).click();
   await expect(page.getByText(/revoke the shared grant/i)).toBeVisible();
   await page.getByRole("button", { name: "Delete and revoke grant" }).click();
+  await expect.poll(() => requestBodies).toEqual([
+    {
+      actionRequestId: "act-e2e-delete",
+      userServiceId: SERVICE_ID,
+    },
+    {
+      actionRequestId: "act-e2e-delete",
+      userServiceId: SERVICE_ID,
+      cascadeGrant: true,
+      cascadeSiblings: [
+        { user_service_id: "sibling", name: "other", slug: "other" },
+      ],
+    },
+  ]);
   await expect(page.getByTestId("wave2-complete")).toHaveText(SERVICE_ID);
 });
