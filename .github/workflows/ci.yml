@@ -65,6 +65,7 @@ jobs:
       cli: ${{ steps.filter.outputs.cli }}
       rust: ${{ steps.filter.outputs.rust }}
       frontend: ${{ steps.filter.outputs.frontend }}
+      mobile: ${{ steps.filter.outputs.mobile }}
       sdk: ${{ steps.filter.outputs.sdk }}
       wizard: ${{ steps.filter.outputs.wizard }}
       cursor_plugin: ${{ steps.filter.outputs.cursor_plugin }}
@@ -125,6 +126,9 @@ jobs:
               - '.config/nextest.toml'
             frontend:
               - 'frontend/**'
+              - '.node-version'
+            mobile:
+              - 'mobile/**'
               - '.node-version'
             sdk:
               - 'sdk/**'
@@ -356,6 +360,32 @@ jobs:
       - run: npm run lint
       - run: npm run test
       - run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # Mobile: committed native state, unit tests, and type-check
+  # ---------------------------------------------------------------------------
+  mobile:
+    name: Mobile
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.mobile == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check:native-sync
+      - run: pnpm test
+      - run: pnpm typecheck
 
   # ---------------------------------------------------------------------------
   # CLI wizard bundle: source-closure freshness check.
