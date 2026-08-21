@@ -350,8 +350,10 @@ pub struct DownstreamService {
 
     /// Operations callers may execute through NyxID. An empty policy denies
     /// every operation. Missing policy preserves the service's existing
-    /// passthrough behavior except on master-credential rows, where
-    /// resolution itself is denied by the authorization gate.
+    /// passthrough behavior except on actor-addressed master-credential rows,
+    /// where resolution itself is denied by the authorization gate.
+    /// Server-chosen master-credential traffic remains passthrough because
+    /// callers cannot select its downstream operation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy_operation_policy: Option<ProxyOperationPolicy>,
 

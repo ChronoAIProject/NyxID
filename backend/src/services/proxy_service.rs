@@ -152,6 +152,7 @@ pub async fn authorize_master_credential(
     actor: &EffectiveActor,
 ) -> AppResult<AuthorizedMasterCredential> {
     validate_master_credential_service(service)?;
+    validate_actor_addressed_master_credential_policy(service)?;
 
     match service.visibility.as_str() {
         "public" => {}
@@ -229,14 +230,17 @@ pub async fn authorize_master_credential_server_chosen(
         return Err(AppError::NotFound("Service not found".to_string()));
     }
     validate_master_credential_service(service)?;
+
+    // Server-chosen callers cannot name downstream operations: the server
+    // constructs the request. A caller operation allowlist therefore has no
+    // meaning on this path, and absent policy remains passthrough by design.
     Ok(AuthorizedMasterCredential::new(
         &service.credential_encrypted,
     ))
 }
 
-/// Validate the catalog row before any master credential is wrapped. Both
-/// actor-addressed and server-chosen surfaces use this gate so a platform
-/// credential cannot bypass the allowlist by selecting another entry point.
+/// Validate the platform-credential row shape shared by actor-addressed and
+/// server-chosen surfaces before either path wraps the credential.
 fn validate_master_credential_service(service: &DownstreamService) -> AppResult<()> {
     if !is_valid_master_credential_service(service) {
         tracing::warn!(
@@ -248,6 +252,12 @@ fn validate_master_credential_service(service: &DownstreamService) -> AppResult<
         return Err(AppError::NotFound("Service not found".to_string()));
     }
 
+    Ok(())
+}
+
+/// Actor-addressed callers choose an operation, so platform credentials on
+/// this path must carry an explicit operation policy.
+fn validate_actor_addressed_master_credential_policy(service: &DownstreamService) -> AppResult<()> {
     // A row holding a platform credential must state what it may do. Absent
     // policy is deny, not passthrough (V1_SPEC item 2). Present-but-empty
     // policy still resolves here and denies at the operation layer.
@@ -3605,11 +3615,6 @@ mod tests {
         );
 
         service.visibility = "public".to_string();
-        assert_service_not_found(
-            authorize_master_credential_server_chosen(&db, &service).await,
-            "server-chosen rows without a policy must fail closed",
-        );
-
         service.proxy_operation_policy = Some(ProxyOperationPolicy { rules: vec![] });
         assert!(
             authorize_master_credential_server_chosen(&db, &service)
@@ -3626,6 +3631,7 @@ mod tests {
 
     fn valid_master_service(policy: Option<ProxyOperationPolicy>) -> DownstreamService {
         let mut service = dummy_service();
+        service.visibility = "public".to_string();
         service.service_category = "internal".to_string();
         service.auth_method = "bearer".to_string();
         service.requires_user_credential = false;
@@ -3635,7 +3641,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn master_credential_without_policy_is_denied() {
+    async fn master_credential_without_policy_is_server_chosen_only() {
         let Some(db) = connect_test_database("proxy_master_credential_missing_policy").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -3643,6 +3649,12 @@ mod tests {
         let service = valid_master_service(None);
         let actor = EffectiveActor::from_user_id(uuid::Uuid::new_v4().to_string());
 
+        assert!(
+            authorize_master_credential_server_chosen(&db, &service)
+                .await
+                .is_ok(),
+            "server-chosen rows without a policy must keep resolving"
+        );
         assert_service_not_found(
             authorize_master_credential(&db, &service, &actor).await,
             "missing policy must fail closed before credential access",

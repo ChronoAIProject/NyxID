@@ -156,26 +156,30 @@ if service.proxy_operation_policy.is_none() {
 **Deliberately unchanged:**
 
 - `authorize_proxy_operation_fields` keeps `None => allow`. Non-platform rows (BYOK
-  connections, user services, no-auth rows) retain passthrough; the fail-closed rule is scoped
-  to rows spending the platform credential, which all funnel through
+  connections, user services, no-auth rows) retain passthrough. The fail-closed rule is scoped
+  to actor-addressed rows spending the platform credential; those transports funnel through
   `authorize_master_credential`.
 - `authorize_master_credential_server_chosen` (`proxy_service.rs:215-242`) is unchanged. The
   server-chosen surface (`execute_admin_proxy` / assistant direct) forwards requests the
   platform itself addressed; the caller never picks the target. Note the interaction: when a
   server-chosen row *does* carry a policy, `handlers/proxy.rs:2018` rule-matches its traffic
-  too — see the deployment prerequisite below.
+  too — see the deployment advisory below.
 - Update the doc comment on the model field (`downstream_service.rs:351-354`) to read: empty
   policy denies every operation; missing policy preserves passthrough **except** on
-  master-credential rows, where resolution itself denies (`authorize_master_credential`).
+  actor-addressed master-credential rows, where resolution itself denies
+  (`authorize_master_credential`). Server-chosen master-credential traffic remains passthrough.
 
 ### Tests
 
 In the existing `#[cfg(test)]` module of `proxy_service.rs`, `connect_test_database` pattern:
 
-- `master_credential_without_policy_is_denied` — public, valid master row (mirror the setup at
-  `proxy_service.rs:3620-3631`: `service_category = "internal"`, `auth_method = "bearer"`,
-  `credential_encrypted = vec![1,2,3]`), `proxy_operation_policy = None`. Assert
-  `authorize_master_credential(&db, &service, &actor).await.is_err()`.
+- `master_credential_without_policy_is_server_chosen_only` — public, valid master row (mirror
+  the setup at `proxy_service.rs:3620-3631`: `service_category = "internal"`,
+  `auth_method = "bearer"`, `credential_encrypted = vec![1,2,3]`),
+  `proxy_operation_policy = None`. Pass the same row through both gates. Assert the
+  server-chosen gate resolves it and the actor-addressed gate returns the exact
+  not-found-shaped denial. This is the regression guard for `chrono-llm-public` and the direct
+  chat engine.
 - `master_credential_with_empty_policy_resolves` — same row with
   `Some(ProxyOperationPolicy { rules: vec![] })`. Assert resolution `is_ok()` (denial of every
   operation is the operation layer's job — pinned by the existing
@@ -201,9 +205,15 @@ In the existing `#[cfg(test)]` module of `proxy_service.rs`, `connect_test_datab
   an execution-path-only gate; MCP `executable` for platform rows is computed at
   `mcp_service.rs:924` without it).
 
-### Deployment prerequisite (production, before this code deploys)
+### Deployment advisory (no pre-deploy configuration prerequisite)
 
-Absent-policy master rows stop resolving the moment this deploys. Audit first:
+No production row requires a policy before this code deploys. In particular, server-chosen rows
+such as `chrono-llm-public` are unaffected: they continue to resolve with no policy because the
+server constructs the downstream request and the caller cannot select an operation. Item 2 only
+changes actor-addressed resolution.
+
+The following audit is advisory. It identifies actor-addressed uses whose behavior changes when
+an absent-policy platform credential begins failing closed:
 
 ```js
 db.downstream_services.find({
@@ -216,24 +226,25 @@ db.downstream_services.find({
 }, { slug: 1, base_url: 1 })
 ```
 
-For each row returned (expected: `chrono-llm-public`, possibly others), check the audit log for
-actor-addressed traffic (proxy/MCP/`/llm` events naming the row) over the last 30 days, then:
+For each row returned (expected: `chrono-llm-public`, possibly others), optionally check the audit
+log for actor-addressed traffic (proxy/MCP/`/llm` events naming the row) over the last 30 days:
 
 - **No actor-addressed traffic** → leave the policy absent. Server-chosen (assistant direct)
-  traffic is unaffected by item 2 and, with policy `None`, is also untouched by the rule
-  matcher at `handlers/proxy.rs:2018`. Post-deploy, actor-addressed calls deny — the desired
-  state.
+  traffic is unaffected by item 2 and, with policy `None`, is also untouched by the rule matcher
+  at `handlers/proxy.rs:2018`.
 - **Actor-addressed traffic exists** (e.g. users calling the public LLM through `/llm` or
-  `/proxy`) → attach a policy whose rules cover **both** the observed actor paths **and** the
-  paths the assistant surface forwards (assistant direct forwards chat-completions-shaped paths
-  into `execute_admin_proxy`, `handlers/assistant.rs:693`; once a policy is present, AdminManaged
-  traffic is rule-matched too). For a chat row with `base_url` ending in the API root, that is
-  at minimum `POST /chat/completions` (plus `GET /models` if observed). Verify the assistant
-  works in staging with the policy attached before production.
+  `/proxy`) → those actor-addressed calls deny after deploy unless an operator deliberately
+  attaches a policy. A compatibility policy must cover **both** the observed actor paths **and**
+  the paths the assistant surface forwards (assistant direct forwards chat-completions-shaped
+  paths into `execute_admin_proxy`, `handlers/assistant.rs:693`; once a policy is present,
+  AdminManaged traffic is rule-matched too). For a chat row with `base_url` ending in the API
+  root, that is at minimum `POST /chat/completions` (plus `GET /models` if observed). Verify the
+  assistant works in staging before attaching such a policy in production.
 
-Do not skip the audit: attaching an empty policy to a row serving assistant traffic breaks the
-assistant (rules evaluate and deny), and leaving policy absent breaks any real `/llm` gateway
-users of that row. The audit decides which of the two configurations is correct per row.
+This audit is not a rollout gate. Do not attach an empty policy to a row serving assistant traffic:
+present policies are still rule-matched and an empty policy denies the server-constructed request.
+Leaving the policy absent preserves server-chosen behavior exactly while actor-addressed calls
+fail closed.
 
 ---
 
@@ -532,8 +543,9 @@ pub fn enforce_platform_user_limit(
 bucket taking rate/burst per call. Do not log `user_id` at warn (keep limiter logs
 id-of-service only; the audit event, if any, carries attribution).
 
-**Enforcement:** in `authorize_master_credential` (`proxy_service.rs:149`), after the item-2
-policy check and before `Ok(...)`:
+**Enforcement:** authorization and throttling remain separate. After
+`authorize_master_credential` succeeds and immediately before decryption, actor-addressed
+credential resolution calls:
 
 ```rust
 crate::mw::rate_limit::enforce_platform_user_limit(
@@ -543,9 +555,14 @@ crate::mw::rate_limit::enforce_platform_user_limit(
 )?;
 ```
 
-(`EffectiveActor.user_id` is module-visible — same module.) The server-chosen gate is not
-limited: it has no actor, and its surfaces (assistant direct) carry their own controls. The
-anonymous/public proxy is untouched — it already has per-IP limits and daily quotas.
+This applies in `resolve_proxy_target`, `resolve_proxy_target_lenient`, and the auto-provisioned
+`finish_resolution` path. Exhaustion returns `AppError::RateLimited` (HTTP 429), independently
+of authorization's not-found-shaped denials.
+
+Server-chosen traffic has no actor to key on, so `resolve_admin_proxy_target` applies
+`enforce_platform_server_chosen_limit` immediately before decryption. All server-chosen calls for
+a service intentionally share the `{service_id}:server-chosen` bucket. The anonymous/public proxy
+is untouched — it already has per-IP limits and daily quotas.
 
 **Config:** `backend/src/config.rs` gains
 `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND` (u32, default **2**) and
@@ -715,12 +732,15 @@ trace.
   search) are not LLM rows, so no v1 surface depends on gateway-side rule matching. Bringing
   the gateway under `authorize_proxy_operation` is follow-up work if an LLM-shaped platform
   row ever carries a selective (non-empty, non-covering) policy.
-- **Per-user limiting of server-chosen assistant traffic** — no actor at that gate; the
-  assistant surface has its own controls. Revisit if assistant-driven platform usage becomes
-  unmetered in practice.
+- **Per-user attribution of server-chosen assistant traffic** — no actor exists at that gate, so
+  v1 uses a service-wide server-chosen bucket. Revisit only if the surface later carries a real
+  actor identity that can safely key separate buckets.
 - **MCP `executable` flag accuracy for policy-less master rows** — such rows list as
-  `executable: true` (`mcp_service.rs:924`) but deny at call after item 2. V1 ships no such
-  row (the runbook forbids it); tightening the flag is cosmetic follow-up.
+  `executable: true` (`mcp_service.rs:924`) but actor-addressed calls deny after item 2.
+  Pre-existing server-chosen rows such as `chrono-llm-public` may legitimately remain
+  policyless; newly activated actor-addressed v1 rows must carry a policy. Tightening the flag
+  would require representing that execution context rather than treating every policyless row
+  alike.
 
 ## Definition of done
 
