@@ -40,6 +40,7 @@ function fatal(message) {
 function readProfile(env, prefix) {
   return {
     apiBaseUrl: env[`${prefix}_API_BASE_URL`] || "",
+    frontendUrl: env[`${prefix}_FRONTEND_URL`] || "",
     iosBundleId: env[`${prefix}_IOS_BUNDLE_ID`] || "",
     androidPackage: env[`${prefix}_ANDROID_PACKAGE`] || "",
     appleAscAppId: env[`${prefix}_APPLE_ASC_APP_ID`] || "",
@@ -55,7 +56,7 @@ function readProfile(env, prefix) {
   };
 }
 
-function resolveProfile(appEnv, env) {
+function resolveProfile(appEnv, env, options = {}) {
   if (appEnv !== "dev" && appEnv !== "prod") {
     fatal(`APP_ENV must be "dev" or "prod"; got "${appEnv}"`);
   }
@@ -82,9 +83,12 @@ function resolveProfile(appEnv, env) {
   }
 
   const pick = (k) => primary[k] || fallback[k] || "";
+  const explicitFrontendUrl = pick("frontendUrl");
+  const legalBaseUrl = pick("legalBaseUrl");
 
   const resolved = {
     apiBaseUrl: pick("apiBaseUrl"),
+    frontendUrl: explicitFrontendUrl || legalBaseUrl,
     iosBundleId: pick("iosBundleId"),
     androidPackage: pick("androidPackage"),
     appleAscAppId: pick("appleAscAppId"),
@@ -92,7 +96,7 @@ function resolveProfile(appEnv, env) {
     androidVersionCode: pick("androidVersionCode") || "1",
     universalLinkHost: pick("universalLinkHost"),
     universalLinkPathPrefix: pick("universalLinkPathPrefix"),
-    legalBaseUrl: pick("legalBaseUrl"),
+    legalBaseUrl,
     allowedEmails: pick("allowedEmails"),
     telemetryDsn: pick("telemetryDsn"),
     telemetryHost: pick("telemetryHost"),
@@ -110,6 +114,23 @@ function resolveProfile(appEnv, env) {
       "FATAL: no ANDROID_PACKAGE set in either DEV or PROD profile.\n" +
         "Set DEV_ANDROID_PACKAGE and/or PROD_ANDROID_PACKAGE in mobile/.env.{dev,prod}.",
     );
+  }
+
+  if (options.warnOnFrontendUrlFallback && !explicitFrontendUrl) {
+    const activeFrontendVariable = `${appEnv.toUpperCase()}_FRONTEND_URL`;
+    if (legalBaseUrl) {
+      console.warn(
+        `[load-env] WARNING: ${activeFrontendVariable} is not explicitly configured; ` +
+          `using the resolved LEGAL_BASE_URL (${legalBaseUrl}) as the trusted QR-login ` +
+          `frontend origin. Set ${activeFrontendVariable} explicitly so moving legal ` +
+          "documents cannot break QR scanning.",
+      );
+    } else {
+      console.warn(
+        `[load-env] WARNING: NO TRUSTED FRONTEND URL RESOLVED FOR ${appEnv.toUpperCase()}. ` +
+          `Web QR login scans will be rejected. Set ${activeFrontendVariable} explicitly.`,
+      );
+    }
   }
 
   return resolved;
