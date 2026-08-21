@@ -526,7 +526,13 @@ pub async fn delete_node(
     let actor = auth_user.user_id.to_string();
     let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let node_id = normalize_action_request_id(body.node_id)?;
-    node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await?;
+    // Ownership is checked AFTER the reservation, not before. `ensure_node_
+    // writable_by_actor` filters `is_active: true`, so running it first made a
+    // retry of an already-committed delete return NotFound before the completed
+    // receipt was ever consulted -- the Replay arm below was unreachable and a
+    // succeeded delete reported "not found". Reserving first keeps replay
+    // working; a caller with no claim to the node has its pending receipt
+    // released immediately, so nothing is leaked or left behind.
     let fingerprint = fingerprint_canonical(&NodeIdentityFingerprint {
         action: NODE_DELETE_ACTION,
         node_id: &node_id,
@@ -544,6 +550,12 @@ pub async fn delete_node(
         ReceiptOutcome::Replay(receipt) => Ok(Json(node_response(&receipt, true))),
         ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
         ReceiptOutcome::Reserved(receipt) => {
+            if let Err(error) =
+                node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await
+            {
+                release_pending_receipt(&state, &receipt).await;
+                return Err(error);
+            }
             if let Err(error) = node_service::delete_node(&state.db, &actor, &node_id).await {
                 if !matches!(error, AppError::DatabaseError(_)) {
                     release_pending_receipt(&state, &receipt).await;
@@ -578,13 +590,10 @@ pub async fn transfer_node(
     let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let node_id = normalize_action_request_id(body.node_id)?;
     let new_owner_user_id = normalize_action_request_id(body.new_owner_user_id)?;
-    let current = node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await?;
-    if current.user_id == new_owner_user_id {
-        return Err(AppError::BadRequest(
-            "node already belongs to that owner".to_string(),
-        ));
-    }
-    ensure_owner_writable(&state, &actor, &new_owner_user_id).await?;
+    // Same ordering rule as delete: the pre-checks move into the Reserved arm
+    // so a retry of a committed transfer replays instead of failing with
+    // "node already belongs to that owner" -- which is the success condition,
+    // reported as an error.
     let fingerprint = fingerprint_canonical(&TransferNodeFingerprint {
         action: NODE_TRANSFER_ACTION,
         node_id: &node_id,
@@ -603,6 +612,25 @@ pub async fn transfer_node(
         ReceiptOutcome::Replay(receipt) => Ok(Json(node_response(&receipt, true))),
         ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
         ReceiptOutcome::Reserved(receipt) => {
+            // Both sides of the transfer are authorised here, inside the
+            // reservation, so a replayed retry never re-runs them.
+            match node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await {
+                Ok(current) if current.user_id == new_owner_user_id => {
+                    release_pending_receipt(&state, &receipt).await;
+                    return Err(AppError::BadRequest(
+                        "node already belongs to that owner".to_string(),
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    release_pending_receipt(&state, &receipt).await;
+                    return Err(error);
+                }
+            }
+            if let Err(error) = ensure_owner_writable(&state, &actor, &new_owner_user_id).await {
+                release_pending_receipt(&state, &receipt).await;
+                return Err(error);
+            }
             let transfer = node_service::transfer_node_owner(
                 &state.db,
                 &actor,
@@ -892,6 +920,109 @@ pub async fn onboard_device(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audit finding F4. `ensure_node_writable_by_actor` filters
+    /// `is_active: true`, so running it BEFORE `reserve_or_replay` made a
+    /// retry of an already-committed delete return NotFound before the
+    /// completed receipt was ever consulted -- the Replay arm was dead code
+    /// and a succeeded delete reported "not found / not yours".
+    ///
+    /// This fails against that ordering: the second request 404s instead of
+    /// replaying 200.
+    #[tokio::test]
+    async fn node_delete_retry_replays_instead_of_denying_a_committed_delete() {
+        use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+        use crate::test_utils::{connect_test_database, test_app_state, test_user};
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use serde_json::{Value, json};
+        use tower::ServiceExt;
+
+        let Some(db) = connect_test_database("assistant_node_delete_retry").await else {
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert actor");
+
+        let now = chrono::Utc::now();
+        let node = Node {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: actor_id.clone(),
+            name: "retry-node".to_string(),
+            status: NodeStatus::Offline,
+            auth_token_hash: "auth-hash".to_string(),
+            signing_secret_encrypted: None,
+            signing_secret_hash: "signing-hash".to_string(),
+            last_heartbeat_at: None,
+            connected_at: None,
+            metadata: None,
+            metrics: NodeMetrics::default(),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+        };
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+
+        let state = test_app_state(db.clone());
+        let token = crate::crypto::jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &uuid::Uuid::parse_str(&actor_id).expect("actor uuid"),
+            "",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("sign token");
+
+        let body = json!({ "actionRequestId": "node-delete-retry", "nodeId": node_id });
+        let send = |st: AppState| {
+            let token = token.clone();
+            let body = body.clone();
+            async move {
+                let (_, private) = crate::routes::build_router();
+                let app = private.with_state(st);
+                let response = app
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/assistant/actions/nodes/delete")
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .expect("build request"),
+                    )
+                    .await
+                    .expect("router responds");
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), 65536).await.expect("body");
+                let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                (status, value)
+            }
+        };
+
+        let (first_status, first) = send(state.clone()).await;
+        assert_eq!(first_status, StatusCode::OK, "first delete: {first}");
+        assert_eq!(first["replayed"], false);
+
+        let (retry_status, retry) = send(state).await;
+        assert_eq!(
+            retry_status,
+            StatusCode::OK,
+            "retry of a committed delete must replay, not deny it: {retry}"
+        );
+        assert_eq!(retry["replayed"], true);
+    }
 
     #[test]
     fn fingerprints_include_every_semantic_field() {
