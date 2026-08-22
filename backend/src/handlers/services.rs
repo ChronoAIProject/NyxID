@@ -17,7 +17,7 @@ use crate::models::downstream_service::{
     ProxyOperationPolicy, ServiceCapabilities, TokenExchangeConfig,
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
-use crate::models::service_billing::ServiceBilling;
+use crate::models::service_billing::{BillingMetric, ServiceBilling};
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::{AuthUser, SERVICE_DELEGATION_SCOPES};
@@ -176,6 +176,9 @@ pub struct ServiceResponse {
     pub capabilities: Option<ServiceCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billing: Option<ServiceBilling>,
+    /// Resolved allowance and platform metering unit after applying the
+    /// service's explicit billing override or protocol/slug heuristic.
+    pub effective_platform_metric: BillingMetric,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2444,7 +2447,7 @@ mod tests {
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
     };
     use crate::models::service_billing::{
-        PricingSyncStatus, ServiceBilling, ServicePlatformPricing,
+        BillingMetric, PricingSyncStatus, ServiceBilling, ServicePlatformPricing,
     };
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
@@ -2668,6 +2671,7 @@ mod tests {
         assert_eq!(response.name, "Admin Service");
         assert_eq!(response.slug, "admin-service");
         assert_eq!(response.visibility, "public");
+        assert_eq!(response.effective_platform_metric, BillingMetric::Requests);
         let service_count = db
             .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .count_documents(doc! { "_id": &response.id })

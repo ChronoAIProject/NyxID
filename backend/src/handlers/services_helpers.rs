@@ -237,6 +237,8 @@ pub fn service_to_response_with_viewer(
     s: DownstreamService,
     viewer: Option<&ViewerRouting>,
 ) -> ServiceResponse {
+    let effective_platform_metric =
+        crate::services::billing::metric_resolution::effective_platform_metric(&s);
     ServiceResponse {
         id: s.id,
         name: s.name,
@@ -278,6 +280,7 @@ pub fn service_to_response_with_viewer(
         issues_url: s.issues_url,
         capabilities: s.capabilities,
         billing: s.billing,
+        effective_platform_metric,
         auth_notes: s.auth_notes,
         known_limitations: s.known_limitations,
         required_permissions: s.required_permissions,

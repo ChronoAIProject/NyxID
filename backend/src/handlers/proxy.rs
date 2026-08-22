@@ -4109,24 +4109,10 @@ fn platform_metric_for_target(
     target: &proxy_service::ProxyTarget,
     is_connection: bool,
 ) -> BillingMetric {
-    // An admin-selected metric on the service's billing config wins;
-    // the slug/transport heuristic is only the fallback, so billing
-    // classification does not depend on service naming conventions.
-    if let Some(metric) = target
-        .service
-        .billing
-        .as_ref()
-        .and_then(|billing| billing.platform_metric)
-    {
-        return metric;
-    }
-    if is_connection || target.service.service_type == "ssh" {
-        BillingMetric::Bytes
-    } else if target.service.slug.starts_with("llm-") {
-        BillingMetric::Tokens
-    } else {
-        BillingMetric::Requests
-    }
+    crate::services::billing::metric_resolution::platform_metric_for_request(
+        &target.service,
+        is_connection,
+    )
 }
 
 fn should_capture_llm_usage(service_slug: &str, platform_metric: BillingMetric) -> bool {
