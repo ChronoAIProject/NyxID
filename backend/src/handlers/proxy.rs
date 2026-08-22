@@ -6804,6 +6804,47 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn plain_http_llm_proxy_and_allowance_creation_use_the_same_metric() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("proxy_allowance_metric_agreement").await
+        else {
+            return;
+        };
+        let mut target = make_target("http://localhost:8080");
+        target.service.id = uuid::Uuid::new_v4().to_string();
+        target.service.slug = "llm-websocket-capable".to_string();
+        target.service.capabilities =
+            Some(crate::models::downstream_service::ServiceCapabilities {
+                supports_websocket: true,
+                ..Default::default()
+            });
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&target.service)
+        .await
+        .expect("insert catalog service");
+
+        let allowance = crate::services::billing::allowances::create_allowance(
+            &db,
+            crate::services::billing::allowances::CreateAllowanceInput {
+                service_ref: target.service.id.clone(),
+                quantity: 1_000,
+                recurrence: crate::models::usage_allowance::AllowanceRecurrence::Monthly,
+                target_kind: crate::models::billing_target::BillingTargetKind::AllUsers,
+                target_user_ids: Vec::new(),
+                created_by: "admin-1".to_string(),
+            },
+        )
+        .await
+        .expect("create allowance");
+        let proxy_metric = super::platform_metric_for_target(&target, false);
+
+        assert_eq!(proxy_metric, BillingMetric::Tokens);
+        assert_eq!(allowance.metric, proxy_metric);
+    }
+
     #[test]
     fn llm_usage_capture_preserves_slug_allowlist_and_adds_token_metrics() {
         assert!(super::should_capture_llm_usage(

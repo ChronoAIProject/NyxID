@@ -2,46 +2,36 @@ use crate::models::downstream_service::DownstreamService;
 use crate::models::service_billing::BillingMetric;
 
 /// Resolve the service-level metric used by allowances and catalog UIs.
-/// WebSocket-capable catalog services are treated as byte-metered because an
-/// allowance has one metric for every route on the service.
+/// This is the metric for the service's plain HTTP path; an actual WebSocket
+/// connection may be byte-metered independently at request time.
 pub fn effective_platform_metric(service: &DownstreamService) -> BillingMetric {
-    resolve_platform_metric(service, service_supports_websocket(service))
+    resolve_platform_metric(service, false)
 }
 
-/// Resolve the metric for one proxy request. A WebSocket upgrade is
-/// byte-metered even when older catalog metadata does not advertise the
-/// capability yet.
+/// Resolve the metric for one proxy request. Only an actual WebSocket
+/// connection, not advertised WebSocket capability, changes the fallback
+/// metric to bytes.
 pub fn platform_metric_for_request(
     service: &DownstreamService,
-    is_websocket: bool,
+    is_connection: bool,
 ) -> BillingMetric {
-    resolve_platform_metric(service, is_websocket || service_supports_websocket(service))
+    resolve_platform_metric(service, is_connection)
 }
 
-fn resolve_platform_metric(
-    service: &DownstreamService,
-    uses_websocket_protocol: bool,
-) -> BillingMetric {
+fn resolve_platform_metric(service: &DownstreamService, is_connection: bool) -> BillingMetric {
     if let Some(metric) = service
         .billing
         .as_ref()
         .and_then(|billing| billing.platform_metric)
     {
         metric
-    } else if uses_websocket_protocol || service.service_type == "ssh" {
+    } else if is_connection || service.service_type == "ssh" {
         BillingMetric::Bytes
     } else if service.slug.starts_with("llm-") {
         BillingMetric::Tokens
     } else {
         BillingMetric::Requests
     }
-}
-
-fn service_supports_websocket(service: &DownstreamService) -> bool {
-    service
-        .capabilities
-        .as_ref()
-        .is_some_and(|capabilities| capabilities.supports_websocket)
 }
 
 #[cfg(test)]
@@ -69,23 +59,51 @@ mod tests {
     }
 
     #[test]
-    fn websocket_and_ssh_services_default_to_bytes() {
-        let mut websocket = dummy_service();
-        websocket.capabilities = Some(ServiceCapabilities {
+    fn websocket_capability_does_not_change_plain_http_llm_metric() {
+        let mut service = dummy_service();
+        service.slug = "llm-websocket-capable".to_string();
+        service.capabilities = Some(ServiceCapabilities {
             supports_websocket: true,
             ..Default::default()
         });
-        assert_eq!(effective_platform_metric(&websocket), BillingMetric::Bytes);
 
-        let mut ssh = dummy_service();
-        ssh.service_type = "ssh".to_string();
-        assert_eq!(effective_platform_metric(&ssh), BillingMetric::Bytes);
+        assert_eq!(effective_platform_metric(&service), BillingMetric::Tokens);
+        assert_eq!(
+            platform_metric_for_request(&service, false),
+            BillingMetric::Tokens
+        );
+        assert_eq!(
+            platform_metric_for_request(&service, true),
+            BillingMetric::Bytes
+        );
+    }
 
+    #[test]
+    fn websocket_capability_does_not_change_plain_http_request_metric() {
+        let mut service = dummy_service();
+        service.capabilities = Some(ServiceCapabilities {
+            supports_websocket: true,
+            ..Default::default()
+        });
+
+        assert_eq!(effective_platform_metric(&service), BillingMetric::Requests);
+        assert_eq!(
+            platform_metric_for_request(&service, false),
+            BillingMetric::Requests
+        );
+    }
+
+    #[test]
+    fn ssh_services_and_actual_connections_default_to_bytes() {
         let plain_http = dummy_service();
         assert_eq!(
             platform_metric_for_request(&plain_http, true),
             BillingMetric::Bytes
         );
+
+        let mut ssh = dummy_service();
+        ssh.service_type = "ssh".to_string();
+        assert_eq!(effective_platform_metric(&ssh), BillingMetric::Bytes);
     }
 
     #[test]
