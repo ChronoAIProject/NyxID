@@ -53,7 +53,7 @@ pub async fn create_allowance(
     validate_quantity(input.quantity)?;
     validate_targets(db, input.target_kind, &input.target_user_ids).await?;
     let service = resolve_service(db, &input.service_ref).await?;
-    let metric = service_metric(&service);
+    let metric = super::metric_resolution::effective_platform_metric(&service);
     let now = Utc::now();
     let allowance = UsageAllowance {
         id: Uuid::new_v4().to_string(),
@@ -119,7 +119,7 @@ pub async fn update_allowance(
         set.insert("is_active", is_active);
     }
     if let Some(service) = service {
-        let metric = service_metric(&service);
+        let metric = super::metric_resolution::effective_platform_metric(&service);
         set.insert("service_id", service.id);
         set.insert("service_slug", service.slug.clone());
         set.insert(
@@ -355,22 +355,6 @@ pub fn available_period_quantity(period: &UsageAllowancePeriod) -> i64 {
         .saturating_sub(period.consumed_quantity)
         .saturating_sub(period.reserved_quantity)
         .max(0)
-}
-
-fn service_metric(service: &DownstreamService) -> BillingMetric {
-    if let Some(metric) = service
-        .billing
-        .as_ref()
-        .and_then(|billing| billing.platform_metric)
-    {
-        metric
-    } else if service.slug.starts_with("llm-") {
-        BillingMetric::Tokens
-    } else if service.service_type == "ssh" {
-        BillingMetric::Bytes
-    } else {
-        BillingMetric::Requests
-    }
 }
 
 fn validate_quantity(quantity: i64) -> AppResult<()> {

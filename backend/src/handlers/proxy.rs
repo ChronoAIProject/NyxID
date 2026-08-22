@@ -4109,24 +4109,10 @@ fn platform_metric_for_target(
     target: &proxy_service::ProxyTarget,
     is_connection: bool,
 ) -> BillingMetric {
-    // An admin-selected metric on the service's billing config wins;
-    // the slug/transport heuristic is only the fallback, so billing
-    // classification does not depend on service naming conventions.
-    if let Some(metric) = target
-        .service
-        .billing
-        .as_ref()
-        .and_then(|billing| billing.platform_metric)
-    {
-        return metric;
-    }
-    if is_connection || target.service.service_type == "ssh" {
-        BillingMetric::Bytes
-    } else if target.service.slug.starts_with("llm-") {
-        BillingMetric::Tokens
-    } else {
-        BillingMetric::Requests
-    }
+    crate::services::billing::metric_resolution::platform_metric_for_request(
+        &target.service,
+        is_connection,
+    )
 }
 
 fn should_capture_llm_usage(service_slug: &str, platform_metric: BillingMetric) -> bool {
@@ -6816,6 +6802,47 @@ mod tests {
             super::platform_metric_for_target(&target, true),
             BillingMetric::Tokens
         );
+    }
+
+    #[tokio::test]
+    async fn plain_http_llm_proxy_and_allowance_creation_use_the_same_metric() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("proxy_allowance_metric_agreement").await
+        else {
+            return;
+        };
+        let mut target = make_target("http://localhost:8080");
+        target.service.id = uuid::Uuid::new_v4().to_string();
+        target.service.slug = "llm-websocket-capable".to_string();
+        target.service.capabilities =
+            Some(crate::models::downstream_service::ServiceCapabilities {
+                supports_websocket: true,
+                ..Default::default()
+            });
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&target.service)
+        .await
+        .expect("insert catalog service");
+
+        let allowance = crate::services::billing::allowances::create_allowance(
+            &db,
+            crate::services::billing::allowances::CreateAllowanceInput {
+                service_ref: target.service.id.clone(),
+                quantity: 1_000,
+                recurrence: crate::models::usage_allowance::AllowanceRecurrence::Monthly,
+                target_kind: crate::models::billing_target::BillingTargetKind::AllUsers,
+                target_user_ids: Vec::new(),
+                created_by: "admin-1".to_string(),
+            },
+        )
+        .await
+        .expect("create allowance");
+        let proxy_metric = super::platform_metric_for_target(&target, false);
+
+        assert_eq!(proxy_metric, BillingMetric::Tokens);
+        assert_eq!(allowance.metric, proxy_metric);
     }
 
     #[test]
