@@ -99,9 +99,18 @@ vi.mock("@/hooks/use-developer-apps", () => ({
 
 vi.mock("@/hooks/use-anonymous-endpoints", () => ({
   useAnonymousEndpoints: () => ({ data: [], isLoading: false }),
-  useCreateAnonymousEndpoint: () => ({ mutateAsync: vi.fn(), isPending: false }),
-  useUpdateAnonymousEndpoint: () => ({ mutateAsync: vi.fn(), isPending: false }),
-  useDeleteAnonymousEndpoint: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useCreateAnonymousEndpoint: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  }),
+  useUpdateAnonymousEndpoint: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  }),
+  useDeleteAnonymousEndpoint: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  }),
 }));
 
 vi.mock("@/stores/auth-store", () => ({
@@ -199,6 +208,8 @@ function makeService(
     your_user_service_id: "usvc-1",
     your_binding_count: 1,
     ...overrides,
+    effective_platform_metric:
+      overrides.effective_platform_metric ?? "requests",
   };
 }
 

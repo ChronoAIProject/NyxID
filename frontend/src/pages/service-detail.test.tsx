@@ -151,6 +151,8 @@ function makeService(
     your_user_service_id: null,
     your_binding_count: 0,
     ...overrides,
+    effective_platform_metric:
+      overrides.effective_platform_metric ?? "requests",
   };
 }
 

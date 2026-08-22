@@ -24,10 +24,21 @@ const DialogOverlay = React.forwardRef<
 ));
 DialogOverlay.displayName = DialogPrimitive.Overlay.displayName;
 
+interface DialogContentProps extends React.ComponentPropsWithoutRef<
+  typeof DialogPrimitive.Content
+> {
+  /**
+   * `content` keeps the legacy whole-dialog scroll owner. `body` makes the
+   * direct form a constrained flex column so a DialogBody can scroll between
+   * a fixed header and footer without nested overflow leaking into the shell.
+   */
+  readonly scrollMode?: "content" | "body";
+}
+
 const DialogContent = React.forwardRef<
   React.ComponentRef<typeof DialogPrimitive.Content>,
-  React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>
->(({ className, children, ...props }, ref) => (
+  DialogContentProps
+>(({ className, children, scrollMode = "content", ...props }, ref) => (
   <DialogPortal>
     <DialogOverlay />
     <DialogPrimitive.Content
@@ -40,6 +51,8 @@ const DialogContent = React.forwardRef<
         // Desktop: centered modal
         "md:inset-auto md:left-[50%] md:top-[50%] md:translate-x-[-50%] md:translate-y-[-50%] md:rounded-xl md:border md:border-border md:shadow-xl md:shadow-primary/5 md:w-full md:max-w-lg md:overflow-y-auto md:max-h-[85vh] md:p-5 md:pt-5",
         "md:data-[state=closed]:slide-out-to-bottom-0 md:data-[state=open]:slide-in-from-bottom-0 md:data-[state=closed]:zoom-out-95 md:data-[state=open]:zoom-in-95",
+        scrollMode === "body" &&
+          "flex flex-col overflow-hidden md:overflow-hidden",
         className,
       )}
       {...props}
@@ -51,6 +64,8 @@ const DialogContent = React.forwardRef<
           // Forms must also flex-grow so mt-auto on DialogFooter reaches bottom
           "[&>form]:flex-1 [&>form]:flex [&>form]:flex-col",
           "md:min-h-0 md:px-0 md:pt-0 md:[&>form]:flex-initial md:[&>form]:block",
+          scrollMode === "body" &&
+            "flex-auto overflow-hidden [&>form]:min-h-0 [&>form]:flex-auto md:[&>form]:flex md:[&>form]:flex-col",
         )}
       >
         {children}
@@ -67,15 +82,26 @@ const DialogContent = React.forwardRef<
 ));
 DialogContent.displayName = DialogPrimitive.Content.displayName;
 
-const DialogHeader = ({
+const DialogBody = ({
   className,
   ...props
 }: React.HTMLAttributes<HTMLDivElement>) => (
   <div
     className={cn(
-      "flex flex-col space-y-1.5 text-left",
+      "min-h-0 flex-auto overflow-y-auto overscroll-contain",
       className,
     )}
+    {...props}
+  />
+);
+DialogBody.displayName = "DialogBody";
+
+const DialogHeader = ({
+  className,
+  ...props
+}: React.HTMLAttributes<HTMLDivElement>) => (
+  <div
+    className={cn("flex flex-col space-y-1.5 text-left", className)}
     {...props}
   />
 );
@@ -93,7 +119,8 @@ const DialogFooter = ({
       className,
     )}
     style={{
-      paddingBottom: "max(1.25rem, var(--sab, env(safe-area-inset-bottom, 0px)))",
+      paddingBottom:
+        "max(1.25rem, var(--sab, env(safe-area-inset-bottom, 0px)))",
       ...style,
     }}
     {...props}
@@ -135,6 +162,7 @@ export {
   DialogClose,
   DialogTrigger,
   DialogContent,
+  DialogBody,
   DialogHeader,
   DialogFooter,
   DialogTitle,

@@ -1,3 +1,5 @@
+import type { BillingMetric } from "@/schemas/billing";
+
 /// Resolved platform role for a user. `admin` is full read+write,
 /// `operator` is read-only platform admin (issue #715), `user` is a
 /// regular user with no platform admin access.
@@ -243,6 +245,8 @@ export interface DownstreamService {
   readonly issues_url?: string | null;
   readonly capabilities?: ServiceCapabilities | null;
   readonly billing?: ServiceBilling | null;
+  /** Backend-resolved unit used by service allowances and platform metering. */
+  readonly effective_platform_metric: BillingMetric;
   readonly auth_notes?: string | null;
   readonly known_limitations?: string | null;
   readonly required_permissions?: readonly string[] | null;

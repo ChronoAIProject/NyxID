@@ -1,9 +1,7 @@
-import { useDeferredValue, useMemo, useState } from "react";
+import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Pencil, Plus, Search, Trash2 } from "lucide-react";
-import type { UseFormReturn } from "react-hook-form";
+import { Pencil, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
-import { useAdminUsers } from "@/hooks/use-admin";
 import {
   useAdminAllowances,
   useAdminCreditGrants,
@@ -14,6 +12,7 @@ import {
 } from "@/hooks/use-billing-credits";
 import { useServices } from "@/hooks/use-services";
 import { ApiError } from "@/lib/api-client";
+import { billingMetricLabel } from "@/lib/billing-units";
 import {
   allowanceFormSchema,
   issueGrantFormSchema,
@@ -23,14 +22,16 @@ import {
   type UsageAllowance,
 } from "@/schemas/billing-credits";
 import { useAuthStore } from "@/stores/auth-store";
-import type { AdminUser } from "@/types/admin";
 import type { DownstreamService } from "@/types/api";
 import { canAdminWrite } from "@/types/api";
+import {
+  AllowanceDialog,
+  GrantDialog,
+} from "@/components/admin-credits/credits-dialogs";
 import { PageHeader } from "@/components/shared/page-header";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Badge } from "@/components/ui/badge";
 import { Button, ButtonIcon } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -39,25 +40,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import {
-  Form,
-  FormControl,
-  FormField,
-  FormItem,
-  FormLabel,
-  FormMessage,
-  useAppForm,
-} from "@/components/ui/form";
-import { Input } from "@/components/ui/input";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { useAppForm } from "@/components/ui/form";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -374,10 +358,18 @@ export function AdminCreditsPage() {
                           )}
                         </div>
                         <div className="text-[11px] text-muted-foreground">
-                          {allowance.metric}
+                          {allowance.service_slug}
                         </div>
                       </TableCell>
-                      <TableCell>{formatNumber(allowance.quantity)}</TableCell>
+                      <TableCell>
+                        {formatNumber(allowance.quantity)}{" "}
+                        <span className="text-[11px] text-muted-foreground">
+                          {billingMetricLabel(
+                            allowance.metric,
+                            allowance.quantity,
+                          )}
+                        </span>
+                      </TableCell>
                       <TableCell className="capitalize">
                         {allowance.recurrence.replace("_", " ")}
                       </TableCell>
@@ -452,7 +444,7 @@ export function AdminCreditsPage() {
         form={allowanceForm}
         services={services}
         pending={createAllowance.isPending || updateAllowance.isPending}
-        editing={editingAllowance !== null}
+        editingAllowance={editingAllowance}
         onSubmit={submitAllowance}
       />
       <Dialog
@@ -465,11 +457,15 @@ export function AdminCreditsPage() {
           <DialogHeader>
             <DialogTitle>Revoke credit grant</DialogTitle>
             <DialogDescription>
-              Revoke the remaining {grantToRevoke?.remaining_micros
+              Revoke the remaining{" "}
+              {grantToRevoke?.remaining_micros
                 ? formatCredits(grantToRevoke.remaining_micros)
-                : "credits"} for {grantToRevoke?.recipient_display_name ||
+                : "credits"}{" "}
+              for{" "}
+              {grantToRevoke?.recipient_display_name ||
                 grantToRevoke?.recipient_email ||
-                "this recipient"}? This cannot be undone.
+                "this recipient"}
+              ? This cannot be undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -492,543 +488,6 @@ export function AdminCreditsPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
-  );
-}
-
-type GrantFormApi = UseFormReturn<IssueGrantForm>;
-type AllowanceFormApi = UseFormReturn<AllowanceForm>;
-
-function GrantDialog({
-  open,
-  onOpenChange,
-  form,
-  services,
-  pending,
-  onSubmit,
-}: {
-  readonly open: boolean;
-  readonly onOpenChange: (open: boolean) => void;
-  readonly form: GrantFormApi;
-  readonly services: readonly DownstreamService[];
-  readonly pending: boolean;
-  readonly onSubmit: (value: IssueGrantForm) => Promise<void>;
-}) {
-  const targetKind = form.watch("target_kind");
-  const allServices = form.watch("all_services");
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>Issue credit grant</DialogTitle>
-          <DialogDescription>
-            Create one attributable grant per selected billing owner.
-          </DialogDescription>
-        </DialogHeader>
-        <Form {...form}>
-          <form className="space-y-5" onSubmit={form.handleSubmit(onSubmit)}>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <FormField
-                control={form.control}
-                name="amount_credits"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Credits per owner</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="number"
-                        min={1}
-                        max={1_000_000}
-                        {...field}
-                        onChange={(event) =>
-                          field.onChange(event.target.valueAsNumber)
-                        }
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="expires_at"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Expiry (optional)</FormLabel>
-                    <FormControl>
-                      <Input type="datetime-local" {...field} />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-            <GrantTargetFields form={form} targetKind={targetKind} />
-            <FormField
-              control={form.control}
-              name="all_services"
-              render={({ field }) => (
-                <FormItem className="flex items-center justify-between rounded-lg border border-border px-3 py-2">
-                  <div>
-                    <FormLabel>All services</FormLabel>
-                    <p className="text-[11px] text-muted-foreground">
-                      Allow this credit balance to fund any service.
-                    </p>
-                  </div>
-                  <FormControl>
-                    <Switch
-                      checked={field.value}
-                      onCheckedChange={field.onChange}
-                    />
-                  </FormControl>
-                </FormItem>
-              )}
-            />
-            {!allServices ? (
-              <FormField
-                control={form.control}
-                name="service_refs"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Service scope</FormLabel>
-                    <FormControl>
-                      <ServicePicker
-                        services={services}
-                        selected={field.value}
-                        onChange={field.onChange}
-                        multiple
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            ) : null}
-            <FormField
-              control={form.control}
-              name="reason"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Reason / note</FormLabel>
-                  <FormControl>
-                    <textarea
-                      rows={3}
-                      className="w-full resize-y rounded-lg border border-input bg-transparent px-3 py-2 text-[12px] outline-none focus:border-white/15"
-                      placeholder="Why these credits are being issued"
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => onOpenChange(false)}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" variant="primary" isLoading={pending}>
-                Issue credits
-              </Button>
-            </DialogFooter>
-          </form>
-        </Form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function AllowanceDialog({
-  open,
-  onOpenChange,
-  form,
-  services,
-  pending,
-  editing,
-  onSubmit,
-}: {
-  readonly open: boolean;
-  readonly onOpenChange: (open: boolean) => void;
-  readonly form: AllowanceFormApi;
-  readonly services: readonly DownstreamService[];
-  readonly pending: boolean;
-  readonly editing: boolean;
-  readonly onSubmit: (value: AllowanceForm) => Promise<void>;
-}) {
-  const targetKind = form.watch("target_kind");
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
-        <DialogHeader>
-          <DialogTitle>
-            {editing ? "Edit allowance" : "Create allowance"}
-          </DialogTitle>
-          <DialogDescription>
-            Free units are consumed before credit grants and wallet credits.
-          </DialogDescription>
-        </DialogHeader>
-        <Form {...form}>
-          <form className="space-y-5" onSubmit={form.handleSubmit(onSubmit)}>
-            <FormField
-              control={form.control}
-              name="service_ref"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Service</FormLabel>
-                  <FormControl>
-                    <ServicePicker
-                      services={services}
-                      selected={[field.value].filter(Boolean)}
-                      onChange={(values) => field.onChange(values[0] ?? "")}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <div className="grid gap-4 sm:grid-cols-2">
-              <FormField
-                control={form.control}
-                name="quantity"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Free units</FormLabel>
-                    <FormControl>
-                      <Input
-                        type="number"
-                        min={1}
-                        max={1_000_000_000_000}
-                        {...field}
-                        onChange={(event) =>
-                          field.onChange(event.target.valueAsNumber)
-                        }
-                      />
-                    </FormControl>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-              <FormField
-                control={form.control}
-                name="recurrence"
-                render={({ field }) => (
-                  <FormItem>
-                    <FormLabel>Recurrence</FormLabel>
-                    <Select value={field.value} onValueChange={field.onChange}>
-                      <FormControl>
-                        <SelectTrigger>
-                          <SelectValue />
-                        </SelectTrigger>
-                      </FormControl>
-                      <SelectContent>
-                        <SelectItem value="one_time">One time</SelectItem>
-                        <SelectItem value="daily">Daily</SelectItem>
-                        <SelectItem value="weekly">Weekly</SelectItem>
-                        <SelectItem value="monthly">Monthly</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <FormMessage />
-                  </FormItem>
-                )}
-              />
-            </div>
-            <AllowanceTargetFields form={form} targetKind={targetKind} />
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="ghost"
-                onClick={() => onOpenChange(false)}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" variant="primary" isLoading={pending}>
-                {editing ? "Save changes" : "Create allowance"}
-              </Button>
-            </DialogFooter>
-          </form>
-        </Form>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-function GrantTargetFields({
-  form,
-  targetKind,
-}: {
-  readonly form: GrantFormApi;
-  readonly targetKind: "all_users" | "selected_users";
-}) {
-  return (
-    <>
-      <FormField
-        control={form.control}
-        name="target_kind"
-        render={({ field }) => (
-          <FormItem>
-            <FormLabel>Recipients</FormLabel>
-            <Select
-              value={field.value}
-              onValueChange={(value) => {
-                field.onChange(value);
-                if (value === "all_users") form.setValue("target_user_ids", []);
-              }}
-            >
-              <FormControl>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-              </FormControl>
-              <SelectContent>
-                <SelectItem value="all_users">All billing owners</SelectItem>
-                <SelectItem value="selected_users">Selected owners</SelectItem>
-              </SelectContent>
-            </Select>
-            <FormMessage />
-          </FormItem>
-        )}
-      />
-      {targetKind === "selected_users" ? (
-        <FormField
-          control={form.control}
-          name="target_user_ids"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Owners</FormLabel>
-              <FormControl>
-                <UserPicker selected={field.value} onChange={field.onChange} />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-      ) : null}
-    </>
-  );
-}
-
-function AllowanceTargetFields({
-  form,
-  targetKind,
-}: {
-  readonly form: AllowanceFormApi;
-  readonly targetKind: "all_users" | "selected_users";
-}) {
-  return (
-    <>
-      <FormField
-        control={form.control}
-        name="target_kind"
-        render={({ field }) => (
-          <FormItem>
-            <FormLabel>Recipients</FormLabel>
-            <Select
-              value={field.value}
-              onValueChange={(value) => {
-                field.onChange(value);
-                if (value === "all_users") form.setValue("target_user_ids", []);
-              }}
-            >
-              <FormControl>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-              </FormControl>
-              <SelectContent>
-                <SelectItem value="all_users">All billing owners</SelectItem>
-                <SelectItem value="selected_users">Selected owners</SelectItem>
-              </SelectContent>
-            </Select>
-            <FormMessage />
-          </FormItem>
-        )}
-      />
-      {targetKind === "selected_users" ? (
-        <FormField
-          control={form.control}
-          name="target_user_ids"
-          render={({ field }) => (
-            <FormItem>
-              <FormLabel>Owners</FormLabel>
-              <FormControl>
-                <UserPicker selected={field.value} onChange={field.onChange} />
-              </FormControl>
-              <FormMessage />
-            </FormItem>
-          )}
-        />
-      ) : null}
-    </>
-  );
-}
-
-function UserPicker({
-  selected,
-  onChange,
-}: {
-  readonly selected: readonly string[];
-  readonly onChange: (ids: string[]) => void;
-}) {
-  const [search, setSearch] = useState("");
-  const deferredSearch = useDeferredValue(search.trim());
-  const peopleQuery = useAdminUsers(
-    1,
-    100,
-    deferredSearch || undefined,
-    "person",
-  );
-  const organizationsQuery = useAdminUsers(
-    1,
-    100,
-    deferredSearch || undefined,
-    "org",
-  );
-  const users = useMemo(() => {
-    const byId = new Map<string, AdminUser>();
-    for (const user of [
-      ...(peopleQuery.data?.users ?? []),
-      ...(organizationsQuery.data?.users ?? []),
-    ]) {
-      if (user.is_active) byId.set(user.id, user);
-    }
-    return [...byId.values()];
-  }, [organizationsQuery.data?.users, peopleQuery.data?.users]);
-  const filtered = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return needle
-      ? users.filter((user) =>
-          `${user.display_name ?? ""} ${user.email} ${user.slug ?? ""}`
-            .toLowerCase()
-            .includes(needle),
-        )
-      : users;
-  }, [search, users]);
-  const loading = peopleQuery.isFetching || organizationsQuery.isFetching;
-  return (
-    <div className="rounded-lg border border-border">
-      <div className="relative border-b border-border">
-        <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search owners"
-          className="border-0 pl-9 focus-visible:ring-0"
-        />
-      </div>
-      <div className="max-h-48 overflow-y-auto p-1">
-        {filtered.map((user) => {
-          const checked = selected.includes(user.id);
-          return (
-            <label
-              key={user.id}
-              className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/50"
-            >
-              <Checkbox
-                checked={checked}
-                onCheckedChange={(value) =>
-                  onChange(
-                    value === true
-                      ? [...selected, user.id]
-                      : selected.filter((id) => id !== user.id),
-                  )
-                }
-              />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-[12px] font-medium">
-                  {user.display_name || user.slug || user.email}
-                </span>
-                <span className="block truncate text-[11px] text-muted-foreground">
-                  {user.slug ? `Organization / ${user.slug}` : user.email}
-                </span>
-              </span>
-            </label>
-          );
-        })}
-        {filtered.length === 0 && !loading ? (
-          <p className="px-3 py-6 text-center text-[12px] text-muted-foreground">
-            No owners found.
-          </p>
-        ) : null}
-        {loading ? (
-          <p className="px-3 py-3 text-center text-[11px] text-muted-foreground">
-            Searching...
-          </p>
-        ) : null}
-      </div>
-      <div className="border-t border-border px-3 py-1.5 text-[11px] text-muted-foreground">
-        {selected.length} selected
-      </div>
-    </div>
-  );
-}
-
-function ServicePicker({
-  services,
-  selected,
-  onChange,
-  multiple = false,
-}: {
-  readonly services: readonly DownstreamService[];
-  readonly selected: readonly string[];
-  readonly onChange: (ids: string[]) => void;
-  readonly multiple?: boolean;
-}) {
-  const [search, setSearch] = useState("");
-  const filtered = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return services.filter(
-      (service) =>
-        service.is_active &&
-        (!needle ||
-          `${service.name} ${service.slug}`.toLowerCase().includes(needle)),
-    );
-  }, [search, services]);
-  return (
-    <div className="rounded-lg border border-border">
-      <div className="relative border-b border-border">
-        <Search className="absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          value={search}
-          onChange={(event) => setSearch(event.target.value)}
-          placeholder="Search services"
-          className="border-0 pl-9 focus-visible:ring-0"
-        />
-      </div>
-      <div className="max-h-44 overflow-y-auto p-1">
-        {filtered.map((service) => {
-          const checked = selected.includes(service.id);
-          return (
-            <label
-              key={service.id}
-              className="flex cursor-pointer items-center gap-3 rounded-md px-2 py-2 hover:bg-muted/50"
-            >
-              <Checkbox
-                checked={checked}
-                onCheckedChange={(value) =>
-                  onChange(
-                    value === true
-                      ? multiple
-                        ? [...selected, service.id]
-                        : [service.id]
-                      : selected.filter((id) => id !== service.id),
-                  )
-                }
-              />
-              <span className="min-w-0">
-                <span className="block truncate text-[12px] font-medium">
-                  {service.name}
-                </span>
-                <span className="block truncate text-[11px] text-muted-foreground">
-                  {service.slug}
-                </span>
-              </span>
-            </label>
-          );
-        })}
-      </div>
     </div>
   );
 }
