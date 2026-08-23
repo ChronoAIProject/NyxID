@@ -35,7 +35,13 @@ export function AssistantAccountDeleteDialog({
       if (confirmEmail.trim().toLowerCase() !== profile.email.trim().toLowerCase()) throw new Error("Type your account email exactly to continue.");
       const before = await api.get<unknown>("/users/me/authorization");
       assertSecretFreeReadBack(before);
-      const response = responseSchema.parse(await api.post<unknown>("/assistant/actions/org/account/delete", { actionRequestId }));
+      const response = responseSchema.parse(await api.post<unknown>("/assistant/actions/org/account/delete", {
+        actionRequestId,
+        // Sent so the SERVER verifies the confirmation. The check above is a
+        // usability guard only -- the effect route is mounted and reachable,
+        // so a browser-side comparison is not a control.
+        confirmEmail: confirmEmail.trim(),
+      }));
       try { await api.get(`/users/me/authorization`); throw new Error("The account still exists after deletion."); }
       catch (caught) { if (!isNotFound(caught)) throw caught; }
       setVerifiedUserId(response.resource.userId);

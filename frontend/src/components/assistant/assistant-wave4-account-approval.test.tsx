@@ -73,7 +73,12 @@ describe("Wave 4 account journeys", () => {
     expect(await screen.findByRole("button", { name: "Continue" })).toBeInTheDocument();
     expect(mockGet).toHaveBeenNthCalledWith(2, "/users/me/authorization");
     expect(mockGet).toHaveBeenNthCalledWith(3, "/users/me/authorization");
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/account/delete", { actionRequestId: "delete-1" });
+    // The confirmation must reach the server -- a browser-side comparison is
+    // not a control, since the effect route is mounted and reachable.
+    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/account/delete", {
+      actionRequestId: "delete-1",
+      confirmEmail: expect.any(String),
+    });
   });
 
   it("keeps MFA material in the browser and reports only the account id", async () => {

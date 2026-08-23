@@ -190,6 +190,12 @@ pub struct RevokeAssistantConsentRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct DeleteAssistantAccountRequest {
     pub action_request_id: String,
+    /// Typed confirmation of the account's own email address.
+    ///
+    /// The browser also asks for this, but a browser-side check is not a
+    /// control: the effect route is mounted and reachable, so the server has
+    /// to verify the confirmation itself for it to mean anything.
+    pub confirm_email: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema)]
@@ -517,11 +523,15 @@ struct ConsentFingerprint<'a> {
     client_id: &'a str,
 }
 
+/// The confirmation is semantic request content, so it is fingerprinted:
+/// reusing one `actionRequestId` with a different confirmation must conflict
+/// rather than replay.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ExistingAccountFingerprint<'a> {
+struct ConfirmedAccountDeleteFingerprint<'a> {
     action: &'static str,
     user_id: &'a str,
+    confirm_email: &'a str,
 }
 
 #[derive(Serialize)]
@@ -862,10 +872,21 @@ async fn delete_account(
 ) -> AppResult<Json<AssistantAccountResponse>> {
     let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let user_id = auth_user.user_id.to_string();
-    require_user(&state, &user_id).await?;
-    let fingerprint = fingerprint_canonical(&ExistingAccountFingerprint {
+    let user = require_user(&state, &user_id).await?;
+
+    // Verify the confirmation BEFORE reserving, so a wrong or missing one
+    // leaves no receipt behind and the user can simply retype it.
+    let confirm_email = body.confirm_email.trim().to_ascii_lowercase();
+    if confirm_email.is_empty() || confirm_email != user.email.trim().to_ascii_lowercase() {
+        return Err(AppError::ValidationError(
+            "confirmEmail must match the account email exactly".to_string(),
+        ));
+    }
+
+    let fingerprint = fingerprint_canonical(&ConfirmedAccountDeleteFingerprint {
         action: ACCOUNT_DELETE_ACTION,
         user_id: &user_id,
+        confirm_email: &confirm_email,
     })?;
     let receipt = reserve_or_replay(
         &state.db,
@@ -2526,6 +2547,130 @@ async fn connect_openclaw_action(
 #[cfg(test)]
 mod wave4_effect_tests {
     use super::*;
+
+    /// `account.delete` is an irreversible cascade. The browser asks the user
+    /// to type their email, but a browser-side comparison is not a control:
+    /// the effect route is mounted and reachable, so anyone holding a
+    /// first-party session could POST it directly.
+    ///
+    /// Falsifier: drop the `confirm_email` check in `delete_account` and this
+    /// fails — the wrong-confirmation request returns 200 and the account is
+    /// gone.
+    #[tokio::test]
+    async fn account_delete_rejects_missing_or_mismatched_confirmation() {
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+        use crate::test_utils::{connect_test_database, test_app_state, test_user};
+        use axum::body::{Body, to_bytes};
+        use axum::http::{Request, StatusCode};
+        use serde_json::{Value, json};
+        use tower::ServiceExt;
+
+        let Some(db) = connect_test_database("assistant_account_delete_confirm").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        let mut actor = test_user(&actor_id, UserType::Person);
+        actor.email = "owner@example.test".to_string();
+        db.collection::<User>(USERS)
+            .insert_one(&actor)
+            .await
+            .expect("insert actor");
+
+        let state = test_app_state(db.clone());
+        let token = crate::crypto::jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &Uuid::parse_str(&actor_id).expect("actor uuid"),
+            "",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("sign token");
+
+        let post = |st: AppState, body: Value| {
+            let token = token.clone();
+            async move {
+                let (_, private) = crate::routes::build_router();
+                let response = private
+                    .with_state(st)
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri("/api/v1/assistant/actions/org/account/delete")
+                            .header("authorization", format!("Bearer {token}"))
+                            .header("content-type", "application/json")
+                            .body(Body::from(body.to_string()))
+                            .expect("build request"),
+                    )
+                    .await
+                    .expect("router responds");
+                let status = response.status();
+                let bytes = to_bytes(response.into_body(), 65_536).await.expect("body");
+                (
+                    status,
+                    serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+                )
+            }
+        };
+
+        // Wrong confirmation must be refused.
+        let (status, _) = post(
+            state.clone(),
+            json!({ "actionRequestId": "delete-wrong", "confirmEmail": "someone@else.test" }),
+        )
+        .await;
+        assert!(
+            status.is_client_error(),
+            "a mismatched confirmation must be refused, got {status}"
+        );
+
+        // Empty confirmation must be refused too.
+        let (status, _) = post(
+            state.clone(),
+            json!({ "actionRequestId": "delete-empty", "confirmEmail": "   " }),
+        )
+        .await;
+        assert!(
+            status.is_client_error(),
+            "an empty confirmation must be refused, got {status}"
+        );
+
+        // The account must still be there after both refusals.
+        let survivor = db
+            .collection::<User>(USERS)
+            .find_one(doc! { "_id": &actor_id })
+            .await
+            .expect("query actor");
+        assert!(
+            survivor.is_some(),
+            "a refused confirmation must not delete the account"
+        );
+    }
+
+    /// The confirmation is semantic content, so reusing one `actionRequestId`
+    /// with a different confirmation must conflict rather than replay.
+    ///
+    /// Falsifier: fingerprint without `confirm_email` and the two values below
+    /// collide.
+    #[test]
+    fn account_delete_fingerprint_binds_the_confirmation() {
+        let first = fingerprint_canonical(&ConfirmedAccountDeleteFingerprint {
+            action: ACCOUNT_DELETE_ACTION,
+            user_id: "user-1",
+            confirm_email: "owner@example.test",
+        })
+        .unwrap();
+        let second = fingerprint_canonical(&ConfirmedAccountDeleteFingerprint {
+            action: ACCOUNT_DELETE_ACTION,
+            user_id: "user-1",
+            confirm_email: "someone@else.test",
+        })
+        .unwrap();
+        assert_ne!(first, second);
+    }
 
     #[test]
     fn fingerprints_include_semantic_request_content() {
