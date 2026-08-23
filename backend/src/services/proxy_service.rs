@@ -257,11 +257,29 @@ fn validate_master_credential_service(service: &DownstreamService) -> AppResult<
 
 /// Actor-addressed callers choose an operation, so platform credentials on
 /// this path must carry an explicit operation policy.
+/// Whether an actor-addressed master-credential row must carry an operation policy.
+///
+/// Ships **disabled**. Enabling it denies every actor-addressed call to a platform row
+/// that has no `proxy_operation_policy` — which is the desired end state, but changes
+/// behaviour for rows that exist today (e.g. `chrono-llm-public`, reachable via
+/// `/proxy/s/{slug}` and `/llm/*`). Operators enable it after confirming, from real
+/// traffic, that every such row either carries a policy or receives no actor-addressed
+/// calls. Off by default so deploying this code is a no-op.
+fn actor_addressed_policy_required() -> bool {
+    std::env::var("PLATFORM_REQUIRE_OPERATION_POLICY")
+        .ok()
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            v == "1" || v == "true" || v == "yes"
+        })
+        .unwrap_or(false)
+}
+
 fn validate_actor_addressed_master_credential_policy(service: &DownstreamService) -> AppResult<()> {
     // A row holding a platform credential must state what it may do. Absent
     // policy is deny, not passthrough (V1_SPEC item 2). Present-but-empty
     // policy still resolves here and denies at the operation layer.
-    if service.proxy_operation_policy.is_none() {
+    if actor_addressed_policy_required() && service.proxy_operation_policy.is_none() {
         tracing::warn!(
             service_id = %service.id,
             service_slug = %service.slug,
@@ -922,12 +940,11 @@ pub async fn resolve_admin_proxy_target(
 
     // SEC-M3: raw decrypted bytes stay wrapped so they zero on drop.
     let authorized = authorize_master_credential_server_chosen(db, &service).await?;
-    // Server-chosen requests have no actor to key on; enforce the explicit
-    // per-service bucket before the authorized ciphertext is decrypted.
-    crate::mw::rate_limit::enforce_platform_server_chosen_limit(
-        crate::mw::rate_limit::platform_user_rate_limiter(),
-        &service.id,
-    )?;
+    // Deliberately NOT rate limited here. This path backs `TargetMode::AdminManaged`,
+    // which serves the live assistant surface: a per-service bucket would be shared by
+    // every caller platform-wide, so one user could starve all others — the inverse of
+    // what the per-user limit exists to do. Per-user limiting applies on actor-addressed
+    // paths only, where there is an actor to key on.
     let decrypted_bytes =
         Zeroizing::new(decrypt_authorized_master_credential(encryption_keys, &authorized).await?);
     let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {

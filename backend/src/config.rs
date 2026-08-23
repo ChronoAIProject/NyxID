@@ -864,12 +864,15 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            // Default 0 = disabled. Enabling a per-user cap on a shared platform
+            // credential is a deliberate operator decision made after observing real
+            // traffic; defaulting it on would throttle existing callers at deploy.
             platform_service_rate_limit_per_second: env::var(
                 "PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND",
             )
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(2),
+            .unwrap_or(0),
             platform_service_rate_limit_burst: env::var("PLATFORM_SERVICE_RATE_LIMIT_BURST")
                 .ok()
                 .and_then(|v| v.parse().ok())

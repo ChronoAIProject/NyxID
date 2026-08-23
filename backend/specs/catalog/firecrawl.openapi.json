@@ -3,7 +3,7 @@
   "info": {
     "title": "Firecrawl API",
     "version": "v2-nyxid-overlay",
-    "description": "NyxID-hosted Firecrawl OpenAPI overlay with Aevatar tool annotations for scrape and search operations."
+    "description": "NyxID-hosted Firecrawl OpenAPI overlay with Aevatar tool annotations for asynchronous agent submit and poll operations."
   },
   "servers": [
     {
@@ -12,6 +12,136 @@
     }
   ],
   "paths": {
+    "/v2/agent": {
+      "post": {
+        "operationId": "agent",
+        "summary": "Submit a Firecrawl agent task",
+        "description": "Starts an asynchronous Firecrawl agent task. Poll the returned id with GET /v2/agent/{id}.",
+        "x-aevatar-tool": {
+          "name": "agent",
+          "description": "Submit an asynchronous Firecrawl agent task.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "prompt"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                  "prompt": {
+                    "type": "string",
+                    "description": "Natural-language task for the Firecrawl agent."
+                  },
+                  "urls": {
+                    "type": "array",
+                    "description": "Optional starting URLs for the agent.",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "schema": {
+                    "type": "object",
+                    "description": "Optional structured extraction schema.",
+                    "additionalProperties": true
+                  },
+                  "model": {
+                    "type": "string",
+                    "description": "Optional model override."
+                  },
+                  "maxCredits": {
+                    "type": "integer",
+                    "description": "Optional maximum credits to spend on the task."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Agent task accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "id": {
+                      "type": "string",
+                      "description": "Agent task id to poll."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/agent/{id}": {
+      "get": {
+        "operationId": "agent_status",
+        "summary": "Poll a Firecrawl agent task",
+        "description": "Returns the current status and result for an asynchronous Firecrawl agent task.",
+        "x-aevatar-tool": {
+          "name": "agent_status",
+          "description": "Poll an asynchronous Firecrawl agent task.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "Firecrawl agent task id returned by POST /v2/agent.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Agent task status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "string",
+                      "description": "Current task status."
+                    },
+                    "data": {
+                      "description": "Completed task result, when available."
+                    },
+                    "error": {
+                      "type": "string",
+                      "description": "Failure details, when available."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v2/scrape": {
       "post": {
         "operationId": "scrape",
@@ -98,6 +228,58 @@
                   "scrapeOptions": {
                     "type": "object",
                     "additionalProperties": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "ok",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v2/map": {
+      "post": {
+        "operationId": "map_site",
+        "summary": "Map a site's URLs",
+        "x-aevatar-tool": {
+          "name": "map_site",
+          "description": "List the URLs of a website with Firecrawl.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "url"
+                ],
+                "properties": {
+                  "url": {
+                    "type": "string"
+                  },
+                  "search": {
+                    "type": "string",
+                    "description": "Optional filter query."
+                  },
+                  "limit": {
+                    "type": "integer"
                   }
                 }
               }

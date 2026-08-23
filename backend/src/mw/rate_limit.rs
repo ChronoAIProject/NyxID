@@ -299,16 +299,6 @@ impl PlatformUserRateLimiter {
         )
     }
 
-    /// Check server-chosen traffic for a platform service. These requests do
-    /// not carry an actor, so all callers share one bucket for the service.
-    pub fn check_server_chosen(&self, service_id: &str) -> bool {
-        self.inner.check(
-            &format!("{service_id}:server-chosen"),
-            self.per_second,
-            self.burst,
-        )
-    }
-
     pub fn cleanup(&self) {
         self.inner.cleanup();
     }
@@ -346,22 +336,6 @@ pub fn enforce_platform_user_limit(
         && !limiter.check(service_id, user_id)
     {
         tracing::warn!(service_id, "Platform per-user rate limit exceeded");
-        return Err(crate::errors::AppError::RateLimited);
-    }
-    Ok(())
-}
-
-/// Enforce the service-wide budget used by server-chosen platform requests.
-/// Server-chosen surfaces have no actor to key on, so they intentionally share
-/// one bucket per platform service instead of bypassing the limiter.
-pub fn enforce_platform_server_chosen_limit(
-    limiter: Option<&PlatformUserRateLimiter>,
-    service_id: &str,
-) -> Result<(), crate::errors::AppError> {
-    if let Some(limiter) = limiter
-        && !limiter.check_server_chosen(service_id)
-    {
-        tracing::warn!(service_id, "Platform server-chosen rate limit exceeded");
         return Err(crate::errors::AppError::RateLimited);
     }
     Ok(())
@@ -1066,15 +1040,6 @@ mod tests {
     }
 
     #[test]
-    fn platform_server_chosen_bucket_is_service_scoped() {
-        let limiter = PlatformUserRateLimiter::new(1, 1);
-        assert!(limiter.check_server_chosen("S"));
-        assert!(!limiter.check_server_chosen("S"));
-        assert!(limiter.check_server_chosen("T"));
-        assert!(limiter.check("S", "A"));
-    }
-
-    #[test]
     fn enforce_platform_user_limit_maps_to_rate_limited() {
         let limiter = PlatformUserRateLimiter::new(1, 1);
         assert!(enforce_platform_user_limit(Some(&limiter), "S", "A").is_ok());
@@ -1083,17 +1048,6 @@ mod tests {
             Err(crate::errors::AppError::RateLimited)
         ));
         assert!(enforce_platform_user_limit(None, "S", "A").is_ok());
-    }
-
-    #[test]
-    fn enforce_platform_server_chosen_limit_maps_to_rate_limited() {
-        let limiter = PlatformUserRateLimiter::new(1, 1);
-        assert!(enforce_platform_server_chosen_limit(Some(&limiter), "S").is_ok());
-        assert!(matches!(
-            enforce_platform_server_chosen_limit(Some(&limiter), "S"),
-            Err(crate::errors::AppError::RateLimited)
-        ));
-        assert!(enforce_platform_server_chosen_limit(None, "S").is_ok());
     }
 
     #[test]
