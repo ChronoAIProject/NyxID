@@ -1044,7 +1044,19 @@ async fn setup_account_mfa(
                 })),
                 ReceiptOutcome::InProgress(receipt) => {
                     let user = require_user(&state, &user_id).await?;
-                    if !user.mfa_enabled {
+                    let pinned_factor_verified = state
+                        .db
+                        .collection::<MfaFactor>(MFA_FACTORS)
+                        .find_one(doc! {
+                            "_id": &factor_id,
+                            "user_id": &user_id,
+                            "factor_type": "totp",
+                            "is_active": true,
+                            "is_verified": true,
+                        })
+                        .await?
+                        .is_some();
+                    if !user.mfa_enabled || !pinned_factor_verified {
                         return Err(in_progress_conflict());
                     }
                     mark_completed(&state.db, &receipt).await?;
@@ -2561,7 +2573,7 @@ mod wave4_effect_tests {
         use crate::models::user::{COLLECTION_NAME as USERS, UserType};
         use crate::test_utils::{connect_test_database, test_app_state, test_user};
         use axum::body::{Body, to_bytes};
-        use axum::http::{Request, StatusCode};
+        use axum::http::Request;
         use serde_json::{Value, json};
         use tower::ServiceExt;
 
@@ -2670,6 +2682,120 @@ mod wave4_effect_tests {
         })
         .unwrap();
         assert_ne!(first, second);
+    }
+
+    #[tokio::test]
+    async fn mfa_confirm_resume_requires_the_pinned_factor() {
+        // Falsifier: resume from `user.mfa_enabled` alone. The first retry
+        // below then succeeds even though its fingerprinted factor is still
+        // unverified, and this test fails before the factor update.
+        use crate::models::assistant_action_receipt::{
+            AssistantActionReceipt, AssistantActionReceiptStatus,
+            COLLECTION_NAME as ASSISTANT_ACTION_RECEIPTS,
+        };
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+
+        let Some(db) = connect_test_database("assistant_mfa_pinned_resume").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let factor_id = Uuid::new_v4().to_string();
+        let mut user = test_user(&user_id, UserType::Person);
+        // This can be explained by another already-confirmed factor. It is
+        // deliberately insufficient evidence for this action's factor.
+        user.mfa_enabled = true;
+        db.collection::<User>(USERS)
+            .insert_one(user)
+            .await
+            .expect("insert user");
+        let now = chrono::Utc::now();
+        db.collection::<MfaFactor>(MFA_FACTORS)
+            .insert_one(MfaFactor {
+                id: factor_id.clone(),
+                user_id: user_id.clone(),
+                factor_type: "totp".to_string(),
+                secret_encrypted: None,
+                recovery_codes: None,
+                is_verified: false,
+                is_active: true,
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert pinned factor");
+
+        let action_request_id = "mfa-confirm-interrupted";
+        let fingerprint = fingerprint_canonical(&MfaFingerprint {
+            action: ACCOUNT_MFA_SETUP_ACTION,
+            user_id: &user_id,
+            stage: AssistantMfaSetupStage::Confirm,
+            factor_id: Some(&factor_id),
+        })
+        .expect("fingerprint");
+        assert!(matches!(
+            reserve_or_replay(
+                &db,
+                &user_id,
+                ACCOUNT_MFA_SETUP_ACTION,
+                action_request_id,
+                &fingerprint,
+                user_id.clone(),
+            )
+            .await
+            .expect("reserve receipt"),
+            ReceiptOutcome::Reserved(_)
+        ));
+
+        let state = test_app_state(db.clone());
+        let request = || AssistantMfaSetupRequest {
+            action_request_id: action_request_id.to_string(),
+            stage: AssistantMfaSetupStage::Confirm,
+            factor_id: Some(factor_id.clone()),
+            code: Some("123456".to_string()),
+        };
+        let denied = setup_account_mfa(
+            State(state.clone()),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(request()),
+        )
+        .await;
+        assert!(matches!(denied, Err(AppError::Conflict(_))));
+
+        let receipt = db
+            .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+            .find_one(doc! { "action_request_id": action_request_id })
+            .await
+            .expect("load pending receipt")
+            .expect("pending receipt");
+        assert_eq!(receipt.status, AssistantActionReceiptStatus::Pending);
+
+        db.collection::<MfaFactor>(MFA_FACTORS)
+            .update_one(
+                doc! { "_id": &factor_id },
+                doc! { "$set": { "is_verified": true } },
+            )
+            .await
+            .expect("verify pinned factor");
+        let resumed = setup_account_mfa(
+            State(state),
+            test_auth_user(&user_id),
+            TelemetryContext::default(),
+            Json(request()),
+        )
+        .await
+        .expect("resume after pinned factor confirmation");
+        assert!(resumed.0.replayed);
+        assert_eq!(resumed.0.factor_id.as_deref(), Some(factor_id.as_str()));
+
+        let completed = db
+            .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+            .find_one(doc! { "action_request_id": action_request_id })
+            .await
+            .expect("load completed receipt")
+            .expect("completed receipt");
+        assert_eq!(completed.status, AssistantActionReceiptStatus::Completed);
     }
 
     #[test]
