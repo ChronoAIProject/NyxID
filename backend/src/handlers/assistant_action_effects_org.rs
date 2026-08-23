@@ -4041,6 +4041,81 @@ mod wave4_effect_tests {
         use crate::test_utils::connect_test_database;
         use serde_json::Value;
 
+        #[derive(Clone)]
+        enum JsonPathSegment {
+            Key(String),
+            Index(usize),
+        }
+
+        fn collect_semantic_leaves(
+            value: &Value,
+            path: &mut Vec<JsonPathSegment>,
+            skip_action: bool,
+            leaves: &mut Vec<Vec<JsonPathSegment>>,
+        ) {
+            match value {
+                Value::Object(values) if !values.is_empty() => {
+                    for (key, child) in values {
+                        if skip_action && key == "action" {
+                            continue;
+                        }
+                        path.push(JsonPathSegment::Key(key.clone()));
+                        collect_semantic_leaves(child, path, false, leaves);
+                        path.pop();
+                    }
+                }
+                Value::Array(values) if !values.is_empty() => {
+                    for (index, child) in values.iter().enumerate() {
+                        path.push(JsonPathSegment::Index(index));
+                        collect_semantic_leaves(child, path, false, leaves);
+                        path.pop();
+                    }
+                }
+                _ => leaves.push(path.clone()),
+            }
+        }
+
+        fn value_at_path_mut<'a>(
+            mut value: &'a mut Value,
+            path: &[JsonPathSegment],
+        ) -> &'a mut Value {
+            for segment in path {
+                value = match segment {
+                    JsonPathSegment::Key(key) => value
+                        .as_object_mut()
+                        .expect("path object")
+                        .get_mut(key)
+                        .expect("path key"),
+                    JsonPathSegment::Index(index) => value
+                        .as_array_mut()
+                        .expect("path array")
+                        .get_mut(*index)
+                        .expect("path index"),
+                };
+            }
+            value
+        }
+
+        fn path_label(path: &[JsonPathSegment]) -> String {
+            let mut label = String::new();
+            for segment in path {
+                match segment {
+                    JsonPathSegment::Key(key) => {
+                        if !label.is_empty() {
+                            label.push('.');
+                        }
+                        label.push_str(key);
+                    }
+                    JsonPathSegment::Index(index) => {
+                        label.push('[');
+                        label.push_str(&index.to_string());
+                        label.push(']');
+                    }
+                }
+            }
+            label
+        }
+
         let Some(db) = connect_test_database("assistant_org_fingerprint_matrix").await else {
             return;
         };
@@ -4350,36 +4425,25 @@ mod wave4_effect_tests {
             cases.into_iter().enumerate()
         {
             assert_eq!(serialized["action"].as_str(), Some(action), "{name}");
-            let semantic = serialized
-                .get("request")
-                .and_then(Value::as_object)
-                .unwrap_or_else(|| serialized.as_object().expect("fingerprint object"));
-            let fields: Vec<String> = semantic
-                .keys()
-                .filter(|field| field.as_str() != "action")
-                .cloned()
-                .collect();
-            assert!(!fields.is_empty(), "{name} has no bound semantic fields");
+            let mut leaves = Vec::new();
+            let mut path = Vec::new();
+            if let Some(request) = serialized.get("request") {
+                path.push(JsonPathSegment::Key("request".to_string()));
+                collect_semantic_leaves(request, &mut path, false, &mut leaves);
+            } else {
+                collect_semantic_leaves(&serialized, &mut path, true, &mut leaves);
+            }
+            assert!(!leaves.is_empty(), "{name} has no bound semantic fields");
 
-            for field in fields {
+            for path in leaves {
+                let field = path_label(&path);
                 let mut changed = serialized.clone();
-                let target = if changed.get("request").is_some() {
-                    changed["request"]
-                        .as_object_mut()
-                        .expect("request object")
-                        .get_mut(&field)
-                        .expect("request field")
-                } else {
-                    changed
-                        .as_object_mut()
-                        .expect("fingerprint object")
-                        .get_mut(&field)
-                        .expect("fingerprint field")
-                };
+                let target = value_at_path_mut(&mut changed, &path);
                 match target {
                     Value::Bool(value) => *value = !*value,
                     Value::Number(number) => {
-                        *target = Value::from(number.as_i64().expect("integer field") + 1)
+                        let next = number.as_i64().expect("integer field") + 1;
+                        *target = Value::from(next);
                     }
                     Value::String(value) => {
                         *value = match value.as_str() {
@@ -4399,15 +4463,7 @@ mod wave4_effect_tests {
                         }
                     }
                     Value::Array(values) => {
-                        if field == "rules" {
-                            values.push(values.first().expect("rule fixture").clone());
-                        } else if field == "redirectUris" {
-                            values.push(Value::String(
-                                "https://different.example/callback".to_string(),
-                            ));
-                        } else {
-                            values.push(Value::String("different".to_string()));
-                        }
+                        values.push(Value::String("different".to_string()));
                     }
                     Value::Null => *target = Value::String("present".to_string()),
                     Value::Object(values) => {
@@ -4451,7 +4507,7 @@ mod wave4_effect_tests {
             }
         }
         assert_eq!(
-            changed_field_count, 89,
+            changed_field_count, 93,
             "adding or removing a bound semantic field requires reviewing this count"
         );
     }
