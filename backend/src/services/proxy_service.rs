@@ -279,7 +279,20 @@ fn validate_actor_addressed_master_credential_policy(service: &DownstreamService
     // A row holding a platform credential must state what it may do. Absent
     // policy is deny, not passthrough (V1_SPEC item 2). Present-but-empty
     // policy still resolves here and denies at the operation layer.
-    if actor_addressed_policy_required() && service.proxy_operation_policy.is_none() {
+    validate_actor_addressed_master_credential_policy_with(
+        service,
+        actor_addressed_policy_required(),
+    )
+}
+
+/// Pure form of the check above, so tests can exercise both flag states without
+/// mutating process-global environment (cargo runs tests as threads in one process,
+/// so `set_var` would leak the flag into every concurrent test).
+fn validate_actor_addressed_master_credential_policy_with(
+    service: &DownstreamService,
+    policy_required: bool,
+) -> AppResult<()> {
+    if policy_required && service.proxy_operation_policy.is_none() {
         tracing::warn!(
             service_id = %service.id,
             service_slug = %service.slug,
@@ -3672,28 +3685,35 @@ mod tests {
                 .is_ok(),
             "server-chosen rows without a policy must keep resolving"
         );
-        // The actor-addressed deny ships disabled so deploying changes no existing
-        // behaviour; with the flag off, a policy-less row still resolves.
+        // The actor-addressed deny ships disabled, so deploying changes no existing
+        // behaviour: with the flag off a policy-less row still resolves.
         assert!(
             authorize_master_credential(&db, &service, &actor)
                 .await
                 .is_ok(),
-            "with PLATFORM_REQUIRE_OPERATION_POLICY unset, actor-addressed rows keep resolving"
+            "with the flag unset, actor-addressed rows keep resolving"
         );
+    }
 
-        // Enabled, the same row is refused on the actor path only.
-        unsafe { std::env::set_var("PLATFORM_REQUIRE_OPERATION_POLICY", "1") };
-        let enabled = authorize_master_credential(&db, &service, &actor).await;
-        let server_chosen_still_ok = authorize_master_credential_server_chosen(&db, &service).await;
-        unsafe { std::env::remove_var("PLATFORM_REQUIRE_OPERATION_POLICY") };
+    /// Both flag states, exercised on the pure form so no process-global env is
+    /// mutated (cargo runs tests as threads; `set_var` would leak into others).
+    #[test]
+    fn actor_addressed_policy_gate_denies_only_when_required() {
+        let service = valid_master_service(None);
 
-        assert_service_not_found(
-            enabled,
-            "with the flag on, missing policy must fail closed before credential access",
-        );
         assert!(
-            server_chosen_still_ok.is_ok(),
-            "server-chosen must resolve regardless of the flag"
+            validate_actor_addressed_master_credential_policy_with(&service, false).is_ok(),
+            "flag off: a policy-less row must resolve, so deploy is a no-op"
+        );
+        assert_service_not_found(
+            validate_actor_addressed_master_credential_policy_with(&service, true),
+            "flag on: a policy-less row must be refused on the actor path",
+        );
+
+        let policed = valid_master_service(Some(ProxyOperationPolicy { rules: vec![] }));
+        assert!(
+            validate_actor_addressed_master_credential_policy_with(&policed, true).is_ok(),
+            "flag on: a row carrying a policy resolves here; empty rules deny at the operation layer"
         );
     }
 
