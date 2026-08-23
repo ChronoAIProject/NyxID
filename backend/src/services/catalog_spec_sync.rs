@@ -517,5 +517,4 @@ mod tests {
         assert_eq!(refreshed.path, "/tweets/search/recent");
         assert!(refreshed.updated_at > old_updated_at);
     }
-
 }

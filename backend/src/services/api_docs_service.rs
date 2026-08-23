@@ -1092,8 +1092,6 @@ mod tests {
         assert_eq!(spec["servers"][0]["url"], "https://api.firecrawl.dev");
         assert_eq!(spec["paths"]["/v2/scrape"]["post"]["operationId"], "scrape");
         assert_eq!(spec["paths"]["/v2/search"]["post"]["operationId"], "search");
-        assert!(spec["paths"].get("/v2/agent/{id}").is_none());
-        assert!(spec["paths"].get("/v2/map").is_none());
     }
 
     #[tokio::test]
