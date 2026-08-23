@@ -196,6 +196,79 @@ vi.mock(
   }),
 );
 
+vi.mock("@/components/assistant/assistant-endpoint-update-dialog", () => ({
+  AssistantEndpointUpdateDialog: (
+    props: MockDialogProps<{
+      readonly endpointId: string;
+      readonly label?: string;
+      readonly endpointUrl?: string;
+      readonly openapiSpecUrl?: string;
+    }>,
+  ) => {
+    if (!props.open) return null;
+    dialogCalls.set("endpoint_update", props);
+    return (
+      <button
+        type="button"
+        onClick={() => props.onComplete("endpoint-updated")}
+      >
+        Finish endpoint_update
+      </button>
+    );
+  },
+}));
+
+vi.mock("@/components/assistant/assistant-endpoint-delete-dialog", () => ({
+  AssistantEndpointDeleteDialog: (
+    props: MockDialogProps<{ readonly endpointId: string }>,
+  ) => {
+    if (!props.open) return null;
+    dialogCalls.set("endpoint_delete", props);
+    return (
+      <button
+        type="button"
+        onClick={() => props.onComplete("endpoint-deleted")}
+      >
+        Finish endpoint_delete
+      </button>
+    );
+  },
+}));
+
+vi.mock("@/components/assistant/assistant-external-key-rotate-dialog", () => ({
+  AssistantExternalKeyRotateDialog: (
+    props: MockDialogProps<{ readonly externalKeyId: string }>,
+  ) => {
+    if (!props.open) return null;
+    dialogCalls.set("external_key_rotate", props);
+    return (
+      <button
+        type="button"
+        onClick={() => props.onComplete("external-key-rotated")}
+      >
+        Finish external_key_rotate
+      </button>
+    );
+  },
+}));
+
+vi.mock("@/components/assistant/assistant-external-key-delete-dialog", () => ({
+  AssistantExternalKeyDeleteDialog: (
+    props: MockDialogProps<{ readonly externalKeyId: string }>,
+  ) => {
+    if (!props.open) return null;
+    dialogCalls.set("external_key_delete", props);
+    return (
+      <button
+        type="button"
+        onClick={() => props.onComplete("external-key-deleted")}
+      >
+        Finish external_key_delete
+      </button>
+    );
+  },
+}));
+
 beforeEach(() => {
   dialogCalls.clear();
 });
@@ -457,6 +530,91 @@ describe("Wave-2 action card wiring", () => {
       dialogParams: { userServiceId: "service-rotate-1" },
       resource: {
         userService: { userServiceId: "service-credential-rotated" },
+      },
+    });
+  });
+
+  it("wires endpoint.update through its typed dialog and endpoint report", async () => {
+    // Falsifiers exercised: deleting the registry row removes the dialog,
+    // breaking toProps changes these props, and changing resource changes the report.
+    await runJourney({
+      action: "endpoint.update",
+      rawParams: {
+        endpointId: "endpoint-update-1",
+        label: "Build endpoint",
+        endpointUrl: "https://build.example.test/v3",
+        openapiSpecUrl: "https://build.example.test/openapi.json",
+      },
+      variant: "endpoint_update",
+      normalizedParams: {
+        variant: "endpoint_update",
+        endpoint_id: "endpoint-update-1",
+        label: "Build endpoint",
+        endpoint_url: "https://build.example.test/v3",
+        openapi_spec_url: "https://build.example.test/openapi.json",
+      },
+      cta: "Update endpoint",
+      dialogParams: {
+        endpointId: "endpoint-update-1",
+        label: "Build endpoint",
+        endpointUrl: "https://build.example.test/v3",
+        openapiSpecUrl: "https://build.example.test/openapi.json",
+      },
+      resource: { endpoint: { endpointId: "endpoint-updated" } },
+    });
+  });
+
+  it("wires endpoint.delete through its typed dialog and endpoint report", async () => {
+    // Falsifiers exercised: deleting the registry row removes the dialog,
+    // breaking toProps changes these props, and changing resource changes the report.
+    await runJourney({
+      action: "endpoint.delete",
+      rawParams: { endpointId: "endpoint-delete-1" },
+      variant: "endpoint_delete",
+      normalizedParams: {
+        variant: "endpoint_delete",
+        endpoint_id: "endpoint-delete-1",
+      },
+      cta: "Delete endpoint",
+      dialogParams: { endpointId: "endpoint-delete-1" },
+      resource: { endpoint: { endpointId: "endpoint-deleted" } },
+    });
+  });
+
+  it("wires external_key.rotate through its typed dialog and external-key report", async () => {
+    // Falsifiers exercised: deleting the registry row removes the dialog,
+    // breaking toProps changes these props, and changing resource changes the report.
+    await runJourney({
+      action: "external_key.rotate",
+      rawParams: { externalKeyId: "external-rotate-1" },
+      variant: "external_key_rotate",
+      normalizedParams: {
+        variant: "external_key_rotate",
+        external_key_id: "external-rotate-1",
+      },
+      cta: "Rotate external credential",
+      dialogParams: { externalKeyId: "external-rotate-1" },
+      resource: {
+        externalKey: { externalKeyId: "external-key-rotated" },
+      },
+    });
+  });
+
+  it("wires external_key.delete through its typed dialog and external-key report", async () => {
+    // Falsifiers exercised: deleting the registry row removes the dialog,
+    // breaking toProps changes these props, and changing resource changes the report.
+    await runJourney({
+      action: "external_key.delete",
+      rawParams: { externalKeyId: "external-delete-1" },
+      variant: "external_key_delete",
+      normalizedParams: {
+        variant: "external_key_delete",
+        external_key_id: "external-delete-1",
+      },
+      cta: "Delete external credential",
+      dialogParams: { externalKeyId: "external-delete-1" },
+      resource: {
+        externalKey: { externalKeyId: "external-key-deleted" },
       },
     });
   });

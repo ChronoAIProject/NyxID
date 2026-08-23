@@ -261,6 +261,7 @@ export const assistantActionParamsSchema = z
     endpointUpdateActionParamsSchema,
     endpointDeleteActionParamsSchema,
     externalKeyRotateActionParamsSchema,
+    externalKeyDeleteActionParamsSchema,
     emptyActionParamsSchema,
   ])
   .optional()
@@ -414,6 +415,25 @@ export type ActionCardParams =
   | {
       readonly variant: "service_rotate_credential";
       readonly user_service_id: string;
+    }
+  | {
+      readonly variant: "endpoint_update";
+      readonly endpoint_id: string;
+      readonly label?: string;
+      readonly endpoint_url?: string;
+      readonly openapi_spec_url?: string;
+    }
+  | {
+      readonly variant: "endpoint_delete";
+      readonly endpoint_id: string;
+    }
+  | {
+      readonly variant: "external_key_rotate";
+      readonly external_key_id: string;
+    }
+  | {
+      readonly variant: "external_key_delete";
+      readonly external_key_id: string;
     }
   | { readonly variant: "unknown" };
 

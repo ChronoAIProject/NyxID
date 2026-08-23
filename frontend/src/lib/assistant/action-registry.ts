@@ -1,6 +1,10 @@
 import {
   ACTION_SCHEMA_VERSION,
   ACTION_SERVICE_SLUG_PATTERN,
+  endpointDeleteActionParamsSchema,
+  endpointUpdateActionParamsSchema,
+  externalKeyDeleteActionParamsSchema,
+  externalKeyRotateActionParamsSchema,
   keyBindCredentialActionParamsSchema,
   keyCreateActionParamsSchema,
   keyDeleteActionParamsSchema,
@@ -289,6 +293,45 @@ function normalizeServiceRotateCredential(
   return {
     variant: "service_rotate_credential",
     user_service_id: parsed.data.userServiceId,
+  };
+}
+
+function normalizeEndpointUpdate(raw: unknown): ActionCardParams | null {
+  const parsed = endpointUpdateActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "endpoint_update",
+    endpoint_id: parsed.data.endpointId,
+    label: parsed.data.label,
+    endpoint_url: parsed.data.endpointUrl,
+    openapi_spec_url: parsed.data.openapiSpecUrl,
+  };
+}
+
+function normalizeEndpointDelete(raw: unknown): ActionCardParams | null {
+  const parsed = endpointDeleteActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "endpoint_delete",
+    endpoint_id: parsed.data.endpointId,
+  };
+}
+
+function normalizeExternalKeyRotate(raw: unknown): ActionCardParams | null {
+  const parsed = externalKeyRotateActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "external_key_rotate",
+    external_key_id: parsed.data.externalKeyId,
+  };
+}
+
+function normalizeExternalKeyDelete(raw: unknown): ActionCardParams | null {
+  const parsed = externalKeyDeleteActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "external_key_delete",
+    external_key_id: parsed.data.externalKeyId,
   };
 }
 
@@ -697,6 +740,113 @@ const serviceRotateCredentialDescriptor: ActionDescriptor = {
       : null,
 };
 
+const endpointUpdateDescriptor: ActionDescriptor = {
+  title: () => "Update endpoint",
+  body: () =>
+    "NyxID will update this endpoint's label, target URL, or OpenAPI specification URL.",
+  cta: () => "Update endpoint",
+  risk: "credential_access",
+  normalize: normalizeEndpointUpdate,
+  summary: (params) =>
+    params.variant === "endpoint_update"
+      ? [
+          { label: "Endpoint", value: params.endpoint_id, mono: true },
+          ...(params.label ? [{ label: "Label", value: params.label }] : []),
+          ...(params.endpoint_url
+            ? [{ label: "Target URL", value: params.endpoint_url, mono: true }]
+            : []),
+          ...(params.openapi_spec_url
+            ? [
+                {
+                  label: "OpenAPI spec",
+                  value: params.openapi_spec_url,
+                  mono: true,
+                },
+              ]
+            : []),
+        ]
+      : [],
+  icon: "globe",
+  busyLabel: "Working",
+  assurance:
+    "NyxID verifies the exact endpoint and applies only these changes. The assistant receives only the safe endpoint reference.",
+  resource: (completion) => ({
+    endpoint: { endpointId: completedId(completion) },
+  }),
+  wiring: "dialog",
+  journey: (params) =>
+    params.variant === "endpoint_update" ? "endpoint_update" : null,
+};
+
+const endpointDeleteDescriptor: ActionDescriptor = {
+  title: () => "Delete endpoint",
+  body: () =>
+    "NyxID will permanently delete this endpoint after you confirm the destructive change.",
+  cta: () => "Delete endpoint",
+  risk: "credential_access",
+  normalize: normalizeEndpointDelete,
+  summary: (params) =>
+    params.variant === "endpoint_delete"
+      ? [{ label: "Endpoint", value: params.endpoint_id, mono: true }]
+      : [],
+  icon: "globe",
+  busyLabel: "Working",
+  assurance:
+    "NyxID confirms and verifies this deletion here. The assistant receives only the deleted endpoint reference.",
+  resource: (completion) => ({
+    endpoint: { endpointId: completedId(completion) },
+  }),
+  wiring: "dialog",
+  journey: (params) =>
+    params.variant === "endpoint_delete" ? "endpoint_delete" : null,
+};
+
+const externalKeyRotateDescriptor: ActionDescriptor = {
+  title: () => "Rotate external credential",
+  body: () =>
+    "NyxID will replace this stored external credential inside the browser journey.",
+  cta: () => "Rotate external credential",
+  risk: "credential_access",
+  normalize: normalizeExternalKeyRotate,
+  summary: (params) =>
+    params.variant === "external_key_rotate"
+      ? [{ label: "External key", value: params.external_key_id, mono: true }]
+      : [],
+  icon: "key",
+  busyLabel: "Working",
+  assurance:
+    "You enter the replacement only inside NyxID. The assistant receives only the verified external-key reference.",
+  resource: (completion) => ({
+    externalKey: { externalKeyId: completedId(completion) },
+  }),
+  wiring: "dialog",
+  journey: (params) =>
+    params.variant === "external_key_rotate" ? "external_key_rotate" : null,
+};
+
+const externalKeyDeleteDescriptor: ActionDescriptor = {
+  title: () => "Delete external credential",
+  body: () =>
+    "NyxID will permanently delete this stored external credential after you confirm the destructive change.",
+  cta: () => "Delete external credential",
+  risk: "credential_access",
+  normalize: normalizeExternalKeyDelete,
+  summary: (params) =>
+    params.variant === "external_key_delete"
+      ? [{ label: "External key", value: params.external_key_id, mono: true }]
+      : [],
+  icon: "key",
+  busyLabel: "Working",
+  assurance:
+    "NyxID confirms and verifies this deletion here. The assistant receives only the deleted external-key reference.",
+  resource: (completion) => ({
+    externalKey: { externalKeyId: completedId(completion) },
+  }),
+  wiring: "dialog",
+  journey: (params) =>
+    params.variant === "external_key_delete" ? "external_key_delete" : null,
+};
+
 const unsupportedDescriptor: ActionDescriptor = {
   title: () => "Unsupported action request",
   body: () =>
@@ -728,10 +878,10 @@ export const ACTION_REGISTRY: Readonly<Record<string, ActionDescriptor>> = {
   "service.delete": serviceDeleteDescriptor,
   "service.route": serviceRouteDescriptor,
   "service.rotate_credential": serviceRotateCredentialDescriptor,
-  "endpoint.update": unsupportedDescriptor,
-  "endpoint.delete": unsupportedDescriptor,
-  "external_key.rotate": unsupportedDescriptor,
-  "external_key.delete": unsupportedDescriptor,
+  "endpoint.update": endpointUpdateDescriptor,
+  "endpoint.delete": endpointDeleteDescriptor,
+  "external_key.rotate": externalKeyRotateDescriptor,
+  "external_key.delete": externalKeyDeleteDescriptor,
   "node.register_token": unsupportedDescriptor,
   "node.rotate_token": unsupportedDescriptor,
   "node.delete": unsupportedDescriptor,

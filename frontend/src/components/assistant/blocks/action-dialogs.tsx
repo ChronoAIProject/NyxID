@@ -1,4 +1,8 @@
 import type { ComponentType } from "react";
+import { AssistantEndpointDeleteDialog } from "@/components/assistant/assistant-endpoint-delete-dialog";
+import { AssistantEndpointUpdateDialog } from "@/components/assistant/assistant-endpoint-update-dialog";
+import { AssistantExternalKeyDeleteDialog } from "@/components/assistant/assistant-external-key-delete-dialog";
+import { AssistantExternalKeyRotateDialog } from "@/components/assistant/assistant-external-key-rotate-dialog";
 import { AssistantKeyBindDialog } from "@/components/assistant/assistant-key-bind-dialog";
 import { AssistantKeyCreateDialog } from "@/components/assistant/assistant-key-create-dialog";
 import { AssistantKeyDeleteDialog } from "@/components/assistant/assistant-key-delete-dialog";
@@ -121,6 +125,35 @@ export const ACTION_DIALOGS: {
       AssistantDialogProps<unknown>
     >,
     toProps: (params) => ({ userServiceId: params.user_service_id }),
+  },
+  endpoint_update: {
+    Dialog: AssistantEndpointUpdateDialog as ComponentType<
+      AssistantDialogProps<unknown>
+    >,
+    toProps: (params) => ({
+      endpointId: params.endpoint_id,
+      label: params.label,
+      endpointUrl: params.endpoint_url,
+      openapiSpecUrl: params.openapi_spec_url,
+    }),
+  },
+  endpoint_delete: {
+    Dialog: AssistantEndpointDeleteDialog as ComponentType<
+      AssistantDialogProps<unknown>
+    >,
+    toProps: (params) => ({ endpointId: params.endpoint_id }),
+  },
+  external_key_rotate: {
+    Dialog: AssistantExternalKeyRotateDialog as ComponentType<
+      AssistantDialogProps<unknown>
+    >,
+    toProps: (params) => ({ externalKeyId: params.external_key_id }),
+  },
+  external_key_delete: {
+    Dialog: AssistantExternalKeyDeleteDialog as ComponentType<
+      AssistantDialogProps<unknown>
+    >,
+    toProps: (params) => ({ externalKeyId: params.external_key_id }),
   },
 };
 
