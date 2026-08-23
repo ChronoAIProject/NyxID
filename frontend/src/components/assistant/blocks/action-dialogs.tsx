@@ -1,6 +1,10 @@
 import type { ComponentType } from "react";
+import { AssistantKeyBindDialog } from "@/components/assistant/assistant-key-bind-dialog";
 import { AssistantKeyCreateDialog } from "@/components/assistant/assistant-key-create-dialog";
+import { AssistantKeyDeleteDialog } from "@/components/assistant/assistant-key-delete-dialog";
 import { AssistantKeyRotateDialog } from "@/components/assistant/assistant-key-rotate-dialog";
+import { AssistantKeyScopeDialog } from "@/components/assistant/assistant-key-scope-dialog";
+import { AssistantKeyUpdateDialog } from "@/components/assistant/assistant-key-update-dialog";
 import type { ActionCardParams } from "@/schemas/assistant-actions";
 
 export type DialogVariant = Exclude<
@@ -18,7 +22,7 @@ interface AssistantDialogProps<P> {
   readonly onOpenChange: (open: boolean) => void;
   readonly actionRequestId: string;
   readonly params: P;
-  readonly onComplete: (id: string) => void;
+  readonly onComplete: (completion: unknown) => void;
 }
 
 export interface DialogBinding<V extends DialogVariant> {
@@ -44,6 +48,42 @@ export const ACTION_DIALOGS: {
       AssistantDialogProps<unknown>
     >,
     toProps: (params) => ({ keyId: params.key_id }),
+  },
+  key_update: {
+    Dialog: AssistantKeyUpdateDialog as ComponentType<
+      AssistantDialogProps<unknown>
+    >,
+    toProps: (params) => ({
+      keyId: params.key_id,
+      name: params.name,
+      platform: params.platform,
+      description: params.description,
+    }),
+  },
+  key_delete: {
+    Dialog: AssistantKeyDeleteDialog as ComponentType<
+      AssistantDialogProps<unknown>
+    >,
+    toProps: (params) => ({ keyId: params.key_id }),
+  },
+  key_extend_scope: {
+    Dialog: AssistantKeyScopeDialog as ComponentType<
+      AssistantDialogProps<unknown>
+    >,
+    toProps: (params) => ({
+      keyId: params.key_id,
+      addServiceIds: params.add_service_ids,
+    }),
+  },
+  key_bind_credential: {
+    Dialog: AssistantKeyBindDialog as ComponentType<
+      AssistantDialogProps<unknown>
+    >,
+    toProps: (params) => ({
+      keyId: params.key_id,
+      userServiceId: params.user_service_id,
+      externalKeyId: params.external_key_id,
+    }),
   },
 };
 

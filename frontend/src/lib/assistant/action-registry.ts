@@ -1,8 +1,12 @@
 import {
   ACTION_SCHEMA_VERSION,
   ACTION_SERVICE_SLUG_PATTERN,
+  keyBindCredentialActionParamsSchema,
   keyCreateActionParamsSchema,
+  keyDeleteActionParamsSchema,
+  keyExtendScopeActionParamsSchema,
   keyRotateActionParamsSchema,
+  keyUpdateActionParamsSchema,
   serviceConnectActionParamsSchema,
   serviceReauthorizeActionParamsSchema,
   type ActionCardParams,
@@ -46,7 +50,7 @@ export interface ActionDescriptor<
   readonly icon: ActionIcon;
   readonly busyLabel: "Working" | "Authorizing" | "Connecting";
   readonly assurance: string;
-  readonly resource: (id: string) => ActionResource;
+  readonly resource: (completion: unknown) => ActionResource;
   readonly wiring:
     | "dialog"
     | "legacy_connect"
@@ -199,6 +203,76 @@ function normalizeKeyRotate(raw: unknown): ActionCardParams | null {
   };
 }
 
+function normalizeKeyUpdate(raw: unknown): ActionCardParams | null {
+  const parsed = keyUpdateActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "key_update",
+    key_id: parsed.data.keyId,
+    name: parsed.data.name,
+    platform: parsed.data.platform,
+    description: parsed.data.description,
+  };
+}
+
+function normalizeKeyDelete(raw: unknown): ActionCardParams | null {
+  const parsed = keyDeleteActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "key_delete",
+    key_id: parsed.data.keyId,
+  };
+}
+
+function normalizeKeyExtendScope(raw: unknown): ActionCardParams | null {
+  const parsed = keyExtendScopeActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "key_extend_scope",
+    key_id: parsed.data.keyId,
+    add_service_ids: parsed.data.addServiceIds,
+  };
+}
+
+function normalizeKeyBindCredential(raw: unknown): ActionCardParams | null {
+  const parsed = keyBindCredentialActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "key_bind_credential",
+    key_id: parsed.data.keyId,
+    user_service_id: parsed.data.userServiceId,
+    external_key_id: parsed.data.externalKeyId,
+  };
+}
+
+function completedId(completion: unknown): string {
+  if (typeof completion !== "string" || !completion) {
+    throw new Error("The action dialog returned an invalid resource identity.");
+  }
+  return completion;
+}
+
+function keyBindingResource(completion: unknown): ActionResource {
+  if (!completion || typeof completion !== "object") {
+    throw new Error("The key binding dialog returned an invalid resource.");
+  }
+  const resource = completion as Record<string, unknown>;
+  if (
+    typeof resource["keyId"] !== "string" ||
+    !resource["keyId"] ||
+    typeof resource["userServiceId"] !== "string" ||
+    !resource["userServiceId"]
+  ) {
+    throw new Error("The key binding dialog returned an invalid resource.");
+  }
+  return {
+    key: {
+      keyId: resource["keyId"],
+      userServiceId: resource["userServiceId"],
+    },
+  };
+}
+
 function endpointHost(endpointUrl: string): string {
   try {
     return new URL(endpointUrl).host;
@@ -256,7 +330,9 @@ const serviceConnectDescriptor: ActionDescriptor = {
   busyLabel: "Connecting",
   assurance:
     "You choose the account, routing, and credential. The assistant receives only brokered access after you finish.",
-  resource: (id) => ({ userService: { userServiceId: id } }),
+  resource: (completion) => ({
+    userService: { userServiceId: completedId(completion) },
+  }),
   wiring: "legacy_connect",
   journey: (params) => {
     if (params.variant === "catalog") return "catalog_service";
@@ -293,7 +369,9 @@ const serviceReauthorizeDescriptor: ActionDescriptor = {
   busyLabel: "Authorizing",
   assurance:
     "NyxID opens the provider authorization flow here. The assistant receives only the service reference after fresh authorization finishes.",
-  resource: (id) => ({ userService: { userServiceId: id } }),
+  resource: (completion) => ({
+    userService: { userServiceId: completedId(completion) },
+  }),
   wiring: "legacy_reauthorize",
   journey: (params) =>
     params.variant === "service_reauthorize" ? "service_reauthorize" : null,
@@ -324,7 +402,7 @@ const keyCreateDescriptor: ActionDescriptor = {
   busyLabel: "Working",
   assurance:
     "NyxID creates and verifies the key here. The assistant receives only the safe key reference after you finish.",
-  resource: (id) => ({ key: { keyId: id } }),
+  resource: (completion) => ({ key: { keyId: completedId(completion) } }),
   wiring: "dialog",
   journey: (params) => (params.variant === "key_create" ? "key_create" : null),
 };
@@ -346,9 +424,115 @@ const keyRotateDescriptor: ActionDescriptor = {
   busyLabel: "Working",
   assurance:
     "NyxID rotates and verifies the exact lineage here. The assistant receives only the replacement key reference after you finish.",
-  resource: (id) => ({ key: { keyId: id } }),
+  resource: (completion) => ({ key: { keyId: completedId(completion) } }),
   wiring: "dialog",
   journey: (params) => (params.variant === "key_rotate" ? "key_rotate" : null),
+};
+
+const keyUpdateDescriptor: ActionDescriptor = {
+  title: () => "Update API key",
+  body: () =>
+    "NyxID will update the display metadata for this API key without changing its access.",
+  cta: () => "Update key",
+  risk: "credential_access",
+  normalize: normalizeKeyUpdate,
+  summary: (params) =>
+    params.variant === "key_update"
+      ? [
+          { label: "Key", value: params.key_id, mono: true },
+          ...(params.name ? [{ label: "Name", value: params.name }] : []),
+          ...(params.platform
+            ? [{ label: "Platform", value: params.platform }]
+            : []),
+          ...(params.description
+            ? [{ label: "Description", value: params.description }]
+            : []),
+        ]
+      : [],
+  icon: "key",
+  busyLabel: "Working",
+  assurance:
+    "NyxID verifies the exact key and applies only these metadata changes. The assistant receives only the safe key reference.",
+  resource: (completion) => ({ key: { keyId: completedId(completion) } }),
+  wiring: "dialog",
+  journey: (params) => (params.variant === "key_update" ? "key_update" : null),
+};
+
+const keyDeleteDescriptor: ActionDescriptor = {
+  title: () => "Delete API key",
+  body: () =>
+    "NyxID will permanently delete this API key after you confirm the destructive change.",
+  cta: () => "Delete key",
+  risk: "credential_access",
+  normalize: normalizeKeyDelete,
+  summary: (params) =>
+    params.variant === "key_delete"
+      ? [{ label: "Key", value: params.key_id, mono: true }]
+      : [],
+  icon: "key",
+  busyLabel: "Working",
+  assurance:
+    "NyxID confirms and verifies this deletion here. The assistant receives only the deleted key reference.",
+  resource: (completion) => ({ key: { keyId: completedId(completion) } }),
+  wiring: "dialog",
+  journey: (params) => (params.variant === "key_delete" ? "key_delete" : null),
+};
+
+const keyExtendScopeDescriptor: ActionDescriptor = {
+  title: () => "Extend API key scope",
+  body: () =>
+    "NyxID will allow this API key to access the additional listed services after you confirm the wider authority.",
+  cta: () => "Extend scope",
+  risk: "credential_access",
+  normalize: normalizeKeyExtendScope,
+  summary: (params) =>
+    params.variant === "key_extend_scope"
+      ? [
+          { label: "Key", value: params.key_id, mono: true },
+          ...params.add_service_ids.map((serviceId) => ({
+            label: "Add service",
+            value: serviceId,
+            mono: true,
+          })),
+        ]
+      : [],
+  icon: "key",
+  busyLabel: "Working",
+  assurance:
+    "NyxID widens only the listed service scope after your confirmation. The assistant receives only the safe key reference.",
+  resource: (completion) => ({ key: { keyId: completedId(completion) } }),
+  wiring: "dialog",
+  journey: (params) =>
+    params.variant === "key_extend_scope" ? "key_extend_scope" : null,
+};
+
+const keyBindCredentialDescriptor: ActionDescriptor = {
+  title: () => "Bind service credential",
+  body: () =>
+    "NyxID will bind this API key to the selected stored credential for one exact service.",
+  cta: () => "Bind credential",
+  risk: "credential_access",
+  normalize: normalizeKeyBindCredential,
+  summary: (params) =>
+    params.variant === "key_bind_credential"
+      ? [
+          { label: "Key", value: params.key_id, mono: true },
+          { label: "Service", value: params.user_service_id, mono: true },
+          {
+            label: "External key",
+            value: params.external_key_id,
+            mono: true,
+          },
+        ]
+      : [],
+  icon: "key",
+  busyLabel: "Working",
+  assurance:
+    "NyxID confirms and verifies the exact binding here. The assistant receives only safe key and service references.",
+  resource: keyBindingResource,
+  wiring: "dialog",
+  journey: (params) =>
+    params.variant === "key_bind_credential" ? "key_bind_credential" : null,
 };
 
 const unsupportedDescriptor: ActionDescriptor = {
@@ -374,10 +558,10 @@ export const ACTION_REGISTRY: Readonly<Record<string, ActionDescriptor>> = {
   "service.reauthorize": serviceReauthorizeDescriptor,
   "key.create": keyCreateDescriptor,
   "key.rotate": keyRotateDescriptor,
-  "key.update": unsupportedDescriptor,
-  "key.delete": unsupportedDescriptor,
-  "key.extend_scope": unsupportedDescriptor,
-  "key.bind_credential": unsupportedDescriptor,
+  "key.update": keyUpdateDescriptor,
+  "key.delete": keyDeleteDescriptor,
+  "key.extend_scope": keyExtendScopeDescriptor,
+  "key.bind_credential": keyBindCredentialDescriptor,
   "service.update": unsupportedDescriptor,
   "service.delete": unsupportedDescriptor,
   "service.route": unsupportedDescriptor,

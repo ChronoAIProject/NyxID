@@ -251,6 +251,7 @@ export const assistantActionParamsSchema = z
     keyCreateActionParamsSchema,
     keyRotateActionParamsSchema,
     keyUpdateActionParamsSchema,
+    keyDeleteActionParamsSchema,
     keyExtendScopeActionParamsSchema,
     keyBindCredentialActionParamsSchema,
     serviceUpdateActionParamsSchema,
@@ -368,6 +369,28 @@ export type ActionCardParams =
   | {
       readonly variant: "key_rotate";
       readonly key_id: string;
+    }
+  | {
+      readonly variant: "key_update";
+      readonly key_id: string;
+      readonly name?: string;
+      readonly platform?: string;
+      readonly description?: string;
+    }
+  | {
+      readonly variant: "key_delete";
+      readonly key_id: string;
+    }
+  | {
+      readonly variant: "key_extend_scope";
+      readonly key_id: string;
+      readonly add_service_ids: readonly string[];
+    }
+  | {
+      readonly variant: "key_bind_credential";
+      readonly key_id: string;
+      readonly user_service_id: string;
+      readonly external_key_id: string;
     }
   | { readonly variant: "unknown" };
 

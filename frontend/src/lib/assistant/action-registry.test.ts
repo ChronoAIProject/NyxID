@@ -8,6 +8,10 @@ const ACTIVE_WIRING = {
   "service.reauthorize": "legacy_reauthorize",
   "key.create": "dialog",
   "key.rotate": "dialog",
+  "key.update": "dialog",
+  "key.delete": "dialog",
+  "key.extend_scope": "dialog",
+  "key.bind_credential": "dialog",
 } as const;
 
 describe("assistant action registry", () => {
