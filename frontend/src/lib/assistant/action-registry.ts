@@ -6,23 +6,46 @@ import {
   serviceConnectActionParamsSchema,
   serviceReauthorizeActionParamsSchema,
   type ActionCardParams,
+  type ActionResource,
   type AssistantActionRequest,
 } from "@/schemas/assistant-actions";
 
 export type ActionRisk = "credential_access" | "unsupported";
-export type ActionJourney =
-  | "catalog_service"
-  | "custom_service"
-  | "service_reauthorize"
-  | "key_create"
-  | "key_rotate"
-  | null;
+export type ActionJourney = ActionCardParams["variant"] | null;
+export type ActionIcon =
+  | "service"
+  | "globe"
+  | "shield"
+  | "key"
+  | "org"
+  | "bell"
+  | "app"
+  | "node";
 
-export interface ActionDescriptor {
-  readonly title: (params: ActionCardParams) => string;
-  readonly body: (params: ActionCardParams) => string;
-  readonly cta: (params: ActionCardParams) => string;
+export interface SummaryRow {
+  readonly label: string;
+  readonly value: string;
+  readonly mono?: boolean;
+}
+
+export interface ActionDescriptor<
+  P extends ActionCardParams = ActionCardParams,
+> {
+  readonly title: (params: P) => string;
+  readonly body: (params: P) => string;
+  readonly cta: (params: P) => string;
   readonly risk: ActionRisk;
+  readonly normalize: (raw: unknown) => P | null;
+  readonly summary: (params: P) => readonly SummaryRow[];
+  readonly icon: ActionIcon;
+  readonly busyLabel: "Working" | "Authorizing" | "Connecting";
+  readonly assurance: string;
+  readonly resource: (id: string) => ActionResource;
+  readonly wiring:
+    | "dialog"
+    | "legacy_connect"
+    | "legacy_reauthorize"
+    | "deferred";
   readonly journey: (params: ActionCardParams) => ActionJourney;
 }
 
@@ -76,76 +99,6 @@ export function actionServiceLabel(params: ActionCardParams): string {
   return "requested action";
 }
 
-const serviceConnectDescriptor: ActionDescriptor = {
-  title: (params) => `Connect ${actionServiceLabel(params)}`,
-  body: (params) =>
-    `NyxID will broker access to ${actionServiceLabel(params)} for this assistant request. Your credential stays in NyxID and is never shared with the model.`,
-  cta: (params) => `Connect ${actionServiceLabel(params)}`,
-  risk: "credential_access",
-  journey: (params) => {
-    if (params.variant === "catalog") return "catalog_service";
-    if (params.variant === "custom") return "custom_service";
-    return null;
-  },
-};
-
-const serviceReauthorizeDescriptor: ActionDescriptor = {
-  title: () => "Re-authorize service",
-  body: (params) =>
-    params.variant === "service_reauthorize"
-      ? "NyxID will re-authorize this connected service with the requested permissions. Your credential stays in NyxID and is never shared with the model."
-      : "NyxID will re-authorize one exact connected service.",
-  cta: () => "Re-authorize",
-  risk: "credential_access",
-  journey: (params) =>
-    params.variant === "service_reauthorize" ? "service_reauthorize" : null,
-};
-
-const keyCreateDescriptor: ActionDescriptor = {
-  title: () => "Create API key",
-  body: (params) =>
-    params.variant === "key_create"
-      ? `NyxID will create ${clampServiceLabel(params.name) || "an API key"} with proxy access limited to the listed services.`
-      : "NyxID will create a least-scope API key.",
-  cta: () => "Create key",
-  risk: "credential_access",
-  journey: (params) => (params.variant === "key_create" ? "key_create" : null),
-};
-
-const keyRotateDescriptor: ActionDescriptor = {
-  title: () => "Rotate API key",
-  body: (params) =>
-    params.variant === "key_rotate"
-      ? "NyxID will replace this exact API key, preserve its authority, and commit an immutable predecessor link."
-      : "NyxID will rotate one exact API key.",
-  cta: () => "Rotate key",
-  risk: "credential_access",
-  journey: (params) => (params.variant === "key_rotate" ? "key_rotate" : null),
-};
-
-const unsupportedDescriptor: ActionDescriptor = {
-  title: () => "Unsupported action request",
-  body: () =>
-    "This assistant requested an action this version of NyxID cannot perform. Decline it to let the assistant continue safely.",
-  cta: () => "",
-  risk: "unsupported",
-  journey: () => null,
-};
-
-export const ACTION_REGISTRY: Readonly<Record<string, ActionDescriptor>> = {
-  "service.connect": serviceConnectDescriptor,
-  "service.reauthorize": serviceReauthorizeDescriptor,
-  "key.create": keyCreateDescriptor,
-  "key.rotate": keyRotateDescriptor,
-};
-
-export interface ResolvedAction {
-  readonly descriptor: ActionDescriptor;
-  readonly params: ActionCardParams;
-  readonly supported: boolean;
-  readonly journey: ActionJourney;
-}
-
 function nullableId(value: string): string | null {
   const trimmed = value.trim();
   return trimmed || null;
@@ -177,46 +130,14 @@ function safeAuthKeyName(value: string): string | null {
   return AUTH_KEY_NAME_PATTERN.test(trimmed) ? trimmed : null;
 }
 
-function normalizeParams(request: AssistantActionRequest): ActionCardParams {
-  if (request.action === "service.reauthorize") {
-    const parsed = serviceReauthorizeActionParamsSchema.safeParse(
-      request.params,
-    );
-    if (!parsed.success) return { variant: "unknown" };
-    return {
-      variant: "service_reauthorize",
-      user_service_id: parsed.data.userServiceId,
-      requested_scopes: parsed.data.requestedScopes,
-    };
-  }
-
-  if (request.action === "key.create") {
-    const parsed = keyCreateActionParamsSchema.safeParse(request.params);
-    if (!parsed.success) return { variant: "unknown" };
-    return {
-      variant: "key_create",
-      name: parsed.data.name,
-      platform: parsed.data.platform,
-      allowed_service_ids: parsed.data.allowedServiceIds,
-    };
-  }
-
-  if (request.action === "key.rotate") {
-    const parsed = keyRotateActionParamsSchema.safeParse(request.params);
-    if (!parsed.success) return { variant: "unknown" };
-    return {
-      variant: "key_rotate",
-      key_id: parsed.data.keyId,
-    };
-  }
-
-  const connected = serviceConnectActionParamsSchema.safeParse(request.params);
-  if (!connected.success) return { variant: "unknown" };
+function normalizeServiceConnect(raw: unknown): ActionCardParams | null {
+  const connected = serviceConnectActionParamsSchema.safeParse(raw);
+  if (!connected.success) return null;
   const catalog = connected.data.catalogService;
   const custom = connected.data.customService;
   if (catalog && !custom) {
     const serviceSlug = safeCatalogServiceSlug(catalog.serviceSlug);
-    if (!serviceSlug) return { variant: "unknown" };
+    if (!serviceSlug) return null;
     return {
       variant: "catalog",
       service_slug: serviceSlug,
@@ -228,7 +149,7 @@ function normalizeParams(request: AssistantActionRequest): ActionCardParams {
   if (custom && !catalog) {
     const endpointUrl = safeEndpointUrl(custom.endpointUrl);
     const authKeyName = safeAuthKeyName(custom.authKeyName);
-    if (!endpointUrl || authKeyName === null) return { variant: "unknown" };
+    if (!endpointUrl || authKeyName === null) return null;
     return {
       variant: "custom",
       name: custom.name.trim(),
@@ -239,14 +160,230 @@ function normalizeParams(request: AssistantActionRequest): ActionCardParams {
       target_org_id: nullableId(custom.targetOrgId),
     };
   }
-  return { variant: "unknown" };
+  return null;
+}
+
+function normalizeServiceReauthorize(raw: unknown): ActionCardParams | null {
+  const parsed = serviceReauthorizeActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "service_reauthorize",
+    user_service_id: parsed.data.userServiceId,
+    requested_scopes: parsed.data.requestedScopes,
+  };
+}
+
+function normalizeKeyCreate(raw: unknown): ActionCardParams | null {
+  const parsed = keyCreateActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "key_create",
+    name: parsed.data.name,
+    platform: parsed.data.platform,
+    allowed_service_ids: parsed.data.allowedServiceIds,
+  };
+}
+
+function normalizeKeyRotate(raw: unknown): ActionCardParams | null {
+  const parsed = keyRotateActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "key_rotate",
+    key_id: parsed.data.keyId,
+  };
+}
+
+function endpointHost(endpointUrl: string): string {
+  try {
+    return new URL(endpointUrl).host;
+  } catch {
+    return "";
+  }
+}
+
+function connectSummary(params: ActionCardParams): readonly SummaryRow[] {
+  if (params.variant === "catalog") {
+    return [
+      {
+        label: "Service",
+        value: clampServiceLabel(params.service_slug) || "Custom",
+      },
+      ...params.requested_scopes
+        .filter(Boolean)
+        .map((scope) => ({ label: "Scopes", value: scope, mono: true })),
+      ...(params.via_node_id
+        ? [{ label: "", value: `Node ${params.via_node_id}`, mono: true }]
+        : []),
+      ...(params.target_org_id
+        ? [{ label: "", value: `Org ${params.target_org_id}`, mono: true }]
+        : []),
+    ];
+  }
+  if (params.variant === "custom") {
+    const host = endpointHost(params.endpoint_url);
+    return [
+      {
+        label: "Service",
+        value: clampServiceLabel(params.name) || "Custom",
+      },
+      ...(host ? [{ label: "Service", value: host }] : []),
+      ...(params.via_node_id
+        ? [{ label: "", value: `Node ${params.via_node_id}`, mono: true }]
+        : []),
+      ...(params.target_org_id
+        ? [{ label: "", value: `Org ${params.target_org_id}`, mono: true }]
+        : []),
+    ];
+  }
+  return [];
+}
+
+const serviceConnectDescriptor: ActionDescriptor = {
+  title: (params) => `Connect ${actionServiceLabel(params)}`,
+  body: (params) =>
+    `NyxID will broker access to ${actionServiceLabel(params)} for this assistant request. Your credential stays in NyxID and is never shared with the model.`,
+  cta: (params) => `Connect ${actionServiceLabel(params)}`,
+  risk: "credential_access",
+  normalize: normalizeServiceConnect,
+  summary: connectSummary,
+  icon: "service",
+  busyLabel: "Connecting",
+  assurance:
+    "You choose the account, routing, and credential. The assistant receives only brokered access after you finish.",
+  resource: (id) => ({ userService: { userServiceId: id } }),
+  wiring: "legacy_connect",
+  journey: (params) => {
+    if (params.variant === "catalog") return "catalog_service";
+    if (params.variant === "custom") return "custom_service";
+    return null;
+  },
+};
+
+const serviceReauthorizeDescriptor: ActionDescriptor = {
+  title: () => "Re-authorize service",
+  body: (params) =>
+    params.variant === "service_reauthorize"
+      ? "NyxID will re-authorize this connected service with the requested permissions. Your credential stays in NyxID and is never shared with the model."
+      : "NyxID will re-authorize one exact connected service.",
+  cta: () => "Re-authorize",
+  risk: "credential_access",
+  normalize: normalizeServiceReauthorize,
+  summary: (params) =>
+    params.variant === "service_reauthorize"
+      ? [
+          {
+            label: "Service",
+            value: params.user_service_id,
+            mono: true,
+          },
+          ...params.requested_scopes.map((scope) => ({
+            label: "Requested scopes",
+            value: scope,
+            mono: true,
+          })),
+        ]
+      : [],
+  icon: "shield",
+  busyLabel: "Authorizing",
+  assurance:
+    "NyxID opens the provider authorization flow here. The assistant receives only the service reference after fresh authorization finishes.",
+  resource: (id) => ({ userService: { userServiceId: id } }),
+  wiring: "legacy_reauthorize",
+  journey: (params) =>
+    params.variant === "service_reauthorize" ? "service_reauthorize" : null,
+};
+
+const keyCreateDescriptor: ActionDescriptor = {
+  title: () => "Create API key",
+  body: (params) =>
+    params.variant === "key_create"
+      ? `NyxID will create ${clampServiceLabel(params.name) || "an API key"} with proxy access limited to the listed services.`
+      : "NyxID will create a least-scope API key.",
+  cta: () => "Create key",
+  risk: "credential_access",
+  normalize: normalizeKeyCreate,
+  summary: (params) =>
+    params.variant === "key_create"
+      ? [
+          { label: "Key", value: params.name },
+          { label: "Key", value: params.platform },
+          ...params.allowed_service_ids.map((serviceId) => ({
+            label: "Allowed services",
+            value: serviceId,
+            mono: true,
+          })),
+        ]
+      : [],
+  icon: "key",
+  busyLabel: "Working",
+  assurance:
+    "NyxID creates and verifies the key here. The assistant receives only the safe key reference after you finish.",
+  resource: (id) => ({ key: { keyId: id } }),
+  wiring: "dialog",
+  journey: (params) => (params.variant === "key_create" ? "key_create" : null),
+};
+
+const keyRotateDescriptor: ActionDescriptor = {
+  title: () => "Rotate API key",
+  body: (params) =>
+    params.variant === "key_rotate"
+      ? "NyxID will replace this exact API key, preserve its authority, and commit an immutable predecessor link."
+      : "NyxID will rotate one exact API key.",
+  cta: () => "Rotate key",
+  risk: "credential_access",
+  normalize: normalizeKeyRotate,
+  summary: (params) =>
+    params.variant === "key_rotate"
+      ? [{ label: "Predecessor", value: params.key_id, mono: true }]
+      : [],
+  icon: "key",
+  busyLabel: "Working",
+  assurance:
+    "NyxID rotates and verifies the exact lineage here. The assistant receives only the replacement key reference after you finish.",
+  resource: (id) => ({ key: { keyId: id } }),
+  wiring: "dialog",
+  journey: (params) => (params.variant === "key_rotate" ? "key_rotate" : null),
+};
+
+const unsupportedDescriptor: ActionDescriptor = {
+  title: () => "Unsupported action request",
+  body: () =>
+    "This assistant requested an action this version of NyxID cannot perform. Decline it to let the assistant continue safely.",
+  cta: () => "",
+  risk: "unsupported",
+  normalize: () => null,
+  summary: () => [],
+  icon: "shield",
+  busyLabel: "Working",
+  assurance: "",
+  resource: () => {
+    throw new Error("Unsupported actions cannot produce a resource.");
+  },
+  wiring: "deferred",
+  journey: () => null,
+};
+
+export const ACTION_REGISTRY: Readonly<Record<string, ActionDescriptor>> = {
+  "service.connect": serviceConnectDescriptor,
+  "service.reauthorize": serviceReauthorizeDescriptor,
+  "key.create": keyCreateDescriptor,
+  "key.rotate": keyRotateDescriptor,
+};
+
+export interface ResolvedAction {
+  readonly descriptor: ActionDescriptor;
+  readonly params: ActionCardParams;
+  readonly supported: boolean;
+  readonly journey: ActionJourney;
 }
 
 export function resolveAssistantAction(
   request: AssistantActionRequest,
 ): ResolvedAction {
-  const params = normalizeParams(request);
   const descriptor = ACTION_REGISTRY[request.action];
+  const params = descriptor?.normalize(request.params) ?? {
+    variant: "unknown",
+  };
   const journey = descriptor?.journey(params) ?? null;
   const supported =
     request.schemaVersion === ACTION_SCHEMA_VERSION &&
