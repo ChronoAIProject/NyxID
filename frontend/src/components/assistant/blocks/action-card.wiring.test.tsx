@@ -10,16 +10,25 @@ import {
 import type { ActionCardContentBlock } from "@/types/assistant";
 import { ActionCard } from "./action-card";
 
-interface MockDialogProps<P, C = string> {
+interface CapturedDialogProps {
   readonly open: boolean;
   readonly actionRequestId: string;
-  readonly params: P;
-  readonly onComplete: (completion: C) => void;
+  readonly params: unknown;
+  readonly onComplete: (completion: unknown) => void;
 }
 
-const { dialogCalls } = vi.hoisted(() => ({
-  dialogCalls: new Map<string, unknown>(),
-}));
+const { captureDialog, dialogCalls } = vi.hoisted(() => {
+  const calls = new Map<string, CapturedDialogProps>();
+  return {
+    dialogCalls: calls,
+    captureDialog:
+      (variant: string) =>
+      (props: CapturedDialogProps): null => {
+        if (props.open) calls.set(variant, props);
+        return null;
+      },
+  };
+});
 
 vi.mock("@/components/dashboard/add-key-dialog", () => ({
   AddKeyDialog: () => null,
@@ -44,229 +53,56 @@ vi.mock("@/hooks/use-keys", () => ({
 }));
 
 vi.mock("@/components/assistant/assistant-key-update-dialog", () => ({
-  AssistantKeyUpdateDialog: (
-    props: MockDialogProps<{
-      readonly keyId: string;
-      readonly name?: string;
-      readonly platform?: string;
-      readonly description?: string;
-    }>,
-  ) => {
-    if (!props.open) return null;
-    dialogCalls.set("key_update", props);
-    return (
-      <button type="button" onClick={() => props.onComplete("key-updated")}>
-        Finish key_update
-      </button>
-    );
-  },
+  AssistantKeyUpdateDialog: captureDialog("key_update"),
 }));
 
 vi.mock("@/components/assistant/assistant-key-delete-dialog", () => ({
-  AssistantKeyDeleteDialog: (
-    props: MockDialogProps<{ readonly keyId: string }>,
-  ) => {
-    if (!props.open) return null;
-    dialogCalls.set("key_delete", props);
-    return (
-      <button type="button" onClick={() => props.onComplete("key-deleted")}>
-        Finish key_delete
-      </button>
-    );
-  },
+  AssistantKeyDeleteDialog: captureDialog("key_delete"),
 }));
 
 vi.mock("@/components/assistant/assistant-key-scope-dialog", () => ({
-  AssistantKeyScopeDialog: (
-    props: MockDialogProps<{
-      readonly keyId: string;
-      readonly addServiceIds: readonly string[];
-    }>,
-  ) => {
-    if (!props.open) return null;
-    dialogCalls.set("key_extend_scope", props);
-    return (
-      <button
-        type="button"
-        onClick={() => props.onComplete("key-scope-extended")}
-      >
-        Finish key_extend_scope
-      </button>
-    );
-  },
+  AssistantKeyScopeDialog: captureDialog("key_extend_scope"),
 }));
 
 vi.mock("@/components/assistant/assistant-key-bind-dialog", () => ({
-  AssistantKeyBindDialog: (
-    props: MockDialogProps<
-      {
-        readonly keyId: string;
-        readonly userServiceId: string;
-        readonly externalKeyId: string;
-      },
-      { readonly keyId: string; readonly userServiceId: string }
-    >,
-  ) => {
-    if (!props.open) return null;
-    dialogCalls.set("key_bind_credential", props);
-    return (
-      <button
-        type="button"
-        onClick={() =>
-          props.onComplete({
-            keyId: "key-bound",
-            userServiceId: props.params.userServiceId,
-          })
-        }
-      >
-        Finish key_bind_credential
-      </button>
-    );
-  },
+  AssistantKeyBindDialog: captureDialog("key_bind_credential"),
 }));
 
 vi.mock("@/components/assistant/assistant-service-update-dialog", () => ({
-  AssistantServiceUpdateDialog: (
-    props: MockDialogProps<{
-      readonly userServiceId: string;
-      readonly name?: string;
-      readonly endpointUrl?: string;
-      readonly authMethod?: string;
-      readonly authKeyName?: string;
-    }>,
-  ) => {
-    if (!props.open) return null;
-    dialogCalls.set("service_update", props);
-    return (
-      <button type="button" onClick={() => props.onComplete("service-updated")}>
-        Finish service_update
-      </button>
-    );
-  },
+  AssistantServiceUpdateDialog: captureDialog("service_update"),
 }));
 
 vi.mock("@/components/assistant/assistant-service-delete-dialog", () => ({
-  AssistantServiceDeleteDialog: (
-    props: MockDialogProps<{ readonly userServiceId: string }>,
-  ) => {
-    if (!props.open) return null;
-    dialogCalls.set("service_delete", props);
-    return (
-      <button type="button" onClick={() => props.onComplete("service-deleted")}>
-        Finish service_delete
-      </button>
-    );
-  },
+  AssistantServiceDeleteDialog: captureDialog("service_delete"),
 }));
 
 vi.mock("@/components/assistant/assistant-service-route-dialog", () => ({
-  AssistantServiceRouteDialog: (
-    props: MockDialogProps<{
-      readonly userServiceId: string;
-      readonly viaNodeId?: string;
-    }>,
-  ) => {
-    if (!props.open) return null;
-    dialogCalls.set("service_route", props);
-    return (
-      <button type="button" onClick={() => props.onComplete("service-routed")}>
-        Finish service_route
-      </button>
-    );
-  },
+  AssistantServiceRouteDialog: captureDialog("service_route"),
 }));
 
 vi.mock(
   "@/components/assistant/assistant-service-rotate-credential-dialog",
   () => ({
-    AssistantServiceRotateCredentialDialog: (
-      props: MockDialogProps<{ readonly userServiceId: string }>,
-    ) => {
-      if (!props.open) return null;
-      dialogCalls.set("service_rotate_credential", props);
-      return (
-        <button
-          type="button"
-          onClick={() => props.onComplete("service-credential-rotated")}
-        >
-          Finish service_rotate_credential
-        </button>
-      );
-    },
+    AssistantServiceRotateCredentialDialog: captureDialog(
+      "service_rotate_credential",
+    ),
   }),
 );
 
 vi.mock("@/components/assistant/assistant-endpoint-update-dialog", () => ({
-  AssistantEndpointUpdateDialog: (
-    props: MockDialogProps<{
-      readonly endpointId: string;
-      readonly label?: string;
-      readonly endpointUrl?: string;
-      readonly openapiSpecUrl?: string;
-    }>,
-  ) => {
-    if (!props.open) return null;
-    dialogCalls.set("endpoint_update", props);
-    return (
-      <button
-        type="button"
-        onClick={() => props.onComplete("endpoint-updated")}
-      >
-        Finish endpoint_update
-      </button>
-    );
-  },
+  AssistantEndpointUpdateDialog: captureDialog("endpoint_update"),
 }));
 
 vi.mock("@/components/assistant/assistant-endpoint-delete-dialog", () => ({
-  AssistantEndpointDeleteDialog: (
-    props: MockDialogProps<{ readonly endpointId: string }>,
-  ) => {
-    if (!props.open) return null;
-    dialogCalls.set("endpoint_delete", props);
-    return (
-      <button
-        type="button"
-        onClick={() => props.onComplete("endpoint-deleted")}
-      >
-        Finish endpoint_delete
-      </button>
-    );
-  },
+  AssistantEndpointDeleteDialog: captureDialog("endpoint_delete"),
 }));
 
 vi.mock("@/components/assistant/assistant-external-key-rotate-dialog", () => ({
-  AssistantExternalKeyRotateDialog: (
-    props: MockDialogProps<{ readonly externalKeyId: string }>,
-  ) => {
-    if (!props.open) return null;
-    dialogCalls.set("external_key_rotate", props);
-    return (
-      <button
-        type="button"
-        onClick={() => props.onComplete("external-key-rotated")}
-      >
-        Finish external_key_rotate
-      </button>
-    );
-  },
+  AssistantExternalKeyRotateDialog: captureDialog("external_key_rotate"),
 }));
 
 vi.mock("@/components/assistant/assistant-external-key-delete-dialog", () => ({
-  AssistantExternalKeyDeleteDialog: (
-    props: MockDialogProps<{ readonly externalKeyId: string }>,
-  ) => {
-    if (!props.open) return null;
-    dialogCalls.set("external_key_delete", props);
-    return (
-      <button
-        type="button"
-        onClick={() => props.onComplete("external-key-deleted")}
-      >
-        Finish external_key_delete
-      </button>
-    );
-  },
+  AssistantExternalKeyDeleteDialog: captureDialog("external_key_delete"),
 }));
 
 beforeEach(() => {
@@ -280,6 +116,7 @@ interface JourneyOptions {
   readonly normalizedParams: ActionCardParams;
   readonly cta: string;
   readonly dialogParams: Readonly<Record<string, unknown>>;
+  readonly completion: unknown;
   readonly resource: ActionResource;
 }
 
@@ -325,14 +162,14 @@ async function runJourney(options: JourneyOptions): Promise<void> {
   );
 
   fireEvent.click(screen.getByRole("button", { name: options.cta }));
-  expect(dialogCalls.get(options.variant)).toMatchObject({
+  const dialogCall = dialogCalls.get(options.variant);
+  expect(dialogCall).toMatchObject({
     actionRequestId,
     params: options.dialogParams,
   });
+  if (!dialogCall) throw new Error(`${options.variant} dialog did not mount.`);
 
-  fireEvent.click(
-    screen.getByRole("button", { name: `Finish ${options.variant}` }),
-  );
+  dialogCall.onComplete(options.completion);
   await waitFor(() => {
     expect(onResolve).toHaveBeenCalledWith({
       actionRequestId,
@@ -370,6 +207,7 @@ describe("Wave-2 action card wiring", () => {
         platform: "codex",
         description: "Build automation",
       },
+      completion: "key-updated",
       resource: { key: { keyId: "key-updated" } },
     });
   });
@@ -384,6 +222,7 @@ describe("Wave-2 action card wiring", () => {
       normalizedParams: { variant: "key_delete", key_id: "key-delete-1" },
       cta: "Delete key",
       dialogParams: { keyId: "key-delete-1" },
+      completion: "key-deleted",
       resource: { key: { keyId: "key-deleted" } },
     });
   });
@@ -408,6 +247,7 @@ describe("Wave-2 action card wiring", () => {
         keyId: "key-scope-1",
         addServiceIds: ["service-a", "service-b"],
       },
+      completion: "key-scope-extended",
       resource: { key: { keyId: "key-scope-extended" } },
     });
   });
@@ -434,6 +274,10 @@ describe("Wave-2 action card wiring", () => {
         keyId: "key-bind-1",
         userServiceId: "service-bind-1",
         externalKeyId: "external-bind-1",
+      },
+      completion: {
+        keyId: "key-bound",
+        userServiceId: "service-bind-1",
       },
       resource: {
         key: { keyId: "key-bound", userServiceId: "service-bind-1" },
@@ -470,6 +314,7 @@ describe("Wave-2 action card wiring", () => {
         authMethod: "header",
         authKeyName: "X-Build-Key",
       },
+      completion: "service-updated",
       resource: { userService: { userServiceId: "service-updated" } },
     });
   });
@@ -487,6 +332,7 @@ describe("Wave-2 action card wiring", () => {
       },
       cta: "Delete service",
       dialogParams: { userServiceId: "service-delete-1" },
+      completion: "service-deleted",
       resource: { userService: { userServiceId: "service-deleted" } },
     });
   });
@@ -511,6 +357,7 @@ describe("Wave-2 action card wiring", () => {
         userServiceId: "service-route-1",
         viaNodeId: "node-route-1",
       },
+      completion: "service-routed",
       resource: { userService: { userServiceId: "service-routed" } },
     });
   });
@@ -528,6 +375,7 @@ describe("Wave-2 action card wiring", () => {
       },
       cta: "Rotate credential",
       dialogParams: { userServiceId: "service-rotate-1" },
+      completion: "service-credential-rotated",
       resource: {
         userService: { userServiceId: "service-credential-rotated" },
       },
@@ -560,6 +408,7 @@ describe("Wave-2 action card wiring", () => {
         endpointUrl: "https://build.example.test/v3",
         openapiSpecUrl: "https://build.example.test/openapi.json",
       },
+      completion: "endpoint-updated",
       resource: { endpoint: { endpointId: "endpoint-updated" } },
     });
   });
@@ -577,6 +426,7 @@ describe("Wave-2 action card wiring", () => {
       },
       cta: "Delete endpoint",
       dialogParams: { endpointId: "endpoint-delete-1" },
+      completion: "endpoint-deleted",
       resource: { endpoint: { endpointId: "endpoint-deleted" } },
     });
   });
@@ -594,6 +444,7 @@ describe("Wave-2 action card wiring", () => {
       },
       cta: "Rotate external credential",
       dialogParams: { externalKeyId: "external-rotate-1" },
+      completion: "external-key-rotated",
       resource: {
         externalKey: { externalKeyId: "external-key-rotated" },
       },
@@ -613,6 +464,7 @@ describe("Wave-2 action card wiring", () => {
       },
       cta: "Delete external credential",
       dialogParams: { externalKeyId: "external-delete-1" },
+      completion: "external-key-deleted",
       resource: {
         externalKey: { externalKeyId: "external-key-deleted" },
       },
