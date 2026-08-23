@@ -255,7 +255,9 @@ export const assistantActionParamsSchema = z
     keyExtendScopeActionParamsSchema,
     keyBindCredentialActionParamsSchema,
     serviceUpdateActionParamsSchema,
+    serviceDeleteActionParamsSchema,
     serviceRouteActionParamsSchema,
+    serviceRotateCredentialActionParamsSchema,
     endpointUpdateActionParamsSchema,
     endpointDeleteActionParamsSchema,
     externalKeyRotateActionParamsSchema,
@@ -391,6 +393,27 @@ export type ActionCardParams =
       readonly key_id: string;
       readonly user_service_id: string;
       readonly external_key_id: string;
+    }
+  | {
+      readonly variant: "service_update";
+      readonly user_service_id: string;
+      readonly name?: string;
+      readonly endpoint_url?: string;
+      readonly auth_method?: z.infer<typeof customServiceAuthMethodSchema>;
+      readonly auth_key_name?: string;
+    }
+  | {
+      readonly variant: "service_delete";
+      readonly user_service_id: string;
+    }
+  | {
+      readonly variant: "service_route";
+      readonly user_service_id: string;
+      readonly via_node_id?: string;
+    }
+  | {
+      readonly variant: "service_rotate_credential";
+      readonly user_service_id: string;
     }
   | { readonly variant: "unknown" };
 

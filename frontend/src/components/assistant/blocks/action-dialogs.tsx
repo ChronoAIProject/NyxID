@@ -5,6 +5,10 @@ import { AssistantKeyDeleteDialog } from "@/components/assistant/assistant-key-d
 import { AssistantKeyRotateDialog } from "@/components/assistant/assistant-key-rotate-dialog";
 import { AssistantKeyScopeDialog } from "@/components/assistant/assistant-key-scope-dialog";
 import { AssistantKeyUpdateDialog } from "@/components/assistant/assistant-key-update-dialog";
+import { AssistantServiceDeleteDialog } from "@/components/assistant/assistant-service-delete-dialog";
+import { AssistantServiceRotateCredentialDialog } from "@/components/assistant/assistant-service-rotate-credential-dialog";
+import { AssistantServiceRouteDialog } from "@/components/assistant/assistant-service-route-dialog";
+import { AssistantServiceUpdateDialog } from "@/components/assistant/assistant-service-update-dialog";
 import type { ActionCardParams } from "@/schemas/assistant-actions";
 
 export type DialogVariant = Exclude<
@@ -84,6 +88,39 @@ export const ACTION_DIALOGS: {
       userServiceId: params.user_service_id,
       externalKeyId: params.external_key_id,
     }),
+  },
+  service_update: {
+    Dialog: AssistantServiceUpdateDialog as ComponentType<
+      AssistantDialogProps<unknown>
+    >,
+    toProps: (params) => ({
+      userServiceId: params.user_service_id,
+      name: params.name,
+      endpointUrl: params.endpoint_url,
+      authMethod: params.auth_method,
+      authKeyName: params.auth_key_name,
+    }),
+  },
+  service_delete: {
+    Dialog: AssistantServiceDeleteDialog as ComponentType<
+      AssistantDialogProps<unknown>
+    >,
+    toProps: (params) => ({ userServiceId: params.user_service_id }),
+  },
+  service_route: {
+    Dialog: AssistantServiceRouteDialog as ComponentType<
+      AssistantDialogProps<unknown>
+    >,
+    toProps: (params) => ({
+      userServiceId: params.user_service_id,
+      viaNodeId: params.via_node_id,
+    }),
+  },
+  service_rotate_credential: {
+    Dialog: AssistantServiceRotateCredentialDialog as ComponentType<
+      AssistantDialogProps<unknown>
+    >,
+    toProps: (params) => ({ userServiceId: params.user_service_id }),
   },
 };
 

@@ -8,7 +8,11 @@ import {
   keyRotateActionParamsSchema,
   keyUpdateActionParamsSchema,
   serviceConnectActionParamsSchema,
+  serviceDeleteActionParamsSchema,
   serviceReauthorizeActionParamsSchema,
+  serviceRotateCredentialActionParamsSchema,
+  serviceRouteActionParamsSchema,
+  serviceUpdateActionParamsSchema,
   type ActionCardParams,
   type ActionResource,
   type AssistantActionRequest,
@@ -242,6 +246,49 @@ function normalizeKeyBindCredential(raw: unknown): ActionCardParams | null {
     key_id: parsed.data.keyId,
     user_service_id: parsed.data.userServiceId,
     external_key_id: parsed.data.externalKeyId,
+  };
+}
+
+function normalizeServiceUpdate(raw: unknown): ActionCardParams | null {
+  const parsed = serviceUpdateActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "service_update",
+    user_service_id: parsed.data.userServiceId,
+    name: parsed.data.name,
+    endpoint_url: parsed.data.endpointUrl,
+    auth_method: parsed.data.authMethod,
+    auth_key_name: parsed.data.authKeyName,
+  };
+}
+
+function normalizeServiceDelete(raw: unknown): ActionCardParams | null {
+  const parsed = serviceDeleteActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "service_delete",
+    user_service_id: parsed.data.userServiceId,
+  };
+}
+
+function normalizeServiceRoute(raw: unknown): ActionCardParams | null {
+  const parsed = serviceRouteActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "service_route",
+    user_service_id: parsed.data.userServiceId,
+    via_node_id: parsed.data.viaNodeId,
+  };
+}
+
+function normalizeServiceRotateCredential(
+  raw: unknown,
+): ActionCardParams | null {
+  const parsed = serviceRotateCredentialActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "service_rotate_credential",
+    user_service_id: parsed.data.userServiceId,
   };
 }
 
@@ -535,6 +582,121 @@ const keyBindCredentialDescriptor: ActionDescriptor = {
     params.variant === "key_bind_credential" ? "key_bind_credential" : null,
 };
 
+const serviceUpdateDescriptor: ActionDescriptor = {
+  title: () => "Update connected service",
+  body: () =>
+    "NyxID will update this connected service's display and routing metadata without exposing its credential.",
+  cta: () => "Update service",
+  risk: "credential_access",
+  normalize: normalizeServiceUpdate,
+  summary: (params) =>
+    params.variant === "service_update"
+      ? [
+          { label: "Service", value: params.user_service_id, mono: true },
+          ...(params.name ? [{ label: "Name", value: params.name }] : []),
+          ...(params.endpoint_url
+            ? [{ label: "Endpoint", value: params.endpoint_url, mono: true }]
+            : []),
+          ...(params.auth_method
+            ? [{ label: "Auth method", value: params.auth_method }]
+            : []),
+          ...(params.auth_key_name
+            ? [{ label: "Auth key name", value: params.auth_key_name }]
+            : []),
+        ]
+      : [],
+  icon: "service",
+  busyLabel: "Working",
+  assurance:
+    "NyxID verifies the exact service and applies only these configuration changes. The assistant receives only the safe service reference.",
+  resource: (completion) => ({
+    userService: { userServiceId: completedId(completion) },
+  }),
+  wiring: "dialog",
+  journey: (params) =>
+    params.variant === "service_update" ? "service_update" : null,
+};
+
+const serviceDeleteDescriptor: ActionDescriptor = {
+  title: () => "Delete connected service",
+  body: () =>
+    "NyxID will permanently disconnect and delete this service after you confirm the destructive change.",
+  cta: () => "Delete service",
+  risk: "credential_access",
+  normalize: normalizeServiceDelete,
+  summary: (params) =>
+    params.variant === "service_delete"
+      ? [{ label: "Service", value: params.user_service_id, mono: true }]
+      : [],
+  icon: "service",
+  busyLabel: "Working",
+  assurance:
+    "NyxID confirms and verifies this deletion here. The assistant receives only the deleted service reference.",
+  resource: (completion) => ({
+    userService: { userServiceId: completedId(completion) },
+  }),
+  wiring: "dialog",
+  journey: (params) =>
+    params.variant === "service_delete" ? "service_delete" : null,
+};
+
+const serviceRouteDescriptor: ActionDescriptor = {
+  title: () => "Change service routing",
+  body: (params) =>
+    params.variant === "service_route" && params.via_node_id
+      ? "NyxID will route this connected service through the selected credential node."
+      : "NyxID will clear node routing and connect to this service directly.",
+  cta: () => "Change routing",
+  risk: "credential_access",
+  normalize: normalizeServiceRoute,
+  summary: (params) =>
+    params.variant === "service_route"
+      ? [
+          { label: "Service", value: params.user_service_id, mono: true },
+          {
+            label: "Route",
+            value: params.via_node_id ?? "Direct",
+            mono: Boolean(params.via_node_id),
+          },
+        ]
+      : [],
+  icon: "node",
+  busyLabel: "Working",
+  assurance:
+    "NyxID verifies the exact service and routing target here. The assistant receives only the safe service reference.",
+  resource: (completion) => ({
+    userService: { userServiceId: completedId(completion) },
+  }),
+  wiring: "dialog",
+  journey: (params) =>
+    params.variant === "service_route" ? "service_route" : null,
+};
+
+const serviceRotateCredentialDescriptor: ActionDescriptor = {
+  title: () => "Rotate service credential",
+  body: () =>
+    "NyxID will replace the stored credential for this connected service inside the browser journey.",
+  cta: () => "Rotate credential",
+  risk: "credential_access",
+  normalize: normalizeServiceRotateCredential,
+  summary: (params) =>
+    params.variant === "service_rotate_credential"
+      ? [{ label: "Service", value: params.user_service_id, mono: true }]
+      : [],
+  icon: "shield",
+  busyLabel: "Working",
+  assurance:
+    "You enter the replacement only inside NyxID. The assistant receives only the verified service reference.",
+  resource: (completion) => ({
+    userService: { userServiceId: completedId(completion) },
+  }),
+  wiring: "dialog",
+  journey: (params) =>
+    params.variant === "service_rotate_credential"
+      ? "service_rotate_credential"
+      : null,
+};
+
 const unsupportedDescriptor: ActionDescriptor = {
   title: () => "Unsupported action request",
   body: () =>
@@ -562,10 +724,10 @@ export const ACTION_REGISTRY: Readonly<Record<string, ActionDescriptor>> = {
   "key.delete": keyDeleteDescriptor,
   "key.extend_scope": keyExtendScopeDescriptor,
   "key.bind_credential": keyBindCredentialDescriptor,
-  "service.update": unsupportedDescriptor,
-  "service.delete": unsupportedDescriptor,
-  "service.route": unsupportedDescriptor,
-  "service.rotate_credential": unsupportedDescriptor,
+  "service.update": serviceUpdateDescriptor,
+  "service.delete": serviceDeleteDescriptor,
+  "service.route": serviceRouteDescriptor,
+  "service.rotate_credential": serviceRotateCredentialDescriptor,
   "endpoint.update": unsupportedDescriptor,
   "endpoint.delete": unsupportedDescriptor,
   "external_key.rotate": unsupportedDescriptor,

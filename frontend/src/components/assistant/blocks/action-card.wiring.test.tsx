@@ -125,6 +125,77 @@ vi.mock("@/components/assistant/assistant-key-bind-dialog", () => ({
   },
 }));
 
+vi.mock("@/components/assistant/assistant-service-update-dialog", () => ({
+  AssistantServiceUpdateDialog: (
+    props: MockDialogProps<{
+      readonly userServiceId: string;
+      readonly name?: string;
+      readonly endpointUrl?: string;
+      readonly authMethod?: string;
+      readonly authKeyName?: string;
+    }>,
+  ) => {
+    if (!props.open) return null;
+    dialogCalls.set("service_update", props);
+    return (
+      <button type="button" onClick={() => props.onComplete("service-updated")}>
+        Finish service_update
+      </button>
+    );
+  },
+}));
+
+vi.mock("@/components/assistant/assistant-service-delete-dialog", () => ({
+  AssistantServiceDeleteDialog: (
+    props: MockDialogProps<{ readonly userServiceId: string }>,
+  ) => {
+    if (!props.open) return null;
+    dialogCalls.set("service_delete", props);
+    return (
+      <button type="button" onClick={() => props.onComplete("service-deleted")}>
+        Finish service_delete
+      </button>
+    );
+  },
+}));
+
+vi.mock("@/components/assistant/assistant-service-route-dialog", () => ({
+  AssistantServiceRouteDialog: (
+    props: MockDialogProps<{
+      readonly userServiceId: string;
+      readonly viaNodeId?: string;
+    }>,
+  ) => {
+    if (!props.open) return null;
+    dialogCalls.set("service_route", props);
+    return (
+      <button type="button" onClick={() => props.onComplete("service-routed")}>
+        Finish service_route
+      </button>
+    );
+  },
+}));
+
+vi.mock(
+  "@/components/assistant/assistant-service-rotate-credential-dialog",
+  () => ({
+    AssistantServiceRotateCredentialDialog: (
+      props: MockDialogProps<{ readonly userServiceId: string }>,
+    ) => {
+      if (!props.open) return null;
+      dialogCalls.set("service_rotate_credential", props);
+      return (
+        <button
+          type="button"
+          onClick={() => props.onComplete("service-credential-rotated")}
+        >
+          Finish service_rotate_credential
+        </button>
+      );
+    },
+  }),
+);
+
 beforeEach(() => {
   dialogCalls.clear();
 });
@@ -293,6 +364,99 @@ describe("Wave-2 action card wiring", () => {
       },
       resource: {
         key: { keyId: "key-bound", userServiceId: "service-bind-1" },
+      },
+    });
+  });
+
+  it("wires service.update through its typed dialog and service report", async () => {
+    // Falsifiers exercised: deleting the registry row removes the dialog,
+    // breaking toProps changes these props, and changing resource changes the report.
+    await runJourney({
+      action: "service.update",
+      rawParams: {
+        userServiceId: "service-update-1",
+        name: "Build API",
+        endpointUrl: "https://build.example.test/v2",
+        authMethod: "header",
+        authKeyName: "X-Build-Key",
+      },
+      variant: "service_update",
+      normalizedParams: {
+        variant: "service_update",
+        user_service_id: "service-update-1",
+        name: "Build API",
+        endpoint_url: "https://build.example.test/v2",
+        auth_method: "header",
+        auth_key_name: "X-Build-Key",
+      },
+      cta: "Update service",
+      dialogParams: {
+        userServiceId: "service-update-1",
+        name: "Build API",
+        endpointUrl: "https://build.example.test/v2",
+        authMethod: "header",
+        authKeyName: "X-Build-Key",
+      },
+      resource: { userService: { userServiceId: "service-updated" } },
+    });
+  });
+
+  it("wires service.delete through its typed dialog and service report", async () => {
+    // Falsifiers exercised: deleting the registry row removes the dialog,
+    // breaking toProps changes these props, and changing resource changes the report.
+    await runJourney({
+      action: "service.delete",
+      rawParams: { userServiceId: "service-delete-1" },
+      variant: "service_delete",
+      normalizedParams: {
+        variant: "service_delete",
+        user_service_id: "service-delete-1",
+      },
+      cta: "Delete service",
+      dialogParams: { userServiceId: "service-delete-1" },
+      resource: { userService: { userServiceId: "service-deleted" } },
+    });
+  });
+
+  it("wires service.route through its typed dialog and service report", async () => {
+    // Falsifiers exercised: deleting the registry row removes the dialog,
+    // breaking toProps changes these props, and changing resource changes the report.
+    await runJourney({
+      action: "service.route",
+      rawParams: {
+        userServiceId: "service-route-1",
+        viaNodeId: "node-route-1",
+      },
+      variant: "service_route",
+      normalizedParams: {
+        variant: "service_route",
+        user_service_id: "service-route-1",
+        via_node_id: "node-route-1",
+      },
+      cta: "Change routing",
+      dialogParams: {
+        userServiceId: "service-route-1",
+        viaNodeId: "node-route-1",
+      },
+      resource: { userService: { userServiceId: "service-routed" } },
+    });
+  });
+
+  it("wires service.rotate_credential through its typed dialog and service report", async () => {
+    // Falsifiers exercised: deleting the registry row removes the dialog,
+    // breaking toProps changes these props, and changing resource changes the report.
+    await runJourney({
+      action: "service.rotate_credential",
+      rawParams: { userServiceId: "service-rotate-1" },
+      variant: "service_rotate_credential",
+      normalizedParams: {
+        variant: "service_rotate_credential",
+        user_service_id: "service-rotate-1",
+      },
+      cta: "Rotate credential",
+      dialogParams: { userServiceId: "service-rotate-1" },
+      resource: {
+        userService: { userServiceId: "service-credential-rotated" },
       },
     });
   });

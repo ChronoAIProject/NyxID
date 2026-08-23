@@ -12,6 +12,10 @@ const ACTIVE_WIRING = {
   "key.delete": "dialog",
   "key.extend_scope": "dialog",
   "key.bind_credential": "dialog",
+  "service.update": "dialog",
+  "service.delete": "dialog",
+  "service.route": "dialog",
+  "service.rotate_credential": "dialog",
 } as const;
 
 describe("assistant action registry", () => {
