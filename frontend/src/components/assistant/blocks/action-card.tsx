@@ -13,8 +13,10 @@ import {
   X,
   type LucideIcon,
 } from "lucide-react";
-import { AssistantKeyCreateDialog } from "@/components/assistant/assistant-key-create-dialog";
-import { AssistantKeyRotateDialog } from "@/components/assistant/assistant-key-rotate-dialog";
+import {
+  dialogBindingFor,
+  isDialogParams,
+} from "@/components/assistant/blocks/action-dialogs";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
@@ -940,28 +942,22 @@ export function ActionCard({
           }}
         />
       ) : null}
-      {!verdict && !unsupported && params.variant === "key_create" ? (
-        <AssistantKeyCreateDialog
-          open={dialogOpen}
-          onOpenChange={setOpen}
-          actionRequestId={block.action_request_id}
-          params={{
-            name: params.name,
-            platform: params.platform,
-            allowedServiceIds: params.allowed_service_ids,
-          }}
-          onComplete={(keyId) => report("completed", { key: { keyId } })}
-        />
-      ) : null}
-      {!verdict && !unsupported && params.variant === "key_rotate" ? (
-        <AssistantKeyRotateDialog
-          open={dialogOpen}
-          onOpenChange={setOpen}
-          actionRequestId={block.action_request_id}
-          params={{ keyId: params.key_id }}
-          onComplete={(keyId) => report("completed", { key: { keyId } })}
-        />
-      ) : null}
+      {!verdict && !unsupported && isDialogParams(params)
+        ? (() => {
+            const binding = dialogBindingFor(params.variant);
+            return (
+              <binding.Dialog
+                open={dialogOpen}
+                onOpenChange={setOpen}
+                actionRequestId={block.action_request_id}
+                params={binding.toProps(params)}
+                onComplete={(id) =>
+                  report("completed", descriptor.resource(id))
+                }
+              />
+            );
+          })()
+        : null}
       {!verdict &&
       !unsupported &&
       params.variant === "service_reauthorize" &&

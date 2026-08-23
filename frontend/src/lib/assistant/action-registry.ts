@@ -11,7 +11,13 @@ import {
 } from "@/schemas/assistant-actions";
 
 export type ActionRisk = "credential_access" | "unsupported";
-export type ActionJourney = ActionCardParams["variant"] | null;
+// The two connect aliases remain observable in existing transport consumers;
+// new dialog journeys use their ActionCardParams variant directly.
+export type ActionJourney =
+  | ActionCardParams["variant"]
+  | "catalog_service"
+  | "custom_service"
+  | null;
 export type ActionIcon =
   | "service"
   | "globe"
@@ -368,6 +374,56 @@ export const ACTION_REGISTRY: Readonly<Record<string, ActionDescriptor>> = {
   "service.reauthorize": serviceReauthorizeDescriptor,
   "key.create": keyCreateDescriptor,
   "key.rotate": keyRotateDescriptor,
+  "key.update": unsupportedDescriptor,
+  "key.delete": unsupportedDescriptor,
+  "key.extend_scope": unsupportedDescriptor,
+  "key.bind_credential": unsupportedDescriptor,
+  "service.update": unsupportedDescriptor,
+  "service.delete": unsupportedDescriptor,
+  "service.route": unsupportedDescriptor,
+  "service.rotate_credential": unsupportedDescriptor,
+  "endpoint.update": unsupportedDescriptor,
+  "endpoint.delete": unsupportedDescriptor,
+  "external_key.rotate": unsupportedDescriptor,
+  "external_key.delete": unsupportedDescriptor,
+  "node.register_token": unsupportedDescriptor,
+  "node.rotate_token": unsupportedDescriptor,
+  "node.delete": unsupportedDescriptor,
+  "node.transfer": unsupportedDescriptor,
+  "node.inject_credential": unsupportedDescriptor,
+  "pending_credential.push": unsupportedDescriptor,
+  "pending_credential.cancel": unsupportedDescriptor,
+  "device.onboard": unsupportedDescriptor,
+  "org.create": unsupportedDescriptor,
+  "org.update": unsupportedDescriptor,
+  "org.delete": unsupportedDescriptor,
+  "org.member_add": unsupportedDescriptor,
+  "org.member_remove": unsupportedDescriptor,
+  "org.member_update_role": unsupportedDescriptor,
+  "org.invite": unsupportedDescriptor,
+  "org.set_primary": unsupportedDescriptor,
+  "account.profile_update": unsupportedDescriptor,
+  "account.revoke_consent": unsupportedDescriptor,
+  "account.delete": unsupportedDescriptor,
+  "account.mfa_setup": unsupportedDescriptor,
+  "approval.configure": unsupportedDescriptor,
+  "approval.enable": unsupportedDescriptor,
+  "approval.disable": unsupportedDescriptor,
+  "approval.revoke_grant": unsupportedDescriptor,
+  "notifications.update": unsupportedDescriptor,
+  "notifications.telegram_link": unsupportedDescriptor,
+  "notifications.telegram_disconnect": unsupportedDescriptor,
+  "service_account.create": unsupportedDescriptor,
+  "service_account.update": unsupportedDescriptor,
+  "service_account.delete": unsupportedDescriptor,
+  "service_account.rotate_secret": unsupportedDescriptor,
+  "service_account.revoke_tokens": unsupportedDescriptor,
+  "developer_app.create": unsupportedDescriptor,
+  "developer_app.update": unsupportedDescriptor,
+  "developer_app.delete": unsupportedDescriptor,
+  "developer_app.rotate_secret": unsupportedDescriptor,
+  "external_key.add_gcp_service_account": unsupportedDescriptor,
+  "openclaw.connect": unsupportedDescriptor,
 };
 
 export interface ResolvedAction {
