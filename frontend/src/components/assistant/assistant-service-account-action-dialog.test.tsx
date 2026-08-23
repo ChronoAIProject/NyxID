@@ -63,6 +63,7 @@ describe("AssistantServiceAccountActionDialog", () => {
     renderDialog("delete", { serviceAccountId: ID });
     await submit(true);
     expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/service-account/delete", expect.objectContaining({ confirmed: true }));
   });
 
   it("runs service_account.rotate_secret and returns material only in the committing response", async () => {
@@ -78,7 +79,7 @@ describe("AssistantServiceAccountActionDialog", () => {
     mockPost.mockResolvedValue({ resource: { serviceAccountId: ID }, replayed: false });
     renderDialog("revoke_tokens", { serviceAccountId: ID });
     await submit(true);
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/service-account/revoke-tokens", expect.any(Object));
+    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/service-account/revoke-tokens", expect.objectContaining({ confirmed: true }));
   });
 
   it("rejects secret-bearing assistant params before any mutation", async () => {

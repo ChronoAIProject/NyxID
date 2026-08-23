@@ -130,6 +130,7 @@ export function AssistantNotificationsActionDialog({
     try {
       assertNoSensitiveActionParams(params);
       const payload: Record<string, unknown> = { actionRequestId };
+      if (destructive) payload.confirmed = confirmed;
       if (action === "update") {
         payload.telegramEnabled = telegramEnabled;
         payload.approvalRequired = approvalRequired;

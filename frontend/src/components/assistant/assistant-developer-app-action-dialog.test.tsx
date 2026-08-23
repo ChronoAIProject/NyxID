@@ -60,6 +60,7 @@ describe("AssistantDeveloperAppActionDialog", () => {
     renderDialog("delete", { clientId: ID });
     await submit(true);
     expect(mockGet).toHaveBeenCalledTimes(2);
+    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/developer-app/delete", expect.objectContaining({ confirmed: true }));
   });
 
   it("runs developer_app.rotate_secret and keeps the secret in the browser response", async () => {

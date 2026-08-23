@@ -180,6 +180,7 @@ export function AssistantOrgActionDialog({
         throw new Error("The user reference is missing.");
       }
       const payload: Record<string, unknown> = { ...params, actionRequestId };
+      if (destructive) payload.confirmed = confirmed;
       if (action === "create" || action === "update") {
         payload.displayName = displayName.trim() || undefined;
         payload.slug = slug.trim() || undefined;

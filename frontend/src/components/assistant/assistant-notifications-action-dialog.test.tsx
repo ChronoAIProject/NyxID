@@ -74,6 +74,6 @@ describe("AssistantNotificationsActionDialog", () => {
     mockPost.mockResolvedValue({ resource: { bindingId: ID }, replayed: false });
     renderDialog("telegram_disconnect");
     await submit(true);
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/notifications/telegram-disconnect", { actionRequestId: "request-telegram_disconnect" });
+    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/notifications/telegram-disconnect", { actionRequestId: "request-telegram_disconnect", confirmed: true });
   });
 });

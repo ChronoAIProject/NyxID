@@ -184,6 +184,7 @@ pub struct AssistantAccountResponse {
 pub struct RevokeAssistantConsentRequest {
     pub action_request_id: String,
     pub client_id: String,
+    pub confirmed: bool,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -380,6 +381,13 @@ pub struct AssistantOrgIdRequest {
 }
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantConfirmedOrgIdRequest {
+    pub action_request_id: String,
+    pub org_id: String,
+    pub confirmed: bool,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssistantOrgMemberAddRequest {
     pub action_request_id: String,
     pub org_id: String,
@@ -389,10 +397,11 @@ pub struct AssistantOrgMemberAddRequest {
 }
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AssistantOrgMemberRequest {
+pub struct AssistantConfirmedOrgMemberRequest {
     pub action_request_id: String,
     pub org_id: String,
     pub member_id: String,
+    pub confirmed: bool,
 }
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -429,6 +438,13 @@ pub struct AssistantServiceAccountRequest {
 }
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantConfirmedServiceAccountRequest {
+    pub action_request_id: String,
+    pub service_account_id: String,
+    pub confirmed: bool,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssistantServiceAccountUpdateRequest {
     pub action_request_id: String,
     pub service_account_id: String,
@@ -447,6 +463,13 @@ pub struct AssistantDeveloperAppCreateRequest {
 pub struct AssistantDeveloperAppRequest {
     pub action_request_id: String,
     pub client_id: String,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantConfirmedDeveloperAppRequest {
+    pub action_request_id: String,
+    pub client_id: String,
+    pub confirmed: bool,
 }
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -470,6 +493,12 @@ pub struct AssistantNotificationsUpdateRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AssistantActionRequestId {
     pub action_request_id: String,
+}
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AssistantConfirmedActionRequestId {
+    pub action_request_id: String,
+    pub confirmed: bool,
 }
 #[derive(Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -523,6 +552,7 @@ struct ConsentFingerprint<'a> {
     action: &'static str,
     user_id: &'a str,
     client_id: &'a str,
+    confirmed: bool,
 }
 
 /// The confirmation is semantic request content, so it is fingerprinted:
@@ -595,6 +625,15 @@ fn reject_secret_shaped(field: &str, value: &str) -> AppResult<()> {
         return Err(AppError::ValidationError(format!(
             "{field} must not contain secret-shaped material"
         )));
+    }
+    Ok(())
+}
+
+fn require_destructive_confirmation(confirmed: bool) -> AppResult<()> {
+    if !confirmed {
+        return Err(AppError::ValidationError(
+            "confirmed must be true for this destructive assistant action".to_string(),
+        ));
     }
     Ok(())
 }
@@ -828,6 +867,7 @@ async fn revoke_account_consent(
     Json(body): Json<RevokeAssistantConsentRequest>,
 ) -> AppResult<Json<AssistantAccountResponse>> {
     let action_request_id = normalize_action_request_id(body.action_request_id)?;
+    require_destructive_confirmation(body.confirmed)?;
     let client_id = parse_uuid(&body.client_id, "clientId")?;
     let user_id = auth_user.user_id.to_string();
     require_user(&state, &user_id).await?;
@@ -838,6 +878,7 @@ async fn revoke_account_consent(
         action: ACCOUNT_REVOKE_CONSENT_ACTION,
         user_id: &user_id,
         client_id: &client_id,
+        confirmed: body.confirmed,
     })?;
     let receipt = reserve_or_replay(
         &state.db,
@@ -1521,12 +1562,16 @@ async fn update_org_action(
 async fn delete_org_action(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Json(body): Json<AssistantOrgIdRequest>,
+    Json(body): Json<AssistantConfirmedOrgIdRequest>,
 ) -> AppResult<Json<AssistantOrgResponse>> {
+    require_destructive_confirmation(body.confirmed)?;
     let actor = auth_user.user_id.to_string();
     let org_id = parse_uuid(&body.org_id, "orgId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(ORG_DELETE_ACTION, serde_json::json!({"orgId":org_id}))?;
+    let fp = action_fingerprint(
+        ORG_DELETE_ACTION,
+        serde_json::json!({"orgId":org_id,"confirmed":body.confirmed}),
+    )?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -1610,15 +1655,16 @@ async fn add_org_member_action(
 async fn remove_org_member_action(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Json(body): Json<AssistantOrgMemberRequest>,
+    Json(body): Json<AssistantConfirmedOrgMemberRequest>,
 ) -> AppResult<Json<AssistantOrgResponse>> {
+    require_destructive_confirmation(body.confirmed)?;
     let actor = auth_user.user_id.to_string();
     let org_id = parse_uuid(&body.org_id, "orgId")?;
     let member_id = parse_uuid(&body.member_id, "memberId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
     let fp = action_fingerprint(
         ORG_MEMBER_REMOVE_ACTION,
-        serde_json::json!({"orgId":org_id,"memberId":member_id}),
+        serde_json::json!({"orgId":org_id,"memberId":member_id,"confirmed":body.confirmed}),
     )?;
     let outcome = reserve_or_replay(
         &state.db,
@@ -1963,15 +2009,19 @@ async fn update_service_account_action(
 async fn delete_service_account_action(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Json(body): Json<AssistantServiceAccountRequest>,
+    Json(body): Json<AssistantConfirmedServiceAccountRequest>,
 ) -> AppResult<Json<AssistantServiceAccountResponse>> {
+    require_destructive_confirmation(body.confirmed)?;
     let actor = auth_user.user_id.to_string();
     let id = parse_uuid(&body.service_account_id, "serviceAccountId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
     let existing = service_account_service::get_service_account(&state.db, &id).await?;
     admin_service_accounts::require_admin_or_owning_org_admin(&state, &auth_user, &existing)
         .await?;
-    let fp = action_fingerprint(SERVICE_ACCOUNT_DELETE_ACTION, serde_json::json!({"id":id}))?;
+    let fp = action_fingerprint(
+        SERVICE_ACCOUNT_DELETE_ACTION,
+        serde_json::json!({"id":id,"confirmed":body.confirmed}),
+    )?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2073,8 +2123,9 @@ async fn rotate_service_account_secret_action(
 async fn revoke_service_account_tokens_action(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Json(body): Json<AssistantServiceAccountRequest>,
+    Json(body): Json<AssistantConfirmedServiceAccountRequest>,
 ) -> AppResult<Json<AssistantServiceAccountResponse>> {
+    require_destructive_confirmation(body.confirmed)?;
     let actor = auth_user.user_id.to_string();
     let id = parse_uuid(&body.service_account_id, "serviceAccountId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
@@ -2083,7 +2134,7 @@ async fn revoke_service_account_tokens_action(
         .await?;
     let fp = action_fingerprint(
         SERVICE_ACCOUNT_REVOKE_TOKENS_ACTION,
-        serde_json::json!({"id":id}),
+        serde_json::json!({"id":id,"confirmed":body.confirmed}),
     )?;
     let outcome = reserve_or_replay(
         &state.db,
@@ -2246,13 +2297,17 @@ async fn update_developer_app_action(
 async fn delete_developer_app_action(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Json(body): Json<AssistantDeveloperAppRequest>,
+    Json(body): Json<AssistantConfirmedDeveloperAppRequest>,
 ) -> AppResult<Json<AssistantDeveloperAppResponse>> {
+    require_destructive_confirmation(body.confirmed)?;
     let actor = auth_user.user_id.to_string();
     let id = parse_uuid(&body.client_id, "clientId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
     developer_apps::resolve_developer_app_write_owner(&state, &actor, &id).await?;
-    let fp = action_fingerprint(DEVELOPER_APP_DELETE_ACTION, serde_json::json!({"id":id}))?;
+    let fp = action_fingerprint(
+        DEVELOPER_APP_DELETE_ACTION,
+        serde_json::json!({"id":id,"confirmed":body.confirmed}),
+    )?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2437,13 +2492,14 @@ async fn link_telegram_action(
 async fn disconnect_telegram_action(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Json(body): Json<AssistantActionRequestId>,
+    Json(body): Json<AssistantConfirmedActionRequestId>,
 ) -> AppResult<Json<AssistantNotificationResponse>> {
+    require_destructive_confirmation(body.confirmed)?;
     let actor = auth_user.user_id.to_string();
     let request_id = normalize_action_request_id(body.action_request_id)?;
     let fp = action_fingerprint(
         NOTIFICATIONS_TELEGRAM_DISCONNECT_ACTION,
-        serde_json::json!({"userId":actor}),
+        serde_json::json!({"userId":actor,"confirmed":body.confirmed}),
     )?;
     let outcome = reserve_or_replay(
         &state.db,
@@ -2729,6 +2785,140 @@ mod wave4_effect_tests {
         assert!(
             survivor.is_some(),
             "a refused confirmation must not delete the account"
+        );
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(
+                crate::models::assistant_action_receipt::COLLECTION_NAME,
+            )
+            .count_documents(doc! {})
+            .await
+            .expect("count refused delete receipts"),
+            0,
+            "a refused confirmation must not reserve a receipt"
+        );
+    }
+
+    #[tokio::test]
+    async fn destructive_preconditions_are_checked_before_reservation() {
+        // Falsifier: accept `confirmed: false` or move any confirmation check
+        // below `reserve_or_replay`; that case either stops returning a
+        // validation error or leaves a pending receipt counted at the end.
+        use crate::models::assistant_action_receipt::COLLECTION_NAME as ASSISTANT_ACTION_RECEIPTS;
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
+
+        let Some(db) = connect_test_database("assistant_destructive_preconditions").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        let resource_id = Uuid::new_v4().to_string();
+        let state = test_app_state(db.clone());
+
+        let consent = revoke_account_consent(
+            State(state.clone()),
+            test_auth_user(&actor_id),
+            Json(RevokeAssistantConsentRequest {
+                action_request_id: "refuse-consent".to_string(),
+                client_id: resource_id.clone(),
+                confirmed: false,
+            }),
+        )
+        .await;
+        assert!(matches!(consent, Err(AppError::ValidationError(_))));
+
+        let org_delete = delete_org_action(
+            State(state.clone()),
+            test_auth_user(&actor_id),
+            Json(AssistantConfirmedOrgIdRequest {
+                action_request_id: "refuse-org-delete".to_string(),
+                org_id: resource_id.clone(),
+                confirmed: false,
+            }),
+        )
+        .await;
+        assert!(matches!(org_delete, Err(AppError::ValidationError(_))));
+
+        let member_remove = remove_org_member_action(
+            State(state.clone()),
+            test_auth_user(&actor_id),
+            Json(AssistantConfirmedOrgMemberRequest {
+                action_request_id: "refuse-member-remove".to_string(),
+                org_id: resource_id.clone(),
+                member_id: Uuid::new_v4().to_string(),
+                confirmed: false,
+            }),
+        )
+        .await;
+        assert!(matches!(member_remove, Err(AppError::ValidationError(_))));
+
+        for (action_request_id, result) in [
+            (
+                "refuse-service-account-delete",
+                delete_service_account_action(
+                    State(state.clone()),
+                    test_auth_user(&actor_id),
+                    Json(AssistantConfirmedServiceAccountRequest {
+                        action_request_id: "refuse-service-account-delete".to_string(),
+                        service_account_id: resource_id.clone(),
+                        confirmed: false,
+                    }),
+                )
+                .await,
+            ),
+            (
+                "refuse-service-account-tokens",
+                revoke_service_account_tokens_action(
+                    State(state.clone()),
+                    test_auth_user(&actor_id),
+                    Json(AssistantConfirmedServiceAccountRequest {
+                        action_request_id: "refuse-service-account-tokens".to_string(),
+                        service_account_id: resource_id.clone(),
+                        confirmed: false,
+                    }),
+                )
+                .await,
+            ),
+        ] {
+            assert!(
+                matches!(result, Err(AppError::ValidationError(_))),
+                "{action_request_id} was not refused"
+            );
+        }
+
+        let developer_delete = delete_developer_app_action(
+            State(state.clone()),
+            test_auth_user(&actor_id),
+            Json(AssistantConfirmedDeveloperAppRequest {
+                action_request_id: "refuse-developer-delete".to_string(),
+                client_id: resource_id,
+                confirmed: false,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            developer_delete,
+            Err(AppError::ValidationError(_))
+        ));
+
+        let telegram_disconnect = disconnect_telegram_action(
+            State(state),
+            test_auth_user(&actor_id),
+            Json(AssistantConfirmedActionRequestId {
+                action_request_id: "refuse-telegram-disconnect".to_string(),
+                confirmed: false,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            telegram_disconnect,
+            Err(AppError::ValidationError(_))
+        ));
+
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(ASSISTANT_ACTION_RECEIPTS)
+                .count_documents(doc! {})
+                .await
+                .expect("count destructive receipts"),
+            0
         );
     }
 

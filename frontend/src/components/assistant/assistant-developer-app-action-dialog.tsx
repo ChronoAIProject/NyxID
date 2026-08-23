@@ -118,6 +118,7 @@ export function AssistantDeveloperAppActionDialog({
       assertNoSensitiveActionParams(params);
       const before = action === "create" ? null : await readEvidence(clientId);
       const payload: Record<string, unknown> = { ...params, actionRequestId };
+      if (destructive) payload.confirmed = confirmed;
       if (action === "create" || action === "update") {
         payload.name = name.trim() || undefined;
         payload.redirectUris = redirectUris

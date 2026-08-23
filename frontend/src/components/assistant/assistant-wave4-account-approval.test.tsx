@@ -57,7 +57,13 @@ describe("Wave 4 account journeys", () => {
     mockGet.mockResolvedValueOnce({ id: IDS.client, granted_scopes: ["openid"] }).mockRejectedValueOnce(new MockApiError(404));
     const onComplete = vi.fn();
     renderDialog(<AssistantAccountRevokeConsentDialog open onOpenChange={vi.fn()} actionRequestId="consent-1" params={{ clientId: IDS.client }} onComplete={onComplete} />);
+    await userEvent.click(screen.getByRole("checkbox"));
     await userEvent.click(screen.getByRole("button", { name: "Revoke consent" }));
+    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/account/revoke-consent", {
+      actionRequestId: "consent-1",
+      clientId: IDS.client,
+      confirmed: true,
+    });
     expect(mockGet).toHaveBeenNthCalledWith(1, `/users/me/consents/${IDS.client}/authorization`);
     expect(mockGet).toHaveBeenNthCalledWith(2, `/users/me/consents/${IDS.client}/authorization`);
     await userEvent.click(await screen.findByRole("button", { name: "Done" }));

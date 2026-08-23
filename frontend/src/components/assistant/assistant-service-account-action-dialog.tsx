@@ -129,6 +129,7 @@ export function AssistantServiceAccountActionDialog({
         throw new Error("NyxID returned a different service-account identity.");
       }
       const payload: Record<string, unknown> = { ...params, actionRequestId };
+      if (destructive) payload.confirmed = confirmed;
       if (action === "create" || action === "update") {
         payload.name = name.trim() || undefined;
         payload.description = description.trim() || undefined;

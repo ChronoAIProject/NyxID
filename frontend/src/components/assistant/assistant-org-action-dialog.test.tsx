@@ -88,6 +88,7 @@ describe("AssistantOrgActionDialog", () => {
     mockPost.mockResolvedValue({ resource: { orgId: ORG_ID }, replayed: false });
     const onComplete = renderDialog("delete", { orgId: ORG_ID });
     await clickSubmit(true);
+    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/org/delete", expect.objectContaining({ confirmed: true }));
     expect(mockGet).toHaveBeenNthCalledWith(1, `/orgs/${ORG_ID}/authorization`);
     expect(mockGet).toHaveBeenNthCalledWith(2, `/orgs/${ORG_ID}/authorization`);
     await userEvent.click(await screen.findByRole("button", { name: "Done" }));
@@ -120,6 +121,7 @@ describe("AssistantOrgActionDialog", () => {
     mockPost.mockResolvedValue({ resource: { orgId: ORG_ID }, replayed: false });
     renderDialog("member_remove", { orgId: ORG_ID, memberId: MEMBER_ID });
     await clickSubmit(true);
+    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/org/member-remove", expect.objectContaining({ confirmed: true }));
     expect(mockGet).toHaveBeenLastCalledWith(`/orgs/${ORG_ID}/members/${MEMBER_ID}/authorization`);
   });
 
