@@ -432,9 +432,10 @@ pub struct AssistantServiceAccountCreateRequest {
 }
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AssistantServiceAccountRequest {
+pub struct AssistantServiceAccountRotateRequest {
     pub action_request_id: String,
     pub service_account_id: String,
+    pub expected_updated_at: String,
 }
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -460,9 +461,10 @@ pub struct AssistantDeveloperAppCreateRequest {
 }
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AssistantDeveloperAppRequest {
+pub struct AssistantDeveloperAppRotateRequest {
     pub action_request_id: String,
     pub client_id: String,
+    pub expected_updated_at: String,
 }
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -871,9 +873,7 @@ async fn revoke_account_consent(
     let client_id = parse_uuid(&body.client_id, "clientId")?;
     let user_id = auth_user.user_id.to_string();
     require_user(&state, &user_id).await?;
-    if !consent_exists(&state, &user_id, &client_id).await? {
-        return Err(AppError::ConsentNotFound);
-    }
+    let exists = consent_exists(&state, &user_id, &client_id).await?;
     let fingerprint = fingerprint_canonical(&ConsentFingerprint {
         action: ACCOUNT_REVOKE_CONSENT_ACTION,
         user_id: &user_id,
@@ -892,8 +892,18 @@ async fn revoke_account_consent(
 
     let replayed = match receipt {
         ReceiptOutcome::Replay(_) => true,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            if exists {
+                return Err(in_progress_conflict());
+            }
+            mark_completed(&state.db, &receipt).await?;
+            true
+        }
         ReceiptOutcome::Reserved(receipt) => {
+            if !exists {
+                discard_pending_wave4(&state, &receipt).await?;
+                return Err(AppError::ConsentNotFound);
+            }
             let _ = consent::revoke_my_consent(State(state.clone()), auth_user, Path(client_id))
                 .await?;
             mark_completed(&state.db, &receipt).await?;
@@ -1362,8 +1372,142 @@ async fn revoke_approval_grant(
 // Wave-4 effects
 // ---------------------------------------------------------------------------
 
-fn action_fingerprint(action: &'static str, value: serde_json::Value) -> AppResult<String> {
-    fingerprint_canonical(&serde_json::json!({ "action": action, "request": value }))
+#[derive(Serialize)]
+#[serde(tag = "action", content = "request", rename_all_fields = "camelCase")]
+enum Wave4Fingerprint<'a> {
+    #[serde(rename = "org.create")]
+    OrgCreate {
+        display_name: &'a str,
+        contact_email: Option<&'a str>,
+        avatar_url: Option<&'a str>,
+    },
+    #[serde(rename = "org.update")]
+    OrgUpdate {
+        org_id: &'a str,
+        display_name: Option<&'a str>,
+        slug: Option<&'a str>,
+        contact_email: Option<&'a str>,
+        avatar_url: Option<&'a str>,
+    },
+    #[serde(rename = "org.delete")]
+    OrgDelete { org_id: &'a str, confirmed: bool },
+    #[serde(rename = "org.member_add")]
+    OrgMemberAdd {
+        org_id: &'a str,
+        user_id: &'a str,
+        role: orgs::OrgRoleWire,
+        allowed_service_ids: Option<&'a [String]>,
+    },
+    #[serde(rename = "org.member_remove")]
+    OrgMemberRemove {
+        org_id: &'a str,
+        member_id: &'a str,
+        confirmed: bool,
+    },
+    #[serde(rename = "org.member_update_role")]
+    OrgMemberUpdateRole {
+        org_id: &'a str,
+        member_id: &'a str,
+        role: orgs::OrgRoleWire,
+        expected_role: orgs::OrgRoleWire,
+    },
+    #[serde(rename = "org.invite")]
+    OrgInvite {
+        org_id: &'a str,
+        role: orgs::OrgRoleWire,
+        allowed_service_ids: Option<&'a [String]>,
+        ttl_hours: Option<i64>,
+    },
+    #[serde(rename = "org.set_primary")]
+    OrgSetPrimary { org_id: &'a str },
+    #[serde(rename = "service_account.create")]
+    ServiceAccountCreate {
+        name: &'a str,
+        description: Option<&'a str>,
+        allowed_scopes: Option<&'a str>,
+        target_org_id: Option<&'a str>,
+    },
+    #[serde(rename = "service_account.update")]
+    ServiceAccountUpdate {
+        #[serde(rename = "id")]
+        service_account_id: &'a str,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+    },
+    #[serde(rename = "service_account.delete")]
+    ServiceAccountDelete {
+        #[serde(rename = "id")]
+        service_account_id: &'a str,
+        confirmed: bool,
+    },
+    #[serde(rename = "service_account.rotate_secret")]
+    ServiceAccountRotate {
+        #[serde(rename = "id")]
+        service_account_id: &'a str,
+        expected_updated_at: &'a str,
+    },
+    #[serde(rename = "service_account.revoke_tokens")]
+    ServiceAccountRevokeTokens {
+        #[serde(rename = "id")]
+        service_account_id: &'a str,
+        confirmed: bool,
+    },
+    #[serde(rename = "developer_app.create")]
+    DeveloperAppCreate {
+        name: &'a str,
+        redirect_uris: &'a [String],
+    },
+    #[serde(rename = "developer_app.update")]
+    DeveloperAppUpdate {
+        #[serde(rename = "id")]
+        client_id: &'a str,
+        name: Option<&'a str>,
+        redirect_uris: Option<&'a [String]>,
+    },
+    #[serde(rename = "developer_app.delete")]
+    DeveloperAppDelete {
+        #[serde(rename = "id")]
+        client_id: &'a str,
+        confirmed: bool,
+    },
+    #[serde(rename = "developer_app.rotate_secret")]
+    DeveloperAppRotate {
+        #[serde(rename = "id")]
+        client_id: &'a str,
+        expected_updated_at: &'a str,
+    },
+    #[serde(rename = "notifications.update")]
+    NotificationsUpdate {
+        telegram_enabled: Option<bool>,
+        approval_required: Option<bool>,
+        approval_timeout_secs: Option<u32>,
+        grant_expiry_days: Option<u32>,
+        push_enabled: Option<bool>,
+    },
+    #[serde(rename = "notifications.telegram_link")]
+    NotificationsTelegramLink { user_id: &'a str },
+    #[serde(rename = "notifications.telegram_disconnect")]
+    NotificationsTelegramDisconnect { user_id: &'a str, confirmed: bool },
+    #[serde(rename = "external_key.add_gcp_service_account")]
+    ExternalKeyAddGcp {
+        label: Option<&'a str>,
+        #[serde(rename = "keyJson")]
+        key_json_fingerprint: &'a str,
+        scopes: Option<&'a str>,
+        service_slugs: Option<&'a [String]>,
+        target_org_id: Option<&'a str>,
+    },
+    #[serde(rename = "openclaw.connect")]
+    OpenClawConnect {
+        gateway_url: &'a str,
+        #[serde(rename = "credential")]
+        credential_fingerprint: &'a str,
+        label: Option<&'a str>,
+    },
+}
+
+fn wave4_fingerprint(value: &Wave4Fingerprint<'_>) -> AppResult<String> {
+    fingerprint_canonical(value)
 }
 
 fn service_account_create_fingerprint(
@@ -1372,28 +1516,24 @@ fn service_account_create_fingerprint(
     allowed_scopes: Option<&str>,
     target_org_id: Option<&str>,
 ) -> AppResult<String> {
-    action_fingerprint(
-        SERVICE_ACCOUNT_CREATE_ACTION,
-        serde_json::json!({"name":name,"description":description,"allowedScopes":allowed_scopes,"targetOrgId":target_org_id}),
-    )
+    wave4_fingerprint(&Wave4Fingerprint::ServiceAccountCreate {
+        name,
+        description,
+        allowed_scopes,
+        target_org_id,
+    })
 }
 
 fn gcp_create_fingerprint(body: &AssistantGcpCreateRequest) -> AppResult<String> {
-    action_fingerprint(
-        EXTERNAL_KEY_ADD_GCP_ACTION,
-        serde_json::json!({
-            "label": body.label.as_deref(),
-            // Keyed, not plain: the receipt is stored, so an unkeyed digest of
-            // caller-supplied material is an offline oracle against a database
-            // snapshot. Identifiers below stay plain -- they are not secret.
-            "keyJson": crate::services::assistant_action_receipts::fingerprint_sensitive_material(
-                body.key_json.as_str(),
-            ),
-            "scopes": body.scopes.as_deref(),
-            "serviceSlugs": body.service_slugs.as_deref(),
-            "targetOrgId": body.target_org_id.as_deref(),
-        }),
-    )
+    let key_json_fingerprint =
+        crate::services::assistant_action_receipts::fingerprint_sensitive_material(&body.key_json);
+    wave4_fingerprint(&Wave4Fingerprint::ExternalKeyAddGcp {
+        label: body.label.as_deref(),
+        key_json_fingerprint: &key_json_fingerprint,
+        scopes: body.scopes.as_deref(),
+        service_slugs: body.service_slugs.as_deref(),
+        target_org_id: body.target_org_id.as_deref(),
+    })
 }
 
 fn openclaw_connect_fingerprint(
@@ -1401,16 +1541,13 @@ fn openclaw_connect_fingerprint(
     credential: &str,
     label: Option<&str>,
 ) -> AppResult<String> {
-    action_fingerprint(
-        OPENCLAW_CONNECT_ACTION,
-        serde_json::json!({
-            "gatewayUrl": gateway_url,
-            "credential": crate::services::assistant_action_receipts::fingerprint_sensitive_material(
-                credential,
-            ),
-            "label": label,
-        }),
-    )
+    let credential_fingerprint =
+        crate::services::assistant_action_receipts::fingerprint_sensitive_material(credential);
+    wave4_fingerprint(&Wave4Fingerprint::OpenClawConnect {
+        gateway_url,
+        credential_fingerprint: &credential_fingerprint,
+        label,
+    })
 }
 
 async fn complete_wave4(
@@ -1448,6 +1585,49 @@ async fn discard_pending_wave4(
     Ok(())
 }
 
+fn updated_since_receipt(
+    updated_at: chrono::DateTime<chrono::Utc>,
+    receipt: &crate::models::assistant_action_receipt::AssistantActionReceipt,
+) -> bool {
+    // MongoDB stores millisecond precision, while a freshly reserved receipt
+    // still carries Chrono's finer in-memory precision.
+    updated_at.timestamp_millis() >= receipt.created_at.timestamp_millis()
+}
+
+fn parse_browser_updated_at(value: &str, field: &str) -> AppResult<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .map_err(|_| AppError::ValidationError(format!("{field} must be an RFC 3339 timestamp")))
+}
+
+fn response_updated_since_receipt(
+    value: &str,
+    receipt: &crate::models::assistant_action_receipt::AssistantActionReceipt,
+) -> AppResult<bool> {
+    let updated_at = chrono::DateTime::parse_from_rfc3339(value)
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .map_err(|error| AppError::Internal(format!("invalid response updated_at: {error}")))?;
+    Ok(updated_since_receipt(updated_at, receipt))
+}
+
+async fn require_assistant_org_access(
+    state: &AppState,
+    actor: &str,
+    org_id: &str,
+    require_admin: bool,
+) -> AppResult<()> {
+    let access = org_service::resolve_owner_access(&state.db, actor, org_id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("Organization not found".to_string()));
+    }
+    if require_admin && !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "admin role required for this operation".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn replayed_resource(outcome: &ReceiptOutcome) -> Option<(String, bool)> {
     match outcome {
         ReceiptOutcome::Replay(receipt) => Some((receipt.resource_id.clone(), true)),
@@ -1462,14 +1642,11 @@ async fn create_org_action(
 ) -> AppResult<Json<AssistantOrgResponse>> {
     let actor = auth_user.user_id.to_string();
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(
-        ORG_CREATE_ACTION,
-        serde_json::json!({
-            "displayName": body.display_name,
-            "contactEmail": body.contact_email,
-            "avatarUrl": body.avatar_url,
-        }),
-    )?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::OrgCreate {
+        display_name: &body.display_name,
+        contact_email: body.contact_email.as_deref(),
+        avatar_url: body.avatar_url.as_deref(),
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -1515,10 +1692,14 @@ async fn update_org_action(
     let actor = auth_user.user_id.to_string();
     let org_id = parse_uuid(&body.org_id, "orgId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(
-        ORG_UPDATE_ACTION,
-        serde_json::json!({"orgId":org_id,"displayName":body.display_name,"slug":body.slug,"contactEmail":body.contact_email,"avatarUrl":body.avatar_url}),
-    )?;
+    require_assistant_org_access(&state, &actor, &org_id, true).await?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::OrgUpdate {
+        org_id: &org_id,
+        display_name: body.display_name.as_deref(),
+        slug: body.slug.as_deref(),
+        contact_email: body.contact_email.as_deref(),
+        avatar_url: body.avatar_url.as_deref(),
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -1536,7 +1717,42 @@ async fn update_org_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let current = require_user(&state, &org_id).await?;
+            let display_name_matches = body
+                .display_name
+                .as_ref()
+                .is_none_or(|value| current.display_name.as_ref() == Some(value));
+            let slug_matches = body
+                .slug
+                .as_ref()
+                .is_none_or(|value| current.slug.as_ref() == Some(value));
+            let avatar_matches = body
+                .avatar_url
+                .as_ref()
+                .is_none_or(|value| current.avatar_url.as_ref() == Some(value));
+            let contact_matches = body.contact_email.as_ref().is_none_or(|value| {
+                let value = value.trim();
+                if value.is_empty() {
+                    org_service::contact_email_for_display(&current).is_none()
+                } else {
+                    current.email == value
+                }
+            });
+            if !display_name_matches
+                || !slug_matches
+                || !avatar_matches
+                || !contact_matches
+                || !updated_since_receipt(current.updated_at, &receipt)
+            {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &org_id).await?;
+            return Ok(Json(AssistantOrgResponse {
+                resource: AssistantOrgResource { org_id },
+                replayed: true,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let _ = orgs::update_org(
@@ -1568,10 +1784,10 @@ async fn delete_org_action(
     let actor = auth_user.user_id.to_string();
     let org_id = parse_uuid(&body.org_id, "orgId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(
-        ORG_DELETE_ACTION,
-        serde_json::json!({"orgId":org_id,"confirmed":body.confirmed}),
-    )?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::OrgDelete {
+        org_id: &org_id,
+        confirmed: body.confirmed,
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -1588,8 +1804,30 @@ async fn delete_org_action(
         }));
     }
     let receipt = match outcome {
-        ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Reserved(receipt) => {
+            if let Err(error) = require_assistant_org_access(&state, &actor, &org_id, true).await {
+                discard_pending_wave4(&state, &receipt).await?;
+                return Err(error);
+            }
+            receipt
+        }
+        ReceiptOutcome::InProgress(receipt) => {
+            let exists = state
+                .db
+                .collection::<User>(USERS)
+                .find_one(doc! { "_id": &org_id })
+                .await?
+                .is_some();
+            if exists {
+                require_assistant_org_access(&state, &actor, &org_id, true).await?;
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &org_id).await?;
+            return Ok(Json(AssistantOrgResponse {
+                resource: AssistantOrgResource { org_id },
+                replayed: true,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     orgs::delete_org(State(state.clone()), auth_user, Path(org_id.clone())).await?;
@@ -1609,10 +1847,13 @@ async fn add_org_member_action(
     let org_id = parse_uuid(&body.org_id, "orgId")?;
     let user_id = parse_uuid(&body.user_id, "userId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(
-        ORG_MEMBER_ADD_ACTION,
-        serde_json::json!({"orgId":org_id,"userId":user_id,"role":body.role,"allowedServiceIds":body.allowed_service_ids}),
-    )?;
+    require_assistant_org_access(&state, &actor, &org_id, true).await?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::OrgMemberAdd {
+        org_id: &org_id,
+        user_id: &user_id,
+        role: body.role,
+        allowed_service_ids: body.allowed_service_ids.as_deref(),
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -1630,7 +1871,22 @@ async fn add_org_member_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let current = org_service::get_active_membership(&state.db, &org_id, &user_id).await?;
+            let already_applied = current.is_some_and(|membership| {
+                membership.role == body.role.into()
+                    && membership.allowed_service_ids == body.allowed_service_ids
+                    && updated_since_receipt(membership.created_at, &receipt)
+            });
+            if !already_applied {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &org_id).await?;
+            return Ok(Json(AssistantOrgResponse {
+                resource: AssistantOrgResource { org_id },
+                replayed: true,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let _ = orgs::add_member(
@@ -1662,10 +1918,12 @@ async fn remove_org_member_action(
     let org_id = parse_uuid(&body.org_id, "orgId")?;
     let member_id = parse_uuid(&body.member_id, "memberId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(
-        ORG_MEMBER_REMOVE_ACTION,
-        serde_json::json!({"orgId":org_id,"memberId":member_id,"confirmed":body.confirmed}),
-    )?;
+    require_assistant_org_access(&state, &actor, &org_id, true).await?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::OrgMemberRemove {
+        org_id: &org_id,
+        member_id: &member_id,
+        confirmed: body.confirmed,
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -1683,7 +1941,30 @@ async fn remove_org_member_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let revoked = state
+                .db
+                .collection::<crate::models::org_membership::OrgMembership>(
+                    crate::models::org_membership::COLLECTION_NAME,
+                )
+                .find_one(doc! {
+                    "org_user_id": &org_id,
+                    "member_user_id": &member_id,
+                    "revoked_at": {
+                        "$gte": bson::DateTime::from_millis(receipt.created_at.timestamp_millis()),
+                    },
+                })
+                .await?
+                .is_some();
+            if !revoked {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &org_id).await?;
+            return Ok(Json(AssistantOrgResponse {
+                resource: AssistantOrgResource { org_id },
+                replayed: true,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     orgs::remove_member(
@@ -1708,15 +1989,7 @@ async fn update_org_member_role_action(
     let org_id = parse_uuid(&body.org_id, "orgId")?;
     let member_id = parse_uuid(&body.member_id, "memberId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let access = org_service::resolve_owner_access(&state.db, &actor, &org_id).await?;
-    if !access.can_read() {
-        return Err(AppError::NotFound("Organization not found".to_string()));
-    }
-    if !access.can_write() {
-        return Err(AppError::OrgRoleInsufficient(
-            "admin role required for this operation".to_string(),
-        ));
-    }
+    require_assistant_org_access(&state, &actor, &org_id, true).await?;
     let update = orgs::UpdateMemberRequest {
         role: Some(body.role),
         scope_source: None,
@@ -1724,10 +1997,12 @@ async fn update_org_member_role_action(
     };
     let current =
         orgs::authorize_member_update(&state, &actor, &org_id, &member_id, &update).await?;
-    let fp = action_fingerprint(
-        ORG_MEMBER_UPDATE_ROLE_ACTION,
-        serde_json::json!({"orgId":org_id,"memberId":member_id,"role":body.role,"expectedRole":body.expected_role}),
-    )?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::OrgMemberUpdateRole {
+        org_id: &org_id,
+        member_id: &member_id,
+        role: body.role,
+        expected_role: body.expected_role,
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -1789,10 +2064,13 @@ async fn invite_org_action(
     let actor = auth_user.user_id.to_string();
     let org_id = parse_uuid(&body.org_id, "orgId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(
-        ORG_INVITE_ACTION,
-        serde_json::json!({"orgId":org_id,"role":body.role,"allowedServiceIds":body.allowed_service_ids,"ttlHours":body.ttl_hours}),
-    )?;
+    require_assistant_org_access(&state, &actor, &org_id, true).await?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::OrgInvite {
+        org_id: &org_id,
+        role: body.role,
+        allowed_service_ids: body.allowed_service_ids.as_deref(),
+        ttl_hours: body.ttl_hours,
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -1810,7 +2088,35 @@ async fn invite_org_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let scope_source = if body.allowed_service_ids.is_some() {
+                "override"
+            } else {
+                "inherit"
+            };
+            let invite_exists = state
+                .db
+                .collection::<mongodb::bson::Document>(crate::models::org_invite::COLLECTION_NAME)
+                .find_one(doc! {
+                    "org_user_id": &org_id,
+                    "created_by": &actor,
+                    "role": crate::models::org_membership::OrgRole::from(body.role).as_str(),
+                    "scope_source": scope_source,
+                    "allowed_service_ids": bson::to_bson(&body.allowed_service_ids)
+                        .map_err(|error| AppError::Internal(error.to_string()))?,
+                    "created_at": { "$gte": bson::DateTime::from_chrono(receipt.created_at) },
+                })
+                .await?
+                .is_some();
+            if !invite_exists {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &org_id).await?;
+            return Ok(Json(AssistantOrgResponse {
+                resource: AssistantOrgResource { org_id },
+                replayed: true,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let _ = orgs::create_invite(
@@ -1840,7 +2146,8 @@ async fn set_primary_org_action(
     let actor = auth_user.user_id.to_string();
     let org_id = parse_uuid(&body.org_id, "orgId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(ORG_SET_PRIMARY_ACTION, serde_json::json!({"orgId":org_id}))?;
+    require_assistant_org_access(&state, &actor, &org_id, false).await?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::OrgSetPrimary { org_id: &org_id })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -1858,7 +2165,19 @@ async fn set_primary_org_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let current = require_user(&state, &actor).await?;
+            if current.primary_org_id.as_deref() != Some(org_id.as_str())
+                || !updated_since_receipt(current.updated_at, &receipt)
+            {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &org_id).await?;
+            return Ok(Json(AssistantOrgResponse {
+                resource: AssistantOrgResource { org_id },
+                replayed: true,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let _ = orgs::set_primary_org(
@@ -1954,10 +2273,11 @@ async fn update_service_account_action(
     let existing = service_account_service::get_service_account(&state.db, &id).await?;
     admin_service_accounts::require_admin_or_owning_org_admin(&state, &auth_user, &existing)
         .await?;
-    let fp = action_fingerprint(
-        SERVICE_ACCOUNT_UPDATE_ACTION,
-        serde_json::json!({"id":id,"name":body.name,"description":body.description}),
-    )?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::ServiceAccountUpdate {
+        service_account_id: &id,
+        name: body.name.as_deref(),
+        description: body.description.as_deref(),
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -1978,7 +2298,30 @@ async fn update_service_account_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let name_matches = body.name.as_ref().is_none_or(|name| existing.name == *name);
+            let description_matches = body.description.as_ref().is_none_or(|description| {
+                if description.is_empty() {
+                    existing.description.is_none()
+                } else {
+                    existing.description.as_ref() == Some(description)
+                }
+            });
+            if !name_matches
+                || !description_matches
+                || !updated_since_receipt(existing.updated_at, &receipt)
+            {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &id).await?;
+            return Ok(Json(AssistantServiceAccountResponse {
+                resource: AssistantServiceAccountResource {
+                    service_account_id: id,
+                },
+                replayed: true,
+                client_secret: None,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let _ = admin_service_accounts::update_service_account(
@@ -2018,10 +2361,10 @@ async fn delete_service_account_action(
     let existing = service_account_service::get_service_account(&state.db, &id).await?;
     admin_service_accounts::require_admin_or_owning_org_admin(&state, &auth_user, &existing)
         .await?;
-    let fp = action_fingerprint(
-        SERVICE_ACCOUNT_DELETE_ACTION,
-        serde_json::json!({"id":id,"confirmed":body.confirmed}),
-    )?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::ServiceAccountDelete {
+        service_account_id: &id,
+        confirmed: body.confirmed,
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2042,7 +2385,19 @@ async fn delete_service_account_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            if existing.is_active || !updated_since_receipt(existing.updated_at, &receipt) {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &id).await?;
+            return Ok(Json(AssistantServiceAccountResponse {
+                resource: AssistantServiceAccountResource {
+                    service_account_id: id,
+                },
+                replayed: true,
+                client_secret: None,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let _ = admin_service_accounts::delete_service_account(
@@ -2066,7 +2421,7 @@ async fn delete_service_account_action(
 async fn rotate_service_account_secret_action(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Json(body): Json<AssistantServiceAccountRequest>,
+    Json(body): Json<AssistantServiceAccountRotateRequest>,
 ) -> AppResult<Json<AssistantServiceAccountResponse>> {
     let actor = auth_user.user_id.to_string();
     let id = parse_uuid(&body.service_account_id, "serviceAccountId")?;
@@ -2074,10 +2429,14 @@ async fn rotate_service_account_secret_action(
     let existing = service_account_service::get_service_account(&state.db, &id).await?;
     admin_service_accounts::require_admin_or_owning_org_admin(&state, &auth_user, &existing)
         .await?;
-    let fp = action_fingerprint(
-        SERVICE_ACCOUNT_ROTATE_SECRET_ACTION,
-        serde_json::json!({"id":id}),
-    )?;
+    let expected_updated_at =
+        parse_browser_updated_at(&body.expected_updated_at, "expectedUpdatedAt")?;
+    let expected_updated_at_fingerprint =
+        expected_updated_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let fp = wave4_fingerprint(&Wave4Fingerprint::ServiceAccountRotate {
+        service_account_id: &id,
+        expected_updated_at: &expected_updated_at_fingerprint,
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2097,7 +2456,15 @@ async fn rotate_service_account_secret_action(
         }));
     }
     let receipt = match outcome {
-        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::Reserved(receipt) => {
+            if existing.updated_at.timestamp_millis() != expected_updated_at.timestamp_millis() {
+                discard_pending_wave4(&state, &receipt).await?;
+                return Err(AppError::Conflict(
+                    "service account changed before secret rotation".to_string(),
+                ));
+            }
+            receipt
+        }
         ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
@@ -2132,10 +2499,10 @@ async fn revoke_service_account_tokens_action(
     let existing = service_account_service::get_service_account(&state.db, &id).await?;
     admin_service_accounts::require_admin_or_owning_org_admin(&state, &auth_user, &existing)
         .await?;
-    let fp = action_fingerprint(
-        SERVICE_ACCOUNT_REVOKE_TOKENS_ACTION,
-        serde_json::json!({"id":id,"confirmed":body.confirmed}),
-    )?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::ServiceAccountRevokeTokens {
+        service_account_id: &id,
+        confirmed: body.confirmed,
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2156,7 +2523,26 @@ async fn revoke_service_account_tokens_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let active_tokens = state
+                .db
+                .collection::<mongodb::bson::Document>(
+                    crate::models::service_account_token::COLLECTION_NAME,
+                )
+                .count_documents(doc! { "service_account_id": &id, "revoked": false })
+                .await?;
+            if active_tokens != 0 || !updated_since_receipt(existing.updated_at, &receipt) {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &id).await?;
+            return Ok(Json(AssistantServiceAccountResponse {
+                resource: AssistantServiceAccountResource {
+                    service_account_id: id,
+                },
+                replayed: true,
+                client_secret: None,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let _ = admin_service_accounts::revoke_tokens(
@@ -2183,10 +2569,10 @@ async fn create_developer_app_action(
 ) -> AppResult<Json<AssistantDeveloperAppResponse>> {
     let actor = auth_user.user_id.to_string();
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(
-        DEVELOPER_APP_CREATE_ACTION,
-        serde_json::json!({"name":body.name,"redirectUris":body.redirect_uris}),
-    )?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::DeveloperAppCreate {
+        name: &body.name,
+        redirect_uris: &body.redirect_uris,
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2245,10 +2631,11 @@ async fn update_developer_app_action(
     let id = parse_uuid(&body.client_id, "clientId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
     developer_apps::resolve_developer_app_write_owner(&state, &actor, &id).await?;
-    let fp = action_fingerprint(
-        DEVELOPER_APP_UPDATE_ACTION,
-        serde_json::json!({"id":id,"name":body.name,"redirectUris":body.redirect_uris}),
-    )?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::DeveloperAppUpdate {
+        client_id: &id,
+        name: body.name.as_deref(),
+        redirect_uris: body.redirect_uris.as_deref(),
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2267,7 +2654,29 @@ async fn update_developer_app_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let current = crate::services::oauth_client_service::get_client(&state.db, &id).await?;
+            let name_matches = body
+                .name
+                .as_ref()
+                .is_none_or(|name| current.client_name == name.trim());
+            let redirects_match = body
+                .redirect_uris
+                .as_ref()
+                .is_none_or(|redirects| current.redirect_uris == *redirects);
+            if !name_matches
+                || !redirects_match
+                || !updated_since_receipt(current.updated_at, &receipt)
+            {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &id).await?;
+            return Ok(Json(AssistantDeveloperAppResponse {
+                resource: AssistantDeveloperAppResource { client_id: id },
+                replayed: true,
+                client_secret: None,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let _ = developer_apps::update_my_oauth_client(
@@ -2304,10 +2713,10 @@ async fn delete_developer_app_action(
     let id = parse_uuid(&body.client_id, "clientId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
     developer_apps::resolve_developer_app_write_owner(&state, &actor, &id).await?;
-    let fp = action_fingerprint(
-        DEVELOPER_APP_DELETE_ACTION,
-        serde_json::json!({"id":id,"confirmed":body.confirmed}),
-    )?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::DeveloperAppDelete {
+        client_id: &id,
+        confirmed: body.confirmed,
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2326,7 +2735,18 @@ async fn delete_developer_app_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let current = crate::services::oauth_client_service::get_client(&state.db, &id).await?;
+            if current.is_active || !updated_since_receipt(current.updated_at, &receipt) {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &id).await?;
+            return Ok(Json(AssistantDeveloperAppResponse {
+                resource: AssistantDeveloperAppResource { client_id: id },
+                replayed: true,
+                client_secret: None,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let _ =
@@ -2343,16 +2763,20 @@ async fn delete_developer_app_action(
 async fn rotate_developer_app_secret_action(
     State(state): State<AppState>,
     auth_user: AuthUser,
-    Json(body): Json<AssistantDeveloperAppRequest>,
+    Json(body): Json<AssistantDeveloperAppRotateRequest>,
 ) -> AppResult<Json<AssistantDeveloperAppResponse>> {
     let actor = auth_user.user_id.to_string();
     let id = parse_uuid(&body.client_id, "clientId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
     developer_apps::resolve_developer_app_write_owner(&state, &actor, &id).await?;
-    let fp = action_fingerprint(
-        DEVELOPER_APP_ROTATE_SECRET_ACTION,
-        serde_json::json!({"id":id}),
-    )?;
+    let expected_updated_at =
+        parse_browser_updated_at(&body.expected_updated_at, "expectedUpdatedAt")?;
+    let expected_updated_at_fingerprint =
+        expected_updated_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let fp = wave4_fingerprint(&Wave4Fingerprint::DeveloperAppRotate {
+        client_id: &id,
+        expected_updated_at: &expected_updated_at_fingerprint,
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2370,7 +2794,16 @@ async fn rotate_developer_app_secret_action(
         }));
     }
     let receipt = match outcome {
-        ReceiptOutcome::Reserved(r) => r,
+        ReceiptOutcome::Reserved(receipt) => {
+            let current = crate::services::oauth_client_service::get_client(&state.db, &id).await?;
+            if current.updated_at.timestamp_millis() != expected_updated_at.timestamp_millis() {
+                discard_pending_wave4(&state, &receipt).await?;
+                return Err(AppError::Conflict(
+                    "developer app changed before secret rotation".to_string(),
+                ));
+            }
+            receipt
+        }
         ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
@@ -2397,10 +2830,13 @@ async fn update_notifications_action(
 ) -> AppResult<Json<AssistantNotificationResponse>> {
     let actor = auth_user.user_id.to_string();
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(
-        NOTIFICATIONS_UPDATE_ACTION,
-        serde_json::json!({"telegramEnabled":body.telegram_enabled,"approvalRequired":body.approval_required,"approvalTimeoutSecs":body.approval_timeout_secs,"grantExpiryDays":body.grant_expiry_days,"pushEnabled":body.push_enabled}),
-    )?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::NotificationsUpdate {
+        telegram_enabled: body.telegram_enabled,
+        approval_required: body.approval_required,
+        approval_timeout_secs: body.approval_timeout_secs,
+        grant_expiry_days: body.grant_expiry_days,
+        push_enabled: body.push_enabled,
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2418,7 +2854,35 @@ async fn update_notifications_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let Json(current) =
+                notifications::get_settings(State(state.clone()), auth_user.clone()).await?;
+            let already_applied = body
+                .telegram_enabled
+                .is_none_or(|value| current.telegram_enabled == value)
+                && body
+                    .approval_required
+                    .is_none_or(|value| current.approval_required == value)
+                && body
+                    .approval_timeout_secs
+                    .is_none_or(|value| current.approval_timeout_secs == value)
+                && body
+                    .grant_expiry_days
+                    .is_none_or(|value| current.grant_expiry_days == value)
+                && body
+                    .push_enabled
+                    .is_none_or(|value| current.push_enabled == value);
+            if !already_applied || !response_updated_since_receipt(&current.updated_at, &receipt)? {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &current.id).await?;
+            return Ok(Json(AssistantNotificationResponse {
+                resource: AssistantNotificationBindingResource {
+                    binding_id: current.id,
+                },
+                replayed: true,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let Json(settings) = notifications::update_settings(
@@ -2448,10 +2912,7 @@ async fn link_telegram_action(
 ) -> AppResult<Json<AssistantTelegramLinkResponse>> {
     let actor = auth_user.user_id.to_string();
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(
-        NOTIFICATIONS_TELEGRAM_LINK_ACTION,
-        serde_json::json!({"userId":actor}),
-    )?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::NotificationsTelegramLink { user_id: &actor })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2497,10 +2958,10 @@ async fn disconnect_telegram_action(
     require_destructive_confirmation(body.confirmed)?;
     let actor = auth_user.user_id.to_string();
     let request_id = normalize_action_request_id(body.action_request_id)?;
-    let fp = action_fingerprint(
-        NOTIFICATIONS_TELEGRAM_DISCONNECT_ACTION,
-        serde_json::json!({"userId":actor,"confirmed":body.confirmed}),
-    )?;
+    let fp = wave4_fingerprint(&Wave4Fingerprint::NotificationsTelegramDisconnect {
+        user_id: &actor,
+        confirmed: body.confirmed,
+    })?;
     let outcome = reserve_or_replay(
         &state.db,
         &actor,
@@ -2518,7 +2979,24 @@ async fn disconnect_telegram_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let Json(current) =
+                notifications::get_settings(State(state.clone()), auth_user.clone()).await?;
+            if current.telegram_connected
+                || current.telegram_enabled
+                || current.telegram_link_pending
+                || !response_updated_since_receipt(&current.updated_at, &receipt)?
+            {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &current.id).await?;
+            return Ok(Json(AssistantNotificationResponse {
+                resource: AssistantNotificationBindingResource {
+                    binding_id: current.id,
+                },
+                replayed: true,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let _ = notifications::telegram_disconnect(
@@ -3220,19 +3698,429 @@ mod wave4_effect_tests {
         );
     }
 
-    #[test]
-    fn fingerprints_include_semantic_request_content() {
-        let first = action_fingerprint(
+    #[tokio::test]
+    async fn semantic_field_changes_conflict_across_all_thirty_verbs() {
+        // Falsifier: remove any field from a typed fingerprint constructor
+        // used by a handler. That field disappears from this exhaustive walk,
+        // reducing `changed_field_count`; keeping it but omitting it from the
+        // hash makes the same-id reservation below replay instead of conflict.
+        use crate::models::service_approval_config::ApprovalVerb;
+        use crate::test_utils::connect_test_database;
+        use serde_json::Value;
+
+        let Some(db) = connect_test_database("assistant_org_fingerprint_matrix").await else {
+            return;
+        };
+        let id_a = "00000000-0000-4000-8000-000000000001";
+        let id_b = "00000000-0000-4000-8000-000000000002";
+        let strings_a = vec!["alpha".to_string()];
+        let strings_b = vec!["https://app.example/callback".to_string()];
+        let mode = ApprovalMode::PerRequest;
+        let default_effect = ApprovalEffect::RequireApproval;
+        let rules = vec![ApprovalRule {
+            methods: vec!["POST".to_string()],
+            resource_pattern: "/v1/*".to_string(),
+            verbs: vec![ApprovalVerb::Write],
+            effect: ApprovalEffect::RequireApproval,
+            mode: ApprovalMode::PerRequest,
+        }];
+        let mut cases: Vec<(&str, &'static str, String, Value)> = Vec::new();
+
+        macro_rules! fingerprint_case {
+            ($name:literal, $action:expr, $value:expr) => {{
+                let typed = $value;
+                let fingerprint = fingerprint_canonical(&typed).expect("fingerprint case");
+                let value = serde_json::to_value(&typed).expect("serialize fingerprint case");
+                cases.push(($name, $action, fingerprint, value));
+            }};
+        }
+
+        fingerprint_case!(
+            "account.profile_update",
+            ACCOUNT_PROFILE_UPDATE_ACTION,
+            ProfileFingerprint {
+                action: ACCOUNT_PROFILE_UPDATE_ACTION,
+                user_id: id_a,
+                display_name: Some("Alice"),
+                avatar_url: Some("https://avatar.example/alice.png"),
+            }
+        );
+        fingerprint_case!(
+            "account.revoke_consent",
+            ACCOUNT_REVOKE_CONSENT_ACTION,
+            ConsentFingerprint {
+                action: ACCOUNT_REVOKE_CONSENT_ACTION,
+                user_id: id_a,
+                client_id: id_b,
+                confirmed: true,
+            }
+        );
+        fingerprint_case!(
+            "account.delete",
+            ACCOUNT_DELETE_ACTION,
+            ConfirmedAccountDeleteFingerprint {
+                action: ACCOUNT_DELETE_ACTION,
+                user_id: id_a,
+                confirm_email: "owner@example.test",
+            }
+        );
+        fingerprint_case!(
+            "account.mfa_setup",
+            ACCOUNT_MFA_SETUP_ACTION,
+            MfaFingerprint {
+                action: ACCOUNT_MFA_SETUP_ACTION,
+                user_id: id_a,
+                stage: AssistantMfaSetupStage::Confirm,
+                factor_id: Some(id_b),
+            }
+        );
+        fingerprint_case!(
+            "approval.configure",
+            APPROVAL_CONFIGURE_ACTION,
+            ApprovalConfigureFingerprint {
+                action: APPROVAL_CONFIGURE_ACTION,
+                service_id: id_a,
+                effective_service_id: id_b,
+                approval_required: true,
+                approval_mode: &mode,
+                rules: &rules,
+                default_effect: Some(&default_effect),
+            }
+        );
+        fingerprint_case!(
+            "approval.enable",
+            APPROVAL_ENABLE_ACTION,
+            ApprovalToggleFingerprint {
+                action: APPROVAL_ENABLE_ACTION,
+                service_id: id_a,
+                effective_service_id: id_b,
+                approval_required: true,
+            }
+        );
+        fingerprint_case!(
+            "approval.disable",
+            APPROVAL_DISABLE_ACTION,
+            ApprovalToggleFingerprint {
+                action: APPROVAL_DISABLE_ACTION,
+                service_id: id_a,
+                effective_service_id: id_b,
+                approval_required: false,
+            }
+        );
+        fingerprint_case!(
+            "approval.revoke_grant",
+            APPROVAL_REVOKE_GRANT_ACTION,
+            GrantFingerprint {
+                action: APPROVAL_REVOKE_GRANT_ACTION,
+                grant_id: id_a,
+                owner_user_id: id_b,
+            }
+        );
+
+        fingerprint_case!(
+            "org.create",
+            ORG_CREATE_ACTION,
+            Wave4Fingerprint::OrgCreate {
+                display_name: "Acme",
+                contact_email: Some("owner@acme.test"),
+                avatar_url: Some("https://acme.test/avatar.png"),
+            }
+        );
+        fingerprint_case!(
+            "org.update",
             ORG_UPDATE_ACTION,
-            serde_json::json!({ "orgId": "00000000-0000-0000-0000-000000000001", "displayName": "one" }),
-        )
-        .unwrap();
-        let second = action_fingerprint(
-            ORG_UPDATE_ACTION,
-            serde_json::json!({ "orgId": "00000000-0000-0000-0000-000000000001", "displayName": "two" }),
-        )
-        .unwrap();
-        assert_ne!(first, second);
+            Wave4Fingerprint::OrgUpdate {
+                org_id: id_a,
+                display_name: Some("Acme Two"),
+                slug: Some("acme-two"),
+                contact_email: Some("owner2@acme.test"),
+                avatar_url: Some("https://acme.test/avatar-two.png"),
+            }
+        );
+        fingerprint_case!(
+            "org.delete",
+            ORG_DELETE_ACTION,
+            Wave4Fingerprint::OrgDelete {
+                org_id: id_a,
+                confirmed: true,
+            }
+        );
+        fingerprint_case!(
+            "org.member_add",
+            ORG_MEMBER_ADD_ACTION,
+            Wave4Fingerprint::OrgMemberAdd {
+                org_id: id_a,
+                user_id: id_b,
+                role: orgs::OrgRoleWire::Member,
+                allowed_service_ids: Some(&strings_a),
+            }
+        );
+        fingerprint_case!(
+            "org.member_remove",
+            ORG_MEMBER_REMOVE_ACTION,
+            Wave4Fingerprint::OrgMemberRemove {
+                org_id: id_a,
+                member_id: id_b,
+                confirmed: true,
+            }
+        );
+        fingerprint_case!(
+            "org.member_update_role",
+            ORG_MEMBER_UPDATE_ROLE_ACTION,
+            Wave4Fingerprint::OrgMemberUpdateRole {
+                org_id: id_a,
+                member_id: id_b,
+                role: orgs::OrgRoleWire::Admin,
+                expected_role: orgs::OrgRoleWire::Member,
+            }
+        );
+        fingerprint_case!(
+            "org.invite",
+            ORG_INVITE_ACTION,
+            Wave4Fingerprint::OrgInvite {
+                org_id: id_a,
+                role: orgs::OrgRoleWire::Viewer,
+                allowed_service_ids: Some(&strings_a),
+                ttl_hours: Some(48),
+            }
+        );
+        fingerprint_case!(
+            "org.set_primary",
+            ORG_SET_PRIMARY_ACTION,
+            Wave4Fingerprint::OrgSetPrimary { org_id: id_a }
+        );
+        fingerprint_case!(
+            "service_account.create",
+            SERVICE_ACCOUNT_CREATE_ACTION,
+            Wave4Fingerprint::ServiceAccountCreate {
+                name: "deploy",
+                description: Some("Deploy worker"),
+                allowed_scopes: Some("proxy"),
+                target_org_id: Some(id_a),
+            }
+        );
+        fingerprint_case!(
+            "service_account.update",
+            SERVICE_ACCOUNT_UPDATE_ACTION,
+            Wave4Fingerprint::ServiceAccountUpdate {
+                service_account_id: id_a,
+                name: Some("deploy two"),
+                description: Some("Deploy worker two"),
+            }
+        );
+        fingerprint_case!(
+            "service_account.delete",
+            SERVICE_ACCOUNT_DELETE_ACTION,
+            Wave4Fingerprint::ServiceAccountDelete {
+                service_account_id: id_a,
+                confirmed: true,
+            }
+        );
+        fingerprint_case!(
+            "service_account.rotate_secret",
+            SERVICE_ACCOUNT_ROTATE_SECRET_ACTION,
+            Wave4Fingerprint::ServiceAccountRotate {
+                service_account_id: id_a,
+                expected_updated_at: "2026-01-01T00:00:00Z",
+            }
+        );
+        fingerprint_case!(
+            "service_account.revoke_tokens",
+            SERVICE_ACCOUNT_REVOKE_TOKENS_ACTION,
+            Wave4Fingerprint::ServiceAccountRevokeTokens {
+                service_account_id: id_a,
+                confirmed: true,
+            }
+        );
+        fingerprint_case!(
+            "developer_app.create",
+            DEVELOPER_APP_CREATE_ACTION,
+            Wave4Fingerprint::DeveloperAppCreate {
+                name: "Console",
+                redirect_uris: &strings_b,
+            }
+        );
+        fingerprint_case!(
+            "developer_app.update",
+            DEVELOPER_APP_UPDATE_ACTION,
+            Wave4Fingerprint::DeveloperAppUpdate {
+                client_id: id_a,
+                name: Some("Console Two"),
+                redirect_uris: Some(&strings_b),
+            }
+        );
+        fingerprint_case!(
+            "developer_app.delete",
+            DEVELOPER_APP_DELETE_ACTION,
+            Wave4Fingerprint::DeveloperAppDelete {
+                client_id: id_a,
+                confirmed: true,
+            }
+        );
+        fingerprint_case!(
+            "developer_app.rotate_secret",
+            DEVELOPER_APP_ROTATE_SECRET_ACTION,
+            Wave4Fingerprint::DeveloperAppRotate {
+                client_id: id_a,
+                expected_updated_at: "2026-01-01T00:00:00Z",
+            }
+        );
+        fingerprint_case!(
+            "notifications.update",
+            NOTIFICATIONS_UPDATE_ACTION,
+            Wave4Fingerprint::NotificationsUpdate {
+                telegram_enabled: Some(true),
+                approval_required: Some(true),
+                approval_timeout_secs: Some(60),
+                grant_expiry_days: Some(30),
+                push_enabled: Some(false),
+            }
+        );
+        fingerprint_case!(
+            "notifications.telegram_link",
+            NOTIFICATIONS_TELEGRAM_LINK_ACTION,
+            Wave4Fingerprint::NotificationsTelegramLink { user_id: id_a }
+        );
+        fingerprint_case!(
+            "notifications.telegram_disconnect",
+            NOTIFICATIONS_TELEGRAM_DISCONNECT_ACTION,
+            Wave4Fingerprint::NotificationsTelegramDisconnect {
+                user_id: id_a,
+                confirmed: true,
+            }
+        );
+        fingerprint_case!(
+            "external_key.add_gcp_service_account",
+            EXTERNAL_KEY_ADD_GCP_ACTION,
+            Wave4Fingerprint::ExternalKeyAddGcp {
+                label: Some("gcp"),
+                key_json_fingerprint: "hmac-sha256:first",
+                scopes: Some("scope-a"),
+                service_slugs: Some(&strings_a),
+                target_org_id: Some(id_a),
+            }
+        );
+        fingerprint_case!(
+            "openclaw.connect",
+            OPENCLAW_CONNECT_ACTION,
+            Wave4Fingerprint::OpenClawConnect {
+                gateway_url: "https://gateway.example",
+                credential_fingerprint: "hmac-sha256:first",
+                label: Some("OpenClaw"),
+            }
+        );
+
+        assert_eq!(cases.len(), 30, "the table must cover every manifest verb");
+        let actor = Uuid::new_v4().to_string();
+        let mut changed_field_count = 0usize;
+        for (case_index, (name, action, base_fingerprint, serialized)) in
+            cases.into_iter().enumerate()
+        {
+            assert_eq!(serialized["action"].as_str(), Some(action), "{name}");
+            let semantic = serialized
+                .get("request")
+                .and_then(Value::as_object)
+                .unwrap_or_else(|| serialized.as_object().expect("fingerprint object"));
+            let fields: Vec<String> = semantic
+                .keys()
+                .filter(|field| field.as_str() != "action")
+                .cloned()
+                .collect();
+            assert!(!fields.is_empty(), "{name} has no bound semantic fields");
+
+            for field in fields {
+                let mut changed = serialized.clone();
+                let target = if changed.get("request").is_some() {
+                    changed["request"]
+                        .as_object_mut()
+                        .expect("request object")
+                        .get_mut(&field)
+                        .expect("request field")
+                } else {
+                    changed
+                        .as_object_mut()
+                        .expect("fingerprint object")
+                        .get_mut(&field)
+                        .expect("fingerprint field")
+                };
+                match target {
+                    Value::Bool(value) => *value = !*value,
+                    Value::Number(number) => {
+                        *target = Value::from(number.as_i64().expect("integer field") + 1)
+                    }
+                    Value::String(value) => {
+                        *value = match value.as_str() {
+                            "admin" => "member".to_string(),
+                            "member" => "viewer".to_string(),
+                            "viewer" => "admin".to_string(),
+                            "per_request" => "grant".to_string(),
+                            "grant" => "per_request".to_string(),
+                            "require_approval" => "auto_allow".to_string(),
+                            "auto_allow" => "deny".to_string(),
+                            "deny" => "require_approval".to_string(),
+                            "confirm" => "start".to_string(),
+                            other if other.starts_with("https://") => {
+                                "https://different.example/value".to_string()
+                            }
+                            other => format!("{other}-different"),
+                        }
+                    }
+                    Value::Array(values) => {
+                        if field == "rules" {
+                            values.push(values.first().expect("rule fixture").clone());
+                        } else if field == "redirectUris" {
+                            values.push(Value::String(
+                                "https://different.example/callback".to_string(),
+                            ));
+                        } else {
+                            values.push(Value::String("different".to_string()));
+                        }
+                    }
+                    Value::Null => *target = Value::String("present".to_string()),
+                    Value::Object(values) => {
+                        values.insert("changed".to_string(), Value::Bool(true));
+                    }
+                }
+
+                let changed_fingerprint =
+                    fingerprint_canonical(&changed).expect("changed fingerprint");
+                assert_ne!(
+                    base_fingerprint, changed_fingerprint,
+                    "{name}.{field} is not fingerprinted"
+                );
+                let action_request_id = format!("fp-{case_index}-{changed_field_count}");
+                assert!(matches!(
+                    reserve_or_replay(
+                        &db,
+                        &actor,
+                        action,
+                        &action_request_id,
+                        &base_fingerprint,
+                        Uuid::new_v4().to_string(),
+                    )
+                    .await
+                    .expect("reserve base fingerprint"),
+                    ReceiptOutcome::Reserved(_)
+                ));
+                assert!(matches!(
+                    reserve_or_replay(
+                        &db,
+                        &actor,
+                        action,
+                        &action_request_id,
+                        &changed_fingerprint,
+                        Uuid::new_v4().to_string(),
+                    )
+                    .await,
+                    Err(AppError::Conflict(_))
+                ));
+                changed_field_count += 1;
+            }
+        }
+        assert_eq!(
+            changed_field_count, 89,
+            "adding or removing a bound semantic field requires reviewing this count"
+        );
     }
 
     #[test]

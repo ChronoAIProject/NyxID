@@ -71,6 +71,12 @@ describe("AssistantServiceAccountActionDialog", () => {
     mockPost.mockResolvedValue({ resource: { serviceAccountId: ID }, replayed: false, clientSecret: "rotated-once" });
     renderDialog("rotate_secret", { serviceAccountId: ID });
     await submit();
+    // Falsifier: remove the `expectedUpdatedAt` payload assignment in the
+    // rotate-secret branch; this request-body assertion then fails.
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/service-account/rotate-secret",
+      expect.objectContaining({ expectedUpdatedAt: "2026-01-01T00:00:00Z" }),
+    );
     expect(await screen.findByDisplayValue("rotated-once")).toBeInTheDocument();
   });
 

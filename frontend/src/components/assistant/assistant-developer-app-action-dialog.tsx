@@ -126,6 +126,7 @@ export function AssistantDeveloperAppActionDialog({
           .map((uri) => uri.trim())
           .filter(Boolean);
       }
+      if (action === "rotate_secret") payload.expectedUpdatedAt = before?.updated_at;
       const raw = await api.post<unknown>(
         `/assistant/actions/org/developer-app/${action.replaceAll("_", "-")}`,
         payload,

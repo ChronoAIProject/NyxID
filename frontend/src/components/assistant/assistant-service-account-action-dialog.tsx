@@ -135,6 +135,7 @@ export function AssistantServiceAccountActionDialog({
         payload.description = description.trim() || undefined;
       }
       if (action === "create") payload.allowedScopes = allowedScopes.trim();
+      if (action === "rotate_secret") payload.expectedUpdatedAt = before?.updated_at;
       const raw = await api.post<unknown>(
         `/assistant/actions/org/service-account/${action.replaceAll("_", "-")}`,
         payload,
