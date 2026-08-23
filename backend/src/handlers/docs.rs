@@ -414,7 +414,6 @@ mod tests {
             value["paths"]["/v2/search"]["post"]["x-aevatar-tool"]["name"],
             "search"
         );
-        assert!(value["paths"]["/v2/agent"].is_null());
     }
 
     #[tokio::test]

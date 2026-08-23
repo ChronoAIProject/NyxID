@@ -3672,9 +3672,28 @@ mod tests {
                 .is_ok(),
             "server-chosen rows without a policy must keep resolving"
         );
+        // The actor-addressed deny ships disabled so deploying changes no existing
+        // behaviour; with the flag off, a policy-less row still resolves.
+        assert!(
+            authorize_master_credential(&db, &service, &actor)
+                .await
+                .is_ok(),
+            "with PLATFORM_REQUIRE_OPERATION_POLICY unset, actor-addressed rows keep resolving"
+        );
+
+        // Enabled, the same row is refused on the actor path only.
+        unsafe { std::env::set_var("PLATFORM_REQUIRE_OPERATION_POLICY", "1") };
+        let enabled = authorize_master_credential(&db, &service, &actor).await;
+        let server_chosen_still_ok = authorize_master_credential_server_chosen(&db, &service).await;
+        unsafe { std::env::remove_var("PLATFORM_REQUIRE_OPERATION_POLICY") };
+
         assert_service_not_found(
-            authorize_master_credential(&db, &service, &actor).await,
-            "missing policy must fail closed before credential access",
+            enabled,
+            "with the flag on, missing policy must fail closed before credential access",
+        );
+        assert!(
+            server_chosen_still_ok.is_ok(),
+            "server-chosen must resolve regardless of the flag"
         );
     }
 
