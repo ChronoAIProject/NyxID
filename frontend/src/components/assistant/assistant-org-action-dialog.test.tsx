@@ -132,7 +132,7 @@ describe("AssistantOrgActionDialog", () => {
     mockPost.mockResolvedValue({ resource: { orgId: ORG_ID }, replayed: false });
     renderDialog("member_update_role", { orgId: ORG_ID, memberId: MEMBER_ID, role: "admin" });
     await clickSubmit();
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/org/member-update-role", expect.objectContaining({ role: "admin" }));
+    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/org/member-update-role", expect.objectContaining({ role: "admin", expectedRole: "viewer" }));
   });
 
   it("runs org.invite and proves the active invite count increased", async () => {

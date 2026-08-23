@@ -992,28 +992,23 @@ pub async fn add_member(
 }
 
 /// PATCH /api/v1/orgs/{org_id}/members/{member_id}
-pub async fn update_member(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Path((org_id, member_id)): Path<(String, String)>,
-    Json(body): Json<UpdateMemberRequest>,
-) -> AppResult<Json<MemberResponse>> {
-    let actor = auth_user.user_id.to_string();
-    require_org_admin(&state.db, &actor, &org_id).await?;
+pub(crate) async fn authorize_member_update(
+    state: &AppState,
+    actor: &str,
+    org_id: &str,
+    member_id: &str,
+    body: &UpdateMemberRequest,
+) -> AppResult<OrgMembership> {
+    require_org_admin(&state.db, actor, org_id).await?;
 
-    // Find the membership row by org+member to get its id.
-    let current = org_service::get_active_membership(&state.db, &org_id, &member_id)
+    let current = org_service::get_active_membership(&state.db, org_id, member_id)
         .await?
         .ok_or_else(|| AppError::NotFound("active membership not found".to_string()))?;
 
-    // Last-admin guard: refuse to demote the last active admin away from
-    // the Admin role. Without this, an admin could brick the org by
-    // self-demoting (DELETE /orgs/{id} also requires an admin, so the org
-    // -- and any resources it still owns -- becomes unrecoverable).
     if let Some(new_role_wire) = body.role.as_ref() {
         let new_role: OrgRole = (*new_role_wire).into();
         if current.role == OrgRole::Admin && new_role != OrgRole::Admin {
-            ensure_not_last_admin(&state.db, &org_id, &member_id).await?;
+            ensure_not_last_admin(&state.db, org_id, member_id).await?;
         }
     }
 
@@ -1034,7 +1029,19 @@ pub async fn update_member(
     }
     let requested_scope =
         org_role_scope_service::effective_scope_for_membership(&state.db, &candidate).await?;
-    require_delegable_scope(&state.db, &actor, &org_id, &requested_scope).await?;
+    require_delegable_scope(&state.db, actor, org_id, &requested_scope).await?;
+
+    Ok(current)
+}
+
+pub async fn update_member(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((org_id, member_id)): Path<(String, String)>,
+    Json(body): Json<UpdateMemberRequest>,
+) -> AppResult<Json<MemberResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let current = authorize_member_update(&state, &actor, &org_id, &member_id, &body).await?;
 
     let scope_source =
         resolve_scope_source_for_update(body.scope_source, body.allowed_service_ids.as_ref());

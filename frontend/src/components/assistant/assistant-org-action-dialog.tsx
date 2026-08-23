@@ -193,7 +193,10 @@ export function AssistantOrgActionDialog({
       if (action === "member_remove" || action === "member_update_role") {
         payload.memberId = memberId;
       }
-      if (action === "member_update_role") payload.role = role;
+      if (action === "member_update_role") {
+        payload.role = role;
+        payload.expectedRole = beforeMember?.role;
+      }
       if (action === "invite") {
         payload.role = role;
         payload.ttlHours = Number(ttlHours);

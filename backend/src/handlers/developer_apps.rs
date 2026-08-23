@@ -27,7 +27,7 @@ use mongodb::bson::doc;
 /// an admin may manage; an OAuth client is a developer app identity,
 /// not a service. Org admins manage every org-owned OAuth client as a
 /// unit.
-async fn resolve_developer_app_write_owner(
+pub(crate) async fn resolve_developer_app_write_owner(
     state: &AppState,
     actor: &str,
     client_id: &str,

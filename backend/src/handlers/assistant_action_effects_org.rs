@@ -44,7 +44,7 @@ use crate::services::assistant_action_receipts::{
     ReceiptOutcome, fingerprint_canonical, in_progress_conflict, mark_completed,
     normalize_action_request_id, reserve_or_replay,
 };
-use crate::services::{approval_service, org_service};
+use crate::services::{approval_service, org_service, service_account_service};
 use crate::telemetry::TelemetryContext;
 
 const ACCOUNT_PROFILE_UPDATE_ACTION: &str = "account.profile_update";
@@ -401,6 +401,7 @@ pub struct AssistantOrgMemberRoleRequest {
     pub org_id: String,
     pub member_id: String,
     pub role: orgs::OrgRoleWire,
+    pub expected_role: orgs::OrgRoleWire,
 }
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -418,6 +419,7 @@ pub struct AssistantServiceAccountCreateRequest {
     pub name: String,
     pub description: Option<String>,
     pub allowed_scopes: Option<String>,
+    pub target_org_id: Option<String>,
 }
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -1327,10 +1329,11 @@ fn service_account_create_fingerprint(
     name: &str,
     description: Option<&str>,
     allowed_scopes: Option<&str>,
+    target_org_id: Option<&str>,
 ) -> AppResult<String> {
     action_fingerprint(
         SERVICE_ACCOUNT_CREATE_ACTION,
-        serde_json::json!({"name":name,"description":description,"allowedScopes":allowed_scopes}),
+        serde_json::json!({"name":name,"description":description,"allowedScopes":allowed_scopes,"targetOrgId":target_org_id}),
     )
 }
 
@@ -1388,6 +1391,20 @@ async fn complete_wave4(
         )
         .await?;
     mark_completed(&state.db, receipt).await
+}
+
+async fn discard_pending_wave4(
+    state: &AppState,
+    receipt: &crate::models::assistant_action_receipt::AssistantActionReceipt,
+) -> AppResult<()> {
+    state
+        .db
+        .collection::<crate::models::assistant_action_receipt::AssistantActionReceipt>(
+            crate::models::assistant_action_receipt::COLLECTION_NAME,
+        )
+        .delete_one(doc! { "_id": &receipt.id, "status": "pending" })
+        .await?;
+    Ok(())
 }
 
 fn replayed_resource(outcome: &ReceiptOutcome) -> Option<(String, bool)> {
@@ -1645,9 +1662,25 @@ async fn update_org_member_role_action(
     let org_id = parse_uuid(&body.org_id, "orgId")?;
     let member_id = parse_uuid(&body.member_id, "memberId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
+    let access = org_service::resolve_owner_access(&state.db, &actor, &org_id).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("Organization not found".to_string()));
+    }
+    if !access.can_write() {
+        return Err(AppError::OrgRoleInsufficient(
+            "admin role required for this operation".to_string(),
+        ));
+    }
+    let update = orgs::UpdateMemberRequest {
+        role: Some(body.role),
+        scope_source: None,
+        allowed_service_ids: None,
+    };
+    let current =
+        orgs::authorize_member_update(&state, &actor, &org_id, &member_id, &update).await?;
     let fp = action_fingerprint(
         ORG_MEMBER_UPDATE_ROLE_ACTION,
-        serde_json::json!({"orgId":org_id,"memberId":member_id,"role":body.role}),
+        serde_json::json!({"orgId":org_id,"memberId":member_id,"role":body.role,"expectedRole":body.expected_role}),
     )?;
     let outcome = reserve_or_replay(
         &state.db,
@@ -1665,19 +1698,34 @@ async fn update_org_member_role_action(
         }));
     }
     let receipt = match outcome {
-        ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::Reserved(receipt) => {
+            if orgs::OrgRoleWire::from(current.role) != body.expected_role {
+                discard_pending_wave4(&state, &receipt).await?;
+                return Err(AppError::Conflict(
+                    "organization member role changed before confirmation".to_string(),
+                ));
+            }
+            receipt
+        }
+        ReceiptOutcome::InProgress(receipt) => {
+            let current =
+                org_service::get_active_membership(&state.db, &org_id, &member_id).await?;
+            if current.is_none_or(|membership| membership.role != body.role.into()) {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &org_id).await?;
+            return Ok(Json(AssistantOrgResponse {
+                resource: AssistantOrgResource { org_id },
+                replayed: true,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let _ = orgs::update_member(
         State(state.clone()),
         auth_user,
         Path((org_id.clone(), member_id)),
-        Json(orgs::UpdateMemberRequest {
-            role: Some(body.role),
-            scope_source: None,
-            allowed_service_ids: None,
-        }),
+        Json(update),
     )
     .await?;
     complete_wave4(&state, &receipt, &org_id).await?;
@@ -1789,10 +1837,17 @@ async fn create_service_account_action(
 ) -> AppResult<Json<AssistantServiceAccountResponse>> {
     let actor = auth_user.user_id.to_string();
     let request_id = normalize_action_request_id(body.action_request_id)?;
+    admin_service_accounts::resolve_service_account_create_owner(
+        &state,
+        &auth_user,
+        body.target_org_id.as_deref(),
+    )
+    .await?;
     let fp = service_account_create_fingerprint(
         &body.name,
         body.description.as_deref(),
         body.allowed_scopes.as_deref(),
+        body.target_org_id.as_deref(),
     )?;
     let outcome = reserve_or_replay(
         &state.db,
@@ -1828,7 +1883,7 @@ async fn create_service_account_action(
             allowed_scopes: body.allowed_scopes.unwrap_or_else(|| "proxy".to_string()),
             role_ids: None,
             rate_limit_override: None,
-            target_org_id: None,
+            target_org_id: body.target_org_id,
         }),
     )
     .await?;
@@ -1850,6 +1905,9 @@ async fn update_service_account_action(
     let actor = auth_user.user_id.to_string();
     let id = parse_uuid(&body.service_account_id, "serviceAccountId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
+    let existing = service_account_service::get_service_account(&state.db, &id).await?;
+    admin_service_accounts::require_admin_or_owning_org_admin(&state, &auth_user, &existing)
+        .await?;
     let fp = action_fingerprint(
         SERVICE_ACCOUNT_UPDATE_ACTION,
         serde_json::json!({"id":id,"name":body.name,"description":body.description}),
@@ -1910,6 +1968,9 @@ async fn delete_service_account_action(
     let actor = auth_user.user_id.to_string();
     let id = parse_uuid(&body.service_account_id, "serviceAccountId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
+    let existing = service_account_service::get_service_account(&state.db, &id).await?;
+    admin_service_accounts::require_admin_or_owning_org_admin(&state, &auth_user, &existing)
+        .await?;
     let fp = action_fingerprint(SERVICE_ACCOUNT_DELETE_ACTION, serde_json::json!({"id":id}))?;
     let outcome = reserve_or_replay(
         &state.db,
@@ -1960,6 +2021,9 @@ async fn rotate_service_account_secret_action(
     let actor = auth_user.user_id.to_string();
     let id = parse_uuid(&body.service_account_id, "serviceAccountId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
+    let existing = service_account_service::get_service_account(&state.db, &id).await?;
+    admin_service_accounts::require_admin_or_owning_org_admin(&state, &auth_user, &existing)
+        .await?;
     let fp = action_fingerprint(
         SERVICE_ACCOUNT_ROTATE_SECRET_ACTION,
         serde_json::json!({"id":id}),
@@ -2014,6 +2078,9 @@ async fn revoke_service_account_tokens_action(
     let actor = auth_user.user_id.to_string();
     let id = parse_uuid(&body.service_account_id, "serviceAccountId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
+    let existing = service_account_service::get_service_account(&state.db, &id).await?;
+    admin_service_accounts::require_admin_or_owning_org_admin(&state, &auth_user, &existing)
+        .await?;
     let fp = action_fingerprint(
         SERVICE_ACCOUNT_REVOKE_TOKENS_ACTION,
         serde_json::json!({"id":id}),
@@ -2126,6 +2193,7 @@ async fn update_developer_app_action(
     let actor = auth_user.user_id.to_string();
     let id = parse_uuid(&body.client_id, "clientId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
+    developer_apps::resolve_developer_app_write_owner(&state, &actor, &id).await?;
     let fp = action_fingerprint(
         DEVELOPER_APP_UPDATE_ACTION,
         serde_json::json!({"id":id,"name":body.name,"redirectUris":body.redirect_uris}),
@@ -2183,6 +2251,7 @@ async fn delete_developer_app_action(
     let actor = auth_user.user_id.to_string();
     let id = parse_uuid(&body.client_id, "clientId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
+    developer_apps::resolve_developer_app_write_owner(&state, &actor, &id).await?;
     let fp = action_fingerprint(DEVELOPER_APP_DELETE_ACTION, serde_json::json!({"id":id}))?;
     let outcome = reserve_or_replay(
         &state.db,
@@ -2224,6 +2293,7 @@ async fn rotate_developer_app_secret_action(
     let actor = auth_user.user_id.to_string();
     let id = parse_uuid(&body.client_id, "clientId")?;
     let request_id = normalize_action_request_id(body.action_request_id)?;
+    developer_apps::resolve_developer_app_write_owner(&state, &actor, &id).await?;
     let fp = action_fingerprint(
         DEVELOPER_APP_ROTATE_SECRET_ACTION,
         serde_json::json!({"id":id}),
@@ -2798,6 +2868,168 @@ mod wave4_effect_tests {
         assert_eq!(completed.status, AssistantActionReceiptStatus::Completed);
     }
 
+    #[tokio::test]
+    async fn member_role_updates_cannot_exceed_actor_authority() {
+        // Falsifiers: remove `require_delegable_scope` from
+        // `authorize_member_update` and the scoped admin grants unrestricted
+        // admin authority; remove the pre-reservation access check and the
+        // denied attempts leave pending receipts behind.
+        use crate::models::assistant_action_receipt::COLLECTION_NAME as ASSISTANT_ACTION_RECEIPTS;
+        use crate::models::oauth_client::ScopeProvenance;
+        use crate::models::org_membership::{
+            COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+        };
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+        use crate::services::oauth_client_service;
+        use crate::test_utils::{
+            connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
+        };
+
+        let Some(db) = connect_test_database("assistant_member_role_authority").await else {
+            return;
+        };
+        let org_id = Uuid::new_v4().to_string();
+        let admin_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        let nonactor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&org_id, UserType::Org),
+                test_user(&admin_id, UserType::Person),
+                test_user(&member_id, UserType::Person),
+                test_user(&nonactor_id, UserType::Person),
+            ])
+            .await
+            .expect("insert authority users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_many([
+                test_membership(
+                    &org_id,
+                    &admin_id,
+                    OrgRole::Admin,
+                    Some(vec!["svc-a".to_string()]),
+                ),
+                test_membership(&org_id, &member_id, OrgRole::Member, None),
+            ])
+            .await
+            .expect("insert authority memberships");
+
+        let state = test_app_state(db.clone());
+        let request = |action_request_id: &str, target: &str| AssistantOrgMemberRoleRequest {
+            action_request_id: action_request_id.to_string(),
+            org_id: org_id.clone(),
+            member_id: target.to_string(),
+            role: orgs::OrgRoleWire::Admin,
+            expected_role: orgs::OrgRoleWire::Member,
+        };
+
+        let widened = update_org_member_role_action(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            Json(request("member-role-widen", &member_id)),
+        )
+        .await;
+        assert!(matches!(widened, Err(AppError::OrgRoleInsufficient(_))));
+
+        let self_escalation = update_org_member_role_action(
+            State(state.clone()),
+            test_auth_user(&member_id),
+            Json(request("member-role-self", &member_id)),
+        )
+        .await;
+        assert!(matches!(
+            self_escalation,
+            Err(AppError::OrgRoleInsufficient(_))
+        ));
+
+        let unrelated = update_org_member_role_action(
+            State(state.clone()),
+            test_auth_user(&nonactor_id),
+            Json(request("member-role-nonactor", &member_id)),
+        )
+        .await;
+        assert!(matches!(unrelated, Err(AppError::NotFound(_))));
+
+        let (service_account, _) = service_account_service::create_service_account(
+            &db,
+            "owner-service-account",
+            None,
+            "proxy",
+            &[],
+            None,
+            &admin_id,
+        )
+        .await
+        .expect("create owned service account");
+        let (developer_app, _) = oauth_client_service::create_client(
+            &db,
+            "Owner application",
+            &["https://owner.example/callback".to_string()],
+            "confidential",
+            &admin_id,
+            "",
+            oauth_client_service::DEFAULT_ALLOWED_SCOPES,
+            ScopeProvenance::Explicit,
+            false,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .expect("create owned developer app");
+
+        let service_account_denied = update_service_account_action(
+            State(state.clone()),
+            test_auth_user(&nonactor_id),
+            Json(AssistantServiceAccountUpdateRequest {
+                action_request_id: "service-account-nonactor".to_string(),
+                service_account_id: service_account.id.clone(),
+                name: Some("unauthorized rename".to_string()),
+                description: None,
+            }),
+        )
+        .await;
+        assert!(matches!(service_account_denied, Err(AppError::NotFound(_))));
+
+        let developer_app_denied = update_developer_app_action(
+            State(state),
+            test_auth_user(&nonactor_id),
+            Json(AssistantDeveloperAppUpdateRequest {
+                action_request_id: "developer-app-nonactor".to_string(),
+                client_id: developer_app.id.clone(),
+                name: Some("unauthorized rename".to_string()),
+                redirect_uris: None,
+            }),
+        )
+        .await;
+        assert!(matches!(developer_app_denied, Err(AppError::NotFound(_))));
+
+        let member = db
+            .collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .find_one(doc! { "org_user_id": &org_id, "member_user_id": &member_id })
+            .await
+            .expect("load target membership")
+            .expect("target membership");
+        assert_eq!(member.role, OrgRole::Member);
+        let stored_service_account =
+            service_account_service::get_service_account(&db, &service_account.id)
+                .await
+                .expect("load service account");
+        assert_eq!(stored_service_account.name, "owner-service-account");
+        let stored_developer_app = oauth_client_service::get_client(&db, &developer_app.id)
+            .await
+            .expect("load developer app");
+        assert_eq!(stored_developer_app.client_name, "Owner application");
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(ASSISTANT_ACTION_RECEIPTS)
+                .count_documents(doc! {})
+                .await
+                .expect("count receipts"),
+            0,
+            "authority denials must happen before receipt reservation"
+        );
+    }
+
     #[test]
     fn fingerprints_include_semantic_request_content() {
         let first = action_fingerprint(
@@ -2828,9 +3060,9 @@ mod wave4_effect_tests {
 
     #[test]
     fn sensitive_and_browser_collected_inputs_change_fingerprints() {
-        let base = service_account_create_fingerprint("deploy", None, Some("proxy")).unwrap();
+        let base = service_account_create_fingerprint("deploy", None, Some("proxy"), None).unwrap();
         let widened =
-            service_account_create_fingerprint("deploy", None, Some("proxy admin")).unwrap();
+            service_account_create_fingerprint("deploy", None, Some("proxy admin"), None).unwrap();
         assert_ne!(base, widened);
 
         let gcp = AssistantGcpCreateRequest {

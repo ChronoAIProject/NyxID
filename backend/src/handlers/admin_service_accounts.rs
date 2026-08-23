@@ -21,7 +21,7 @@ use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 ///
 /// Returns the effective `created_by` value to pass through to the
 /// service layer for downstream queries that filter by creator.
-async fn require_admin_or_owning_org_admin(
+pub(crate) async fn require_admin_or_owning_org_admin(
     state: &AppState,
     auth_user: &AuthUser,
     sa: &ServiceAccount,
@@ -37,12 +37,15 @@ async fn require_admin_or_owning_org_admin(
     let owner = sa.effective_owner_user_id();
     let actor = auth_user.user_id.to_string();
     let access = org_service::resolve_owner_access(&state.db, &actor, owner).await?;
+    if !access.can_read() {
+        return Err(AppError::NotFound("Service account not found".to_string()));
+    }
     if access.can_write() {
         return Ok(());
     }
 
-    Err(AppError::Forbidden(
-        "admin access required (global or owning org)".to_string(),
+    Err(AppError::OrgRoleInsufficient(
+        "admin access to the owning org is required".to_string(),
     ))
 }
 
@@ -221,6 +224,27 @@ fn sa_to_item(sa: ServiceAccount) -> ServiceAccountItem {
 
 // --- Handlers ---
 
+pub(crate) async fn resolve_service_account_create_owner(
+    state: &AppState,
+    auth_user: &AuthUser,
+    target_org_id: Option<&str>,
+) -> AppResult<String> {
+    let actor = auth_user.user_id.to_string();
+    if let Some(target_org_id) = target_org_id {
+        let access = org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
+        if !access.can_write() {
+            return Err(AppError::OrgRoleInsufficient(
+                "you must be an admin of the target org to create service accounts under it"
+                    .to_string(),
+            ));
+        }
+        Ok(target_org_id.to_string())
+    } else {
+        require_admin(state, auth_user).await?;
+        Ok(actor)
+    }
+}
+
 /// POST /api/v1/admin/service-accounts
 pub async fn create_service_account(
     State(state): State<AppState>,
@@ -229,8 +253,6 @@ pub async fn create_service_account(
     _headers: HeaderMap,
     Json(body): Json<CreateServiceAccountRequest>,
 ) -> AppResult<Json<CreateServiceAccountResponse>> {
-    let actor = auth_user.user_id.to_string();
-
     // Determine the effective owner. Two paths:
     // - target_org_id set: caller must be an admin of that org. The SA is
     //   created with owner = org user_id, so every admin of that org can
@@ -238,19 +260,9 @@ pub async fn create_service_account(
     //   `require_admin_or_owning_org_admin`).
     // - target_org_id not set: legacy admin-created SA, caller must be a
     //   global NyxID admin.
-    let effective_owner = if let Some(target_org_id) = body.target_org_id.as_deref() {
-        let access = org_service::resolve_owner_access(&state.db, &actor, target_org_id).await?;
-        if !access.can_write() {
-            return Err(AppError::OrgRoleInsufficient(
-                "you must be an admin of the target org to create service accounts under it"
-                    .to_string(),
-            ));
-        }
-        target_org_id.to_string()
-    } else {
-        require_admin(&state, &auth_user).await?;
-        actor
-    };
+    let effective_owner =
+        resolve_service_account_create_owner(&state, &auth_user, body.target_org_id.as_deref())
+            .await?;
 
     let role_ids = body.role_ids.unwrap_or_default();
 
