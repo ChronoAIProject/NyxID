@@ -3699,6 +3699,339 @@ mod wave4_effect_tests {
     }
 
     #[tokio::test]
+    async fn receipts_prevent_duplicate_effects_and_replayed_one_time_material() {
+        // Falsifiers:
+        // - Return the create/rotate material from a completed `Replay`; the
+        //   four `client_secret.is_none()` assertions fail.
+        // - Route a rotation `InProgress` receipt into its mutation arm; the
+        //   reopened retry changes the persisted service-account secret hash.
+        // - Remove the `expectedUpdatedAt` comparison or its pending-receipt
+        //   discard; the stale rotation changes the hash or leaves a receipt.
+        // - Restore the unconditional notifications `InProgress` conflict or
+        //   rerun its mutation; the resumed call fails or advances `updated_at`.
+        use crate::models::assistant_action_receipt::{
+            AssistantActionReceipt, AssistantActionReceiptStatus,
+            COLLECTION_NAME as ASSISTANT_ACTION_RECEIPTS,
+        };
+        use crate::models::notification_channel::{
+            COLLECTION_NAME as NOTIFICATION_CHANNELS, NotificationChannel,
+        };
+        use crate::models::org_membership::{
+            COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
+        };
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+        use crate::services::oauth_client_service;
+        use crate::test_utils::{
+            connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
+        };
+
+        let Some(db) = connect_test_database("assistant_receipt_material_discipline").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert receipt-discipline users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(&org_id, &actor_id, OrgRole::Admin, None))
+            .await
+            .expect("insert org admin membership");
+
+        let state = test_app_state(db.clone());
+        let auth = || test_auth_user(&actor_id);
+
+        let service_account_create = || AssistantServiceAccountCreateRequest {
+            action_request_id: "service-account-create-once".to_string(),
+            name: "assistant receipt service account".to_string(),
+            description: Some("receipt discipline fixture".to_string()),
+            allowed_scopes: Some("proxy".to_string()),
+            target_org_id: Some(org_id.clone()),
+        };
+        let created_service_account = create_service_account_action(
+            State(state.clone()),
+            auth(),
+            Json(service_account_create()),
+        )
+        .await
+        .expect("create service account")
+        .0;
+        assert!(!created_service_account.replayed);
+        assert!(created_service_account.client_secret.is_some());
+        let service_account_id = created_service_account.resource.service_account_id;
+
+        let replayed_service_account = create_service_account_action(
+            State(state.clone()),
+            auth(),
+            Json(service_account_create()),
+        )
+        .await
+        .expect("replay service-account create")
+        .0;
+        assert!(replayed_service_account.replayed);
+        assert!(replayed_service_account.client_secret.is_none());
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(
+                crate::models::service_account::COLLECTION_NAME,
+            )
+            .count_documents(doc! {
+                "_id": &service_account_id,
+                "owner_user_id": &org_id,
+            })
+            .await
+            .expect("count created service account"),
+            1
+        );
+
+        let service_account_before =
+            service_account_service::get_service_account(&db, &service_account_id)
+                .await
+                .expect("load service account before rotation");
+        let service_account_expected_at = service_account_before.updated_at.to_rfc3339();
+        let service_account_rotate = || AssistantServiceAccountRotateRequest {
+            action_request_id: "service-account-rotate-once".to_string(),
+            service_account_id: service_account_id.clone(),
+            expected_updated_at: service_account_expected_at.clone(),
+        };
+        let rotated_service_account = rotate_service_account_secret_action(
+            State(state.clone()),
+            auth(),
+            Json(service_account_rotate()),
+        )
+        .await
+        .expect("rotate service-account secret")
+        .0;
+        assert!(!rotated_service_account.replayed);
+        assert!(rotated_service_account.client_secret.is_some());
+        let service_account_after =
+            service_account_service::get_service_account(&db, &service_account_id)
+                .await
+                .expect("load rotated service account");
+        let rotated_service_account_hash = service_account_after.client_secret_hash.clone();
+        assert_ne!(
+            rotated_service_account_hash,
+            service_account_before.client_secret_hash
+        );
+
+        let replayed_service_account_rotation = rotate_service_account_secret_action(
+            State(state.clone()),
+            auth(),
+            Json(service_account_rotate()),
+        )
+        .await
+        .expect("replay completed service-account rotation")
+        .0;
+        assert!(replayed_service_account_rotation.replayed);
+        assert!(replayed_service_account_rotation.client_secret.is_none());
+
+        let receipts = db.collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS);
+        receipts
+            .update_one(
+                doc! {
+                    "user_id": &actor_id,
+                    "action": SERVICE_ACCOUNT_ROTATE_SECRET_ACTION,
+                    "action_request_id": "service-account-rotate-once",
+                },
+                doc! {
+                    "$set": { "status": "pending" },
+                    "$unset": { "completed_at": "" },
+                },
+            )
+            .await
+            .expect("reopen service-account rotation receipt");
+        let interrupted_service_account_retry = rotate_service_account_secret_action(
+            State(state.clone()),
+            auth(),
+            Json(service_account_rotate()),
+        )
+        .await;
+        assert!(matches!(
+            interrupted_service_account_retry,
+            Err(AppError::Conflict(_))
+        ));
+        let service_account_after_interrupted_retry =
+            service_account_service::get_service_account(&db, &service_account_id)
+                .await
+                .expect("reload service account after interrupted retry");
+        assert_eq!(
+            service_account_after_interrupted_retry.client_secret_hash,
+            rotated_service_account_hash,
+            "a pending retry must not rotate the secret again"
+        );
+
+        let stale_service_account_rotation = rotate_service_account_secret_action(
+            State(state.clone()),
+            auth(),
+            Json(AssistantServiceAccountRotateRequest {
+                action_request_id: "service-account-rotate-stale".to_string(),
+                service_account_id: service_account_id.clone(),
+                expected_updated_at: service_account_expected_at,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            stale_service_account_rotation,
+            Err(AppError::Conflict(_))
+        ));
+        assert_eq!(
+            service_account_service::get_service_account(&db, &service_account_id)
+                .await
+                .expect("reload service account after stale fence")
+                .client_secret_hash,
+            rotated_service_account_hash
+        );
+        assert_eq!(
+            receipts
+                .count_documents(doc! {
+                    "action_request_id": "service-account-rotate-stale",
+                })
+                .await
+                .expect("count stale rotation receipts"),
+            0,
+            "a refused optimistic fence must not leave a pending receipt"
+        );
+
+        let developer_app_create = || AssistantDeveloperAppCreateRequest {
+            action_request_id: "developer-app-create-once".to_string(),
+            name: "Assistant receipt application".to_string(),
+            redirect_uris: vec!["https://assistant.example/callback".to_string()],
+        };
+        let created_developer_app =
+            create_developer_app_action(State(state.clone()), auth(), Json(developer_app_create()))
+                .await
+                .expect("create developer app")
+                .0;
+        assert!(!created_developer_app.replayed);
+        assert!(created_developer_app.client_secret.is_some());
+        let developer_app_id = created_developer_app.resource.client_id;
+
+        let replayed_developer_app =
+            create_developer_app_action(State(state.clone()), auth(), Json(developer_app_create()))
+                .await
+                .expect("replay developer-app create")
+                .0;
+        assert!(replayed_developer_app.replayed);
+        assert!(replayed_developer_app.client_secret.is_none());
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(crate::models::oauth_client::COLLECTION_NAME,)
+                .count_documents(doc! {
+                    "_id": &developer_app_id,
+                    "created_by": &actor_id,
+                })
+                .await
+                .expect("count created developer app"),
+            1
+        );
+
+        let developer_app_before = oauth_client_service::get_client(&db, &developer_app_id)
+            .await
+            .expect("load developer app before rotation");
+        let developer_app_expected_at = developer_app_before.updated_at.to_rfc3339();
+        let developer_app_rotate = || AssistantDeveloperAppRotateRequest {
+            action_request_id: "developer-app-rotate-once".to_string(),
+            client_id: developer_app_id.clone(),
+            expected_updated_at: developer_app_expected_at.clone(),
+        };
+        let rotated_developer_app = rotate_developer_app_secret_action(
+            State(state.clone()),
+            auth(),
+            Json(developer_app_rotate()),
+        )
+        .await
+        .expect("rotate developer-app secret")
+        .0;
+        assert!(!rotated_developer_app.replayed);
+        assert!(rotated_developer_app.client_secret.is_some());
+        let developer_app_after = oauth_client_service::get_client(&db, &developer_app_id)
+            .await
+            .expect("load rotated developer app");
+        assert_ne!(
+            developer_app_after.client_secret_hash,
+            developer_app_before.client_secret_hash
+        );
+
+        let replayed_developer_app_rotation = rotate_developer_app_secret_action(
+            State(state.clone()),
+            auth(),
+            Json(developer_app_rotate()),
+        )
+        .await
+        .expect("replay completed developer-app rotation")
+        .0;
+        assert!(replayed_developer_app_rotation.replayed);
+        assert!(replayed_developer_app_rotation.client_secret.is_none());
+
+        let notification_request = || AssistantNotificationsUpdateRequest {
+            action_request_id: "notifications-update-interrupted".to_string(),
+            telegram_enabled: None,
+            approval_required: None,
+            approval_timeout_secs: Some(75),
+            grant_expiry_days: None,
+            push_enabled: None,
+        };
+        let notification_update =
+            update_notifications_action(State(state.clone()), auth(), Json(notification_request()))
+                .await
+                .expect("update notification settings")
+                .0;
+        assert!(!notification_update.replayed);
+        let notification_before_retry = db
+            .collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+            .find_one(doc! { "user_id": &actor_id })
+            .await
+            .expect("load notification channel")
+            .expect("notification channel exists");
+        receipts
+            .update_one(
+                doc! {
+                    "user_id": &actor_id,
+                    "action": NOTIFICATIONS_UPDATE_ACTION,
+                    "action_request_id": "notifications-update-interrupted",
+                },
+                doc! {
+                    "$set": { "status": "pending" },
+                    "$unset": { "completed_at": "" },
+                },
+            )
+            .await
+            .expect("reopen notification receipt");
+
+        let resumed_notification_update =
+            update_notifications_action(State(state), auth(), Json(notification_request()))
+                .await
+                .expect("resume notification update")
+                .0;
+        assert!(resumed_notification_update.replayed);
+        let notification_after_retry = db
+            .collection::<NotificationChannel>(NOTIFICATION_CHANNELS)
+            .find_one(doc! { "user_id": &actor_id })
+            .await
+            .expect("reload notification channel")
+            .expect("notification channel exists");
+        assert_eq!(notification_after_retry.approval_timeout_secs, 75);
+        assert_eq!(
+            notification_after_retry.updated_at, notification_before_retry.updated_at,
+            "an interrupted retry must not apply the settings update twice"
+        );
+        let notification_receipt = receipts
+            .find_one(doc! {
+                "action": NOTIFICATIONS_UPDATE_ACTION,
+                "action_request_id": "notifications-update-interrupted",
+            })
+            .await
+            .expect("load resumed notification receipt")
+            .expect("notification receipt exists");
+        assert_eq!(
+            notification_receipt.status,
+            AssistantActionReceiptStatus::Completed
+        );
+    }
+
+    #[tokio::test]
     async fn semantic_field_changes_conflict_across_all_thirty_verbs() {
         // Falsifier: remove any field from a typed fingerprint constructor
         // used by a handler. That field disappears from this exhaustive walk,
