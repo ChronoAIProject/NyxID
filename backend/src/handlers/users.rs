@@ -72,14 +72,21 @@ pub struct AccountAuthorizationEvidenceResponse {
     pub updated_at: String,
 }
 
+fn javascript_string_length(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+
 impl AccountAuthorizationEvidenceResponse {
     fn from_profile_response(profile: &UserProfileResponse) -> Self {
         Self {
             id: profile.id.clone(),
             is_active: profile.is_active,
             mfa_enabled: profile.mfa_enabled,
-            display_name_length: profile.display_name.as_ref().map(String::len),
-            avatar_url_length: profile.avatar_url.as_ref().map(String::len),
+            display_name_length: profile
+                .display_name
+                .as_deref()
+                .map(javascript_string_length),
+            avatar_url_length: profile.avatar_url.as_deref().map(javascript_string_length),
             updated_at: profile.updated_at.clone(),
         }
     }
@@ -516,6 +523,41 @@ mod tests {
         assert!(json["profile_config"]["onboarding"]["ai_services_completed_at"].is_null());
         assert_eq!(json["capabilities"]["billing_available"], false);
         assert_eq!(json["role"], "user");
+    }
+
+    #[test]
+    fn profile_update_verification_accepts_multibyte_display_name() {
+        // Falsifier: replace `javascript_string_length` with `str::len` and
+        // this reports UTF-8 bytes (10) instead of JavaScript code units (7).
+        let profile = UserProfileResponse {
+            id: "user-multibyte".to_string(),
+            email: "multibyte@example.com".to_string(),
+            display_name: Some("café 🧭".to_string()),
+            avatar_url: None,
+            email_verified: true,
+            mfa_enabled: false,
+            is_admin: false,
+            is_operator: false,
+            role: "user".to_string(),
+            is_active: true,
+            social_provider: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:01Z".to_string(),
+            last_login_at: None,
+            profile_config: ProfileConfigResponse {
+                onboarding: OnboardingStateResponse {
+                    ai_services_completed_at: None,
+                },
+            },
+            capabilities: UserCapabilitiesResponse {
+                billing_available: false,
+                enabled_features: vec![],
+            },
+        };
+
+        let evidence = AccountAuthorizationEvidenceResponse::from_profile_response(&profile);
+        assert_eq!(evidence.display_name_length, Some(7));
+        assert_ne!(evidence.display_name_length, Some("café 🧭".len()));
     }
 
     // --- Serialization tests: OnboardingStateResponse ---
