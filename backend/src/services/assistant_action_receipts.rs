@@ -283,7 +283,7 @@ pub async fn reserve_or_replay_with_secret_marker(
     action_request_id: &str,
     fingerprint: &str,
     resource_id: String,
-    resource_secret_fingerprint: Option<String>,
+    resource_material_fingerprint: Option<String>,
 ) -> AppResult<ReceiptOutcome> {
     reserve_or_replay_with_all_markers(
         db,
@@ -294,7 +294,7 @@ pub async fn reserve_or_replay_with_secret_marker(
         resource_id,
         None,
         None,
-        resource_secret_fingerprint,
+        resource_material_fingerprint,
     )
     .await
 }
@@ -309,7 +309,7 @@ async fn reserve_or_replay_with_all_markers(
     resource_id: String,
     resource_state_version: Option<i64>,
     resource_access_revision: Option<i64>,
-    resource_secret_fingerprint: Option<String>,
+    resource_material_fingerprint: Option<String>,
 ) -> AppResult<ReceiptOutcome> {
     if let Some(existing) = find_receipt(db, user_id, action, action_request_id).await? {
         return existing_outcome(existing, fingerprint);
@@ -324,7 +324,7 @@ async fn reserve_or_replay_with_all_markers(
         resource_id,
         resource_state_version,
         resource_access_revision,
-        resource_secret_fingerprint,
+        resource_material_fingerprint,
         status: AssistantActionReceiptStatus::Pending,
         created_at: utc_now_at_bson_precision(),
         completed_at: None,
@@ -468,7 +468,7 @@ mod tests {
             resource_id: "key-1".to_string(),
             resource_state_version: None,
             resource_access_revision: None,
-            resource_secret_fingerprint: None,
+            resource_material_fingerprint: None,
             status: AssistantActionReceiptStatus::Pending,
             created_at: utc_now_at_bson_precision(),
             completed_at: None,
@@ -492,7 +492,7 @@ mod tests {
             resource_id: "key-1".to_string(),
             resource_state_version: None,
             resource_access_revision: None,
-            resource_secret_fingerprint: None,
+            resource_material_fingerprint: None,
             status: AssistantActionReceiptStatus::Pending,
             created_at: utc_now_at_bson_precision(),
             completed_at: None,
@@ -514,7 +514,7 @@ mod tests {
             resource_id: "key-1".to_string(),
             resource_state_version: None,
             resource_access_revision: None,
-            resource_secret_fingerprint: None,
+            resource_material_fingerprint: None,
             status: AssistantActionReceiptStatus::Completed,
             created_at: utc_now_at_bson_precision(),
             completed_at: Some(utc_now_at_bson_precision()),

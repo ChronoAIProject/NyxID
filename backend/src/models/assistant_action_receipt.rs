@@ -36,8 +36,12 @@ pub struct AssistantActionReceipt {
     /// Optional keyed fingerprint of secret material captured immediately
     /// before a secret rotation. It proves the secret itself changed without
     /// exposing the stored hash or raw credential.
-    #[serde(default)]
-    pub resource_secret_fingerprint: Option<String>,
+    #[serde(
+        default,
+        alias = "resource_secret_fingerprint",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub resource_material_fingerprint: Option<String>,
     pub status: AssistantActionReceiptStatus,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -60,7 +64,7 @@ mod tests {
             resource_id: "key-alpha".to_string(),
             resource_state_version: None,
             resource_access_revision: None,
-            resource_secret_fingerprint: None,
+            resource_material_fingerprint: None,
             status: AssistantActionReceiptStatus::Completed,
             created_at: Utc::now(),
             completed_at: Some(Utc::now()),

@@ -2583,7 +2583,7 @@ async fn rotate_service_account_secret_action(
         ReceiptOutcome::InProgress(receipt) => {
             let current = service_account_service::get_service_account(&state.db, &id).await?;
             let committed = receipt
-                .resource_secret_fingerprint
+                .resource_material_fingerprint
                 .as_ref()
                 .is_some_and(|marker| {
                     crate::services::assistant_action_receipts::fingerprint_sensitive_material(
@@ -2985,7 +2985,7 @@ async fn rotate_developer_app_secret_action(
         ReceiptOutcome::InProgress(receipt) => {
             let current = crate::services::oauth_client_service::get_client(&state.db, &id).await?;
             let committed = receipt
-                .resource_secret_fingerprint
+                .resource_material_fingerprint
                 .as_ref()
                 .is_some_and(|marker| {
                     crate::services::assistant_action_receipts::fingerprint_sensitive_material(
