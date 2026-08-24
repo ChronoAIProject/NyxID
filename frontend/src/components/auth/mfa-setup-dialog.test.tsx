@@ -18,16 +18,9 @@ const {
     mockApiPost: vi.fn(),
     mockToastError: vi.fn(),
     mockToastSuccess: vi.fn(),
-    mockQrToDataURL: vi.fn(
-      (
-        _payload: string,
-        _options: {
-          width: number;
-          margin: number;
-          color: { dark: string; light: string };
-        },
-      ) => Promise.resolve("data:image/png;base64,QR"),
-    ),
+    // Arg shape is asserted explicitly in the QR test below, so the mock
+    // itself stays untyped — named-but-unused params trip no-unused-vars.
+    mockQrToDataURL: vi.fn(() => Promise.resolve("data:image/png;base64,QR")),
   }));
 
 // `useMfaSetup` is the enroll-start hook (POST /auth/mfa/setup). The dialog then

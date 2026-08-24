@@ -22,17 +22,9 @@ const {
     mockGenerateNew: vi.fn(),
     mockClose: vi.fn(),
     mockNavigate: vi.fn(),
-    mockQrToDataURL: vi.fn(
-      (
-        _payload: string,
-        _options: {
-          errorCorrectionLevel: string;
-          margin: number;
-          width: number;
-          color: { dark: string; light: string };
-        },
-      ) => Promise.resolve("data:image/png;base64,qr"),
-    ),
+    // Arg shape is asserted explicitly in the QR test below, so the mock
+    // itself stays untyped — named-but-unused params trip no-unused-vars.
+    mockQrToDataURL: vi.fn(() => Promise.resolve("data:image/png;base64,qr")),
   }));
 
 vi.mock("@/hooks/use-auth-device", () => ({
