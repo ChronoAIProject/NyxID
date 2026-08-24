@@ -1,10 +1,10 @@
 import { AGUIEventType, parseCustomEvent } from "@/lib/assistant/agui-types";
 import type { ChatActorProjection } from "@/lib/assistant/chat-actor-state";
-import { patchChatMessage, stringField } from "@/lib/assistant/chat-session-state";
-import type {
-  ChatMessage,
-  ChatSessionState,
-} from "@/lib/assistant/chat-types";
+import {
+  patchChatMessage,
+  stringField,
+} from "@/lib/assistant/chat-session-state";
+import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 
 export class ReaderStoppedError extends Error {
   constructor() {
@@ -17,6 +17,13 @@ export class ChatProgressTimeoutError extends Error {
   constructor() {
     super("The assistant stopped making progress.");
     this.name = "ChatProgressTimeoutError";
+  }
+}
+
+export class ChatStartTimeoutError extends Error {
+  constructor() {
+    super("The assistant did not start replying in time. Try again.");
+    this.name = "ChatStartTimeoutError";
   }
 }
 

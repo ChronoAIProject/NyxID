@@ -19,15 +19,13 @@ import {
 import {
   chatErrorMessage,
   ChatProgressTimeoutError,
+  ChatStartTimeoutError,
   isKeepaliveEvent,
   isRunStoppedEvent,
   ReaderStoppedError,
   updateSessionMessage,
 } from "@/lib/assistant/chat-session-runtime";
-import type {
-  ChatMessage,
-  ChatSessionState,
-} from "@/lib/assistant/chat-types";
+import type { ChatMessage, ChatSessionState } from "@/lib/assistant/chat-types";
 import {
   applyRuntimeEvent,
   createRuntimeEventAccumulator,
@@ -35,6 +33,7 @@ import {
 } from "@/lib/assistant/runtime-event-semantics";
 
 export const STREAM_PROGRESS_TIMEOUT_MS = 120_000;
+export const STREAM_START_DEADLINE_MS = 30_000;
 
 export interface ChatEntryPatch {
   readonly projection?: ChatActorProjection | null;
@@ -108,7 +107,8 @@ export async function runChatStream({
   let authoritativeTurnId = "";
   let adopted = false;
   let serverStopped = false;
-  let watchdog: ReturnType<typeof setTimeout> | undefined;
+  let progressWatchdog: ReturnType<typeof setTimeout> | undefined;
+  let streamStarted = false;
 
   updateEntry(activeKey, { projection: actorState, session: streaming });
 
@@ -132,14 +132,23 @@ export async function runChatStream({
       new AbortController().signal,
     ).catch(() => undefined);
   };
-  const armWatchdog = () => {
-    if (watchdog) clearTimeout(watchdog);
-    watchdog = setTimeout(() => {
+  const armProgressWatchdog = () => {
+    if (progressWatchdog) clearTimeout(progressWatchdog);
+    progressWatchdog = setTimeout(() => {
       bestEffortStop();
       controller.abort(new ChatProgressTimeoutError());
     }, STREAM_PROGRESS_TIMEOUT_MS);
   };
-  armWatchdog();
+  const observeMeaningfulFrame = () => {
+    if (!streamStarted) {
+      streamStarted = true;
+      clearTimeout(startDeadline);
+    }
+    armProgressWatchdog();
+  };
+  const startDeadline = setTimeout(() => {
+    controller.abort(new ChatStartTimeoutError());
+  }, STREAM_START_DEADLINE_MS);
 
   try {
     const response = await sendChatCommand(command, controller.signal);
@@ -149,12 +158,12 @@ export async function runChatStream({
       rawFrames.push(frame.raw);
       const actorFrame = decodeActorFrame(frame.raw);
       if (actorFrame.type !== "ignored") {
-        armWatchdog();
+        observeMeaningfulFrame();
         actorState = reduceActorFrame(actorState, actorFrame);
         updateEntry(activeKey, { projection: actorState });
       }
       if (!frame.event) continue;
-      if (!isKeepaliveEvent(frame.event)) armWatchdog();
+      if (!isKeepaliveEvent(frame.event)) observeMeaningfulFrame();
       applyRuntimeEvent(accumulator, frame.event);
       serverStopped ||= isRunStoppedEvent(frame.event);
       if (frame.event.type === AGUIEventType.RUN_STARTED) {
@@ -165,7 +174,10 @@ export async function runChatStream({
             "Chat RUN_STARTED did not contain authoritative conversation and turn identities.",
           );
         }
-        if (command.conversationId && command.conversationId !== conversationId) {
+        if (
+          command.conversationId &&
+          command.conversationId !== conversationId
+        ) {
           throw new Error("Chat returned a different conversation identity.");
         }
         if (
@@ -173,7 +185,9 @@ export async function runChatStream({
             authoritativeConversationId !== conversationId) ||
           (authoritativeTurnId && authoritativeTurnId !== turnId)
         ) {
-          throw new Error("Chat RUN_STARTED identity changed during the stream.");
+          throw new Error(
+            "Chat RUN_STARTED identity changed during the stream.",
+          );
         }
         authoritativeConversationId = conversationId;
         authoritativeTurnId = turnId;
@@ -277,6 +291,16 @@ export async function runChatStream({
   } catch (error) {
     const reason = controller.signal.aborted ? controller.signal.reason : error;
     const stopped = reason instanceof ReaderStoppedError || serverStopped;
+    if (!adopted && reason instanceof ChatStartTimeoutError) {
+      accumulator.errorText = reason.message;
+      const failed = updateSessionMessage(
+        { ...streaming, status: "error" },
+        assistantMessageId,
+        buildAssistantMessagePatch(accumulator, "error"),
+      );
+      updateEntry(entryKey, { projection: actorState, session: failed });
+      throw reason;
+    }
     if (!adopted && !stopped) {
       updateEntry(entryKey, { projection: initialProjection, session: base });
       throw reason;
@@ -291,6 +315,7 @@ export async function runChatStream({
     if (adopted) await refreshConversations().catch(() => undefined);
     return authoritativeConversationId || undefined;
   } finally {
-    if (watchdog) clearTimeout(watchdog);
+    clearTimeout(startDeadline);
+    if (progressWatchdog) clearTimeout(progressWatchdog);
   }
 }

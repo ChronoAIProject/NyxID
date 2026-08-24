@@ -2,7 +2,9 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ChatProgressTimeoutError,
+  ChatStartTimeoutError,
   STREAM_PROGRESS_TIMEOUT_MS,
+  STREAM_START_DEADLINE_MS,
   useAssistantChat,
 } from "@/hooks/use-assistant-chat";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
@@ -39,7 +41,9 @@ function sse(frames: readonly unknown[], keepOpen = false): Response {
     new ReadableStream<Uint8Array>({
       start(controller) {
         for (const frame of frames) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`));
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(frame)}\n\n`),
+          );
         }
         if (!keepOpen) controller.close();
       },
@@ -62,14 +66,23 @@ function controlledSse() {
   return {
     response,
     push(frame: unknown) {
-      controller.enqueue(
-        encoder.encode(`data: ${JSON.stringify(frame)}\n\n`),
-      );
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify(frame)}\n\n`));
     },
     close() {
       controller.close();
     },
   };
+}
+
+function responsePendingUntilAbort(
+  signal: AbortSignal | null | undefined,
+): Promise<Response> {
+  return new Promise((_, reject) => {
+    const rejectWithAbort = () =>
+      reject(signal?.reason ?? new DOMException("Aborted", "AbortError"));
+    if (signal?.aborted) rejectWithAbort();
+    else signal?.addEventListener("abort", rejectWithAbort, { once: true });
+  });
 }
 
 function currentState(
@@ -142,7 +155,9 @@ function installSwitchingMock(stream: ReturnType<typeof controlledSse>) {
     if (endpoint.startsWith(`/assistant/conversations/${ACTOR_ID}/state`)) {
       return json(currentState(3, ACTOR_ID));
     }
-    if (endpoint.startsWith(`/assistant/conversations/${OTHER_ACTOR_ID}/state`)) {
+    if (
+      endpoint.startsWith(`/assistant/conversations/${OTHER_ACTOR_ID}/state`)
+    ) {
       return json(currentState(3, OTHER_ACTOR_ID));
     }
     if (endpoint === "/assistant/chat") return stream.response;
@@ -261,7 +276,9 @@ function installDefaultMock(
       return json(currentState());
     }
     if (endpoint === "/assistant/chat") {
-      return postResponse(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return postResponse(
+        JSON.parse(String(init.body)) as Record<string, unknown>,
+      );
     }
     throw new Error(`Unhandled assistant mock request: ${endpoint}`);
   };
@@ -315,14 +332,18 @@ describe("useAssistantChat", () => {
       if (request.endpoint.includes("/state")) {
         statePaths.push(request.endpoint);
         stateRead += 1;
-        return json(stateRead === 1 ? { status: "reload_required" } : currentState(4));
+        return json(
+          stateRead === 1 ? { status: "reload_required" } : currentState(4),
+        );
       }
       return original?.(request);
     };
     const { result } = renderHook(() =>
       useAssistantChat({ selectedConversationId: ACTOR_ID }),
     );
-    await waitFor(() => expect(result.current.projection?.stateVersion).toBe(4));
+    await waitFor(() =>
+      expect(result.current.projection?.stateVersion).toBe(4),
+    );
     expect(statePaths).toEqual([
       `/assistant/conversations/${ACTOR_ID}/state`,
       `/assistant/conversations/${ACTOR_ID}/state`,
@@ -377,7 +398,9 @@ describe("useAssistantChat", () => {
     );
     expect(result.current.session?.status).toBe("completed_text");
     expect(result.current.session?.messages).toHaveLength(2);
-    expect(result.current.session?.messages.at(-1)?.content).toBe("Saved answer");
+    expect(result.current.session?.messages.at(-1)?.content).toBe(
+      "Saved answer",
+    );
   });
 
   it("settles a server RUN_STOPPED quietly", async () => {
@@ -412,11 +435,74 @@ describe("useAssistantChat", () => {
     act(() => {
       sendPromise = result.current.send("Watch this");
     });
-    await waitFor(() => expect(result.current.session?.latestTurnId).toBe("turn-open"));
+    await waitFor(() =>
+      expect(result.current.session?.latestTurnId).toBe("turn-open"),
+    );
     await act(async () => result.current.stop());
     await act(async () => sendPromise!);
     expect(result.current.session?.status).toBe("stopped");
     expect(result.current.session?.messages.at(-1)?.error).toBeUndefined();
+  });
+
+  it("stops locally while response headers are still pending", async () => {
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+      if (endpoint === "/assistant/conversations") {
+        return json({ conversations: [] });
+      }
+      if (endpoint === "/assistant/chat") {
+        return responsePendingUntilAbort(init.signal);
+      }
+      throw new Error(`Unhandled assistant mock request: ${endpoint}`);
+    };
+    const { result } = renderHook(() => useAssistantChat({}));
+    await waitFor(() => expect(result.current.listLoading).toBe(false));
+    let sendPromise: Promise<void>;
+    act(() => {
+      sendPromise = result.current.send("Stop before headers");
+    });
+    await waitFor(() => expect(result.current.isStreaming).toBe(true));
+
+    await act(async () => result.current.stop());
+    await act(async () => sendPromise!);
+
+    expect(result.current.isStreaming).toBe(false);
+    expect(result.current.session?.status).toBe("stopped");
+    expect(result.current.session?.messages.at(-1)?.error).toBeUndefined();
+  });
+
+  it("rejects a silent pre-start request at the 30 second deadline", async () => {
+    vi.useFakeTimers();
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+      if (endpoint === "/assistant/conversations") {
+        return json({ conversations: [] });
+      }
+      if (endpoint === "/assistant/chat") {
+        return responsePendingUntilAbort(init.signal);
+      }
+      throw new Error(`Unhandled assistant mock request: ${endpoint}`);
+    };
+    const { result } = renderHook(() => useAssistantChat({}));
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    let sendPromise: Promise<void>;
+    act(() => {
+      sendPromise = result.current.send("Wait for a reply");
+    });
+    const observed = sendPromise!.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+    await act(async () =>
+      vi.advanceTimersByTimeAsync(STREAM_START_DEADLINE_MS),
+    );
+
+    await expect(observed).resolves.toBeInstanceOf(ChatStartTimeoutError);
+    expect(result.current.isStreaming).toBe(false);
+    expect(result.current.session?.status).toBe("error");
+    expect(result.current.session?.messages.at(-1)?.error).toBe(
+      new ChatStartTimeoutError().message,
+    );
+    expect(result.current.session?.messages).toHaveLength(2);
   });
 
   it("expires a keepalive-only stream and issues a best-effort stop", async () => {
@@ -450,7 +536,9 @@ describe("useAssistantChat", () => {
       (error: unknown) => error,
     );
     await act(async () => vi.advanceTimersByTimeAsync(0));
-    await act(async () => vi.advanceTimersByTimeAsync(STREAM_PROGRESS_TIMEOUT_MS));
+    await act(async () =>
+      vi.advanceTimersByTimeAsync(STREAM_PROGRESS_TIMEOUT_MS),
+    );
     await expect(observed).resolves.toBeUndefined();
     expect(commands.some((command) => command.type === "task.stop")).toBe(true);
     expect(result.current.session?.status).toBe("error");
@@ -539,7 +627,9 @@ describe("useAssistantChat", () => {
         commands.push(body);
         return sse([
           { runStarted: { actorId: ACTOR_ID, runId: "turn-after-404" } },
-          { textMessageEnd: { messageId: "answer-after-404", message: "Ready" } },
+          {
+            textMessageEnd: { messageId: "answer-after-404", message: "Ready" },
+          },
           { runFinished: { runId: "turn-after-404", result: {} } },
         ]);
       }
@@ -549,7 +639,9 @@ describe("useAssistantChat", () => {
       useAssistantChat({ selectedConversationId: ACTOR_ID }),
     );
 
-    await waitFor(() => expect(result.current.detailState.status).toBe("missing"));
+    await waitFor(() =>
+      expect(result.current.detailState.status).toBe("missing"),
+    );
     expect(result.current.session).toMatchObject({
       conversationId: ACTOR_ID,
       messages: [],
@@ -561,6 +653,61 @@ describe("useAssistantChat", () => {
     );
     expect(result.current.session?.status).toBe("completed_text");
   });
+
+  it.each([
+    [404, "missing"],
+    [503, "error"],
+  ] as const)(
+    "retries a settled %i transcript failure when the conversation is reselected",
+    async (status, detailStatus) => {
+      let actorReads = 0;
+      globalThis.__nyxidAssistantHttpMock = ({ endpoint }) => {
+        if (endpoint === "/assistant/conversations") {
+          return json({ conversations: [META, OTHER_META] });
+        }
+        if (endpoint === `/assistant/conversations/${ACTOR_ID}`) {
+          actorReads += 1;
+          return actorReads === 1
+            ? json({ message: "Transcript unavailable" }, status)
+            : json(storedDetail(ACTOR_ID, "Saved chat"));
+        }
+        if (endpoint === `/assistant/conversations/${OTHER_ACTOR_ID}`) {
+          return json(storedDetail(OTHER_ACTOR_ID, "Other saved chat", 1));
+        }
+        if (endpoint.startsWith(`/assistant/conversations/${ACTOR_ID}/state`)) {
+          return json(currentState(3, ACTOR_ID));
+        }
+        if (
+          endpoint.startsWith(
+            `/assistant/conversations/${OTHER_ACTOR_ID}/state`,
+          )
+        ) {
+          return json(currentState(3, OTHER_ACTOR_ID));
+        }
+        throw new Error(`Unhandled assistant mock request: ${endpoint}`);
+      };
+      const { result, rerender } = renderHook(
+        ({ conversationId }: { conversationId: string }) =>
+          useAssistantChat({ selectedConversationId: conversationId }),
+        { initialProps: { conversationId: ACTOR_ID } },
+      );
+      await waitFor(() =>
+        expect(result.current.detailState.status).toBe(detailStatus),
+      );
+
+      rerender({ conversationId: OTHER_ACTOR_ID });
+      await waitFor(() =>
+        expect(result.current.session?.conversationId).toBe(OTHER_ACTOR_ID),
+      );
+      rerender({ conversationId: ACTOR_ID });
+      await waitFor(() =>
+        expect(result.current.session?.messages).toHaveLength(2),
+      );
+
+      expect(actorReads).toBe(2);
+      expect(result.current.detailState.status).toBe("idle");
+    },
+  );
 
   it("repairs an index-absent transcript 404 to New chat", async () => {
     const missing = vi.fn();
@@ -647,7 +794,9 @@ describe("useAssistantChat", () => {
       useAssistantChat({ selectedConversationId: ACTOR_ID }),
     );
 
-    await waitFor(() => expect(result.current.detailState.status).toBe("loading"));
+    await waitFor(() =>
+      expect(result.current.detailState.status).toBe("loading"),
+    );
     expect(result.current.session).toMatchObject({
       conversationId: ACTOR_ID,
       expectedTurnCount: 2,
@@ -667,7 +816,9 @@ describe("useAssistantChat", () => {
         useAssistantChat({ selectedConversationId: selected }),
       { initialProps: { selected: ACTOR_ID } },
     );
-    await waitFor(() => expect(result.current.session?.messages).toHaveLength(2));
+    await waitFor(() =>
+      expect(result.current.session?.messages).toHaveLength(2),
+    );
     let sendPromise: Promise<void>;
     act(() => {
       sendPromise = result.current.send("Only for the first chat");
@@ -689,7 +840,10 @@ describe("useAssistantChat", () => {
 
     await act(async () => {
       stream.push({
-        textMessageEnd: { messageId: "switch-answer", message: "Finished away" },
+        textMessageEnd: {
+          messageId: "switch-answer",
+          message: "Finished away",
+        },
       });
       stream.push({ runFinished: { runId: "turn-switch", result: {} } });
       stream.close();
@@ -704,7 +858,9 @@ describe("useAssistantChat", () => {
         status: "completed_text",
       }),
     );
-    expect(result.current.session?.messages.at(-1)?.content).toBe("Finished away");
+    expect(result.current.session?.messages.at(-1)?.content).toBe(
+      "Finished away",
+    );
   });
 
   it("switching back while the turn still streams resumes its live loading state", async () => {
@@ -715,13 +871,17 @@ describe("useAssistantChat", () => {
         useAssistantChat({ selectedConversationId: selected }),
       { initialProps: { selected: ACTOR_ID } },
     );
-    await waitFor(() => expect(result.current.session?.messages).toHaveLength(2));
+    await waitFor(() =>
+      expect(result.current.session?.messages).toHaveLength(2),
+    );
     let sendPromise: Promise<void>;
     act(() => {
       sendPromise = result.current.send("Keep streaming here");
     });
     await act(async () => {
-      stream.push({ runStarted: { actorId: ACTOR_ID, runId: "turn-live-switch" } });
+      stream.push({
+        runStarted: { actorId: ACTOR_ID, runId: "turn-live-switch" },
+      });
       stream.push({
         textMessageContent: { messageId: "live-switch", delta: "Partial" },
       });
@@ -763,7 +923,9 @@ describe("useAssistantChat", () => {
         useAssistantChat({ selectedConversationId: selected }),
       { initialProps: { selected: ACTOR_ID } },
     );
-    await waitFor(() => expect(result.current.session?.messages).toHaveLength(2));
+    await waitFor(() =>
+      expect(result.current.session?.messages).toHaveLength(2),
+    );
     let sendPromise: Promise<void>;
     act(() => {
       sendPromise = result.current.send("Optimistic first-chat echo");
@@ -817,7 +979,9 @@ describe("useAssistantChat", () => {
       expect(result.current.session?.conversationId).toBe(OTHER_ACTOR_ID),
     );
     await act(async () => {
-      stream.push({ runStarted: { actorId: ACTOR_ID, runId: "turn-adopt-late" } });
+      stream.push({
+        runStarted: { actorId: ACTOR_ID, runId: "turn-adopt-late" },
+      });
       stream.push({ runFinished: { runId: "turn-adopt-late", result: {} } });
       stream.close();
       await sendPromise!;
@@ -825,9 +989,9 @@ describe("useAssistantChat", () => {
 
     expect(adopted).not.toHaveBeenCalled();
     expect(result.current.session?.conversationId).toBe(OTHER_ACTOR_ID);
-    expect(result.current.visibleConversations.map((item) => item.id)).toContain(
-      ACTOR_ID,
-    );
+    expect(
+      result.current.visibleConversations.map((item) => item.id),
+    ).toContain(ACTOR_ID);
   });
 
   it("dispatches every typed control with the fresh version and refreshes after 202", async () => {
@@ -867,10 +1031,7 @@ describe("useAssistantChat", () => {
     const step = projection.steps.get("step-active")!;
 
     await act(async () =>
-      result.current.resolveInput(
-        { selectedOptionIds: ["option-sg"] },
-        input,
-      ),
+      result.current.resolveInput({ selectedOptionIds: ["option-sg"] }, input),
     );
     await act(async () =>
       result.current.resolveApproval(
@@ -983,10 +1144,14 @@ describe("useAssistantChat", () => {
       }
       return original?.(request);
     };
-    const { result } = renderHook(() =>
-      useAssistantChat({ selectedConversationId: ACTOR_ID }),
+    const { result, rerender } = renderHook(
+      ({ conversationId }: { conversationId: string | undefined }) =>
+        useAssistantChat({ selectedConversationId: conversationId }),
+      { initialProps: { conversationId: ACTOR_ID as string | undefined } },
     );
-    await waitFor(() => expect(result.current.session?.messages).toHaveLength(2));
+    await waitFor(() =>
+      expect(result.current.session?.messages).toHaveLength(2),
+    );
 
     await act(async () => result.current.deleteConversation(ACTOR_ID));
 
@@ -996,6 +1161,32 @@ describe("useAssistantChat", () => {
       status: "draft",
       title: "New chat",
     });
+    const draftClientId = result.current.session?.clientId;
+    rerender({ conversationId: undefined });
+    await waitFor(() =>
+      expect(result.current.session?.clientId).toBe(draftClientId),
+    );
+  });
+
+  it("prunes superseded empty drafts when New chat is repeated", async () => {
+    const { result, rerender } = renderHook(
+      ({ conversationId }: { conversationId: string | undefined }) =>
+        useAssistantChat({ selectedConversationId: conversationId }),
+      { initialProps: { conversationId: undefined } },
+    );
+    await waitFor(() => expect(result.current.listLoading).toBe(false));
+    const initialClientId = result.current.session?.clientId;
+    let latestClientId: string | undefined;
+    act(() => {
+      result.current.newChat();
+      latestClientId = result.current.newChat();
+    });
+
+    expect(latestClientId).not.toBe(initialClientId);
+    expect(result.current.session?.clientId).toBe(latestClientId);
+    expect(result.current.visibleConversations).toEqual([META]);
+    rerender({ conversationId: undefined });
+    expect(result.current.session?.clientId).toBe(latestClientId);
   });
 
   it("refuses deletion while that conversation is streaming", async () => {
@@ -1013,7 +1204,9 @@ describe("useAssistantChat", () => {
     const { result } = renderHook(() =>
       useAssistantChat({ selectedConversationId: ACTOR_ID }),
     );
-    await waitFor(() => expect(result.current.session?.messages).toHaveLength(2));
+    await waitFor(() =>
+      expect(result.current.session?.messages).toHaveLength(2),
+    );
     let sendPromise: Promise<void>;
     act(() => {
       sendPromise = result.current.send("Still running");
@@ -1027,7 +1220,9 @@ describe("useAssistantChat", () => {
     expect(deletes).toEqual([]);
 
     await act(async () => {
-      stream.push({ runStopped: { runId: "turn-delete", reason: "test_done" } });
+      stream.push({
+        runStopped: { runId: "turn-delete", reason: "test_done" },
+      });
       stream.close();
       await sendPromise!;
     });
@@ -1066,7 +1261,9 @@ describe("useAssistantChat", () => {
     expect(result.current.session?.status).toBe("streaming");
 
     await act(async () => {
-      stream.push({ runStopped: { runId: "turn-refresh", reason: "test_done" } });
+      stream.push({
+        runStopped: { runId: "turn-refresh", reason: "test_done" },
+      });
       stream.close();
       await sendPromise!;
     });

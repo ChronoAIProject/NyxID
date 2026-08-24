@@ -4,10 +4,7 @@ import {
   createChatActorProjection,
   type ChatActorProjection,
 } from "@/lib/assistant/chat-actor-state";
-import {
-  sendChatCommand,
-  type ChatCommand,
-} from "@/lib/assistant/chat-api";
+import { sendChatCommand, type ChatCommand } from "@/lib/assistant/chat-api";
 import {
   chatHistoryApi,
   ChatHistoryApiError,
@@ -15,6 +12,7 @@ import {
 import {
   runChatStream,
   STREAM_PROGRESS_TIMEOUT_MS,
+  STREAM_START_DEADLINE_MS,
   type ChatEntryPatch,
 } from "@/lib/assistant/chat-stream-orchestrator";
 import {
@@ -26,6 +24,7 @@ import {
 import {
   chatErrorMessage,
   ChatProgressTimeoutError,
+  ChatStartTimeoutError,
   currentActorTurnId,
   ReaderStoppedError,
 } from "@/lib/assistant/chat-session-runtime";
@@ -38,7 +37,12 @@ import { isLegacyConversationId } from "@/lib/assistant/aevatar-transport";
 import { useAssistantChatControls } from "@/hooks/use-assistant-chat-controls";
 
 export const ACTIVE_STATE_REFRESH_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
-export { ChatProgressTimeoutError, STREAM_PROGRESS_TIMEOUT_MS };
+export {
+  ChatProgressTimeoutError,
+  ChatStartTimeoutError,
+  STREAM_PROGRESS_TIMEOUT_MS,
+  STREAM_START_DEADLINE_MS,
+};
 
 export type ChatDetailState =
   | { readonly status: "idle" }
@@ -170,10 +174,21 @@ export function useAssistantChat({
   const createNewChat = useCallback(() => {
     const session = createDraftChatSession();
     routeSelectionRef.current = null;
-    putEntry(session.clientId, createEntry(session));
+    const next = new Map(entriesRef.current);
+    for (const [key, entry] of next) {
+      if (
+        !entry.session.conversationId &&
+        entry.session.messages.length === 0 &&
+        entry.session.status !== "streaming"
+      ) {
+        next.delete(key);
+      }
+    }
+    next.set(session.clientId, createEntry(session));
+    commitEntries(next);
     selectKey(session.clientId);
     return session.clientId;
-  }, [putEntry, selectKey]);
+  }, [commitEntries, selectKey]);
 
   const refreshConversations = useCallback(async (signal?: AbortSignal) => {
     setListLoading(true);
@@ -225,7 +240,11 @@ export function useAssistantChat({
       if (result.reloadWithoutCursor) {
         result = applyCurrentStateResult(
           result.projection,
-          await chatHistoryApi.loadConversationState(conversationId, {}, signal),
+          await chatHistoryApi.loadConversationState(
+            conversationId,
+            {},
+            signal,
+          ),
         );
       }
       const entry = entriesRef.current.get(entryKey);
@@ -240,10 +259,17 @@ export function useAssistantChat({
   const restoreConversation = useCallback(
     async (conversationId: string) => {
       const existing = entriesRef.current.get(conversationId);
-      if (existing) return;
+      if (
+        existing &&
+        (existing.session.status === "streaming" ||
+          existing.detailState.status === "idle" ||
+          existing.detailState.status === "loading")
+      ) {
+        return;
+      }
       const meta = conversations.find((item) => item.id === conversationId);
       const requestId = createClientId();
-      const placeholder: ChatSessionState = {
+      const placeholder: ChatSessionState = existing?.session ?? {
         clientId: createClientId(),
         conversationId,
         expectedTurnCount: meta?.messageCount ?? 0,
@@ -252,14 +278,16 @@ export function useAssistantChat({
         title: meta?.title || "New chat",
       };
       detailRequestsRef.current.set(conversationId, requestId);
-      putEntry(
-        conversationId,
-        createEntry(
-          placeholder,
-          createChatActorProjection(conversationId),
-          { status: "loading" },
-        ),
-      );
+      if (existing) {
+        updateEntry(conversationId, { detailState: { status: "loading" } });
+      } else {
+        putEntry(
+          conversationId,
+          createEntry(placeholder, createChatActorProjection(conversationId), {
+            status: "loading",
+          }),
+        );
+      }
       const [detailResult, stateResult] = await Promise.allSettled([
         loadTranscriptWithPendingRetry(conversationId),
         loadActorState(
@@ -276,7 +304,7 @@ export function useAssistantChat({
       const projection =
         stateResult.status === "fulfilled"
           ? stateResult.value
-          : current.projection ?? createChatActorProjection(conversationId);
+          : (current.projection ?? createChatActorProjection(conversationId));
       if (detailResult.status === "fulfilled") {
         const { detail, pendingExhausted } = detailResult.value;
         const restored: ChatSessionState = {
@@ -345,6 +373,18 @@ export function useAssistantChat({
     if (routeSelectionRef.current === routeKey) return;
     routeSelectionRef.current = routeKey;
     if (!selectedConversationId) {
+      const currentKey = selectedKeyRef.current;
+      const current = currentKey
+        ? entriesRef.current.get(currentKey)
+        : undefined;
+      if (
+        current &&
+        !current.session.conversationId &&
+        current.session.messages.length === 0 &&
+        current.session.status !== "streaming"
+      ) {
+        return;
+      }
       createNewChat();
       return;
     }
@@ -389,7 +429,10 @@ export function useAssistantChat({
             const conversationId = entry?.session.conversationId;
             const projection = entry?.projection;
             if (!entry || !conversationId || !projection) return;
-            if (projection.stateVersion > 0 || entry.session.status !== "streaming") {
+            if (
+              projection.stateVersion > 0 ||
+              entry.session.status !== "streaming"
+            ) {
               return;
             }
             try {
@@ -431,7 +474,10 @@ export function useAssistantChat({
         streamControllersRef.current.delete(previousKey);
         streamControllersRef.current.set(conversationId, controller);
       }
-      if (previousKey !== conversationId && selectedKeyRef.current === previousKey) {
+      if (
+        previousKey !== conversationId &&
+        selectedKeyRef.current === previousKey
+      ) {
         selectKey(conversationId);
         onConversationAdopted?.(conversationId);
       }
@@ -654,7 +700,8 @@ export function useAssistantChat({
     const known = new Set(visible.map((item) => item.id));
     for (const entry of entries.values()) {
       const current = entry.session;
-      if (!current.conversationId || known.has(current.conversationId)) continue;
+      if (!current.conversationId || known.has(current.conversationId))
+        continue;
       const timestamps = current.messages.map((message) => message.timestamp);
       visible.push({
         createdAt: new Date(timestamps[0] ?? Date.now()).toISOString(),

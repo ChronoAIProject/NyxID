@@ -1,10 +1,4 @@
-import {
-  useCallback,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
@@ -21,7 +15,9 @@ import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation } from "@/types/assistant";
 
 function sidebarConversation(
-  conversation: ReturnType<typeof useAssistantChat>["visibleConversations"][number],
+  conversation: ReturnType<
+    typeof useAssistantChat
+  >["visibleConversations"][number],
 ): Conversation {
   return {
     id: conversation.id,
@@ -62,7 +58,11 @@ export function AssistantChatPage() {
     [navigate],
   );
   const repairMissingConversation = useCallback(() => {
-    void navigate({ to: "/assistant" as never, search: {} as never, replace: true });
+    void navigate({
+      to: "/assistant" as never,
+      search: {} as never,
+      replace: true,
+    });
   }, [navigate]);
   const chat = useAssistantChat({
     selectedConversationId: selectedId,
@@ -86,12 +86,12 @@ export function AssistantChatPage() {
   );
   const actorActive = Boolean(
     chat.projection?.activeTurn?.status === "active" ||
-      chat.projection?.task?.status === "active",
+    chat.projection?.task?.status === "active",
   );
   const title = chat.session?.title ?? "New chat";
   const readOnly = Boolean(
     chat.session?.conversationId &&
-      isLegacyConversationId(chat.session.conversationId),
+    isLegacyConversationId(chat.session.conversationId),
   );
   const draftKey = chat.session?.conversationId
     ? `conv:${chat.session.conversationId}`
@@ -174,7 +174,9 @@ export function AssistantChatPage() {
       onNewChat={createNewChat}
       onSelect={selectConversation}
       onDelete={deleteConversation}
-      notice={chat.listError ? `Could not load chats. ${chat.listError}` : undefined}
+      notice={
+        chat.listError ? `Could not load chats. ${chat.listError}` : undefined
+      }
     />
   );
   const threadNotice = readOnly
@@ -221,7 +223,6 @@ export function AssistantChatPage() {
             focusRequest={composerFocusRequest}
             onSend={send}
             onStop={chat.stop}
-            stopDisabled={!chat.controlReady}
           />
         </div>
       </div>
