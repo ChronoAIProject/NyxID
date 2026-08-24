@@ -51,6 +51,22 @@ pub async fn create_org_user(
     contact_email: Option<&str>,
     avatar_url: Option<&str>,
 ) -> AppResult<User> {
+    let id = Uuid::new_v4().to_string();
+    create_org_user_with_id(db, &id, display_name, contact_email, avatar_url).await
+}
+
+/// Create an org user with a caller-reserved identity.
+///
+/// Assistant action receipts reserve this id before attempting the multi-step
+/// org create, so a retry can prove that the org user insert committed even
+/// if membership creation or receipt completion was interrupted.
+pub async fn create_org_user_with_id(
+    db: &mongodb::Database,
+    id: &str,
+    display_name: &str,
+    contact_email: Option<&str>,
+    avatar_url: Option<&str>,
+) -> AppResult<User> {
     let trimmed_name = display_name.trim();
     if trimmed_name.is_empty() {
         return Err(AppError::ValidationError(
@@ -64,7 +80,6 @@ pub async fn create_org_user(
     }
 
     let now = Utc::now();
-    let id = Uuid::new_v4().to_string();
     let slug = org_slug::reserve_slug(db, &org_slug::slugify(trimmed_name), None).await?;
     // Synthetic placeholder when the admin doesn't provide a contact email.
     // The partial-unique index on `users.email` only constrains
@@ -73,10 +88,10 @@ pub async fn create_org_user(
     let email = contact_email
         .map(|e| e.trim().to_lowercase())
         .filter(|e| !e.is_empty())
-        .unwrap_or_else(|| synthetic_org_email(&id));
+        .unwrap_or_else(|| synthetic_org_email(id));
 
     let org = User {
-        id: id.clone(),
+        id: id.to_string(),
         email,
         password_hash: None,
         display_name: Some(trimmed_name.to_string()),

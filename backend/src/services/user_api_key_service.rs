@@ -144,6 +144,22 @@ pub async fn create_api_key(
     Ok(api_key)
 }
 
+/// Create an API key with a caller-reserved UUID.
+pub async fn create_api_key_with_id(
+    db: &Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    id: &str,
+    params: CreateApiKeyParams<'_>,
+) -> AppResult<UserApiKey> {
+    let mut api_key = build_api_key(encryption_keys, user_id, params).await?;
+    api_key.id = id.to_string();
+    db.collection::<UserApiKey>(COLLECTION_NAME)
+        .insert_one(&api_key)
+        .await?;
+    Ok(api_key)
+}
+
 /// Build an encrypted API-key document without writing it.
 pub async fn build_api_key(
     encryption_keys: &EncryptionKeys,

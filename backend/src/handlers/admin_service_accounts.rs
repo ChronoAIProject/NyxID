@@ -253,6 +253,18 @@ pub async fn create_service_account(
     _headers: HeaderMap,
     Json(body): Json<CreateServiceAccountRequest>,
 ) -> AppResult<Json<CreateServiceAccountResponse>> {
+    create_service_account_with_id(State(state), auth_user, tele, _headers, Json(body), None).await
+}
+
+/// Internal assistant-action create path with a receipt-reserved identity.
+pub(crate) async fn create_service_account_with_id(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    _headers: HeaderMap,
+    Json(body): Json<CreateServiceAccountRequest>,
+    reserved_id: Option<&str>,
+) -> AppResult<Json<CreateServiceAccountResponse>> {
     // Determine the effective owner. Two paths:
     // - target_org_id set: caller must be an admin of that org. The SA is
     //   created with owner = org user_id, so every admin of that org can
@@ -266,16 +278,33 @@ pub async fn create_service_account(
 
     let role_ids = body.role_ids.unwrap_or_default();
 
-    let (sa, raw_secret) = service_account_service::create_service_account(
-        &state.db,
-        &body.name,
-        body.description.as_deref(),
-        &body.allowed_scopes,
-        &role_ids,
-        body.rate_limit_override,
-        &effective_owner,
-    )
-    .await?;
+    let (sa, raw_secret) = match reserved_id {
+        Some(id) => {
+            service_account_service::create_service_account_with_id(
+                &state.db,
+                id,
+                &body.name,
+                body.description.as_deref(),
+                &body.allowed_scopes,
+                &role_ids,
+                body.rate_limit_override,
+                &effective_owner,
+            )
+            .await?
+        }
+        None => {
+            service_account_service::create_service_account(
+                &state.db,
+                &body.name,
+                body.description.as_deref(),
+                &body.allowed_scopes,
+                &role_ids,
+                body.rate_limit_override,
+                &effective_owner,
+            )
+            .await?
+        }
+    };
 
     audit_service::log_for_user(
         state.db.clone(),

@@ -1978,6 +1978,99 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_node_with_expected_state_version_rejects_stale_mutation_atomically() {
+        let Some(db) = connect_test_database("node_delete_expected_version_atomic").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&actor_id, UserType::Person))
+            .await
+            .expect("insert actor");
+        let node = make_node(&actor_id, "atomic-delete");
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+        db.collection::<mongodb::bson::Document>(NODES)
+            .update_one(
+                doc! { "_id": &node.id },
+                doc! { "$set": { "state_version": 2_i64 } },
+            )
+            .await
+            .expect("bump state version");
+
+        let error = delete_node_with_expected_state_version(&db, &actor_id, &node.id, Some(1))
+            .await
+            .expect_err("stale delete must conflict");
+        assert!(matches!(error, AppError::Conflict(_)));
+        let stored = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": &node.id })
+            .await
+            .expect("load node")
+            .expect("node exists");
+        assert!(stored.is_active, "stale fence must leave node active");
+    }
+
+    #[tokio::test]
+    async fn transfer_node_with_expected_state_version_rejects_stale_mutation_atomically() {
+        let Some(db) = connect_test_database("node_transfer_expected_version_atomic").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        let destination_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor_id, UserType::Person),
+                test_user(&destination_id, UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &destination_id,
+                &actor_id,
+                OrgRole::Admin,
+                None,
+            ))
+            .await
+            .expect("insert destination membership");
+        let node = make_node(&actor_id, "atomic-transfer");
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+        db.collection::<mongodb::bson::Document>(NODES)
+            .update_one(
+                doc! { "_id": &node.id },
+                doc! { "$set": { "state_version": 2_i64 } },
+            )
+            .await
+            .expect("bump state version");
+
+        let error = transfer_node_owner_with_expected_state_version(
+            &db,
+            &actor_id,
+            &node.id,
+            &destination_id,
+            10,
+            Some(1),
+        )
+        .await
+        .expect_err("stale transfer must conflict");
+        assert!(matches!(error, AppError::Conflict(_)));
+        let stored = db
+            .collection::<Node>(NODES)
+            .find_one(doc! { "_id": &node.id })
+            .await
+            .expect("load node")
+            .expect("node exists");
+        assert_eq!(stored.user_id, actor_id, "stale fence must preserve owner");
+        assert!(stored.is_active);
+    }
+
+    #[tokio::test]
     async fn rotate_auth_token_uses_org_owner_acl_matrix() {
         let Some(db) = connect_test_database("node_rotate_acl").await else {
             eprintln!("skipping node service ACL test: no local MongoDB available");

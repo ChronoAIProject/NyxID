@@ -41,8 +41,8 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::AuthUser;
 use crate::services::assistant_action_receipts::{
-    ReceiptOutcome, fingerprint_canonical, in_progress_conflict, mark_completed,
-    normalize_action_request_id, reserve_or_replay,
+    OneTimeMaterialAvailability, ReceiptOutcome, fingerprint_canonical, in_progress_conflict,
+    mark_completed, normalize_action_request_id, reserve_or_replay,
 };
 use crate::services::{approval_service, org_service, service_account_service};
 use crate::telemetry::TelemetryContext;
@@ -227,14 +227,6 @@ pub struct AssistantMfaSetupResponse {
     pub replayed: bool,
     #[serde(default)]
     pub one_time_material: OneTimeMaterialAvailability,
-}
-
-#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum OneTimeMaterialAvailability {
-    #[default]
-    Delivered,
-    Unavailable,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -1755,7 +1747,7 @@ async fn create_org_action(
         }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
-    let (_, Json(org)) = orgs::create_org(
+    let (_, Json(org)) = orgs::create_org_with_id(
         State(state.clone()),
         auth_user,
         Json(orgs::CreateOrgRequest {
@@ -1763,6 +1755,7 @@ async fn create_org_action(
             contact_email: body.contact_email,
             avatar_url: body.avatar_url,
         }),
+        Some(&receipt.resource_id),
     )
     .await?;
     complete_wave4(&state, &receipt, &org.id).await?;
@@ -2345,7 +2338,7 @@ async fn create_service_account_action(
         }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
-    let Json(created) = admin_service_accounts::create_service_account(
+    let Json(created) = admin_service_accounts::create_service_account_with_id(
         State(state.clone()),
         auth_user,
         TelemetryContext::default(),
@@ -2358,6 +2351,7 @@ async fn create_service_account_action(
             rate_limit_override: None,
             target_org_id: body.target_org_id,
         }),
+        Some(&receipt.resource_id),
     )
     .await?;
     complete_wave4(&state, &receipt, &created.id).await?;
@@ -2402,7 +2396,7 @@ async fn update_service_account_action(
                 service_account_id: id,
             },
             replayed,
-            one_time_material: OneTimeMaterialAvailability::Unavailable,
+            one_time_material: OneTimeMaterialAvailability::Delivered,
             client_secret: None,
         }));
     }
@@ -2429,7 +2423,7 @@ async fn update_service_account_action(
                     service_account_id: id,
                 },
                 replayed: true,
-                one_time_material: OneTimeMaterialAvailability::Unavailable,
+                one_time_material: OneTimeMaterialAvailability::Delivered,
                 client_secret: None,
             }));
         }
@@ -2492,7 +2486,7 @@ async fn delete_service_account_action(
                 service_account_id: id,
             },
             replayed,
-            one_time_material: OneTimeMaterialAvailability::Unavailable,
+            one_time_material: OneTimeMaterialAvailability::Delivered,
             client_secret: None,
         }));
     }
@@ -2508,7 +2502,7 @@ async fn delete_service_account_action(
                     service_account_id: id,
                 },
                 replayed: true,
-                one_time_material: OneTimeMaterialAvailability::Unavailable,
+                one_time_material: OneTimeMaterialAvailability::Delivered,
                 client_secret: None,
             }));
         }
@@ -2548,17 +2542,22 @@ async fn rotate_service_account_secret_action(
         parse_browser_updated_at(&body.expected_updated_at, "expectedUpdatedAt")?;
     let expected_updated_at_fingerprint =
         expected_updated_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let secret_fingerprint =
+        crate::services::assistant_action_receipts::fingerprint_sensitive_material(
+            &existing.client_secret_hash,
+        );
     let fp = wave4_fingerprint(&Wave4Fingerprint::ServiceAccountRotate {
         service_account_id: &id,
         expected_updated_at: &expected_updated_at_fingerprint,
     })?;
-    let outcome = reserve_or_replay(
+    let outcome = crate::services::assistant_action_receipts::reserve_or_replay_with_secret_marker(
         &state.db,
         &actor,
         SERVICE_ACCOUNT_ROTATE_SECRET_ACTION,
         &request_id,
         &fp,
         id.clone(),
+        Some(secret_fingerprint),
     )
     .await?;
     if let Some((_, replayed)) = replayed_resource(&outcome) {
@@ -2583,7 +2582,15 @@ async fn rotate_service_account_secret_action(
         }
         ReceiptOutcome::InProgress(receipt) => {
             let current = service_account_service::get_service_account(&state.db, &id).await?;
-            if !updated_since_receipt(current.updated_at, &receipt) {
+            let committed = receipt
+                .resource_secret_fingerprint
+                .as_ref()
+                .is_some_and(|marker| {
+                    crate::services::assistant_action_receipts::fingerprint_sensitive_material(
+                        &current.client_secret_hash,
+                    ) != *marker
+                });
+            if !committed {
                 return Err(in_progress_conflict());
             }
             mark_completed(&state.db, &receipt).await?;
@@ -2649,7 +2656,7 @@ async fn revoke_service_account_tokens_action(
                 service_account_id: id,
             },
             replayed,
-            one_time_material: OneTimeMaterialAvailability::Unavailable,
+            one_time_material: OneTimeMaterialAvailability::Delivered,
             client_secret: None,
         }));
     }
@@ -2672,7 +2679,7 @@ async fn revoke_service_account_tokens_action(
                     service_account_id: id,
                 },
                 replayed: true,
-                one_time_material: OneTimeMaterialAvailability::Unavailable,
+                one_time_material: OneTimeMaterialAvailability::Delivered,
                 client_secret: None,
             }));
         }
@@ -2748,7 +2755,7 @@ async fn create_developer_app_action(
         }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
-    let Json(created) = developer_apps::create_my_oauth_client(
+    let Json(created) = developer_apps::create_my_oauth_client_with_id(
         State(state.clone()),
         auth_user,
         TelemetryContext::default(),
@@ -2764,6 +2771,7 @@ async fn create_developer_app_action(
             target_org_id: None,
             default_service_catalog_slugs: None,
         }),
+        Some(&receipt.resource_id),
     )
     .await?;
     complete_wave4(&state, &receipt, &created.id).await?;
@@ -2804,7 +2812,7 @@ async fn update_developer_app_action(
         return Ok(Json(AssistantDeveloperAppResponse {
             resource: AssistantDeveloperAppResource { client_id: id },
             replayed,
-            one_time_material: OneTimeMaterialAvailability::Unavailable,
+            one_time_material: OneTimeMaterialAvailability::Delivered,
             client_secret: None,
         }));
     }
@@ -2830,7 +2838,7 @@ async fn update_developer_app_action(
             return Ok(Json(AssistantDeveloperAppResponse {
                 resource: AssistantDeveloperAppResource { client_id: id },
                 replayed: true,
-                one_time_material: OneTimeMaterialAvailability::Unavailable,
+                one_time_material: OneTimeMaterialAvailability::Delivered,
                 client_secret: None,
             }));
         }
@@ -2888,7 +2896,7 @@ async fn delete_developer_app_action(
         return Ok(Json(AssistantDeveloperAppResponse {
             resource: AssistantDeveloperAppResource { client_id: id },
             replayed,
-            one_time_material: OneTimeMaterialAvailability::Unavailable,
+            one_time_material: OneTimeMaterialAvailability::Delivered,
             client_secret: None,
         }));
     }
@@ -2903,7 +2911,7 @@ async fn delete_developer_app_action(
             return Ok(Json(AssistantDeveloperAppResponse {
                 resource: AssistantDeveloperAppResource { client_id: id },
                 replayed: true,
-                one_time_material: OneTimeMaterialAvailability::Unavailable,
+                one_time_material: OneTimeMaterialAvailability::Delivered,
                 client_secret: None,
             }));
         }
@@ -2934,17 +2942,25 @@ async fn rotate_developer_app_secret_action(
         parse_browser_updated_at(&body.expected_updated_at, "expectedUpdatedAt")?;
     let expected_updated_at_fingerprint =
         expected_updated_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let existing_secret_hash = crate::services::oauth_client_service::get_client(&state.db, &id)
+        .await?
+        .client_secret_hash;
+    let secret_fingerprint =
+        crate::services::assistant_action_receipts::fingerprint_sensitive_material(
+            &existing_secret_hash,
+        );
     let fp = wave4_fingerprint(&Wave4Fingerprint::DeveloperAppRotate {
         client_id: &id,
         expected_updated_at: &expected_updated_at_fingerprint,
     })?;
-    let outcome = reserve_or_replay(
+    let outcome = crate::services::assistant_action_receipts::reserve_or_replay_with_secret_marker(
         &state.db,
         &actor,
         DEVELOPER_APP_ROTATE_SECRET_ACTION,
         &request_id,
         &fp,
         id.clone(),
+        Some(secret_fingerprint),
     )
     .await?;
     if let Some((_, replayed)) = replayed_resource(&outcome) {
@@ -2968,7 +2984,15 @@ async fn rotate_developer_app_secret_action(
         }
         ReceiptOutcome::InProgress(receipt) => {
             let current = crate::services::oauth_client_service::get_client(&state.db, &id).await?;
-            if !updated_since_receipt(current.updated_at, &receipt) {
+            let committed = receipt
+                .resource_secret_fingerprint
+                .as_ref()
+                .is_some_and(|marker| {
+                    crate::services::assistant_action_receipts::fingerprint_sensitive_material(
+                        &current.client_secret_hash,
+                    ) != *marker
+                });
+            if !committed {
                 return Err(in_progress_conflict());
             }
             mark_completed(&state.db, &receipt).await?;
@@ -3234,7 +3258,7 @@ async fn add_gcp_service_account_action(
                 external_key_id: id,
             },
             replayed,
-            one_time_material: OneTimeMaterialAvailability::Unavailable,
+            one_time_material: OneTimeMaterialAvailability::Delivered,
         }));
     }
     let receipt = match outcome {
@@ -3255,12 +3279,12 @@ async fn add_gcp_service_account_action(
                     external_key_id: receipt.resource_id,
                 },
                 replayed: true,
-                one_time_material: OneTimeMaterialAvailability::Unavailable,
+                one_time_material: OneTimeMaterialAvailability::Delivered,
             }));
         }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
-    let (_, Json(created)) = user_api_keys_external::create_gcp_service_account_key(
+    let (_, Json(created)) = user_api_keys_external::create_gcp_service_account_key_with_id(
         State(state.clone()),
         auth_user,
         Json(user_api_keys_external::CreateGcpServiceAccountRequest {
@@ -3270,6 +3294,7 @@ async fn add_gcp_service_account_action(
             service_slugs: body.service_slugs.unwrap_or_default(),
             target_org_id: body.target_org_id,
         }),
+        Some(&receipt.resource_id),
     )
     .await?;
     complete_wave4(&state, &receipt, &created.id).await?;
@@ -3323,7 +3348,7 @@ async fn connect_openclaw_action(
                 user_service_id: id,
             },
             replayed,
-            one_time_material: OneTimeMaterialAvailability::Unavailable,
+            one_time_material: OneTimeMaterialAvailability::Delivered,
         }));
     }
     let receipt = match outcome {
@@ -3338,12 +3363,12 @@ async fn connect_openclaw_action(
                     user_service_id: receipt.resource_id,
                 },
                 replayed: true,
-                one_time_material: OneTimeMaterialAvailability::Unavailable,
+                one_time_material: OneTimeMaterialAvailability::Delivered,
             }));
         }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
-    let Json(created) = keys::create_key(
+    let Json(created) = keys::create_key_with_service_id(
         State(state.clone()),
         auth_user,
         TelemetryContext::default(),
@@ -3378,6 +3403,7 @@ async fn connect_openclaw_action(
             oauth_client_secret: None,
             copy_oauth_client_from: None,
         }),
+        Some(&receipt.resource_id),
     )
     .await?;
     complete_wave4(&state, &receipt, &created.id).await?;
@@ -3393,6 +3419,855 @@ async fn connect_openclaw_action(
 #[cfg(test)]
 mod wave4_effect_tests {
     use super::*;
+    use chrono::Utc;
+
+    async fn reserve_pending_wave4_receipt(
+        db: &mongodb::Database,
+        actor_id: &str,
+        action: &str,
+        request_id: &str,
+        fingerprint: &str,
+        resource_id: String,
+    ) -> crate::models::assistant_action_receipt::AssistantActionReceipt {
+        match reserve_or_replay(db, actor_id, action, request_id, fingerprint, resource_id)
+            .await
+            .expect("reserve receipt")
+        {
+            ReceiptOutcome::Reserved(receipt) => receipt,
+            other => panic!("expected fresh receipt reservation, got {other:?}"),
+        }
+    }
+
+    async fn reopen_wave4_receipt(
+        db: &mongodb::Database,
+        actor_id: &str,
+        action: &str,
+        request_id: &str,
+    ) {
+        db.collection::<crate::models::assistant_action_receipt::AssistantActionReceipt>(
+            crate::models::assistant_action_receipt::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! {
+                "user_id": actor_id,
+                "action": action,
+                "action_request_id": request_id,
+            },
+            doc! {
+                "$set": { "status": "pending" },
+                "$unset": { "completed_at": "" },
+            },
+        )
+        .await
+        .expect("reopen Wave-4 receipt");
+    }
+
+    #[tokio::test]
+    async fn mfa_setup_start_interrupted_commit_replays_without_second_factor() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_mfa_start_interrupted").await
+        else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert actor");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let first = setup_account_mfa(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&actor_id),
+            TelemetryContext::default(),
+            Json(AssistantMfaSetupRequest {
+                action_request_id: "mfa-start-interrupted".to_string(),
+                stage: AssistantMfaSetupStage::Start,
+                factor_id: None,
+                code: None,
+            }),
+        )
+        .await
+        .expect("start MFA")
+        .0;
+        assert!(!first.replayed);
+        assert!(first.setup_value.is_some());
+        reopen_wave4_receipt(
+            &db,
+            &actor_id,
+            ACCOUNT_MFA_SETUP_START_ACTION,
+            "mfa-start-interrupted",
+        )
+        .await;
+        let replay = setup_account_mfa(
+            State(state),
+            crate::test_utils::test_auth_user(&actor_id),
+            TelemetryContext::default(),
+            Json(AssistantMfaSetupRequest {
+                action_request_id: "mfa-start-interrupted".to_string(),
+                stage: AssistantMfaSetupStage::Start,
+                factor_id: None,
+                code: None,
+            }),
+        )
+        .await
+        .expect("recover MFA start")
+        .0;
+        assert!(replay.replayed);
+        assert_eq!(
+            replay.one_time_material,
+            OneTimeMaterialAvailability::Unavailable
+        );
+        assert!(replay.setup_value.is_none());
+        assert_eq!(
+            db.collection::<MfaFactor>(MFA_FACTORS)
+                .count_documents(doc! { "user_id": &actor_id, "factor_type": "totp" })
+                .await
+                .expect("count factors"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn org_create_interrupted_commit_replays_reserved_id_without_duplicate() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_org_create_reserved").await
+        else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert actor");
+        let body = AssistantOrgCreateRequest {
+            action_request_id: "org-create-reserved".to_string(),
+            display_name: "Reserved org".to_string(),
+            contact_email: None,
+            avatar_url: None,
+        };
+        let fingerprint = wave4_fingerprint(&Wave4Fingerprint::OrgCreate {
+            display_name: &body.display_name,
+            contact_email: None,
+            avatar_url: None,
+        })
+        .expect("fingerprint org create");
+        let receipt = reserve_pending_wave4_receipt(
+            &db,
+            &actor_id,
+            ORG_CREATE_ACTION,
+            &body.action_request_id,
+            &fingerprint,
+            Uuid::new_v4().to_string(),
+        )
+        .await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let _ = orgs::create_org_with_id(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&actor_id),
+            Json(orgs::CreateOrgRequest {
+                display_name: body.display_name.clone(),
+                contact_email: None,
+                avatar_url: None,
+            }),
+            Some(&receipt.resource_id),
+        )
+        .await
+        .expect("commit org create");
+        let replay = create_org_action(
+            State(state),
+            crate::test_utils::test_auth_user(&actor_id),
+            Json(body),
+        )
+        .await
+        .expect("recover org create")
+        .0;
+        assert!(replay.replayed);
+        assert_eq!(replay.resource.org_id, receipt.resource_id);
+        assert_eq!(
+            db.collection::<User>(USERS)
+                .count_documents(doc! {"_id": &receipt.resource_id})
+                .await
+                .expect("count orgs"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn service_account_create_interrupted_commit_replays_reserved_id_without_duplicate() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_sa_create_reserved").await
+        else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        let org_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                crate::test_utils::test_user(&actor_id, crate::models::user::UserType::Person),
+                crate::test_utils::test_user(&org_id, crate::models::user::UserType::Org),
+            ])
+            .await
+            .expect("insert users");
+        db.collection::<crate::models::org_membership::OrgMembership>(
+            crate::models::org_membership::COLLECTION_NAME,
+        )
+        .insert_one(crate::test_utils::test_membership(
+            &org_id,
+            &actor_id,
+            crate::models::org_membership::OrgRole::Admin,
+            None,
+        ))
+        .await
+        .expect("insert membership");
+        let body = AssistantServiceAccountCreateRequest {
+            action_request_id: "sa-create-reserved".to_string(),
+            name: "Reserved SA".to_string(),
+            description: None,
+            allowed_scopes: Some("proxy".to_string()),
+            target_org_id: Some(org_id.clone()),
+        };
+        let fingerprint =
+            service_account_create_fingerprint(&body.name, None, Some("proxy"), Some(&org_id))
+                .expect("fingerprint service account create");
+        let receipt = reserve_pending_wave4_receipt(
+            &db,
+            &actor_id,
+            SERVICE_ACCOUNT_CREATE_ACTION,
+            &body.action_request_id,
+            &fingerprint,
+            Uuid::new_v4().to_string(),
+        )
+        .await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let _ = admin_service_accounts::create_service_account_with_id(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&actor_id),
+            TelemetryContext::default(),
+            HeaderMap::new(),
+            Json(admin_service_accounts::CreateServiceAccountRequest {
+                name: body.name.clone(),
+                description: None,
+                allowed_scopes: "proxy".to_string(),
+                role_ids: None,
+                rate_limit_override: None,
+                target_org_id: Some(org_id),
+            }),
+            Some(&receipt.resource_id),
+        )
+        .await
+        .expect("commit service-account create");
+        let replay = create_service_account_action(
+            State(state),
+            crate::test_utils::test_auth_user(&actor_id),
+            Json(body),
+        )
+        .await
+        .expect("recover service-account create")
+        .0;
+        assert!(replay.replayed);
+        assert_eq!(replay.resource.service_account_id, receipt.resource_id);
+        assert_eq!(
+            db.collection::<crate::models::service_account::ServiceAccount>(
+                crate::models::service_account::COLLECTION_NAME
+            )
+            .count_documents(doc! {"_id": &receipt.resource_id})
+            .await
+            .expect("count service accounts"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn developer_app_create_interrupted_commit_replays_reserved_id_without_duplicate() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_app_create_reserved").await
+        else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert actor");
+        let body = AssistantDeveloperAppCreateRequest {
+            action_request_id: "app-create-reserved".to_string(),
+            name: "Reserved app".to_string(),
+            redirect_uris: vec!["https://example.test/callback".to_string()],
+        };
+        let fingerprint = wave4_fingerprint(&Wave4Fingerprint::DeveloperAppCreate {
+            name: &body.name,
+            redirect_uris: &body.redirect_uris,
+        })
+        .expect("fingerprint developer app create");
+        let receipt = reserve_pending_wave4_receipt(
+            &db,
+            &actor_id,
+            DEVELOPER_APP_CREATE_ACTION,
+            &body.action_request_id,
+            &fingerprint,
+            Uuid::new_v4().to_string(),
+        )
+        .await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let _ = developer_apps::create_my_oauth_client_with_id(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&actor_id),
+            TelemetryContext::default(),
+            Json(developer_apps::CreateDeveloperOAuthClientRequest {
+                name: body.name.clone(),
+                redirect_uris: body.redirect_uris.clone(),
+                client_type: None,
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+            Some(&receipt.resource_id),
+        )
+        .await
+        .expect("commit developer app create");
+        let replay = create_developer_app_action(
+            State(state),
+            crate::test_utils::test_auth_user(&actor_id),
+            Json(body),
+        )
+        .await
+        .expect("recover developer app create")
+        .0;
+        assert!(replay.replayed);
+        assert_eq!(replay.resource.client_id, receipt.resource_id);
+        assert_eq!(
+            db.collection::<crate::models::oauth_client::OauthClient>(
+                crate::models::oauth_client::COLLECTION_NAME
+            )
+            .count_documents(doc! {"_id": &receipt.resource_id})
+            .await
+            .expect("count apps"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn gcp_key_create_interrupted_commit_replays_reserved_id_without_duplicate() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_gcp_create_reserved").await
+        else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert actor");
+        let body = AssistantGcpCreateRequest {
+            action_request_id: "gcp-create-reserved".to_string(),
+            label: Some("Reserved GCP".to_string()),
+            key_json: "{\"client_email\":\"svc@example.test\",\"private_key\":\"redacted\"}"
+                .to_string(),
+            scopes: None,
+            service_slugs: None,
+            target_org_id: None,
+        };
+        let fingerprint = gcp_create_fingerprint(&body).expect("fingerprint GCP create");
+        let receipt = reserve_pending_wave4_receipt(
+            &db,
+            &actor_id,
+            EXTERNAL_KEY_ADD_GCP_ACTION,
+            &body.action_request_id,
+            &fingerprint,
+            Uuid::new_v4().to_string(),
+        )
+        .await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        crate::services::user_api_key_service::create_api_key_with_id(
+            &db,
+            &state.encryption_keys,
+            &actor_id,
+            &receipt.resource_id,
+            crate::services::user_api_key_service::CreateApiKeyParams {
+                label: "Reserved GCP",
+                credential_type: "gcp_service_account",
+                credential: &body.key_json,
+                access_token: None,
+                refresh_token: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                status: "active",
+                source: Some("user_created"),
+                source_id: None,
+            },
+        )
+        .await
+        .expect("commit GCP key create");
+        let replay = add_gcp_service_account_action(
+            State(state),
+            crate::test_utils::test_auth_user(&actor_id),
+            Json(body),
+        )
+        .await
+        .expect("recover GCP key create")
+        .0;
+        assert!(replay.replayed);
+        assert_eq!(replay.resource.external_key_id, receipt.resource_id);
+        assert_eq!(
+            db.collection::<crate::models::user_api_key::UserApiKey>(
+                crate::models::user_api_key::COLLECTION_NAME
+            )
+            .count_documents(doc! {"_id": &receipt.resource_id})
+            .await
+            .expect("count GCP keys"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn openclaw_connect_interrupted_commit_replays_reserved_id_without_duplicate() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_openclaw_reserved").await
+        else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert actor");
+        let body = AssistantOpenClawConnectRequest {
+            action_request_id: "openclaw-reserved".to_string(),
+            gateway_url: "https://openclaw.example.test".to_string(),
+            credential: "bearer-token".to_string(),
+            label: Some("Reserved OpenClaw".to_string()),
+        };
+        let fingerprint = openclaw_connect_fingerprint(
+            &body.gateway_url,
+            &body.credential,
+            body.label.as_deref(),
+        )
+        .expect("fingerprint OpenClaw connect");
+        let receipt = reserve_pending_wave4_receipt(
+            &db,
+            &actor_id,
+            OPENCLAW_CONNECT_ACTION,
+            &body.action_request_id,
+            &fingerprint,
+            Uuid::new_v4().to_string(),
+        )
+        .await;
+        crate::services::user_service_service::create_user_service_with_id(
+            &db,
+            &actor_id,
+            &actor_id,
+            "llm-openclaw",
+            "endpoint-reserved",
+            None,
+            "none",
+            "",
+            None,
+            None,
+            0,
+            "http",
+            crate::models::ssh_auth_mode::SshAuthMode::ProxyOnly,
+            None,
+            None,
+            None,
+            &crate::services::user_service_service::IdentityConfig {
+                identity_propagation_mode: "none".to_string(),
+                identity_include_user_id: false,
+                identity_include_email: false,
+                identity_include_name: false,
+                identity_jwt_audience: None,
+                forward_access_token: false,
+                inject_delegation_token: false,
+                delegation_token_scope: "llm:proxy".to_string(),
+            },
+            None,
+            false,
+            Some(&receipt.resource_id),
+        )
+        .await
+        .expect("commit OpenClaw service create");
+        let replay = connect_openclaw_action(
+            State(crate::test_utils::test_app_state(db.clone())),
+            crate::test_utils::test_auth_user(&actor_id),
+            Json(body),
+        )
+        .await
+        .expect("recover OpenClaw connect")
+        .0;
+        assert!(replay.replayed);
+        assert_eq!(replay.resource.user_service_id, receipt.resource_id);
+        assert_eq!(
+            db.collection::<UserService>(USER_SERVICES)
+                .count_documents(doc! {"_id": &receipt.resource_id})
+                .await
+                .expect("count OpenClaw services"),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn developer_app_rotate_interrupted_commit_replays_without_second_rotation() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_app_rotate_interrupted").await
+        else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert actor");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let created = developer_apps::create_my_oauth_client(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&actor_id),
+            TelemetryContext::default(),
+            Json(developer_apps::CreateDeveloperOAuthClientRequest {
+                name: "Interrupted rotation".to_string(),
+                redirect_uris: vec!["https://example.test/callback".to_string()],
+                client_type: Some("confidential".to_string()),
+                delegation_scopes: None,
+                broker_capability_enabled: None,
+                revocation_webhook_url: None,
+                revocation_webhook_secret: None,
+                allowed_scopes: None,
+                target_org_id: None,
+                default_service_catalog_slugs: None,
+            }),
+        )
+        .await
+        .expect("create app")
+        .0;
+        let before = crate::services::oauth_client_service::get_client(&db, &created.id)
+            .await
+            .expect("load app");
+        let expected_updated_at = before.updated_at.to_rfc3339();
+        let request = || AssistantDeveloperAppRotateRequest {
+            action_request_id: "app-rotate-interrupted".to_string(),
+            client_id: created.id.clone(),
+            expected_updated_at: expected_updated_at.clone(),
+        };
+        let first = rotate_developer_app_secret_action(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&actor_id),
+            Json(request()),
+        )
+        .await
+        .expect("rotate app")
+        .0;
+        assert!(!first.replayed);
+        let rotated_hash = crate::services::oauth_client_service::get_client(&db, &created.id)
+            .await
+            .expect("load rotated app")
+            .client_secret_hash;
+        reopen_wave4_receipt(
+            &db,
+            &actor_id,
+            DEVELOPER_APP_ROTATE_SECRET_ACTION,
+            "app-rotate-interrupted",
+        )
+        .await;
+        let replay = rotate_developer_app_secret_action(
+            State(state),
+            crate::test_utils::test_auth_user(&actor_id),
+            Json(request()),
+        )
+        .await
+        .expect("recover app rotation")
+        .0;
+        assert!(replay.replayed);
+        assert_eq!(
+            replay.one_time_material,
+            OneTimeMaterialAvailability::Unavailable
+        );
+        assert_eq!(
+            crate::services::oauth_client_service::get_client(&db, &created.id)
+                .await
+                .expect("reload app")
+                .client_secret_hash,
+            rotated_hash,
+            "retry must not rotate the client secret twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_link_interrupted_commit_replays_without_second_code() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_telegram_link_interrupted").await
+        else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &actor_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert actor");
+        let state = crate::test_utils::test_app_state(db.clone());
+        let first = link_telegram_action(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&actor_id),
+            Json(AssistantActionRequestId {
+                action_request_id: "telegram-link-interrupted".to_string(),
+            }),
+        )
+        .await
+        .expect("link Telegram")
+        .0;
+        assert!(!first.replayed);
+        let channel_before = db
+            .collection::<crate::models::notification_channel::NotificationChannel>(
+                crate::models::notification_channel::COLLECTION_NAME,
+            )
+            .find_one(doc! { "user_id": &actor_id })
+            .await
+            .expect("load notification channel")
+            .expect("notification channel");
+        reopen_wave4_receipt(
+            &db,
+            &actor_id,
+            NOTIFICATIONS_TELEGRAM_LINK_ACTION,
+            "telegram-link-interrupted",
+        )
+        .await;
+        let replay = link_telegram_action(
+            State(state),
+            crate::test_utils::test_auth_user(&actor_id),
+            Json(AssistantActionRequestId {
+                action_request_id: "telegram-link-interrupted".to_string(),
+            }),
+        )
+        .await
+        .expect("recover Telegram link")
+        .0;
+        assert!(replay.replayed);
+        assert_eq!(
+            replay.one_time_material,
+            OneTimeMaterialAvailability::Unavailable
+        );
+        assert!(replay.link_code.is_none());
+        let channel_after = db
+            .collection::<crate::models::notification_channel::NotificationChannel>(
+                crate::models::notification_channel::COLLECTION_NAME,
+            )
+            .find_one(doc! { "user_id": &actor_id })
+            .await
+            .expect("reload notification channel")
+            .expect("notification channel");
+        assert_eq!(
+            channel_after.telegram_link_code, channel_before.telegram_link_code,
+            "retry must not mint a second Telegram link code"
+        );
+    }
+
+    #[test]
+    fn replay_material_serialization_distinguishes_secret_and_non_secret_actions() {
+        let secret_replay = serde_json::to_value(AssistantServiceAccountResponse {
+            resource: AssistantServiceAccountResource {
+                service_account_id: "sa-1".to_string(),
+            },
+            replayed: true,
+            one_time_material: OneTimeMaterialAvailability::Unavailable,
+            client_secret: None,
+        })
+        .expect("serialize secret replay");
+        assert_eq!(secret_replay["oneTimeMaterial"], "unavailable");
+
+        let non_secret_replay = serde_json::to_value(AssistantUserServiceResponse {
+            resource: AssistantUserServiceResource {
+                user_service_id: "service-1".to_string(),
+            },
+            replayed: true,
+            one_time_material: OneTimeMaterialAvailability::Delivered,
+        })
+        .expect("serialize non-secret replay");
+        assert_eq!(non_secret_replay["oneTimeMaterial"], "delivered");
+        assert_ne!(
+            non_secret_replay["oneTimeMaterial"], "unavailable",
+            "non-material actions must not warn that a secret was lost"
+        );
+    }
+
+    #[tokio::test]
+    async fn service_account_rotation_metadata_bump_is_not_proof_of_commit() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_sa_rotation_marker").await
+        else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &actor_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert actor");
+        let (service_account, _) =
+            crate::services::service_account_service::create_service_account(
+                &db,
+                "marker test",
+                None,
+                "proxy",
+                &[],
+                None,
+                &actor_id,
+            )
+            .await
+            .expect("create service account");
+        let expected = service_account
+            .updated_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let marker = crate::services::assistant_action_receipts::fingerprint_sensitive_material(
+            &service_account.client_secret_hash,
+        );
+        let fingerprint = wave4_fingerprint(&Wave4Fingerprint::ServiceAccountRotate {
+            service_account_id: &service_account.id,
+            expected_updated_at: &expected,
+        })
+        .expect("fingerprint rotation");
+        assert!(matches!(
+            crate::services::assistant_action_receipts::reserve_or_replay_with_secret_marker(
+                &db,
+                &actor_id,
+                SERVICE_ACCOUNT_ROTATE_SECRET_ACTION,
+                "sa-marker-retry",
+                &fingerprint,
+                service_account.id.clone(),
+                Some(marker),
+            )
+            .await
+            .expect("reserve receipt"),
+            ReceiptOutcome::Reserved(_)
+        ));
+        db.collection::<crate::models::service_account::ServiceAccount>(
+            crate::models::service_account::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! { "_id": &service_account.id },
+            doc! { "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(1)) } },
+        )
+        .await
+        .expect("bump metadata timestamp");
+
+        let result = rotate_service_account_secret_action(
+            State(crate::test_utils::test_app_state(db)),
+            crate::test_utils::test_auth_user(&actor_id),
+            Json(AssistantServiceAccountRotateRequest {
+                action_request_id: "sa-marker-retry".to_string(),
+                service_account_id: service_account.id,
+                expected_updated_at: expected,
+            }),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+    }
+
+    #[tokio::test]
+    async fn developer_app_rotation_metadata_bump_is_not_proof_of_commit() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_app_rotation_marker").await
+        else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &actor_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert actor");
+        let (client, _) = crate::services::oauth_client_service::create_client(
+            &db,
+            "marker app",
+            &["https://example.test/callback".to_string()],
+            "confidential",
+            &actor_id,
+            "",
+            crate::services::oauth_client_service::DEFAULT_ALLOWED_SCOPES,
+            crate::models::oauth_client::ScopeProvenance::Defaulted,
+            false,
+            None,
+            None,
+            &[],
+        )
+        .await
+        .expect("create developer app");
+        let expected = client
+            .updated_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let marker = crate::services::assistant_action_receipts::fingerprint_sensitive_material(
+            &client.client_secret_hash,
+        );
+        let fingerprint = wave4_fingerprint(&Wave4Fingerprint::DeveloperAppRotate {
+            client_id: &client.id,
+            expected_updated_at: &expected,
+        })
+        .expect("fingerprint rotation");
+        assert!(matches!(
+            crate::services::assistant_action_receipts::reserve_or_replay_with_secret_marker(
+                &db,
+                &actor_id,
+                DEVELOPER_APP_ROTATE_SECRET_ACTION,
+                "app-marker-retry",
+                &fingerprint,
+                client.id.clone(),
+                Some(marker),
+            )
+            .await
+            .expect("reserve receipt"),
+            ReceiptOutcome::Reserved(_)
+        ));
+        db.collection::<crate::models::oauth_client::OauthClient>(
+            crate::models::oauth_client::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! { "_id": &client.id },
+            doc! { "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(1)) } },
+        )
+        .await
+        .expect("bump metadata timestamp");
+
+        let result = rotate_developer_app_secret_action(
+            State(crate::test_utils::test_app_state(db)),
+            crate::test_utils::test_auth_user(&actor_id),
+            Json(AssistantDeveloperAppRotateRequest {
+                action_request_id: "app-marker-retry".to_string(),
+                client_id: client.id,
+                expected_updated_at: expected,
+            }),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+    }
 
     /// `account.delete` is an irreversible cascade. The browser asks the user
     /// to type their email, but a browser-side comparison is not a control:

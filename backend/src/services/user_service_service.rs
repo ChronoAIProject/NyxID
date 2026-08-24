@@ -711,6 +711,55 @@ pub async fn create_user_service(
     ws_frame_injections: Option<&[WsFrameInjection]>,
     admin_only: bool,
 ) -> AppResult<UserService> {
+    create_user_service_with_id(
+        db,
+        user_id,
+        actor_user_id,
+        slug,
+        endpoint_id,
+        api_key_id,
+        auth_method,
+        auth_key_name,
+        catalog_service_id,
+        node_id,
+        node_priority,
+        service_type,
+        ssh_auth_mode,
+        source,
+        source_id,
+        source_app_id,
+        identity,
+        ws_frame_injections,
+        admin_only,
+        None,
+    )
+    .await
+}
+
+/// Create a user service with an optional caller-reserved UUID.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_user_service_with_id(
+    db: &mongodb::Database,
+    user_id: &str,
+    actor_user_id: &str,
+    slug: &str,
+    endpoint_id: &str,
+    api_key_id: Option<&str>,
+    auth_method: &str,
+    auth_key_name: &str,
+    catalog_service_id: Option<&str>,
+    node_id: Option<&str>,
+    node_priority: i32,
+    service_type: &str,
+    ssh_auth_mode: SshAuthMode,
+    source: Option<&str>,
+    source_id: Option<&str>,
+    source_app_id: Option<&str>,
+    identity: &IdentityConfig,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: bool,
+    reserved_id: Option<&str>,
+) -> AppResult<UserService> {
     validate_slug(slug)?;
     validate_auth_method(auth_method)?;
     let identity = normalize_identity_config(identity)?;
@@ -820,7 +869,9 @@ pub async fn create_user_service(
 
     let now = Utc::now();
     let service = UserService {
-        id: Uuid::new_v4().to_string(),
+        id: reserved_id
+            .map(str::to_string)
+            .unwrap_or_else(|| Uuid::new_v4().to_string()),
         user_id: user_id.to_string(),
         slug: slug.to_string(),
         endpoint_id: endpoint_id.to_string(),

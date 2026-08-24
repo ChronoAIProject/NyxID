@@ -33,6 +33,11 @@ pub struct AssistantActionReceipt {
     /// Optional access-material revision used by node token rotation recovery.
     #[serde(default)]
     pub resource_access_revision: Option<i64>,
+    /// Optional keyed fingerprint of secret material captured immediately
+    /// before a secret rotation. It proves the secret itself changed without
+    /// exposing the stored hash or raw credential.
+    #[serde(default)]
+    pub resource_secret_fingerprint: Option<String>,
     pub status: AssistantActionReceiptStatus,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -55,6 +60,7 @@ mod tests {
             resource_id: "key-alpha".to_string(),
             resource_state_version: None,
             resource_access_revision: None,
+            resource_secret_fingerprint: None,
             status: AssistantActionReceiptStatus::Completed,
             created_at: Utc::now(),
             completed_at: Some(Utc::now()),

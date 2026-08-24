@@ -657,6 +657,105 @@ pub async fn create_key(
     oauth_client_credentials: OauthClientCredentialsInput<'_>,
     hosted_mode: bool,
 ) -> AppResult<CreateKeyResult> {
+    create_key_inner(
+        db,
+        encryption_keys,
+        user_id,
+        actor_user_id,
+        service_slug,
+        endpoint_url,
+        credential,
+        label,
+        slug_override,
+        auth_method,
+        auth_key_name,
+        node_id,
+        ssh_params,
+        identity,
+        openapi_spec_url,
+        ws_frame_injections,
+        admin_only,
+        oauth_client_credentials,
+        hosted_mode,
+        None,
+    )
+    .await
+}
+
+/// Create a key while forcing the `UserService` identity to a previously
+/// reserved assistant-action receipt id. The endpoint and credential rows
+/// retain their normal generated identities.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_key_with_service_id(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    actor_user_id: &str,
+    service_slug: Option<&str>,
+    endpoint_url: Option<&str>,
+    credential: &str,
+    label: &str,
+    slug_override: Option<&str>,
+    auth_method: Option<&str>,
+    auth_key_name: Option<&str>,
+    node_id: Option<&str>,
+    ssh_params: Option<SshCreateParams<'_>>,
+    identity: Option<user_service_service::IdentityConfig>,
+    openapi_spec_url: OpenApiSpecUrlInput<'_>,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: bool,
+    oauth_client_credentials: OauthClientCredentialsInput<'_>,
+    hosted_mode: bool,
+    service_id: &str,
+) -> AppResult<CreateKeyResult> {
+    create_key_inner(
+        db,
+        encryption_keys,
+        user_id,
+        actor_user_id,
+        service_slug,
+        endpoint_url,
+        credential,
+        label,
+        slug_override,
+        auth_method,
+        auth_key_name,
+        node_id,
+        ssh_params,
+        identity,
+        openapi_spec_url,
+        ws_frame_injections,
+        admin_only,
+        oauth_client_credentials,
+        hosted_mode,
+        Some(service_id),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_key_inner(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    actor_user_id: &str,
+    service_slug: Option<&str>,
+    endpoint_url: Option<&str>,
+    credential: &str,
+    label: &str,
+    slug_override: Option<&str>,
+    auth_method: Option<&str>,
+    auth_key_name: Option<&str>,
+    node_id: Option<&str>,
+    ssh_params: Option<SshCreateParams<'_>>,
+    identity: Option<user_service_service::IdentityConfig>,
+    openapi_spec_url: OpenApiSpecUrlInput<'_>,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: bool,
+    oauth_client_credentials: OauthClientCredentialsInput<'_>,
+    hosted_mode: bool,
+    reserved_service_id: Option<&str>,
+) -> AppResult<CreateKeyResult> {
     let node_id = node_id.filter(|nid| !nid.is_empty());
     if let Some(rules) = ws_frame_injections {
         ws_frame_injector::validate_rules(rules)?;
@@ -1002,7 +1101,7 @@ pub async fn create_key(
         let mut attempts_left = USER_SERVICE_SLUG_INSERT_RETRIES;
         let service = loop {
             let resolved_slug = resolve_unique_slug(db, user_id, &base_slug, strategy).await?;
-            match user_service_service::create_user_service(
+            match user_service_service::create_user_service_with_id(
                 db,
                 user_id,
                 actor_user_id,
@@ -1022,6 +1121,7 @@ pub async fn create_key(
                 &catalog_identity,
                 ws_frame_injections,
                 admin_only,
+                reserved_service_id,
             )
             .await
             {
@@ -1221,7 +1321,7 @@ pub async fn create_key(
         let mut attempts_left = USER_SERVICE_SLUG_INSERT_RETRIES;
         let service = loop {
             let resolved_slug = resolve_unique_slug(db, user_id, &base_slug, strategy).await?;
-            match user_service_service::create_user_service(
+            match user_service_service::create_user_service_with_id(
                 db,
                 user_id,
                 actor_user_id,
@@ -1241,6 +1341,7 @@ pub async fn create_key(
                 &user_service_service::IdentityConfig::none(),
                 ws_frame_injections,
                 admin_only,
+                reserved_service_id,
             )
             .await
             {
@@ -1381,7 +1482,7 @@ pub async fn create_key(
         let mut attempts_left = USER_SERVICE_SLUG_INSERT_RETRIES;
         let service = loop {
             let resolved_slug = resolve_unique_slug(db, user_id, &base_slug, strategy).await?;
-            match user_service_service::create_user_service(
+            match user_service_service::create_user_service_with_id(
                 db,
                 user_id,
                 actor_user_id,
@@ -1401,6 +1502,7 @@ pub async fn create_key(
                 &custom_identity,
                 ws_frame_injections,
                 admin_only,
+                reserved_service_id,
             )
             .await
             {
