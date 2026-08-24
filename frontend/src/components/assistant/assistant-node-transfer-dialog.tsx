@@ -104,7 +104,7 @@ export function AssistantNodeTransferDialog({
         }
         setResult({ id: after.id, movedOutOfScope: false });
       } catch (caught) {
-        if (!response.replayed && isNotFound(caught)) {
+        if (isNotFound(caught)) {
           setResult({
             id: response.resource.nodeId,
             movedOutOfScope: true,

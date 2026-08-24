@@ -367,6 +367,48 @@ describe("AssistantNodeTransferDialog", () => {
     await userEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(onComplete).toHaveBeenCalledWith(NODE_ID);
   });
+
+  it("completes a replayed transfer when the node is no longer readable", async () => {
+    mockGet
+      .mockResolvedValueOnce(nodeEvidence({ state_version: 6 }))
+      .mockRejectedValueOnce(
+        new ApiError(404, {
+          error: "not_found",
+          error_code: 8000,
+          message: "node not found",
+        }),
+      );
+    mockPost.mockResolvedValue({
+      resource: { nodeId: NODE_ID },
+      replayed: true,
+      requestedAt: REQUESTED_AT,
+    });
+    const onComplete = vi.fn();
+    render(
+      <AssistantNodeTransferDialog
+        open
+        onOpenChange={vi.fn()}
+        actionRequestId="act-transfer-replayed"
+        params={{ nodeId: NODE_ID, newOwnerUserId: NEW_OWNER_ID }}
+        onComplete={onComplete}
+      />,
+    );
+
+    await userEvent.click(
+      screen.getByRole("checkbox", {
+        name: /current owner will lose control/i,
+      }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Transfer node" }),
+    );
+
+    expect(
+      await screen.findByText(/ownership moved out of its access scope/i),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(onComplete).toHaveBeenCalledWith(NODE_ID);
+  });
 });
 
 describe("AssistantNodeInjectCredentialDialog", () => {
