@@ -619,6 +619,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route(
             "/{service_id}/credential",
             put(handlers::connections::update_connection_credential),
+        )
+        .route(
+            "/{service_id}/authorization",
+            get(handlers::connections::get_connection_authorization),
         );
 
     let provider_routes = Router::new()
@@ -669,6 +673,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             delete(handlers::user_tokens::disconnect_provider),
         )
         .route(
+            "/{provider_id}/authorization",
+            get(handlers::user_tokens::get_provider_token_authorization),
+        )
+        .route(
             "/{provider_id}/refresh",
             post(handlers::user_tokens::manual_refresh),
         )
@@ -677,6 +685,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             get(handlers::user_credentials::get_my_credentials)
                 .put(handlers::user_credentials::set_my_credentials)
                 .delete(handlers::user_credentials::delete_my_credentials),
+        )
+        .route(
+            "/{provider_id}/credentials/authorization",
+            get(handlers::user_credentials::get_my_credentials_authorization),
         );
 
     // TODO(M-7): LLM endpoints share the global rate limiter. Consider adding a
@@ -1600,6 +1612,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .nest(
             "/actions/nodes",
             handlers::assistant_action_effects_nodes::router(),
+        )
+        .nest(
+            "/actions/providers",
+            handlers::assistant_action_effects_providers::router(),
         )
         .nest(
             "/actions/org",

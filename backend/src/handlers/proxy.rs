@@ -9855,6 +9855,7 @@ mod proxy_resolution_integration_tests {
                 credential_label: None,
                 metadata: None,
                 is_active: false,
+                state_version: 1,
                 created_at: now,
                 updated_at: now,
             },

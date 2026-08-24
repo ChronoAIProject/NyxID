@@ -5,6 +5,7 @@ import {
   accountRevokeConsentActionParamsSchema,
   approvalRevokeGrantActionParamsSchema,
   approvalServiceActionParamsSchema,
+  connectionRevokeActionParamsSchema,
   developerAppCreateActionParamsSchema,
   developerAppIdentityActionParamsSchema,
   developerAppUpdateActionParamsSchema,
@@ -34,6 +35,8 @@ import {
   orgMemberUpdateRoleActionParamsSchema,
   orgUpdateActionParamsSchema,
   pendingCredentialCancelActionParamsSchema,
+  providerDisconnectActionParamsSchema,
+  providerSetAppCredentialsActionParamsSchema,
   serviceConnectActionParamsSchema,
   serviceAccountCreateActionParamsSchema,
   serviceAccountIdentityActionParamsSchema,
@@ -359,6 +362,32 @@ function normalizeExternalKeyDelete(raw: unknown): ActionCardParams | null {
     variant: "external_key_delete",
     external_key_id: parsed.data.externalKeyId,
   };
+}
+
+function normalizeConnectionRevoke(raw: unknown): ActionCardParams | null {
+  const parsed = connectionRevokeActionParamsSchema.safeParse(raw);
+  return parsed.success
+    ? { variant: "connection_revoke", service_id: parsed.data.serviceId }
+    : null;
+}
+
+function normalizeProviderDisconnect(raw: unknown): ActionCardParams | null {
+  const parsed = providerDisconnectActionParamsSchema.safeParse(raw);
+  return parsed.success
+    ? { variant: "provider_disconnect", provider_id: parsed.data.providerId }
+    : null;
+}
+
+function normalizeProviderSetAppCredentials(
+  raw: unknown,
+): ActionCardParams | null {
+  const parsed = providerSetAppCredentialsActionParamsSchema.safeParse(raw);
+  return parsed.success
+    ? {
+        variant: "provider_set_app_credentials",
+        provider_id: parsed.data.providerId,
+      }
+    : null;
 }
 
 function normalizeNodeRegisterToken(raw: unknown): ActionCardParams | null {
@@ -1236,6 +1265,39 @@ const externalKeyDeleteDescriptor: ActionDescriptor = {
     params.variant === "external_key_delete" ? "external_key_delete" : null,
 };
 
+const connectionRevokeDescriptor = createDialogDescriptor({
+  variant: "connection_revoke",
+  title: "Revoke service connection",
+  body: "NyxID will revoke this legacy service connection and securely clear its stored credential after explicit confirmation.",
+  cta: "Revoke connection",
+  icon: "service",
+  normalize: normalizeConnectionRevoke,
+  resourceKind: "connection",
+  fields: [{ label: "Service", key: "service_id", mono: true }],
+});
+
+const providerDisconnectDescriptor = createDialogDescriptor({
+  variant: "provider_disconnect",
+  title: "Disconnect provider",
+  body: "NyxID will revoke this legacy provider token and securely clear its stored token material after explicit confirmation.",
+  cta: "Disconnect provider",
+  icon: "key",
+  normalize: normalizeProviderDisconnect,
+  resourceKind: "providerToken",
+  fields: [{ label: "Provider", key: "provider_id", mono: true }],
+});
+
+const providerSetAppCredentialsDescriptor = createDialogDescriptor({
+  variant: "provider_set_app_credentials",
+  title: "Set OAuth app credentials",
+  body: "Enter the OAuth app client ID and secret only in this NyxID dialog. They are never returned to the assistant.",
+  cta: "Save credentials",
+  icon: "key",
+  normalize: normalizeProviderSetAppCredentials,
+  resourceKind: "providerCredentials",
+  fields: [{ label: "Provider", key: "provider_id", mono: true }],
+});
+
 type DialogResourceKind =
   | "userService"
   | "node"
@@ -1248,7 +1310,10 @@ type DialogResourceKind =
   | "notificationBinding"
   | "serviceAccount"
   | "developerApp"
-  | "externalKey";
+  | "externalKey"
+  | "connection"
+  | "providerToken"
+  | "providerCredentials";
 
 interface DialogSummaryField {
   readonly label: string;
@@ -1298,6 +1363,12 @@ function dialogResource(
       return { developerApp: { clientId: id } };
     case "externalKey":
       return { externalKey: { externalKeyId: id } };
+    case "connection":
+      return { connection: { serviceId: id } };
+    case "providerToken":
+      return { providerToken: { providerId: id } };
+    case "providerCredentials":
+      return { providerCredentials: { providerId: id } };
   }
 }
 
@@ -1849,6 +1920,9 @@ export const ACTION_REGISTRY: Readonly<Record<string, ActionDescriptor>> = {
   "endpoint.delete": endpointDeleteDescriptor,
   "external_key.rotate": externalKeyRotateDescriptor,
   "external_key.delete": externalKeyDeleteDescriptor,
+  "connection.revoke": connectionRevokeDescriptor,
+  "provider.disconnect": providerDisconnectDescriptor,
+  "provider.set_app_credentials": providerSetAppCredentialsDescriptor,
   "node.register_token": nodeRegisterTokenDescriptor,
   "node.rotate_token": nodeRotateTokenDescriptor,
   "node.delete": nodeDeleteDescriptor,

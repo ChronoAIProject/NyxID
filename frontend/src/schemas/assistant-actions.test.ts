@@ -476,6 +476,9 @@ describe("assistant action request schema", () => {
       ["endpoint.delete", { endpointId: "endpoint-1" }],
       ["external_key.rotate", { externalKeyId: "external-1" }],
       ["external_key.delete", { externalKeyId: "external-1" }],
+      ["connection.revoke", { serviceId: "legacy-service-1" }],
+      ["provider.disconnect", { providerId: "provider-1" }],
+      ["provider.set_app_credentials", { providerId: "provider-1" }],
     ] as const;
 
     for (const [index, [action, params]] of wave2.entries()) {

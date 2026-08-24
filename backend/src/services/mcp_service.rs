@@ -4962,6 +4962,7 @@ mod tests {
                 credential_label: None,
                 metadata: None,
                 is_active: true,
+                state_version: 1,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })
@@ -5486,6 +5487,7 @@ mod tests {
                 credential_label: None,
                 metadata: None,
                 is_active: false,
+                state_version: 1,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })

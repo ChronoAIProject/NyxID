@@ -2396,6 +2396,7 @@ mod tests {
                 expires_at: None,
                 api_key_encrypted: None,
                 status: "active".to_string(),
+                state_version: 1,
                 last_refreshed_at: None,
                 last_used_at: None,
                 error_message: None,
@@ -2415,6 +2416,7 @@ mod tests {
                 client_id_encrypted: Some(vec![13, 14, 15]),
                 client_secret_encrypted: Some(vec![16, 17, 18]),
                 label: Some("BYO OAuth app".to_string()),
+                state_version: 1,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })
@@ -2482,6 +2484,7 @@ mod tests {
                 credential_label: Some("Connection secret fixture".to_string()),
                 metadata: None,
                 is_active: true,
+                state_version: 1,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })

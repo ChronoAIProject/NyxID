@@ -2798,6 +2798,7 @@ pub enum DisconnectTarget<'a> {
     UserService(&'a str),
     UserApiKey(&'a str),
     Provider(&'a str),
+    ProviderWithExpectedStateVersion(&'a str, i64),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2851,6 +2852,7 @@ struct DisconnectPlan {
     provider_token: Option<UserProviderToken>,
     initiating_key_id: Option<String>,
     initiating_provider_token_id: Option<String>,
+    expected_provider_token_state_version: Option<i64>,
 }
 
 /// Shared local-teardown and remote-revocation orchestration for every OAuth
@@ -2935,7 +2937,14 @@ pub async fn disconnect_credentials_with_expected_siblings(
     }
 
     let mut claimed_provider_token = if let Some(token) = plan.provider_token.take() {
-        match user_token_service::claim_provider_token_by_id(db, owner_id, &token.id).await? {
+        match user_token_service::claim_provider_token_by_id_with_expected_state_version(
+            db,
+            owner_id,
+            &token.id,
+            plan.expected_provider_token_state_version,
+        )
+        .await?
+        {
             Some(claimed) => Some(claimed),
             None if plan.initiating_provider_token_id.as_deref() == Some(token.id.as_str()) => {
                 return Err(AppError::NotFound(
@@ -3079,7 +3088,13 @@ async fn build_disconnect_plan(
     options: &DisconnectOptions,
     expected_siblings: Option<&[(String, String, String)]>,
 ) -> AppResult<DisconnectPlan> {
-    let (primary_service, initiating_key, initiating_token, provider_id) = match target {
+    let (
+        primary_service,
+        initiating_key,
+        initiating_token,
+        provider_id,
+        expected_provider_token_state_version,
+    ) = match target {
         DisconnectTarget::UserService(service_id) => {
             let service = user_service_service::get_user_service(db, owner_id, service_id).await?;
             let key = match service.api_key_id.as_deref() {
@@ -3087,12 +3102,12 @@ async fn build_disconnect_plan(
                 None => None,
             };
             let provider_id = key.as_ref().and_then(|key| key.provider_config_id.clone());
-            (Some(service), key, None, provider_id)
+            (Some(service), key, None, provider_id, None)
         }
         DisconnectTarget::UserApiKey(key_id) => {
             let key = user_api_key_service::get_api_key(db, owner_id, key_id).await?;
             let provider_id = key.provider_config_id.clone();
-            (None, Some(key), None, provider_id)
+            (None, Some(key), None, provider_id, None)
         }
         DisconnectTarget::Provider(provider_id) => {
             let token = db
@@ -3106,7 +3121,32 @@ async fn build_disconnect_plan(
                 .ok_or_else(|| {
                     AppError::NotFound("No active token found for this provider".to_string())
                 })?;
-            (None, None, Some(token), Some(provider_id.to_string()))
+            (None, None, Some(token), Some(provider_id.to_string()), None)
+        }
+        DisconnectTarget::ProviderWithExpectedStateVersion(provider_id, expected) => {
+            let token = db
+                .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+                .find_one(doc! {
+                    "user_id": owner_id,
+                    "provider_config_id": provider_id,
+                    "status": { "$ne": "revoked" },
+                })
+                .await?
+                .ok_or_else(|| {
+                    AppError::NotFound("No active token found for this provider".to_string())
+                })?;
+            if token.state_version != expected {
+                return Err(AppError::Conflict(
+                    "the provider token changed since this action was prepared".to_string(),
+                ));
+            }
+            (
+                None,
+                None,
+                Some(token),
+                Some(provider_id.to_string()),
+                Some(expected),
+            )
         }
     };
     let provider = match provider_id.as_deref() {
@@ -3136,6 +3176,7 @@ async fn build_disconnect_plan(
             provider_token: initiating_token.clone(),
             initiating_key_id: initiating_key.map(|key| key.id),
             initiating_provider_token_id: initiating_token.map(|token| token.id),
+            expected_provider_token_state_version,
         });
     }
 
@@ -3306,6 +3347,7 @@ async fn build_disconnect_plan(
             .flatten(),
         initiating_key_id: initiating_key.map(|key| key.id),
         initiating_provider_token_id: initiating_token.map(|token| token.id),
+        expected_provider_token_state_version,
     })
 }
 
@@ -4174,6 +4216,7 @@ mod tests {
                 expires_at: None,
                 api_key_encrypted: None,
                 status: "active".to_string(),
+                state_version: 1,
                 last_refreshed_at: None,
                 last_used_at: None,
                 error_message: None,
@@ -6804,6 +6847,7 @@ mod tests {
                 expires_at: None,
                 api_key_encrypted: None,
                 status: "active".to_string(),
+                state_version: 1,
                 last_refreshed_at: None,
                 last_used_at: None,
                 error_message: None,
@@ -6882,6 +6926,7 @@ mod tests {
                 expires_at: None,
                 api_key_encrypted: Some(vec![9, 9, 9]),
                 status: "active".to_string(),
+                state_version: 1,
                 last_refreshed_at: None,
                 last_used_at: None,
                 error_message: None,
