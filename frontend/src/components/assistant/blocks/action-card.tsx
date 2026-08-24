@@ -947,10 +947,10 @@ export function ActionCard({
             const binding = dialogBindingFor(params.variant);
             return (
               <binding.Dialog
+                {...binding.toProps(params)}
                 open={dialogOpen}
                 onOpenChange={setOpen}
                 actionRequestId={block.action_request_id}
-                params={binding.toProps(params)}
                 onComplete={(id) =>
                   report("completed", descriptor.resource(id))
                 }

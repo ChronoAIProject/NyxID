@@ -107,11 +107,17 @@ export function AssistantOrgActionDialog({
   params,
   onComplete,
 }: AssistantOrgActionDialogProps) {
-  const [displayName, setDisplayName] = useState(textParam(params, "displayName"));
+  const [displayName, setDisplayName] = useState(
+    textParam(params, "displayName"),
+  );
   const [slug, setSlug] = useState(textParam(params, "slug"));
-  const [contactEmail, setContactEmail] = useState(textParam(params, "contactEmail"));
+  const [contactEmail, setContactEmail] = useState(
+    textParam(params, "contactEmail"),
+  );
   const [avatarUrl, setAvatarUrl] = useState(textParam(params, "avatarUrl"));
-  const [memberId, setMemberId] = useState(textParam(params, "memberId") || textParam(params, "userId"));
+  const [memberId, setMemberId] = useState(
+    textParam(params, "memberId") || textParam(params, "userId"),
+  );
   const [userId, setUserId] = useState(textParam(params, "userId"));
   const [role, setRole] = useState(textParam(params, "role") || "member");
   const [ttlHours, setTtlHours] = useState(String(params.ttlHours ?? "24"));
@@ -133,7 +139,9 @@ export function AssistantOrgActionDialog({
   }
 
   async function readOrg(id: string) {
-    const raw = await api.get<unknown>(`/orgs/${encodeURIComponent(id)}/authorization`);
+    const raw = await api.get<unknown>(
+      `/orgs/${encodeURIComponent(id)}/authorization`,
+    );
     assertSecretFreeReadBack(raw);
     return orgEvidenceSchema.parse(raw);
   }
@@ -152,7 +160,10 @@ export function AssistantOrgActionDialog({
       setError("Confirm this destructive change to continue.");
       return;
     }
-    if ((action === "create" || action === "update") && SECRET_VALUE_PATTERN.test(displayName)) {
+    if (
+      (action === "create" || action === "update") &&
+      SECRET_VALUE_PATTERN.test(displayName)
+    ) {
       setError("Organization names cannot contain secret-shaped values.");
       return;
     }
@@ -171,41 +182,72 @@ export function AssistantOrgActionDialog({
       assertNoSensitiveActionParams(params);
       const before = action === "create" ? null : await readOrg(orgId);
       const beforeMember =
-        (action === "member_remove" || action === "member_update_role") && memberId
+        (action === "member_remove" || action === "member_update_role") &&
+        memberId
           ? await readMember(orgId, memberId)
           : null;
-      if (action === "member_update_role" && beforeMember?.role === role && !beforeMember.revoked_at) {
+      if (
+        action === "member_update_role" &&
+        beforeMember?.role === role &&
+        !beforeMember.revoked_at
+      ) {
         throw new Error("That member already has the requested role.");
       }
-      if ((action === "member_add" || action === "member_remove" || action === "member_update_role") && !memberId && action !== "member_add") {
+      if (
+        (action === "member_add" ||
+          action === "member_remove" ||
+          action === "member_update_role") &&
+        !memberId &&
+        action !== "member_add"
+      ) {
         throw new Error("The member reference is missing.");
       }
       if (action === "member_add" && !userId) {
         throw new Error("The user reference is missing.");
       }
-      const payload: Record<string, unknown> = { ...params, actionRequestId };
-      if (destructive) payload.confirmed = confirmed;
-      if (action === "create" || action === "update") {
-        payload.displayName = displayName.trim() || undefined;
-        payload.slug = slug.trim() || undefined;
-        payload.contactEmail = contactEmail.trim() || undefined;
-        payload.avatarUrl = avatarUrl.trim() || undefined;
-      }
-      if (action === "member_add") {
-        payload.userId = userId;
-        payload.role = role;
-      }
-      if (action === "member_remove" || action === "member_update_role") {
-        payload.memberId = memberId;
-      }
-      if (action === "member_update_role") {
-        payload.role = role;
-        payload.expectedRole = beforeMember?.role;
-      }
-      if (action === "invite") {
-        payload.role = role;
-        payload.ttlHours = Number(ttlHours);
-      }
+      const payload: Record<string, unknown> = (() => {
+        switch (action) {
+          case "create":
+            return {
+              actionRequestId,
+              displayName: displayName.trim(),
+              contactEmail: contactEmail.trim() || undefined,
+              avatarUrl: avatarUrl.trim() || undefined,
+            };
+          case "update":
+            return {
+              actionRequestId,
+              orgId,
+              displayName: displayName.trim() || undefined,
+              slug: slug.trim() || undefined,
+              contactEmail: contactEmail.trim() || undefined,
+              avatarUrl: avatarUrl.trim() || undefined,
+            };
+          case "delete":
+            return { actionRequestId, orgId, confirmed };
+          case "member_add":
+            return { actionRequestId, orgId, userId, role };
+          case "member_remove":
+            return { actionRequestId, orgId, memberId, confirmed };
+          case "member_update_role":
+            return {
+              actionRequestId,
+              orgId,
+              memberId,
+              role,
+              expectedRole: beforeMember?.role,
+            };
+          case "invite":
+            return {
+              actionRequestId,
+              orgId,
+              role,
+              ttlHours: Number(ttlHours),
+            };
+          case "set_primary":
+            return { actionRequestId, orgId };
+        }
+      })();
       const raw = await api.post<unknown>(
         `/assistant/actions/org/org/${action.replaceAll("_", "-")}`,
         payload,
@@ -215,28 +257,42 @@ export function AssistantOrgActionDialog({
       if (action === "delete") {
         try {
           await readOrg(id);
-          throw new Error("The organization still has a live authorization projection.");
+          throw new Error(
+            "The organization still has a live authorization projection.",
+          );
         } catch (caught) {
           if (!isNotFound(caught)) throw caught;
         }
       } else {
         const after = await readOrg(id);
-        if (after.id !== id) throw new Error("NyxID returned a different organization identity.");
+        if (after.id !== id)
+          throw new Error("NyxID returned a different organization identity.");
         if (action === "create" && after.member_count < 1) {
-          throw new Error("NyxID did not show the created organization membership.");
+          throw new Error(
+            "NyxID did not show the created organization membership.",
+          );
         }
         if (action === "set_primary" && !after.is_primary) {
           throw new Error("NyxID did not mark this organization as primary.");
         }
-        if (action === "member_add" && !response.replayed && before && after.member_count <= before.member_count) {
+        if (
+          action === "member_add" &&
+          !response.replayed &&
+          before &&
+          after.member_count <= before.member_count
+        ) {
           throw new Error("NyxID did not show the new organization member.");
         }
         if (action === "member_remove") {
-          if (!before || (!response.replayed && after.member_count >= before.member_count)) {
+          if (
+            !before ||
+            (!response.replayed && after.member_count >= before.member_count)
+          ) {
             throw new Error("NyxID did not show the member removal.");
           }
           const removed = await readMember(id, memberId);
-          if (removed.revoked_at === null) throw new Error("NyxID did not show the member as revoked.");
+          if (removed.revoked_at === null)
+            throw new Error("NyxID did not show the member as revoked.");
         }
         if (action === "member_update_role") {
           const changed = await readMember(id, memberId);
@@ -244,16 +300,32 @@ export function AssistantOrgActionDialog({
             throw new Error("NyxID did not show the requested member role.");
           }
         }
-        if (action === "invite" && !response.replayed && before && after.active_invite_count <= before.active_invite_count) {
+        if (
+          action === "invite" &&
+          !response.replayed &&
+          before &&
+          after.active_invite_count <= before.active_invite_count
+        ) {
           throw new Error("NyxID did not show the new organization invite.");
         }
-        if ((action === "update" || action === "set_primary") && !response.replayed && before && action === "update" && !isNewerTimestamp(before.updated_at, after.updated_at)) {
+        if (
+          (action === "update" || action === "set_primary") &&
+          !response.replayed &&
+          before &&
+          action === "update" &&
+          !isNewerTimestamp(before.updated_at, after.updated_at)
+        ) {
           throw new Error("NyxID did not show a newer organization state.");
         }
       }
       setResultId(id);
     } catch (caught) {
-      setError(errorMessage(caught, "NyxID could not complete this organization action."));
+      setError(
+        errorMessage(
+          caught,
+          "NyxID could not complete this organization action.",
+        ),
+      );
     } finally {
       pendingRef.current = false;
       setPending(false);
@@ -280,23 +352,162 @@ export function AssistantOrgActionDialog({
           <div className="space-y-4 border-y border-border py-4">
             {(action === "create" || action === "update") && (
               <>
-                <div className="space-y-2"><Label htmlFor="org-name">Organization name</Label><Input id="org-name" value={displayName} onChange={(event) => setDisplayName(event.target.value)} autoComplete="off" /></div>
-                <div className="space-y-2"><Label htmlFor="org-slug">Slug</Label><Input id="org-slug" value={slug} onChange={(event) => setSlug(event.target.value)} autoComplete="off" /></div>
-                <div className="space-y-2"><Label htmlFor="org-contact">Contact email</Label><Input id="org-contact" value={contactEmail} onChange={(event) => setContactEmail(event.target.value)} autoComplete="email" /></div>
-                <div className="space-y-2"><Label htmlFor="org-avatar">Avatar URL</Label><Input id="org-avatar" value={avatarUrl} onChange={(event) => setAvatarUrl(event.target.value)} autoComplete="url" /></div>
+                <div className="space-y-2">
+                  <Label htmlFor="org-name">Organization name</Label>
+                  <Input
+                    id="org-name"
+                    value={displayName}
+                    onChange={(event) => setDisplayName(event.target.value)}
+                    autoComplete="off"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="org-slug">Slug</Label>
+                  <Input
+                    id="org-slug"
+                    value={slug}
+                    onChange={(event) => setSlug(event.target.value)}
+                    autoComplete="off"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="org-contact">Contact email</Label>
+                  <Input
+                    id="org-contact"
+                    value={contactEmail}
+                    onChange={(event) => setContactEmail(event.target.value)}
+                    autoComplete="email"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="org-avatar">Avatar URL</Label>
+                  <Input
+                    id="org-avatar"
+                    value={avatarUrl}
+                    onChange={(event) => setAvatarUrl(event.target.value)}
+                    autoComplete="url"
+                  />
+                </div>
               </>
             )}
-            {action === "member_add" && <><div className="space-y-2"><Label htmlFor="org-user-id">User ID</Label><Input id="org-user-id" value={userId} onChange={(event) => setUserId(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="org-member-role">Role</Label><Input id="org-member-role" value={role} onChange={(event) => setRole(event.target.value)} /></div></>}
-            {(action === "member_remove" || action === "member_update_role") && <div className="space-y-2"><Label htmlFor="org-member-id">Member ID</Label><Input id="org-member-id" value={memberId} onChange={(event) => setMemberId(event.target.value)} /></div>}
-            {action === "member_update_role" && <div className="space-y-2"><Label htmlFor="org-role">Role</Label><Input id="org-role" value={role} onChange={(event) => setRole(event.target.value)} /></div>}
-            {action === "invite" && <><div className="space-y-2"><Label htmlFor="invite-role">Invite role</Label><Input id="invite-role" value={role} onChange={(event) => setRole(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="invite-ttl">Invite lifetime (hours)</Label><Input id="invite-ttl" type="number" min={1} max={720} value={ttlHours} onChange={(event) => setTtlHours(event.target.value)} /></div></>}
-            {action !== "create" && action !== "update" && action !== "member_add" && action !== "member_remove" && action !== "member_update_role" && action !== "invite" ? <p className="font-mono text-xs text-muted-foreground">{orgId}</p> : null}
-            {destructive && <label className="flex items-start gap-2 text-xs"><Checkbox checked={confirmed} onCheckedChange={(value) => setConfirmed(value === true)} /><span className="flex items-center gap-1"><ShieldAlert className="size-3" />I understand this access change is destructive.</span></label>}
+            {action === "member_add" && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="org-user-id">User ID</Label>
+                  <Input
+                    id="org-user-id"
+                    value={userId}
+                    onChange={(event) => setUserId(event.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="org-member-role">Role</Label>
+                  <Input
+                    id="org-member-role"
+                    value={role}
+                    onChange={(event) => setRole(event.target.value)}
+                  />
+                </div>
+              </>
+            )}
+            {(action === "member_remove" ||
+              action === "member_update_role") && (
+              <div className="space-y-2">
+                <Label htmlFor="org-member-id">Member ID</Label>
+                <Input
+                  id="org-member-id"
+                  value={memberId}
+                  onChange={(event) => setMemberId(event.target.value)}
+                />
+              </div>
+            )}
+            {action === "member_update_role" && (
+              <div className="space-y-2">
+                <Label htmlFor="org-role">Role</Label>
+                <Input
+                  id="org-role"
+                  value={role}
+                  onChange={(event) => setRole(event.target.value)}
+                />
+              </div>
+            )}
+            {action === "invite" && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="invite-role">Invite role</Label>
+                  <Input
+                    id="invite-role"
+                    value={role}
+                    onChange={(event) => setRole(event.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="invite-ttl">Invite lifetime (hours)</Label>
+                  <Input
+                    id="invite-ttl"
+                    type="number"
+                    min={1}
+                    max={720}
+                    value={ttlHours}
+                    onChange={(event) => setTtlHours(event.target.value)}
+                  />
+                </div>
+              </>
+            )}
+            {action !== "create" &&
+            action !== "update" &&
+            action !== "member_add" &&
+            action !== "member_remove" &&
+            action !== "member_update_role" &&
+            action !== "invite" ? (
+              <p className="font-mono text-xs text-muted-foreground">{orgId}</p>
+            ) : null}
+            {destructive && (
+              <label className="flex items-start gap-2 text-xs">
+                <Checkbox
+                  checked={confirmed}
+                  onCheckedChange={(value) => setConfirmed(value === true)}
+                />
+                <span className="flex items-center gap-1">
+                  <ShieldAlert className="size-3" />I understand this access
+                  change is destructive.
+                </span>
+              </label>
+            )}
           </div>
         ) : null}
-        {error ? <p role="alert" className="text-xs text-destructive">{error}</p> : null}
+        {error ? (
+          <p role="alert" className="text-xs text-destructive">
+            {error}
+          </p>
+        ) : null}
         <DialogFooter>
-          {resultId ? <Button type="button" onClick={() => { onComplete(resultId); close(); }}>Done</Button> : <><Button type="button" variant="outline" onClick={close}>Cancel</Button><Button type="button" variant={destructive ? "destructive" : "primary"} isLoading={pending} disabled={pending || (destructive && !confirmed)} onClick={() => void submit()}>{destructive ? "Confirm change" : "Continue"}</Button></>}
+          {resultId ? (
+            <Button
+              type="button"
+              onClick={() => {
+                onComplete(resultId);
+                close();
+              }}
+            >
+              Done
+            </Button>
+          ) : (
+            <>
+              <Button type="button" variant="outline" onClick={close}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant={destructive ? "destructive" : "primary"}
+                isLoading={pending}
+                disabled={pending || (destructive && !confirmed)}
+                onClick={() => void submit()}
+              >
+                {destructive ? "Confirm change" : "Continue"}
+              </Button>
+            </>
+          )}
         </DialogFooter>
       </DialogContent>
     </Dialog>
