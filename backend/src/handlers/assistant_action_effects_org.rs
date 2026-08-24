@@ -15,7 +15,7 @@ use axum::{
     routing::post,
 };
 use futures::TryStreamExt;
-use mongodb::bson::doc;
+use mongodb::bson::{Document, doc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -225,6 +225,16 @@ pub struct AssistantMfaSetupResponse {
     pub qr_code_url: Option<String>,
     pub recovery_values: Option<Vec<String>>,
     pub replayed: bool,
+    #[serde(default)]
+    pub one_time_material: OneTimeMaterialAvailability,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OneTimeMaterialAvailability {
+    #[default]
+    Delivered,
+    Unavailable,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -312,6 +322,8 @@ pub struct AssistantNotificationResponse {
 pub struct AssistantTelegramLinkResponse {
     pub resource: AssistantNotificationBindingResource,
     pub replayed: bool,
+    #[serde(default)]
+    pub one_time_material: OneTimeMaterialAvailability,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub link_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -324,6 +336,8 @@ pub struct AssistantTelegramLinkResponse {
 pub struct AssistantServiceAccountResponse {
     pub resource: AssistantServiceAccountResource,
     pub replayed: bool,
+    #[serde(default)]
+    pub one_time_material: OneTimeMaterialAvailability,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
 }
@@ -332,6 +346,8 @@ pub struct AssistantServiceAccountResponse {
 pub struct AssistantDeveloperAppResponse {
     pub resource: AssistantDeveloperAppResource,
     pub replayed: bool,
+    #[serde(default)]
+    pub one_time_material: OneTimeMaterialAvailability,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
 }
@@ -340,6 +356,8 @@ pub struct AssistantDeveloperAppResponse {
 pub struct AssistantExternalKeyResponse {
     pub resource: AssistantExternalKeyResource,
     pub replayed: bool,
+    #[serde(default)]
+    pub one_time_material: OneTimeMaterialAvailability,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -353,6 +371,8 @@ pub struct AssistantUserServiceResource {
 pub struct AssistantUserServiceResponse {
     pub resource: AssistantUserServiceResource,
     pub replayed: bool,
+    #[serde(default)]
+    pub one_time_material: OneTimeMaterialAvailability,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -1019,13 +1039,52 @@ async fn setup_account_mfa(
             .await?;
             let receipt = match receipt {
                 ReceiptOutcome::Reserved(receipt) => receipt,
-                ReceiptOutcome::Replay(_) => {
-                    return Err(AppError::Conflict(
-                        "MFA setup material was already displayed; start a new assistant action"
-                            .to_string(),
-                    ));
+                ReceiptOutcome::Replay(receipt) => {
+                    let factor = state
+                        .db
+                        .collection::<MfaFactor>(MFA_FACTORS)
+                        .find_one(doc! {
+                            "user_id": &user_id,
+                            "factor_type": "totp",
+                            "created_at": { "$gte": bson::DateTime::from_chrono(receipt.created_at) },
+                        })
+                        .await?;
+                    return Ok(Json(AssistantMfaSetupResponse {
+                        resource: AssistantAccountResource { user_id },
+                        stage: AssistantMfaSetupStage::Start,
+                        factor_id: factor.map(|factor| factor.id),
+                        setup_value: None,
+                        qr_code_url: None,
+                        recovery_values: None,
+                        replayed: true,
+                        one_time_material: OneTimeMaterialAvailability::Unavailable,
+                    }));
                 }
-                ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+                ReceiptOutcome::InProgress(receipt) => {
+                    let factor = state
+                        .db
+                        .collection::<MfaFactor>(MFA_FACTORS)
+                        .find_one(doc! {
+                            "user_id": &user_id,
+                            "factor_type": "totp",
+                            "created_at": { "$gte": bson::DateTime::from_chrono(receipt.created_at) },
+                        })
+                        .await?;
+                    let Some(factor) = factor else {
+                        return Err(in_progress_conflict());
+                    };
+                    mark_completed(&state.db, &receipt).await?;
+                    return Ok(Json(AssistantMfaSetupResponse {
+                        resource: AssistantAccountResource { user_id },
+                        stage: AssistantMfaSetupStage::Start,
+                        factor_id: Some(factor.id),
+                        setup_value: None,
+                        qr_code_url: None,
+                        recovery_values: None,
+                        replayed: true,
+                        one_time_material: OneTimeMaterialAvailability::Unavailable,
+                    }));
+                }
             };
             let Json(setup) = mfa::setup(State(state.clone()), auth_user, tele).await?;
             mark_completed(&state.db, &receipt).await?;
@@ -1037,6 +1096,7 @@ async fn setup_account_mfa(
                 qr_code_url: Some(setup.qr_code_url),
                 recovery_values: None,
                 replayed: false,
+                one_time_material: OneTimeMaterialAvailability::Delivered,
             }))
         }
         AssistantMfaSetupStage::Confirm => {
@@ -1094,6 +1154,7 @@ async fn setup_account_mfa(
                     qr_code_url: None,
                     recovery_values: None,
                     replayed: true,
+                    one_time_material: OneTimeMaterialAvailability::Unavailable,
                 })),
                 ReceiptOutcome::InProgress(receipt) => {
                     let user = require_user(&state, &user_id).await?;
@@ -1121,6 +1182,7 @@ async fn setup_account_mfa(
                         qr_code_url: None,
                         recovery_values: None,
                         replayed: true,
+                        one_time_material: OneTimeMaterialAvailability::Unavailable,
                     }))
                 }
                 ReceiptOutcome::Reserved(receipt) => {
@@ -1140,6 +1202,7 @@ async fn setup_account_mfa(
                         qr_code_url: None,
                         recovery_values: Some(confirmed.recovery_codes),
                         replayed: false,
+                        one_time_material: OneTimeMaterialAvailability::Delivered,
                     }))
                 }
             }
@@ -1636,6 +1699,19 @@ fn replayed_resource(outcome: &ReceiptOutcome) -> Option<(String, bool)> {
     }
 }
 
+async fn receipt_resource_exists(
+    state: &AppState,
+    collection: &str,
+    receipt: &crate::models::assistant_action_receipt::AssistantActionReceipt,
+) -> AppResult<bool> {
+    Ok(state
+        .db
+        .collection::<Document>(collection)
+        .find_one(doc! { "_id": &receipt.resource_id })
+        .await?
+        .is_some())
+}
+
 async fn create_org_action(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -1665,7 +1741,18 @@ async fn create_org_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            if !receipt_resource_exists(&state, USERS, &receipt).await? {
+                return Err(in_progress_conflict());
+            }
+            complete_wave4(&state, &receipt, &receipt.resource_id).await?;
+            return Ok(Json(AssistantOrgResponse {
+                resource: AssistantOrgResource {
+                    org_id: receipt.resource_id,
+                },
+                replayed: true,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let (_, Json(org)) = orgs::create_org(
@@ -2230,12 +2317,32 @@ async fn create_service_account_action(
                 service_account_id: id,
             },
             replayed,
+            one_time_material: OneTimeMaterialAvailability::Unavailable,
             client_secret: None,
         }));
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            if !receipt_resource_exists(
+                &state,
+                crate::models::service_account::COLLECTION_NAME,
+                &receipt,
+            )
+            .await?
+            {
+                return Err(in_progress_conflict());
+            }
+            mark_completed(&state.db, &receipt).await?;
+            return Ok(Json(AssistantServiceAccountResponse {
+                resource: AssistantServiceAccountResource {
+                    service_account_id: receipt.resource_id,
+                },
+                replayed: true,
+                one_time_material: OneTimeMaterialAvailability::Unavailable,
+                client_secret: None,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let Json(created) = admin_service_accounts::create_service_account(
@@ -2259,6 +2366,7 @@ async fn create_service_account_action(
             service_account_id: created.id,
         },
         replayed: false,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         client_secret: Some(created.client_secret),
     }))
 }
@@ -2294,6 +2402,7 @@ async fn update_service_account_action(
                 service_account_id: id,
             },
             replayed,
+            one_time_material: OneTimeMaterialAvailability::Unavailable,
             client_secret: None,
         }));
     }
@@ -2320,6 +2429,7 @@ async fn update_service_account_action(
                     service_account_id: id,
                 },
                 replayed: true,
+                one_time_material: OneTimeMaterialAvailability::Unavailable,
                 client_secret: None,
             }));
         }
@@ -2346,6 +2456,7 @@ async fn update_service_account_action(
             service_account_id: id,
         },
         replayed: false,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         client_secret: None,
     }))
 }
@@ -2381,6 +2492,7 @@ async fn delete_service_account_action(
                 service_account_id: id,
             },
             replayed,
+            one_time_material: OneTimeMaterialAvailability::Unavailable,
             client_secret: None,
         }));
     }
@@ -2396,6 +2508,7 @@ async fn delete_service_account_action(
                     service_account_id: id,
                 },
                 replayed: true,
+                one_time_material: OneTimeMaterialAvailability::Unavailable,
                 client_secret: None,
             }));
         }
@@ -2415,6 +2528,7 @@ async fn delete_service_account_action(
             service_account_id: id,
         },
         replayed: false,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         client_secret: None,
     }))
 }
@@ -2453,6 +2567,7 @@ async fn rotate_service_account_secret_action(
                 service_account_id: id,
             },
             replayed,
+            one_time_material: OneTimeMaterialAvailability::Unavailable,
             client_secret: None,
         }));
     }
@@ -2466,7 +2581,21 @@ async fn rotate_service_account_secret_action(
             }
             receipt
         }
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let current = service_account_service::get_service_account(&state.db, &id).await?;
+            if !updated_since_receipt(current.updated_at, &receipt) {
+                return Err(in_progress_conflict());
+            }
+            mark_completed(&state.db, &receipt).await?;
+            return Ok(Json(AssistantServiceAccountResponse {
+                resource: AssistantServiceAccountResource {
+                    service_account_id: id,
+                },
+                replayed: true,
+                one_time_material: OneTimeMaterialAvailability::Unavailable,
+                client_secret: None,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let rotated = admin_service_accounts::rotate_secret(
@@ -2484,6 +2613,7 @@ async fn rotate_service_account_secret_action(
             service_account_id: id,
         },
         replayed: false,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         client_secret: Some(rotated_secret),
     }))
 }
@@ -2519,6 +2649,7 @@ async fn revoke_service_account_tokens_action(
                 service_account_id: id,
             },
             replayed,
+            one_time_material: OneTimeMaterialAvailability::Unavailable,
             client_secret: None,
         }));
     }
@@ -2541,6 +2672,7 @@ async fn revoke_service_account_tokens_action(
                     service_account_id: id,
                 },
                 replayed: true,
+                one_time_material: OneTimeMaterialAvailability::Unavailable,
                 client_secret: None,
             }));
         }
@@ -2559,6 +2691,7 @@ async fn revoke_service_account_tokens_action(
             service_account_id: id,
         },
         replayed: false,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         client_secret: None,
     }))
 }
@@ -2587,12 +2720,32 @@ async fn create_developer_app_action(
         return Ok(Json(AssistantDeveloperAppResponse {
             resource: AssistantDeveloperAppResource { client_id: id },
             replayed,
+            one_time_material: OneTimeMaterialAvailability::Unavailable,
             client_secret: None,
         }));
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            if !receipt_resource_exists(
+                &state,
+                crate::models::oauth_client::COLLECTION_NAME,
+                &receipt,
+            )
+            .await?
+            {
+                return Err(in_progress_conflict());
+            }
+            mark_completed(&state.db, &receipt).await?;
+            return Ok(Json(AssistantDeveloperAppResponse {
+                resource: AssistantDeveloperAppResource {
+                    client_id: receipt.resource_id,
+                },
+                replayed: true,
+                one_time_material: OneTimeMaterialAvailability::Unavailable,
+                client_secret: None,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let Json(created) = developer_apps::create_my_oauth_client(
@@ -2619,6 +2772,7 @@ async fn create_developer_app_action(
             client_id: created.id,
         },
         replayed: false,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         client_secret: created.client_secret,
     }))
 }
@@ -2650,6 +2804,7 @@ async fn update_developer_app_action(
         return Ok(Json(AssistantDeveloperAppResponse {
             resource: AssistantDeveloperAppResource { client_id: id },
             replayed,
+            one_time_material: OneTimeMaterialAvailability::Unavailable,
             client_secret: None,
         }));
     }
@@ -2675,6 +2830,7 @@ async fn update_developer_app_action(
             return Ok(Json(AssistantDeveloperAppResponse {
                 resource: AssistantDeveloperAppResource { client_id: id },
                 replayed: true,
+                one_time_material: OneTimeMaterialAvailability::Unavailable,
                 client_secret: None,
             }));
         }
@@ -2700,6 +2856,7 @@ async fn update_developer_app_action(
     Ok(Json(AssistantDeveloperAppResponse {
         resource: AssistantDeveloperAppResource { client_id: id },
         replayed: false,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         client_secret: None,
     }))
 }
@@ -2731,6 +2888,7 @@ async fn delete_developer_app_action(
         return Ok(Json(AssistantDeveloperAppResponse {
             resource: AssistantDeveloperAppResource { client_id: id },
             replayed,
+            one_time_material: OneTimeMaterialAvailability::Unavailable,
             client_secret: None,
         }));
     }
@@ -2745,6 +2903,7 @@ async fn delete_developer_app_action(
             return Ok(Json(AssistantDeveloperAppResponse {
                 resource: AssistantDeveloperAppResource { client_id: id },
                 replayed: true,
+                one_time_material: OneTimeMaterialAvailability::Unavailable,
                 client_secret: None,
             }));
         }
@@ -2757,6 +2916,7 @@ async fn delete_developer_app_action(
     Ok(Json(AssistantDeveloperAppResponse {
         resource: AssistantDeveloperAppResource { client_id: id },
         replayed: false,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         client_secret: None,
     }))
 }
@@ -2791,6 +2951,7 @@ async fn rotate_developer_app_secret_action(
         return Ok(Json(AssistantDeveloperAppResponse {
             resource: AssistantDeveloperAppResource { client_id: id },
             replayed,
+            one_time_material: OneTimeMaterialAvailability::Unavailable,
             client_secret: None,
         }));
     }
@@ -2805,7 +2966,19 @@ async fn rotate_developer_app_secret_action(
             }
             receipt
         }
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let current = crate::services::oauth_client_service::get_client(&state.db, &id).await?;
+            if !updated_since_receipt(current.updated_at, &receipt) {
+                return Err(in_progress_conflict());
+            }
+            mark_completed(&state.db, &receipt).await?;
+            return Ok(Json(AssistantDeveloperAppResponse {
+                resource: AssistantDeveloperAppResource { client_id: id },
+                replayed: true,
+                one_time_material: OneTimeMaterialAvailability::Unavailable,
+                client_secret: None,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let rotated = developer_apps::rotate_my_oauth_client_secret(
@@ -2820,6 +2993,7 @@ async fn rotate_developer_app_secret_action(
     Ok(Json(AssistantDeveloperAppResponse {
         resource: AssistantDeveloperAppResource { client_id: id },
         replayed: false,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         client_secret: Some(rotated_secret),
     }))
 }
@@ -2927,6 +3101,7 @@ async fn link_telegram_action(
         return Ok(Json(AssistantTelegramLinkResponse {
             resource: AssistantNotificationBindingResource { binding_id: id },
             replayed,
+            one_time_material: OneTimeMaterialAvailability::Unavailable,
             link_code: None,
             bot_username: None,
             expires_in_secs: None,
@@ -2934,7 +3109,26 @@ async fn link_telegram_action(
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            let Json(settings) =
+                notifications::get_settings(State(state.clone()), auth_user.clone()).await?;
+            if !settings.telegram_link_pending
+                || !response_updated_since_receipt(&settings.updated_at, &receipt)?
+            {
+                return Err(in_progress_conflict());
+            }
+            mark_completed(&state.db, &receipt).await?;
+            return Ok(Json(AssistantTelegramLinkResponse {
+                resource: AssistantNotificationBindingResource {
+                    binding_id: settings.id,
+                },
+                replayed: true,
+                one_time_material: OneTimeMaterialAvailability::Unavailable,
+                link_code: None,
+                bot_username: None,
+                expires_in_secs: None,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let Json(link) = notifications::telegram_link(State(state.clone()), auth_user.clone()).await?;
@@ -2945,6 +3139,7 @@ async fn link_telegram_action(
             binding_id: settings.id,
         },
         replayed: false,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         link_code: Some(link.link_code),
         bot_username: Some(link.bot_username),
         expires_in_secs: Some(link.expires_in_secs),
@@ -3039,11 +3234,30 @@ async fn add_gcp_service_account_action(
                 external_key_id: id,
             },
             replayed,
+            one_time_material: OneTimeMaterialAvailability::Unavailable,
         }));
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            if !receipt_resource_exists(
+                &state,
+                crate::models::user_api_key::COLLECTION_NAME,
+                &receipt,
+            )
+            .await?
+            {
+                return Err(in_progress_conflict());
+            }
+            mark_completed(&state.db, &receipt).await?;
+            return Ok(Json(AssistantExternalKeyResponse {
+                resource: AssistantExternalKeyResource {
+                    external_key_id: receipt.resource_id,
+                },
+                replayed: true,
+                one_time_material: OneTimeMaterialAvailability::Unavailable,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let (_, Json(created)) = user_api_keys_external::create_gcp_service_account_key(
@@ -3064,6 +3278,7 @@ async fn add_gcp_service_account_action(
             external_key_id: created.id,
         },
         replayed: false,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
     }))
 }
 
@@ -3108,11 +3323,24 @@ async fn connect_openclaw_action(
                 user_service_id: id,
             },
             replayed,
+            one_time_material: OneTimeMaterialAvailability::Unavailable,
         }));
     }
     let receipt = match outcome {
         ReceiptOutcome::Reserved(r) => r,
-        ReceiptOutcome::InProgress(_) => return Err(in_progress_conflict()),
+        ReceiptOutcome::InProgress(receipt) => {
+            if !receipt_resource_exists(&state, USER_SERVICES, &receipt).await? {
+                return Err(in_progress_conflict());
+            }
+            mark_completed(&state.db, &receipt).await?;
+            return Ok(Json(AssistantUserServiceResponse {
+                resource: AssistantUserServiceResource {
+                    user_service_id: receipt.resource_id,
+                },
+                replayed: true,
+                one_time_material: OneTimeMaterialAvailability::Unavailable,
+            }));
+        }
         ReceiptOutcome::Replay(_) => unreachable!(),
     };
     let Json(created) = keys::create_key(
@@ -3158,6 +3386,7 @@ async fn connect_openclaw_action(
             user_service_id: created.id,
         },
         replayed: false,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
     }))
 }
 
@@ -3850,10 +4079,15 @@ mod wave4_effect_tests {
             Json(service_account_rotate()),
         )
         .await;
-        assert!(matches!(
-            interrupted_service_account_retry,
-            Err(AppError::Conflict(_))
-        ));
+        let interrupted_service_account_retry = interrupted_service_account_retry
+            .expect("resume committed service-account rotation")
+            .0;
+        assert!(interrupted_service_account_retry.replayed);
+        assert_eq!(
+            interrupted_service_account_retry.one_time_material,
+            OneTimeMaterialAvailability::Unavailable
+        );
+        assert!(interrupted_service_account_retry.client_secret.is_none());
         let service_account_after_interrupted_retry =
             service_account_service::get_service_account(&db, &service_account_id)
                 .await
@@ -3862,6 +4096,18 @@ mod wave4_effect_tests {
             service_account_after_interrupted_retry.client_secret_hash,
             rotated_service_account_hash,
             "a pending retry must not rotate the secret again"
+        );
+        let resumed_receipt = receipts
+            .find_one(doc! {
+                "action": SERVICE_ACCOUNT_ROTATE_SECRET_ACTION,
+                "action_request_id": "service-account-rotate-once",
+            })
+            .await
+            .expect("load resumed service-account rotation receipt")
+            .expect("resumed service-account rotation receipt exists");
+        assert_eq!(
+            resumed_receipt.status,
+            AssistantActionReceiptStatus::Completed
         );
 
         let stale_service_account_rotation = rotate_service_account_secret_action(
