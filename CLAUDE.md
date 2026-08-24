@@ -334,6 +334,8 @@ SA_TOKEN_TTL_SECS=3600              # Service account tokens
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
 RATE_LIMIT_BURST=30
+PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND=0  # Sustained per-user rate for platform-credentialed services; 0 (default) disables
+PLATFORM_SERVICE_RATE_LIMIT_BURST=10      # Per-user burst capacity for platform-credentialed services
 TRUSTED_PROXY_IPS=                  # Reverse-proxy IPs whose X-Forwarded-For/X-Real-IP are trusted for
                                     # per-IP rate-limit keying. Empty = trust only the TCP peer. Only list
                                     # proxies configured to overwrite client-supplied forwarded headers.

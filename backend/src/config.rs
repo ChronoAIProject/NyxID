@@ -96,6 +96,11 @@ pub struct AppConfig {
     pub rate_limit_per_second: u64,
     /// Max burst size for rate limiter
     pub rate_limit_burst: u32,
+    /// Sustained per-user request rate for platform-credentialed services.
+    /// Zero disables this limiter.
+    pub platform_service_rate_limit_per_second: u32,
+    /// Burst capacity for platform-credentialed service requests per user.
+    pub platform_service_rate_limit_burst: u32,
     /// Allowlist of reverse-proxy IPs whose `X-Forwarded-For` /
     /// `X-Real-IP` headers may be trusted for rate-limit keying.
     /// When the TCP peer is not in this list, forwarded headers are
@@ -446,6 +451,14 @@ impl std::fmt::Debug for AppConfig {
             )
             .field("rate_limit_per_second", &self.rate_limit_per_second)
             .field("rate_limit_burst", &self.rate_limit_burst)
+            .field(
+                "platform_service_rate_limit_per_second",
+                &self.platform_service_rate_limit_per_second,
+            )
+            .field(
+                "platform_service_rate_limit_burst",
+                &self.platform_service_rate_limit_burst,
+            )
             .field("trusted_proxy_ips", &self.trusted_proxy_ips)
             .field("mtls_client_cert_header", &self.mtls_client_cert_header)
             .field(
@@ -851,6 +864,19 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            // Default 0 = disabled. Enabling a per-user cap on a shared platform
+            // credential is a deliberate operator decision made after observing real
+            // traffic; defaulting it on would throttle existing callers at deploy.
+            platform_service_rate_limit_per_second: env::var(
+                "PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND",
+            )
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+            platform_service_rate_limit_burst: env::var("PLATFORM_SERVICE_RATE_LIMIT_BURST")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10),
             trusted_proxy_ips: parse_trusted_proxy_ips(env::var("TRUSTED_PROXY_IPS").ok()),
             mtls_client_cert_header: env::var("MTLS_CLIENT_CERT_HEADER")
                 .ok()
@@ -1444,6 +1470,8 @@ mod tests {
             encryption_key_previous: None,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
+            platform_service_rate_limit_per_second: 2,
+            platform_service_rate_limit_burst: 10,
             trusted_proxy_ips: vec![],
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,

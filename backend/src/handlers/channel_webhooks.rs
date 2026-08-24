@@ -688,6 +688,8 @@ mod tests {
             encryption_key_previous: None,
             rate_limit_per_second: 10,
             rate_limit_burst: 30,
+            platform_service_rate_limit_per_second: 2,
+            platform_service_rate_limit_burst: 10,
             trusted_proxy_ips: vec![],
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,

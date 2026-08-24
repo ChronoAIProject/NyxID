@@ -8466,6 +8466,13 @@ mod proxy_resolution_integration_tests {
         service.base_url = format!("http://{addr}");
         service.service_category = "internal".to_string();
         service.auth_method = "bearer".to_string();
+        service.proxy_operation_policy =
+            Some(crate::models::downstream_service::ProxyOperationPolicy {
+                rules: vec![crate::models::downstream_service::ProxyOperationRule {
+                    method: "GET".to_string(),
+                    path_template: "/error".to_string(),
+                }],
+            });
         service.credential_encrypted = encryption_keys
             .encrypt(b"test-master-credential")
             .await

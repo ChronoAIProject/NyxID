@@ -402,14 +402,17 @@ mod tests {
             .expect("firecrawl overlay registered");
 
         assert_eq!(value["info"]["title"], "Firecrawl API");
-        assert_eq!(value["paths"]["/v2/agent"]["post"]["operationId"], "agent");
         assert_eq!(
-            value["paths"]["/v2/agent"]["post"]["x-aevatar-tool"]["name"],
-            "agent"
+            value["paths"]["/v2/scrape"]["post"]["operationId"],
+            "scrape"
         );
         assert_eq!(
-            value["paths"]["/v2/agent/{id}"]["get"]["x-aevatar-tool"]["readOnly"],
-            true
+            value["paths"]["/v2/scrape"]["post"]["x-aevatar-tool"]["name"],
+            "scrape"
+        );
+        assert_eq!(
+            value["paths"]["/v2/search"]["post"]["x-aevatar-tool"]["name"],
+            "search"
         );
     }
 

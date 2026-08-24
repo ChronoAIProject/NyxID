@@ -447,4 +447,74 @@ mod tests {
             .expect("list endpoints again");
         assert_eq!(endpoints.len(), after.len());
     }
+
+    #[tokio::test]
+    async fn additive_sync_preserves_operator_deactivation() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("catalog_spec_sync_deactivation").await
+        else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = crate::test_utils::test_encryption_keys();
+        crate::services::provider_service::seed_default_providers(&db, &enc)
+            .await
+            .expect("seed providers");
+        crate::services::provider_service::seed_default_services(&db, &enc)
+            .await
+            .expect("seed services");
+
+        sync_seeded_service_endpoints(&db)
+            .await
+            .expect("initial endpoint sync");
+        let service = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "slug": "api-twitter" })
+            .await
+            .expect("query service")
+            .expect("api-twitter seeded");
+        let endpoint = db
+            .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+                crate::models::service_endpoint::COLLECTION_NAME,
+            )
+            .find_one(doc! {
+                "service_id": &service.id,
+                "name": "search_recent_tweets",
+            })
+            .await
+            .expect("query endpoint")
+            .expect("search endpoint seeded");
+
+        let old_updated_at = chrono::Utc::now() - chrono::Duration::days(1);
+        db.collection::<crate::models::service_endpoint::ServiceEndpoint>(
+            crate::models::service_endpoint::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! { "_id": &endpoint.id },
+            doc! {
+                "$set": {
+                    "is_active": false,
+                    "path": "/operator-stale-definition",
+                    "updated_at": mongodb::bson::DateTime::from_chrono(old_updated_at),
+                }
+            },
+        )
+        .await
+        .expect("deactivate endpoint");
+
+        sync_seeded_service_endpoints(&db)
+            .await
+            .expect("second endpoint sync");
+        let refreshed = db
+            .collection::<crate::models::service_endpoint::ServiceEndpoint>(
+                crate::models::service_endpoint::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": &endpoint.id })
+            .await
+            .expect("query refreshed endpoint")
+            .expect("refreshed endpoint");
+        assert!(!refreshed.is_active);
+        assert_eq!(refreshed.path, "/tweets/search/recent");
+        assert!(refreshed.updated_at > old_updated_at);
+    }
 }

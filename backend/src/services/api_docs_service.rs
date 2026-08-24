@@ -1084,34 +1084,14 @@ mod tests {
     }
 
     #[test]
-    fn firecrawl_overlay_declares_aevatar_agent_operations() {
+    fn firecrawl_overlay_declares_scrape_and_search_operations() {
         let spec = crate::services::catalog_spec_registry::spec_for_key("firecrawl")
             .expect("firecrawl overlay registered");
         let spec = spec.as_ref();
         assert_eq!(spec["openapi"], "3.1.0");
         assert_eq!(spec["servers"][0]["url"], "https://api.firecrawl.dev");
-
-        let submit = &spec["paths"]["/v2/agent"]["post"];
-        assert_eq!(submit["operationId"], "agent");
-        assert_eq!(submit["x-aevatar-tool"]["name"], "agent");
-        assert_eq!(submit["x-aevatar-tool"]["readOnly"], false);
-
-        // Schemas are inlined (no $ref): aevatar workflow admission rejects
-        // unresolved refs, see NyxID#1296.
-        let submit_schema = &submit["requestBody"]["content"]["application/json"]["schema"];
-        assert!(submit_schema.get("$ref").is_none());
-        assert_eq!(submit_schema["required"][0], "prompt");
-        assert!(submit_schema["properties"].get("urls").is_some());
-        assert!(submit_schema["properties"].get("schema").is_some());
-        assert!(submit_schema["properties"].get("model").is_some());
-        assert!(submit_schema["properties"].get("maxCredits").is_some());
-
-        let poll = &spec["paths"]["/v2/agent/{id}"]["get"];
-        assert_eq!(poll["operationId"], "agent_status");
-        assert_eq!(poll["x-aevatar-tool"]["name"], "agent_status");
-        assert_eq!(poll["x-aevatar-tool"]["readOnly"], true);
-        assert_eq!(poll["parameters"][0]["name"], "id");
-        assert_eq!(poll["parameters"][0]["required"], true);
+        assert_eq!(spec["paths"]["/v2/scrape"]["post"]["operationId"], "scrape");
+        assert_eq!(spec["paths"]["/v2/search"]["post"]["operationId"], "search");
     }
 
     #[tokio::test]
@@ -1122,7 +1102,7 @@ mod tests {
             fetch_spec_json("http://localhost:3001/api/v1/catalog-specs/firecrawl/openapi.json")
                 .await
                 .expect("built-in Firecrawl catalog spec");
-        assert_eq!(spec["paths"]["/v2/agent"]["post"]["operationId"], "agent");
+        assert_eq!(spec["paths"]["/v2/scrape"]["post"]["operationId"], "scrape");
 
         let err = fetch_spec_json("http://localhost:3001/openapi.json")
             .await
