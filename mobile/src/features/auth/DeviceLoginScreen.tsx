@@ -12,18 +12,13 @@ import {
 } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import {
-  ChevronLeft,
-  ScanQrCode,
-  ShieldCheck,
-  ShieldX,
-  TriangleAlert,
-  X,
-} from "lucide-react-native";
+import { ChevronLeft, Info, ScanQrCode, X } from "lucide-react-native";
 
 import type { RootStackParamList } from "../../app/AppNavigator";
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
+import { MagicKeyIllustration } from "../../components/icons/empty-state/MagicKeyIllustration";
+import { RoadBarrierIllustration } from "../../components/icons/empty-state/RoadBarrierIllustration";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { mobileApi } from "../../lib/api/mobileApi";
 import type { AuthDevicePreview } from "../../lib/api/authDeviceApi";
@@ -41,6 +36,9 @@ type Props = NativeStackScreenProps<RootStackParamList, "DeviceLogin">;
 type TerminalState = "approved" | "denied" | null;
 
 const ACTION_THROTTLE_MS = 750;
+const COMPLETION_MARK_SIZE = spacing.huge * 7;
+// Design-selected so completion marks stay clear without overpowering the title.
+const COMPLETION_MARK_OPACITY = 0.85;
 
 function formatTimestamp(value: string): string {
   const parsed = new Date(value);
@@ -392,24 +390,19 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     return (
       <ScreenContainer>
         <View style={styles.terminalScreen}>
-          <View
-            style={[
-              styles.terminalIcon,
-              approved ? styles.successIcon : styles.deniedIcon,
-            ]}
-          >
-            {approved ? (
-              <ShieldCheck
-                size={spacing.huge * 2 + spacing.xs}
-                color={colors.success}
-              />
-            ) : (
-              <ShieldX
-                size={spacing.huge * 2 + spacing.xs}
-                color={colors.danger}
-              />
-            )}
-          </View>
+          {approved ? (
+            <MagicKeyIllustration
+              size={COMPLETION_MARK_SIZE}
+              color={colors.success}
+              opacity={COMPLETION_MARK_OPACITY}
+            />
+          ) : (
+            <RoadBarrierIllustration
+              size={COMPLETION_MARK_SIZE}
+              color={colors.danger}
+              opacity={COMPLETION_MARK_OPACITY}
+            />
+          )}
           <Text style={styles.terminalTitle}>
             {approved ? "Login approved" : "Request denied"}
           </Text>
@@ -444,10 +437,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
             </Pressable>
             <Text style={styles.title}>Approve device login</Text>
           </View>
-          <Text style={styles.subtitle}>
-            Review where the request started before allowing another device to
-            sign in.
-          </Text>
+          <Text style={styles.subtitle}>Review the request details.</Text>
 
           {!preview ? (
             <View style={styles.inputSection}>
@@ -504,19 +494,6 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
             </View>
           ) : (
             <View style={styles.previewSection}>
-              <View style={styles.warningBanner}>
-                <View style={styles.warningIcon}>
-                  <TriangleAlert
-                    size={spacing.xxxl}
-                    color={colors.warningTone.text}
-                  />
-                </View>
-                <Text style={styles.warningText}>
-                  Reject this request if you do not recognize the device, IP
-                  address, or time.
-                </Text>
-              </View>
-
               <View style={styles.detailPanel}>
                 {loginCode ? (
                   <DetailRow
@@ -548,6 +525,20 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   }
                   styles={styles}
                 />
+              </View>
+
+              <View style={styles.caution}>
+                <Info
+                  size={spacing.xl}
+                  color={colors.textMuted}
+                  style={styles.cautionIcon}
+                />
+                <Text style={styles.cautionText}>
+                  {"Only approve if you started this sign-in. "}
+                  <Text style={styles.cautionDanger}>
+                    If anything looks unfamiliar, reject it.
+                  </Text>
+                </Text>
               </View>
 
               {isAuthenticated ? (
