@@ -22,7 +22,11 @@ import {
   SECRET_VALUE_PATTERN,
 } from "./assistant-action-dialog-utils";
 
-const serviceAccountActions = [
+// Exported as the single source of truth for the action union below.
+// It is a real runtime value, not just a type: callers can validate an
+// incoming action against it rather than trusting the compile-time type,
+// which matters because the action is interpolated into the effect path.
+export const serviceAccountActions = [
   "create",
   "update",
   "delete",
