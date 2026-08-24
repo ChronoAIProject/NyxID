@@ -483,6 +483,7 @@ export function NotificationSettingsPage() {
               Boolean(settings?.push_enabled)
             }
             approvalEnabled={Boolean(settings?.approval_required)}
+            approvalSuspended={Boolean(settings?.approval_suspended)}
           />
 
           {/* Telegram Connection Card */}

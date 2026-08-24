@@ -20,6 +20,14 @@ pub struct NotificationResult {
     pub telegram_message_id: Option<i64>,
 }
 
+/// Return whether at least one notification channel can currently receive an
+/// approval request. This is a delivery fact, separate from the user's stored
+/// approval preference.
+pub fn has_active_notification_channel(channel: &NotificationChannel) -> bool {
+    (channel.telegram_enabled && channel.telegram_chat_id.is_some())
+        || (channel.push_enabled && !channel.push_devices.is_empty())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeviceNotificationTemplate {
     BindSuccess,
@@ -1040,27 +1048,6 @@ async fn remove_stale_device_tokens(db: &Database, channel_id: &str, device_ids:
                         },
                     )
                     .await;
-
-                let _ = db
-                    .collection::<NotificationChannel>(COLLECTION_NAME)
-                    .update_one(
-                        doc! {
-                            "_id": channel_id,
-                            "approval_required": true,
-                            "push_devices.0": { "$exists": false },
-                            "$or": [
-                                { "telegram_enabled": { "$ne": true } },
-                                { "telegram_chat_id": bson::Bson::Null },
-                            ],
-                        },
-                        doc! {
-                            "$set": {
-                                "approval_required": false,
-                                "updated_at": bson::DateTime::from_chrono(chrono::Utc::now()),
-                            }
-                        },
-                    )
-                    .await;
             }
         }
         Err(e) => tracing::warn!("Failed to remove stale device tokens: {e}"),
@@ -1491,6 +1478,43 @@ mod tests {
         let updated = get_or_create_channel(&db, &user_id).await.unwrap();
         assert!(updated.push_devices.is_empty());
         assert!(!updated.push_enabled);
+    }
+
+    #[tokio::test]
+    async fn remove_stale_device_tokens_preserves_approval_preference() {
+        let Some(db) = connect_test_database("notif_svc_rm_stale_approval").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let channel = get_or_create_channel(&db, &user_id).await.unwrap();
+        let device = make_device("dev-only", "fcm", "token-only");
+        let device_doc = bson::to_bson(&device).unwrap();
+        db.collection::<NotificationChannel>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &channel.id },
+                doc! {
+                    "$set": {
+                        "approval_required": true,
+                        "push_enabled": true,
+                        "push_devices": [device_doc],
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        remove_stale_device_tokens(&db, &channel.id, &["dev-only".to_string()]).await;
+
+        let updated = get_or_create_channel(&db, &user_id).await.unwrap();
+        assert!(updated.approval_required);
+        assert!(updated.push_devices.is_empty());
+        assert!(!updated.push_enabled);
+        assert!(
+            !crate::services::approval_service::user_requires_approval(&db, &user_id)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]

@@ -39,7 +39,8 @@ pub async fn resolve_approval_mode(
     Ok(per_service.map(|c| c.approval_mode).unwrap_or_default())
 }
 
-/// Check whether a user has the global approval system enabled.
+/// Check whether the user's global approval preference is currently enforceable.
+/// A stored opt-in is suspended while the user has no active notification channel.
 pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<bool> {
     Ok(user_global_approval_setting(db, user_id)
         .await?
@@ -62,7 +63,7 @@ pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<b
 ///    `primary_owner_user_id` is the org's user_id; grants live under the
 ///    org so the next call from the same actor reuses it.
 /// 2. Otherwise -- personal service, OR org-owned without an org policy --
-///    the actor's per-service or global setting applies (existing behavior).
+///    the actor's per-service config or active global setting applies.
 ///    The request `primary_owner_user_id` is the actor.
 /// 3. For an auto-connected `UserService`, the global setting is not an
 ///    implicit fallback. An explicit actor/org config still wins as above.
@@ -303,7 +304,8 @@ async fn user_global_approval_setting(db: &Database, user_id: &str) -> AppResult
         .collection::<NotificationChannel>(CHANNELS)
         .find_one(doc! { "user_id": user_id })
         .await?;
-    Ok(channel.map(|c| c.approval_required))
+    Ok(channel
+        .map(|c| c.approval_required && notification_service::has_active_notification_channel(&c)))
 }
 
 /// Pure resolution helper kept for unit-testable semantics. Used to be the
@@ -2596,9 +2598,9 @@ mod tests {
         NotificationChannel {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
-            telegram_chat_id: None,
-            telegram_username: None,
-            telegram_enabled: false,
+            telegram_chat_id: Some(1234),
+            telegram_username: Some("test".to_string()),
+            telegram_enabled: true,
             telegram_link_code: None,
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 30,
@@ -2761,6 +2763,75 @@ mod tests {
 
         let result = user_requires_approval(&db, &user_id).await.unwrap();
         assert!(result);
+    }
+
+    #[tokio::test]
+    async fn suspended_global_approval_fails_open_and_resumes_when_channel_returns() {
+        let Some(db) = connect_test_database("appr_svc_suspended_global").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let mut channel = make_channel(&user_id, true);
+        channel.telegram_chat_id = None;
+        channel.telegram_username = None;
+        channel.telegram_enabled = false;
+        insert_channel(&db, &channel).await;
+
+        let operation = test_operation();
+        let suspended = evaluate_and_check(
+            &db,
+            &user_id,
+            &user_id,
+            &service_id,
+            &operation,
+            Some("api_key"),
+            "agent-1",
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            suspended,
+            ApprovalOutcome::Allowed { required: false }
+        ));
+        assert_eq!(
+            db.collection::<ApprovalRequest>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+
+        db.collection::<NotificationChannel>(CHANNELS)
+            .update_one(
+                doc! { "_id": &channel.id },
+                doc! {
+                    "$set": {
+                        "telegram_enabled": true,
+                        "telegram_chat_id": 1234_i64,
+                    }
+                },
+            )
+            .await
+            .unwrap();
+
+        let resumed = evaluate_and_check(
+            &db,
+            &user_id,
+            &user_id,
+            &service_id,
+            &operation,
+            Some("api_key"),
+            "agent-1",
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(resumed, ApprovalOutcome::NeedsApproval(_)));
     }
 
     // --- check_approval ---
@@ -3518,7 +3589,11 @@ mod tests {
             return;
         };
         let actor_id = uuid::Uuid::new_v4().to_string();
-        insert_channel(&db, &make_channel(&actor_id, true)).await;
+        let mut suspended_channel = make_channel(&actor_id, true);
+        suspended_channel.telegram_chat_id = None;
+        suspended_channel.telegram_username = None;
+        suspended_channel.telegram_enabled = false;
+        insert_channel(&db, &suspended_channel).await;
 
         let cases = [
             (false, None, ApprovalEffect::AutoAllow, false),
