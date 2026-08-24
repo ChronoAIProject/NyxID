@@ -1,8 +1,14 @@
-use std::sync::{Arc, OnceLock, atomic::AtomicUsize};
-use std::time::Duration;
+use std::collections::{HashMap, HashSet};
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
+};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
-use mongodb::bson::doc;
+use futures::TryStreamExt;
+use mongodb::bson::{Document, doc};
 use uuid::Uuid;
 
 use crate::AppState;
@@ -28,9 +34,74 @@ use crate::services::provider_token_exchange_service::TokenExchangeCache;
 use crate::services::ssh_service::SshSessionManager;
 
 const TEST_DB_NAME_PREFIX: &str = "nyxid_test_";
-const TEST_DB_UUID_LEN: usize = 36;
-const MAX_TEST_DB_PREFIX_LEN: usize = 63 - TEST_DB_NAME_PREFIX.len() - 1 - TEST_DB_UUID_LEN;
+const TEST_DB_MAX_NAME_LEN: usize = 63;
+const TEST_DB_CREATED_AT_HEX_LEN: usize = 16;
+const TEST_DB_RUN_ID_HEX_LEN: usize = 16;
+const TEST_DB_U32_HEX_LEN: usize = 8;
+const TEST_DB_MANAGED_SEPARATOR_COUNT: usize = 3;
+const TEST_DB_MANAGED_FIELDS_LEN: usize = TEST_DB_CREATED_AT_HEX_LEN
+    + TEST_DB_RUN_ID_HEX_LEN
+    + TEST_DB_U32_HEX_LEN
+    + TEST_DB_MANAGED_SEPARATOR_COUNT;
+const MAX_TEST_DB_PREFIX_LEN: usize =
+    TEST_DB_MAX_NAME_LEN - TEST_DB_NAME_PREFIX.len() - TEST_DB_MANAGED_FIELDS_LEN;
+const MAX_LEGACY_TEST_DB_PREFIX_LEN: usize =
+    TEST_DB_MAX_NAME_LEN - TEST_DB_NAME_PREFIX.len() - 1 - 36;
 const TEST_DATABASE_URL_ENV: &str = "NYXID_TEST_DATABASE_URL";
+const TEST_DB_RUN_LEASE: Duration = Duration::from_secs(15 * 60);
+const TEST_DB_RUN_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+const MANAGED_TEST_DB_MIN_AGE: Duration = Duration::from_secs(60 * 60);
+const LEGACY_TEST_DB_QUARANTINE: Duration = Duration::from_secs(24 * 60 * 60);
+const STALE_TEST_DB_LIST_TIMEOUT: Duration = Duration::from_secs(5);
+const STALE_TEST_DB_METADATA_TIMEOUT: Duration = Duration::from_secs(5);
+const STALE_TEST_DB_DROP_TIMEOUT: Duration = Duration::from_secs(3);
+// A stale-drop claim fences producer renewal across the final lease check and
+// bounded dropDatabase call. The lease is deliberately much longer than the
+// drop timeout so ordinary scheduler stalls cannot reopen that race; expiry is
+// only crash recovery for a sweeper that disappears while holding the claim.
+const STALE_TEST_DB_DROP_CLAIM_LEASE: Duration = Duration::from_secs(30);
+const STALE_TEST_DB_SWEEP_BUDGET: Duration = Duration::from_secs(45);
+const STALE_TEST_DB_SWEEP_LEASE: Duration = Duration::from_secs(90);
+const STALE_TEST_DB_SWEEP_COOLDOWN: Duration = Duration::from_secs(30);
+const TEST_DB_EXIT_CLEANUP_BUDGET: Duration = Duration::from_secs(30);
+const TEST_DB_CLEANUP_CLIENT_PARSE_TIMEOUT: Duration = Duration::from_secs(3);
+const TEST_DB_CLIENT_HEARTBEAT_FREQUENCY: Duration = Duration::from_secs(1);
+const TEST_DB_DROP_QUEUE_CAPACITY: usize = 256;
+const TEST_DB_DROP_WORKER_COUNT: usize = 8;
+const TEST_DB_DROP_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+const TEST_DB_LIFECYCLE_DROP_MAX_ATTEMPTS: usize = 3;
+const TEST_DB_LIFECYCLE_DROP_RETRY_BACKOFF: Duration = Duration::from_millis(100);
+const TEST_DB_RUNS_COLLECTION: &str = "__test_db_runs";
+const TEST_DB_SWEEP_LEASES_COLLECTION: &str = "__test_db_sweep_leases";
+const TEST_DB_LEGACY_CANDIDATES_COLLECTION: &str = "__test_db_legacy_candidates";
+const TEST_DB_SWEEP_LEASE_ID: &str = "stale-test-database-sweep";
+
+static TEST_DB_NAME_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static TEST_DB_PROCESS: OnceLock<TestDbProcess> = OnceLock::new();
+static TEST_DB_PINNED_URI: OnceLock<String> = OnceLock::new();
+static TEST_DB_HEARTBEAT: std::sync::Mutex<Option<TestDbHeartbeat>> = std::sync::Mutex::new(None);
+
+struct TestDbProcess {
+    run_id: String,
+    started_at_secs: u64,
+}
+
+struct TestDbHeartbeat {
+    stop: SyncSender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ManagedTestDbName {
+    created_at_secs: u64,
+    run_id: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum StaleTestDbKind {
+    Managed,
+    Legacy,
+}
 
 /// Single shared database used by every probe to check write-readiness. Reusing
 /// one fixed name (instead of a per-call UUID database) keeps the probe from
@@ -58,18 +129,14 @@ const TEST_DB_PROBE_NAME: &str = "nyxid_test_probe";
 /// coverage measurement — a shared client broke under the runtime-per-test
 /// harness (see #864). The TCP pre-check keeps per-test connects cheap.
 ///
-/// Each database created here is registered for teardown and dropped when the
-/// test process exits (see `register_test_db_for_cleanup`), so a full test run
-/// no longer leaves thousands of orphaned `nyxid_test_*` databases behind.
+/// Each per-test client's SDAM handler retains a database drop guard. After the
+/// driver finishes tearing down the client (which can outlive the final external
+/// Client/Database/Collection handle), the guard queues a drop on a
+/// runtime-independent worker. A renewable process lease, process-exit retry,
+/// and the cross-process stale sweep remain crash recovery.
 pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Database> {
-    let (client, cleanup_uri) = probe_test_mongo_client().await?;
-    let db_name = format!(
-        "{TEST_DB_NAME_PREFIX}{}_{}",
-        sanitize_test_db_prefix(prefix),
-        uuid::Uuid::new_v4()
-    );
-
-    register_test_db_for_cleanup(&cleanup_uri, &db_name);
+    let db_name = new_test_db_name(prefix);
+    let client = probe_test_mongo_client(&db_name, None).await?;
 
     Some(client.database(&db_name))
 }
@@ -82,22 +149,8 @@ pub(crate) async fn connect_test_database_with_command_handler(
     prefix: &str,
     handler: mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
 ) -> Option<mongodb::Database> {
-    let (_, cleanup_uri) = probe_test_mongo_client().await?;
-    let db_name = format!(
-        "{TEST_DB_NAME_PREFIX}{}_{}",
-        sanitize_test_db_prefix(prefix),
-        uuid::Uuid::new_v4()
-    );
-    register_test_db_for_cleanup(&cleanup_uri, &db_name);
-
-    let mut options = mongodb::options::ClientOptions::parse(&cleanup_uri)
-        .await
-        .expect("test MongoDB URI was already parsed by the readiness probe");
-    options.server_selection_timeout = Some(Duration::from_secs(30));
-    options.connect_timeout = Some(Duration::from_secs(20));
-    options.max_pool_size = Some(4);
-    options.command_event_handler = Some(handler);
-    let client = mongodb::Client::with_options(options).expect("build monitored test client");
+    let db_name = new_test_db_name(prefix);
+    let client = probe_test_mongo_client(&db_name, Some(handler)).await?;
     Some(client.database(&db_name))
 }
 
@@ -182,8 +235,14 @@ async fn test_mongo_port_reachable(addr: &str) -> bool {
 
 /// Probe both candidate mongods and return a connected client plus the URI that
 /// won, so callers can register a fresh-client teardown that survives the test's
-/// own tokio runtime being torn down (see `drop_test_databases_at_exit`).
-async fn probe_test_mongo_client() -> Option<(mongodb::Client, String)> {
+/// own tokio runtime being torn down. `command_event_handler` is independent of
+/// the SDAM slot used to retain the per-database cleanup guard.
+async fn probe_test_mongo_client(
+    db_name: &str,
+    command_event_handler: Option<
+        mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
+    >,
+) -> Option<mongodb::Client> {
     if let Some(configured_uri) = std::env::var_os(TEST_DATABASE_URL_ENV) {
         let configured_uri = configured_uri
             .into_string()
@@ -192,12 +251,32 @@ async fn probe_test_mongo_client() -> Option<(mongodb::Client, String)> {
             !configured_uri.trim().is_empty(),
             "{TEST_DATABASE_URL_ENV} must not be empty"
         );
-        let client = probe_test_mongo_uri(&configured_uri).await.unwrap_or_else(|| {
+        assert!(
+            TEST_DB_PINNED_URI
+                .get()
+                .is_none_or(|pinned_uri| pinned_uri == &configured_uri),
+            "{TEST_DATABASE_URL_ENV} cannot change after this test process has selected MongoDB"
+        );
+        let client = probe_test_mongo_uri(
+            &configured_uri,
+            db_name,
+            command_event_handler.clone(),
+        )
+        .await
+        .unwrap_or_else(|| {
             panic!(
                 "{TEST_DATABASE_URL_ENV} is configured but MongoDB is not reachable and writable; refusing to fall back to a different test database"
             )
         });
-        return Some((client, configured_uri));
+        return Some(client);
+    }
+
+    // Heartbeat, stale-sweep metadata, lifecycle drops, and exit recovery must
+    // all address the same server for the lifetime of the process. Once one
+    // default candidate wins, fail closed if it disappears instead of silently
+    // moving later databases to the other local mongod.
+    if let Some(pinned_uri) = TEST_DB_PINNED_URI.get() {
+        return probe_test_mongo_uri(pinned_uri, db_name, command_event_handler).await;
     }
 
     // (tcp address, client URI). 27018 is the dev docker-compose port; 27017 is
@@ -225,15 +304,42 @@ async fn probe_test_mongo_client() -> Option<(mongodb::Client, String)> {
             continue;
         }
 
-        if let Some(client) = probe_test_mongo_uri(&uri).await {
-            return Some((client, uri));
+        if let Some(client) =
+            probe_test_mongo_uri(&uri, db_name, command_event_handler.clone()).await
+        {
+            return Some(client);
         }
+    }
+
+    // A concurrent probe may have selected the other candidate after this
+    // call passed the initial pinned-URI check. If this call lost that race,
+    // retry the winner once instead of misreporting MongoDB as unavailable.
+    if let Some(pinned_uri) = TEST_DB_PINNED_URI.get() {
+        return probe_test_mongo_uri(pinned_uri, db_name, command_event_handler).await;
     }
 
     None
 }
 
-async fn probe_test_mongo_uri(uri: &str) -> Option<mongodb::Client> {
+fn pin_test_db_uri_in(cell: &OnceLock<String>, uri: &str) -> bool {
+    if let Some(pinned_uri) = cell.get() {
+        return pinned_uri == uri;
+    }
+    let _ = cell.set(uri.to_string());
+    cell.get().is_some_and(|pinned_uri| pinned_uri == uri)
+}
+
+fn pin_test_db_uri(uri: &str) -> bool {
+    pin_test_db_uri_in(&TEST_DB_PINNED_URI, uri)
+}
+
+async fn probe_test_mongo_uri(
+    uri: &str,
+    db_name: &str,
+    command_event_handler: Option<
+        mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
+    >,
+) -> Option<mongodb::Client> {
     let Ok(mut options) = mongodb::options::ClientOptions::parse(uri).await else {
         return None;
     };
@@ -243,7 +349,17 @@ async fn probe_test_mongo_uri(uri: &str) -> Option<mongodb::Client> {
     // can starve the heartbeat monitor long enough to otherwise clear the pool.
     options.server_selection_timeout = Some(Duration::from_secs(30));
     options.connect_timeout = Some(Duration::from_secs(20));
+    // The cleanup guard is released only after the driver's SDAM monitor exits.
+    // Keep test clients near the driver's 500 ms minimum so teardown does not
+    // inherit the production-default 10 second heartbeat delay under load.
+    options.heartbeat_freq = Some(TEST_DB_CLIENT_HEARTBEAT_FREQUENCY);
     options.max_pool_size = Some(4);
+    options.command_event_handler = command_event_handler;
+    let drop_guard = Arc::new(TestDbDropGuard::new(uri, db_name));
+    let guard_keepalive = Arc::clone(&drop_guard);
+    options.sdam_event_handler = Some(mongodb::event::EventHandler::callback(move |_event| {
+        let _ = Arc::strong_count(&guard_keepalive);
+    }));
     let Ok(client) = mongodb::Client::with_options(options) else {
         return None;
     };
@@ -269,19 +385,752 @@ async fn probe_test_mongo_uri(uri: &str) -> Option<mongodb::Client> {
         probe.delete_one(doc! { "_id": probe_id }),
     )
     .await;
+
+    // Pin only after this candidate proves writable, but before publishing a
+    // run lease or registering a destructive cleanup target. A concurrent
+    // probe that loses the race may retry the URI that won; it must never
+    // register state on a second server.
+    if !pin_test_db_uri(uri) {
+        return None;
+    }
+
+    // Register before sweeping. A process that cannot publish its own live
+    // lease must never decide that another process's databases are abandoned.
+    let process = test_db_process();
+    if !matches!(
+        tokio::time::timeout(
+            STALE_TEST_DB_METADATA_TIMEOUT,
+            renew_test_db_run_record(
+                &client,
+                &process.run_id,
+                process.started_at_secs,
+                unix_time_secs(),
+            ),
+        )
+        .await,
+        Ok(Ok(true))
+    ) {
+        return None;
+    }
+    ensure_test_db_heartbeat(uri);
+    sweep_stale_test_databases_once(&client, unix_time_secs()).await;
+    register_test_db_for_cleanup(uri, db_name);
+    drop_guard.arm();
     Some(client)
 }
 
-/// Per-process registry of the databases created by `connect_test_database`,
-/// drained once at process exit by `drop_test_databases_at_exit`.
+fn unix_time_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("test database cleanup requires a system clock after the Unix epoch")
+        .as_secs()
+}
+
+fn test_db_process() -> &'static TestDbProcess {
+    TEST_DB_PROCESS.get_or_init(|| TestDbProcess {
+        run_id: format!("{:016x}", Uuid::new_v4().as_u128() as u64),
+        started_at_secs: unix_time_secs(),
+    })
+}
+
+fn new_test_db_name(prefix: &str) -> String {
+    let created_at_secs = unix_time_secs();
+    let sequence = TEST_DB_NAME_SEQUENCE.fetch_add(1, Ordering::Relaxed) as u32;
+    let process = test_db_process();
+
+    format_test_db_name(prefix, created_at_secs, &process.run_id, sequence)
+}
+
+fn format_test_db_name(prefix: &str, created_at_secs: u64, run_id: &str, sequence: u32) -> String {
+    debug_assert_eq!(run_id.len(), TEST_DB_RUN_ID_HEX_LEN);
+    debug_assert!(
+        run_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    );
+    let name = format!(
+        "{TEST_DB_NAME_PREFIX}{created_at_secs:016x}_{run_id}_{sequence:08x}_{}",
+        sanitize_test_db_prefix(prefix)
+    );
+    debug_assert!(name.len() <= TEST_DB_MAX_NAME_LEN);
+    name
+}
+
+fn parse_managed_test_db_name(name: &str) -> Option<ManagedTestDbName> {
+    let suffix = name.strip_prefix(TEST_DB_NAME_PREFIX)?;
+    let mut fields = suffix.splitn(4, '_');
+    let created_at = fields.next()?;
+    let run_id = fields.next()?;
+    let sequence = fields.next()?;
+    let prefix = fields.next()?;
+
+    if created_at.len() != TEST_DB_CREATED_AT_HEX_LEN
+        || run_id.len() != TEST_DB_RUN_ID_HEX_LEN
+        || sequence.len() != TEST_DB_U32_HEX_LEN
+        || prefix.is_empty()
+        || prefix.len() > MAX_TEST_DB_PREFIX_LEN
+        || !run_id
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+        || !prefix
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+    {
+        return None;
+    }
+
+    let created_at_secs = u64::from_str_radix(created_at, 16).ok()?;
+    u32::from_str_radix(sequence, 16).ok()?;
+    Some(ManagedTestDbName {
+        created_at_secs,
+        run_id: run_id.to_ascii_lowercase(),
+    })
+}
+
+fn is_legacy_test_db_name(name: &str) -> bool {
+    let Some(suffix) = name.strip_prefix(TEST_DB_NAME_PREFIX) else {
+        return false;
+    };
+    let Some((prefix, uuid)) = suffix.rsplit_once('_') else {
+        return false;
+    };
+    let Ok(parsed_uuid) = Uuid::parse_str(uuid) else {
+        return false;
+    };
+
+    !prefix.is_empty()
+        && prefix.len() <= MAX_LEGACY_TEST_DB_PREFIX_LEN
+        && sanitize_test_db_prefix_with_limit(prefix, MAX_LEGACY_TEST_DB_PREFIX_LEN) == prefix
+        && uuid.len() == 36
+        && parsed_uuid.get_version() == Some(uuid::Version::Random)
+        && parsed_uuid.hyphenated().to_string() == uuid
+}
+
+fn managed_test_db_is_eligible(
+    metadata: &ManagedTestDbName,
+    now_secs: u64,
+    active_run_ids: &HashSet<String>,
+) -> bool {
+    now_secs
+        .checked_sub(metadata.created_at_secs)
+        .is_some_and(|age_secs| age_secs >= MANAGED_TEST_DB_MIN_AGE.as_secs())
+        && !active_run_ids.contains(&metadata.run_id)
+}
+
+fn legacy_test_db_is_eligible(first_seen_at_secs: u64, now_secs: u64) -> bool {
+    now_secs
+        .checked_sub(first_seen_at_secs)
+        .is_some_and(|age_secs| age_secs >= LEGACY_TEST_DB_QUARANTINE.as_secs())
+}
+
+fn test_db_metadata_collection(
+    client: &mongodb::Client,
+    collection_name: &str,
+) -> mongodb::Collection<Document> {
+    client
+        .database(TEST_DB_PROBE_NAME)
+        .collection(collection_name)
+}
+
+fn bson_secs(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+async fn renew_test_db_run_record(
+    client: &mongodb::Client,
+    run_id: &str,
+    started_at_secs: u64,
+    now_secs: u64,
+) -> Result<bool, mongodb::error::Error> {
+    renew_test_db_run_record_in_collection(
+        &test_db_metadata_collection(client, TEST_DB_RUNS_COLLECTION),
+        run_id,
+        started_at_secs,
+        now_secs,
+    )
+    .await
+}
+
+async fn renew_test_db_run_record_in_collection(
+    run_records: &mongodb::Collection<Document>,
+    run_id: &str,
+    started_at_secs: u64,
+    now_secs: u64,
+) -> Result<bool, mongodb::error::Error> {
+    let lease_until_secs = now_secs.saturating_add(TEST_DB_RUN_LEASE.as_secs());
+    let initial_lease = run_records
+        .update_one(
+            doc! { "_id": run_id },
+            doc! {
+                "$setOnInsert": {
+                    "started_at_secs": bson_secs(started_at_secs),
+                    "process_id": i64::from(std::process::id()),
+                    "heartbeat_at_secs": bson_secs(now_secs),
+                    "lease_until_secs": bson_secs(lease_until_secs),
+                },
+            },
+        )
+        .upsert(true)
+        .await;
+    match initial_lease {
+        Ok(result) if result.upserted_id.is_some() => return Ok(true),
+        Ok(_) => {}
+        Err(error) if is_duplicate_key_error(&error) => {}
+        Err(error) => return Err(error),
+    }
+
+    // Renewal and stale-drop claiming use mutually exclusive predicates on the
+    // same producer row. No upsert is allowed here: a losing renewal must return
+    // false instead of racing another first writer into a duplicate-key error.
+    let result = run_records
+        .update_one(
+            doc! {
+                "_id": run_id,
+                "$or": [
+                    {
+                        "cleanup_claim_id": { "$exists": false },
+                        "cleanup_claim_until_secs": { "$exists": false },
+                    },
+                    {
+                        "cleanup_claim_id": { "$type": "string" },
+                        "cleanup_claim_until_secs": {
+                            "$type": "long",
+                            "$lte": bson_secs(now_secs),
+                        },
+                    },
+                ],
+            },
+            doc! {
+                "$set": {
+                    "heartbeat_at_secs": bson_secs(now_secs),
+                    "lease_until_secs": bson_secs(lease_until_secs),
+                },
+                "$unset": {
+                    "cleanup_claim_id": "",
+                    "cleanup_claim_until_secs": "",
+                },
+            },
+        )
+        .await?;
+    Ok(result.matched_count == 1)
+}
+
+fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
+    match error.kind.as_ref() {
+        mongodb::error::ErrorKind::Command(command) => command.code == 11000,
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write)) => {
+            write.code == 11000
+        }
+        _ => false,
+    }
+}
+
+fn ensure_test_db_heartbeat(uri: &str) {
+    let mut heartbeat = TEST_DB_HEARTBEAT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if heartbeat
+        .as_ref()
+        .is_some_and(|current| !current.thread.is_finished())
+    {
+        return;
+    }
+    if let Some(finished) = heartbeat.take() {
+        let _ = finished.thread.join();
+    }
+
+    let (stop, receiver) = sync_channel(1);
+    let uri = uri.to_string();
+    let process = test_db_process();
+    let run_id = process.run_id.clone();
+    let started_at_secs = process.started_at_secs;
+    let Ok(thread) = std::thread::Builder::new()
+        .name("nyxid-test-db-heartbeat".to_string())
+        .spawn(move || test_db_heartbeat_loop(uri, run_id, started_at_secs, receiver))
+    else {
+        return;
+    };
+    *heartbeat = Some(TestDbHeartbeat { stop, thread });
+}
+
+fn stop_test_db_heartbeat() {
+    let heartbeat = TEST_DB_HEARTBEAT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    if let Some(heartbeat) = heartbeat {
+        let _ = heartbeat.stop.try_send(());
+        let _ = heartbeat.thread.join();
+    }
+}
+
+fn test_db_heartbeat_loop(uri: String, run_id: String, started_at_secs: u64, stop: Receiver<()>) {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    let Some(client) = runtime.block_on(test_db_cleanup_client(&uri)) else {
+        return;
+    };
+
+    loop {
+        match stop.recv_timeout(TEST_DB_RUN_HEARTBEAT_INTERVAL) {
+            Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                let _ = runtime.block_on(tokio::time::timeout(
+                    STALE_TEST_DB_METADATA_TIMEOUT,
+                    renew_test_db_run_record(&client, &run_id, started_at_secs, unix_time_secs()),
+                ));
+            }
+        }
+    }
+}
+
+async fn acquire_test_db_sweep_lease(
+    collection: &mongodb::Collection<Document>,
+    owner_id: &str,
+    now_secs: u64,
+) -> bool {
+    if collection
+        .update_one(
+            doc! { "_id": TEST_DB_SWEEP_LEASE_ID },
+            doc! {
+                "$setOnInsert": {
+                    "owner_id": "",
+                    "lease_until_secs": 0_i64,
+                },
+            },
+        )
+        .upsert(true)
+        .await
+        .is_err()
+    {
+        return false;
+    }
+
+    let lease_until_secs = now_secs.saturating_add(STALE_TEST_DB_SWEEP_LEASE.as_secs());
+    collection
+        .find_one_and_update(
+            doc! {
+                "_id": TEST_DB_SWEEP_LEASE_ID,
+                "$or": [
+                    { "lease_until_secs": { "$lte": bson_secs(now_secs) } },
+                    { "lease_until_secs": { "$exists": false } },
+                ],
+            },
+            doc! {
+                "$set": {
+                    "owner_id": owner_id,
+                    "lease_until_secs": bson_secs(lease_until_secs),
+                    "started_at_secs": bson_secs(now_secs),
+                },
+            },
+        )
+        .return_document(mongodb::options::ReturnDocument::After)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|document| document.get_str("owner_id").ok().map(str::to_string))
+        .is_some_and(|claimed_owner| claimed_owner == owner_id)
+}
+
+async fn release_test_db_sweep_lease(
+    collection: &mongodb::Collection<Document>,
+    owner_id: &str,
+    now_secs: u64,
+) {
+    let next_sweep_at_secs = now_secs.saturating_add(STALE_TEST_DB_SWEEP_COOLDOWN.as_secs());
+    let _ = tokio::time::timeout(
+        STALE_TEST_DB_METADATA_TIMEOUT,
+        collection.update_one(
+            doc! {
+                "_id": TEST_DB_SWEEP_LEASE_ID,
+                "owner_id": owner_id,
+            },
+            doc! {
+                "$set": {
+                    "owner_id": "",
+                    "lease_until_secs": bson_secs(next_sweep_at_secs),
+                    "completed_at_secs": bson_secs(now_secs),
+                },
+            },
+        ),
+    )
+    .await;
+}
+
+async fn active_test_db_run_ids(
+    client: &mongodb::Client,
+    run_ids: &HashSet<String>,
+    now_secs: u64,
+) -> Option<HashSet<String>> {
+    if run_ids.is_empty() {
+        return Some(HashSet::new());
+    }
+    let run_ids: Vec<String> = run_ids.iter().cloned().collect();
+    let query = async {
+        let cursor = test_db_metadata_collection(client, TEST_DB_RUNS_COLLECTION)
+            .find(doc! {
+                "_id": { "$in": run_ids },
+                "lease_until_secs": { "$gt": bson_secs(now_secs) },
+            })
+            .await?;
+        let documents: Vec<Document> = cursor.try_collect().await?;
+        Ok::<HashSet<String>, mongodb::error::Error>(
+            documents
+                .into_iter()
+                .filter_map(|document| document.get_str("_id").ok().map(str::to_string))
+                .collect(),
+        )
+    };
+    match tokio::time::timeout(STALE_TEST_DB_METADATA_TIMEOUT, query).await {
+        Ok(Ok(active)) => Some(active),
+        _ => None,
+    }
+}
+
+async fn claim_expired_test_db_run(
+    run_records: &mongodb::Collection<Document>,
+    run_id: &str,
+    claim_id: &str,
+    now_secs: u64,
+) -> bool {
+    let claim_until_secs = now_secs.saturating_add(STALE_TEST_DB_DROP_CLAIM_LEASE.as_secs());
+    let claim = run_records
+        .find_one_and_update(
+            doc! {
+                "_id": run_id,
+                "lease_until_secs": {
+                    "$type": "long",
+                    "$lte": bson_secs(now_secs),
+                },
+                "$or": [
+                    {
+                        "cleanup_claim_id": { "$exists": false },
+                        "cleanup_claim_until_secs": { "$exists": false },
+                    },
+                    {
+                        "cleanup_claim_id": { "$type": "string" },
+                        "cleanup_claim_until_secs": {
+                            "$type": "long",
+                            "$lte": bson_secs(now_secs),
+                        },
+                    },
+                ],
+            },
+            doc! {
+                "$set": {
+                    "cleanup_claim_id": claim_id,
+                    "cleanup_claim_until_secs": bson_secs(claim_until_secs),
+                },
+            },
+        )
+        .return_document(mongodb::options::ReturnDocument::After);
+    matches!(
+        tokio::time::timeout(STALE_TEST_DB_METADATA_TIMEOUT, claim).await,
+        Ok(Ok(Some(document)))
+            if document.get_str("cleanup_claim_id").ok() == Some(claim_id)
+    )
+}
+
+async fn release_test_db_drop_claim(
+    run_records: &mongodb::Collection<Document>,
+    run_id: &str,
+    claim_id: &str,
+) -> bool {
+    matches!(
+        tokio::time::timeout(
+            STALE_TEST_DB_METADATA_TIMEOUT,
+            run_records.update_one(
+                doc! {
+                    "_id": run_id,
+                    "cleanup_claim_id": claim_id,
+                },
+                doc! {
+                    "$unset": {
+                        "cleanup_claim_id": "",
+                        "cleanup_claim_until_secs": "",
+                    },
+                },
+            ),
+        )
+        .await,
+        Ok(Ok(result)) if result.modified_count == 1
+    )
+}
+
+async fn release_test_db_drop_claim_after_confirmed_drop(
+    run_records: &mongodb::Collection<Document>,
+    run_id: &str,
+    claim_id: &str,
+    dropped: bool,
+) -> bool {
+    if !dropped {
+        return false;
+    }
+
+    release_test_db_drop_claim(run_records, run_id, claim_id).await
+}
+
+async fn legacy_test_db_first_seen_at(
+    client: &mongodb::Client,
+    database_name: &str,
+    now_secs: u64,
+) -> Option<u64> {
+    let collection = test_db_metadata_collection(client, TEST_DB_LEGACY_CANDIDATES_COLLECTION);
+    let update = collection
+        .find_one_and_update(
+            doc! { "_id": database_name },
+            doc! {
+                "$set": { "last_seen_at_secs": bson_secs(now_secs) },
+                "$setOnInsert": { "first_seen_at_secs": bson_secs(now_secs) },
+            },
+        )
+        .upsert(true)
+        .return_document(mongodb::options::ReturnDocument::After);
+    match tokio::time::timeout(STALE_TEST_DB_METADATA_TIMEOUT, update).await {
+        Ok(Ok(Some(document))) => document
+            .get_i64("first_seen_at_secs")
+            .ok()
+            .and_then(|value| u64::try_from(value).ok()),
+        _ => None,
+    }
+}
+
+async fn prune_test_db_metadata_collections(
+    run_records: &mongodb::Collection<Document>,
+    legacy_candidates: &mongodb::Collection<Document>,
+    now_secs: u64,
+    referenced_run_ids: &HashSet<String>,
+    present_legacy_database_names: &HashSet<String>,
+) {
+    let referenced_run_ids: Vec<String> = referenced_run_ids.iter().cloned().collect();
+    let present_legacy_database_names: Vec<String> =
+        present_legacy_database_names.iter().cloned().collect();
+
+    // Both deletes fail closed: a run record must carry an explicitly expired
+    // lease and must have no managed database referent; a legacy quarantine row
+    // survives for as long as its exact database name is still present.
+    let _ = tokio::join!(
+        tokio::time::timeout(
+            STALE_TEST_DB_METADATA_TIMEOUT,
+            run_records.delete_many(doc! {
+                "_id": {
+                    "$type": "string",
+                    "$nin": referenced_run_ids,
+                },
+                "lease_until_secs": {
+                    "$type": "long",
+                    "$lte": bson_secs(now_secs),
+                },
+            }),
+        ),
+        tokio::time::timeout(
+            STALE_TEST_DB_METADATA_TIMEOUT,
+            legacy_candidates.delete_many(doc! {
+                "_id": {
+                    "$type": "string",
+                    "$nin": present_legacy_database_names,
+                },
+            }),
+        ),
+    );
+}
+
+async fn sweep_stale_test_databases_once(client: &mongodb::Client, now_secs: u64) {
+    let owner_id = test_db_process().run_id.clone();
+    let lease_collection = test_db_metadata_collection(client, TEST_DB_SWEEP_LEASES_COLLECTION);
+    let acquired = matches!(
+        tokio::time::timeout(
+            STALE_TEST_DB_METADATA_TIMEOUT,
+            acquire_test_db_sweep_lease(&lease_collection, &owner_id, now_secs),
+        )
+        .await,
+        Ok(true)
+    );
+    if !acquired {
+        return;
+    }
+
+    sweep_stale_test_databases_under_lease(client, now_secs).await;
+    release_test_db_sweep_lease(&lease_collection, &owner_id, unix_time_secs()).await;
+}
+
+/// Recover logical test databases left by killed or crashed test processes.
 ///
-/// Cleaning up at process exit — rather than after each individual test — is
-/// correct precisely because the registry is drained only after *every* test in
-/// the binary has finished, so no still-running test can be using a database
-/// that gets dropped. It also composes with per-test-process runners such as
-/// cargo-nextest: each process registers and drops only the single database it
-/// created.
+/// Recovery deliberately starts only after a writable MongoDB probe succeeds.
+/// It cannot make an already-unstartable mongod recover from file-descriptor or
+/// dbpath exhaustion, and dropping logical databases does not guarantee that
+/// WiredTiger files are reclaimed. An isolated test dbpath that has reached
+/// that state still requires out-of-process container/dbpath recreation.
+async fn sweep_stale_test_databases_under_lease(client: &mongodb::Client, now_secs: u64) {
+    let deadline = tokio::time::Instant::now() + STALE_TEST_DB_SWEEP_BUDGET;
+    let Ok(Ok(database_names)) =
+        tokio::time::timeout(STALE_TEST_DB_LIST_TIMEOUT, client.list_database_names()).await
+    else {
+        return;
+    };
+
+    let mut managed_databases = Vec::new();
+    let mut legacy_databases = Vec::new();
+    let mut managed_run_ids = HashSet::new();
+    let mut managed_run_ref_counts = HashMap::new();
+    let mut present_legacy_database_names = HashSet::new();
+    for name in database_names {
+        if let Some(metadata) = parse_managed_test_db_name(&name) {
+            managed_run_ids.insert(metadata.run_id.clone());
+            *managed_run_ref_counts
+                .entry(metadata.run_id.clone())
+                .or_insert(0_usize) += 1;
+            managed_databases.push((metadata, name));
+        } else if is_legacy_test_db_name(&name) {
+            present_legacy_database_names.insert(name.clone());
+            legacy_databases.push(name);
+        }
+    }
+
+    // Fail closed for managed names if the authoritative live-run query fails.
+    let active_run_ids = active_test_db_run_ids(client, &managed_run_ids, now_secs).await;
+    let mut stale_databases: Vec<(u64, String, StaleTestDbKind, Option<String>)> = active_run_ids
+        .map(|active_run_ids| {
+            managed_databases
+                .into_iter()
+                .filter(|(metadata, _)| {
+                    managed_test_db_is_eligible(metadata, now_secs, &active_run_ids)
+                })
+                .map(|(metadata, name)| {
+                    (
+                        metadata.created_at_secs,
+                        name,
+                        StaleTestDbKind::Managed,
+                        Some(metadata.run_id),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Legacy names have no producer timestamp or run lease. Quarantine the
+    // exact historical `<prefix>_<uuid>` shape from first observation before
+    // considering it stale; arbitrary `nyxid_test_*` names are never adopted.
+    for name in legacy_databases {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let Some(first_seen_at_secs) = legacy_test_db_first_seen_at(client, &name, now_secs).await
+        else {
+            continue;
+        };
+        if legacy_test_db_is_eligible(first_seen_at_secs, now_secs) {
+            stale_databases.push((first_seen_at_secs, name, StaleTestDbKind::Legacy, None));
+        }
+    }
+
+    stale_databases.sort_unstable();
+    let run_records = test_db_metadata_collection(client, TEST_DB_RUNS_COLLECTION);
+    for (_, name, kind, run_id) in stale_databases {
+        if tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let cleanup_claim = if kind == StaleTestDbKind::Managed {
+            let Some(run_id) = run_id.as_deref() else {
+                continue;
+            };
+            // The active-run set above is only a batching snapshot. Atomically
+            // claim an explicitly expired producer lease before dropDatabase;
+            // producer renewal uses the same record predicate and therefore
+            // cannot slip between this final check and the destructive call.
+            // Missing, malformed, claimed, or unreadable state fails closed.
+            let claim_id = Uuid::new_v4().to_string();
+            if !claim_expired_test_db_run(&run_records, run_id, &claim_id, unix_time_secs()).await {
+                continue;
+            }
+            Some((run_id.to_string(), claim_id))
+        } else {
+            None
+        };
+        let dropped = matches!(
+            tokio::time::timeout(STALE_TEST_DB_DROP_TIMEOUT, client.database(&name).drop(),).await,
+            Ok(Ok(()))
+        );
+        if let Some((run_id, claim_id)) = cleanup_claim.as_ref() {
+            let _ = release_test_db_drop_claim_after_confirmed_drop(
+                &run_records,
+                run_id,
+                claim_id,
+                dropped,
+            )
+            .await;
+        }
+        if !dropped {
+            continue;
+        }
+        match kind {
+            StaleTestDbKind::Managed => {
+                let Some(run_id) = run_id else {
+                    continue;
+                };
+                if let Some(reference_count) = managed_run_ref_counts.get_mut(&run_id) {
+                    *reference_count = reference_count.saturating_sub(1);
+                    if *reference_count == 0 {
+                        managed_run_ref_counts.remove(&run_id);
+                    }
+                }
+            }
+            StaleTestDbKind::Legacy => {
+                present_legacy_database_names.remove(&name);
+                let _ = tokio::time::timeout(
+                    STALE_TEST_DB_METADATA_TIMEOUT,
+                    test_db_metadata_collection(client, TEST_DB_LEGACY_CANDIDATES_COLLECTION)
+                        .delete_one(doc! { "_id": name }),
+                )
+                .await;
+            }
+        }
+    }
+
+    let referenced_run_ids: HashSet<String> = managed_run_ref_counts.into_keys().collect();
+    let legacy_candidates =
+        test_db_metadata_collection(client, TEST_DB_LEGACY_CANDIDATES_COLLECTION);
+    let prune_metadata = prune_test_db_metadata_collections(
+        &run_records,
+        &legacy_candidates,
+        now_secs,
+        &referenced_run_ids,
+        &present_legacy_database_names,
+    );
+    let _ = tokio::time::timeout_at(deadline, prune_metadata).await;
+}
+
+async fn test_db_cleanup_client(uri: &str) -> Option<mongodb::Client> {
+    let parse = async { mongodb::options::ClientOptions::parse(uri).await };
+    let Some(Ok(mut options)) =
+        test_db_cleanup_operation_with_timeout(TEST_DB_CLEANUP_CLIENT_PARSE_TIMEOUT, parse).await
+    else {
+        return None;
+    };
+    options.server_selection_timeout = Some(Duration::from_secs(3));
+    options.connect_timeout = Some(Duration::from_secs(3));
+    options.max_pool_size = Some(2);
+    mongodb::Client::with_options(options).ok()
+}
+
+async fn test_db_cleanup_operation_with_timeout<T>(
+    timeout: Duration,
+    operation: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::time::timeout(timeout, operation).await.ok()
+}
+
+/// Per-process recovery registry for databases that have not yet been dropped
+/// by their per-client lifecycle guard. Process exit retries the remaining set.
+///
 static TEST_DB_CLEANUP: OnceLock<std::sync::Mutex<TestDbCleanup>> = OnceLock::new();
+static TEST_DB_DROP_WORKERS: OnceLock<Option<TestDbDropWorkers>> = OnceLock::new();
+static TEST_DB_DROP_OBSERVERS: OnceLock<std::sync::Mutex<HashMap<String, SyncSender<bool>>>> =
+    OnceLock::new();
 
 struct TestDbCleanup {
     /// Connection URI (with credentials) of the mongod that owns the test
@@ -289,25 +1138,285 @@ struct TestDbCleanup {
     /// in a run lives on the same server, so one URI is enough to reconnect a
     /// fresh client at exit.
     uri: Option<String>,
-    /// Databases created this run, dropped at process exit.
-    db_names: Vec<String>,
+    /// Databases created this run that still need a successful drop.
+    db_names: HashSet<String>,
     /// Guards one-time `atexit` registration.
     hook_installed: bool,
 }
 
-fn register_test_db_for_cleanup(uri: &str, db_name: &str) {
-    let cell = TEST_DB_CLEANUP.get_or_init(|| {
-        std::sync::Mutex::new(TestDbCleanup {
+impl TestDbCleanup {
+    fn new() -> Self {
+        Self {
             uri: None,
-            db_names: Vec::new(),
+            db_names: HashSet::new(),
             hook_installed: false,
-        })
-    });
-    let mut guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if guard.uri.is_none() {
-        guard.uri = Some(uri.to_string());
+        }
     }
-    guard.db_names.push(db_name.to_string());
+
+    fn register(&mut self, uri: &str, db_name: &str) {
+        if self.uri.is_none() {
+            self.uri = Some(uri.to_string());
+        }
+        self.db_names.insert(db_name.to_string());
+    }
+
+    fn complete_lifecycle_drop(&mut self, db_name: &str, dropped: bool) {
+        if dropped {
+            self.db_names.remove(db_name);
+        }
+    }
+
+    fn is_registered(&self, db_name: &str) -> bool {
+        self.db_names.contains(db_name)
+    }
+}
+
+struct TestDbDropGuard {
+    uri: String,
+    db_name: String,
+    armed: AtomicBool,
+}
+
+impl TestDbDropGuard {
+    fn new(uri: &str, db_name: &str) -> Self {
+        Self {
+            uri: uri.to_string(),
+            db_name: db_name.to_string(),
+            armed: AtomicBool::new(false),
+        }
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::Release);
+    }
+}
+
+impl Drop for TestDbDropGuard {
+    fn drop(&mut self) {
+        if !self.armed.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let uri = self.uri.clone();
+        let db_name = self.db_name.clone();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            enqueue_test_db_lifecycle_drop(uri, db_name);
+        }));
+    }
+}
+
+#[derive(Clone)]
+struct TestDbDropJob {
+    uri: String,
+    db_name: String,
+}
+
+struct TestDbDropWorkers {
+    job_sender: SyncSender<TestDbDropJob>,
+    retry: Option<TestDbDropRetry>,
+}
+
+struct TestDbDropRetry {
+    wake_sender: SyncSender<()>,
+    jobs: Arc<std::sync::Mutex<HashMap<String, TestDbDropJob>>>,
+}
+
+fn enqueue_test_db_lifecycle_drop(uri: String, db_name: String) {
+    let workers = TEST_DB_DROP_WORKERS.get_or_init(start_test_db_drop_workers);
+    let queued = workers.as_ref().is_some_and(|workers| {
+        enqueue_test_db_drop_job(
+            workers,
+            TestDbDropJob {
+                uri,
+                db_name: db_name.clone(),
+            },
+        )
+    });
+    if !queued {
+        notify_test_db_drop_observer(&db_name, false);
+    }
+}
+
+fn enqueue_test_db_drop_job(workers: &TestDbDropWorkers, job: TestDbDropJob) -> bool {
+    match workers.job_sender.try_send(job) {
+        Ok(()) => true,
+        Err(TrySendError::Full(job)) => workers
+            .retry
+            .as_ref()
+            .is_some_and(|retry| defer_test_db_drop_job(retry, job)),
+        Err(TrySendError::Disconnected(_)) => false,
+    }
+}
+
+fn defer_test_db_drop_job(retry: &TestDbDropRetry, job: TestDbDropJob) -> bool {
+    let db_name = job.db_name.clone();
+    retry
+        .jobs
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(db_name.clone(), job);
+
+    match retry.wake_sender.try_send(()) {
+        Ok(()) | Err(TrySendError::Full(())) => true,
+        Err(TrySendError::Disconnected(())) => {
+            retry
+                .jobs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .remove(&db_name);
+            false
+        }
+    }
+}
+
+fn start_test_db_drop_workers() -> Option<TestDbDropWorkers> {
+    let (sender, receiver) = sync_channel(TEST_DB_DROP_QUEUE_CAPACITY);
+    let receiver = Arc::new(std::sync::Mutex::new(receiver));
+    let mut started = 0_usize;
+
+    for worker_index in 0..TEST_DB_DROP_WORKER_COUNT {
+        let receiver = Arc::clone(&receiver);
+        if std::thread::Builder::new()
+            .name(format!("nyxid-test-db-drop-{worker_index}"))
+            .spawn(move || test_db_drop_worker(receiver))
+            .is_ok()
+        {
+            started += 1;
+        }
+    }
+
+    if started == 0 {
+        return None;
+    }
+
+    let retry = start_test_db_drop_retry_coordinator(sender.clone());
+    Some(TestDbDropWorkers {
+        job_sender: sender,
+        retry,
+    })
+}
+
+fn start_test_db_drop_retry_coordinator(
+    job_sender: SyncSender<TestDbDropJob>,
+) -> Option<TestDbDropRetry> {
+    let jobs = Arc::new(std::sync::Mutex::new(HashMap::new()));
+    let coordinator_jobs = Arc::clone(&jobs);
+    let (wake_sender, wake_receiver) = sync_channel(1);
+    let started = std::thread::Builder::new()
+        .name("nyxid-test-db-drop-retry".to_string())
+        .spawn(move || test_db_drop_retry_coordinator(job_sender, coordinator_jobs, wake_receiver))
+        .is_ok();
+
+    started.then_some(TestDbDropRetry { wake_sender, jobs })
+}
+
+fn test_db_drop_retry_coordinator(
+    job_sender: SyncSender<TestDbDropJob>,
+    jobs: Arc<std::sync::Mutex<HashMap<String, TestDbDropJob>>>,
+    wake_receiver: Receiver<()>,
+) {
+    while wake_receiver.recv().is_ok() {
+        loop {
+            let retry_result = {
+                let mut jobs = jobs.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                let Some(db_name) = jobs.keys().next().cloned() else {
+                    break;
+                };
+                let job = jobs
+                    .get(&db_name)
+                    .expect("retry job selected from the same registry")
+                    .clone();
+                match job_sender.try_send(job) {
+                    Ok(()) => {
+                        jobs.remove(&db_name);
+                        Ok(true)
+                    }
+                    Err(TrySendError::Full(_)) => Ok(false),
+                    Err(TrySendError::Disconnected(_)) => Err(()),
+                }
+            };
+
+            match retry_result {
+                Ok(true) => continue,
+                Ok(false) => std::thread::sleep(TEST_DB_DROP_RETRY_INTERVAL),
+                Err(()) => return,
+            }
+        }
+    }
+}
+
+fn receive_test_db_drop_job(
+    receiver: &std::sync::Mutex<Receiver<TestDbDropJob>>,
+) -> Option<TestDbDropJob> {
+    receiver
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .recv()
+        .ok()
+}
+
+fn test_db_drop_worker(receiver: Arc<std::sync::Mutex<Receiver<TestDbDropJob>>>) {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    let mut clients = HashMap::<String, mongodb::Client>::new();
+    while let Some(job) = receive_test_db_drop_job(&receiver) {
+        let client = if let Some(client) = clients.get(&job.uri) {
+            Some(client.clone())
+        } else {
+            let client = runtime.block_on(test_db_cleanup_client(&job.uri));
+            if let Some(client) = client.as_ref() {
+                clients.insert(job.uri.clone(), client.clone());
+            }
+            client
+        };
+        let dropped = client.is_some_and(|client| {
+            runtime.block_on(retry_test_db_lifecycle_drop(
+                TEST_DB_LIFECYCLE_DROP_RETRY_BACKOFF,
+                || {
+                    let client = client.clone();
+                    let db_name = job.db_name.clone();
+                    async move {
+                        matches!(
+                            tokio::time::timeout(
+                                STALE_TEST_DB_DROP_TIMEOUT,
+                                client.database(&db_name).drop(),
+                            )
+                            .await,
+                            Ok(Ok(()))
+                        )
+                    }
+                },
+            ))
+        });
+        complete_test_db_lifecycle_drop(&job.db_name, dropped);
+        notify_test_db_drop_observer(&job.db_name, dropped);
+    }
+}
+
+async fn retry_test_db_lifecycle_drop<F, Fut>(backoff: Duration, mut attempt: F) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for attempt_index in 0..TEST_DB_LIFECYCLE_DROP_MAX_ATTEMPTS {
+        if attempt().await {
+            return true;
+        }
+        if attempt_index + 1 < TEST_DB_LIFECYCLE_DROP_MAX_ATTEMPTS {
+            tokio::time::sleep(backoff).await;
+        }
+    }
+    false
+}
+
+fn register_test_db_for_cleanup(uri: &str, db_name: &str) {
+    TEST_DB_DROP_WORKERS.get_or_init(start_test_db_drop_workers);
+    let cell = TEST_DB_CLEANUP.get_or_init(|| std::sync::Mutex::new(TestDbCleanup::new()));
+    let mut guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    guard.register(uri, db_name);
     if !guard.hook_installed {
         guard.hook_installed = true;
         // SAFETY: `atexit` registers a C callback invoked once at normal process
@@ -321,13 +1430,60 @@ fn register_test_db_for_cleanup(uri: &str, db_name: &str) {
     }
 }
 
+fn complete_test_db_lifecycle_drop(db_name: &str, dropped: bool) {
+    let Some(cell) = TEST_DB_CLEANUP.get() else {
+        return;
+    };
+    cell.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .complete_lifecycle_drop(db_name, dropped);
+}
+
+fn test_db_is_registered_for_cleanup(db_name: &str) -> bool {
+    TEST_DB_CLEANUP.get().is_some_and(|cell| {
+        cell.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_registered(db_name)
+    })
+}
+
+fn observe_test_db_drop(db_name: &str) -> Receiver<bool> {
+    let (sender, receiver) = sync_channel(1);
+    let previous = TEST_DB_DROP_OBSERVERS
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(db_name.to_string(), sender);
+    assert!(previous.is_none(), "duplicate test DB drop observer");
+    receiver
+}
+
+fn notify_test_db_drop_observer(db_name: &str, dropped: bool) {
+    let Some(observers) = TEST_DB_DROP_OBSERVERS.get() else {
+        return;
+    };
+    let observer = observers
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(db_name);
+    if let Some(observer) = observer {
+        let _ = observer.try_send(dropped);
+    }
+}
+
+fn test_db_exit_cleanup_can_delete_run_record(drop_pass_result: Option<bool>) -> bool {
+    matches!(drop_pass_result, Some(true))
+}
+
 /// Drop every database this test process created. Best-effort: connection or
-/// drop failures are swallowed so a flaky or absent mongod never blocks or
-/// aborts process exit, and each operation is bounded by a short timeout.
+/// drop failures are swallowed so a flaky or absent mongod never aborts process
+/// exit. The entire drop pass is bounded; leftovers remain associated with an
+/// expired run lease for a later cross-process sweep.
 extern "C" fn drop_test_databases_at_exit() {
     // Never unwind across the FFI boundary — a panic escaping an `atexit`
     // callback would abort the process.
     let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        stop_test_db_heartbeat();
         let Some(cell) = TEST_DB_CLEANUP.get() else {
             return;
         };
@@ -335,9 +1491,6 @@ extern "C" fn drop_test_databases_at_exit() {
             let mut guard = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
             (guard.uri.clone(), std::mem::take(&mut guard.db_names))
         };
-        if db_names.is_empty() {
-            return;
-        }
         let Some(uri) = uri else {
             return;
         };
@@ -357,19 +1510,48 @@ extern "C" fn drop_test_databases_at_exit() {
                 return;
             };
             runtime.block_on(async move {
-                let Ok(mut options) = mongodb::options::ClientOptions::parse(&uri).await else {
+                let Some(client) = test_db_cleanup_client(&uri).await else {
                     return;
                 };
-                options.server_selection_timeout = Some(Duration::from_secs(3));
-                options.connect_timeout = Some(Duration::from_secs(3));
-                options.max_pool_size = Some(2);
-                let Ok(client) = mongodb::Client::with_options(options) else {
-                    return;
+                let process = test_db_process();
+                let runs = test_db_metadata_collection(&client, TEST_DB_RUNS_COLLECTION);
+                let _ = tokio::time::timeout(
+                    STALE_TEST_DB_METADATA_TIMEOUT,
+                    runs.update_one(
+                        doc! { "_id": &process.run_id },
+                        doc! {
+                            "$set": {
+                                "heartbeat_at_secs": bson_secs(unix_time_secs()),
+                                "lease_until_secs": 0_i64,
+                            },
+                        },
+                    ),
+                )
+                .await;
+
+                let cleanup = async {
+                    let mut all_dropped = true;
+                    for name in db_names {
+                        all_dropped &= matches!(
+                            tokio::time::timeout(
+                                STALE_TEST_DB_DROP_TIMEOUT,
+                                client.database(&name).drop(),
+                            )
+                            .await,
+                            Ok(Ok(()))
+                        );
+                    }
+                    all_dropped
                 };
-                for name in db_names {
-                    let _ =
-                        tokio::time::timeout(Duration::from_secs(3), client.database(&name).drop())
-                            .await;
+                let drop_pass_result = tokio::time::timeout(TEST_DB_EXIT_CLEANUP_BUDGET, cleanup)
+                    .await
+                    .ok();
+                if test_db_exit_cleanup_can_delete_run_record(drop_pass_result) {
+                    let _ = tokio::time::timeout(
+                        STALE_TEST_DB_METADATA_TIMEOUT,
+                        runs.delete_one(doc! { "_id": &process.run_id }),
+                    )
+                    .await;
                 }
             });
         })
@@ -378,6 +1560,10 @@ extern "C" fn drop_test_databases_at_exit() {
 }
 
 fn sanitize_test_db_prefix(prefix: &str) -> String {
+    sanitize_test_db_prefix_with_limit(prefix, MAX_TEST_DB_PREFIX_LEN)
+}
+
+fn sanitize_test_db_prefix_with_limit(prefix: &str, max_len: usize) -> String {
     let sanitized: String = prefix
         .chars()
         .map(|ch| {
@@ -387,13 +1573,14 @@ fn sanitize_test_db_prefix(prefix: &str) -> String {
                 '_'
             }
         })
-        .take(MAX_TEST_DB_PREFIX_LEN)
+        .take(max_len)
         .collect();
+    let sanitized = sanitized.trim_matches('_');
 
     if sanitized.is_empty() {
         "db".to_string()
     } else {
-        sanitized
+        sanitized.to_string()
     }
 }
 
@@ -1110,6 +2297,789 @@ pub(crate) fn aevatar_secret_free_violation(value: &serde_json::Value) -> Option
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn managed_test_db_name_round_trips_run_lease_identity_and_fits_mongodb_limit() {
+        let created_at_secs = 0x0123_4567_89ab_cdef;
+        let run_id = "1020304050607080";
+        let name = format_test_db_name(
+            "approval drift/with a prefix that is much too long",
+            created_at_secs,
+            run_id,
+            0x5060_7080,
+        );
+
+        assert_eq!(
+            parse_managed_test_db_name(&name),
+            Some(ManagedTestDbName {
+                created_at_secs,
+                run_id: run_id.to_string(),
+            })
+        );
+        assert!(name.len() <= TEST_DB_MAX_NAME_LEN);
+        assert!(name.ends_with("approval"));
+    }
+
+    #[test]
+    fn managed_test_db_parser_rejects_probe_legacy_and_malformed_names() {
+        let valid = format_test_db_name("parser", 123, "0000000000000001", 2);
+        assert_eq!(
+            parse_managed_test_db_name(&valid),
+            Some(ManagedTestDbName {
+                created_at_secs: 123,
+                run_id: "0000000000000001".to_string(),
+            })
+        );
+
+        let malformed = [
+            TEST_DB_PROBE_NAME.to_string(),
+            format!("{TEST_DB_NAME_PREFIX}legacy_{}", Uuid::nil()),
+            valid.replacen("000000000000007b", "00000000000000zz", 1),
+            valid.replacen("0000000000000001", "1", 1),
+            format!("{TEST_DB_NAME_PREFIX}000000000000007b_0000000000000001_00000002_"),
+            format!("{TEST_DB_NAME_PREFIX}000000000000007b_0000000000000001_00000002_bad-prefix"),
+        ];
+
+        for name in malformed {
+            assert_eq!(
+                parse_managed_test_db_name(&name),
+                None,
+                "unexpectedly accepted {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn managed_test_db_eligibility_requires_age_and_an_expired_run_lease() {
+        let now_secs = 2_000_000;
+        let stale_after_secs = MANAGED_TEST_DB_MIN_AGE.as_secs();
+        let exactly_stale = ManagedTestDbName {
+            created_at_secs: now_secs - stale_after_secs,
+            run_id: "0000000000000001".to_string(),
+        };
+        let one_second_too_young = ManagedTestDbName {
+            created_at_secs: now_secs - stale_after_secs + 1,
+            run_id: "0000000000000002".to_string(),
+        };
+        let future = ManagedTestDbName {
+            created_at_secs: now_secs + 1,
+            run_id: "0000000000000003".to_string(),
+        };
+        let active = HashSet::from([exactly_stale.run_id.clone()]);
+
+        assert!(!managed_test_db_is_eligible(
+            &exactly_stale,
+            now_secs,
+            &active
+        ));
+        assert!(managed_test_db_is_eligible(
+            &exactly_stale,
+            now_secs,
+            &HashSet::new()
+        ));
+        assert!(!managed_test_db_is_eligible(
+            &one_second_too_young,
+            now_secs,
+            &HashSet::new()
+        ));
+        assert!(!managed_test_db_is_eligible(
+            &future,
+            now_secs,
+            &HashSet::new()
+        ));
+    }
+
+    #[test]
+    fn legacy_test_db_adoption_is_exact_and_quarantined_from_first_observation() {
+        let canonical_v4 = "01234567-89ab-4def-8123-456789abcdef";
+        let legacy = format!("{TEST_DB_NAME_PREFIX}approval_drift_{canonical_v4}");
+        assert!(is_legacy_test_db_name(&legacy));
+        assert!(!is_legacy_test_db_name(TEST_DB_PROBE_NAME));
+        assert!(!is_legacy_test_db_name(&format!(
+            "{TEST_DB_NAME_PREFIX}arbitrary_user_database"
+        )));
+        assert!(!is_legacy_test_db_name(&format!(
+            "{TEST_DB_NAME_PREFIX}bad-prefix_{}",
+            canonical_v4
+        )));
+        for noncanonical in [
+            canonical_v4.replace('-', ""),
+            format!("{{{canonical_v4}}}"),
+            canonical_v4.to_uppercase(),
+            Uuid::nil().to_string(),
+            format!("urn:uuid:{canonical_v4}"),
+        ] {
+            assert!(
+                !is_legacy_test_db_name(&format!(
+                    "{TEST_DB_NAME_PREFIX}approval_drift_{noncanonical}"
+                )),
+                "unexpectedly adopted noncanonical UUID form {noncanonical}"
+            );
+        }
+        assert!(!is_legacy_test_db_name(&format!(
+            "{TEST_DB_NAME_PREFIX}_approval_{canonical_v4}"
+        )));
+        assert!(!is_legacy_test_db_name(&format!(
+            "{TEST_DB_NAME_PREFIX}approval__{canonical_v4}"
+        )));
+
+        let now_secs = 2_000_000;
+        let quarantine_secs = LEGACY_TEST_DB_QUARANTINE.as_secs();
+        assert!(legacy_test_db_is_eligible(
+            now_secs - quarantine_secs,
+            now_secs
+        ));
+        assert!(!legacy_test_db_is_eligible(
+            now_secs - quarantine_secs + 1,
+            now_secs
+        ));
+        assert!(!legacy_test_db_is_eligible(now_secs + 1, now_secs));
+    }
+
+    #[test]
+    fn first_writable_test_database_uri_is_pinned_for_the_process() {
+        let pinned_uri = OnceLock::new();
+        assert!(pin_test_db_uri_in(&pinned_uri, "mongodb://127.0.0.1:27018"));
+        assert!(pin_test_db_uri_in(&pinned_uri, "mongodb://127.0.0.1:27018"));
+        assert!(!pin_test_db_uri_in(
+            &pinned_uri,
+            "mongodb://127.0.0.1:27017"
+        ));
+        assert_eq!(
+            pinned_uri.get().map(String::as_str),
+            Some("mongodb://127.0.0.1:27018")
+        );
+    }
+
+    #[test]
+    fn losing_test_database_uri_race_converges_on_the_winner() {
+        let pinned_uri = Arc::new(OnceLock::new());
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let contenders = [
+            "mongodb://127.0.0.1:27018".to_string(),
+            "mongodb://127.0.0.1:27017".to_string(),
+        ];
+        let contenders: Vec<_> = contenders
+            .into_iter()
+            .map(|candidate| {
+                let pinned_uri = Arc::clone(&pinned_uri);
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    let won = pin_test_db_uri_in(&pinned_uri, &candidate);
+                    let retry_uri = pinned_uri
+                        .get()
+                        .expect("one contender must publish the winner")
+                        .clone();
+                    (won, retry_uri)
+                })
+            })
+            .collect();
+        let outcomes: Vec<_> = contenders
+            .into_iter()
+            .map(|contender| contender.join().expect("join URI contender"))
+            .collect();
+
+        assert_eq!(outcomes.iter().filter(|(won, _)| *won).count(), 1);
+        let winner = pinned_uri.get().expect("URI winner");
+        assert!(
+            outcomes.iter().all(|(_, retry_uri)| retry_uri == winner),
+            "the losing probe must retry the process-wide winner"
+        );
+    }
+
+    #[test]
+    fn exit_cleanup_deletes_run_record_only_after_a_complete_successful_drop_pass() {
+        assert!(test_db_exit_cleanup_can_delete_run_record(Some(true)));
+        assert!(!test_db_exit_cleanup_can_delete_run_record(Some(false)));
+        assert!(!test_db_exit_cleanup_can_delete_run_record(None));
+    }
+
+    #[test]
+    fn failed_lifecycle_drop_remains_registered_for_exit_recovery() {
+        let mut cleanup = TestDbCleanup::new();
+        cleanup.register("mongodb://test.invalid", "nyxid_test_failed_drop");
+
+        cleanup.complete_lifecycle_drop("nyxid_test_failed_drop", false);
+        assert!(cleanup.is_registered("nyxid_test_failed_drop"));
+
+        cleanup.complete_lifecycle_drop("nyxid_test_failed_drop", true);
+        assert!(!cleanup.is_registered("nyxid_test_failed_drop"));
+    }
+
+    #[tokio::test]
+    async fn lifecycle_drop_retries_transient_failures_and_stays_bounded() {
+        let transient_attempts = Arc::new(AtomicUsize::new(0));
+        let attempts = Arc::clone(&transient_attempts);
+        assert!(
+            retry_test_db_lifecycle_drop(Duration::ZERO, move || {
+                let attempt = attempts.fetch_add(1, Ordering::SeqCst) + 1;
+                std::future::ready(attempt == TEST_DB_LIFECYCLE_DROP_MAX_ATTEMPTS)
+            })
+            .await
+        );
+        assert_eq!(
+            transient_attempts.load(Ordering::SeqCst),
+            TEST_DB_LIFECYCLE_DROP_MAX_ATTEMPTS
+        );
+
+        let failed_attempts = Arc::new(AtomicUsize::new(0));
+        let attempts = Arc::clone(&failed_attempts);
+        assert!(
+            !retry_test_db_lifecycle_drop(Duration::ZERO, move || {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                std::future::ready(false)
+            })
+            .await
+        );
+        assert_eq!(
+            failed_attempts.load(Ordering::SeqCst),
+            TEST_DB_LIFECYCLE_DROP_MAX_ATTEMPTS
+        );
+    }
+
+    #[test]
+    fn drop_worker_pool_claims_a_bounded_backlog_concurrently() {
+        let (sender, receiver) = sync_channel(TEST_DB_DROP_QUEUE_CAPACITY);
+        for job_index in 0..TEST_DB_DROP_QUEUE_CAPACITY {
+            sender
+                .send(TestDbDropJob {
+                    uri: "mongodb://test.invalid".to_string(),
+                    db_name: format!("nyxid_test_backlog_{job_index}"),
+                })
+                .expect("seed bounded drop backlog");
+        }
+
+        let receiver = Arc::new(std::sync::Mutex::new(receiver));
+        let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let (started_sender, started_receiver) = sync_channel(TEST_DB_DROP_WORKER_COUNT);
+        let workers: Vec<_> = (0..TEST_DB_DROP_WORKER_COUNT)
+            .map(|_| {
+                let receiver = Arc::clone(&receiver);
+                let release = Arc::clone(&release);
+                let started_sender = started_sender.clone();
+                std::thread::spawn(move || {
+                    let job = receive_test_db_drop_job(&receiver).expect("claim drop job");
+                    started_sender
+                        .send(job.db_name)
+                        .expect("report claimed drop job");
+
+                    let (released, wake) = &*release;
+                    let mut released = released
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    while !*released {
+                        released = wake
+                            .wait(released)
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    }
+                })
+            })
+            .collect();
+        drop(started_sender);
+
+        let mut claimed_names = HashSet::new();
+        let mut all_workers_started = true;
+        for _ in 0..TEST_DB_DROP_WORKER_COUNT {
+            match started_receiver.recv_timeout(Duration::from_secs(5)) {
+                Ok(db_name) => {
+                    claimed_names.insert(db_name);
+                }
+                Err(_) => {
+                    all_workers_started = false;
+                    break;
+                }
+            }
+        }
+
+        let (released, wake) = &*release;
+        *released
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        wake.notify_all();
+        for worker in workers {
+            worker.join().expect("join drop backlog worker");
+        }
+
+        assert!(
+            all_workers_started,
+            "every drop worker must claim backlog without waiting for another worker to finish"
+        );
+        assert_eq!(claimed_names.len(), TEST_DB_DROP_WORKER_COUNT);
+    }
+
+    #[test]
+    fn full_drop_queue_defers_to_one_retry_coordinator_until_capacity_returns() {
+        let (job_sender, job_receiver) = sync_channel(1);
+        job_sender
+            .send(TestDbDropJob {
+                uri: "mongodb://test.invalid".to_string(),
+                db_name: "nyxid_test_queue_seed".to_string(),
+            })
+            .expect("fill the bounded queue");
+        let retry = start_test_db_drop_retry_coordinator(job_sender.clone())
+            .expect("start fixed retry coordinator");
+        let workers = TestDbDropWorkers {
+            job_sender,
+            retry: Some(retry),
+        };
+
+        assert!(enqueue_test_db_drop_job(
+            &workers,
+            TestDbDropJob {
+                uri: "mongodb://test.invalid".to_string(),
+                db_name: "nyxid_test_queue_deferred".to_string(),
+            },
+        ));
+        assert_eq!(
+            workers
+                .retry
+                .as_ref()
+                .expect("retry coordinator")
+                .jobs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .len(),
+            1,
+            "queue admission overflow must remain tracked"
+        );
+
+        assert_eq!(
+            job_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("read queue seed")
+                .db_name,
+            "nyxid_test_queue_seed"
+        );
+        assert_eq!(
+            job_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("retry coordinator queues the deferred job")
+                .db_name,
+            "nyxid_test_queue_deferred"
+        );
+        assert!(
+            workers
+                .retry
+                .as_ref()
+                .expect("retry coordinator")
+                .jobs
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_client_operation_timeout_fails_closed() {
+        let result = test_db_cleanup_operation_with_timeout(
+            Duration::ZERO,
+            std::future::pending::<Result<(), ()>>(),
+        )
+        .await;
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn per_test_client_release_drops_database_before_process_exit() {
+        let db = connect_transaction_test_database("lifecycle_release").await;
+        let db_name = db.name().to_string();
+        db.collection::<Document>("fixture")
+            .insert_one(doc! { "_id": "materialized" })
+            .await
+            .expect("materialize lifecycle test database");
+        assert!(test_db_is_registered_for_cleanup(&db_name));
+        let observer = observe_test_db_drop(&db_name);
+
+        drop(db);
+
+        let dropped =
+            tokio::task::spawn_blocking(move || observer.recv_timeout(Duration::from_secs(20)))
+                .await
+                .expect("join lifecycle drop observer")
+                .expect("driver client teardown should release the database before process exit");
+        assert!(
+            dropped,
+            "the lifecycle worker must report a successful drop"
+        );
+        assert!(!test_db_is_registered_for_cleanup(&db_name));
+    }
+
+    #[tokio::test]
+    async fn database_clone_keeps_lifecycle_cleanup_from_running_early() {
+        let db = connect_transaction_test_database("lifecycle_clone").await;
+        let db_name = db.name().to_string();
+        db.collection::<Document>("fixture")
+            .insert_one(doc! { "_id": "clone-still-live" })
+            .await
+            .expect("materialize clone lifecycle database");
+        let surviving_clone = db.clone();
+        let observer = observe_test_db_drop(&db_name);
+        drop(db);
+
+        let mut drop_wait =
+            tokio::task::spawn_blocking(move || observer.recv_timeout(Duration::from_secs(20)));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), &mut drop_wait)
+                .await
+                .is_err(),
+            "cleanup must not run while a Database clone still owns the client"
+        );
+        assert!(test_db_is_registered_for_cleanup(&db_name));
+        assert_eq!(
+            surviving_clone
+                .collection::<Document>("fixture")
+                .count_documents(doc! {})
+                .await
+                .expect("use the surviving database clone"),
+            1
+        );
+
+        drop(surviving_clone);
+
+        let dropped = drop_wait
+            .await
+            .expect("join clone lifecycle drop observer")
+            .expect("final clone release should enqueue cleanup");
+        assert!(
+            dropped,
+            "the lifecycle worker must report a successful drop"
+        );
+        assert!(!test_db_is_registered_for_cleanup(&db_name));
+    }
+
+    #[tokio::test]
+    async fn mongo_sweep_lease_is_cross_process_exclusive_and_owner_checked() {
+        let db = connect_transaction_test_database("sweep_lease").await;
+        let collection = db.collection::<Document>("sweep_lease_test");
+        let now_secs = unix_time_secs();
+
+        assert!(acquire_test_db_sweep_lease(&collection, "owner-a", now_secs).await);
+        assert!(!acquire_test_db_sweep_lease(&collection, "owner-b", now_secs).await);
+
+        release_test_db_sweep_lease(&collection, "owner-b", now_secs).await;
+        assert!(!acquire_test_db_sweep_lease(&collection, "owner-b", now_secs).await);
+
+        release_test_db_sweep_lease(&collection, "owner-a", now_secs).await;
+        assert!(
+            !acquire_test_db_sweep_lease(
+                &collection,
+                "owner-b",
+                now_secs + STALE_TEST_DB_SWEEP_COOLDOWN.as_secs() - 1,
+            )
+            .await
+        );
+        assert!(
+            acquire_test_db_sweep_lease(
+                &collection,
+                "owner-b",
+                now_secs + STALE_TEST_DB_SWEEP_COOLDOWN.as_secs(),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn mongo_metadata_pruning_keeps_live_referenced_and_ambiguous_records() {
+        let db = connect_transaction_test_database("sweep_metadata").await;
+        let run_records = db.collection::<Document>("run_records");
+        let legacy_candidates = db.collection::<Document>("legacy_candidates");
+        let now_secs = 2_000_000;
+
+        run_records
+            .insert_many([
+                doc! { "_id": "expired-orphan", "lease_until_secs": bson_secs(now_secs - 1) },
+                doc! { "_id": "expired-referenced", "lease_until_secs": bson_secs(now_secs - 1) },
+                doc! { "_id": "live-orphan", "lease_until_secs": bson_secs(now_secs + 1) },
+                doc! { "_id": "missing-expiry" },
+            ])
+            .await
+            .expect("insert run metadata fixtures");
+        legacy_candidates
+            .insert_many([
+                doc! { "_id": "nyxid_test_present_00000000-0000-0000-0000-000000000000" },
+                doc! { "_id": "nyxid_test_missing_00000000-0000-0000-0000-000000000000" },
+            ])
+            .await
+            .expect("insert legacy metadata fixtures");
+
+        prune_test_db_metadata_collections(
+            &run_records,
+            &legacy_candidates,
+            now_secs,
+            &HashSet::from(["expired-referenced".to_string()]),
+            &HashSet::from(["nyxid_test_present_00000000-0000-0000-0000-000000000000".to_string()]),
+        )
+        .await;
+
+        let remaining_runs: HashSet<String> = run_records
+            .find(doc! {})
+            .await
+            .expect("query remaining run records")
+            .try_collect::<Vec<Document>>()
+            .await
+            .expect("read remaining run records")
+            .into_iter()
+            .map(|record| record.get_str("_id").expect("string run id").to_string())
+            .collect();
+        assert_eq!(
+            remaining_runs,
+            HashSet::from([
+                "expired-referenced".to_string(),
+                "live-orphan".to_string(),
+                "missing-expiry".to_string(),
+            ])
+        );
+
+        let remaining_legacy_candidates: HashSet<String> = legacy_candidates
+            .find(doc! {})
+            .await
+            .expect("query remaining legacy candidates")
+            .try_collect::<Vec<Document>>()
+            .await
+            .expect("read remaining legacy candidates")
+            .into_iter()
+            .map(|record| {
+                record
+                    .get_str("_id")
+                    .expect("string legacy candidate id")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            remaining_legacy_candidates,
+            HashSet::from(["nyxid_test_present_00000000-0000-0000-0000-000000000000".to_string(),])
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_first_run_renewals_publish_one_live_lease() {
+        let Some(db) = connect_test_database("concurrent_run_renewal").await else {
+            return;
+        };
+        let run_records = db.collection::<Document>("run_records");
+        let run_id = Uuid::new_v4().to_string();
+        let now_secs = 2_000_000;
+        let participants = 16;
+        let barrier = Arc::new(tokio::sync::Barrier::new(participants));
+        let mut renewals = Vec::with_capacity(participants);
+
+        for _ in 0..participants {
+            let run_records = run_records.clone();
+            let run_id = run_id.clone();
+            let barrier = Arc::clone(&barrier);
+            renewals.push(tokio::spawn(async move {
+                barrier.wait().await;
+                renew_test_db_run_record_in_collection(
+                    &run_records,
+                    &run_id,
+                    now_secs - 100,
+                    now_secs,
+                )
+                .await
+            }));
+        }
+
+        for renewal in futures::future::join_all(renewals).await {
+            assert!(
+                matches!(renewal, Ok(Ok(true))),
+                "every concurrent first renewal must observe a live lease: {renewal:?}"
+            );
+        }
+        assert_eq!(
+            run_records
+                .count_documents(doc! { "_id": &run_id })
+                .await
+                .expect("count run records"),
+            1
+        );
+        let lease = run_records
+            .find_one(doc! { "_id": &run_id })
+            .await
+            .expect("read run lease")
+            .expect("run lease exists");
+        assert_eq!(
+            lease.get_i64("lease_until_secs"),
+            Ok(bson_secs(
+                now_secs.saturating_add(TEST_DB_RUN_LEASE.as_secs())
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn mongo_managed_drop_claim_fences_renewal_and_is_owner_checked() {
+        let db = connect_transaction_test_database("sweep_drop_claim").await;
+        let run_records = db.collection::<Document>("run_records");
+        let now_secs = 2_000_000;
+        let started_at_secs = now_secs - 100;
+
+        run_records
+            .insert_many([
+                doc! { "_id": "renewed-first", "lease_until_secs": bson_secs(now_secs - 1) },
+                doc! { "_id": "claimed-first", "lease_until_secs": bson_secs(now_secs - 1) },
+                doc! {
+                    "_id": "expired-claim",
+                    "lease_until_secs": bson_secs(now_secs - 1),
+                    "cleanup_claim_id": "crashed-sweeper",
+                    "cleanup_claim_until_secs": bson_secs(now_secs - 1),
+                },
+                doc! {
+                    "_id": "malformed-claim",
+                    "lease_until_secs": bson_secs(now_secs - 1),
+                    "cleanup_claim_id": "missing-expiry",
+                },
+            ])
+            .await
+            .expect("insert run lease fixtures");
+
+        renew_test_db_run_record_in_collection(
+            &run_records,
+            "renewed-first",
+            started_at_secs,
+            now_secs,
+        )
+        .await
+        .expect("producer renews before stale-drop claim");
+        assert!(
+            !claim_expired_test_db_run(
+                &run_records,
+                "renewed-first",
+                "sweeper-after-renewal",
+                now_secs,
+            )
+            .await,
+            "a producer renewal that wins the race must block stale cleanup"
+        );
+
+        assert!(
+            claim_expired_test_db_run(&run_records, "claimed-first", "sweeper-owner", now_secs,)
+                .await,
+            "an explicitly expired producer lease can be claimed"
+        );
+        assert!(
+            !claim_expired_test_db_run(
+                &run_records,
+                "claimed-first",
+                "competing-sweeper",
+                now_secs,
+            )
+            .await,
+            "an active cleanup claim is exclusive"
+        );
+        assert!(
+            matches!(
+                renew_test_db_run_record_in_collection(
+                    &run_records,
+                    "claimed-first",
+                    started_at_secs,
+                    now_secs,
+                )
+                .await,
+                Ok(false)
+            ),
+            "a producer renewal that loses the atomic claim race must fail closed"
+        );
+        assert!(
+            !release_test_db_drop_claim(&run_records, "claimed-first", "wrong-owner").await,
+            "a different sweeper must not release the fencing claim"
+        );
+        let claimed = run_records
+            .find_one(doc! { "_id": "claimed-first" })
+            .await
+            .expect("read claimed run")
+            .expect("claimed run exists");
+        assert_eq!(
+            claimed
+                .get_str("cleanup_claim_id")
+                .expect("string cleanup claim owner"),
+            "sweeper-owner"
+        );
+        assert!(
+            !release_test_db_drop_claim_after_confirmed_drop(
+                &run_records,
+                "claimed-first",
+                "sweeper-owner",
+                false,
+            )
+            .await,
+            "an ambiguous or failed drop must retain its fencing claim"
+        );
+        assert!(matches!(
+            renew_test_db_run_record_in_collection(
+                &run_records,
+                "claimed-first",
+                started_at_secs,
+                now_secs,
+            )
+            .await,
+            Ok(false)
+        ));
+        let retained = run_records
+            .find_one(doc! { "_id": "claimed-first" })
+            .await
+            .expect("read retained claim")
+            .expect("retained claim exists");
+        assert_eq!(retained.get_str("cleanup_claim_id"), Ok("sweeper-owner"));
+        assert!(
+            release_test_db_drop_claim_after_confirmed_drop(
+                &run_records,
+                "claimed-first",
+                "sweeper-owner",
+                true,
+            )
+            .await,
+            "only a confirmed drop may release its fencing claim"
+        );
+        renew_test_db_run_record_in_collection(
+            &run_records,
+            "claimed-first",
+            started_at_secs,
+            now_secs,
+        )
+        .await
+        .expect("producer can renew after the bounded drop claim is released");
+        let renewed = run_records
+            .find_one(doc! { "_id": "claimed-first" })
+            .await
+            .expect("read renewed run")
+            .expect("renewed run exists");
+        assert_eq!(
+            renewed.get_i64("lease_until_secs"),
+            Ok(bson_secs(
+                now_secs.saturating_add(TEST_DB_RUN_LEASE.as_secs())
+            ))
+        );
+        assert!(!renewed.contains_key("cleanup_claim_id"));
+        assert!(!renewed.contains_key("cleanup_claim_until_secs"));
+
+        assert!(
+            claim_expired_test_db_run(
+                &run_records,
+                "expired-claim",
+                "replacement-sweeper",
+                now_secs,
+            )
+            .await
+        );
+        assert!(
+            !claim_expired_test_db_run(&run_records, "malformed-claim", "sweeper", now_secs,).await,
+            "malformed claim state must block destructive recovery"
+        );
+        assert!(
+            matches!(
+                renew_test_db_run_record_in_collection(
+                    &run_records,
+                    "malformed-claim",
+                    started_at_secs,
+                    now_secs,
+                )
+                .await,
+                Ok(false)
+            ),
+            "malformed claim state must also fail producer renewal closed"
+        );
+    }
 
     /// Guards the per-test mongo probe against the CI slowdown regression: a
     /// candidate port with no listener must fail over in ~milliseconds, not stall

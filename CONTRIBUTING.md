@@ -214,6 +214,27 @@ If your change touches authentication, encryption, or credential handling, it wi
 
 ### Running Tests
 
+The full backend suite needs a dedicated, ephemeral MongoDB 8 replica set. It
+creates and drops a database per DB-backed test, so start that test-only mongod
+with `minSnapshotHistoryWindowInSeconds=0`; MongoDB's 300-second default retains
+dropped WiredTiger idents and file descriptors long enough to exhaust a full
+run. This is a server-wide parameter: do not set it on a shared development,
+staging, or production MongoDB.
+
+```bash
+docker run --rm --detach --name nyxid-test-mongodb --publish 27017:27017 \
+  --ulimit nofile=65536:65536 \
+  mongo:8.0 --replSet rs0 --bind_ip_all \
+  --setParameter minSnapshotHistoryWindowInSeconds=0
+docker exec nyxid-test-mongodb mongosh --quiet --eval \
+  'rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]})'
+export NYXID_TEST_DATABASE_URL='mongodb://127.0.0.1:27017/?replicaSet=rs0&directConnection=true'
+```
+
+Wait until `db.hello().isWritablePrimary` is `true` before starting the suite.
+The CI workflow uses the same startup contract and verifies the effective
+parameter with `getParameter` before running tests.
+
 ```bash
 # Backend unit tests
 cargo test
