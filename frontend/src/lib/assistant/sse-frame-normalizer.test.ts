@@ -82,6 +82,31 @@ describe("sseFrameNormalizer", () => {
     });
   });
 
+  it("normalizes typed actor mediaContent oneof frames", () => {
+    expect(
+      normalizeBackendSseFrame({
+        mediaContent: {
+          dataBase64: "aGVsbG8=",
+          kind: "image",
+          mediaType: "image/png",
+          name: "chart.png",
+          uri: "https://example.test/chart.png",
+        },
+        timestamp: 5,
+        type: "MEDIA_CONTENT",
+      }),
+    ).toEqual({
+      dataBase64: "aGVsbG8=",
+      kind: "image",
+      mediaType: "image/png",
+      name: "chart.png",
+      text: "",
+      timestamp: 5,
+      type: AGUIEventType.MEDIA_CONTENT,
+      uri: "https://example.test/chart.png",
+    });
+  });
+
   it("extracts run identifiers from nested backend frames", () => {
     expect(
       normalizeBackendSseFrame({

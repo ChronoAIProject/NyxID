@@ -185,12 +185,12 @@ test.describe("NYX-5: approval episode cleanup", () => {
     ).toBeVisible();
 
     await thread(page)
-      .getByRole("button", { name: "Approve", exact: true })
+      .getByRole("button", { name: "Approve and send", exact: true })
       .click();
 
     await expect(
-      thread(page).getByRole("button", { name: "Approve", exact: true }),
-    ).toHaveCount(0, { timeout: 5_000 });
+      thread(page).getByText("Approved and sent", { exact: true }),
+    ).toBeVisible({ timeout: 5_000 });
 
     await page.waitForTimeout(2_000);
     const episode = await readEpisode(page, "conversation-stripe");
@@ -210,11 +210,11 @@ test.describe("NYX-5: approval episode cleanup", () => {
   }) => {
     await openAssistant(page, { conversation: "conversation-stripe" });
     await thread(page)
-      .getByRole("button", { name: "Approve", exact: true })
+      .getByRole("button", { name: "Approve and send", exact: true })
       .click();
     await expect(
-      thread(page).getByRole("button", { name: "Approve", exact: true }),
-    ).toHaveCount(0, { timeout: 5_000 });
+      thread(page).getByText("Approved and sent", { exact: true }),
+    ).toBeVisible({ timeout: 5_000 });
 
     await page.waitForTimeout(2_000);
     const episode = await readEpisode(page, "conversation-stripe");

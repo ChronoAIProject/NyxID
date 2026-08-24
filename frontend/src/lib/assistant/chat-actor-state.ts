@@ -15,6 +15,11 @@ import {
   assistantInputRequestSchema,
   type AssistantInputRequest,
 } from "@/schemas/assistant-input";
+import {
+  approvalRequestToBlock,
+  approvalResolutionDecision,
+} from "./chat-approval-presentation";
+import type { ApprovalCardContentBlock } from "@/types/assistant";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -80,6 +85,7 @@ export type ChatActorProjection = {
   steps: Map<string, ChatActorStep>;
   pendingInput: ChatPendingInput | null;
   pendingApproval: ChatPendingApproval | null;
+  approvalCards: Map<string, ApprovalCardContentBlock>;
   actions: Map<string, ChatActionSummary>;
   controlFence: JsonRecord | null;
   latestControlResult: JsonRecord | null;
@@ -133,6 +139,7 @@ export function createChatActorProjection(
     steps: new Map(),
     pendingInput: null,
     pendingApproval: null,
+    approvalCards: new Map(),
     actions: new Map(),
     controlFence: null,
     latestControlResult: null,
@@ -226,7 +233,7 @@ export function reduceActorFrame(
       }
       break;
     case "approval_request":
-      next.pendingApproval = normalizePendingApproval(frame.payload);
+      applyApprovalRequest(next, frame.payload);
       break;
     case "approval_changed":
       next.latestApprovalResolution = cloneRecord(frame.payload);
@@ -236,6 +243,7 @@ export function reduceActorFrame(
       ) {
         next.pendingApproval = null;
       }
+      applyApprovalResolution(next, frame.payload);
       break;
     case "action_request":
       applyActionRequest(next, frame.validation);
@@ -334,7 +342,10 @@ export function applyCurrentStateResult(
         .map(cloneRecord)
     : [];
   applyPendingInput(next, snapshot.pendingInput);
-  next.pendingApproval = normalizePendingApproval(snapshot.pendingApproval);
+  next.approvalCards = new Map(
+    [...projection.approvalCards].map(([key, block]) => [key, { ...block }]),
+  );
+  applyApprovalRequest(next, snapshot.pendingApproval);
   next.controlFence = cloneNullableRecord(snapshot.controlFence);
   next.latestControlResult = cloneNullableRecord(snapshot.latestControlResult);
   next.latestStepControlResult = cloneNullableRecord(
@@ -356,6 +367,9 @@ export function applyCurrentStateResult(
   next.latestApprovalResolution = cloneNullableRecord(
     snapshot.latestApprovalResolution,
   );
+  if (next.latestApprovalResolution) {
+    applyApprovalResolution(next, next.latestApprovalResolution);
+  }
   const activeTask = optionalRecord(snapshot.activeTask);
   if (activeTask) applyTask(next, activeTask);
   applyActionSummaries(
@@ -384,6 +398,21 @@ export function actorCan(
   }
   if (!stepId) return false;
   return projection.steps.get(stepId)?.availableActions?.[action] === true;
+}
+
+export function updateApprovalDecisionSubmission(
+  projection: ChatActorProjection,
+  requestId: string,
+  submission: "approved" | "denied" | null,
+): ChatActorProjection {
+  const block = projection.approvalCards.get(requestId);
+  if (!block || block.decision !== null) return projection;
+  const next = cloneProjection(projection);
+  next.approvalCards.set(requestId, {
+    ...block,
+    decision_submission: submission,
+  });
+  return next;
 }
 
 export function chatActionIdentityKey(
@@ -560,6 +589,45 @@ function normalizePendingApproval(input: unknown): ChatPendingApproval | null {
   };
 }
 
+function applyApprovalRequest(
+  projection: ChatActorProjection,
+  input: unknown,
+): void {
+  const pending = normalizePendingApproval(input);
+  projection.pendingApproval = pending;
+  if (!pending) return;
+  projection.approvalCards.set(
+    pending.approvalRequestId,
+    approvalRequestToBlock(
+      pending,
+      projection.stateVersion,
+      projection.approvalCards.get(pending.approvalRequestId),
+    ),
+  );
+}
+
+function applyApprovalResolution(
+  projection: ChatActorProjection,
+  resolution: JsonRecord,
+): void {
+  const requestId = readIdentity(
+    resolution.approvalRequestId ?? resolution.requestId,
+  );
+  const decision = approvalResolutionDecision(resolution);
+  if (!requestId || !decision) return;
+  const existing = projection.approvalCards.get(requestId);
+  if (!existing) return;
+  projection.approvalCards.set(requestId, {
+    ...existing,
+    decision,
+    decision_channel: "web",
+    decision_submission: null,
+    ...(projection.stateVersion > 0
+      ? { state_version: projection.stateVersion }
+      : {}),
+  });
+}
+
 function decodePendingInput(input: unknown): ChatPendingInput | null {
   const value = optionalRecord(input);
   if (!value) return null;
@@ -697,6 +765,9 @@ function cloneProjection(projection: ChatActorProjection): ChatActorProjection {
     pendingApproval: projection.pendingApproval
       ? ({ ...projection.pendingApproval } as ChatPendingApproval)
       : null,
+    approvalCards: new Map(
+      [...projection.approvalCards].map(([key, block]) => [key, { ...block }]),
+    ),
     actions: new Map(
       [...projection.actions].map(([key, value]) => [key, { ...value }]),
     ),

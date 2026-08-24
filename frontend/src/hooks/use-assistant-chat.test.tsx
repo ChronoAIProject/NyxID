@@ -470,7 +470,7 @@ describe("useAssistantChat", () => {
     expect(result.current.session?.messages.at(-1)?.error).toBeUndefined();
   });
 
-  it("rejects a silent pre-start request at the 30 second deadline", async () => {
+  it("settles a silent pre-start request at the 30 second deadline", async () => {
     vi.useFakeTimers();
     globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
       if (endpoint === "/assistant/conversations") {
@@ -487,16 +487,11 @@ describe("useAssistantChat", () => {
     act(() => {
       sendPromise = result.current.send("Wait for a reply");
     });
-    const observed = sendPromise!.then(
-      () => undefined,
-      (error: unknown) => error,
-    );
-
     await act(async () =>
       vi.advanceTimersByTimeAsync(STREAM_START_DEADLINE_MS),
     );
 
-    await expect(observed).resolves.toBeInstanceOf(ChatStartTimeoutError);
+    await expect(sendPromise!).resolves.toBeUndefined();
     expect(result.current.isStreaming).toBe(false);
     expect(result.current.session?.status).toBe("error");
     expect(result.current.session?.messages.at(-1)?.error).toBe(
@@ -1075,6 +1070,54 @@ describe("useAssistantChat", () => {
         (message) => message.content === "NyxID action update: declined.",
       ),
     ).toBe(true);
+  });
+
+  it("keeps an approval submission visible until the committed fact arrives", async () => {
+    let resolveCommand: ((response: Response) => void) | undefined;
+    globalThis.__nyxidAssistantHttpMock = ({ endpoint, init }) => {
+      if (endpoint === "/assistant/conversations") {
+        return json({ conversations: [META] });
+      }
+      if (endpoint === `/assistant/conversations/${ACTOR_ID}`) {
+        return json(storedDetail(ACTOR_ID, "Saved chat"));
+      }
+      if (endpoint.startsWith(`/assistant/conversations/${ACTOR_ID}/state`)) {
+        return json(actorControlState());
+      }
+      if (endpoint === "/assistant/chat") {
+        const body = JSON.parse(String(init.body)) as Record<string, unknown>;
+        expect(body.type).toBe("approval.resolve");
+        return new Promise<Response>((resolve) => {
+          resolveCommand = resolve;
+        });
+      }
+      throw new Error(`Unhandled assistant mock request: ${endpoint}`);
+    };
+    const { result } = renderHook(() =>
+      useAssistantChat({ selectedConversationId: ACTOR_ID }),
+    );
+    await waitFor(() => expect(result.current.controlReady).toBe(true));
+
+    let decision: Promise<void>;
+    act(() => {
+      decision = result.current.resolveApproval("approval-active", true);
+    });
+    await waitFor(() =>
+      expect(
+        result.current.projection?.approvalCards.get("approval-active")
+          ?.decision_submission,
+      ).toBe("approved"),
+    );
+    expect(result.current.controlBusy).toBe(true);
+
+    await act(async () => {
+      resolveCommand?.(json({ accepted: true }, 202));
+      await decision!;
+    });
+    expect(
+      result.current.projection?.approvalCards.get("approval-active")
+        ?.decision_submission,
+    ).toBe("approved");
   });
 
   it("fences all typed controls until a positive current state is available", async () => {

@@ -249,6 +249,55 @@ describe("runtime event accumulation", () => {
     });
   });
 
+  it("accumulates media artifacts and both typed blocker sources", () => {
+    const accumulator = createRuntimeEventAccumulator();
+    const events: AGUIEvent[] = [
+      {
+        type: AGUIEventType.MEDIA_CONTENT,
+        dataBase64: "aGVsbG8=",
+        mediaType: "text/plain",
+        name: "fixture.txt",
+      },
+      {
+        type: AGUIEventType.CUSTOM,
+        name: "nyxid.authorization.required",
+        value: {
+          serviceSlug: "api-github",
+          serviceLabel: "GitHub",
+          reasonCode: "NYXID_UNAUTHORIZED",
+          safeMessage: "Reconnect GitHub.",
+        },
+      },
+      {
+        type: AGUIEventType.TOOL_CALL_END,
+        toolCallId: "tool-lark",
+        result: JSON.stringify({
+          blocked: true,
+          service_slug: "api-lark",
+          readiness_status: "ServiceRegistrationRequired",
+          reason_code: "USER_SERVICE_NOT_VISIBLE",
+          safe_message: "No visible service.",
+        }),
+      },
+    ];
+    events.forEach((event) => applyRuntimeEvent(accumulator, event));
+    expect(accumulator.artifacts).toHaveLength(1);
+    expect(accumulator.artifacts[0]).toMatchObject({
+      name: "fixture.txt",
+      download_url: "data:text/plain;base64,aGVsbG8=",
+    });
+    expect(accumulator.authorizationBlockers).toEqual([
+      expect.objectContaining({
+        reasonCode: "NYXID_UNAUTHORIZED",
+        serviceSlug: "api-github",
+      }),
+      expect.objectContaining({
+        reasonCode: "NYXID_SERVICE_NOT_CONNECTED",
+        serviceSlug: "api-lark",
+      }),
+    ]);
+  });
+
   it("retains RUN_STOPPED as a terminal runtime event", () => {
     const accumulator = createRuntimeEventAccumulator();
     applyRuntimeEvent(accumulator, {

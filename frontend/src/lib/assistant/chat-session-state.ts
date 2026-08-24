@@ -72,6 +72,10 @@ export function buildAssistantMessagePatch(
   status: ChatMessage["status"],
 ): Partial<ChatMessage> {
   return {
+    artifacts: accumulator.artifacts.map((artifact) => ({ ...artifact })),
+    authorizationBlockers: accumulator.authorizationBlockers.map((blocker) => ({
+      ...blocker,
+    })),
     content: accumulator.finalOutput || accumulator.assistantText,
     error: accumulator.errorText || undefined,
     events: [...accumulator.events],

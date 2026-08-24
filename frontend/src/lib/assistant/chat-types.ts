@@ -5,6 +5,8 @@ import type {
   RuntimeToolApprovalRequestInfo,
   RuntimeToolCallInfo,
 } from "@/lib/assistant/runtime-event-semantics";
+import type { ChatAuthorizationBlocker } from "@/lib/assistant/chat-authorization";
+import type { ArtifactContentBlock } from "@/types/assistant";
 
 export type { RuntimeEvent };
 
@@ -17,6 +19,7 @@ export type ChatMessageStatus = ExtensibleString<
 export type StoredChatMessageStatus = ExtensibleString<"complete" | "error">;
 
 export interface ChatMessage {
+  readonly artifacts?: ArtifactContentBlock[];
   readonly id: string;
   readonly role: ChatMessageRole;
   readonly content: string;
@@ -25,6 +28,7 @@ export interface ChatMessage {
   readonly turnId?: string | null;
   readonly authorId?: string | null;
   readonly authorName?: string | null;
+  readonly authorizationBlockers?: ChatAuthorizationBlocker[];
   readonly error?: string | null;
   readonly events?: RuntimeEvent[];
   readonly pendingApproval?: RuntimeToolApprovalRequestInfo;

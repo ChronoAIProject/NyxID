@@ -6,6 +6,7 @@ import {
   createChatActorProjection,
   decodeActorFrame,
   reduceActorFrame,
+  updateApprovalDecisionSubmission,
   validateActionRequest,
 } from "./chat-actor-state";
 
@@ -107,6 +108,74 @@ const actionRequest = {
 } as const;
 
 describe("chatActorState", () => {
+  it("projects approval presentation through submission and committed resolution", () => {
+    const initial = createChatActorProjection("conversation-alpha");
+    initial.stateVersion = 7;
+    const pending = reduceActorFrame(
+      initial,
+      decodeActorFrame({
+        sequence: 1,
+        custom: {
+          name: "nyxid.approval.request",
+          payload: {
+            approvalRequestId: "approval-alpha",
+            toolName: "lark.postMessage",
+            serviceSlug: "lark",
+            agentKeyPrefix: "nyxid-agent",
+            approvalMode: "grant",
+            grantDurationSec: 3_600,
+            expiresAt: "2026-08-08T01:00:00Z",
+            presentation: {
+              actorLabel: "NyxID assistant",
+              action: "post an incident update",
+              target: "Lark",
+            },
+          },
+        },
+      }),
+    );
+    expect(pending.approvalCards.get("approval-alpha")).toMatchObject({
+      approval_request_id: "approval-alpha",
+      body: "NyxID assistant post an incident update on Lark",
+      service_slug: "lark",
+      agent_key_prefix: "nyxid-agent",
+      approval_mode: "grant",
+      grant_duration_sec: 3_600,
+      state_version: 7,
+      decision: null,
+    });
+
+    const submitted = updateApprovalDecisionSubmission(
+      pending,
+      "approval-alpha",
+      "approved",
+    );
+    expect(
+      submitted.approvalCards.get("approval-alpha")?.decision_submission,
+    ).toBe("approved");
+
+    const committed = reduceActorFrame(
+      submitted,
+      decodeActorFrame({
+        sequence: 2,
+        custom: {
+          name: "nyxid.approval.changed",
+          payload: {
+            approvalRequestId: "approval-alpha",
+            outcome: "accepted",
+            approved: true,
+          },
+        },
+      }),
+    );
+    expect(committed.pendingApproval).toBeNull();
+    expect(committed.approvalCards.get("approval-alpha")).toMatchObject({
+      decision: "approved",
+      decision_channel: "web",
+      decision_submission: null,
+    });
+  });
+
   it("decodes the same bounded numeric threshold from live frames and reloads", () => {
     const pendingInput = {
       requestId: "input-threshold",

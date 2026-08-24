@@ -299,7 +299,7 @@ export async function runChatStream({
         buildAssistantMessagePatch(accumulator, "error"),
       );
       updateEntry(entryKey, { projection: actorState, session: failed });
-      throw reason;
+      return undefined;
     }
     if (!adopted && !stopped) {
       updateEntry(entryKey, { projection: initialProjection, session: base });

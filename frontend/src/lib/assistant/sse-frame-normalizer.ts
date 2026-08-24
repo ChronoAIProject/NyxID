@@ -7,6 +7,7 @@ type RuntimeEventType = AGUIEventType | "RUN_STOPPED" | "TOOL_APPROVAL_REQUEST";
 const ONEOF_KEY_MAP: Record<string, RuntimeEventType> = {
   custom: AGUIEventType.CUSTOM,
   humanInputRequest: AGUIEventType.HUMAN_INPUT_REQUEST,
+  mediaContent: AGUIEventType.MEDIA_CONTENT,
   runError: AGUIEventType.RUN_ERROR,
   runFinished: AGUIEventType.RUN_FINISHED,
   runStarted: AGUIEventType.RUN_STARTED,
@@ -227,6 +228,15 @@ export function normalizeBackendSseFrame(raw: unknown): AGUIEvent | null {
           stepId: readString(nested, "stepId"),
           suspensionType: readString(nested, "suspensionType"),
           timeoutSeconds: readNumber(nested, 0, "timeoutSeconds"),
+        });
+      case AGUIEventType.MEDIA_CONTENT:
+        return createTypedEvent(eventType, timestamp, {
+          dataBase64: readString(nested, "dataBase64", "data"),
+          kind: readString(nested, "kind"),
+          mediaType: readString(nested, "mediaType", "mimeType"),
+          name: readString(nested, "name"),
+          text: readString(nested, "text"),
+          uri: readString(nested, "uri", "url"),
         });
       case AGUIEventType.CUSTOM:
         return createTypedEvent(eventType, timestamp, {

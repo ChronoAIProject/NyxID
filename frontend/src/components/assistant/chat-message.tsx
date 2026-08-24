@@ -16,7 +16,10 @@ import {
   Wrench,
   X,
 } from "lucide-react";
+import { ArtifactBlock } from "@/components/assistant/blocks/artifact-block";
+import { ConnectCard } from "@/components/assistant/blocks/connect-card";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
+import { authorizationBlockerToConnectCard } from "@/lib/assistant/chat-authorization";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import type {
   ChatMessage,
@@ -138,7 +141,13 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
   );
 }
 
-export function ChatMessageBubble({ message }: { readonly message: ChatMessage }) {
+export function ChatMessageBubble({
+  message,
+  interactiveCards = true,
+}: {
+  readonly message: ChatMessage;
+  readonly interactiveCards?: boolean;
+}) {
   const streaming = message.status === "streaming";
   const content =
     message.role === "assistant"
@@ -152,7 +161,11 @@ export function ChatMessageBubble({ message }: { readonly message: ChatMessage }
     );
   }
   const printable = Boolean(
-    content || message.steps?.length || message.toolCalls?.length,
+    content ||
+      message.steps?.length ||
+      message.toolCalls?.length ||
+      message.artifacts?.length ||
+      message.authorizationBlockers?.length,
   );
   const thinking = streaming && !printable;
   return (
@@ -172,6 +185,18 @@ export function ChatMessageBubble({ message }: { readonly message: ChatMessage }
         <ThinkingBlock text={message.thinking ?? ""} streaming={streaming} />
         <ActivityBlock message={message} />
         {content ? <TextBlock text={content} streaming={streaming} /> : null}
+        {interactiveCards
+          ? message.authorizationBlockers?.map((blocker) => (
+              <div className="mt-2" key={blocker.serviceSlug}>
+                <ConnectCard block={authorizationBlockerToConnectCard(blocker)} />
+              </div>
+            ))
+          : null}
+        {message.artifacts?.map((artifact) => (
+          <div className="mt-2" key={artifact.block_id}>
+            <ArtifactBlock block={artifact} />
+          </div>
+        ))}
         {streaming && !content ? (
           <div
             data-streaming-dots
@@ -197,7 +222,11 @@ export function ChatMessageBubble({ message }: { readonly message: ChatMessage }
 
 export function ChatMessageEntry({
   message,
-}: { readonly message: ChatMessage }) {
+  interactiveCards = true,
+}: {
+  readonly message: ChatMessage;
+  readonly interactiveCards?: boolean;
+}) {
   const authorName = message.authorName?.trim() ?? "";
   if (message.role === "user" || message.role === "assistant") {
     return (
@@ -212,7 +241,10 @@ export function ChatMessageEntry({
             {authorName}
           </div>
         ) : null}
-        <ChatMessageBubble message={message} />
+        <ChatMessageBubble
+          message={message}
+          interactiveCards={interactiveCards}
+        />
       </div>
     );
   }
@@ -277,7 +309,9 @@ export function ChatMessageList({
       terminalAssistant?.role === "assistant" &&
       !terminalAssistant.content.trim() &&
       !terminalAssistant.error &&
-      !(terminalAssistant.steps?.length || terminalAssistant.toolCalls?.length),
+      !(terminalAssistant.steps?.length || terminalAssistant.toolCalls?.length) &&
+      !(terminalAssistant.artifacts?.length ||
+        terminalAssistant.authorizationBlockers?.length),
   );
   useEffect(() => {
     if (!emptyTerminal) return;

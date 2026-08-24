@@ -151,7 +151,7 @@ export function AssistantWireReplayView({
         diagnostic only and cannot be acted on here.
       </p>
       {replay.message ? (
-        <ChatMessageEntry message={replay.message} />
+        <ChatMessageEntry message={replay.message} interactiveCards={false} />
       ) : replay.actorFacts.length === 0 ? (
         <p className="py-5 text-center text-[11px] text-text-tertiary">
           No renderable chat content in this capture.

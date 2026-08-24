@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyCurrentStateResult,
   createChatActorProjection,
+  updateApprovalDecisionSubmission,
   type ChatActorProjection,
 } from "@/lib/assistant/chat-actor-state";
 import { sendChatCommand, type ChatCommand } from "@/lib/assistant/chat-api";
@@ -602,6 +603,18 @@ export function useAssistantChat({
       const controller = new AbortController();
       controlControllerRef.current = controller;
       setControlBusyKey(key);
+      if (command.type === "approval.resolve") {
+        const projection = entriesRef.current.get(key)?.projection;
+        if (projection) {
+          updateEntry(key, {
+            projection: updateApprovalDecisionSubmission(
+              projection,
+              command.requestId,
+              command.approved ? "approved" : "denied",
+            ),
+          });
+        }
+      }
       try {
         await sendChatCommand(command, controller.signal);
         const projection = entriesRef.current.get(key)?.projection ?? null;
@@ -616,6 +629,20 @@ export function useAssistantChat({
         } catch {
           // A 202 receipt is dispatch-only; stale actor state remains honest.
         }
+      } catch (error) {
+        if (command.type === "approval.resolve") {
+          const projection = entriesRef.current.get(key)?.projection;
+          if (projection) {
+            updateEntry(key, {
+              projection: updateApprovalDecisionSubmission(
+                projection,
+                command.requestId,
+                null,
+              ),
+            });
+          }
+        }
+        throw error;
       } finally {
         if (controlControllerRef.current === controller) {
           controlControllerRef.current = null;
@@ -623,7 +650,7 @@ export function useAssistantChat({
         }
       }
     },
-    [loadActorState],
+    [loadActorState, updateEntry],
   );
 
   const abortStream = useCallback((key: string, reason: ReaderStoppedError) => {

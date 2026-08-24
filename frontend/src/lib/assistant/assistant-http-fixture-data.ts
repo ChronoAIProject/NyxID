@@ -348,10 +348,12 @@ export function assistantFixtureFrames(
     },
     {
       type: "MEDIA_CONTENT",
-      messageId,
-      mimeType: "text/plain",
-      data: "SGVsbG8=",
-      name: "fixture.txt",
+      mediaContent: {
+        dataBase64: "SGVsbG8=",
+        kind: "text",
+        mediaType: "text/plain",
+        name: "fixture.txt",
+      },
     },
     {
       toolCallEnd: {

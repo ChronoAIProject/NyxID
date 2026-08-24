@@ -102,6 +102,35 @@ describe("canonical chat presentation", () => {
     expect(screen.queryByRole("button", { name: /approve/i })).not.toBeInTheDocument();
   });
 
+  it("renders accumulated media with the shipped artifact block", () => {
+    const { container } = render(
+      <ChatMessageBubble
+        message={{
+          ...BASE,
+          content: "",
+          artifacts: [
+            {
+              type: "artifact",
+              block_id: "artifact-1",
+              artifact_id: "media-1",
+              name: "chart.png",
+              mime: "image/png",
+              size_bytes: 6,
+              preview: null,
+              download_url: "data:image/png;base64,aGVsbG8=",
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText("chart.png")).toBeVisible();
+    expect(screen.getByRole("link", { name: "Download chart.png" })).toHaveAttribute(
+      "href",
+      "data:image/png;base64,aGVsbG8=",
+    );
+    expect(container.querySelector("[data-assistant-halo]")).toBeNull();
+  });
+
   it("renders author labels and nonstandard roles without dropping content", () => {
     const { rerender } = render(
       <ChatMessageEntry message={{ ...BASE, authorName: "NyxID Operator" }} />,

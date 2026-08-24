@@ -14,6 +14,7 @@ export const AGUIEventType = {
   TOOL_APPROVAL_REQUEST: "TOOL_APPROVAL_REQUEST",
   HUMAN_INPUT_REQUEST: "HUMAN_INPUT_REQUEST",
   HUMAN_INPUT_RESPONSE: "HUMAN_INPUT_RESPONSE",
+  MEDIA_CONTENT: "MEDIA_CONTENT",
   CUSTOM: "CUSTOM",
 } as const;
 
@@ -131,6 +132,16 @@ export interface HumanInputResponseEvent extends EventBase {
   readonly userInput?: string;
 }
 
+export interface MediaContentEvent extends EventBase {
+  readonly type: typeof AGUIEventType.MEDIA_CONTENT;
+  readonly dataBase64?: string;
+  readonly kind?: string;
+  readonly mediaType?: string;
+  readonly name?: string;
+  readonly text?: string;
+  readonly uri?: string;
+}
+
 export interface CustomEvent extends EventBase {
   readonly type: typeof AGUIEventType.CUSTOM;
   readonly name: string;
@@ -153,6 +164,7 @@ export type AGUIEvent =
   | ToolApprovalRequestEvent
   | HumanInputRequestEvent
   | HumanInputResponseEvent
+  | MediaContentEvent
   | CustomEvent;
 
 export const CustomEventName = {

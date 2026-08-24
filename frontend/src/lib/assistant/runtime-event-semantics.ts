@@ -12,6 +12,16 @@ import {
   parseWaitingSignalData,
 } from "@/lib/assistant/custom-event-data";
 import { normalizeBackendSseFrame } from "@/lib/assistant/sse-frame-normalizer";
+import {
+  parseAuthorizationBlocker,
+  parseToolResultBlocker,
+  type ChatAuthorizationBlocker,
+} from "@/lib/assistant/chat-authorization";
+import {
+  extractMediaContent,
+  presentMediaContent,
+} from "@/lib/assistant/chat-media";
+import type { ArtifactContentBlock } from "@/types/assistant";
 
 type JsonRecord = Record<string, unknown>;
 type RuntimeFinalOutputSource =
@@ -97,7 +107,9 @@ export type RuntimeRunInterventionInfo = {
 
 export type RuntimeEventAccumulator = {
   actorId: string;
+  artifacts: ArtifactContentBlock[];
   assistantText: string;
+  authorizationBlockers: ChatAuthorizationBlocker[];
   commandId: string;
   correlationId: string;
   errorCode: string;
@@ -488,7 +500,9 @@ export function createRuntimeEventAccumulator(input?: {
 }): RuntimeEventAccumulator {
   return {
     actorId: input?.actorId ?? "",
+    artifacts: [],
     assistantText: "",
+    authorizationBlockers: [],
     commandId: "",
     correlationId: "",
     errorCode: "",
@@ -605,6 +619,10 @@ export function applyRuntimeEvent(
           : "";
       existingTool.status = "done";
     }
+    const blocker = parseToolResultBlocker(
+      "result" in event ? event.result : undefined,
+    );
+    if (blocker) upsertAuthorizationBlocker(accumulator, blocker);
   }
 
   if (event.type === AGUIEventType.RUN_ERROR) {
@@ -728,10 +746,38 @@ export function applyRuntimeEvent(
 
   if (event.type === AGUIEventType.CUSTOM) {
     const custom = parseCustomEvent(event);
+    if (custom.name === "nyxid.authorization.required") {
+      const blocker = parseAuthorizationBlocker(custom.data);
+      if (blocker) upsertAuthorizationBlocker(accumulator, blocker);
+    }
     if (custom.name === "studio.human.resume") {
       accumulator.pendingRunIntervention = undefined;
     }
   }
 
+  const media = extractMediaContent(event);
+  if (media) {
+    const presentation = presentMediaContent(media, accumulator.artifacts.length + 1);
+    if (presentation.artifact) {
+      accumulator.artifacts.push(presentation.artifact);
+    } else if (
+      presentation.notice &&
+      !accumulator.assistantText.includes(presentation.notice)
+    ) {
+      accumulator.assistantText += `${accumulator.assistantText ? "\n\n" : ""}${presentation.notice}`;
+    }
+  }
+
   return accumulator;
+}
+
+function upsertAuthorizationBlocker(
+  accumulator: RuntimeEventAccumulator,
+  blocker: ChatAuthorizationBlocker,
+): void {
+  const index = accumulator.authorizationBlockers.findIndex(
+    (existing) => existing.serviceSlug === blocker.serviceSlug,
+  );
+  if (index < 0) accumulator.authorizationBlockers.push(blocker);
+  else accumulator.authorizationBlockers[index] = blocker;
 }

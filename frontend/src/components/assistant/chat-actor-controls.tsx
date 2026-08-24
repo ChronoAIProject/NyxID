@@ -1,5 +1,6 @@
-import { Check, RotateCcw, ShieldAlert, SkipForward, StopCircle, X } from "lucide-react";
+import { RotateCcw, SkipForward, StopCircle } from "lucide-react";
 import { ActionCard } from "@/components/assistant/blocks/action-card";
+import { ApprovalCard } from "@/components/assistant/blocks/approval-card";
 import { InputCard } from "@/components/assistant/blocks/input-card";
 import { TaskPlanCard } from "@/components/assistant/blocks/task-plan-card";
 import { Button } from "@/components/ui/button";
@@ -77,11 +78,11 @@ export function ChatActorControls({
   const controllableSteps = [...projection.steps.values()].filter(
     (step) => step.availableActions.retry || step.availableActions.skip,
   );
-  const pendingApproval = projection.pendingApproval;
+  const approvalCards = [...projection.approvalCards.values()];
   const hasControls = Boolean(
     projection.task ||
       projection.pendingInput ||
-      pendingApproval ||
+      approvalCards.length ||
       actions.length ||
       controllableSteps.length,
   );
@@ -130,38 +131,16 @@ export function ChatActorControls({
         />
       ) : null}
 
-      {pendingApproval ? (
-        <section className="overflow-hidden rounded-lg border border-warning/30 bg-warning/[0.05]">
-          <div className="flex items-start gap-2 border-b border-warning/20 px-3 py-2.5">
-            <ShieldAlert className="mt-0.5 h-4 w-4 text-warning" />
-            <div className="min-w-0 flex-1">
-              <h3 className="text-[12px] font-semibold text-foreground">Approval required</h3>
-              <p className="mt-0.5 break-words text-[11px] text-muted-foreground">
-                {pendingApproval.toolName || pendingApproval.action || pendingApproval.approvalRequestId}
-              </p>
-            </div>
-          </div>
-          <div className="flex justify-end gap-2 px-3 py-2">
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={disabled}
-              onClick={() => void onResolveApproval(pendingApproval.approvalRequestId, false)}
-            >
-              <X /> Reject
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              disabled={disabled}
-              onClick={() => void onResolveApproval(pendingApproval.approvalRequestId, true)}
-            >
-              <Check /> Approve
-            </Button>
-          </div>
-        </section>
-      ) : null}
+      {approvalCards.map((block) => (
+        <ApprovalCard
+          key={block.approval_request_id}
+          block={block}
+          disabled={disabled}
+          onDecide={(approved) =>
+            onResolveApproval(block.approval_request_id, approved)
+          }
+        />
+      ))}
 
       {controllableSteps.map((step) => (
         <section key={step.stepId} className="rounded-lg border border-border bg-card px-3 py-2.5">
