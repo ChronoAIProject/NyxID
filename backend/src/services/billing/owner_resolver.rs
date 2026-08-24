@@ -43,6 +43,21 @@ impl BillingOwnerResolver {
         Self::from_owner_access(billing_principal_user_id, resource_owner_id, &access)
     }
 
+    /// Resolve an owner selected on a billing-benefit read surface.
+    ///
+    /// Unlike resource execution, grants and allowances have no resource row
+    /// to establish the owner. The request may select an organization, so this
+    /// method deliberately accepts that owner id while retaining the same
+    /// direct/admin/member consumption ACL as [`Self::resolve_for_resource`].
+    pub async fn resolve_for_benefit_read(
+        &self,
+        actor_user_id: &str,
+        requested_owner_id: Option<&str>,
+    ) -> AppResult<ResolvedBillingOwner> {
+        self.resolve_for_resource(actor_user_id, requested_owner_id.unwrap_or(actor_user_id))
+            .await
+    }
+
     /// Resolve a wallet targeted by an explicit management operation.
     ///
     /// Personal owners and org admins may mutate wallets. Org members retain

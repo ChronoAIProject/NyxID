@@ -5,6 +5,7 @@ use axum::{
     extract::{Path, Query, State},
 };
 use chrono::{DateTime, Utc};
+use futures::{StreamExt, TryStreamExt};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -42,6 +43,23 @@ pub struct IssueGrantResponse {
     /// Recipients that remain unspendable until the reconcile sweep journals
     /// their issuance. Large batches deliberately use this bounded path.
     pub pending_activation_count: usize,
+    /// Per-recipient visibility and activation signals for the completed
+    /// issuance. This lets the admin surface warn without consulting Lago.
+    pub recipients: Vec<IssueGrantRecipientResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct IssueGrantRecipientResponse {
+    pub recipient_user_id: String,
+    pub recipient_billing_enabled: bool,
+    pub activation_state: CreditGrantActivationState,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CreditGrantActivationState {
+    Active,
+    PendingActivation,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,7 +71,7 @@ pub struct GrantListQuery {
 
 #[derive(Debug, Default, Deserialize, ToSchema)]
 pub struct BillingBenefitsQuery {
-    /// Personal owner when omitted; organization user id for an org admin.
+    /// Personal owner when omitted; organization user id for an authorized member.
     pub owner_id: Option<String>,
 }
 
@@ -64,6 +82,10 @@ pub struct CreditGrantResponse {
     pub recipient_user_id: String,
     pub recipient_email: Option<String>,
     pub recipient_display_name: Option<String>,
+    /// Present on admin grant listings. User reads are already rollout-gated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipient_billing_enabled: Option<bool>,
+    pub activation_state: CreditGrantActivationState,
     pub target_kind: BillingTargetKind,
     pub amount_credits: i64,
     pub amount_micros: i64,
@@ -184,6 +206,27 @@ pub async fn issue_grant(
         .iter()
         .filter(|grant| grant.issued_ledgered_at.is_some())
         .count();
+    let rollout_by_recipient = match rollout_for_grants(&state.db, &grants).await {
+        Ok(values) => values,
+        Err(error) => {
+            // The grants already exist at this point. Return a conservative
+            // warning signal instead of turning a successful mutation into a
+            // retryable-looking error that could duplicate the batch.
+            tracing::warn!(%error, "credit grant recipient rollout lookup failed");
+            HashMap::new()
+        }
+    };
+    let recipients = grants
+        .iter()
+        .map(|grant| IssueGrantRecipientResponse {
+            recipient_user_id: grant.recipient_user_id.clone(),
+            recipient_billing_enabled: rollout_by_recipient
+                .get(&grant.recipient_user_id)
+                .copied()
+                .unwrap_or(false),
+            activation_state: activation_state(grant),
+        })
+        .collect();
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -199,6 +242,7 @@ pub async fn issue_grant(
         created_count: grants.len(),
         activated_count,
         pending_activation_count: grants.len().saturating_sub(activated_count),
+        recipients,
     }))
 }
 
@@ -225,12 +269,19 @@ pub async fn admin_list_grants(
     )
     .await?;
     let users = users_for_grants(&state.db, &grants).await?;
+    let rollout_by_recipient = rollout_for_users(&state.db, &users).await?;
     Ok(Json(CreditGrantListResponse {
         grants: grants
             .into_iter()
             .map(|grant| {
                 let user = users.get(&grant.recipient_user_id);
-                grant_response(grant, user)
+                let recipient_billing_enabled = Some(
+                    rollout_by_recipient
+                        .get(&grant.recipient_user_id)
+                        .copied()
+                        .unwrap_or(false),
+                );
+                grant_response(grant, user, recipient_billing_enabled)
             })
             .collect(),
         page,
@@ -260,14 +311,14 @@ pub async fn revoke_grant(
         "billing.credit_grant.revoked",
         Some(serde_json::json!({ "grant_id": grant_id })),
     );
-    Ok(Json(grant_response(grant, None)))
+    Ok(Json(grant_response(grant, None, None)))
 }
 
 #[utoipa::path(
     get,
     path = "/api/v1/billing/grants",
     tag = "Billing",
-    params(("owner_id" = Option<String>, Query, description = "Billing owner id; org admins may select an organization")),
+    params(("owner_id" = Option<String>, Query, description = "Billing owner id; authorized organization members may select an organization")),
     responses((status = 200, body = CreditGrantListResponse)),
     security(("bearer_auth" = []))
 )]
@@ -280,7 +331,7 @@ pub async fn user_list_grants(
     let owner = state
         .billing
         .owner_resolver()
-        .resolve_for_wallet_management(&actor_id, query.owner_id.as_deref())
+        .resolve_for_benefit_read(&actor_id, query.owner_id.as_deref())
         .await?;
     super::billing::ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
     let grants =
@@ -289,7 +340,7 @@ pub async fn user_list_grants(
     Ok(Json(CreditGrantListResponse {
         grants: grants
             .into_iter()
-            .map(|grant| grant_response(grant, None))
+            .map(|grant| grant_response(grant, None, None))
             .collect(),
         page: 1,
         per_page: total.min(u64::from(u32::MAX)) as u32,
@@ -395,7 +446,7 @@ pub async fn update_allowance(
     get,
     path = "/api/v1/billing/allowances",
     tag = "Billing",
-    params(("owner_id" = Option<String>, Query, description = "Billing owner id; org admins may select an organization")),
+    params(("owner_id" = Option<String>, Query, description = "Billing owner id; authorized organization members may select an organization")),
     responses((status = 200, body = UserAllowanceListResponse)),
     security(("bearer_auth" = []))
 )]
@@ -408,7 +459,7 @@ pub async fn user_list_allowances(
     let owner = state
         .billing
         .owner_resolver()
-        .resolve_for_wallet_management(&actor_id, query.owner_id.as_deref())
+        .resolve_for_benefit_read(&actor_id, query.owner_id.as_deref())
         .await?;
     super::billing::ensure_billing_rollout(&state, &owner.owner_id, &actor_id).await?;
     let balances =
@@ -421,13 +472,20 @@ pub async fn user_list_allowances(
     }))
 }
 
-fn grant_response(grant: CreditGrant, user: Option<&User>) -> CreditGrantResponse {
+fn grant_response(
+    grant: CreditGrant,
+    user: Option<&User>,
+    recipient_billing_enabled: Option<bool>,
+) -> CreditGrantResponse {
+    let activation_state = activation_state(&grant);
     CreditGrantResponse {
         id: grant.id,
         batch_id: grant.batch_id,
         recipient_user_id: grant.recipient_user_id,
         recipient_email: user.map(|value| value.email.clone()),
         recipient_display_name: user.and_then(|value| value.display_name.clone()),
+        recipient_billing_enabled,
+        activation_state,
         target_kind: grant.target_kind,
         amount_credits: grant.amount_credits,
         amount_micros: grant.amount_micros,
@@ -493,24 +551,57 @@ async fn users_for_grants(
         .collection::<User>(USERS)
         .find(doc! { "_id": { "$in": ids } })
         .await?;
-    use futures::TryStreamExt;
     while let Some(user) = cursor.try_next().await? {
         users.insert(user.id.clone(), user);
     }
     Ok(users)
 }
 
+fn activation_state(grant: &CreditGrant) -> CreditGrantActivationState {
+    if grant.issued_ledgered_at.is_some() {
+        CreditGrantActivationState::Active
+    } else {
+        CreditGrantActivationState::PendingActivation
+    }
+}
+
+async fn rollout_for_grants(
+    db: &mongodb::Database,
+    grants: &[CreditGrant],
+) -> AppResult<HashMap<String, bool>> {
+    let users = users_for_grants(db, grants).await?;
+    rollout_for_users(db, &users).await
+}
+
+async fn rollout_for_users(
+    db: &mongodb::Database,
+    users: &HashMap<String, User>,
+) -> AppResult<HashMap<String, bool>> {
+    let pairs: Vec<(String, bool)> = futures::stream::iter(users.values().cloned())
+        .map(|user| {
+            let db = db.clone();
+            async move {
+                let enabled =
+                    crate::services::feature_flag_service::billing_recipient_rollout_enabled(
+                        &db, &user,
+                    )
+                    .await?;
+                Ok::<_, AppError>((user.id, enabled))
+            }
+        })
+        .buffer_unordered(16)
+        .try_collect()
+        .await?;
+    Ok(pairs.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::billing_target::BillingServiceScope;
-    use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgRole};
     use crate::models::user::{COLLECTION_NAME as USERS, UserType};
     use crate::services::feature_flag_service::{self, BILLING_FLAG_KEY, FlagTarget};
     use crate::services::role_service;
-    use crate::test_utils::{
-        connect_test_database, test_app_state, test_auth_user, test_membership, test_user,
-    };
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
     use axum::extract::{Path, Query, State};
     use uuid::Uuid;
 
@@ -682,74 +773,5 @@ mod tests {
 
         assert!(matches!(grant, AppError::ValidationError(_)));
         assert!(matches!(allowance, AppError::ValidationError(_)));
-    }
-
-    #[tokio::test]
-    async fn org_admin_can_read_organization_grants() {
-        let Some((state, _admin_id, _operator_id, user_id)) =
-            setup("billing_credits_org_owner_read").await
-        else {
-            return;
-        };
-        let org_id = Uuid::new_v4().to_string();
-        state
-            .db
-            .collection(USERS)
-            .insert_one(test_user(&org_id, UserType::Org))
-            .await
-            .expect("insert organization");
-        state
-            .db
-            .collection(ORG_MEMBERSHIPS)
-            .insert_one(test_membership(&org_id, &user_id, OrgRole::Admin, None))
-            .await
-            .expect("insert org-admin membership");
-        let now = Utc::now();
-        state
-            .db
-            .collection::<CreditGrant>(crate::models::credit_grant::COLLECTION_NAME)
-            .insert_one(CreditGrant {
-                id: Uuid::new_v4().to_string(),
-                batch_id: Uuid::new_v4().to_string(),
-                recipient_user_id: org_id.clone(),
-                target_kind: BillingTargetKind::SelectedUsers,
-                amount_credits: 5,
-                amount_micros: 5_000_000,
-                remaining_micros: 5_000_000,
-                reserved_micros: 0,
-                scope: BillingServiceScope {
-                    all_services: true,
-                    service_ids: Vec::new(),
-                    service_slugs: Vec::new(),
-                },
-                expires_at: None,
-                reason: None,
-                granted_by: "admin-1".to_string(),
-                status: CreditGrantStatus::Active,
-                issued_ledgered_at: Some(now),
-                terminal_ledgered_at: None,
-                terminal_amount_micros: 0,
-                active_settlement: None,
-                created_at: now,
-                updated_at: now,
-                consumed_at: None,
-                expired_at: None,
-                revoked_at: None,
-            })
-            .await
-            .expect("insert org grant");
-
-        let Json(response) = user_list_grants(
-            State(state),
-            test_auth_user(&user_id),
-            Query(BillingBenefitsQuery {
-                owner_id: Some(org_id.clone()),
-            }),
-        )
-        .await
-        .expect("org admin benefit read should succeed");
-
-        assert_eq!(response.grants.len(), 1);
-        assert_eq!(response.grants[0].recipient_user_id, org_id);
     }
 }

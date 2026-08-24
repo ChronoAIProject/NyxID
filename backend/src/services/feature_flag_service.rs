@@ -420,6 +420,24 @@ pub async fn billing_rollout_enabled(
     Ok(enabled.iter().any(|key| key == BILLING_FLAG_KEY))
 }
 
+/// Whether a grant recipient is covered by the billing rollout.
+///
+/// Person recipients use the same personal feature resolution as their
+/// billing page. Organization recipients use the org-wide member baseline;
+/// legacy member-specific overrides may still make an individual member's
+/// result more specific until startup migration removes those rows.
+pub async fn billing_recipient_rollout_enabled(
+    db: &mongodb::Database,
+    recipient: &User,
+) -> AppResult<bool> {
+    let enabled = if recipient.user_type.is_org() {
+        resolve_enabled_features(db, &recipient.id, "", OrgRole::Member).await?
+    } else {
+        resolve_personal_features(db, &recipient.id).await?
+    };
+    Ok(enabled.iter().any(|key| key == BILLING_FLAG_KEY))
+}
+
 /// Whether the Aevatar chat wire-log diagnostic is enabled for the acting user.
 ///
 /// Assistant chat is a **personal** surface, so this resolves through the same

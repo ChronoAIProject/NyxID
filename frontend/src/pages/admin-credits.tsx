@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { Pencil, Plus } from "lucide-react";
 import { toast } from "sonner";
 import {
   useAdminAllowances,
@@ -28,6 +28,8 @@ import {
   AllowanceDialog,
   GrantDialog,
 } from "@/components/admin-credits/credits-dialogs";
+import { CreditGrantsTable } from "@/components/admin-credits/credit-grants-table";
+import { rolloutWarningMessage } from "@/components/admin-credits/credit-grant-visibility";
 import { PageHeader } from "@/components/shared/page-header";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Badge } from "@/components/ui/badge";
@@ -70,10 +72,13 @@ const ALLOWANCE_DEFAULTS: AllowanceForm = {
   target_user_ids: [],
 };
 
+const GRANTS_PER_PAGE = 50;
+
 export function AdminCreditsPage() {
   const currentUser = useAuthStore((state) => state.user);
   const canWrite = canAdminWrite(currentUser);
-  const grantsQuery = useAdminCreditGrants();
+  const [grantPage, setGrantPage] = useState(1);
+  const grantsQuery = useAdminCreditGrants(grantPage, GRANTS_PER_PAGE);
   const allowancesQuery = useAdminAllowances();
   const servicesQuery = useServices();
   const issueGrant = useIssueCreditGrant();
@@ -125,6 +130,9 @@ export function AdminCreditsPage() {
           ? `Issued credits to ${recipientLabel}; ${String(result.pending_activation_count)} pending activation`
           : `Issued credits to ${recipientLabel}`,
       );
+      const rolloutWarning = rolloutWarningMessage(result.recipients);
+      if (rolloutWarning) toast.warning(rolloutWarning);
+      setGrantPage(1);
       setGrantOpen(false);
     } catch (error) {
       toast.error(errorMessage(error, "Failed to issue credits"));
@@ -216,89 +224,17 @@ export function AdminCreditsPage() {
           ) : grantsQuery.isLoading ? (
             <Skeleton className="h-52 w-full" />
           ) : (
-            <div className="overflow-x-auto rounded-lg border border-border">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>Recipient</TableHead>
-                    <TableHead>Remaining</TableHead>
-                    <TableHead>Scope</TableHead>
-                    <TableHead>Expiry</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Reason</TableHead>
-                    {canWrite ? (
-                      <TableHead className="text-right">Actions</TableHead>
-                    ) : null}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {(grantsQuery.data?.grants ?? []).map((grant) => (
-                    <TableRow key={grant.id}>
-                      <TableCell>
-                        <div className="font-medium">
-                          {grant.recipient_display_name ||
-                            grant.recipient_email ||
-                            grant.recipient_user_id}
-                        </div>
-                        {grant.recipient_display_name &&
-                        grant.recipient_email ? (
-                          <div className="text-[11px] text-muted-foreground">
-                            {grant.recipient_email}
-                          </div>
-                        ) : null}
-                      </TableCell>
-                      <TableCell>
-                        {formatCredits(grant.remaining_micros)}{" "}
-                        <span className="text-[11px] text-muted-foreground">
-                          of {formatCredits(grant.amount_micros)}
-                        </span>
-                      </TableCell>
-                      <TableCell>
-                        {scopeLabel(
-                          grant.scope.all_services,
-                          grant.scope.service_slugs,
-                        )}
-                      </TableCell>
-                      <TableCell>{formatDateTime(grant.expires_at)}</TableCell>
-                      <TableCell>
-                        <StatusBadge status={grant.status} />
-                      </TableCell>
-                      <TableCell className="max-w-56 truncate text-muted-foreground">
-                        {grant.reason || "-"}
-                      </TableCell>
-                      {canWrite ? (
-                        <TableCell className="text-right">
-                          <Button
-                            type="button"
-                            size="icon"
-                            variant="ghost"
-                            title="Revoke grant"
-                            disabled={
-                              grant.status !== "active" ||
-                              grant.reserved_micros > 0 ||
-                              revokeGrant.isPending
-                            }
-                            onClick={() => setGrantToRevoke(grant)}
-                          >
-                            <Trash2 className="h-4 w-4" />
-                          </Button>
-                        </TableCell>
-                      ) : null}
-                    </TableRow>
-                  ))}
-                  {(grantsQuery.data?.grants.length ?? 0) === 0 ? (
-                    <TableRow>
-                      <TableCell
-                        colSpan={canWrite ? 7 : 6}
-                        className="py-10 text-center text-muted-foreground"
-                      >
-                        No credit grants.
-                      </TableCell>
-                    </TableRow>
-                  ) : null}
-                </TableBody>
-              </Table>
-            </div>
+            <CreditGrantsTable
+              grants={grantsQuery.data?.grants ?? []}
+              canWrite={canWrite}
+              revokePending={revokeGrant.isPending}
+              page={grantsQuery.data?.page ?? grantPage}
+              perPage={grantsQuery.data?.per_page ?? GRANTS_PER_PAGE}
+              total={grantsQuery.data?.total ?? 0}
+              fetching={grantsQuery.isFetching}
+              onPageChange={setGrantPage}
+              onRevoke={(grant) => setGrantToRevoke(grant)}
+            />
           )}
         </TabsContent>
 
@@ -492,30 +428,6 @@ export function AdminCreditsPage() {
   );
 }
 
-function StatusBadge({
-  status,
-}: {
-  readonly status: "active" | "consumed" | "expired" | "revoked";
-}) {
-  const variants = {
-    active: "success",
-    consumed: "secondary",
-    expired: "warning",
-    revoked: "destructive",
-  } as const;
-  return (
-    <Badge variant={variants[status]} className="capitalize">
-      {status}
-    </Badge>
-  );
-}
-function scopeLabel(allServices: boolean, slugs: readonly string[]) {
-  return allServices
-    ? "All services"
-    : slugs.length <= 2
-      ? slugs.join(", ")
-      : `${slugs.slice(0, 2).join(", ")} +${String(slugs.length - 2)}`;
-}
 function serviceName(
   services: readonly DownstreamService[],
   id: string,
@@ -528,9 +440,6 @@ function formatCredits(micros: number) {
 }
 function formatNumber(value: number) {
   return new Intl.NumberFormat().format(value);
-}
-function formatDateTime(value: string | null | undefined) {
-  return value ? new Date(value).toLocaleString() : "Never";
 }
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof ApiError ? error.message : fallback;

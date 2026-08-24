@@ -61,6 +61,7 @@ describe("billing credit schemas", () => {
             id: "grant-1",
             batch_id: "batch-1",
             recipient_user_id: "user-1",
+            activation_state: "active",
             target_kind: "selected_users",
             amount_credits: 2,
             amount_micros: 2_000_000,
