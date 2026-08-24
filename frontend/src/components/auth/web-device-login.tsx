@@ -42,9 +42,9 @@ export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
 
     void QRCode.toDataURL(payload, {
       errorCorrectionLevel: "M",
-      margin: 2,
+      margin: 4,
       width: 208,
-      color: { dark: "#e8e4f0", light: "#0c0b14" },
+      color: { dark: "#0c0b14", light: "#e8e4f0" },
     }).then((dataUrl) => {
       if (!cancelled) setQrDataUrl(dataUrl);
     }).catch(() => {

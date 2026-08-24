@@ -1,13 +1,39 @@
 import { StyleSheet } from "react-native";
 
-import { radius, spacing, typeScale, TOUCH_TARGET } from "../../theme/designTokens";
+import {
+  radius,
+  spacing,
+  typeScale,
+  TOUCH_TARGET,
+} from "../../theme/designTokens";
 import type { ThemeColors } from "../../theme/mobileTheme";
 
 export function createDeviceLoginStyles(c: ThemeColors) {
   return StyleSheet.create({
     fill: { flex: 1 },
     content: { padding: spacing.xxl, paddingBottom: 48 },
-    title: { ...typeScale.pageHeader, color: c.textPrimary },
+    screenHeader: {
+      minHeight: TOUCH_TARGET,
+      flexDirection: "row" as const,
+      alignItems: "center" as const,
+      gap: spacing.lg,
+    },
+    headerBackButton: {
+      width: TOUCH_TARGET,
+      height: TOUCH_TARGET,
+      borderRadius: radius.md,
+      alignItems: "center" as const,
+      justifyContent: "center" as const,
+      borderWidth: 1,
+      borderColor: c.border,
+      backgroundColor: c.ghostBg,
+    },
+    title: {
+      ...typeScale.pageHeader,
+      color: c.textPrimary,
+      flex: 1,
+      letterSpacing: 0,
+    },
     subtitle: {
       ...typeScale.description,
       color: c.textSecondary,
@@ -17,17 +43,25 @@ export function createDeviceLoginStyles(c: ThemeColors) {
     inputSection: { gap: spacing.lg },
     inputLabel: { ...typeScale.bodyStrong, color: c.textPrimary },
     codeInput: {
-      minHeight: 52,
+      width: "100%" as const,
+      height: 56,
       borderRadius: radius.md,
       borderWidth: 1,
       borderColor: c.border,
       backgroundColor: c.card,
       paddingHorizontal: spacing.xxl,
+      paddingVertical: 0,
       color: c.textPrimary,
       ...typeScale.mono,
       fontSize: 18,
+      lineHeight: 24,
+      letterSpacing: 0,
       textAlign: "center" as const,
+      textAlignVertical: "center" as const,
+      includeFontPadding: false,
     },
+    codeInputError: { borderColor: c.danger },
+    fieldErrorText: { ...typeScale.body, color: c.danger },
     scanButton: {
       minHeight: TOUCH_TARGET,
       flexDirection: "row" as const,
@@ -41,17 +75,14 @@ export function createDeviceLoginStyles(c: ThemeColors) {
     },
     scanButtonText: { ...typeScale.label, color: c.primary },
     previewSection: { gap: spacing.lg },
-    warningBanner: {
+    caution: {
       flexDirection: "row" as const,
       alignItems: "flex-start" as const,
-      gap: spacing.md,
-      padding: spacing.lg,
-      borderRadius: radius.lg,
-      borderWidth: 1,
-      borderColor: c.warningTone.border,
-      backgroundColor: c.warningTone.bg,
+      gap: spacing.sm,
     },
-    warningText: { ...typeScale.body, color: c.warningTone.text, flex: 1 },
+    cautionIcon: { marginTop: spacing.xxs },
+    cautionText: { ...typeScale.caption, color: c.textSecondary, flex: 1 },
+    cautionDanger: { ...typeScale.label, color: c.danger },
     detailPanel: {
       borderRadius: radius.lg,
       borderWidth: 1,
@@ -67,6 +98,7 @@ export function createDeviceLoginStyles(c: ThemeColors) {
     },
     detailLabel: { ...typeScale.overline, color: c.textMuted },
     detailValue: { ...typeScale.body, color: c.textPrimary },
+    detailValueMono: { ...typeScale.mono },
     decisionRow: { flexDirection: "row" as const, gap: spacing.md },
     decisionButton: { flex: 1 },
     signInNotice: { gap: spacing.lg },
@@ -79,33 +111,59 @@ export function createDeviceLoginStyles(c: ThemeColors) {
     },
     pressed: { opacity: 0.72 },
     disabled: { opacity: 0.5 },
+    modalRoot: {
+      flex: 1,
+      justifyContent: "flex-end" as const,
+    },
+    modalBackdrop: {
+      ...StyleSheet.absoluteFillObject,
+      backgroundColor: "rgba(0,0,0,0.65)",
+    },
+    modalCard: {
+      width: "100%" as const,
+      paddingTop: spacing.xxxl,
+      paddingHorizontal: spacing.huge,
+      gap: spacing.xxl,
+      borderTopLeftRadius: radius.lg,
+      borderTopRightRadius: radius.lg,
+      borderWidth: 1,
+      borderBottomWidth: 0,
+      borderColor: c.borderSoft,
+      backgroundColor: c.card,
+    },
+    modalHeader: {
+      flexDirection: "row" as const,
+      alignItems: "flex-start" as const,
+      gap: spacing.lg,
+    },
+    modalHeaderCopy: { flex: 1, gap: spacing.sm },
+    modalTitle: { ...typeScale.h2, color: c.textPrimary, letterSpacing: 0 },
+    modalDescription: {
+      ...typeScale.body,
+      color: c.textSecondary,
+      letterSpacing: 0,
+    },
+    modalCloseButton: {
+      width: TOUCH_TARGET,
+      height: TOUCH_TARGET,
+      marginTop: -spacing.md,
+      marginRight: -spacing.md,
+      borderRadius: radius.md,
+      alignItems: "center" as const,
+      justifyContent: "center" as const,
+    },
+    modalField: { gap: spacing.sm },
     terminalScreen: {
       flex: 1,
       justifyContent: "center" as const,
-      padding: spacing.huge,
-      gap: spacing.lg,
-    },
-    terminalIcon: {
-      width: 64,
-      height: 64,
-      borderRadius: radius.lg,
       alignItems: "center" as const,
-      justifyContent: "center" as const,
-      borderWidth: 1,
+      padding: spacing.huge,
+      gap: spacing.xxxl,
     },
-    successIcon: {
-      backgroundColor: c.successTone.bg,
-      borderColor: c.successTone.border,
-    },
-    deniedIcon: {
-      backgroundColor: c.dangerTone.bg,
-      borderColor: c.dangerTone.border,
-    },
-    terminalTitle: { ...typeScale.pageHeader, color: c.textPrimary },
-    terminalBody: {
-      ...typeScale.description,
-      color: c.textSecondary,
-      marginBottom: spacing.md,
+    terminalTitle: {
+      ...typeScale.pageHeader,
+      color: c.textPrimary,
+      textAlign: "center" as const,
     },
   });
 }

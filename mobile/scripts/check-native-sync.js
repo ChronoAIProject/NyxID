@@ -9,6 +9,7 @@ const MOBILE_ROOT = path.join(__dirname, "..");
 const PACKAGE_JSON_PATH = path.join(MOBILE_ROOT, "package.json");
 const PODFILE_LOCK_PATH = path.join(MOBILE_ROOT, "ios", "Podfile.lock");
 const INFO_PLIST_PATH = path.join(MOBILE_ROOT, "ios", "NyxIDMobile", "Info.plist");
+const REQUIRED_IOS_PODS = ["ExpoCameraBarcodeScanning", "ZXingObjC"];
 
 function runJson(command, args, env = process.env) {
   const commandEnv = { ...env };
@@ -121,6 +122,12 @@ function main() {
     }
   }
 
+  for (const pod of REQUIRED_IOS_PODS) {
+    if (!lockedPods.has(pod)) {
+      failures.push(`required iOS companion pod ${pod} is missing`);
+    }
+  }
+
   const config = resolvedExpoConfig();
   const nativeInfoPlist = plist.parse(fs.readFileSync(INFO_PLIST_PATH, "utf8"));
   const { permissions, microphoneSuppressed } = declaredIosPermissions(config);
@@ -146,7 +153,7 @@ function main() {
 
   const nativePackages = [...expectedPods.keys()].sort();
   process.stdout.write(
-    `iOS native sync verified for ${nativePackages.length} direct native dependencies and ${permissions.size} declared permissions.\n`
+    `iOS native sync verified for ${nativePackages.length} direct native dependencies, ${REQUIRED_IOS_PODS.length} required companion pods, and ${permissions.size} declared permissions.\n`
   );
 }
 

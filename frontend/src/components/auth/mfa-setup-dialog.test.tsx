@@ -7,12 +7,20 @@ import { ApiError } from "@/lib/api-client";
 import type { MfaSetupResponse } from "@/types/api";
 import { MfaSetupDialog } from "./mfa-setup-dialog";
 
-const { mockSetupMutateAsync, mockApiPost, mockToastError, mockToastSuccess } =
-  vi.hoisted(() => ({
+const {
+  mockSetupMutateAsync,
+  mockApiPost,
+  mockToastError,
+  mockToastSuccess,
+  mockQrToDataURL,
+} = vi.hoisted(() => ({
     mockSetupMutateAsync: vi.fn(),
     mockApiPost: vi.fn(),
     mockToastError: vi.fn(),
     mockToastSuccess: vi.fn(),
+    // Arg shape is asserted explicitly in the QR test below, so the mock
+    // itself stays untyped — named-but-unused params trip no-unused-vars.
+    mockQrToDataURL: vi.fn(() => Promise.resolve("data:image/png;base64,QR")),
   }));
 
 // `useMfaSetup` is the enroll-start hook (POST /auth/mfa/setup). The dialog then
@@ -41,8 +49,23 @@ vi.mock("sonner", () => ({
 
 // QRCode.toDataURL is async and touches canvas; stub it to a fixed data URL.
 vi.mock("qrcode", () => ({
-  default: { toDataURL: vi.fn().mockResolvedValue("data:image/png;base64,QR") },
+  default: { toDataURL: mockQrToDataURL },
 }));
+
+function relativeLuminance(color: string): number {
+  const linearChannel = (start: number) => {
+    const channel = Number.parseInt(color.slice(start, start + 2), 16) / 255;
+    return channel <= 0.04045
+      ? channel / 12.92
+      : ((channel + 0.055) / 1.055) ** 2.4;
+  };
+
+  return (
+    0.2126 * linearChannel(1) +
+    0.7152 * linearChannel(3) +
+    0.0722 * linearChannel(5)
+  );
+}
 
 const setupResponse: MfaSetupResponse = {
   factor_id: "factor-1",
@@ -90,6 +113,20 @@ describe("MfaSetupDialog", () => {
 
     // Step 2: verify step renders the manual-entry secret returned by setup.
     expect(await screen.findByText(setupResponse.secret)).toBeInTheDocument();
+
+    const expectedQrOptions = {
+      width: 200,
+      margin: 4,
+      color: { dark: "#0d0b14", light: "#f0eeff" },
+    };
+    await waitFor(() => {
+      expect(mockQrToDataURL.mock.calls).toEqual([
+        [setupResponse.qr_code_url, expectedQrOptions],
+      ]);
+    });
+    expect(relativeLuminance(expectedQrOptions.color.dark)).toBeLessThan(
+      relativeLuminance(expectedQrOptions.color.light),
+    );
 
     // Step 3: user enters the code and submits; confirm hits /auth/mfa/confirm.
     await user.type(
