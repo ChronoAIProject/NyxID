@@ -4,6 +4,7 @@ pub mod admin_feature_flags;
 pub mod admin_groups;
 pub mod admin_helpers;
 pub mod admin_nodes;
+pub mod admin_platform_ops;
 pub mod admin_roles;
 pub mod admin_sa_connections;
 pub mod admin_sa_providers;

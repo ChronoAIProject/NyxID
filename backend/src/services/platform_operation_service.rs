@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use chrono::Utc;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use mongodb::bson::doc;
 use mongodb::options::ReturnDocument;
 use reqwest::header::CONTENT_TYPE;
@@ -24,12 +24,14 @@ pub const SPEAK_HARD_MAX_CHARS: u32 = 5_000;
 pub const CALL_AND_SAY_HARD_MAX_MESSAGE_CHARS: u32 = 1_000;
 const MAX_VENDOR_JSON_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
-#[allow(dead_code)] // Used by the admin configuration surface in the next increment.
 pub const X_SEARCH_VENDOR_SLUG: &str = "platform-x";
-#[allow(dead_code)] // Used by the admin configuration surface in the next increment.
 pub const SPEAK_VENDOR_SLUG: &str = "platform-elevenlabs";
-#[allow(dead_code)] // Used by the admin configuration surface in the next increment.
 pub const CALL_AND_SAY_VENDOR_SLUG: &str = "platform-twilio";
+pub const PLATFORM_OPERATION_NAMES: [PlatformOperationName; 3] = [
+    PlatformOperationName::XSearch,
+    PlatformOperationName::Speak,
+    PlatformOperationName::CallAndSay,
+];
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -90,7 +92,6 @@ pub fn operation_name(op: PlatformOperationName) -> &'static str {
     }
 }
 
-#[allow(dead_code)] // Used by the admin configuration surface in the next increment.
 pub fn parse_operation_name(value: &str) -> AppResult<PlatformOperationName> {
     match value {
         "x_search" => Ok(PlatformOperationName::XSearch),
@@ -102,7 +103,6 @@ pub fn parse_operation_name(value: &str) -> AppResult<PlatformOperationName> {
     }
 }
 
-#[allow(dead_code)] // Used by the admin configuration surface in the next increment.
 pub fn default_operation_config(op: PlatformOperationName) -> PlatformOperationConfig {
     match op {
         PlatformOperationName::XSearch => PlatformOperationConfig::XSearch(XSearchConfig {
@@ -126,7 +126,6 @@ pub fn default_operation_config(op: PlatformOperationName) -> PlatformOperationC
     }
 }
 
-#[allow(dead_code)] // Used by the admin configuration surface in the next increment.
 pub fn default_vendor_service_slug(op: PlatformOperationName) -> &'static str {
     match op {
         PlatformOperationName::XSearch => X_SEARCH_VENDOR_SLUG,
@@ -465,6 +464,62 @@ pub async fn load_enabled_operation(
         return Err(AppError::PlatformOperationUnavailable);
     }
     Ok(operation)
+}
+
+pub async fn list_configured_operations(
+    db: &mongodb::Database,
+) -> AppResult<Vec<PlatformOperation>> {
+    let operation_names = PLATFORM_OPERATION_NAMES
+        .iter()
+        .map(|op| operation_name(*op))
+        .collect::<Vec<_>>();
+    db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        .find(doc! { "op": { "$in": operation_names } })
+        .await?
+        .try_collect()
+        .await
+        .map_err(AppError::DatabaseError)
+}
+
+pub async fn upsert_operation(
+    db: &mongodb::Database,
+    op: PlatformOperationName,
+    enabled: bool,
+    vendor_service_slug: String,
+    config: PlatformOperationConfig,
+    updated_by: &str,
+) -> AppResult<PlatformOperation> {
+    validate_operation_config(op, &vendor_service_slug, &config)?;
+
+    let config = bson::to_bson(&config).map_err(|error| {
+        AppError::Internal(format!(
+            "Failed to serialize platform operation config: {error}"
+        ))
+    })?;
+    let updated_at = Utc::now();
+    db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        .find_one_and_update(
+            doc! { "op": operation_name(op) },
+            doc! {
+                "$set": {
+                    "enabled": enabled,
+                    "vendor_service_slug": vendor_service_slug,
+                    "config": config,
+                    "updated_at": bson::DateTime::from_chrono(updated_at),
+                    "updated_by": updated_by,
+                },
+                "$setOnInsert": {
+                    "_id": uuid::Uuid::new_v4().to_string(),
+                    "op": operation_name(op),
+                },
+            },
+        )
+        .upsert(true)
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(|| {
+            AppError::Internal("Platform operation upsert returned no document".to_string())
+        })
 }
 
 pub async fn execute_x_search(
