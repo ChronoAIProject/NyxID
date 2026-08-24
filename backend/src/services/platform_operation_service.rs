@@ -5,7 +5,7 @@ use futures::StreamExt;
 use mongodb::bson::doc;
 use mongodb::options::ReturnDocument;
 use reqwest::header::CONTENT_TYPE;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
@@ -24,8 +24,11 @@ pub const SPEAK_HARD_MAX_CHARS: u32 = 5_000;
 pub const CALL_AND_SAY_HARD_MAX_MESSAGE_CHARS: u32 = 1_000;
 const MAX_VENDOR_JSON_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
+#[allow(dead_code)] // Used by the admin configuration surface in the next increment.
 pub const X_SEARCH_VENDOR_SLUG: &str = "platform-x";
+#[allow(dead_code)] // Used by the admin configuration surface in the next increment.
 pub const SPEAK_VENDOR_SLUG: &str = "platform-elevenlabs";
+#[allow(dead_code)] // Used by the admin configuration surface in the next increment.
 pub const CALL_AND_SAY_VENDOR_SLUG: &str = "platform-twilio";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -60,28 +63,17 @@ pub struct XSearchUpstreamRequest {
 pub struct SpeakUpstreamRequest {
     pub path: String,
     pub body: serde_json::Value,
-    pub text_chars: usize,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CallAndSayUpstreamRequest {
     pub path: String,
     pub form: Vec<(&'static str, String)>,
-    pub message_chars: usize,
-    pub destination_suffix: String,
 }
 
 #[derive(Debug)]
 pub struct SpeakVendorResponse {
     pub response: reqwest::Response,
-    pub text_chars: usize,
-}
-
-#[derive(Clone, Debug, Serialize)]
-pub struct CallAndSayResult {
-    pub response: serde_json::Value,
-    pub destination_suffix: String,
-    pub message_chars: usize,
 }
 
 struct VendorTarget {
@@ -98,6 +90,7 @@ pub fn operation_name(op: PlatformOperationName) -> &'static str {
     }
 }
 
+#[allow(dead_code)] // Used by the admin configuration surface in the next increment.
 pub fn parse_operation_name(value: &str) -> AppResult<PlatformOperationName> {
     match value {
         "x_search" => Ok(PlatformOperationName::XSearch),
@@ -109,6 +102,7 @@ pub fn parse_operation_name(value: &str) -> AppResult<PlatformOperationName> {
     }
 }
 
+#[allow(dead_code)] // Used by the admin configuration surface in the next increment.
 pub fn default_operation_config(op: PlatformOperationName) -> PlatformOperationConfig {
     match op {
         PlatformOperationName::XSearch => PlatformOperationConfig::XSearch(XSearchConfig {
@@ -132,6 +126,7 @@ pub fn default_operation_config(op: PlatformOperationName) -> PlatformOperationC
     }
 }
 
+#[allow(dead_code)] // Used by the admin configuration surface in the next increment.
 pub fn default_vendor_service_slug(op: PlatformOperationName) -> &'static str {
     match op {
         PlatformOperationName::XSearch => X_SEARCH_VENDOR_SLUG,
@@ -367,7 +362,6 @@ pub fn build_speak_request(
             "text": request.text,
             "model_id": config.model_id,
         }),
-        text_chars,
     })
 }
 
@@ -414,8 +408,6 @@ pub fn build_call_and_say_request(
             ("From", config.call_from.clone()),
             ("Twiml", twiml),
         ],
-        message_chars,
-        destination_suffix: redacted_destination_suffix(&request.to),
     })
 }
 
@@ -545,10 +537,7 @@ pub async fn execute_speak(
         .map_err(|error| vendor_request_failed(PlatformOperationName::Speak, error))?;
     ensure_vendor_success(PlatformOperationName::Speak, &response)?;
 
-    Ok(SpeakVendorResponse {
-        response,
-        text_chars: upstream.text_chars,
-    })
+    Ok(SpeakVendorResponse { response })
 }
 
 pub async fn execute_call_and_say(
@@ -558,7 +547,7 @@ pub async fn execute_call_and_say(
     user_id: &str,
     yyyymmdd: &str,
     request: CallAndSayRequest,
-) -> AppResult<CallAndSayResult> {
+) -> AppResult<serde_json::Value> {
     validate_usage_date(yyyymmdd)?;
     let operation = load_enabled_operation(db, PlatformOperationName::CallAndSay).await?;
     let PlatformOperationConfig::CallAndSay(config) = &operation.config else {
@@ -585,11 +574,7 @@ pub async fn execute_call_and_say(
         }
     };
 
-    Ok(CallAndSayResult {
-        response,
-        destination_suffix: upstream.destination_suffix,
-        message_chars: upstream.message_chars,
-    })
+    Ok(response)
 }
 
 async fn send_call_and_say(
@@ -799,6 +784,9 @@ async fn release_daily_call(
 
 fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
     matches!(
+        error.kind.as_ref(),
+        mongodb::error::ErrorKind::Command(command) if command.code == 11000
+    ) || matches!(
         error.kind.as_ref(),
         mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write_error))
             if write_error.code == 11000
