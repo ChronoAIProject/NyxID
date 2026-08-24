@@ -578,6 +578,28 @@ pub async fn transfer_node_owner(
     new_owner_user_id: &str,
     max_nodes_per_user: u32,
 ) -> AppResult<TransferNodeResult> {
+    transfer_node_owner_with_expected_state_version(
+        db,
+        actor_user_id,
+        node_id,
+        new_owner_user_id,
+        max_nodes_per_user,
+        None,
+    )
+    .await
+}
+
+/// Transfer a node while atomically fencing the mutation on the authority
+/// projection's expected state version. Missing `state_version` is treated as
+/// the legacy version-one row, matching the authorization projection.
+pub async fn transfer_node_owner_with_expected_state_version(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    node_id: &str,
+    new_owner_user_id: &str,
+    max_nodes_per_user: u32,
+    expected_state_version: Option<i64>,
+) -> AppResult<TransferNodeResult> {
     let node = load_active_node(db, node_id).await?;
     ensure_node_writable_by_access(db, actor_user_id, &node).await?;
 
@@ -605,13 +627,14 @@ pub async fn transfer_node_owner(
         .start_transaction()
         .and_run2(async move |session| {
             let operation: AppResult<TransferNodeResult> = async {
+                let current_filter = doc! {
+                    "_id": &node_id,
+                    "user_id": &previous_owner_user_id,
+                    "is_active": true,
+                };
                 let current = db
                     .collection::<Node>(NODES)
-                    .find_one(doc! {
-                        "_id": &node_id,
-                        "user_id": &previous_owner_user_id,
-                        "is_active": true,
-                    })
+                    .find_one(current_filter)
                     .session(&mut *session)
                     .await?
                     .ok_or_else(|| AppError::NodeNotFound("Node not found".to_string()))?;
@@ -679,25 +702,46 @@ pub async fn transfer_node_owner(
                     )
                     .session(&mut *session)
                     .await?;
+                let mut node_filter = doc! {
+                    "_id": &node_id,
+                    "user_id": &previous_owner_user_id,
+                    "is_active": true,
+                };
+                if let Some(expected) = expected_state_version {
+                    node_filter.insert(
+                        "$or",
+                        vec![
+                            doc! { "state_version": expected },
+                            doc! { "state_version": { "$exists": false } },
+                        ],
+                    );
+                }
+                let state_version_fallback = expected_state_version.unwrap_or(0);
                 let update_result = db
                     .collection::<Node>(NODES)
                     .update_one(
-                        doc! {
-                            "_id": &node_id,
-                            "user_id": &previous_owner_user_id,
-                            "is_active": true,
-                        },
-                        doc! {
+                        node_filter,
+                        vec![doc! {
                             "$set": {
                                 "user_id": &new_owner_user_id,
                                 "updated_at": &now,
-                            },
-                            "$inc": { "state_version": 1_i64 },
-                        },
+                                "state_version": {
+                                    "$add": [
+                                        { "$ifNull": ["$state_version", state_version_fallback] },
+                                        1_i64,
+                                    ]
+                                },
+                            }
+                        }],
                     )
                     .session(&mut *session)
                     .await?;
                 if update_result.matched_count == 0 {
+                    if expected_state_version.is_some() {
+                        return Err(AppError::Conflict(
+                            "the node changed since this action was prepared".to_string(),
+                        ));
+                    }
                     return Err(AppError::NodeNotFound("Node not found".to_string()));
                 }
 
@@ -719,6 +763,18 @@ pub async fn transfer_node_owner(
 
 /// Soft-delete a node and its bindings.
 pub async fn delete_node(db: &mongodb::Database, user_id: &str, node_id: &str) -> AppResult<()> {
+    delete_node_with_expected_state_version(db, user_id, node_id, None).await
+}
+
+/// Soft-delete a node while atomically fencing the mutation on the expected
+/// authority state version. Legacy rows without `state_version` are treated as
+/// version one and advance to the next version in the same write.
+pub async fn delete_node_with_expected_state_version(
+    db: &mongodb::Database,
+    user_id: &str,
+    node_id: &str,
+    expected_state_version: Option<i64>,
+) -> AppResult<()> {
     let node = load_active_node(db, node_id).await?;
     ensure_node_writable_by_access(db, user_id, &node).await?;
 
@@ -732,26 +788,47 @@ pub async fn delete_node(db: &mongodb::Database, user_id: &str, node_id: &str) -
         .and_run2(async move |session| {
             let operation: AppResult<()> = async {
                 let now = bson::DateTime::from_chrono(Utc::now());
+                let mut node_filter = doc! {
+                    "_id": &node_id,
+                    "user_id": &owner_user_id,
+                    "is_active": true,
+                };
+                if let Some(expected) = expected_state_version {
+                    node_filter.insert(
+                        "$or",
+                        vec![
+                            doc! { "state_version": expected },
+                            doc! { "state_version": { "$exists": false } },
+                        ],
+                    );
+                }
+                let state_version_fallback = expected_state_version.unwrap_or(0);
                 let result = db
                     .collection::<Node>(NODES)
                     .update_one(
-                        doc! {
-                            "_id": &node_id,
-                            "user_id": &owner_user_id,
-                            "is_active": true,
-                        },
-                        doc! {
+                        node_filter,
+                        vec![doc! {
                             "$set": {
                                 "is_active": false,
                                 "status": NodeStatus::Offline.as_str(),
                                 "updated_at": &now,
-                            },
-                            "$inc": { "state_version": 1_i64 },
-                        },
+                                "state_version": {
+                                    "$add": [
+                                        { "$ifNull": ["$state_version", state_version_fallback] },
+                                        1_i64,
+                                    ]
+                                },
+                            }
+                        }],
                     )
                     .session(&mut *session)
                     .await?;
                 if result.matched_count == 0 {
+                    if expected_state_version.is_some() {
+                        return Err(AppError::Conflict(
+                            "the node changed since this action was prepared".to_string(),
+                        ));
+                    }
                     return Err(AppError::NodeNotFound("Node not found".to_string()));
                 }
 

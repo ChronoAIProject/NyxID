@@ -26,6 +26,13 @@ pub struct AssistantActionReceipt {
     pub action_request_id: String,
     pub request_fingerprint: String,
     pub resource_id: String,
+    /// Optional monotonic marker captured immediately before a mutation. It
+    /// is secret-free evidence used to recover an interrupted one-time effect.
+    #[serde(default)]
+    pub resource_state_version: Option<i64>,
+    /// Optional access-material revision used by node token rotation recovery.
+    #[serde(default)]
+    pub resource_access_revision: Option<i64>,
     pub status: AssistantActionReceiptStatus,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -46,6 +53,8 @@ mod tests {
             action_request_id: "action-alpha".to_string(),
             request_fingerprint: "abc123".to_string(),
             resource_id: "key-alpha".to_string(),
+            resource_state_version: None,
+            resource_access_revision: None,
             status: AssistantActionReceiptStatus::Completed,
             created_at: Utc::now(),
             completed_at: Some(Utc::now()),

@@ -9,7 +9,7 @@ use axum::{
     extract::State,
     routing::{get, post},
 };
-use mongodb::bson::{Document, doc};
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -154,6 +154,8 @@ pub struct AssistantDeviceResource {
 pub struct AssistantNodeEffectResponse {
     pub resource: AssistantNodeResource,
     pub replayed: bool,
+    #[serde(default)]
+    pub one_time_material: OneTimeMaterialAvailability,
     pub requested_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registration_token: Option<String>,
@@ -163,6 +165,14 @@ pub struct AssistantNodeEffectResponse {
     pub signing_secret: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OneTimeMaterialAvailability {
+    #[default]
+    Delivered,
+    Unavailable,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -178,6 +188,8 @@ pub struct AssistantPendingCredentialEffectResponse {
 pub struct AssistantDeviceEffectResponse {
     pub resource: AssistantDeviceResource,
     pub replayed: bool,
+    #[serde(default)]
+    pub one_time_material: OneTimeMaterialAvailability,
     pub requested_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qr_payload: Option<String>,
@@ -308,40 +320,6 @@ fn validate_expected_state_version(expected_state_version: i64) -> AppResult<i64
     Ok(expected_state_version)
 }
 
-/// Compare-and-set the authority projection's version after a receipt is
-/// reserved. The node model intentionally remains backward-compatible with
-/// rows that predate the projection; those rows are treated as version one,
-/// matching the public authorization endpoint, and get the explicit version
-/// field as part of this no-op write. A stale confirmation therefore cannot
-/// pass the database write predicate into the mutation service.
-async fn ensure_expected_node_state_version(
-    state: &AppState,
-    node_id: &str,
-    expected_state_version: i64,
-) -> AppResult<()> {
-    let result = state
-        .db
-        .collection::<Document>(NODES)
-        .update_one(
-            doc! {
-                "_id": node_id,
-                "is_active": true,
-                "$or": [
-                    { "state_version": expected_state_version },
-                    { "state_version": { "$exists": false } },
-                ],
-            },
-            doc! { "$set": { "state_version": expected_state_version } },
-        )
-        .await?;
-    if result.matched_count != 1 {
-        return Err(AppError::Conflict(
-            "the node changed since this action was prepared".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 async fn release_pending_receipt(state: &AppState, receipt: &AssistantActionReceipt) {
     if let Err(error) = state
         .db
@@ -366,12 +344,19 @@ fn node_response(receipt: &AssistantActionReceipt, replayed: bool) -> AssistantN
             node_id: receipt.resource_id.clone(),
         },
         replayed,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         requested_at: receipt.created_at.to_rfc3339(),
         registration_token: None,
         auth_token: None,
         signing_secret: None,
         expires_at: None,
     }
+}
+
+fn node_replay_response(receipt: &AssistantActionReceipt) -> AssistantNodeEffectResponse {
+    let mut response = node_response(receipt, true);
+    response.one_time_material = OneTimeMaterialAvailability::Unavailable;
+    response
 }
 
 fn pending_response(
@@ -396,10 +381,17 @@ fn device_response(
             device_id: receipt.resource_id.clone(),
         },
         replayed,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         requested_at: receipt.created_at.to_rfc3339(),
         qr_payload: None,
         expires_at: None,
     }
+}
+
+fn device_replay_response(receipt: &AssistantActionReceipt) -> AssistantDeviceEffectResponse {
+    let mut response = device_response(receipt, true);
+    response.one_time_material = OneTimeMaterialAvailability::Unavailable;
+    response
 }
 
 async fn replay_in_progress_registration(
@@ -411,7 +403,7 @@ async fn replay_in_progress_registration(
         .await
         .map_err(|_| in_progress_conflict())?;
     assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-    Ok(Json(node_response(&receipt, true)))
+    Ok(Json(node_replay_response(&receipt)))
 }
 
 async fn replay_in_progress_pending(
@@ -430,22 +422,6 @@ async fn replay_in_progress_pending(
     .map_err(|_| in_progress_conflict())?;
     assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
     Ok(Json(pending_response(&receipt, true)))
-}
-
-async fn replay_in_progress_device(
-    state: &AppState,
-    actor_user_id: &str,
-    receipt: AssistantActionReceipt,
-) -> AppResult<Json<AssistantDeviceEffectResponse>> {
-    crate::services::device_code_service::get_onboard_authorization_state(
-        &state.db,
-        actor_user_id,
-        &receipt.resource_id,
-    )
-    .await
-    .map_err(|_| in_progress_conflict())?;
-    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-    Ok(Json(device_response(&receipt, true)))
 }
 
 pub async fn register_node_token(
@@ -474,7 +450,7 @@ pub async fn register_node_token(
     )
     .await?;
     match outcome {
-        ReceiptOutcome::Replay(receipt) => Ok(Json(node_response(&receipt, true))),
+        ReceiptOutcome::Replay(receipt) => Ok(Json(node_replay_response(&receipt))),
         ReceiptOutcome::InProgress(receipt) => {
             replay_in_progress_registration(&state, &actor, receipt).await
         }
@@ -524,59 +500,69 @@ pub async fn rotate_node_token(
     let actor = auth_user.user_id.to_string();
     let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let node_id = normalize_action_request_id(body.node_id)?;
+    let authority = node_service::get_node_authorization_state(&state.db, &actor, &node_id).await?;
     node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await?;
     let fingerprint = fingerprint_canonical(&NodeIdentityFingerprint {
         action: NODE_ROTATE_TOKEN_ACTION,
         node_id: &node_id,
     })?;
-    match assistant_action_receipts::reserve_or_replay(
+    let receipt = match assistant_action_receipts::reserve_or_replay_with_markers(
         &state.db,
         &actor,
         NODE_ROTATE_TOKEN_ACTION,
         &action_request_id,
         &fingerprint,
         node_id.clone(),
+        Some(authority.state_version),
+        Some(authority.access_revision),
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) => Ok(Json(node_response(&receipt, true))),
-        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
-        ReceiptOutcome::Reserved(receipt) => {
-            let (raw_token, signing_secret) = node_service::rotate_auth_token(
-                &state.db,
-                &state.encryption_keys,
-                &actor,
-                &node_id,
-            )
-            .await?;
-            assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            if state.node_ws_manager.is_connected(&node_id) {
-                state
-                    .node_ws_manager
-                    .disconnect_connection(&node_id, 4002, "node credentials rotated")
-                    .await;
-                if let Err(error) = node_service::set_node_status(
-                    &state.db,
-                    &node_id,
-                    crate::models::node::NodeStatus::Offline,
-                )
+        ReceiptOutcome::Replay(receipt) => return Ok(Json(node_replay_response(&receipt))),
+        ReceiptOutcome::InProgress(receipt) => {
+            let current = node_service::get_node_authorization_state(&state.db, &actor, &node_id)
                 .await
-                {
-                    tracing::warn!(node_id = %node_id, error = %error, "failed to persist rotated node disconnect status");
-                }
+                .map_err(|_| in_progress_conflict())?;
+            let committed = receipt
+                .resource_access_revision
+                .is_some_and(|revision| current.access_revision > revision);
+            if committed {
+                assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+                return Ok(Json(node_replay_response(&receipt)));
             }
-            audit_service::log_for_user(
-                state.db.clone(),
-                &auth_user,
-                "assistant_node_token_rotated",
-                Some(serde_json::json!({ "node_id": &node_id })),
-            );
-            let mut response = node_response(&receipt, false);
-            response.auth_token = Some(raw_token);
-            response.signing_secret = Some(signing_secret);
-            Ok(Json(response))
+            receipt
+        }
+        ReceiptOutcome::Reserved(receipt) => receipt,
+    };
+    let (raw_token, signing_secret) =
+        node_service::rotate_auth_token(&state.db, &state.encryption_keys, &actor, &node_id)
+            .await?;
+    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+    if state.node_ws_manager.is_connected(&node_id) {
+        state
+            .node_ws_manager
+            .disconnect_connection(&node_id, 4002, "node credentials rotated")
+            .await;
+        if let Err(error) = node_service::set_node_status(
+            &state.db,
+            &node_id,
+            crate::models::node::NodeStatus::Offline,
+        )
+        .await
+        {
+            tracing::warn!(node_id = %node_id, error = %error, "failed to persist rotated node disconnect status");
         }
     }
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "assistant_node_token_rotated",
+        Some(serde_json::json!({ "node_id": &node_id })),
+    );
+    let mut response = node_response(&receipt, false);
+    response.auth_token = Some(raw_token);
+    response.signing_secret = Some(signing_secret);
+    Ok(Json(response))
 }
 
 pub async fn delete_node(
@@ -601,7 +587,7 @@ pub async fn delete_node(
         node_id: &node_id,
         expected_state_version,
     })?;
-    match assistant_action_receipts::reserve_or_replay(
+    let receipt = match assistant_action_receipts::reserve_or_replay(
         &state.db,
         &actor,
         NODE_DELETE_ACTION,
@@ -611,43 +597,59 @@ pub async fn delete_node(
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) => Ok(Json(node_response(&receipt, true))),
-        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
-        ReceiptOutcome::Reserved(receipt) => {
-            if let Err(error) =
-                node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await
+        ReceiptOutcome::Replay(receipt) => return Ok(Json(node_replay_response(&receipt))),
+        ReceiptOutcome::InProgress(receipt) => {
+            let current = state
+                .db
+                .collection::<mongodb::bson::Document>(NODES)
+                .find_one(doc! { "_id": &node_id })
+                .await
+                .map_err(AppError::from)?;
+            if current
+                .as_ref()
+                .and_then(|node| node.get_bool("is_active").ok())
+                == Some(false)
             {
-                release_pending_receipt(&state, &receipt).await;
-                return Err(error);
+                assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+                return Ok(Json(node_replay_response(&receipt)));
             }
-            if let Err(error) =
-                ensure_expected_node_state_version(&state, &node_id, expected_state_version).await
-            {
-                release_pending_receipt(&state, &receipt).await;
-                return Err(error);
-            }
-            if let Err(error) = node_service::delete_node(&state.db, &actor, &node_id).await {
-                if !matches!(error, AppError::DatabaseError(_)) {
-                    release_pending_receipt(&state, &receipt).await;
-                }
-                return Err(error);
-            }
-            assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            if state.node_ws_manager.is_connected(&node_id) {
-                state
-                    .node_ws_manager
-                    .disconnect_connection(&node_id, 4006, "node deleted")
-                    .await;
-            }
-            audit_service::log_for_user(
-                state.db.clone(),
-                &auth_user,
-                "assistant_node_deleted",
-                Some(serde_json::json!({ "node_id": &node_id })),
-            );
-            Ok(Json(node_response(&receipt, false)))
+            receipt
         }
+        ReceiptOutcome::Reserved(receipt) => receipt,
+    };
+    if let Err(error) =
+        node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await
+    {
+        release_pending_receipt(&state, &receipt).await;
+        return Err(error);
     }
+    if let Err(error) = node_service::delete_node_with_expected_state_version(
+        &state.db,
+        &actor,
+        &node_id,
+        Some(expected_state_version),
+    )
+    .await
+    {
+        if !matches!(error, AppError::DatabaseError(_)) {
+            release_pending_receipt(&state, &receipt).await;
+        }
+        return Err(error);
+    }
+    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+    if state.node_ws_manager.is_connected(&node_id) {
+        state
+            .node_ws_manager
+            .disconnect_connection(&node_id, 4006, "node deleted")
+            .await;
+    }
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "assistant_node_deleted",
+        Some(serde_json::json!({ "node_id": &node_id })),
+    );
+    Ok(Json(node_response(&receipt, false)))
 }
 
 pub async fn transfer_node(
@@ -671,7 +673,7 @@ pub async fn transfer_node(
         new_owner_user_id: &new_owner_user_id,
         expected_state_version,
     })?;
-    match assistant_action_receipts::reserve_or_replay(
+    let receipt = match assistant_action_receipts::reserve_or_replay(
         &state.db,
         &actor,
         NODE_TRANSFER_ACTION,
@@ -681,61 +683,71 @@ pub async fn transfer_node(
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) => Ok(Json(node_response(&receipt, true))),
-        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
-        ReceiptOutcome::Reserved(receipt) => {
-            // Both sides of the transfer are authorised here, inside the
-            // reservation, so a replayed retry never re-runs them.
-            match node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await {
-                Ok(current) if current.user_id == new_owner_user_id => {
-                    release_pending_receipt(&state, &receipt).await;
-                    return Err(AppError::BadRequest(
-                        "node already belongs to that owner".to_string(),
-                    ));
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    release_pending_receipt(&state, &receipt).await;
-                    return Err(error);
-                }
-            }
-            if let Err(error) =
-                ensure_expected_node_state_version(&state, &node_id, expected_state_version).await
+        ReceiptOutcome::Replay(receipt) => return Ok(Json(node_replay_response(&receipt))),
+        ReceiptOutcome::InProgress(receipt) => {
+            let current = state
+                .db
+                .collection::<mongodb::bson::Document>(NODES)
+                .find_one(doc! { "_id": &node_id })
+                .await
+                .map_err(AppError::from)?;
+            if current
+                .as_ref()
+                .and_then(|node| node.get_str("user_id").ok())
+                == Some(new_owner_user_id.as_str())
             {
-                release_pending_receipt(&state, &receipt).await;
-                return Err(error);
+                assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+                return Ok(Json(node_replay_response(&receipt)));
             }
-            if let Err(error) = ensure_owner_writable(&state, &actor, &new_owner_user_id).await {
-                release_pending_receipt(&state, &receipt).await;
-                return Err(error);
-            }
-            let transfer = node_service::transfer_node_owner(
-                &state.db,
-                &actor,
-                &node_id,
-                &new_owner_user_id,
-                state.config.node_max_per_user,
-            )
-            .await;
-            if let Err(error) = transfer {
-                if !matches!(error, AppError::DatabaseError(_)) {
-                    release_pending_receipt(&state, &receipt).await;
-                }
-                return Err(error);
-            }
-            assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            audit_service::log_for_user(
-                state.db.clone(),
-                &auth_user,
-                "assistant_node_transferred",
-                Some(serde_json::json!({
-                    "node_id": &node_id,
-                    "new_owner_user_id": &new_owner_user_id,
-                })),
-            );
-            Ok(Json(node_response(&receipt, false)))
+            receipt
+        }
+        ReceiptOutcome::Reserved(receipt) => receipt,
+    };
+    // Both sides of the transfer are authorised here, inside the reservation,
+    // so a replayed retry never re-runs them.
+    match node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await {
+        Ok(current) if current.user_id == new_owner_user_id => {
+            release_pending_receipt(&state, &receipt).await;
+            return Err(AppError::BadRequest(
+                "node already belongs to that owner".to_string(),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            release_pending_receipt(&state, &receipt).await;
+            return Err(error);
         }
     }
+    if let Err(error) = ensure_owner_writable(&state, &actor, &new_owner_user_id).await {
+        release_pending_receipt(&state, &receipt).await;
+        return Err(error);
+    }
+    let transfer = node_service::transfer_node_owner_with_expected_state_version(
+        &state.db,
+        &actor,
+        &node_id,
+        &new_owner_user_id,
+        state.config.node_max_per_user,
+        Some(expected_state_version),
+    )
+    .await;
+    if let Err(error) = transfer {
+        if !matches!(error, AppError::DatabaseError(_)) {
+            release_pending_receipt(&state, &receipt).await;
+        }
+        return Err(error);
+    }
+    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "assistant_node_transferred",
+        Some(serde_json::json!({
+            "node_id": &node_id,
+            "new_owner_user_id": &new_owner_user_id,
+        })),
+    );
+    Ok(Json(node_response(&receipt, false)))
 }
 
 async fn create_pending_credential_effect(
@@ -882,7 +894,7 @@ pub async fn cancel_pending_credential(
         node_id: &node_id,
         pending_credential_id: &pending_credential_id,
     })?;
-    match assistant_action_receipts::reserve_or_replay(
+    let receipt = match assistant_action_receipts::reserve_or_replay(
         &state.db,
         &actor,
         PENDING_CREDENTIAL_CANCEL_ACTION,
@@ -892,35 +904,49 @@ pub async fn cancel_pending_credential(
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) => Ok(Json(pending_response(&receipt, true))),
-        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
-        ReceiptOutcome::Reserved(receipt) => {
-            let cancelled = node_pending_credential_service::cancel_pending_credential(
-                &state.db,
-                &actor,
-                &node_id,
-                &pending_credential_id,
-            )
-            .await;
-            if let Err(error) = cancelled {
-                if !matches!(error, AppError::DatabaseError(_)) {
-                    release_pending_receipt(&state, &receipt).await;
-                }
-                return Err(error);
+        ReceiptOutcome::Replay(receipt) => return Ok(Json(pending_response(&receipt, true))),
+        ReceiptOutcome::InProgress(receipt) => {
+            let current =
+                node_pending_credential_service::get_pending_credential_authorization_state(
+                    &state.db,
+                    &actor,
+                    &node_id,
+                    &pending_credential_id,
+                )
+                .await
+                .map_err(|_| in_progress_conflict())?;
+            if !current.is_active && current.declined_at.is_some() {
+                assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+                return Ok(Json(pending_response(&receipt, true)));
             }
-            assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            audit_service::log_for_user(
-                state.db.clone(),
-                &auth_user,
-                "assistant_pending_credential_cancelled",
-                Some(serde_json::json!({
-                    "node_id": &node_id,
-                    "pending_credential_id": &pending_credential_id,
-                })),
-            );
-            Ok(Json(pending_response(&receipt, false)))
+            receipt
         }
+        ReceiptOutcome::Reserved(receipt) => receipt,
+    };
+    let cancelled = node_pending_credential_service::cancel_pending_credential(
+        &state.db,
+        &actor,
+        &node_id,
+        &pending_credential_id,
+    )
+    .await;
+    if let Err(error) = cancelled {
+        if !matches!(error, AppError::DatabaseError(_)) {
+            release_pending_receipt(&state, &receipt).await;
+        }
+        return Err(error);
     }
+    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "assistant_pending_credential_cancelled",
+        Some(serde_json::json!({
+            "node_id": &node_id,
+            "pending_credential_id": &pending_credential_id,
+        })),
+    );
+    Ok(Json(pending_response(&receipt, false)))
 }
 
 pub async fn onboard_device(
@@ -941,7 +967,7 @@ pub async fn onboard_device(
         target_owner_user_id: &owner_user_id,
         default_service_ids: &default_service_ids,
     })?;
-    match assistant_action_receipts::reserve_or_replay(
+    let receipt = match assistant_action_receipts::reserve_or_replay(
         &state.db,
         &actor,
         DEVICE_ONBOARD_ACTION,
@@ -951,48 +977,58 @@ pub async fn onboard_device(
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) => Ok(Json(device_response(&receipt, true))),
+        ReceiptOutcome::Replay(receipt) => return Ok(Json(device_replay_response(&receipt))),
         ReceiptOutcome::InProgress(receipt) => {
-            replay_in_progress_device(&state, &actor, receipt).await
-        }
-        ReceiptOutcome::Reserved(receipt) => {
-            let created = onboard_with_id(
+            let current = crate::services::device_code_service::get_onboard_authorization_state(
                 &state.db,
                 &actor,
                 &receipt.resource_id,
-                DeviceOnboardInput {
-                    org_id: (owner_user_id != actor).then_some(owner_user_id.clone()),
-                    label,
-                    default_services: Some(default_service_ids),
-                    base_url: state.config.base_url.clone(),
-                },
             )
-            .await;
-            let onboarded = match created {
-                Ok(onboarded) => onboarded,
-                Err(error) => {
-                    if !matches!(error, AppError::DatabaseError(_)) {
-                        release_pending_receipt(&state, &receipt).await;
-                    }
-                    return Err(error);
-                }
-            };
-            assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            audit_service::log_for_user(
-                state.db.clone(),
-                &auth_user,
-                "assistant_device_onboard_created",
-                Some(serde_json::json!({
-                    "device_id": &receipt.resource_id,
-                    "owner_user_id": &owner_user_id,
-                })),
-            );
-            let mut response = device_response(&receipt, false);
-            response.qr_payload = Some(onboarded.qr_payload);
-            response.expires_at = Some(onboarded.expires_at.to_rfc3339());
-            Ok(Json(response))
+            .await
+            .map_err(|_| in_progress_conflict())?;
+            if current.used {
+                assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+                return Ok(Json(device_replay_response(&receipt)));
+            }
+            receipt
         }
-    }
+        ReceiptOutcome::Reserved(receipt) => receipt,
+    };
+    let created = onboard_with_id(
+        &state.db,
+        &actor,
+        &receipt.resource_id,
+        DeviceOnboardInput {
+            org_id: (owner_user_id != actor).then_some(owner_user_id.clone()),
+            label,
+            default_services: Some(default_service_ids),
+            base_url: state.config.base_url.clone(),
+        },
+    )
+    .await;
+    let onboarded = match created {
+        Ok(onboarded) => onboarded,
+        Err(error) => {
+            if !matches!(error, AppError::DatabaseError(_)) {
+                release_pending_receipt(&state, &receipt).await;
+            }
+            return Err(error);
+        }
+    };
+    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "assistant_device_onboard_created",
+        Some(serde_json::json!({
+            "device_id": &receipt.resource_id,
+            "owner_user_id": &owner_user_id,
+        })),
+    );
+    let mut response = device_response(&receipt, false);
+    response.qr_payload = Some(onboarded.qr_payload);
+    response.expires_at = Some(onboarded.expires_at.to_rfc3339());
+    Ok(Json(response))
 }
 
 #[cfg(test)]

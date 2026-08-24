@@ -222,6 +222,32 @@ pub async fn reserve_or_replay(
     fingerprint: &str,
     resource_id: String,
 ) -> AppResult<ReceiptOutcome> {
+    reserve_or_replay_with_markers(
+        db,
+        user_id,
+        action,
+        action_request_id,
+        fingerprint,
+        resource_id,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Reserve a receipt while recording optional secret-free monotonic markers
+/// captured by the caller immediately before the effect.
+#[allow(clippy::too_many_arguments)]
+pub async fn reserve_or_replay_with_markers(
+    db: &mongodb::Database,
+    user_id: &str,
+    action: &str,
+    action_request_id: &str,
+    fingerprint: &str,
+    resource_id: String,
+    resource_state_version: Option<i64>,
+    resource_access_revision: Option<i64>,
+) -> AppResult<ReceiptOutcome> {
     if let Some(existing) = find_receipt(db, user_id, action, action_request_id).await? {
         return existing_outcome(existing, fingerprint);
     }
@@ -233,6 +259,8 @@ pub async fn reserve_or_replay(
         action_request_id: action_request_id.to_string(),
         request_fingerprint: fingerprint.to_string(),
         resource_id,
+        resource_state_version,
+        resource_access_revision,
         status: AssistantActionReceiptStatus::Pending,
         created_at: utc_now_at_bson_precision(),
         completed_at: None,
@@ -374,6 +402,8 @@ mod tests {
             action_request_id: "act-1".to_string(),
             request_fingerprint: "fingerprint-a".to_string(),
             resource_id: "key-1".to_string(),
+            resource_state_version: None,
+            resource_access_revision: None,
             status: AssistantActionReceiptStatus::Pending,
             created_at: utc_now_at_bson_precision(),
             completed_at: None,
@@ -395,6 +425,8 @@ mod tests {
             action_request_id: "act-1".to_string(),
             request_fingerprint: "fingerprint-a".to_string(),
             resource_id: "key-1".to_string(),
+            resource_state_version: None,
+            resource_access_revision: None,
             status: AssistantActionReceiptStatus::Pending,
             created_at: utc_now_at_bson_precision(),
             completed_at: None,
@@ -414,6 +446,8 @@ mod tests {
             action_request_id: "act-1".to_string(),
             request_fingerprint: "fingerprint-a".to_string(),
             resource_id: "key-1".to_string(),
+            resource_state_version: None,
+            resource_access_revision: None,
             status: AssistantActionReceiptStatus::Completed,
             created_at: utc_now_at_bson_precision(),
             completed_at: Some(utc_now_at_bson_precision()),
