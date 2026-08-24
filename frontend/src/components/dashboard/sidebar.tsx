@@ -30,6 +30,7 @@ import {
   Circle,
   QrCode,
   Webhook,
+  WandSparkles,
 } from "lucide-react";
 import {
   Popover,
@@ -40,7 +41,7 @@ import { cn } from "@/lib/utils";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { useAuthStore } from "@/stores/auth-store";
-import { hasAdminRead, isBillingAvailable } from "@/types/api";
+import { canAdminWrite, hasAdminRead, isBillingAvailable } from "@/types/api";
 
 type SidebarMode = "expanded" | "collapsed" | "hover";
 const STORAGE_KEY = "nyxid:sidebar-mode";
@@ -77,6 +78,11 @@ export const ADMIN_NAV = [
   { to: "/admin/feature-flags", icon: Flag, label: "Feature Flags" },
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },
   { to: "/admin/integrity", icon: ShieldCheck, label: "Integrity" },
+  {
+    to: "/admin/platform-ops",
+    icon: WandSparkles,
+    label: "Platform Operations",
+  },
   { to: "/admin/credits", icon: Coins, label: "Credits" },
   { to: "/admin/service-accounts", icon: Bot, label: "Service Accounts" },
   { to: "/admin/oauth-clients", icon: KeyRound, label: "OAuth Clients" },
@@ -98,6 +104,15 @@ export function getVisibleMainNav(
 ): readonly NavItemDef[] {
   return MAIN_NAV.filter(
     (item) => item.to !== "/billing" || isBillingAvailable(user),
+  );
+}
+
+function getVisibleAdminNav(
+  user: Parameters<typeof canAdminWrite>[0],
+): readonly NavItemDef[] {
+  return ADMIN_NAV.filter(
+    (item) =>
+      item.to !== "/admin/platform-ops" || canAdminWrite(user),
   );
 }
 
@@ -238,6 +253,7 @@ export function Sidebar({
   const user = useAuthStore((s) => s.user);
   const currentPath = routerState.location.pathname;
   const mainNav = getVisibleMainNav(user);
+  const adminNav = getVisibleAdminNav(user);
 
   const [mode, setMode] = useState<SidebarMode>(readMode);
   const [hovered, setHovered] = useState(false);
@@ -348,7 +364,7 @@ export function Sidebar({
               )}
             </div>
             <div className="flex flex-col gap-[2px]">
-              {ADMIN_NAV.map((item) => (
+              {adminNav.map((item) => (
                 <NavItem
                   key={item.to}
                   item={item}

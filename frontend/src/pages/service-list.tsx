@@ -74,6 +74,7 @@ export function ServiceListPage() {
       base_url: "",
       auth_type: "api_key",
       auth_key_name: "",
+      credential: "",
       service_category: "connection",
       host: "",
       port: "22",
@@ -119,6 +120,7 @@ export function ServiceListPage() {
               base_url: data.base_url ?? "",
               auth_type: data.auth_type ?? "api_key",
               auth_key_name: data.auth_key_name || undefined,
+              credential: data.credential || undefined,
               service_category: data.service_category ?? "connection",
             });
 
@@ -390,6 +392,9 @@ export function ServiceListPage() {
                               if (value !== "body") {
                                 form.setValue("auth_key_name", "");
                               }
+                              if (value === "oidc" || value === "none") {
+                                form.setValue("credential", "");
+                              }
                             }}
                           >
                             <FormControl>
@@ -447,6 +452,28 @@ export function ServiceListPage() {
                               injected. For Lark/Feishu use{" "}
                               <code>app_secret</code>.
                             </p>
+                            <FormMessage />
+                          </FormItem>
+                        )}
+                      />
+                    )}
+
+                    {authType !== "oidc" && authType !== "none" && (
+                      <FormField
+                        control={form.control}
+                        name="credential"
+                        render={({ field }) => (
+                          <FormItem>
+                            <FormLabel>Master Credential</FormLabel>
+                            <FormControl>
+                              <Input
+                                type="password"
+                                autoComplete="new-password"
+                                placeholder="Vendor credential"
+                                {...field}
+                                value={field.value ?? ""}
+                              />
+                            </FormControl>
                             <FormMessage />
                           </FormItem>
                         )}
