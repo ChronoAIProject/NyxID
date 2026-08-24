@@ -4400,27 +4400,27 @@ other effect authority. The existing approval endpoints intentionally return
 }
 ```
 
-`exact_view_digest` is the representation validator for the exact
-caller-visible `services` array. It is SHA-256 over canonical compact JSON
-containing `contract_version: "nyxid-delegated-operation-catalog.v2"` and the
-returned `services`; services are sorted by `user_service_id`, operations by
-`endpoint_id`, and object keys recursively in lexicographic order. The dynamic
-timestamps, totals, and `catalog_digest` are excluded. Delegated discovery and
-exact approval create, observe, and redeem use this same projection.
+`exact_view_digest` is the representation validator for the caller-visible
+`services` array. Digests use SHA-256 over canonical compact JSON containing
+`contract_version: "nyxid-delegated-operation-catalog.v2"` and the returned
+`services`; services are sorted by `user_service_id`, operations by
+`endpoint_id`, and object keys recursively in lexicographic order. Dynamic
+timestamps, totals, and `catalog_digest` are excluded.
 
 The producer-owned `operation_generation`, `risk`, and
 `supports_idempotency_key` fields are additive to v2. During the bounded mixed-
 replica compatibility window, discovery emits the v2 digest of the same
-projection with those three fields omitted. New replicas accept either that
-pre-additive digest or the full additive digest at create and live
+projection with those three fields omitted. Clients should echo that response
+value for compatibility with every replica. A client may instead recompute the
+full additive digest by retaining all three fields in the canonical projection;
+new replicas accept either value at create and redeem, and during live
 revalidation. New rows retain the pre-additive value in the legacy
 `exact_view_digest` slot so an old replica can revalidate them, and persist the
 full projection in a server-owned `exact_view_digest_binding` slot that new
 replicas also enforce. This catches additive policy changes written by an old
-replica even though that writer cannot bump `operation_generation`. Clients
-must treat the response digest as opaque and echo the server value rather than
-rebuilding it. This lets existing clients and old and new NyxID replicas
-coexist during an ordinary rolling deploy.
+replica even though that writer cannot bump `operation_generation`. This lets
+existing clients and old and new NyxID replicas coexist during an ordinary
+rolling deploy.
 
 Each service also carries the producer-owned `catalog_service_id` used to
 resolve its catalog provider. This field is included in `exact_view_digest` and
@@ -4533,8 +4533,8 @@ receipt write while preserving at-most-once dispatch.
 | Destination, credential identity/epoch, injection, headers, policy, or configured node set changed | `drifted` | `execution_authority_drift` | None |
 | Unknown future authority projection | `drifted` | `execution_authority_version_unsupported` | None |
 | Selector gone / out of scope | `revoked` | `selector_revoked` | None |
-| Direct DNS/connect/TLS/build/request failure known to precede dispatch | `failed` | `provider_unreachable` | None; terminal request may be recreated only with a new effect key |
-| Effect timeout, response-body/decode/stream failure, or stale `executing` recovery | `failed` | `provider_outcome_unknown` | Never replayed; reconcile provider state |
+| Direct DNS/connect/TLS handshake or request-build failure | `failed` | `provider_unreachable` | None; terminal request may be recreated only with a new effect key |
+| In-flight request failure, effect timeout, response-body/decode/stream failure, or stale `executing` recovery | `failed` | `provider_outcome_unknown` | Never replayed; reconcile provider state |
 | Background OAuth token refresh (epoch unchanged) | `redeemed` | omitted | Exactly one |
 | URL changed away and back before redeem (ABA) | `redeemed` | omitted | Exactly one |
 

@@ -588,6 +588,15 @@ pub async fn redeem_request(
                     failure_code: Some(PROVIDER_OUTCOME_UNKNOWN.to_string()),
                 }
             }
+            Ok(mcp_service::McpToolExecutionOutcome::ProviderUnreachable(_)) => {
+                ExactServiceApprovalRedemption {
+                    status: ExactServiceRedemptionStatus::Failed,
+                    admitted_at: now,
+                    completed_at: Some(completed_at),
+                    receipt: None,
+                    failure_code: Some("provider_unreachable".to_string()),
+                }
+            }
             Err(error) => ExactServiceApprovalRedemption {
                 status: ExactServiceRedemptionStatus::Failed,
                 admitted_at: now,
@@ -1530,10 +1539,10 @@ fn exact_authority_has_drift(
 fn ensure_fence(request: &ApprovalRequest, fence: &ExactServiceApprovalFence) -> AppResult<()> {
     let binding = request.exact_service.as_ref().unwrap();
     if binding.catalog_digest != fence.catalog_digest
-        || fence
-            .exact_view_digest
-            .as_ref()
-            .is_some_and(|provided| binding.exact_view_digest.as_ref() != Some(provided))
+        || fence.exact_view_digest.as_ref().is_some_and(|provided| {
+            binding.exact_view_digest.as_ref() != Some(provided)
+                && binding.exact_view_digest_binding.as_ref() != Some(provided)
+        })
         || binding.operation_digest != fence.operation_digest
         || binding.operation_id != fence.operation_id
         || binding.operation_generation != fence.operation_generation
@@ -1675,7 +1684,6 @@ async fn reject_legacy_request_replay(
 
 fn safe_execution_failure_code(error: &AppError) -> &'static str {
     match error {
-        AppError::Internal(message) if message == "provider_unreachable" => "provider_unreachable",
         AppError::ApiKeyScopeForbidden(_)
         | AppError::ApiKeyScopeInactive
         | AppError::ApiKeyScopeNotFound(_) => "authorization_revoked",
@@ -1947,29 +1955,34 @@ mod tests {
     #[test]
     fn redemption_fence_rejects_conflicting_replay() {
         let input = create();
+        let mut exact_binding = binding();
+        exact_binding.exact_view_digest = Some("sha256:legacy-exact-view".to_string());
+        exact_binding.exact_view_digest_binding = Some("sha256:additive-exact-view".to_string());
         let request = approval_request(
             "request-alpha",
             "approved",
             Utc::now() + Duration::minutes(5),
-            Some(binding()),
+            Some(exact_binding),
         );
         let mut fence = ExactServiceApprovalFence {
             catalog_digest: input.catalog_digest,
-            exact_view_digest: input.exact_view_digest,
+            exact_view_digest: Some("sha256:legacy-exact-view".to_string()),
             operation_digest: input.operation_digest,
             operation_id: input.operation_id,
             operation_generation: 3,
             idempotency_key: input.idempotency_key,
         };
-        ensure_fence(&request, &fence).unwrap();
-        let exact_view_digest = fence.exact_view_digest.take().unwrap();
+        ensure_fence(&request, &fence).expect("legacy exact-view digest echo is accepted");
+        fence.exact_view_digest = Some("sha256:additive-exact-view".to_string());
+        ensure_fence(&request, &fence).expect("additive exact-view digest echo is accepted");
+        fence.exact_view_digest = None;
         ensure_fence(&request, &fence).expect("legacy client may omit additive exact-view fence");
-        fence.exact_view_digest = Some(format!("{exact_view_digest}-changed"));
+        fence.exact_view_digest = Some("sha256:unrecognized-exact-view".to_string());
         assert!(matches!(
             ensure_fence(&request, &fence),
             Err(AppError::Conflict(_))
         ));
-        fence.exact_view_digest = Some(exact_view_digest);
+        fence.exact_view_digest = Some("sha256:additive-exact-view".to_string());
         fence.operation_generation += 1;
         assert!(matches!(
             ensure_fence(&request, &fence),

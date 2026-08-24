@@ -2640,7 +2640,20 @@ async fn persist_exact_service_semantic_effect_diagnostic(
     detail: String,
 ) {
     let now = mongodb::bson::DateTime::from_chrono(Utc::now());
-    if let Err(error) = startup_diagnostics_for(approval_requests)
+    let diagnostics = startup_diagnostics_for(approval_requests);
+    if let Err(error) = diagnostics
+        .update_one(
+            doc! { "_id": EXACT_SERVICE_SEMANTIC_EFFECT_INDEX, "active": false },
+            doc! { "$set": { "detected_at": now } },
+        )
+        .await
+    {
+        tracing::error!(
+            error = %error,
+            "Failed to reset exact-service semantic-effect diagnostic detection time"
+        );
+    }
+    if let Err(error) = diagnostics
         .update_one(
             doc! { "_id": EXACT_SERVICE_SEMANTIC_EFFECT_INDEX },
             doc! {
@@ -2650,9 +2663,9 @@ async fn persist_exact_service_semantic_effect_diagnostic(
                     "summary": "Exact-approval semantic uniqueness is not enforced by a database index.",
                     "detail": detail,
                     "remediation": EXACT_SERVICE_SEMANTIC_EFFECT_REMEDIATION,
-                    "detected_at": now,
                     "updated_at": now,
                 },
+                "$setOnInsert": { "detected_at": now },
                 "$unset": { "resolved_at": "" },
             },
         )
@@ -4443,6 +4456,75 @@ mod tests {
                 .contains("duplicate semantic-effect group")
         );
         assert!(diagnostic.remediation.contains("audited migration"));
+    }
+
+    #[tokio::test]
+    async fn exact_service_semantic_effect_diagnostic_preserves_and_resets_detection_time() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("db_exact_semantic_diagnostic_time").await
+        else {
+            return;
+        };
+        let approval_requests = db.collection::<Document>("approval_requests");
+        let diagnostics = startup_diagnostics_for(&approval_requests);
+        let first_detected_at = mongodb::bson::DateTime::from_millis(1_700_000_000_000);
+        diagnostics
+            .insert_one(doc! {
+                "_id": EXACT_SERVICE_SEMANTIC_EFFECT_INDEX,
+                "active": true,
+                "code": EXACT_SERVICE_SEMANTIC_EFFECT_INDEX,
+                "summary": "old summary",
+                "detail": "first occurrence",
+                "remediation": "old remediation",
+                "detected_at": first_detected_at,
+                "updated_at": first_detected_at,
+            })
+            .await
+            .expect("seed active startup diagnostic");
+
+        persist_exact_service_semantic_effect_diagnostic(
+            &approval_requests,
+            "repeated while active".to_string(),
+        )
+        .await;
+        let active = diagnostics
+            .find_one(doc! { "_id": EXACT_SERVICE_SEMANTIC_EFFECT_INDEX })
+            .await
+            .expect("load repeated startup diagnostic")
+            .expect("repeated startup diagnostic");
+        assert_eq!(
+            active.get_datetime("detected_at").unwrap(),
+            &first_detected_at,
+            "an active diagnostic retains its first-detection time"
+        );
+        assert_eq!(active.get_str("detail").unwrap(), "repeated while active");
+
+        clear_exact_service_semantic_effect_diagnostic(&approval_requests).await;
+        let resolved = diagnostics
+            .find_one(doc! { "_id": EXACT_SERVICE_SEMANTIC_EFFECT_INDEX })
+            .await
+            .expect("load resolved startup diagnostic")
+            .expect("resolved startup diagnostic");
+        assert!(!resolved.get_bool("active").unwrap());
+        assert!(resolved.contains_key("resolved_at"));
+
+        persist_exact_service_semantic_effect_diagnostic(
+            &approval_requests,
+            "recurring after resolution".to_string(),
+        )
+        .await;
+        let recurring = diagnostics
+            .find_one(doc! { "_id": EXACT_SERVICE_SEMANTIC_EFFECT_INDEX })
+            .await
+            .expect("load recurring startup diagnostic")
+            .expect("recurring startup diagnostic");
+        assert!(recurring.get_bool("active").unwrap());
+        assert!(recurring.get_datetime("detected_at").unwrap() > &first_detected_at);
+        assert_eq!(
+            recurring.get_str("detail").unwrap(),
+            "recurring after resolution"
+        );
+        assert!(!recurring.contains_key("resolved_at"));
     }
 
     #[tokio::test]

@@ -4255,11 +4255,23 @@ mod tests {
     #[tokio::test]
     async fn full_router_closed_port_is_failed_provider_unreachable() {
         let fixture = setup_full_router_fixture("exact_router_provider_unreachable").await;
+        let closed_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind closed-port fixture");
+        let closed_address = closed_listener.local_addr().expect("closed-port address");
+        drop(closed_listener);
+        fixture
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_USER_ENDPOINT_ID },
+                mongodb::bson::doc! { "$set": { "url": format!("http://{closed_address}") } },
+            )
+            .await
+            .expect("point fixture at closed port");
         let created = create_full_router_request(&fixture, "provider-unreachable").await;
         let request_id = created["request_id"].as_str().unwrap().to_string();
         approve_full_router_request(&fixture, &request_id).await;
-        fixture.provider.abort();
-        tokio::task::yield_now().await;
 
         let (status, result) = redeem_full_router_request(&fixture, &created).await;
         assert_eq!(
@@ -4270,6 +4282,56 @@ mod tests {
         assert_eq!(result["state"], "failed");
         assert_eq!(result["failure_code"], "provider_unreachable");
         assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn full_router_reset_after_request_sent_is_outcome_unknown() {
+        let fixture = setup_full_router_fixture("exact_router_request_reset").await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind reset provider");
+        let address = listener.local_addr().expect("reset provider address");
+        let provider = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt as _;
+
+            let (mut stream, _) = listener.accept().await.expect("accept provider request");
+            let mut received = Vec::new();
+            loop {
+                let mut buffer = [0_u8; 1024];
+                let read = stream
+                    .read(&mut buffer)
+                    .await
+                    .expect("read complete provider request");
+                if read == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buffer[..read]);
+                if received.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            assert!(received.starts_with(b"GET /items HTTP/1.1\r\n"));
+            drop(stream);
+        });
+        fixture
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_USER_ENDPOINT_ID },
+                mongodb::bson::doc! { "$set": { "url": format!("http://{address}") } },
+            )
+            .await
+            .expect("point fixture at reset provider");
+        let created = create_full_router_request(&fixture, "request-reset").await;
+        let request_id = created["request_id"].as_str().unwrap().to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+
+        let (status, result) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "reset redeem failed: {result}");
+        assert_eq!(result["state"], "failed");
+        assert_eq!(result["failure_code"], "provider_outcome_unknown");
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+        provider.await.expect("reset provider task");
     }
 
     #[tokio::test]

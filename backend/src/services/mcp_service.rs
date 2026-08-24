@@ -459,7 +459,9 @@ pub fn exact_operation_view_digest(view: &ExactOperationView) -> String {
 ///
 /// TODO(2026-09-01): remove this compatibility digest and publish/store
 /// `exact_operation_view_digest` after every pre-deploy replica has drained and
-/// the longest five-minute approval TTL has elapsed.
+/// the maximum 300-second exact-approval lifetime has elapsed. That bound comes
+/// from `NotificationChannel::approval_timeout_secs` and is enforced by the
+/// notification-settings handler.
 pub fn legacy_exact_operation_view_digest(view: &ExactOperationView) -> String {
     let services = view
         .services
@@ -3652,6 +3654,7 @@ pub async fn execute_tool(
     {
         McpToolExecutionOutcome::Response(response) => Ok(response),
         McpToolExecutionOutcome::ProviderOutcomeUnknown(error) => Err(error),
+        McpToolExecutionOutcome::ProviderUnreachable(error) => Err(error),
     }
 }
 
@@ -3662,6 +3665,7 @@ pub async fn execute_tool(
 pub enum McpToolExecutionOutcome {
     Response((u16, String)),
     ProviderOutcomeUnknown(AppError),
+    ProviderUnreachable(AppError),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -4074,7 +4078,9 @@ pub async fn execute_tool_resolved(
                 request = error.is_request(),
                 "Provider was unreachable before direct dispatch"
             );
-            return Err(AppError::Internal("provider_unreachable".to_string()));
+            return Ok(McpToolExecutionOutcome::ProviderUnreachable(
+                AppError::Internal("Proxy request failed".to_string()),
+            ));
         }
         Err(proxy_service::ForwardRequestError::Transport(error)) => {
             tracing::error!(
@@ -4117,7 +4123,7 @@ pub async fn execute_tool_resolved(
 }
 
 fn direct_transport_failure_is_pre_dispatch(error: &reqwest::Error) -> bool {
-    !error.is_timeout() && (error.is_connect() || error.is_builder() || error.is_request())
+    error.is_connect() || error.is_builder()
 }
 
 /// Build proxy arguments from a generic proxy tool call.
