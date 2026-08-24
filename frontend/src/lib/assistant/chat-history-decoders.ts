@@ -198,10 +198,12 @@ export function decodeChatHistoryIndex(value: unknown): ChatHistoryIndex {
   if (!Array.isArray(record.conversations)) {
     return failContract("$index.conversations", "an array");
   }
+  const nextCursor = readOptionalNullableString(record, "nextCursor", "$index");
   return {
     conversations: record.conversations.map((conversation, index) =>
       decodeConversationMeta(conversation, `$index.conversations[${index}]`),
     ),
+    ...(nextCursor !== undefined ? { nextCursor } : {}),
   };
 }
 

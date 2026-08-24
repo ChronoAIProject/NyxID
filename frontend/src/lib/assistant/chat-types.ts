@@ -95,6 +95,7 @@ export interface ChatConversationDetail {
 
 export interface ChatHistoryIndex {
   readonly conversations: ConversationMeta[];
+  readonly nextCursor?: string | null;
 }
 
 export interface ChatSessionState {

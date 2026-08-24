@@ -516,10 +516,11 @@ describe("chatActorState", () => {
   });
 
   it("rehydrates only secret-free exact pending and recent action requests", () => {
-    expect(validateActionRequest(actionRequest)).toMatchObject(actionRequest);
-    expect(() =>
-      validateActionRequest({ ...actionRequest, apiKey: "secret" }),
-    ).toThrow(expect.objectContaining({ code: "NYXID_FIELD_UNDECLARED" }));
+    expect(validateActionRequest(actionRequest)).toMatchObject({
+      request: actionRequest,
+      supported: true,
+      recovered: false,
+    });
 
     const live = reduceActorFrame(
       createChatActorProjection("conversation-alpha"),
@@ -588,6 +589,55 @@ describe("chatActorState", () => {
       ...actionRequest,
       stepId: "step-recent",
       actionRequestId: "action-recent",
+    });
+  });
+
+  it("keeps a malformed reloaded action summary declinable without throwing", () => {
+    const reload = applyCurrentStateResult(
+      createChatActorProjection("conversation-alpha"),
+      {
+        status: "current",
+        stateVersion: 5,
+        snapshot: {
+          actorId: "conversation-alpha",
+          scopeId: "scope-alpha",
+          stateVersion: 5,
+          progressSequence: 2,
+          activeTurn: null,
+          latestTurn: null,
+          recentTerminalTurns: [],
+          activeTask: null,
+          pendingInput: null,
+          pendingApproval: null,
+          pendingActions: [
+            {
+              schemaVersion: 4,
+              originTurnId: "turn-alpha",
+              taskId: "task-alpha",
+              stepId: "step-key",
+              actionRequestId: "action-malformed",
+              action: "key.create",
+              reports: [],
+              postconditionResult: null,
+              request: {
+                ...actionRequest,
+                stepId: "step-key",
+                actionRequestId: "action-malformed",
+                action: "key.create",
+                params: {},
+              },
+            },
+          ],
+          recentActions: [],
+        },
+      },
+    ).projection;
+
+    expect(reload.actions.get("action-malformed")).toMatchObject({
+      action: "key.create",
+      request: null,
+      supported: false,
+      recovered: true,
     });
   });
 

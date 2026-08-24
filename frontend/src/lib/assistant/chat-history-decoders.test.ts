@@ -81,6 +81,18 @@ describe("chat history decoders", () => {
     });
   });
 
+  it("preserves the upstream cursor so the NyxID API layer can reject it", () => {
+    expect(
+      decodeChatHistoryIndex({
+        conversations: [],
+        nextCursor: "unexpected-page",
+      }),
+    ).toEqual({ conversations: [], nextCursor: "unexpected-page" });
+    expect(
+      decodeChatHistoryIndex({ conversations: [], nextCursor: null }),
+    ).toEqual({ conversations: [], nextCursor: null });
+  });
+
   it("preserves transcript fields, turn identity, and extensible strings", () => {
     expect(
       decodeChatConversationDetail({

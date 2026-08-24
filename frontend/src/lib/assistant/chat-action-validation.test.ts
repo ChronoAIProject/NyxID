@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import { resolveAssistantAction } from "@/lib/assistant/action-registry";
 import { validateActionRequest } from "./chat-action-validation";
 
 const baseRequest = {
@@ -12,99 +11,101 @@ const baseRequest = {
   actionRequestId: "action-alpha",
 } as const;
 
+const supportedRequest = {
+  ...baseRequest,
+  action: "key.create",
+  params: {
+    name: "Automation key",
+    platform: "codex",
+    allowedServiceIds: ["service-alpha"],
+  },
+} as const;
+
+function expectRecovered(input: unknown) {
+  const result = validateActionRequest(input);
+  expect(result).toMatchObject({ supported: false, recovered: true });
+  expect(result.request).toMatchObject({
+    actionRequestId: "action-alpha",
+    originTurnId: "turn-alpha",
+    params: {},
+  });
+  return result;
+}
+
 describe("chat action validation", () => {
   it("accepts a supported non-service.connect v4 action", () => {
-    const request = validateActionRequest({
+    expect(validateActionRequest(supportedRequest)).toMatchObject({
+      request: supportedRequest,
+      supported: true,
+      recovered: false,
+    });
+  });
+
+  it("recovers malformed supported-action params as unsupported", () => {
+    expectRecovered({ ...baseRequest, action: "key.create", params: {} });
+  });
+
+  it("recovers undeclared fields as unsupported", () => {
+    const recovered = expectRecovered({
+      ...supportedRequest,
+      extra: "future-field",
+    });
+    expect(recovered).toMatchObject({ reason: "undeclared_field" });
+  });
+
+  it("recovers unknown actions as unsupported", () => {
+    expectRecovered({ ...baseRequest, action: "future.action", params: {} });
+  });
+
+  it("recovers future schema versions as unsupported", () => {
+    expectRecovered({ ...supportedRequest, schemaVersion: 5 });
+  });
+
+  it("recovers deferred registry wiring as unsupported", () => {
+    expectRecovered({ ...baseRequest, action: "node.delete", params: {} });
+  });
+
+  it("recovers unsafe custom-service endpoints as unsupported", () => {
+    expectRecovered({
       ...baseRequest,
-      action: "key.create",
+      action: "service.connect",
       params: {
-        name: "Automation key",
-        platform: "codex",
-        allowedServiceIds: ["service-alpha"],
+        customService: {
+          name: "Unsafe service",
+          endpointUrl: "http://example.com/api?visible=true",
+          authMethod: "none",
+        },
       },
     });
-
-    expect(request.action).toBe("key.create");
-    expect(resolveAssistantAction(request).supported).toBe(true);
   });
 
-  it("preserves structurally valid future and deferred actions", () => {
-    const future = validateActionRequest({
-      ...baseRequest,
-      schemaVersion: 5,
-      action: "future.action",
-      params: {},
-    });
-    const deferred = validateActionRequest({
-      ...baseRequest,
-      action: "node.delete",
-      params: {},
-    });
-
-    expect(resolveAssistantAction(future).supported).toBe(false);
-    expect(resolveAssistantAction(deferred).supported).toBe(false);
-  });
-
-  it("rejects undeclared fields at every strict schema boundary", () => {
+  it("rejects secret-bearing params and identities", () => {
     expect(() =>
       validateActionRequest({
-        ...baseRequest,
-        action: "node.delete",
-        extra: 1,
+        ...supportedRequest,
+        params: { ...supportedRequest.params, name: "Bearer abcdefghijklmnop" },
       }),
-    ).toThrow(expect.objectContaining({ code: "NYXID_FIELD_UNDECLARED" }));
+    ).toThrow(expect.objectContaining({ code: "NYXID_SECRET_FORBIDDEN" }));
     expect(() =>
       validateActionRequest({
-        ...baseRequest,
-        action: "key.create",
-        params: {
-          name: "Automation key",
-          platform: "codex",
-          allowedServiceIds: ["service-alpha"],
-          extra: true,
-        },
-      }),
-    ).toThrow(expect.objectContaining({ code: "NYXID_FIELD_UNDECLARED" }));
-  });
-
-  it("rejects secret-shaped values in otherwise declared fields", () => {
-    expect(() =>
-      validateActionRequest({
-        ...baseRequest,
-        action: "key.create",
-        params: {
-          name: "Bearer abcdefghijklmnop",
-          platform: "codex",
-          allowedServiceIds: ["service-alpha"],
-        },
+        ...supportedRequest,
+        actorId: "nyxid_secretidentity",
       }),
     ).toThrow(expect.objectContaining({ code: "NYXID_SECRET_FORBIDDEN" }));
   });
 
-  it("requires every actor action identity", () => {
+  it("rejects payloads without recoverable control identities", () => {
+    expect(() => validateActionRequest(null)).toThrow(
+      expect.objectContaining({ code: "NYXID_ACTION_VARIANT_INVALID" }),
+    );
     expect(() =>
       validateActionRequest({
-        ...baseRequest,
-        actorId: "conversation/alpha",
-        action: "node.delete",
-        params: {},
+        ...supportedRequest,
+        originTurnId: undefined,
+        actionRequestId: undefined,
       }),
-    ).toThrow(expect.objectContaining({ code: "NYXID_IDENTITY_INVALID" }));
-  });
-
-  it("rejects unsafe custom-service endpoints before they reach a journey", () => {
-    expect(() =>
-      validateActionRequest({
-        ...baseRequest,
-        action: "service.connect",
-        params: {
-          customService: {
-            name: "Unsafe service",
-            endpointUrl: "http://example.com/api?token=visible",
-            authMethod: "none",
-          },
-        },
-      }),
-    ).toThrow(expect.objectContaining({ code: "NYXID_URL_UNSAFE" }));
+    ).toThrow(
+      expect.objectContaining({ code: "NYXID_ACTION_VARIANT_INVALID" }),
+    );
   });
 });

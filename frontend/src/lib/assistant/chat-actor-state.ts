@@ -7,6 +7,7 @@ import {
 import {
   ACTION_IDENTITY_KEYS,
   ChatActorProtocolError,
+  type ChatActionValidationResult,
   validateActionRequest,
 } from "./chat-action-validation";
 import type { AssistantActionRequest } from "@/schemas/assistant-actions";
@@ -63,6 +64,8 @@ export type ChatActionSummary = {
   reports?: readonly JsonRecord[];
   postconditionResult?: JsonRecord | null;
   request?: AssistantActionRequest | null;
+  supported: boolean;
+  recovered: boolean;
   conflicted?: boolean;
 };
 
@@ -108,7 +111,7 @@ export type ChatActorFrame =
   | {
       type: "action_request";
       sequence: number;
-      request: AssistantActionRequest;
+      validation: ChatActionValidationResult;
     };
 
 export function createChatActorProjection(
@@ -158,7 +161,7 @@ export function decodeActorFrame(raw: unknown): ChatActorFrame {
     return { type, sequence, payload: pendingInput };
   }
   return type === "action_request"
-    ? { type, sequence, request: validateActionRequest(payload) }
+    ? { type, sequence, validation: validateActionRequest(payload) }
     : { type, sequence, payload };
 }
 
@@ -216,7 +219,7 @@ export function reduceActorFrame(
       }
       break;
     case "action_request":
-      applyActionRequest(next, frame.request);
+      applyActionRequest(next, frame.validation);
       break;
   }
   return next;
@@ -400,9 +403,14 @@ function applyStep(
 
 function applyActionRequest(
   projection: ChatActorProjection,
-  request: AssistantActionRequest,
+  validation: ChatActionValidationResult,
 ): void {
-  if (projection.actorId && projection.actorId !== request.actorId) {
+  const { request } = validation;
+  if (
+    projection.actorId &&
+    request.actorId &&
+    projection.actorId !== request.actorId
+  ) {
     projection.conflicts = [
       ...projection.conflicts,
       { code: "NYXID_STATE_IDENTITY_CONFLICT" },
@@ -432,6 +440,8 @@ function applyActionRequest(
     reports: existing?.reports ?? [],
     postconditionResult: existing?.postconditionResult ?? null,
     request,
+    supported: validation.supported,
+    recovered: validation.recovered,
   } as ChatActionSummary);
 }
 
@@ -472,17 +482,23 @@ function applyActionSummaries(
       stepId,
       actionRequestId,
       action: typeof summary.action === "string" ? summary.action : "",
+      request: null,
+      supported: false,
+      recovered: false,
       reports: Array.isArray(summary.reports)
         ? (summary.reports.filter(optionalRecord) as JsonRecord[])
         : [],
       postconditionResult: cloneNullableRecord(summary.postconditionResult),
     };
-    const reloadedRequest = optionalRecord(summary.request)
+    const reloadedValidation = optionalRecord(summary.request)
       ? validateActionRequest(summary.request)
       : null;
-    if (reloadedRequest) {
-      if (actionIdentityMatches(item, reloadedRequest)) {
-        item.request = reloadedRequest;
+    if (reloadedValidation) {
+      if (reloadedValidation.recovered) {
+        item.recovered = true;
+      } else if (actionIdentityMatches(item, reloadedValidation.request)) {
+        item.request = reloadedValidation.request;
+        item.supported = true;
       } else {
         item.conflicted = true;
         projection.conflicts = [
@@ -494,12 +510,15 @@ function applyActionSummaries(
     const observed = observedActions.get(actionRequestId);
     if (
       !item.request &&
+      !item.recovered &&
       !item.conflicted &&
       observed?.request &&
       !observed.conflicted &&
       actionIdentityMatches(item, observed.request)
     ) {
       item.request = observed.request;
+      item.supported = observed.supported;
+      item.recovered = observed.recovered;
     }
     projection.actions.set(actionRequestId, item);
   }

@@ -1,11 +1,8 @@
+import { resolveAssistantAction } from "@/lib/assistant/action-registry";
 import {
-  ACTION_REGISTRY,
-  resolveAssistantAction,
-} from "@/lib/assistant/action-registry";
-import {
-  ACTION_SCHEMA_VERSION,
-  actionControlIdentitySchema,
   assistantActionRequestSchema,
+  findSecretPath,
+  recoverUnsupportedAssistantActionRequest,
   type AssistantActionRequest,
 } from "@/schemas/assistant-actions";
 
@@ -19,12 +16,21 @@ export const ACTION_IDENTITY_KEYS = [
   "actionRequestId",
 ] as const;
 
-const ACTION_KEYS = [
-  "schemaVersion",
-  ...ACTION_IDENTITY_KEYS,
-  "action",
-  "params",
-] as const;
+export type ChatActionValidationResult =
+  | {
+      readonly request: AssistantActionRequest;
+      readonly supported: true;
+      readonly recovered: false;
+    }
+  | {
+      readonly request: AssistantActionRequest;
+      readonly supported: false;
+      readonly recovered: true;
+      readonly reason:
+        | "invalid_shape"
+        | "undeclared_field"
+        | "unsupported_action";
+    };
 
 export class ChatActorProtocolError extends Error {
   readonly code: string;
@@ -36,69 +42,50 @@ export class ChatActorProtocolError extends Error {
   }
 }
 
-export function validateActionRequest(input: unknown): AssistantActionRequest {
+export function validateActionRequest(
+  input: unknown,
+): ChatActionValidationResult {
   const value = unpackAny(input);
-  assertAllowedKeys(value, ACTION_KEYS);
-  for (const key of ACTION_IDENTITY_KEYS) {
-    if (!actionControlIdentitySchema.safeParse(value[key]).success) {
-      throw new ChatActorProtocolError(
-        "NyxID action identity is invalid.",
-        "NYXID_IDENTITY_INVALID",
-      );
-    }
+  if (findSecretPath(value)) {
+    throw new ChatActorProtocolError(
+      "NyxID action input must not contain secrets.",
+      "NYXID_SECRET_FORBIDDEN",
+    );
   }
 
   const parsed = assistantActionRequestSchema.safeParse(value);
   if (!parsed.success) {
-    const issues = JSON.stringify(parsed.error.issues);
-    if (issues.includes("unrecognized_keys")) {
-      throw new ChatActorProtocolError(
-        "NyxID action contains an undeclared field.",
-        "NYXID_FIELD_UNDECLARED",
-      );
-    }
-    if (issues.includes("Action request contained secret material")) {
-      throw new ChatActorProtocolError(
-        "NyxID action input must not contain secrets.",
-        "NYXID_SECRET_FORBIDDEN",
-      );
-    }
-    throw invalidVariant();
+    return recoverActionRequest(
+      value,
+      parsed.error.issues.some(containsUnrecognizedKeys)
+        ? "undeclared_field"
+        : "invalid_shape",
+    );
   }
 
-  const resolved = resolveAssistantAction(parsed.data);
-  const registered = ACTION_REGISTRY[parsed.data.action];
-  if (
-    parsed.data.schemaVersion === ACTION_SCHEMA_VERSION &&
-    registered?.wiring !== "deferred" &&
-    !resolved.supported
-  ) {
-    if (parsed.data.action === "service.connect" && hasUnsafeEndpoint(value)) {
-      throw new ChatActorProtocolError(
-        "NyxID action URL is unsafe.",
-        "NYXID_URL_UNSAFE",
-      );
-    }
-    throw invalidVariant();
+  if (!resolveAssistantAction(parsed.data).supported) {
+    return recoverActionRequest(value, "unsupported_action");
   }
 
-  return parsed.data;
+  return { request: parsed.data, supported: true, recovered: false };
 }
 
-function hasUnsafeEndpoint(value: JsonRecord): boolean {
-  const params = optionalRecord(value.params);
-  const custom = optionalRecord(params?.customService);
-  if (!custom || typeof custom.endpointUrl !== "string") return false;
-  try {
-    const url = new URL(custom.endpointUrl);
-    return (
-      url.protocol !== "https:" ||
-      !url.hostname ||
-      Boolean(url.username || url.password || url.search || url.hash)
-    );
-  } catch {
-    return true;
-  }
+function recoverActionRequest(
+  value: JsonRecord,
+  reason: Extract<ChatActionValidationResult, { recovered: true }>["reason"],
+): ChatActionValidationResult {
+  const request = recoverUnsupportedAssistantActionRequest(value);
+  if (!request) throw invalidVariant();
+  return { request, supported: false, recovered: true, reason };
+}
+
+function containsUnrecognizedKeys(issue: unknown): boolean {
+  if (!issue || typeof issue !== "object") return false;
+  const record = issue as Record<string, unknown>;
+  if (record.code === "unrecognized_keys") return true;
+  return Object.values(record).some((value) =>
+    Array.isArray(value) ? value.some(containsUnrecognizedKeys) : false,
+  );
 }
 
 function unpackAny(input: unknown): JsonRecord {
@@ -109,19 +96,6 @@ function unpackAny(input: unknown): JsonRecord {
   const result = { ...value };
   delete result["@type"];
   return result;
-}
-
-function assertAllowedKeys(
-  value: JsonRecord,
-  allowed: readonly string[],
-): void {
-  const declared = new Set(allowed);
-  if (Object.keys(value).some((key) => !declared.has(key))) {
-    throw new ChatActorProtocolError(
-      "NyxID action contains an undeclared field.",
-      "NYXID_FIELD_UNDECLARED",
-    );
-  }
 }
 
 function optionalRecord(input: unknown): JsonRecord | null {
