@@ -950,6 +950,8 @@ mod tests {
             source_app_id: None,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
+            state_version: 1,
+            rotation_predecessor_id: None,
         };
         let params = build_credential_params(
             &svc,

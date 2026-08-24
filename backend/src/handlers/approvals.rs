@@ -84,6 +84,7 @@ pub struct ApprovalGrantItem {
     pub scope: Option<String>,
     pub granted_at: String,
     pub expires_at: String,
+    pub revoked: bool,
     /// True when the grant is owned by an org (reusable by any member of
     /// that org). Clients render an "Org" chip when set.
     #[serde(default)]
@@ -97,6 +98,33 @@ pub struct ApprovalGrantItem {
     /// is missing a display name or the lookup failed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub org_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ApprovalGrantAuthorizationEvidenceResponse {
+    pub id: String,
+    pub service_id: String,
+    pub requester_id: String,
+    pub granted_at: String,
+    pub expires_at: String,
+    pub revoked: bool,
+    pub org_scoped: bool,
+    pub org_id: Option<String>,
+}
+
+impl ApprovalGrantAuthorizationEvidenceResponse {
+    fn from_grant_item(item: &ApprovalGrantItem) -> Self {
+        Self {
+            id: item.id.clone(),
+            service_id: item.service_id.clone(),
+            requester_id: item.requester_id.clone(),
+            granted_at: item.granted_at.clone(),
+            expires_at: item.expires_at.clone(),
+            revoked: item.revoked,
+            org_scoped: item.org_scoped,
+            org_id: item.org_id.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -206,6 +234,7 @@ fn to_approval_grant_item(
         scope: grant.scope,
         granted_at: grant.granted_at.to_rfc3339(),
         expires_at: grant.expires_at.to_rfc3339(),
+        revoked: grant.revoked,
         org_scoped,
         org_id,
         org_name: resolved_org_name,
@@ -950,7 +979,7 @@ pub async fn revoke_grant(
     // is expected to be owned by the org and the caller must be an
     // admin of that org. Without this branch, org-policy grants would
     // be unrevokable through the API.
-    let owner_user_id = if let Some(target_org_id) = query.org_id.as_deref() {
+    let (owner_user_id, owner_access) = if let Some(target_org_id) = query.org_id.as_deref() {
         let access =
             crate::services::org_service::resolve_owner_access(&state.db, &actor, target_org_id)
                 .await?;
@@ -960,10 +989,32 @@ pub async fn revoke_grant(
                     .to_string(),
             ));
         }
-        target_org_id.to_string()
+        (target_org_id.to_string(), Some(access))
     } else {
-        actor.clone()
+        (actor.clone(), None)
     };
+
+    if let Some(access) = owner_access.as_ref() {
+        let grant = state
+            .db
+            .collection::<crate::models::approval_grant::ApprovalGrant>(
+                crate::models::approval_grant::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! {
+                "_id": &grant_id,
+                "user_id": &owner_user_id,
+            })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Grant not found".to_string()))?;
+        let service_ids =
+            scope_user_service_ids_for_config(&state.db, &owner_user_id, &grant.service_id).await?;
+        if !access.allows_any_resource(&service_ids) {
+            return Err(AppError::OrgRoleInsufficient(
+                "your org role is scoped to other services and cannot revoke this grant"
+                    .to_string(),
+            ));
+        }
+    }
 
     // Pre-fetch the grant so we can resolve a real `service_slug` for the
     // telemetry emission below. Emitting the raw `grant_id` would be scrubbed
@@ -1042,6 +1093,44 @@ pub async fn revoke_grant(
     }))
 }
 
+/// GET /api/v1/approvals/grants/{grant_id}/authorization
+pub async fn get_grant_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(grant_id): Path<String>,
+) -> AppResult<Json<ApprovalGrantAuthorizationEvidenceResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let grant = state
+        .db
+        .collection::<crate::models::approval_grant::ApprovalGrant>(
+            crate::models::approval_grant::COLLECTION_NAME,
+        )
+        .find_one(mongodb::bson::doc! { "_id": &grant_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Grant not found".to_string()))?;
+
+    let org_name = if grant.user_id == actor {
+        None
+    } else {
+        let access =
+            crate::services::org_service::resolve_owner_access(&state.db, &actor, &grant.user_id)
+                .await?;
+        if !access.can_write() {
+            return Err(AppError::NotFound("Grant not found".to_string()));
+        }
+        let service_ids =
+            scope_user_service_ids_for_config(&state.db, &grant.user_id, &grant.service_id).await?;
+        if !access.allows_any_resource(&service_ids) {
+            return Err(AppError::NotFound("Grant not found".to_string()));
+        }
+        None
+    };
+    let item = to_approval_grant_item(grant, org_name);
+    Ok(Json(
+        ApprovalGrantAuthorizationEvidenceResponse::from_grant_item(&item),
+    ))
+}
+
 // --- Per-service approval config types ---
 
 #[derive(Debug, Serialize)]
@@ -1067,6 +1156,33 @@ pub struct ServiceApprovalConfigItem {
     /// Proxy slug of the matching `UserService`, for display.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_service_slug: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ServiceApprovalConfigAuthorizationEvidenceResponse {
+    pub service_id: String,
+    pub approval_required: bool,
+    pub approval_mode: ApprovalMode,
+    pub rule_count: usize,
+    pub default_effect: Option<ApprovalEffect>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub user_service_id: Option<String>,
+}
+
+impl ServiceApprovalConfigAuthorizationEvidenceResponse {
+    fn from_config_item(item: &ServiceApprovalConfigItem) -> Self {
+        Self {
+            service_id: item.service_id.clone(),
+            approval_required: item.approval_required,
+            approval_mode: item.approval_mode.clone(),
+            rule_count: item.rules.len(),
+            default_effect: item.default_effect.clone(),
+            created_at: item.created_at.clone(),
+            updated_at: item.updated_at.clone(),
+            user_service_id: item.user_service_id.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1513,6 +1629,69 @@ pub async fn list_service_configs(
     }))
 }
 
+/// GET /api/v1/approvals/service-configs/{service_id}/authorization
+///
+/// Uses the same owner and scoped-admin checks as the detail mutation while
+/// omitting names, slugs, and rule bodies from the response.
+pub async fn get_service_config_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(service_id): Path<String>,
+    Query(query): Query<ServiceApprovalConfigQuery>,
+) -> AppResult<Json<ServiceApprovalConfigAuthorizationEvidenceResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let (owner_user_id, access) =
+        resolve_service_config_owner(&state, &actor, query.org_id.as_deref()).await?;
+    let target = resolve_approval_target(&state.db, &owner_user_id, &service_id).await?;
+    if let Some(ref user_service_id) = target.user_service_id
+        && !access.allows_resource(user_service_id)
+    {
+        return Err(AppError::NotFound(
+            "Approval configuration not found".to_string(),
+        ));
+    }
+    ensure_service_config_in_scope(
+        &state.db,
+        &access,
+        &owner_user_id,
+        &target.effective_service_id,
+    )
+    .await?;
+    let config = state
+        .db
+        .collection::<crate::models::service_approval_config::ServiceApprovalConfig>(
+            crate::models::service_approval_config::COLLECTION_NAME,
+        )
+        .find_one(mongodb::bson::doc! {
+            "user_id": &owner_user_id,
+            "service_id": &target.effective_service_id,
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Approval configuration not found".to_string()))?;
+    let matching = find_matching_user_service_for_config(
+        &state.db,
+        &access,
+        &owner_user_id,
+        &config.service_id,
+    )
+    .await?;
+    let item = ServiceApprovalConfigItem {
+        service_id: config.service_id,
+        service_name: config.service_name,
+        approval_required: config.approval_required,
+        approval_mode: config.approval_mode,
+        rules: config.rules,
+        default_effect: config.default_effect,
+        created_at: config.created_at.to_rfc3339(),
+        updated_at: config.updated_at.to_rfc3339(),
+        user_service_id: matching.as_ref().map(|service| service.id.clone()),
+        user_service_slug: matching.map(|service| service.slug),
+    };
+    Ok(Json(
+        ServiceApprovalConfigAuthorizationEvidenceResponse::from_config_item(&item),
+    ))
+}
+
 /// PUT /api/v1/approvals/service-configs/{service_id}
 ///
 /// Set a per-service approval override. Creates or updates. Pass
@@ -1954,6 +2133,7 @@ mod tests {
             org_scoped: false,
             org_id: None,
             org_name: None,
+            revoked: false,
         };
         let json = serde_json::to_value(&item).unwrap();
         assert!(json.get("org_id").is_none());

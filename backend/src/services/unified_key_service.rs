@@ -466,6 +466,14 @@ pub struct KeyView {
     pub last_used_at: Option<String>,
     pub error_message: Option<String>,
     pub created_at: String,
+    /// Authoritative timestamp of the latest committed `UserService` mutation.
+    pub updated_at: String,
+    /// Authoritative monotonic version for the user-service row. Legacy rows
+    /// without the field report zero.
+    pub state_version: i64,
+    /// Credential-rotation predecessor (`UserApiKey` id). Absent when this
+    /// service has never rotated its stored credential.
+    pub rotation_predecessor_id: Option<String>,
     // SSH fields
     pub ssh_host: Option<String>,
     pub ssh_port: Option<u16>,
@@ -2856,8 +2864,41 @@ pub async fn disconnect_credentials(
     target: DisconnectTarget<'_>,
     options: DisconnectOptions,
 ) -> AppResult<DisconnectResult> {
+    disconnect_credentials_with_expected_siblings(
+        db,
+        encryption_keys,
+        owner_id,
+        actor,
+        target,
+        options,
+        None,
+    )
+    .await
+}
+
+/// Variant used by assistant destructive actions. When a grant-cascade
+/// confirmation was shown to a human, the exact sibling rows shown in that
+/// response are supplied here and compared inside the same plan build that
+/// drives deletion.
+pub async fn disconnect_credentials_with_expected_siblings(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    owner_id: &str,
+    actor: &AuditActor,
+    target: DisconnectTarget<'_>,
+    options: DisconnectOptions,
+    expected_siblings: Option<&[(String, String, String)]>,
+) -> AppResult<DisconnectResult> {
     options.validate()?;
-    let mut plan = build_disconnect_plan(db, encryption_keys, owner_id, target, &options).await?;
+    let mut plan = build_disconnect_plan(
+        db,
+        encryption_keys,
+        owner_id,
+        target,
+        &options,
+        expected_siblings,
+    )
+    .await?;
     let excluded_service_ids: Vec<String> = plan
         .services
         .iter()
@@ -3014,12 +3055,29 @@ pub async fn disconnect_credentials(
     })
 }
 
+/// Build the destructive plan without applying it. This is intentionally
+/// called before an assistant receipt is reserved so a deliberate confirmation
+/// response does not leave a pending receipt behind.
+pub async fn ensure_disconnect_confirmation(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    owner_id: &str,
+    target: DisconnectTarget<'_>,
+    options: DisconnectOptions,
+) -> AppResult<()> {
+    options.validate()?;
+    build_disconnect_plan(db, encryption_keys, owner_id, target, &options, None)
+        .await
+        .map(|_| ())
+}
+
 async fn build_disconnect_plan(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     owner_id: &str,
     target: DisconnectTarget<'_>,
     options: &DisconnectOptions,
+    expected_siblings: Option<&[(String, String, String)]>,
 ) -> AppResult<DisconnectPlan> {
     let (primary_service, initiating_key, initiating_token, provider_id) = match target {
         DisconnectTarget::UserService(service_id) => {
@@ -3197,7 +3255,29 @@ async fn build_disconnect_plan(
         });
     }
 
-    if !siblings.is_empty() && !options.cascade_grant {
+    if options.cascade_grant {
+        if let Some(expected) = expected_siblings {
+            let mut actual_signatures: Vec<(String, String, String)> = siblings
+                .iter()
+                .map(|sibling| {
+                    (
+                        sibling.user_service_id.clone(),
+                        sibling.name.clone(),
+                        sibling.slug.clone(),
+                    )
+                })
+                .collect();
+            let mut expected_signatures = expected.to_vec();
+            actual_signatures.sort();
+            expected_signatures.sort();
+            if actual_signatures != expected_signatures {
+                return Err(AppError::Conflict(
+                    "the grant-cascade sibling set changed; review the confirmation again"
+                        .to_string(),
+                ));
+            }
+        }
+    } else if !siblings.is_empty() {
         return Err(AppError::GrantCascadeConfirmationRequired(Box::new(
             GrantCascadePayload {
                 provider_slug: provider.slug.clone(),
@@ -3779,6 +3859,9 @@ fn build_key_view(
         last_used_at: ak.and_then(|k| k.last_used_at.map(|dt| dt.to_rfc3339())),
         error_message: ak.and_then(|k| k.error_message.clone()),
         created_at: svc.created_at.to_rfc3339(),
+        updated_at: svc.updated_at.to_rfc3339(),
+        state_version: svc.state_version,
+        rotation_predecessor_id: svc.rotation_predecessor_id.clone(),
         ssh_host,
         ssh_port,
         ssh_ca_public_key,
@@ -4051,6 +4134,8 @@ mod tests {
             source_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            state_version: 1,
+            rotation_predecessor_id: None,
         }
     }
 

@@ -3403,6 +3403,8 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             source_app_id: None,
             created_at: now,
             updated_at: now,
+            state_version: 1,
+            rotation_predecessor_id: None,
         };
         if let Err(e) = db
             .collection::<UserService>(USER_SERVICES)
@@ -3641,6 +3643,8 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             source_app_id: None,
             created_at: now,
             updated_at: now,
+            state_version: 1,
+            rotation_predecessor_id: None,
         };
         if let Err(e) = db
             .collection::<UserService>(USER_SERVICES)
@@ -3900,6 +3904,8 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             source_app_id: None,
             created_at: now,
             updated_at: now,
+            state_version: 1,
+            rotation_predecessor_id: None,
         };
         if let Err(e) = db
             .collection::<UserService>(USER_SERVICES)

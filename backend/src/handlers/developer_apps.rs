@@ -27,7 +27,7 @@ use mongodb::bson::doc;
 /// an admin may manage; an OAuth client is a developer app identity,
 /// not a service. Org admins manage every org-owned OAuth client as a
 /// unit.
-async fn resolve_developer_app_write_owner(
+pub(crate) async fn resolve_developer_app_write_owner(
     state: &AppState,
     actor: &str,
     client_id: &str,
@@ -141,6 +141,33 @@ pub struct DeveloperOAuthClientResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_secret: Option<String>,
     pub created_at: String,
+    pub updated_at: String,
+}
+
+/// Minimal assistant evidence projection.  Client names, redirect URIs,
+/// scopes, webhook URLs, and the optional client secret are intentionally
+/// absent because they are user-controlled or secret-bearing.
+#[derive(Debug, Serialize)]
+pub struct DeveloperOAuthClientAuthorizationEvidenceResponse {
+    pub id: String,
+    pub broker_capability_enabled: bool,
+    pub connection_webhook_enabled: bool,
+    pub is_active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl DeveloperOAuthClientAuthorizationEvidenceResponse {
+    pub fn from_client_response(response: &DeveloperOAuthClientResponse) -> Self {
+        Self {
+            id: response.id.clone(),
+            broker_capability_enabled: response.broker_capability_enabled,
+            connection_webhook_enabled: response.connection_webhook_enabled,
+            is_active: response.is_active,
+            created_at: response.created_at.clone(),
+            updated_at: response.updated_at.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -187,6 +214,7 @@ fn to_response(c: OauthClient, secret: Option<String>) -> DeveloperOAuthClientRe
         default_service_catalog_slugs: c.default_service_catalog_slugs,
         client_secret: secret,
         created_at: c.created_at.to_rfc3339(),
+        updated_at: c.updated_at.to_rfc3339(),
     }
 }
 
@@ -402,6 +430,22 @@ pub async fn get_my_oauth_client(
     let user_id = resolve_developer_app_read_owner(&state, &actor, &client_id).await?;
     let c = oauth_client_service::get_client_for_creator(&state.db, &client_id, &user_id).await?;
     Ok(Json(to_response(c, None)))
+}
+
+/// GET /api/v1/developer/oauth-clients/{client_id}/authorization
+pub async fn get_my_oauth_client_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(client_id): Path<String>,
+) -> AppResult<Json<DeveloperOAuthClientAuthorizationEvidenceResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let owner = resolve_developer_app_read_owner(&state, &actor, &client_id).await?;
+    let client =
+        oauth_client_service::get_client_for_creator(&state.db, &client_id, &owner).await?;
+    let detail = to_response(client, None);
+    Ok(Json(
+        DeveloperOAuthClientAuthorizationEvidenceResponse::from_client_response(&detail),
+    ))
 }
 
 /// PATCH /api/v1/developer/oauth-clients/:client_id
@@ -1621,6 +1665,7 @@ mod tests {
             is_active: true,
             client_secret: None,
             created_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-01T00:00:00Z".to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["id"], "c1");
@@ -1644,9 +1689,39 @@ mod tests {
             is_active: true,
             client_secret: Some("secret_abc".to_string()),
             created_at: "2025-01-01T00:00:00Z".to_string(),
+            updated_at: "2025-01-01T00:00:00Z".to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["client_secret"], "secret_abc");
+    }
+
+    #[test]
+    fn developer_app_authorization_projection_excludes_names_urls_and_secret() {
+        let detail = DeveloperOAuthClientResponse {
+            id: "client-1".to_string(),
+            client_name: "Bearer nyxid_ag_abcdefghijklmnop".to_string(),
+            client_type: "confidential".to_string(),
+            redirect_uris: vec!["https://example.invalid/Bearer-secret".to_string()],
+            allowed_scopes: "openid Bearer secret".to_string(),
+            delegation_scopes: "account:read".to_string(),
+            broker_capability_enabled: true,
+            revocation_webhook_url: Some("https://example.invalid/hook".to_string()),
+            connection_webhook_url: None,
+            connection_webhook_enabled: false,
+            is_active: true,
+            default_service_catalog_slugs: vec!["openai".to_string()],
+            client_secret: Some("secret_value".to_string()),
+            created_at: "2024-01-01T00:00:00Z".to_string(),
+            updated_at: "2024-01-02T00:00:00Z".to_string(),
+        };
+        let value = serde_json::to_value(
+            DeveloperOAuthClientAuthorizationEvidenceResponse::from_client_response(&detail),
+        )
+        .unwrap();
+        assert!(value.get("client_name").is_none());
+        assert!(value.get("redirect_uris").is_none());
+        assert!(value.get("client_secret").is_none());
+        assert!(value.to_string().find("secret").is_none());
     }
 
     #[tokio::test]

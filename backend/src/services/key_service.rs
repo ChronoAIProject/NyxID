@@ -558,23 +558,71 @@ pub async fn get_api_key(db: &mongodb::Database, user_id: &str, key_id: &str) ->
 
 /// Delete (deactivate) an API key.
 pub async fn delete_api_key(db: &mongodb::Database, user_id: &str, key_id: &str) -> AppResult<()> {
+    delete_api_key_with_expected_state_version(db, user_id, key_id, None).await
+}
+
+/// Delete an API key, optionally fencing the write on `expected_state_version`
+/// so a stale precondition cannot commit.
+pub async fn delete_api_key_with_expected_state_version(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+    expected_state_version: Option<i64>,
+) -> AppResult<()> {
     let key = db
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "_id": key_id, "user_id": user_id })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+    if let Some(expected) = expected_state_version
+        && key.state_version != expected
+    {
+        return Err(stale_api_key_conflict());
+    }
 
-    key_mutations::update_one(
-        db,
-        doc! { "_id": &key.id },
-        doc! { "$set": { "is_active": false } },
-        None,
-    )
-    .await?;
+    let mut filter = doc! { "_id": &key.id, "user_id": user_id };
+    if let Some(expected) = expected_state_version {
+        filter.insert("state_version", expected);
+    }
+
+    let result =
+        key_mutations::update_one(db, filter, doc! { "$set": { "is_active": false } }, None)
+            .await?;
+    if result.matched_count != 1 {
+        return Err(unmatched_api_key_write(db, user_id, key_id, expected_state_version).await?);
+    }
 
     tracing::info!(key_id = %key_id, user_id = %user_id, "API key deactivated");
 
     Ok(())
+}
+
+fn stale_api_key_conflict() -> AppError {
+    AppError::Conflict("the API key changed since this action was prepared".to_string())
+}
+
+async fn unmatched_api_key_write(
+    db: &mongodb::Database,
+    user_id: &str,
+    key_id: &str,
+    expected_state_version: Option<i64>,
+) -> AppResult<AppError> {
+    let current = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! { "_id": key_id, "user_id": user_id })
+        .await?;
+    match current {
+        None => Ok(AppError::NotFound("API key not found".to_string())),
+        Some(key) if !key.is_active => Ok(AppError::NotFound("API key not found".to_string())),
+        Some(key)
+            if expected_state_version.is_some_and(|expected| key.state_version != expected) =>
+        {
+            Ok(stale_api_key_conflict())
+        }
+        Some(_) => Ok(AppError::Internal(
+            "API key disappeared after update".to_string(),
+        )),
+    }
 }
 
 /// Rotate an API key: deactivate the old one and create a new one preserving name, scopes, and scope fields.
@@ -938,11 +986,61 @@ pub async fn update_api_key_scope_with_scope_authorization(
     callback_url: Option<Option<&str>>,
     scope_plan_digest: Option<&str>,
 ) -> AppResult<ApiKey> {
+    update_api_key_scope_with_expected_state_version(
+        db,
+        user_id,
+        scope_actor_user_id,
+        key_id,
+        name,
+        description,
+        scopes,
+        allowed_service_ids,
+        allowed_node_ids,
+        allow_all_services,
+        allow_all_nodes,
+        rate_limit_per_second,
+        rate_limit_burst,
+        platform,
+        callback_url,
+        scope_plan_digest,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+/// Like [`update_api_key_scope_with_scope_authorization`], but the write
+/// filter includes `expected_state_version` when set so a stale read cannot
+/// commit over a concurrent mutation.
+pub async fn update_api_key_scope_with_expected_state_version(
+    db: &mongodb::Database,
+    user_id: &str,
+    scope_actor_user_id: Option<&str>,
+    key_id: &str,
+    name: Option<&str>,
+    description: Option<&str>,
+    scopes: Option<&str>,
+    allowed_service_ids: Option<&[String]>,
+    allowed_node_ids: Option<&[String]>,
+    allow_all_services: Option<bool>,
+    allow_all_nodes: Option<bool>,
+    rate_limit_per_second: Option<Option<u32>>,
+    rate_limit_burst: Option<Option<u32>>,
+    platform: Option<Option<&str>>,
+    callback_url: Option<Option<&str>>,
+    scope_plan_digest: Option<&str>,
+    expected_state_version: Option<i64>,
+) -> AppResult<ApiKey> {
     let existing = db
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "_id": key_id, "user_id": user_id, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+    if let Some(expected) = expected_state_version
+        && existing.state_version != expected
+    {
+        return Err(stale_api_key_conflict());
+    }
 
     if existing.purpose == ApiKeyPurpose::ScheduledInvocation
         && (scopes.is_some()
@@ -1085,13 +1183,15 @@ pub async fn update_api_key_scope_with_scope_authorization(
         return Ok(existing);
     }
 
-    key_mutations::update_one(
-        db,
-        doc! { "_id": key_id, "user_id": user_id },
-        doc! { "$set": update },
-        None,
-    )
-    .await?;
+    let mut filter = doc! { "_id": key_id, "user_id": user_id, "is_active": true };
+    if let Some(expected) = expected_state_version {
+        filter.insert("state_version", expected);
+    }
+
+    let result = key_mutations::update_one(db, filter, doc! { "$set": update }, None).await?;
+    if result.matched_count != 1 {
+        return Err(unmatched_api_key_write(db, user_id, key_id, expected_state_version).await?);
+    }
 
     db.collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "_id": key_id, "user_id": user_id })
@@ -2330,5 +2430,146 @@ mod tests {
         .expect("should update");
         assert_eq!(updated.rate_limit_per_second, None);
         assert_eq!(updated.rate_limit_burst, None);
+    }
+
+    #[tokio::test]
+    async fn update_with_expected_state_version_does_not_clobber_concurrent_write() {
+        let Some(db) = connect_test_database("key_svc_fence").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let created = create_api_key(
+            &db,
+            &user_id,
+            "fence-key",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create key");
+        assert_eq!(created.state_version, 1);
+
+        let concurrent = update_api_key_scope_with_expected_state_version(
+            &db,
+            &user_id,
+            None,
+            &created.id,
+            Some("from-concurrent"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(1),
+        )
+        .await
+        .expect("concurrent authorized write at version 1");
+        assert_eq!(concurrent.state_version, 2);
+        assert_eq!(concurrent.name, "from-concurrent");
+
+        let stale = update_api_key_scope_with_expected_state_version(
+            &db,
+            &user_id,
+            None,
+            &created.id,
+            Some("from-stale"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(1),
+        )
+        .await
+        .expect_err("stale expected version must not commit");
+        assert!(matches!(stale, AppError::Conflict(_)));
+
+        let stored = get_api_key(&db, &user_id, &created.id)
+            .await
+            .expect("key still active");
+        assert_eq!(stored.state_version, 2);
+        assert_eq!(
+            stored.name, "from-concurrent",
+            "stale write must not clobber the concurrent mutation"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_with_expected_state_version_rejects_stale_precondition() {
+        let Some(db) = connect_test_database("key_svc_del_fence").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let created = create_api_key(
+            &db,
+            &user_id,
+            "delete-fence",
+            "read",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("create key");
+        update_api_key_scope_with_scope_authorization(
+            &db,
+            &user_id,
+            None,
+            &created.id,
+            Some("renamed"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("advance version");
+
+        let stale = delete_api_key_with_expected_state_version(&db, &user_id, &created.id, Some(1))
+            .await
+            .expect_err("stale delete must not deactivate");
+        assert!(matches!(stale, AppError::Conflict(_)));
+        let stored = get_api_key(&db, &user_id, &created.id)
+            .await
+            .expect("key still active");
+        assert!(stored.is_active);
+        assert_eq!(stored.state_version, 2);
     }
 }

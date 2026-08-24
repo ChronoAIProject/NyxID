@@ -6,7 +6,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fmt;
 
@@ -67,6 +67,18 @@ pub struct OnboardDeviceRequest {
 #[derive(Deserialize)]
 pub struct RedeemOnboardDeviceRequest {
     pub bootstrap_token: String,
+}
+
+/// Minimal device-onboard evidence. Provisioning payloads, bootstrap material,
+/// key identifiers, refresh material, and user-authored labels are excluded.
+#[derive(Debug, Serialize)]
+pub struct DeviceOnboardAuthorizationEvidenceResponse {
+    pub id: String,
+    pub owner_user_id: String,
+    pub used: bool,
+    pub redeemed_node_id: Option<String>,
+    pub created_at: String,
+    pub expires_at: String,
 }
 
 impl fmt::Debug for RequestDeviceCodeRequest {
@@ -263,6 +275,28 @@ pub async fn revoke_onboard_device(
     );
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/v1/devices/onboard/{bootstrap_id}/authorization
+pub async fn get_onboard_device_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(bootstrap_id): Path<String>,
+) -> AppResult<Json<DeviceOnboardAuthorizationEvidenceResponse>> {
+    let authority = crate::services::device_code_service::get_onboard_authorization_state(
+        &state.db,
+        &auth_user.user_id.to_string(),
+        &bootstrap_id,
+    )
+    .await?;
+    Ok(Json(DeviceOnboardAuthorizationEvidenceResponse {
+        id: authority.id,
+        owner_user_id: authority.owner_user_id,
+        used: authority.used,
+        redeemed_node_id: authority.redeemed_node_id,
+        created_at: authority.created_at.to_rfc3339(),
+        expires_at: authority.expires_at.to_rfc3339(),
+    }))
 }
 
 async fn approve_device_code_with_notification_dispatcher<F>(

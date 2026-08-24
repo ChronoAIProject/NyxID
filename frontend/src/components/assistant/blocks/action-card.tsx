@@ -2,15 +2,21 @@ import { useEffect, useRef, useState } from "react";
 import { z } from "zod";
 import {
   AlertTriangle,
+  AppWindow,
+  Bell,
+  Building2,
   Globe,
   KeyRound,
   Loader2,
   Server,
   ShieldCheck,
   X,
+  type LucideIcon,
 } from "lucide-react";
-import { AssistantKeyCreateDialog } from "@/components/assistant/assistant-key-create-dialog";
-import { AssistantKeyRotateDialog } from "@/components/assistant/assistant-key-rotate-dialog";
+import {
+  dialogBindingFor,
+  isDialogParams,
+} from "@/components/assistant/blocks/action-dialogs";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import { ServiceIcon } from "@/components/service-icon";
 import { Badge } from "@/components/ui/badge";
@@ -18,8 +24,9 @@ import { Button } from "@/components/ui/button";
 import { useChatPresence } from "@/hooks/use-chat-presence";
 import { KEY_AUTH_FAILED, useKeyAuthorizationWatch } from "@/hooks/use-keys";
 import {
-  clampServiceLabel,
   descriptorForAction,
+  type ActionIcon,
+  type SummaryRow,
 } from "@/lib/assistant/action-registry";
 import { connectWatchDeadline } from "@/lib/assistant/connect-watch";
 import { ApiError, api } from "@/lib/api-client";
@@ -325,162 +332,71 @@ function authorizationFailedNote(reason: string | undefined): string {
     : "Authorization did not complete. Ask the assistant to request this service again.";
 }
 
-function ParameterSummary({
-  block,
-}: {
-  readonly block: ActionCardContentBlock;
-}) {
-  const params = block.params;
-  if (params.variant === "unknown") return null;
-  if (params.variant === "key_create") {
-    return (
-      <div className="space-y-2.5 border-y border-border bg-muted px-4 py-3">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
-            Key
-          </span>
-          <Badge variant="secondary" className="max-w-full truncate">
-            {params.name}
-          </Badge>
-          <Badge variant="secondary" className="max-w-full truncate">
-            {params.platform}
-          </Badge>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
-            Allowed services
-          </span>
-          {params.allowed_service_ids.map((serviceId) => (
-            <Badge
-              key={serviceId}
-              variant="secondary"
-              className="max-w-full truncate font-mono"
-            >
-              {serviceId}
-            </Badge>
-          ))}
-        </div>
-      </div>
-    );
+function groupSummaryRows(
+  rows: readonly SummaryRow[],
+): readonly SummaryRow[][] {
+  const groups: SummaryRow[][] = [];
+  for (const row of rows) {
+    const current = groups.at(-1);
+    if (current?.[0]?.label === row.label) current.push(row);
+    else groups.push([row]);
   }
-  if (params.variant === "key_rotate") {
-    return (
-      <div className="border-y border-border bg-muted px-4 py-3">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
-            Predecessor
-          </span>
-          <Badge variant="secondary" className="max-w-full truncate font-mono">
-            {params.key_id}
-          </Badge>
-        </div>
-      </div>
-    );
-  }
-  if (params.variant === "service_reauthorize") {
-    return (
-      <div className="space-y-2.5 border-y border-border bg-muted px-4 py-3">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
-            Service
-          </span>
-          <Badge variant="secondary" className="max-w-full truncate font-mono">
-            {params.user_service_id}
-          </Badge>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
-            Requested scopes
-          </span>
-          {params.requested_scopes.map((scope) => (
-            <Badge
-              key={scope}
-              variant="secondary"
-              className="max-w-full truncate font-mono"
-            >
-              <span className="min-w-0 truncate">{scope}</span>
-            </Badge>
-          ))}
-        </div>
-      </div>
-    );
-  }
-  const scopes =
-    params.variant === "catalog" ? params.requested_scopes.filter(Boolean) : [];
-  let endpointHost = "";
-  if (params.variant === "custom" && params.endpoint_url) {
-    try {
-      endpointHost = new URL(params.endpoint_url).host;
-    } catch {
-      endpointHost = "";
-    }
-  }
+  return groups;
+}
 
+function ParameterSummary({ rows }: { readonly rows: readonly SummaryRow[] }) {
+  if (rows.length === 0) return null;
   return (
     <div className="space-y-2.5 border-y border-border bg-muted px-4 py-3">
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
-          Service
-        </span>
-        <Badge variant="secondary" className="max-w-full truncate">
-          <span className="min-w-0 truncate">
-            {clampServiceLabel(
-              params.variant === "catalog" ? params.service_slug : params.name,
-            ) || "Custom"}
-          </span>
-        </Badge>
-        {endpointHost ? (
-          <Badge variant="secondary" className="max-w-full truncate">
-            <Globe className="mr-1 h-3 w-3" />
-            <span className="min-w-0 truncate">{endpointHost}</span>
-          </Badge>
-        ) : null}
-      </div>
-      {scopes.length > 0 ? (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
-            Scopes
-          </span>
-          {scopes.map((scope) => (
+      {groupSummaryRows(rows).map((group, groupIndex) => (
+        <div
+          key={`${group[0]?.label ?? "summary"}-${groupIndex}`}
+          className="flex flex-wrap items-center gap-1.5"
+        >
+          {group[0]?.label ? (
+            <span className="text-[10px] font-semibold uppercase tracking-[1px] text-muted-foreground">
+              {group[0].label}
+            </span>
+          ) : null}
+          {group.map((row, rowIndex) => (
             <Badge
-              key={scope}
+              key={`${row.value}-${rowIndex}`}
               variant="secondary"
-              className="max-w-full truncate font-mono"
+              className={`max-w-full truncate${row.mono ? " font-mono" : ""}`}
             >
-              <span className="min-w-0 truncate">{scope}</span>
+              <span className="min-w-0 truncate">{row.value}</span>
             </Badge>
           ))}
         </div>
-      ) : null}
-      {params.via_node_id || params.target_org_id ? (
-        <div className="flex flex-wrap items-center gap-1.5">
-          {/* Ids are wire-supplied and only length-capped at 256 chars, so they
-              stay inside the card instead of widening the chat column. */}
-          {params.via_node_id ? (
-            <Badge
-              variant="secondary"
-              className="max-w-full truncate font-mono"
-            >
-              <Server className="mr-1 h-3 w-3" />
-              <span className="min-w-0 truncate">
-                Node {params.via_node_id}
-              </span>
-            </Badge>
-          ) : null}
-          {params.target_org_id ? (
-            <Badge
-              variant="secondary"
-              className="max-w-full truncate font-mono"
-            >
-              <span className="min-w-0 truncate">
-                Org {params.target_org_id}
-              </span>
-            </Badge>
-          ) : null}
-        </div>
-      ) : null}
+      ))}
     </div>
   );
+}
+
+const ACTION_ICON_COMPONENTS: Readonly<
+  Record<Exclude<ActionIcon, "service">, LucideIcon>
+> = {
+  globe: Globe,
+  shield: ShieldCheck,
+  key: KeyRound,
+  org: Building2,
+  bell: Bell,
+  app: AppWindow,
+  node: Server,
+};
+
+function DescriptorIcon({
+  icon,
+  params,
+}: {
+  readonly icon: ActionIcon;
+  readonly params: ActionCardContentBlock["params"];
+}) {
+  if (icon === "service" && params.variant === "catalog") {
+    return <ServiceIcon slug={params.service_slug} size="sm" />;
+  }
+  const Icon = icon === "service" ? Globe : ACTION_ICON_COMPONENTS[icon];
+  return <Icon className="h-4 w-4 text-muted-foreground" />;
 }
 
 /**
@@ -854,17 +770,10 @@ export function ActionCard({
                 : "border-nyx-secondary-400/30 bg-nyx-secondary-400/10"
           }`}
         >
-          {params.variant === "catalog" ? (
-            <ServiceIcon slug={params.service_slug} size="sm" />
-          ) : params.variant === "custom" ? (
-            <Globe className="h-4 w-4 text-muted-foreground" />
-          ) : params.variant === "service_reauthorize" ? (
-            <ShieldCheck className="h-4 w-4 text-muted-foreground" />
-          ) : params.variant === "key_create" ||
-            params.variant === "key_rotate" ? (
-            <KeyRound className="h-4 w-4 text-muted-foreground" />
-          ) : (
+          {unsupported ? (
             <AlertTriangle className="h-4 w-4 text-destructive" />
+          ) : (
+            <DescriptorIcon icon={descriptor.icon} params={params} />
           )}
         </div>
         <div className="min-w-0 flex-1">
@@ -906,7 +815,7 @@ export function ActionCard({
         </div>
       </div>
 
-      <ParameterSummary block={block} />
+      <ParameterSummary rows={descriptor.summary(params)} />
       <StatusNotice block={block} />
 
       {verdict?.footer && VerdictIcon ? (
@@ -924,13 +833,7 @@ export function ActionCard({
         <div className="flex items-start gap-2 px-4 py-3">
           <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-nyx-secondary-400" />
           <p className="text-[11px] leading-relaxed text-muted-foreground">
-            {params.variant === "key_create"
-              ? "NyxID creates and verifies the key here. The assistant receives only the safe key reference after you finish."
-              : params.variant === "key_rotate"
-                ? "NyxID rotates and verifies the exact lineage here. The assistant receives only the replacement key reference after you finish."
-                : params.variant === "service_reauthorize"
-                  ? "NyxID opens the provider authorization flow here. The assistant receives only the service reference after fresh authorization finishes."
-                  : "You choose the account, routing, and credential. The assistant receives only brokered access after you finish."}
+            {descriptor.assurance}
           </p>
         </div>
       ) : null}
@@ -949,12 +852,7 @@ export function ActionCard({
               {awaitingAuthorization
                 ? "Waiting for authorization"
                 : busy
-                  ? params.variant === "key_create" ||
-                    params.variant === "key_rotate"
-                    ? "Working"
-                    : params.variant === "service_reauthorize"
-                      ? "Authorizing"
-                      : "Connecting"
+                  ? descriptor.busyLabel
                   : descriptor.cta(params)}
             </Button>
           ) : null}
@@ -1044,28 +942,22 @@ export function ActionCard({
           }}
         />
       ) : null}
-      {!verdict && !unsupported && params.variant === "key_create" ? (
-        <AssistantKeyCreateDialog
-          open={dialogOpen}
-          onOpenChange={setOpen}
-          actionRequestId={block.action_request_id}
-          params={{
-            name: params.name,
-            platform: params.platform,
-            allowedServiceIds: params.allowed_service_ids,
-          }}
-          onComplete={(keyId) => report("completed", { key: { keyId } })}
-        />
-      ) : null}
-      {!verdict && !unsupported && params.variant === "key_rotate" ? (
-        <AssistantKeyRotateDialog
-          open={dialogOpen}
-          onOpenChange={setOpen}
-          actionRequestId={block.action_request_id}
-          params={{ keyId: params.key_id }}
-          onComplete={(keyId) => report("completed", { key: { keyId } })}
-        />
-      ) : null}
+      {!verdict && !unsupported && isDialogParams(params)
+        ? (() => {
+            const binding = dialogBindingFor(params.variant);
+            return (
+              <binding.Dialog
+                open={dialogOpen}
+                onOpenChange={setOpen}
+                actionRequestId={block.action_request_id}
+                params={binding.toProps(params)}
+                onComplete={(id) =>
+                  report("completed", descriptor.resource(id))
+                }
+              />
+            );
+          })()
+        : null}
       {!verdict &&
       !unsupported &&
       params.variant === "service_reauthorize" &&

@@ -1,7 +1,7 @@
 use chrono::Utc;
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
-use mongodb::options::ReturnDocument;
+use mongodb::{ClientSession, Database, options::ReturnDocument};
 use uuid::Uuid;
 
 use crate::crypto::aes::EncryptionKeys;
@@ -25,7 +25,7 @@ fn credential_epoch_add_expr() -> mongodb::bson::Document {
 
 /// Maximum credential length in bytes to prevent abuse.
 const MAX_CREDENTIAL_LENGTH: usize = 8192;
-const VALID_CREDENTIAL_TYPES: &[&str] = &[
+pub(crate) const VALID_CREDENTIAL_TYPES: &[&str] = &[
     "api_key",
     "oauth2",
     "bearer",
@@ -38,7 +38,7 @@ const VALID_CREDENTIAL_TYPES: &[&str] = &[
     // `access_token_encrypted` (see `gcp_sa_service`).
     "gcp_service_account",
 ];
-const VALID_STATUSES: &[&str] = &[
+pub(crate) const VALID_STATUSES: &[&str] = &[
     "active",
     "expired",
     "revoked",
@@ -133,6 +133,19 @@ pub async fn find_api_key(
 /// Create a new API key with an encrypted credential.
 pub async fn create_api_key(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    params: CreateApiKeyParams<'_>,
+) -> AppResult<UserApiKey> {
+    let api_key = build_api_key(encryption_keys, user_id, params).await?;
+    db.collection::<UserApiKey>(COLLECTION_NAME)
+        .insert_one(&api_key)
+        .await?;
+    Ok(api_key)
+}
+
+/// Build an encrypted API-key document without writing it.
+pub async fn build_api_key(
     encryption_keys: &EncryptionKeys,
     user_id: &str,
     params: CreateApiKeyParams<'_>,
@@ -237,11 +250,20 @@ pub async fn create_api_key(
         updated_at: now,
     };
 
-    db.collection::<UserApiKey>(COLLECTION_NAME)
-        .insert_one(&api_key)
-        .await?;
-
     Ok(api_key)
+}
+
+/// Insert a previously built API-key document, optionally in a caller-owned
+/// transaction. Keeping construction separate lets multi-document mutations
+/// encrypt and validate before any write occurs.
+pub async fn insert_api_key_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    api_key: &UserApiKey,
+) -> AppResult<()> {
+    let collection = db.collection::<UserApiKey>(COLLECTION_NAME);
+    collection.insert_one(api_key).session(session).await?;
+    Ok(())
 }
 
 /// Create a new API key by copying encrypted fields from an existing provider token.
@@ -1445,6 +1467,12 @@ pub async fn update_api_key(
                     .to_string(),
             ));
         }
+        if existing.credential_type == "ssh_certificate" {
+            return Err(AppError::SshAuthModeUnsupportedForOperation(
+                "ssh_certificate credentials are rotated through the SSH certificate flow"
+                    .to_string(),
+            ));
+        }
 
         if cred.is_empty() {
             return Err(AppError::ValidationError(
@@ -1469,6 +1497,10 @@ pub async fn update_api_key(
             set_doc.insert("token_scopes", bson::Bson::Null);
         } else {
             set_doc.insert("credential_encrypted", encrypted_bson);
+            // A rotation replaces the durable credential. Any cached access
+            // token minted from the old value must be discarded immediately.
+            set_doc.insert("access_token_encrypted", bson::Bson::Null);
+            set_doc.insert("expires_at", bson::Bson::Null);
         }
         set_doc.insert("status", "active");
         set_doc.insert("error_message", bson::Bson::Null);

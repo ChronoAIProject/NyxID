@@ -488,7 +488,15 @@ impl ActionDisposition {
 pub enum ActionResource {
     UserService { user_service_id: String },
     Key { key_id: String },
+    Endpoint { endpoint_id: String },
+    ExternalKey { external_key_id: String },
     Node { node_id: String },
+    PendingCredential { pending_credential_id: String },
+    Org { org_id: String },
+    Account { user_id: String },
+    Grant { grant_id: String },
+    ApprovalConfig { service_id: String },
+    NotificationBinding { binding_id: String },
     ServiceAccount { service_account_id: String },
     DeveloperApp { client_id: String },
     Device { device_id: String },
@@ -503,8 +511,32 @@ impl ActionResource {
             Self::Key { key_id } => serde_json::json!({
                 "key": { "keyId": key_id }
             }),
+            Self::Endpoint { endpoint_id } => serde_json::json!({
+                "endpoint": { "endpointId": endpoint_id }
+            }),
+            Self::ExternalKey { external_key_id } => serde_json::json!({
+                "externalKey": { "externalKeyId": external_key_id }
+            }),
             Self::Node { node_id } => serde_json::json!({
                 "node": { "nodeId": node_id }
+            }),
+            Self::PendingCredential {
+                pending_credential_id,
+            } => serde_json::json!({
+                "pendingCredential": { "pendingCredentialId": pending_credential_id }
+            }),
+            Self::Org { org_id } => serde_json::json!({ "org": { "orgId": org_id } }),
+            Self::Account { user_id } => serde_json::json!({
+                "account": { "userId": user_id }
+            }),
+            Self::Grant { grant_id } => serde_json::json!({
+                "grant": { "grantId": grant_id }
+            }),
+            Self::ApprovalConfig { service_id } => serde_json::json!({
+                "approvalConfig": { "serviceId": service_id }
+            }),
+            Self::NotificationBinding { binding_id } => serde_json::json!({
+                "notificationBinding": { "bindingId": binding_id }
             }),
             Self::ServiceAccount { service_account_id } => serde_json::json!({
                 "serviceAccount": { "serviceAccountId": service_account_id }
@@ -796,8 +828,36 @@ fn parse_action_resource(value: Option<serde_json::Value>) -> AppResult<Option<A
         "key" => ActionResource::Key {
             key_id: parse_identity(payload, "keyId", "keyId")?,
         },
+        "endpoint" => ActionResource::Endpoint {
+            endpoint_id: parse_identity(payload, "endpointId", "endpointId")?,
+        },
+        "externalKey" => ActionResource::ExternalKey {
+            external_key_id: parse_identity(payload, "externalKeyId", "externalKeyId")?,
+        },
         "node" => ActionResource::Node {
             node_id: parse_identity(payload, "nodeId", "nodeId")?,
+        },
+        "pendingCredential" => ActionResource::PendingCredential {
+            pending_credential_id: parse_identity(
+                payload,
+                "pendingCredentialId",
+                "pendingCredentialId",
+            )?,
+        },
+        "org" => ActionResource::Org {
+            org_id: parse_identity(payload, "orgId", "orgId")?,
+        },
+        "account" => ActionResource::Account {
+            user_id: parse_identity(payload, "userId", "userId")?,
+        },
+        "grant" => ActionResource::Grant {
+            grant_id: parse_identity(payload, "grantId", "grantId")?,
+        },
+        "approvalConfig" => ActionResource::ApprovalConfig {
+            service_id: parse_identity(payload, "serviceId", "serviceId")?,
+        },
+        "notificationBinding" => ActionResource::NotificationBinding {
+            binding_id: parse_identity(payload, "bindingId", "bindingId")?,
         },
         "serviceAccount" => ActionResource::ServiceAccount {
             service_account_id: parse_identity(payload, "serviceAccountId", "serviceAccountId")?,

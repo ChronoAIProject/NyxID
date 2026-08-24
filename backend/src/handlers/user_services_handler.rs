@@ -139,6 +139,13 @@ pub struct UserServiceResponse {
     pub ws_frame_injections: Vec<crate::models::ws_frame_injection::WsFrameInjection>,
     pub created_at: String,
     pub updated_at: String,
+    /// Authoritative monotonic version for this user-service row. Legacy
+    /// rows without the field report zero.
+    pub state_version: i64,
+    /// Credential-rotation predecessor (`UserApiKey` id). Absent when this
+    /// service has never rotated its stored credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation_predecessor_id: Option<String>,
     /// Provenance: personal credentials, or inherited from an org membership.
     /// Always present in list responses; the single-item update/delete
     /// responses use Personal as a sensible default since they only operate
@@ -600,6 +607,8 @@ fn user_service_with_source_response(
         ws_frame_injections: svc.ws_frame_injections,
         created_at: svc.created_at.to_rfc3339(),
         updated_at: svc.updated_at.to_rfc3339(),
+        state_version: svc.state_version,
+        rotation_predecessor_id: svc.rotation_predecessor_id,
         credential_source: source.into(),
     }
 }
@@ -784,6 +793,8 @@ mod tests {
         assert!(resp.ws_frame_injections.is_empty());
         assert_eq!(resp.created_at, created_at.to_rfc3339());
         assert_eq!(resp.updated_at, updated_at.to_rfc3339());
+        assert_eq!(resp.state_version, 1);
+        assert!(resp.rotation_predecessor_id.is_none());
         // user_service_response wraps with Personal source
         assert!(matches!(
             resp.credential_source,

@@ -3,6 +3,7 @@ import { resolveAssistantAction } from "@/lib/assistant/action-registry";
 import {
   actionContinueBodySchema,
   actionControlIdentitySchema,
+  actionResourceSchema,
   actionWakeBodySchema,
   assistantActionRequestSchema,
   buildActionContinueBody,
@@ -214,6 +215,131 @@ describe("assistant action request schema", () => {
           ...BASE_REQUEST,
           actionRequestId: `invalid-rotate-${JSON.stringify(params)}`,
           action: "key.rotate",
+          params,
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  it("accepts all twelve Wave-2 param shapes while their journeys stay unsupported", () => {
+    const wave2 = [
+      ["key.update", { keyId: "key-1", name: "renamed" }],
+      ["key.delete", { keyId: "key-1" }],
+      [
+        "key.extend_scope",
+        { keyId: "key-1", addServiceIds: ["service-alpha"] },
+      ],
+      [
+        "key.bind_credential",
+        {
+          keyId: "key-1",
+          userServiceId: "service-alpha",
+          externalKeyId: "external-1",
+        },
+      ],
+      [
+        "service.update",
+        { userServiceId: "service-alpha", name: "Renamed API" },
+      ],
+      ["service.delete", { userServiceId: "service-alpha" }],
+      ["service.route", { userServiceId: "service-alpha", viaNodeId: "node-1" }],
+      ["service.rotate_credential", { userServiceId: "service-alpha" }],
+      ["endpoint.update", { endpointId: "endpoint-1", label: "Renamed" }],
+      ["endpoint.delete", { endpointId: "endpoint-1" }],
+      ["external_key.rotate", { externalKeyId: "external-1" }],
+      ["external_key.delete", { externalKeyId: "external-1" }],
+    ] as const;
+
+    for (const [index, [action, params]] of wave2.entries()) {
+      const request = assistantActionRequestSchema.parse({
+        ...BASE_REQUEST,
+        actionRequestId: `wave2-${String(index)}`,
+        action,
+        params,
+      });
+      // Wave 2's journeys have landed, so these now resolve to a real
+      // variant. Dormancy still holds where it matters: these verbs are
+      // absent from every Aevatar pinned revision set, so no card for them
+      // can arrive until the v9 bump. The browser being ready is the point.
+      //
+      // Falsifier: drop a Wave-2 registry row and its entry here resolves to
+      // `unknown` again, failing this assertion.
+      const resolved = resolveAssistantAction(request);
+      expect(resolved.supported).toBe(true);
+      expect(resolved.params.variant).not.toBe("unknown");
+    }
+  });
+
+  it("keeps Wave-3 and Wave-4 journeys unsupported until they are wired", () => {
+    // The guard the Wave-2 case above used to provide. Wiring a verb makes a
+    // dormant backend effect reachable the instant a revision pins it, so a
+    // verb must not gain a journey before its family is review-closed.
+    //
+    // Falsifier: add a registry row for any name below and this fails.
+    const deferred = [
+      ["node.delete", { nodeId: "node-1" }],
+      ["node.transfer", { nodeId: "node-1", newOwnerUserId: "user-2" }],
+      ["device.onboard", { label: "Kitchen" }],
+      ["org.delete", { orgId: "org-1" }],
+      ["account.delete", {}],
+      ["service_account.rotate_secret", { serviceAccountId: "sa-1" }],
+    ] as const;
+
+    for (const [index, [action, params]] of deferred.entries()) {
+      // Built directly rather than via `assistantActionRequestSchema.parse`:
+      // these verbs have no param schema precisely because they are unwired,
+      // so parsing would fail before resolution — which is the thing under
+      // test here.
+      const request = {
+        ...BASE_REQUEST,
+        actionRequestId: `deferred-${String(index)}`,
+        action,
+        params,
+      } as unknown as Parameters<typeof resolveAssistantAction>[0];
+      expect(resolveAssistantAction(request)).toMatchObject({
+        supported: false,
+        journey: null,
+      });
+    }
+  });
+
+  it("rejects id-less, widened, and secret-carrying Wave-2 params", () => {
+    const invalid = [
+      ["key.update", { name: "renamed" }],
+      ["key.extend_scope", { keyId: "key-1", addServiceIds: [] }],
+      [
+        "key.extend_scope",
+        { keyId: "key-1", addServiceIds: ["service-alpha", "service-alpha"] },
+      ],
+      [
+        "key.bind_credential",
+        { keyId: "key-1", userServiceId: "service-alpha" },
+      ],
+      [
+        "service.update",
+        { userServiceId: "service-alpha", authMethod: "bogus" },
+      ],
+      [
+        "service.route",
+        { userServiceId: "service-alpha", viaNodeId: "invalid/node" },
+      ],
+      [
+        "service.rotate_credential",
+        { userServiceId: "service-alpha", credentialValue: "nyxid_ag_secret99" },
+      ],
+      ["endpoint.update", { label: "Renamed" }],
+      [
+        "external_key.rotate",
+        { externalKeyId: "external-1", replacement: "Bearer top-secret" },
+      ],
+    ] as const;
+
+    for (const [index, [action, params]] of invalid.entries()) {
+      expect(
+        assistantActionRequestSchema.safeParse({
+          ...BASE_REQUEST,
+          actionRequestId: `wave2-invalid-${String(index)}`,
+          action,
           params,
         }).success,
       ).toBe(false);
@@ -650,6 +776,43 @@ describe("action continuation schema", () => {
         new Map([["act-1", "key.rotate"]]),
       ),
     ).toThrow("key.rotate completed reports must include resource.key.keyId");
+    expect(() =>
+      buildActionContinueBody(
+        "nyxid-chat-actor-1",
+        "request-1",
+        "turn-origin-1",
+        [
+          {
+            actionRequestId: "act-1",
+            originTurnId: "turn-origin-1",
+            disposition: "completed",
+            resource: { key: { keyId: "key-1" } },
+          },
+        ],
+        new Map([["act-1", "key.bind_credential"]]),
+      ),
+    ).toThrow(
+      "key.bind_credential completed reports must include resource.key.userServiceId",
+    );
+    const bindBody = buildActionContinueBody(
+      "nyxid-chat-actor-1",
+      "request-1",
+      "turn-origin-1",
+      [
+        {
+          actionRequestId: "act-1",
+          originTurnId: "turn-origin-1",
+          disposition: "completed",
+          resource: {
+            key: { keyId: "key-1", userServiceId: "svc-1" },
+          },
+        },
+      ],
+      new Map([["act-1", "key.bind_credential"]]),
+    );
+    expect(bindBody.actions[0]?.resource).toEqual({
+      key: { keyId: "key-1", userServiceId: "svc-1" },
+    });
   });
 
   it("round-trips all six safe resource variants when the action is neutral", () => {
@@ -717,5 +880,48 @@ describe("action continuation schema", () => {
     expect(
       actionControlIdentitySchema.safeParse("turn-safe_1:part").success,
     ).toBe(true);
+  });
+});
+
+describe("wave-2 typed resource variants", () => {
+  it("accepts the endpoint and externalKey variants", () => {
+    expect(
+      actionResourceSchema.safeParse({ endpoint: { endpointId: "ep-1" } })
+        .success,
+    ).toBe(true);
+    expect(
+      actionResourceSchema.safeParse({
+        externalKey: { externalKeyId: "xk-1" },
+      }).success,
+    ).toBe(true);
+  });
+
+  it("rejects unknown members inside the new variants", () => {
+    expect(
+      actionResourceSchema.safeParse({
+        endpoint: { endpointId: "ep-1", label: "leak" },
+      }).success,
+    ).toBe(false);
+    expect(
+      actionResourceSchema.safeParse({
+        externalKey: { externalKeyId: "xk-1", credential: "nyxid_abcdefgh" },
+      }).success,
+    ).toBe(false);
+  });
+
+  // api_keys and user_api_keys are different collections: a `key` variant is
+  // resolved against /api/v1/api-keys/{id}/authorization, so an external-key
+  // id sent that way reads the wrong collection entirely.
+  it("keeps externalKey distinct from key", () => {
+    const asKey = actionResourceSchema.safeParse({
+      key: { keyId: "xk-1" },
+    });
+    const asExternal = actionResourceSchema.safeParse({
+      externalKey: { externalKeyId: "xk-1" },
+    });
+    expect(asKey.success && asExternal.success).toBe(true);
+    expect(JSON.stringify(asKey.data)).not.toEqual(
+      JSON.stringify(asExternal.data),
+    );
   });
 });

@@ -48,6 +48,19 @@ pub struct CreateFanOutPendingCredentialInput {
     pub remote_crypto: bool,
 }
 
+#[derive(Clone, Debug)]
+pub struct PendingCredentialAuthorizationState {
+    pub id: String,
+    pub node_id: String,
+    pub owner_user_id: String,
+    pub remote_state: Option<RemoteCryptoState>,
+    pub is_active: bool,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+    pub declined_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct StorePendingCiphertextInput {
     pub admin_pubkey: Zeroizing<String>,
@@ -414,6 +427,29 @@ pub async fn create_pending_credential(
     node_id: &str,
     input: CreatePendingCredentialInput,
 ) -> AppResult<NodePendingCredential> {
+    create_pending_credential_with_id(
+        db,
+        actor_user_id,
+        node_id,
+        &Uuid::new_v4().to_string(),
+        input,
+    )
+    .await
+}
+
+/// Create pending credential metadata using a caller-reserved UUID. The raw
+/// credential is deliberately absent: the browser encrypts it to the node's
+/// ephemeral public key through the existing RCI flow.
+pub async fn create_pending_credential_with_id(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    node_id: &str,
+    pending_id: &str,
+    input: CreatePendingCredentialInput,
+) -> AppResult<NodePendingCredential> {
+    let pending_id = Uuid::parse_str(pending_id)
+        .map_err(|_| AppError::ValidationError("pending_id must be a UUID".to_string()))?
+        .to_string();
     validate_service_slug(&input.service_slug)?;
     validate_field_name(&input.field_name, &input.injection_method)?;
     let target_url = clean_optional_string(input.target_url);
@@ -455,7 +491,7 @@ pub async fn create_pending_credential(
         ciphertext: None,
     });
     let pending = NodePendingCredential {
-        id: Uuid::new_v4().to_string(),
+        id: pending_id,
         node_id: node_id.to_string(),
         service_slug: input.service_slug,
         injection_method: input.injection_method,
@@ -482,6 +518,35 @@ pub async fn create_pending_credential(
         .await?;
 
     Ok(pending)
+}
+
+/// Minimal authority state for assistant postcondition reads. Cancel softly
+/// deactivates its row, so the surviving `is_active: false` plus
+/// `declined_at` fields remain terminal evidence; consumed and declined rows
+/// remain readable as well.
+pub async fn get_pending_credential_authorization_state(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    node_id: &str,
+    pending_id: &str,
+) -> AppResult<PendingCredentialAuthorizationState> {
+    let pending = db
+        .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+        .find_one(doc! { "_id": pending_id, "node_id": node_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Pending credential not found".to_string()))?;
+    ensure_actor_can_manage_pending_owner(db, actor_user_id, &pending).await?;
+    Ok(PendingCredentialAuthorizationState {
+        id: pending.id,
+        node_id: pending.node_id,
+        owner_user_id: pending.owner_user_id,
+        remote_state: pending.remote_state,
+        is_active: pending.is_active,
+        created_at: pending.created_at,
+        expires_at: pending.expires_at,
+        consumed_at: pending.consumed_at,
+        declined_at: pending.declined_at,
+    })
 }
 
 pub async fn create_fan_out_pending_credential(
@@ -1645,6 +1710,12 @@ pub async fn cancel_pending_credential(
     // Consume rejects expired pushes because accepting stale setup metadata is
     // correctness-critical. Cancel intentionally remains admin housekeeping:
     // it can deactivate an expired active row so cleanup is idempotent.
+    //
+    // Cancel deliberately does NOT hard-delete. The deactivated row is the
+    // assistant's terminal evidence -- `is_active: false` plus `declined_at`
+    // proves *this* cancellation happened, which absence cannot: a 404 is
+    // equally consistent with "never existed" and "not yours". It also keeps
+    // the row the cancellation audit entry refers to.
     let now = bson::DateTime::from_chrono(Utc::now());
     db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
         .find_one_and_update(
@@ -1653,8 +1724,9 @@ pub async fn cancel_pending_credential(
                 "node_id": node_id,
                 "is_active": true,
             },
-            doc! { "$set": { "is_active": false, "updated_at": &now } },
+            doc! { "$set": { "is_active": false, "declined_at": &now, "updated_at": &now } },
         )
+        .return_document(ReturnDocument::After)
         .await?
         .ok_or_else(|| AppError::NotFound("Pending credential not found".to_string()))
 }
@@ -3253,9 +3325,20 @@ mod tests {
             .expect_err("canceled row is not consumable");
         assert!(matches!(err, AppError::NotFound(_)));
 
-        let stored = load_pending(&db, &pending.id).await;
-        assert!(!stored.is_active);
-        assert!(stored.consumed_at.is_none());
+        // Cancel is terminal-state evidence, not absence: the row survives so
+        // `is_active: false` + `declined_at` prove *this* cancellation. A 404
+        // could not -- it is equally consistent with "never existed".
+        let stored = db
+            .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+            .find_one(doc! { "_id": &pending.id })
+            .await
+            .expect("query cancelled pending credential")
+            .expect("cancelled row must survive as terminal evidence");
+        assert!(!stored.is_active, "cancel must deactivate the row");
+        assert!(
+            stored.declined_at.is_some(),
+            "cancel must stamp declined_at as causal evidence"
+        );
     }
 
     #[tokio::test]

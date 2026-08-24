@@ -6039,6 +6039,8 @@ mod tests {
             source_app_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            state_version: 1,
+            rotation_predecessor_id: None,
         }
     }
 

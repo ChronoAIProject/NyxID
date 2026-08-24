@@ -1088,7 +1088,48 @@ function sameActionCardParams(
       return right.variant === "key_rotate" && left.key_id === right.key_id;
     case "unknown":
       return right.variant === "unknown";
+    default:
+      // Wave-2 onward: variants are added as registry data rows, so a case per
+      // variant here would reintroduce exactly the per-verb ladder the card
+      // harness removed. These variants carry only plain scalars and string
+      // arrays, so a structural comparison is equivalent to spelling each one
+      // out.
+      //
+      // The hand-written cases above stay as they are on purpose: they are NOT
+      // pure structural comparisons. `allowed_service_ids` is compared as a set
+      // (order-insensitive) while `requested_scopes` is compared as an array
+      // (order-sensitive), and collapsing them into this default would silently
+      // change shipped behaviour.
+      return sameStructuralParams(left, right);
   }
+}
+
+/// Order-sensitive deep comparison for variants whose fields are scalars or
+/// string arrays. Key order is ignored; array order is not.
+function sameStructuralParams(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right)) return false;
+    return (
+      left.length === right.length &&
+      left.every((value, index) => sameStructuralParams(value, right[index]))
+    );
+  }
+  if (
+    typeof left !== "object" ||
+    typeof right !== "object" ||
+    left === null ||
+    right === null
+  ) {
+    return false;
+  }
+  const leftEntries = Object.entries(left as Record<string, unknown>);
+  const rightRecord = right as Record<string, unknown>;
+  if (leftEntries.length !== Object.keys(rightRecord).length) return false;
+  return leftEntries.every(
+    ([key, value]) =>
+      key in rightRecord && sameStructuralParams(value, rightRecord[key]),
+  );
 }
 
 function matchesCommittedActionRequest(

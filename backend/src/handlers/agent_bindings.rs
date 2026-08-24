@@ -97,6 +97,41 @@ pub struct BindingResponse {
     pub invalid_reason: Option<String>,
 }
 
+/// Authorization evidence for one agent service binding — the minimal
+/// projection of `BindingResponse` that an assistant-action postcondition
+/// reader consumes, for the `key.bind_credential` verb.
+///
+/// `BindingResponse` carries user-controlled free text (`service_label`,
+/// `credential_label`, and the fallback `service_slug`) that the evidence
+/// reader's recursive secret-shape scan cannot distinguish from a real
+/// credential. This projection keeps ids and RFC 3339 timestamps only.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct BindingAuthorizationEvidenceResponse {
+    pub id: String,
+    pub api_key_id: String,
+    pub user_service_id: String,
+    pub user_api_key_id: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl BindingAuthorizationEvidenceResponse {
+    /// Project the full detail response down to authorization evidence.
+    ///
+    /// Derived from `BindingResponse` so the two representations report the
+    /// same values for every shared property.
+    fn from_binding_response(response: BindingResponse) -> Self {
+        Self {
+            id: response.id,
+            api_key_id: response.api_key_id,
+            user_service_id: response.user_service_id,
+            user_api_key_id: response.user_api_key_id,
+            created_at: response.created_at,
+            updated_at: response.updated_at,
+        }
+    }
+}
+
 async fn enrich_bindings(
     state: &AppState,
     bindings: Vec<crate::models::agent_service_binding::AgentServiceBinding>,
@@ -343,6 +378,95 @@ pub async fn list_bindings(
 }
 
 #[utoipa::path(
+    get,
+    path = "/api/v1/api-keys/{key_id}/bindings/{binding_id}/authorization",
+    params(
+        ("key_id" = String, Path, description = "API key ID"),
+        ("binding_id" = String, Path, description = "Binding ID")
+    ),
+    responses(
+        (status = 200, description = "Binding authorization evidence", body = BindingAuthorizationEvidenceResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Binding not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Agent Bindings"
+)]
+/// GET /api/v1/api-keys/{key_id}/bindings/{binding_id}/authorization
+///
+/// Same ownership/ACL as listing or deleting this binding, projected to
+/// the properties an assistant-action postcondition reader consumes.
+pub async fn get_binding_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((key_id, binding_id)): Path<(String, String)>,
+) -> AppResult<Json<BindingAuthorizationEvidenceResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let BindingOwnerAccess {
+        user_id,
+        access,
+        platform: _,
+    } = resolve_binding_owner(&state, &actor, &key_id, false).await?;
+    let binding =
+        agent_binding_service::get_binding(&state.db, &user_id, &key_id, &binding_id).await?;
+    project_binding_authorization(&state, access, binding).await
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/api-keys/{key_id}/bindings/by-service/{user_service_id}/authorization",
+    params(
+        ("key_id" = String, Path, description = "API key ID"),
+        ("user_service_id" = String, Path, description = "User service ID")
+    ),
+    responses(
+        (status = 200, description = "Binding authorization evidence", body = BindingAuthorizationEvidenceResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Binding not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "Agent Bindings"
+)]
+/// GET /api/v1/api-keys/{key_id}/bindings/by-service/{user_service_id}/authorization
+///
+/// Addressable from a `key.bind_credential` report, which carries `keyId`
+/// plus `userServiceId` (the random binding UUID is not in the report).
+/// Same ACL and projection as [`get_binding_authorization`].
+pub async fn get_binding_authorization_by_service(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((key_id, user_service_id)): Path<(String, String)>,
+) -> AppResult<Json<BindingAuthorizationEvidenceResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let BindingOwnerAccess {
+        user_id,
+        access,
+        platform: _,
+    } = resolve_binding_owner(&state, &actor, &key_id, false).await?;
+    let binding = agent_binding_service::get_binding_by_service(
+        &state.db,
+        &user_id,
+        &key_id,
+        &user_service_id,
+    )
+    .await?;
+    project_binding_authorization(&state, access, binding).await
+}
+
+async fn project_binding_authorization(
+    state: &AppState,
+    access: OwnerAccess,
+    binding: crate::models::agent_service_binding::AgentServiceBinding,
+) -> AppResult<Json<BindingAuthorizationEvidenceResponse>> {
+    if !access.allows_resource(&binding.user_service_id) {
+        return Err(AppError::NotFound("Binding not found".to_string()));
+    }
+    let mut responses = enrich_bindings(state, vec![binding]).await?;
+    let response = responses.remove(0);
+    Ok(Json(
+        BindingAuthorizationEvidenceResponse::from_binding_response(response),
+    ))
+}
+
+#[utoipa::path(
     delete,
     path = "/api/v1/api-keys/{key_id}/bindings/{binding_id}",
     params(
@@ -450,6 +574,77 @@ mod tests {
 
     fn tele() -> TelemetryContext {
         TelemetryContext::default()
+    }
+
+    fn poisoned_binding_response() -> BindingResponse {
+        BindingResponse {
+            id: "binding-1".to_string(),
+            api_key_id: "key-1".to_string(),
+            user_service_id: "service-1".to_string(),
+            user_api_key_id: "credential-1".to_string(),
+            service_slug: "bearer-bot".to_string(),
+            service_label: "Bearer Bot".to_string(),
+            credential_label: "nyxid_ag_must_not_escape_this".to_string(),
+            created_at: "2026-08-11T00:00:00Z".to_string(),
+            updated_at: "2026-08-11T00:00:01Z".to_string(),
+            is_invalid: false,
+            invalid_reason: None,
+        }
+    }
+
+    #[test]
+    fn binding_authorization_evidence_strips_label_carriers() {
+        let evidence =
+            serde_json::to_value(BindingAuthorizationEvidenceResponse::from_binding_response(
+                poisoned_binding_response(),
+            ))
+            .unwrap();
+
+        assert_eq!(
+            crate::test_utils::aevatar_secret_free_violation(&evidence),
+            None,
+            "binding evidence must never carry a secret-shaped value"
+        );
+        for forbidden in [
+            "service_label",
+            "credential_label",
+            "service_slug",
+            "is_invalid",
+            "invalid_reason",
+        ] {
+            assert!(
+                evidence.get(forbidden).is_none(),
+                "evidence leaked {forbidden}"
+            );
+        }
+        let properties: std::collections::BTreeSet<&str> = evidence
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            properties,
+            [
+                "api_key_id",
+                "created_at",
+                "id",
+                "updated_at",
+                "user_api_key_id",
+                "user_service_id",
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<&str>>()
+        );
+    }
+
+    #[test]
+    fn full_binding_response_trips_the_aevatar_secret_scan() {
+        let json = serde_json::to_value(poisoned_binding_response()).unwrap();
+        assert!(
+            crate::test_utils::aevatar_secret_free_violation(&json).is_some(),
+            "expected the full binding detail response to be rejected by the evidence scan"
+        );
     }
 
     fn fixture_api_key(id: &str, user_id: &str) -> ApiKey {
