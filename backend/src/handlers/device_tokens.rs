@@ -287,10 +287,11 @@ pub async fn register_device(
         state.db.clone(),
         &auth_user,
         "push_device_registered",
-        Some(serde_json::json!({
-            "device_id": device_id,
-            "platform": body.platform,
-        })),
+        Some(push_device_registered_audit_metadata(
+            &channel,
+            &device_id,
+            &body.platform,
+        )),
     );
 
     // Telemetry: notification.device_registered (new-device path).
@@ -622,6 +623,19 @@ fn new_device_update_doc(device_token: &DeviceToken, now: bson::DateTime) -> App
             "push_enabled": true,
             "updated_at": now,
         }
+    })
+}
+
+fn push_device_registered_audit_metadata(
+    channel: &NotificationChannel,
+    device_id: &str,
+    platform: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "device_id": device_id,
+        "platform": platform,
+        "approval_resumed": channel.approval_required
+            && !notification_service::has_active_notification_channel(channel),
     })
 }
 
@@ -975,6 +989,48 @@ mod tests {
         assert!(notification_service::has_active_notification_channel(
             &channel
         ));
+    }
+
+    #[test]
+    fn new_push_device_audit_reports_approval_resumption_without_token() {
+        let channel = NotificationChannel {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            telegram_chat_id: None,
+            telegram_username: None,
+            telegram_enabled: false,
+            telegram_link_code: None,
+            telegram_link_code_expires_at: None,
+            approval_timeout_secs: 30,
+            grant_expiry_days: 30,
+            approval_required: true,
+            push_enabled: false,
+            push_devices: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let metadata = push_device_registered_audit_metadata(&channel, "device-id", "fcm");
+
+        assert_eq!(metadata["approval_resumed"], true);
+        assert_eq!(metadata["device_id"], "device-id");
+        assert_eq!(metadata["platform"], "fcm");
+        assert!(metadata.get("token").is_none());
+
+        let mut already_active = channel.clone();
+        already_active.telegram_enabled = true;
+        already_active.telegram_chat_id = Some(1234);
+        assert_eq!(
+            push_device_registered_audit_metadata(&already_active, "device-id", "fcm")["approval_resumed"],
+            false
+        );
+
+        let mut approval_off = channel;
+        approval_off.approval_required = false;
+        assert_eq!(
+            push_device_registered_audit_metadata(&approval_off, "device-id", "fcm")["approval_resumed"],
+            false
+        );
     }
 
     #[tokio::test]

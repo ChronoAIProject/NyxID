@@ -3,7 +3,10 @@ use mongodb::bson::{self, doc};
 use crate::AppState;
 use crate::errors::AppError;
 use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
-use crate::services::{approval_service, audit_service, telegram_service};
+use crate::services::{approval_service, audit_service, notification_service, telegram_service};
+
+const TELEGRAM_LINKED_APPROVAL_ACTIVE_MESSAGE: &str = "Your Telegram account has been linked to NyxID. Approval protection is now active and approval requests will be delivered here.";
+const TELEGRAM_LINKED_APPROVAL_OFF_MESSAGE: &str = "Your Telegram account has been linked to NyxID. Approval protection is off — enable it in NyxID notification settings when you want requests delivered here.";
 
 /// Run the Telegram long polling loop (development mode fallback).
 ///
@@ -229,6 +232,7 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
     let update = doc! {
         "$set": telegram_link_update_fields(chat_id, &username, now)
     };
+    let link_outcome = telegram_link_outcome(&channel);
 
     match collection
         .update_one(doc! { "_id": &channel.id }, update)
@@ -239,7 +243,7 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
                 &state.http_client,
                 bot_token,
                 chat_id,
-                "Your Telegram account has been linked to NyxID. Approval protection remains controlled by your notification settings.",
+                link_outcome.message,
             )
             .await;
 
@@ -247,10 +251,11 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
                 state.db.clone(),
                 Some(channel.user_id.clone()),
                 "telegram_linked".to_string(),
-                Some(serde_json::json!({
-                    "telegram_username": username,
-                    "telegram_chat_id": chat_id,
-                })),
+                Some(telegram_link_audit_metadata(
+                    username.as_deref(),
+                    chat_id,
+                    link_outcome,
+                )),
                 None,
                 None,
                 None,
@@ -268,6 +273,36 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
             .await;
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TelegramLinkOutcome {
+    message: &'static str,
+    approval_resumed: bool,
+}
+
+fn telegram_link_outcome(channel: &NotificationChannel) -> TelegramLinkOutcome {
+    TelegramLinkOutcome {
+        message: if channel.approval_required {
+            TELEGRAM_LINKED_APPROVAL_ACTIVE_MESSAGE
+        } else {
+            TELEGRAM_LINKED_APPROVAL_OFF_MESSAGE
+        },
+        approval_resumed: channel.approval_required
+            && !notification_service::has_active_notification_channel(channel),
+    }
+}
+
+fn telegram_link_audit_metadata(
+    username: Option<&str>,
+    chat_id: i64,
+    outcome: TelegramLinkOutcome,
+) -> serde_json::Value {
+    serde_json::json!({
+        "telegram_username": username,
+        "telegram_chat_id": chat_id,
+        "approval_resumed": outcome.approval_resumed,
+    })
 }
 
 fn telegram_link_update_fields(
@@ -309,6 +344,25 @@ fn decision_callback_message(error: &AppError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn notification_channel(approval_required: bool) -> NotificationChannel {
+        NotificationChannel {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            telegram_chat_id: None,
+            telegram_username: None,
+            telegram_enabled: false,
+            telegram_link_code: Some("NYXID-TEST".to_string()),
+            telegram_link_code_expires_at: None,
+            approval_timeout_secs: 30,
+            grant_expiry_days: 30,
+            approval_required,
+            push_enabled: false,
+            push_devices: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
 
     #[test]
     fn decision_callback_message_maps_expired_forbidden() {
@@ -357,5 +411,47 @@ mod tests {
                 approval_required
             );
         }
+    }
+
+    #[test]
+    fn telegram_link_reports_approval_resumption() {
+        let outcome = telegram_link_outcome(&notification_channel(true));
+        let metadata = telegram_link_audit_metadata(Some("nyx"), 1234, outcome);
+
+        assert_eq!(outcome.message, TELEGRAM_LINKED_APPROVAL_ACTIVE_MESSAGE);
+        assert!(outcome.approval_resumed);
+        assert_eq!(metadata["approval_resumed"], true);
+    }
+
+    #[test]
+    fn telegram_link_reports_approval_off_without_resumption() {
+        let outcome = telegram_link_outcome(&notification_channel(false));
+        let metadata = telegram_link_audit_metadata(None, 1234, outcome);
+
+        assert_eq!(outcome.message, TELEGRAM_LINKED_APPROVAL_OFF_MESSAGE);
+        assert!(!outcome.approval_resumed);
+        assert_eq!(metadata["approval_resumed"], false);
+    }
+
+    #[test]
+    fn telegram_link_does_not_report_resumption_when_another_channel_is_active() {
+        let mut channel = notification_channel(true);
+        channel.push_enabled = true;
+        channel
+            .push_devices
+            .push(crate::models::notification_channel::DeviceToken {
+                device_id: "existing-device".to_string(),
+                platform: "fcm".to_string(),
+                token: "existing-token".to_string(),
+                device_name: None,
+                app_id: None,
+                registered_at: chrono::Utc::now(),
+                last_used_at: None,
+            });
+
+        let outcome = telegram_link_outcome(&channel);
+
+        assert_eq!(outcome.message, TELEGRAM_LINKED_APPROVAL_ACTIVE_MESSAGE);
+        assert!(!outcome.approval_resumed);
     }
 }

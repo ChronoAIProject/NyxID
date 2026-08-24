@@ -47,6 +47,7 @@ pub(crate) async fn approval_target_for_tool(
         .unwrap_or_else(|| proxy_service::ApprovalResolutionHint {
             service_id: downstream_service_id.clone(),
             service_owner_id: effective_approval_owner_user_id.to_string(),
+            is_auto_connected: false,
         }),
     };
 
@@ -206,6 +207,7 @@ mod tests {
                     &target.service_owner_user_id,
                     &target.service_id,
                     &operation,
+                    target.is_auto_connected,
                 )
                 .await
                 .unwrap(),
