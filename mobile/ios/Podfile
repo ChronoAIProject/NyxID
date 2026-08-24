@@ -67,5 +67,48 @@ target 'NyxIDMobile' do
       :mac_catalyst_enabled => false,
       :ccache_enabled => ccache_enabled?(podfile_properties),
     )
+
+    # expo-constants' podspec breaks on spaced paths in both its `bash -l -c`
+    # invocation and get-app-config-ios.sh's unquoted basename. Keep this inline
+    # replacement in sync with upstream whenever expo-constants is upgraded.
+    ex_constants_target = installer.pods_project.targets.find { |target| target.name == 'EXConstants' }
+    raise 'EXConstants target missing; re-check the spaced-path app.config workaround' unless ex_constants_target
+
+    app_config_phase = ex_constants_target.shell_script_build_phases.find do |phase|
+      phase.name&.include?('Generate app.config')
+    end
+    raise 'EXConstants app.config phase missing; re-check the spaced-path workaround' unless app_config_phase
+
+    app_config_phase.shell_script = <<~'SCRIPT'
+      set -eo pipefail
+
+      case "$(basename "$PROJECT_DIR")" in
+        Pods) ;;
+        *) exit 0 ;;
+      esac
+
+      PROJECT_ROOT="${PROJECT_ROOT:-$PROJECT_DIR/../..}"
+      cd "$PROJECT_ROOT"
+
+      RESOURCE_BUNDLE_NAME="EXConstants.bundle"
+      case "$BUNDLE_FORMAT" in
+        shallow)
+          RESOURCE_DEST="$CONFIGURATION_BUILD_DIR/$RESOURCE_BUNDLE_NAME"
+          ;;
+        deep)
+          RESOURCE_DEST="$CONFIGURATION_BUILD_DIR/$RESOURCE_BUNDLE_NAME/Contents/Resources"
+          mkdir -p "$RESOURCE_DEST"
+          ;;
+        *)
+          echo "Unsupported bundle format: $BUNDLE_FORMAT"
+          exit 1
+          ;;
+      esac
+
+      "$PODS_TARGET_SRCROOT/../scripts/with-node.sh" \
+        "$PODS_TARGET_SRCROOT/../scripts/getAppConfig.js" \
+        "$PROJECT_ROOT" \
+        "$RESOURCE_DEST"
+    SCRIPT
   end
 end
