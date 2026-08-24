@@ -22,6 +22,7 @@ use crate::services::{assistant_service, proxy_service};
 pub const X_SEARCH_HARD_MAX_RESULTS: u32 = 25;
 pub const SPEAK_HARD_MAX_CHARS: u32 = 5_000;
 pub const CALL_AND_SAY_HARD_MAX_MESSAGE_CHARS: u32 = 1_000;
+pub const MCP_SPEAK_HARD_MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 const MAX_VENDOR_JSON_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
 pub const X_SEARCH_VENDOR_SLUG: &str = "platform-x";
@@ -481,6 +482,31 @@ pub async fn list_configured_operations(
         .map_err(AppError::DatabaseError)
 }
 
+pub async fn list_enabled_operations(db: &mongodb::Database) -> AppResult<Vec<PlatformOperation>> {
+    let configured = list_configured_operations(db).await?;
+    Ok(configured
+        .into_iter()
+        .filter(|operation| {
+            if !operation.enabled {
+                return false;
+            }
+            if let Err(error) = validate_operation_config(
+                operation.op,
+                &operation.vendor_service_slug,
+                &operation.config,
+            ) {
+                tracing::error!(
+                    op = operation_name(operation.op),
+                    error = %error,
+                    "Omitting invalid enabled platform operation from discovery"
+                );
+                return false;
+            }
+            true
+        })
+        .collect())
+}
+
 pub async fn upsert_operation(
     db: &mongodb::Database,
     op: PlatformOperationName,
@@ -593,6 +619,30 @@ pub async fn execute_speak(
     ensure_vendor_success(PlatformOperationName::Speak, &response)?;
 
     Ok(SpeakVendorResponse { response })
+}
+
+pub async fn collect_speak_audio(vendor: SpeakVendorResponse) -> AppResult<Vec<u8>> {
+    if vendor
+        .response
+        .content_length()
+        .is_some_and(|length| length > MCP_SPEAK_HARD_MAX_AUDIO_BYTES as u64)
+    {
+        tracing::error!("Platform speak response exceeded the MCP audio response limit");
+        return Err(AppError::PlatformOperationUnavailable);
+    }
+
+    let mut audio = Vec::new();
+    let mut stream = vendor.response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|error| vendor_request_failed(PlatformOperationName::Speak, error))?;
+        if audio.len().saturating_add(chunk.len()) > MCP_SPEAK_HARD_MAX_AUDIO_BYTES {
+            tracing::error!("Platform speak response exceeded the MCP audio response limit");
+            return Err(AppError::PlatformOperationUnavailable);
+        }
+        audio.extend_from_slice(&chunk);
+    }
+    Ok(audio)
 }
 
 pub async fn execute_call_and_say(
@@ -869,6 +919,60 @@ mod tests {
             account_sid: format!("AC{}", "1".repeat(32)),
             call_from: "+16505550100".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn enabled_operation_listing_omits_disabled_and_invalid_rows() {
+        let Some(db) = crate::test_utils::connect_test_database("platform_ops_enabled_list").await
+        else {
+            eprintln!("skipping platform operation listing test: no local MongoDB available");
+            return;
+        };
+        let now = Utc::now();
+        let rows = [
+            PlatformOperation {
+                id: uuid::Uuid::new_v4().to_string(),
+                op: PlatformOperationName::XSearch,
+                enabled: true,
+                vendor_service_slug: X_SEARCH_VENDOR_SLUG.to_string(),
+                config: PlatformOperationConfig::XSearch(XSearchConfig {
+                    max_results_cap: 10,
+                }),
+                updated_at: now,
+                updated_by: "admin-user".to_string(),
+            },
+            PlatformOperation {
+                id: uuid::Uuid::new_v4().to_string(),
+                op: PlatformOperationName::Speak,
+                enabled: false,
+                vendor_service_slug: SPEAK_VENDOR_SLUG.to_string(),
+                config: PlatformOperationConfig::Speak(speak_config()),
+                updated_at: now,
+                updated_by: "admin-user".to_string(),
+            },
+            PlatformOperation {
+                id: uuid::Uuid::new_v4().to_string(),
+                op: PlatformOperationName::CallAndSay,
+                enabled: true,
+                vendor_service_slug: CALL_AND_SAY_VENDOR_SLUG.to_string(),
+                config: PlatformOperationConfig::CallAndSay(CallAndSayConfig {
+                    max_message_chars: CALL_AND_SAY_HARD_MAX_MESSAGE_CHARS + 1,
+                    ..call_config(vec!["+65".to_string()])
+                }),
+                updated_at: now,
+                updated_by: "admin-user".to_string(),
+            },
+        ];
+        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+            .insert_many(rows)
+            .await
+            .expect("insert platform operation rows");
+
+        let enabled = list_enabled_operations(&db)
+            .await
+            .expect("list enabled operations");
+        assert_eq!(enabled.len(), 1);
+        assert_eq!(enabled[0].op, PlatformOperationName::XSearch);
     }
 
     #[test]
