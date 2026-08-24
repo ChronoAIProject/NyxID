@@ -277,7 +277,11 @@ vi.mock("@/components/assistant/direct-chat-controls", () => ({
   DirectChatControls: () => <div>Direct model controls</div>,
 }));
 
-import { AssistantPage } from "./assistant";
+vi.mock("@/components/assistant/assistant-http-fixture-page", () => ({
+  AssistantHttpFixturePage: () => <div>HTTP fixture assistant page</div>,
+}));
+
+import { AssistantPage, LegacyAssistantPage } from "./assistant";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -323,6 +327,16 @@ function userTranscriptMessage(id: string, text: string) {
 }
 
 function page() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <LegacyAssistantPage />
+      </TooltipProvider>
+    </QueryClientProvider>
+  );
+}
+
+function routedPage() {
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
@@ -376,6 +390,14 @@ beforeEach(() => {
     lastScreen: null,
   });
   useAssistantDraftStore.setState({ ownerUserId: user.id, drafts: {} });
+});
+
+describe("AssistantPage pipeline routing", () => {
+  it("routes test-mode chat through the HTTP fixture pipeline", async () => {
+    render(routedPage());
+
+    expect(await screen.findByText("HTTP fixture assistant page")).toBeVisible();
+  });
 });
 
 describe("AssistantPage direct mode", () => {

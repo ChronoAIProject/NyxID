@@ -2931,12 +2931,12 @@ describe("captured production wire shapes", () => {
   // Both shapes must map to the identical transcript, and the wrapper must
   // not be confused with a body that merely happens to be an object.
   it("maps the PR #2923 wrapped transcript identically to the legacy array", async () => {
-    stubFetch(routeHistory({ messages: capturedHistory, stateVersion: 7 }));
+    stubFetch(routeHistory(capturedHistory));
     const transport = new AevatarAssistantTransport();
 
     const wrapped = await transport.getHistory(CONVERSATION_ID);
 
-    stubFetch(routeHistory(capturedHistory));
+    stubFetch(routeHistory(capturedHistory.messages));
     const legacy = await new AevatarAssistantTransport().getHistory(
       CONVERSATION_ID,
     );

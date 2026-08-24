@@ -1,4 +1,12 @@
-import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
@@ -13,6 +21,14 @@ import { markChatActivity } from "@/lib/assistant/connect-watch";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation } from "@/types/assistant";
+
+const MockScenariosAction = import.meta.env.DEV
+  ? lazy(() =>
+      import("@/components/assistant/mock-scenarios-action").then((module) => ({
+        default: module.MockScenariosAction,
+      })),
+    )
+  : null;
 
 function sidebarConversation(
   conversation: ReturnType<
@@ -42,6 +58,11 @@ export function AssistantChatPage() {
       parseAssistantSearch(state.location.search as Record<string, unknown>)
         .draft === true,
   });
+  const fixtureMode = Boolean(
+    import.meta.env.DEV &&
+      typeof window !== "undefined" &&
+      new URLSearchParams(window.location.search).get("mock") === "1",
+  );
   const selectedId = drafting ? undefined : selectedConversationId;
   const composerRef = useRef<HTMLDivElement>(null);
   const [composerHeight, setComposerHeight] = useState(0);
@@ -51,19 +72,22 @@ export function AssistantChatPage() {
     (conversationId: string) => {
       void navigate({
         to: "/assistant" as never,
-        search: { c: conversationId } as never,
+        search: {
+          c: conversationId,
+          ...(fixtureMode ? { mock: 1 } : {}),
+        } as never,
         replace: true,
       });
     },
-    [navigate],
+    [fixtureMode, navigate],
   );
   const repairMissingConversation = useCallback(() => {
     void navigate({
       to: "/assistant" as never,
-      search: {} as never,
+      search: (fixtureMode ? { mock: 1 } : {}) as never,
       replace: true,
     });
-  }, [navigate]);
+  }, [fixtureMode, navigate]);
   const chat = useAssistantChat({
     selectedConversationId: selectedId,
     onConversationAdopted: adoptConversation,
@@ -101,7 +125,10 @@ export function AssistantChatPage() {
     setComposerFocusRequest((value) => value + 1);
     void navigate({
       to: "/assistant" as never,
-      search: { c: conversationId } as never,
+      search: {
+        c: conversationId,
+        ...(fixtureMode ? { mock: 1 } : {}),
+      } as never,
     });
   }
 
@@ -110,7 +137,10 @@ export function AssistantChatPage() {
     chat.newChat();
     void navigate({
       to: "/assistant" as never,
-      search: { draft: true } as never,
+      search: {
+        draft: true,
+        ...(fixtureMode ? { mock: 1 } : {}),
+      } as never,
     });
   }
 
@@ -119,7 +149,10 @@ export function AssistantChatPage() {
     try {
       await chat.deleteConversation(conversationId);
       if (selectedId === conversationId) {
-        void navigate({ to: "/assistant" as never, search: {} as never });
+        void navigate({
+          to: "/assistant" as never,
+          search: (fixtureMode ? { mock: 1 } : {}) as never,
+        });
       }
     } catch (error) {
       toast.error("Could not delete the chat", {
@@ -192,9 +225,16 @@ export function AssistantChatPage() {
       title={title}
       sidebar={sidebar}
       headerActions={
-        <AssistantWireLogAction
-          activeConversationId={chat.session?.conversationId ?? null}
-        />
+        <>
+          {MockScenariosAction ? (
+            <Suspense fallback={null}>
+              <MockScenariosAction />
+            </Suspense>
+          ) : null}
+          <AssistantWireLogAction
+            activeConversationId={chat.session?.conversationId ?? null}
+          />
+        </>
       }
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">

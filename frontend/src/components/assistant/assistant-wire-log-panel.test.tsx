@@ -541,7 +541,7 @@ describe("AssistantWireLogPanel", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders text and inert original-frame placeholders without side effects", () => {
+  it("renders text and inert actor diagnostics without side effects", () => {
     const exchangeId = recordPanelExchange([responseEnvelope()]);
     if (!exchangeId) throw new Error("expected exchange");
     const connectFrame = {
@@ -617,9 +617,9 @@ describe("AssistantWireLogPanel", () => {
     expect(renderedTab).toHaveAttribute("aria-selected", "true");
     expect(screen.getByText("markdown").tagName).toBe("STRONG");
     expect(
-      screen.getByLabelText("Connection card not replayed"),
+      screen.getByRole("region", { name: "Actor facts (diagnostic only)" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Original source frame JSON")).toBeInTheDocument();
+    expect(screen.getByText("Diagnostic only")).toBeInTheDocument();
     expect(screen.getByText(/NYXID_SERVICE_NOT_CONNECTED/)).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /connect github/i }),

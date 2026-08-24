@@ -77,23 +77,21 @@ A newly sent user message always restores tail following so the optimistic echo 
 
 Completed, blocked, failed, and cancelled turns stop thinking and streaming treatment. Open text and run activity are finalized according to the terminal. A blocked turn keeps its recovery card visible. A cancelled turn reflects the user's Stop action and does not show the empty-turn error solely because no assistant text arrived.
 
-### Empty terminal
+### Empty-terminal detection
 
-If a noncancelled turn closes without printable content, and no transcript projection is still in flight, the UI waits 700 milliseconds before rendering:
+If a noncancelled turn closes without printable content, and no transcript projection is still in flight, the UI waits 700 milliseconds before rendering a detection-only marker:
 
 ```html
-<p role="alert" data-empty-turn-error>
-  Sorry, there seems to be an error with the request for now.
-</p>
+<span data-empty-turn-error class="sr-only" aria-hidden="true"></span>
 ```
 
-The grace period is longer than the 500-millisecond thinking exit and protects against status and transcript events arriving in opposite orders. A fresh episode resets the timer in render state, so an old settled flag cannot leak into a new turn.
+The marker is observable by tests and diagnostics but is not a visible alert and is hidden from the accessibility tree. Production evidence shows that a content-free terminal can be legitimate, and the console does not present a "didn't reply" alert. The grace period protects against status and transcript events arriving in opposite orders. A fresh episode resets the timer in render state, so an old settled flag cannot leak into a new turn.
 
 `turnPrinted` from the current stream episode is authoritative when available. After reload, the visible assistant tail is the fallback evidence. Earlier content in an approval continuation cannot be mistaken for content printed by the new episode.
 
 ### Transcript settling
 
-An active transcript fetch or projection deadline suppresses the empty-turn error. A terminal can arrive before its history/query projection; the UI keeps the thread coherent until the pump reports whether the episode printed and projection either lands or completes.
+An active transcript fetch or projection deadline suppresses empty-terminal detection. A terminal can arrive before its history/query projection; the UI keeps the thread coherent until the pump reports whether the episode printed and projection either lands or completes.
 
 ## Stable semantic markers
 
@@ -103,7 +101,7 @@ The browser suite intentionally asserts three markers rather than CSS implementa
 | --- | --- |
 | `[data-assistant-halo]` | active thinking identity treatment, decorative inside a named status |
 | `[data-streaming-dots]` | answer pending at the future content position |
-| `[data-empty-turn-error]` | closed noncancelled episode with no printable content |
+| `[data-empty-turn-error]` | hidden detection marker for a closed noncancelled episode with no printable content |
 
 These attributes are part of the testing contract. They can move with equivalent markup but must not be removed without updating both component tests and Playwright helpers.
 
@@ -268,7 +266,7 @@ The page must not render incoherent overlaps or empty gaps during state handoff.
 - thinking begins before a transcript query identity exists;
 - dots occupy the future answer slot;
 - leaving loaders exit out of layout;
-- empty-turn error waits for projection and exit animation;
+- empty-terminal detection waits for projection and exit animation;
 - loading detail does not show the empty-chat prompt;
 - active streams preserve local transcripts while list metadata refreshes;
 - scroll following respects deliberate reader position; and

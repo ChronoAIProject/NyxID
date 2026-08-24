@@ -33,7 +33,9 @@ test.describe("explicit conversation repair", () => {
       page.locator("header").getByText("New chat", { exact: true }),
     ).toBeVisible({ timeout: 5_000 });
     await expect(
-      thread(page).getByText("Start a new conversation"),
+      thread(page).getByText(
+        "Ask NyxID to help with services, access, and account operations.",
+      ),
     ).toBeVisible();
     expect(new URL(page.url()).searchParams.has("c")).toBe(false);
   });
@@ -80,7 +82,9 @@ test.describe("NYX-1: a turn that never starts reaches a deadline", () => {
     await expect(composerInput(page)).toBeEnabled();
   });
 
-  test("a rejected retry cannot erase the live episode", async ({ page }) => {
+  test("the composer stays locked until the silent live episode settles", async ({
+    page,
+  }) => {
     await openAssistant(page, {
       conversation: "conversation-github",
       faults: { sendSilent: true },
@@ -91,18 +95,12 @@ test.describe("NYX-1: a turn that never starts reaches a deadline", () => {
       timeout: 3_000,
     });
 
-    await sendMessage(page, "Hello? Are you still there?");
-    await expect(
-      page.getByText("Message not sent", { exact: false }).first(),
-    ).toBeVisible({ timeout: 5_000 });
     await expect(streamingDots(page).first()).toBeVisible({ timeout: 5_000 });
     await expect(emptyTurnError(page)).toHaveCount(0);
-    await expect(stopButton(page)).toHaveCount(0);
-    // The rejected text is restored so the reader can retry it once the
-    // hanging turn reaches its deadline, rather than losing what they typed.
-    await expect(composerInput(page)).toHaveValue(
-      "Hello? Are you still there?",
-    );
+    await expect(stopButton(page)).toBeVisible();
+    await expect(composerInput(page)).toBeDisabled();
+    await expect(emptyTurnError(page)).toBeVisible({ timeout: 10_000 });
+    await expect(composerInput(page)).toBeEnabled();
   });
 
   test("desired: a stream that never starts surfaces a way out within 10 s", async ({
@@ -187,13 +185,12 @@ test.describe("NYX-5: approval episode cleanup", () => {
     ).toBeVisible();
 
     await thread(page)
-      .getByRole("button", { name: "Approve and send" })
+      .getByRole("button", { name: "Approve", exact: true })
       .click();
 
-    // The decision lands on screen — this part works.
     await expect(
-      thread(page).getByText("Approved", { exact: false }).first(),
-    ).toBeVisible({ timeout: 5_000 });
+      thread(page).getByRole("button", { name: "Approve", exact: true }),
+    ).toHaveCount(0, { timeout: 5_000 });
 
     await page.waitForTimeout(2_000);
     const episode = await readEpisode(page, "conversation-stripe");
@@ -213,11 +210,11 @@ test.describe("NYX-5: approval episode cleanup", () => {
   }) => {
     await openAssistant(page, { conversation: "conversation-stripe" });
     await thread(page)
-      .getByRole("button", { name: "Approve and send" })
+      .getByRole("button", { name: "Approve", exact: true })
       .click();
     await expect(
-      thread(page).getByText("Approved", { exact: false }).first(),
-    ).toBeVisible({ timeout: 5_000 });
+      thread(page).getByRole("button", { name: "Approve", exact: true }),
+    ).toHaveCount(0, { timeout: 5_000 });
 
     await page.waitForTimeout(2_000);
     const episode = await readEpisode(page, "conversation-stripe");

@@ -17,6 +17,12 @@ describe("parseAssistantSearch", () => {
     expect(parseAssistantSearch({ draft: "true" })).toEqual({ draft: true });
   });
 
+  it("preserves only the dev HTTP fixture marker", () => {
+    expect(parseAssistantSearch({ mock: "1" })).toEqual({ mock: 1 });
+    expect(parseAssistantSearch({ mock: 1 })).toEqual({ mock: 1 });
+    expect(parseAssistantSearch({ mock: "true" })).toEqual({});
+  });
+
   it("drops junk rather than letting it reach the page", () => {
     expect(parseAssistantSearch({ c: 42, draft: "yes", other: "x" })).toEqual(
       {},
@@ -80,5 +86,25 @@ describe("/assistant search round-trip through a real router", () => {
     );
     expect(search.c).toBe("conv-new");
     expect(search.draft).toBeUndefined();
+  });
+
+  it("round-trips the numeric mock marker without quoting it", async () => {
+    const router = buildAssistantRouter("/assistant?mock=1");
+    await router.load();
+
+    await router.navigate({
+      to: "/assistant",
+      search: { c: "nyxid-chat-mock-1", mock: 1 },
+      replace: true,
+    });
+    await router.invalidate();
+
+    expect(router.state.location.searchStr).toContain("mock=1");
+    expect(router.state.location.searchStr).not.toContain("%22");
+    expect(
+      parseAssistantSearch(
+        router.state.location.search as Record<string, unknown>,
+      ),
+    ).toEqual({ c: "nyxid-chat-mock-1", mock: 1 });
   });
 });

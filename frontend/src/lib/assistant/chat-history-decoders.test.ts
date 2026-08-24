@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import capturedHistory from "@/lib/assistant/__fixtures__/aevatar-chat-history.json";
+import { hydrateStoredMessages } from "@/lib/assistant/chat-session-state";
 
 import {
   ChatHistoryApiError,
@@ -141,6 +143,17 @@ describe("chat history decoders", () => {
         stateVersion: 0,
       }),
     ).toEqual({ messages: [], projectionStatus: "pending", stateVersion: 0 });
+  });
+
+  it("hydrates a stored completed message as settled from the wrapped capture", () => {
+    const detail = decodeChatConversationDetail(capturedHistory);
+
+    expect(detail.projectionStatus).toBe("current");
+    expect(hydrateStoredMessages(detail.messages)[1]).toMatchObject({
+      content: "Blue is a color.  \nGreen is a color.",
+      role: "assistant",
+      status: "complete",
+    });
   });
 
   it("rejects malformed successful index rows and transcripts with paths", () => {

@@ -80,6 +80,14 @@ const MockScenariosAction = import.meta.env.DEV
     )
   : null;
 
+const AssistantHttpFixturePage = import.meta.env.DEV
+  ? lazy(() =>
+      import("@/components/assistant/assistant-http-fixture-page").then(
+        (module) => ({ default: module.AssistantHttpFixturePage }),
+      ),
+    )
+  : null;
+
 type ScenarioActionComponent =
   | ComponentType
   | LazyExoticComponent<ComponentType>;
@@ -179,8 +187,17 @@ export function AssistantPage({
   });
   if (
     view === "chat" &&
-    import.meta.env.MODE !== "test" &&
-    transportKind !== "mock" &&
+    AssistantHttpFixturePage &&
+    (import.meta.env.MODE === "test" || transportKind === "mock")
+  ) {
+    return (
+      <Suspense fallback={null}>
+        <AssistantHttpFixturePage />
+      </Suspense>
+    );
+  }
+  if (
+    view === "chat" &&
     !directChatFlagEnabled
   ) {
     return <AssistantChatPage />;
@@ -188,7 +205,7 @@ export function AssistantPage({
   return <LegacyAssistantPage view={view} />;
 }
 
-function LegacyAssistantPage({
+export function LegacyAssistantPage({
   view = "chat",
 }: {
   readonly view?: "chat" | "plugins" | "approvals";
