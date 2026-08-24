@@ -72,10 +72,13 @@ fn key_create_params_schema_pre_least_scope() -> Value {
     })
 }
 
+/// The `(param name, schema factory)` table for a single revision.
+type ParamsSchemaOverrides = &'static [(&'static str, fn() -> Value)];
+
 /// Per-revision `params_schema` overrides. Absence means "use the current
 /// live descriptor". A future schema split is a new row here, not a new
 /// branch in `compose_revision_manifest`.
-const PARAMS_SCHEMA_OVERRIDES_BY_REVISION: &[(&str, &[(&str, fn() -> Value)])] = &[(
+const PARAMS_SCHEMA_OVERRIDES_BY_REVISION: &[(&str, ParamsSchemaOverrides)] = &[(
     "nyxid-assistant-actions.v5",
     &[("key.create", key_create_params_schema_pre_least_scope)],
 )];
@@ -2873,7 +2876,7 @@ mod tests {
             );
             assert_eq!(
                 action_names(&manifest),
-                expected_names.iter().copied().collect::<Vec<_>>(),
+                expected_names.to_vec(),
                 "handler served the wrong action set for {revision}"
             );
             assert_ne!(

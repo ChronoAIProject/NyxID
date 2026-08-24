@@ -187,6 +187,7 @@ pub async fn update_endpoint(
 }
 
 /// Apply an endpoint update inside a caller-owned MongoDB transaction.
+#[allow(clippy::too_many_arguments)]
 pub async fn update_endpoint_in_session(
     db: &Database,
     session: &mut ClientSession,

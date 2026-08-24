@@ -1147,6 +1147,7 @@ async fn setup_account_mfa(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn set_approval_config(
     state: AppState,
     auth_user: AuthUser,

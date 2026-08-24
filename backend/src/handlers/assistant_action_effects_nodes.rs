@@ -1662,7 +1662,8 @@ mod tests {
             }
         }
 
-        let cases: [(&str, Value, &[(&str, Value)]); 8] = [
+        type NodeEffectCase<'a> = (&'a str, Value, &'a [(&'a str, Value)]);
+        let cases: [NodeEffectCase; 8] = [
             (
                 NODE_REGISTER_TOKEN_ACTION,
                 json!({

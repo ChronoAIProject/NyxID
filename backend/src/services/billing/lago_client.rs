@@ -289,7 +289,7 @@ fn existing_charge_for_plan_update(mut charge: Value) -> AppResult<Value> {
     let object = charge.as_object_mut().ok_or_else(|| {
         AppError::BillingProviderUnavailable("Lago plan returned a non-object charge".to_string())
     })?;
-    if !object.get("id").is_some_and(|value| !value.is_null()) {
+    if object.get("id").is_none_or(|value| value.is_null()) {
         let id = object
             .get("lago_id")
             .and_then(Value::as_str)

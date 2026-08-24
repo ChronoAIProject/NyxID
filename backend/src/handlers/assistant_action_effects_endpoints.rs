@@ -281,6 +281,7 @@ async fn resolve_endpoint_owner(
     Ok(endpoint.user_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn commit_endpoint_update(
     state: &AppState,
     auth_user: &AuthUser,
@@ -382,6 +383,7 @@ async fn commit_external_key_rotate(
     Ok(false)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn commit_external_key_delete(
     state: &AppState,
     actor: &str,
@@ -951,6 +953,7 @@ mod tests {
 
     fn fixture_external_key(key_id: &str, user_id: &str, label: &str) -> UserApiKey {
         UserApiKey {
+            credential_epoch: 1,
             credential_source: None,
             id: key_id.to_string(),
             user_id: user_id.to_string(),

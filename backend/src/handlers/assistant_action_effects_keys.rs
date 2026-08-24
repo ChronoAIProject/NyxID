@@ -913,6 +913,7 @@ mod tests {
 
     fn fixture_user_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            credential_epoch: 1,
             credential_source: None,
             id: id.to_string(),
             user_id: user_id.to_string(),
@@ -1280,14 +1281,13 @@ mod tests {
         assert!(allowed.contains(&extra_service.id.as_str()));
         assert!(!allowed.contains(&other_service_id.as_str()));
         assert_eq!(evidence["allow_all_services"], false);
-        assert_eq!(
-            db.collection::<ApiKey>(API_KEYS)
+        assert!(
+            !db.collection::<ApiKey>(API_KEYS)
                 .find_one(doc! { "_id": &key_id })
                 .await
                 .expect("load key")
                 .expect("key")
-                .allow_all_services,
-            false
+                .allow_all_services
         );
     }
 

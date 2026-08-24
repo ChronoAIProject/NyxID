@@ -750,6 +750,7 @@ async fn commit_service_rotate(
     Ok(false)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_update_in_session(
     db: &mongodb::Database,
     session: &mut mongodb::ClientSession,
@@ -1138,6 +1139,7 @@ mod tests {
 
     fn fixture_api_key(id: &str, user_id: &str) -> UserApiKey {
         UserApiKey {
+            credential_epoch: 1,
             credential_source: None,
             id: id.to_string(),
             user_id: user_id.to_string(),
@@ -1337,9 +1339,7 @@ mod tests {
         UserService,
         UserService,
     )> {
-        let Some((db, actor_id)) = prepare_actor(prefix).await else {
-            return None;
-        };
+        let (db, actor_id) = prepare_actor(prefix).await?;
         let encryption_keys = test_encryption_keys();
         let provider = grant_provider_for_test();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)

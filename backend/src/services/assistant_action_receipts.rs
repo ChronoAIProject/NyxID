@@ -307,8 +307,6 @@ mod tests {
         );
     }
 
-    use super::*;
-
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
     struct ExampleFingerprint<'a> {
