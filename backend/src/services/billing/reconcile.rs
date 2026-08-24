@@ -342,12 +342,15 @@ impl BillingReconciler {
     }
 }
 
-pub fn spawn_reconcile_worker(reconciler: BillingReconciler, interval_secs: u64) {
+pub fn spawn_reconcile_worker(
+    reconciler: BillingReconciler,
+    interval_secs: u64,
+) -> Option<tokio::task::JoinHandle<()>> {
     if interval_secs == 0 {
-        return;
+        return None;
     }
 
-    tokio::spawn(async move {
+    Some(tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // The first tick fires immediately so a fresh deploy has rate-cache
@@ -358,7 +361,7 @@ pub fn spawn_reconcile_worker(reconciler: BillingReconciler, interval_secs: u64)
                 tracing::warn!(error = %error, "Billing reconcile sweep failed");
             }
         }
-    });
+    }))
 }
 
 pub fn decide_lago_push(

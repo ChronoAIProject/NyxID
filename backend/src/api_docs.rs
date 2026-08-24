@@ -211,6 +211,8 @@
             crate::handlers::billing::TopUpResponse,
             crate::handlers::billing_credits::IssueGrantRequest,
             crate::handlers::billing_credits::IssueGrantResponse,
+            crate::handlers::billing_credits::IssueGrantRecipientResponse,
+            crate::handlers::billing_credits::CreditGrantActivationState,
             crate::handlers::billing_credits::CreditGrantResponse,
             crate::handlers::billing_credits::CreditGrantListResponse,
             crate::handlers::billing_credits::CreateAllowanceRequest,

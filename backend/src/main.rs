@@ -33,6 +33,9 @@ mod test_utils;
 #[cfg(test)]
 mod billing_integration_tests;
 
+#[cfg(test)]
+mod grant_visibility_tests;
+
 use std::sync::Arc;
 
 /// Install `aws_lc_rs` as the rustls process-wide crypto provider.
@@ -777,7 +780,7 @@ async fn main() {
     // Spawn the telemetry-erasure worker. No-op when `state.telemetry`
     // is `None` (hard-off mode); the function logs + returns.
     services::telemetry_erasure_service::spawn_worker(state.db.clone(), state.telemetry.clone());
-    services::billing::reconcile::spawn_reconcile_worker(
+    let _billing_reconcile_worker = services::billing::reconcile::spawn_reconcile_worker(
         state.billing.reconciler(),
         config.billing_reconcile_interval_secs,
     );
