@@ -1,8 +1,9 @@
 import { useRef, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { RefreshCw, ShieldAlert } from "lucide-react";
 import { z } from "zod";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
   DialogContent,
@@ -60,6 +61,7 @@ export function AssistantProviderDisconnectDialog({
   const submittingRef = useRef(false);
   const verifyingRef = useRef(false);
   const expectedVersionRef = useRef<number | null>(null);
+  const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [verified, setVerified] = useState(false);
@@ -71,6 +73,7 @@ export function AssistantProviderDisconnectDialog({
     submittingRef.current = false;
     verifyingRef.current = false;
     expectedVersionRef.current = null;
+    setConfirmed(false);
     setSubmitting(false);
     setVerifying(false);
     setVerified(false);
@@ -116,7 +119,7 @@ export function AssistantProviderDisconnectDialog({
   }
 
   async function submit() {
-    if (submittingRef.current || resultId) return;
+    if (submittingRef.current || resultId || !confirmed) return;
     submittingRef.current = true;
     setSubmitting(true);
     setError(null);
@@ -137,7 +140,7 @@ export function AssistantProviderDisconnectDialog({
           actionRequestId,
           providerId: expected.providerId,
           expectedStateVersion: expectedVersion,
-          confirmed: true,
+          confirmed,
         },
       );
       assertSecretFreeReadBack(rawResponse);
@@ -172,6 +175,16 @@ export function AssistantProviderDisconnectDialog({
                 {params.providerId}
               </Badge>
             </div>
+            <label className="flex items-start gap-2">
+              <Checkbox
+                checked={confirmed}
+                onCheckedChange={(value) => setConfirmed(value === true)}
+              />
+              <span className="flex items-start gap-1.5 text-destructive">
+                <ShieldAlert className="mt-0.5 size-3 shrink-0" />I understand
+                this revokes and clears the legacy provider token.
+              </span>
+            </label>
           </div>
         ) : null}
         {error ? <p role="alert" className="text-[11px] text-destructive">{error}</p> : null}
@@ -180,7 +193,7 @@ export function AssistantProviderDisconnectDialog({
           {!resultId ? (
             <>
               <Button type="button" variant="outline" onClick={close}>Cancel</Button>
-              <Button type="button" variant="destructive" isLoading={submitting} disabled={submitting} onClick={() => void submit()}>
+              <Button type="button" variant="destructive" isLoading={submitting} disabled={submitting || !confirmed} onClick={() => void submit()}>
                 Disconnect provider
               </Button>
             </>

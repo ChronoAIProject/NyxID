@@ -1,7 +1,9 @@
 use axum::{Json, Router, extract::State, routing::post};
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use utoipa::ToSchema;
+use zeroize::Zeroizing;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -137,12 +139,13 @@ async fn release_receipt(
     db.collection::<AssistantActionReceipt>(
         crate::models::assistant_action_receipt::COLLECTION_NAME,
     )
-    .delete_one(doc! { "_id": &receipt.id })
+    .delete_one(doc! { "_id": &receipt.id, "status": "pending" })
     .await?;
     Ok(())
 }
 
 fn validate_state_version(value: i64) -> AppResult<i64> {
+    // Zero is the canonical version for legacy rows without the field and for absent credentials.
     if value < 0 {
         return Err(AppError::ValidationError(
             "expectedStateVersion must be non-negative".to_string(),
@@ -204,7 +207,9 @@ async fn credentials_match(
     let Some(encrypted_client_id) = credentials.client_id_encrypted.as_deref() else {
         return Ok(false);
     };
-    if state.encryption_keys.decrypt(encrypted_client_id).await? != client_id.as_bytes() {
+    let decrypted_client_id =
+        Zeroizing::new(state.encryption_keys.decrypt(encrypted_client_id).await?);
+    if !bool::from(decrypted_client_id.as_slice().ct_eq(client_id.as_bytes())) {
         return Ok(false);
     }
     match (
@@ -213,7 +218,10 @@ async fn credentials_match(
     ) {
         (None, None) => Ok(true),
         (Some(encrypted), Some(expected)) => {
-            Ok(state.encryption_keys.decrypt(encrypted).await? == expected.as_bytes())
+            let decrypted_secret = Zeroizing::new(state.encryption_keys.decrypt(encrypted).await?);
+            Ok(bool::from(
+                decrypted_secret.as_slice().ct_eq(expected.as_bytes()),
+            ))
         }
         _ => Ok(false),
     }

@@ -55,9 +55,13 @@ describe("AssistantProviderDisconnectDialog", () => {
         onComplete={onComplete}
       />,
     );
-    await userEvent.click(
-      screen.getByRole("button", { name: "Disconnect provider" }),
-    );
+    const disconnectButton = screen.getByRole("button", {
+      name: "Disconnect provider",
+    });
+    expect(disconnectButton).toBeDisabled();
+    await userEvent.click(screen.getByRole("checkbox"));
+    expect(disconnectButton).toBeEnabled();
+    await userEvent.click(disconnectButton);
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
     expect(mockPost).toHaveBeenCalledWith(
       "/assistant/actions/providers/provider-disconnect",
@@ -94,6 +98,7 @@ describe("AssistantProviderDisconnectDialog", () => {
         onComplete={vi.fn()}
       />,
     );
+    await userEvent.click(screen.getByRole("checkbox"));
     await userEvent.click(
       screen.getByRole("button", { name: "Disconnect provider" }),
     );

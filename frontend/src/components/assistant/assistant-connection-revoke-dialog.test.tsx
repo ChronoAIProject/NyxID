@@ -57,9 +57,13 @@ describe("AssistantConnectionRevokeDialog", () => {
       />,
     );
 
-    await userEvent.click(
-      screen.getByRole("button", { name: "Revoke connection" }),
-    );
+    const revokeButton = screen.getByRole("button", {
+      name: "Revoke connection",
+    });
+    expect(revokeButton).toBeDisabled();
+    await userEvent.click(screen.getByRole("checkbox"));
+    expect(revokeButton).toBeEnabled();
+    await userEvent.click(revokeButton);
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
     expect(mockPost).toHaveBeenCalledWith(
       "/assistant/actions/providers/connection-revoke",
@@ -103,6 +107,7 @@ describe("AssistantConnectionRevokeDialog", () => {
         onComplete={vi.fn()}
       />,
     );
+    await userEvent.click(screen.getByRole("checkbox"));
     await userEvent.click(
       screen.getByRole("button", { name: "Revoke connection" }),
     );
