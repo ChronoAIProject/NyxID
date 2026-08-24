@@ -457,17 +457,26 @@ discovery, create, human decision, redeem.
    declared typed operations, with generic-proxy targets excluded. The response
    carries `catalog_digest` over the whole catalog, `exact_view_digest` over the
    sorted generic-free projection, and an `endpoint_contract_digest` per
-   operation.
+   operation. Version 3 also publishes the producer-owned
+   `operation_generation` for each operation.
 2. **Create** — the caller submits the operation it intends to run, echoing the
    digests from the discovery response. Every field is derivable from that
    response: `operation_digest` is `canonical_sha256` over the contract version,
    `user_service_id`, `endpoint_id`, `endpoint_contract_digest` and the caller's
-   arguments, so no second catalog read is needed.
+   arguments, so no second catalog read is needed. Delegated create must echo
+   the matching `operation_generation`; omission or drift fails closed.
 3. **Decision** — a human approves or denies using their own first-party
    session. The delegated bearer is never used for the decision and does not
    change across the journey.
 4. **Redeem** — the caller presents the fence it received at create, and the
    server revalidates it against the live catalog before any effect.
+
+Observe and redeem share the same live ordering: catalog and producer
+generation, approval policy, then a read-only execution-authority v2 snapshot.
+Observe is non-mutating and may recover after content-addressed A-to-B-to-A
+configuration. Redeem claims first, persists terminal revalidation failures,
+then materializes credentials and compares execution authority once more before
+dispatch.
 
 The digests fence two different things. `catalog_digest` and `exact_view_digest`
 bind what the caller was *shown*; `endpoint_contract_digest` and

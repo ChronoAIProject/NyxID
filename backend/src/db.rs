@@ -677,6 +677,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    backfill_service_endpoint_operation_generations(db).await?;
     endpoints
         .create_index(
             IndexModel::builder()
@@ -1005,6 +1006,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    ensure_exact_service_semantic_effect_index(&approval_requests).await?;
 
     // ── approval_grants ──
     let approval_grants = db.collection::<mongodb::bson::Document>("approval_grants");
@@ -2464,6 +2466,149 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     purge_legacy_channel_message_content(db).await?;
 
     Ok(())
+}
+
+pub(crate) async fn backfill_service_endpoint_operation_generations(
+    db: &Database,
+) -> Result<(), mongodb::error::Error> {
+    db.collection::<Document>("service_endpoints")
+        .update_many(
+            doc! { "operation_generation": { "$exists": false } },
+            doc! { "$set": { "operation_generation": 1 } },
+        )
+        .await?;
+    Ok(())
+}
+
+async fn ensure_exact_service_semantic_effect_index(
+    approval_requests: &mongodb::Collection<Document>,
+) -> Result<(), mongodb::error::Error> {
+    let expected_keys = doc! {
+        "requester_type": 1,
+        "requester_id": 1,
+        "exact_service.actor_user_id": 1,
+        "exact_service.endpoint_id": 1,
+        "exact_service.effect_idempotency_key": 1,
+    };
+    let expected_partial = doc! {
+        "exact_service.effect_idempotency_key": { "$type": "string" },
+    };
+    let existing_indexes: Vec<IndexModel> = approval_requests
+        .list_indexes()
+        .await?
+        .try_collect()
+        .await?;
+    let existing_named = existing_indexes.iter().find(|index| {
+        index
+            .options
+            .as_ref()
+            .and_then(|options| options.name.as_deref())
+            == Some("exact_service_semantic_effect_unique")
+    });
+    if existing_named.is_some_and(|index| {
+        index.keys == expected_keys
+            && index.options.as_ref().is_some_and(|options| {
+                options.unique == Some(true)
+                    && options.partial_filter_expression.as_ref() == Some(&expected_partial)
+            })
+    }) {
+        return Ok(());
+    }
+
+    let duplicate_cursor = approval_requests
+        .aggregate(vec![
+            doc! {
+                "$match": {
+                    "exact_service.effect_idempotency_key": { "$type": "string" },
+                },
+            },
+            doc! {
+                "$group": {
+                    "_id": {
+                        "requester_type": "$requester_type",
+                        "requester_id": "$requester_id",
+                        "actor_user_id": "$exact_service.actor_user_id",
+                        "endpoint_id": "$exact_service.endpoint_id",
+                        "effect_idempotency_key": "$exact_service.effect_idempotency_key",
+                    },
+                    "sample_request_id": { "$first": "$_id" },
+                    "count": { "$sum": 1 },
+                },
+            },
+            doc! { "$match": { "count": { "$gt": 1 } } },
+            doc! {
+                "$project": {
+                    "_id": 0,
+                    "sample_request_id": 1,
+                    "count": 1,
+                },
+            },
+            doc! { "$limit": 10 },
+        ])
+        .await?;
+    let duplicate_groups: Vec<Document> = duplicate_cursor.try_collect().await?;
+    if !duplicate_groups.is_empty() {
+        tracing::error!(
+            duplicate_groups = duplicate_groups.len(),
+            samples = ?duplicate_groups,
+            "approval_requests contains duplicate exact-service semantic effect identities; \
+             refusing to create the mandatory unique index. Pause exact-approval creates, \
+             inspect every duplicate group (including terminal/redeemed effects), reconcile \
+             each group to one authoritative request through an audited migration, then restart. \
+             Do not blindly delete approval rows."
+        );
+        return Err(mongodb::error::Error::custom(
+            "approval_requests has duplicate exact-service semantic effect identities; \
+             see the startup diagnostic for audited remediation"
+                .to_string(),
+        ));
+    }
+
+    if existing_named.is_some() {
+        tracing::warn!(
+            "Replacing mismatched exact_service_semantic_effect_unique index after a green \
+             duplicate preflight; writes racing the rebuild remain guarded by the index-build \
+             duplicate-key failure path"
+        );
+        approval_requests
+            .drop_index("exact_service_semantic_effect_unique")
+            .await?;
+    }
+
+    let semantic_effect_unique = IndexModel::builder()
+        .keys(expected_keys)
+        .options(
+            IndexOptions::builder()
+                .name("exact_service_semantic_effect_unique".to_string())
+                .unique(true)
+                .partial_filter_expression(expected_partial)
+                .build(),
+        )
+        .build();
+    match approval_requests.create_index(semantic_effect_unique).await {
+        Ok(_) => {
+            // This non-unique rollout index is redundant once the semantic
+            // identity is enforced atomically. It may not exist on older DBs.
+            let _ = approval_requests
+                .drop_index("exact_service_legacy_replay_lookup")
+                .await;
+            Ok(())
+        }
+        Err(error) if is_duplicate_key_error_including_commands(&error) => {
+            tracing::error!(
+                error = %error,
+                "A concurrent exact-approval write introduced duplicate semantic effect \
+                 identities while the unique index was being built. Pause exact-approval \
+                 creates, run the documented duplicate-group aggregation, reconcile each \
+                 group through an audited migration, and restart. No non-unique fallback \
+                 index will be installed."
+            );
+            Err(mongodb::error::Error::custom(format!(
+                "exact-service semantic effect unique-index build raced with a duplicate write: {error}"
+            )))
+        }
+        Err(error) => Err(error),
+    }
 }
 
 async fn ensure_billing_ledger_dedupe_index(
@@ -4110,6 +4255,176 @@ mod tests {
         ensure_indexes(&db)
             .await
             .expect("ensure_indexes should be idempotent on second call");
+
+        let approval_indexes: Vec<IndexModel> = db
+            .collection::<Document>("approval_requests")
+            .list_indexes()
+            .await
+            .expect("list approval indexes")
+            .try_collect()
+            .await
+            .expect("collect approval indexes");
+        let semantic_effect = approval_indexes
+            .iter()
+            .find(|index| {
+                index
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.name.as_deref())
+                    == Some("exact_service_semantic_effect_unique")
+            })
+            .expect("semantic effect unique index");
+        assert_eq!(
+            semantic_effect.keys,
+            doc! {
+                "requester_type": 1,
+                "requester_id": 1,
+                "exact_service.actor_user_id": 1,
+                "exact_service.endpoint_id": 1,
+                "exact_service.effect_idempotency_key": 1,
+            }
+        );
+        let semantic_effect_options = semantic_effect.options.as_ref().unwrap();
+        assert_eq!(semantic_effect_options.unique, Some(true));
+        assert_eq!(
+            semantic_effect_options.partial_filter_expression.as_ref(),
+            Some(&doc! {
+                "exact_service.effect_idempotency_key": { "$type": "string" },
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_service_semantic_effect_index_refuses_duplicates_with_remediation() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("db_exact_semantic_duplicates").await
+        else {
+            return;
+        };
+        let approval_requests = db.collection::<Document>("approval_requests");
+        approval_requests
+            .insert_many([
+                doc! {
+                    "_id": "request-old",
+                    "requester_type": "delegated",
+                    "requester_id": "client-alpha",
+                    "exact_service": {
+                        "request_key": "old-caller-generation-key",
+                        "actor_user_id": "user-alpha",
+                        "endpoint_id": "endpoint-alpha",
+                        "operation_id": "operation-alpha",
+                        "operation_generation": 2,
+                        "producer_generation_bound": false,
+                        "effect_idempotency_key": "effect-alpha",
+                    },
+                },
+                doc! {
+                    "_id": "request-new",
+                    "requester_type": "delegated",
+                    "requester_id": "client-alpha",
+                    "exact_service": {
+                        "request_key": "new-producer-generation-key",
+                        "actor_user_id": "user-alpha",
+                        "endpoint_id": "endpoint-alpha",
+                        "operation_id": "operation-alpha",
+                        "operation_generation": 3,
+                        "producer_generation_bound": true,
+                        "effect_idempotency_key": "effect-alpha",
+                    },
+                },
+            ])
+            .await
+            .expect("insert duplicate semantic effect fixtures");
+
+        let error = ensure_exact_service_semantic_effect_index(&approval_requests)
+            .await
+            .expect_err("duplicate semantic effects must block the unique-index rollout");
+        let message = error.to_string();
+        assert!(
+            message.contains("duplicate exact-service semantic effect identities"),
+            "unexpected rollout diagnostic: {message}"
+        );
+        assert!(
+            message.contains("startup diagnostic"),
+            "unexpected rollout diagnostic: {message}"
+        );
+        let indexes: Vec<IndexModel> = approval_requests
+            .list_indexes()
+            .await
+            .expect("list indexes after refused rollout")
+            .try_collect()
+            .await
+            .expect("collect indexes after refused rollout");
+        assert!(indexes.iter().all(|index| {
+            index
+                .options
+                .as_ref()
+                .and_then(|options| options.name.as_deref())
+                != Some("exact_service_semantic_effect_unique")
+        }));
+    }
+
+    #[tokio::test]
+    async fn operation_generation_backfill_only_ratifies_missing_legacy_rows() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("db_operation_generation_backfill").await
+        else {
+            return;
+        };
+        let endpoints = db.collection::<Document>("service_endpoints");
+        endpoints
+            .insert_many([
+                doc! { "_id": "missing", "service_id": "service" },
+                doc! { "_id": "zero", "service_id": "service", "operation_generation": 0 },
+                doc! { "_id": "negative", "service_id": "service", "operation_generation": -7 },
+                doc! { "_id": "positive", "service_id": "service", "operation_generation": 9 },
+            ])
+            .await
+            .expect("insert generation backfill fixtures");
+
+        backfill_service_endpoint_operation_generations(&db)
+            .await
+            .expect("run operation generation backfill");
+        let first: Vec<Document> = endpoints
+            .find(doc! {})
+            .sort(doc! { "_id": 1 })
+            .await
+            .expect("load first backfill result")
+            .try_collect()
+            .await
+            .expect("collect first backfill result");
+        assert_eq!(
+            first
+                .iter()
+                .map(|row| {
+                    let generation = match row.get("operation_generation").unwrap() {
+                        mongodb::bson::Bson::Int32(value) => i64::from(*value),
+                        mongodb::bson::Bson::Int64(value) => *value,
+                        other => panic!("unexpected generation BSON: {other:?}"),
+                    };
+                    (row.get_str("_id").unwrap(), generation)
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                ("missing", 1),
+                ("negative", -7),
+                ("positive", 9),
+                ("zero", 0)
+            ]
+        );
+
+        backfill_service_endpoint_operation_generations(&db)
+            .await
+            .expect("repeat operation generation backfill");
+        let second: Vec<Document> = endpoints
+            .find(doc! {})
+            .sort(doc! { "_id": 1 })
+            .await
+            .expect("load repeated backfill result")
+            .try_collect()
+            .await
+            .expect("collect repeated backfill result");
+        assert_eq!(second, first, "the second backfill must be a no-op");
     }
 
     #[tokio::test]

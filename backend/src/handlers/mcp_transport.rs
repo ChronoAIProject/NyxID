@@ -3538,6 +3538,7 @@ mod tests {
                 risk: None,
                 supports_idempotency_key: false,
                 is_active: true,
+                operation_generation: 1,
                 created_at: now,
                 updated_at: now,
             })
@@ -3560,6 +3561,7 @@ mod tests {
                 risk: None,
                 supports_idempotency_key: false,
                 is_active: true,
+                operation_generation: 1,
                 created_at: now,
                 updated_at: now,
             })
