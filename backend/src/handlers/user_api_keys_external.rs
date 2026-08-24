@@ -18,20 +18,19 @@ use crate::services::{
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 /// Look up the external API key without an ownership filter and check
-/// whether the actor may modify it (directly or as an org admin).
-/// Returns the effective owner_id (which may be an org user_id) for
-/// downstream service calls.
+/// whether the actor may read it (directly or as an org member). Unauthorized
+/// access is not-found-shaped so existence is not leaked.
 ///
 /// `OrgMembership.allowed_service_ids` lives in the `UserService.id`
 /// space, so we translate by looking up every UserService that
 /// references this credential and gating on `allows_any_resource`. An
-/// orphan credential (referenced by zero services) is only writable by
+/// orphan credential (referenced by zero services) is only readable by
 /// Direct owners or unscoped admins.
-async fn resolve_api_key_write_owner(
+async fn load_readable_api_key(
     state: &AppState,
     actor: &str,
     key_id: &str,
-) -> AppResult<String> {
+) -> AppResult<UserApiKey> {
     let key = state
         .db
         .collection::<UserApiKey>(USER_API_KEYS)
@@ -49,12 +48,37 @@ async fn resolve_api_key_write_owner(
     if !access.allows_any_resource(&backing_service_ids) {
         return Err(AppError::NotFound("API key not found".to_string()));
     }
+    Ok(key)
+}
+
+/// Look up the external API key without an ownership filter and check
+/// whether the actor may modify it (directly or as an org admin).
+/// Returns the key so action handlers can reject unsupported mutation modes
+/// before reserving an idempotency receipt.
+pub(crate) async fn resolve_api_key_write_target(
+    state: &AppState,
+    actor: &str,
+    key_id: &str,
+) -> AppResult<UserApiKey> {
+    let key = load_readable_api_key(state, actor, key_id).await?;
+    let access = org_service::resolve_owner_access(&state.db, actor, &key.user_id).await?;
     if !access.can_write() {
         return Err(AppError::OrgRoleInsufficient(
             "you do not have permission to modify this API key".to_string(),
         ));
     }
-    Ok(key.user_id)
+    Ok(key)
+}
+
+/// Resolve the effective owner for service-layer mutations.
+pub(crate) async fn resolve_api_key_write_owner(
+    state: &AppState,
+    actor: &str,
+    key_id: &str,
+) -> AppResult<String> {
+    Ok(resolve_api_key_write_target(state, actor, key_id)
+        .await?
+        .user_id)
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -91,6 +115,88 @@ pub struct ExternalApiKeyResponse {
     pub error_message: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/// Closed credential_type set served as assistant-action evidence.
+/// Adding a value is a breaking consumer change (`ParseCredentialStatus`-style
+/// closed parsers throw on unknowns) — not additive. Keep in lockstep with
+/// `user_api_key_service::VALID_CREDENTIAL_TYPES`.
+pub(crate) const SERVED_EXTERNAL_KEY_CREDENTIAL_TYPES: &[&str] =
+    user_api_key_service::VALID_CREDENTIAL_TYPES;
+
+/// Closed status set served as assistant-action evidence.
+/// Adding a value is a breaking consumer change — not additive. Keep in
+/// lockstep with `user_api_key_service::VALID_STATUSES`.
+pub(crate) const SERVED_EXTERNAL_KEY_STATUSES: &[&str] = user_api_key_service::VALID_STATUSES;
+
+fn served_credential_type(value: String) -> AppResult<String> {
+    // Telegram login rows predate the unified credential enum and are
+    // migrated verbatim. They carry identity metadata, not a distinct
+    // externally injectable credential; normalize without echoing the
+    // legacy source value into the closed evidence contract.
+    let value = if value == "telegram_identity" {
+        "api_key".to_string()
+    } else {
+        value
+    };
+    if SERVED_EXTERNAL_KEY_CREDENTIAL_TYPES.contains(&value.as_str()) {
+        Ok(value)
+    } else {
+        Err(AppError::Internal(
+            "refusing to serve unknown credential_type as evidence".to_string(),
+        ))
+    }
+}
+
+fn served_credential_status(value: String) -> AppResult<String> {
+    if SERVED_EXTERNAL_KEY_STATUSES.contains(&value.as_str()) {
+        Ok(value)
+    } else {
+        Err(AppError::Internal(
+            "refusing to serve unknown credential status as evidence".to_string(),
+        ))
+    }
+}
+
+/// Authorization evidence for one external API key — the minimal projection
+/// of [`ExternalApiKeyResponse`] that an assistant-action postcondition
+/// reader consumes.
+///
+/// The full detail response carries user-controlled `label` and
+/// `error_message` (which echoes upstream text and can contain anything).
+/// Either trips the reader's secret-shape scan, so a failed OAuth row or a
+/// user-labelled key would become permanently unverifiable. This projection
+/// keeps only the id, closed enums, and RFC 3339 timestamps.
+///
+/// Every property is serialized unconditionally. Readers distinguish an
+/// explicit `null` from a missing property, so `expires_at` and
+/// `last_used_at` are never `skip_serializing_if`.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ExternalApiKeyAuthorizationEvidenceResponse {
+    pub id: String,
+    pub credential_type: String,
+    pub status: String,
+    pub expires_at: Option<String>,
+    pub last_used_at: Option<String>,
+    pub updated_at: String,
+}
+
+impl ExternalApiKeyAuthorizationEvidenceResponse {
+    /// Project the full detail response down to authorization evidence.
+    ///
+    /// Derived from [`ExternalApiKeyResponse`] so the two representations
+    /// cannot drift on shared properties. Unknown enum values fail closed
+    /// rather than being emitted into a consumer whose parsers throw.
+    pub fn from_external_api_key_response(response: ExternalApiKeyResponse) -> AppResult<Self> {
+        Ok(Self {
+            id: response.id,
+            credential_type: served_credential_type(response.credential_type)?,
+            status: served_credential_status(response.status)?,
+            expires_at: response.expires_at,
+            last_used_at: response.last_used_at,
+            updated_at: response.updated_at,
+        })
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -490,6 +596,38 @@ pub async fn delete_external_api_key(
         deleted: true,
         upstream_revocation_scheduled: result.upstream_revocation_scheduled,
     }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/v1/api-keys/external/{key_id}/authorization",
+    params(
+        ("key_id" = String, Path, description = "External API key ID")
+    ),
+    responses(
+        (status = 200, description = "Authorization evidence", body = ExternalApiKeyAuthorizationEvidenceResponse),
+        (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 404, description = "Key not found", body = crate::errors::ErrorResponse)
+    ),
+    tag = "External API Keys"
+)]
+/// GET /api/v1/api-keys/external/{key_id}/authorization
+///
+/// Same ACL as the external-key write sibling, projected to the properties
+/// an assistant-action postcondition reader consumes. Delete-shaped verbs
+/// prove absence through this route returning 404.
+pub async fn get_external_api_key_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(key_id): Path<String>,
+) -> AppResult<Json<ExternalApiKeyAuthorizationEvidenceResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let key = load_readable_api_key(&state, &actor, &key_id).await?;
+    Ok(Json(
+        ExternalApiKeyAuthorizationEvidenceResponse::from_external_api_key_response(
+            external_api_key_response(key),
+        )?,
+    ))
 }
 
 fn external_api_key_response(key: UserApiKey) -> ExternalApiKeyResponse {
@@ -1413,5 +1551,208 @@ mod tests {
             create_gcp_service_account_key(State(state), test_auth_user(&user_id), Json(body))
                 .await;
         assert!(matches!(result, Err(AppError::ValidationError(_))));
+    }
+
+    fn poisoned_external_key_response() -> ExternalApiKeyResponse {
+        ExternalApiKeyResponse {
+            id: uuid::Uuid::new_v4().to_string(),
+            label: "Bearer nyxid_ag_abcdefghijklmnopqrst".to_string(),
+            credential_type: "api_key".to_string(),
+            status: "failed".to_string(),
+            provider_config_id: None,
+            expires_at: None,
+            last_used_at: None,
+            error_message: Some("upstream said Bearer nyxid_ag_abcdefghijklmnopqrst".to_string()),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        }
+    }
+
+    #[tokio::test]
+    async fn external_key_evidence_projection_has_no_error_message() {
+        let Some(db) = connect_test_database("h_ext_keys_evidence_no_err").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let key_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .unwrap();
+        let mut key =
+            fixture_external_key(&key_id, &user_id, "Bearer nyxid_ag_abcdefghijklmnopqrst");
+        key.error_message = Some("upstream said Bearer nyxid_ag_abcdefghijklmnopqrst".to_string());
+        key.status = "failed".to_string();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(key)
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+
+        let Json(evidence) = get_external_api_key_authorization(
+            State(state),
+            test_auth_user(&user_id),
+            Path(key_id.clone()),
+        )
+        .await
+        .unwrap();
+        let json = serde_json::to_value(&evidence).unwrap();
+
+        assert_eq!(json["id"], key_id);
+        assert_eq!(json["credential_type"], "api_key");
+        assert_eq!(json["status"], "failed");
+        assert!(
+            json.get("error_message").is_none(),
+            "evidence must never carry error_message"
+        );
+        assert!(
+            json.get("label").is_none(),
+            "evidence must never carry label"
+        );
+        assert!(json.get("created_at").is_none());
+        assert_eq!(json["expires_at"], serde_json::Value::Null);
+        assert_eq!(json["last_used_at"], serde_json::Value::Null);
+        assert!(json.as_object().unwrap().contains_key("expires_at"));
+        assert!(json.as_object().unwrap().contains_key("last_used_at"));
+        assert_eq!(
+            crate::test_utils::aevatar_secret_free_violation(&json),
+            None,
+            "external-key evidence must never carry a secret-shaped value"
+        );
+        let properties: std::collections::BTreeSet<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            properties,
+            [
+                "credential_type",
+                "expires_at",
+                "id",
+                "last_used_at",
+                "status",
+                "updated_at",
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<&str>>()
+        );
+    }
+
+    #[test]
+    fn telegram_identity_evidence_uses_pinned_api_key_type() {
+        let mut response = poisoned_external_key_response();
+        response.credential_type = "telegram_identity".to_string();
+        response.label = "safe-label".to_string();
+        response.error_message = None;
+        let evidence =
+            ExternalApiKeyAuthorizationEvidenceResponse::from_external_api_key_response(response)
+                .expect("legacy telegram identity rows normalize safely");
+        assert_eq!(evidence.credential_type, "api_key");
+        assert_eq!(evidence.status, "failed");
+        let json = serde_json::to_value(evidence).unwrap();
+        assert_eq!(
+            crate::test_utils::aevatar_secret_free_violation(&json),
+            None
+        );
+    }
+
+    #[test]
+    fn full_external_key_response_trips_the_aevatar_secret_scan() {
+        let json = serde_json::to_value(poisoned_external_key_response()).unwrap();
+        assert!(
+            crate::test_utils::aevatar_secret_free_violation(&json).is_some(),
+            "full external-key detail must trip the evidence scan"
+        );
+    }
+
+    #[test]
+    fn external_key_evidence_emits_only_pinned_credential_type_and_status_values() {
+        assert_eq!(
+            SERVED_EXTERNAL_KEY_CREDENTIAL_TYPES,
+            [
+                "api_key",
+                "oauth2",
+                "bearer",
+                "basic",
+                "ssh_certificate",
+                "node_managed",
+                "gcp_service_account",
+            ]
+        );
+        assert_eq!(
+            SERVED_EXTERNAL_KEY_STATUSES,
+            [
+                "active",
+                "expired",
+                "revoked",
+                "failed",
+                "refresh_failed",
+                "pending_auth",
+            ]
+        );
+
+        let mut seen_types = std::collections::BTreeSet::new();
+        let mut seen_statuses = std::collections::BTreeSet::new();
+        for credential_type in SERVED_EXTERNAL_KEY_CREDENTIAL_TYPES {
+            for status in SERVED_EXTERNAL_KEY_STATUSES {
+                let mut response = poisoned_external_key_response();
+                response.credential_type = credential_type.to_string();
+                response.status = status.to_string();
+                response.label = "safe-label".to_string();
+                response.error_message = None;
+                let evidence =
+                    ExternalApiKeyAuthorizationEvidenceResponse::from_external_api_key_response(
+                        response,
+                    )
+                    .unwrap();
+                let json = serde_json::to_value(&evidence).unwrap();
+                assert_eq!(json["credential_type"], *credential_type);
+                assert_eq!(json["status"], *status);
+                assert_eq!(
+                    crate::test_utils::aevatar_secret_free_violation(&json),
+                    None
+                );
+                seen_types.insert(json["credential_type"].as_str().unwrap().to_string());
+                seen_statuses.insert(json["status"].as_str().unwrap().to_string());
+            }
+        }
+        assert_eq!(
+            seen_types,
+            SERVED_EXTERNAL_KEY_CREDENTIAL_TYPES
+                .iter()
+                .map(|value| value.to_string())
+                .collect()
+        );
+        assert_eq!(
+            seen_statuses,
+            SERVED_EXTERNAL_KEY_STATUSES
+                .iter()
+                .map(|value| value.to_string())
+                .collect()
+        );
+
+        let mut unknown = poisoned_external_key_response();
+        unknown.credential_type = "device_code".to_string();
+        unknown.label = "safe".to_string();
+        unknown.error_message = None;
+        assert!(
+            ExternalApiKeyAuthorizationEvidenceResponse::from_external_api_key_response(unknown)
+                .is_err(),
+            "unknown credential_type must fail closed rather than be emitted"
+        );
+
+        let mut unknown_status = poisoned_external_key_response();
+        unknown_status.status = "disabled".to_string();
+        unknown_status.label = "safe".to_string();
+        unknown_status.error_message = None;
+        assert!(
+            ExternalApiKeyAuthorizationEvidenceResponse::from_external_api_key_response(
+                unknown_status
+            )
+            .is_err(),
+            "unknown status must fail closed rather than be emitted"
+        );
     }
 }

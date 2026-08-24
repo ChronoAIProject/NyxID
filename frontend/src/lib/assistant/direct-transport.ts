@@ -13,17 +13,6 @@ import {
   toTerminalBlock,
 } from "@/lib/assistant/stream";
 import {
-  cancelAgentPocTurn,
-  createAgentPocRuntime,
-  MAX_AGENT_POC_CONTENT_BYTES,
-  projectAgentPocMessages,
-  streamAgentPocTurn,
-  type AgentPocRuntime,
-  type DirectAgentPocMessage,
-  type DirectAgentPocRequest,
-} from "@/lib/assistant/direct-agent-poc";
-import { isAgentPocPlanBlockId } from "@/lib/assistant/direct-agent-poc-ids";
-import {
   isNyxidErrorEnvelope,
   parseJsonErrorResponse,
 } from "@/lib/assistant/direct-http-error";
@@ -52,8 +41,6 @@ const FIRST_BYTE_TIMEOUT_MS = 30_000;
 const IDLE_TIMEOUT_MS = 120_000;
 const UTF8_ENCODER = new TextEncoder();
 
-export { isAgentPocPlanBlockId } from "@/lib/assistant/direct-agent-poc-ids";
-
 interface CompletionChunk {
   readonly id?: string;
   readonly choices?: ReadonlyArray<{
@@ -80,7 +67,6 @@ export interface DirectConversationSettings {
   readonly skillSlug: string | null;
   /** `null` sends no `effort`, leaving the upstream default in place. */
   readonly effort: string | null;
-  readonly agentPocMode: boolean;
 }
 
 /**
@@ -92,7 +78,6 @@ const DEFAULT_DIRECT_SETTINGS: DirectConversationSettings = {
   model: DEFAULT_DIRECT_MODEL,
   skillSlug: null,
   effort: null,
-  agentPocMode: false,
 };
 
 interface StoredConversation {
@@ -116,7 +101,6 @@ interface RunningTurn {
   sawFinishReason: boolean;
   sawUpstreamError: boolean;
   sawDone: boolean;
-  agentPoc: AgentPocRuntime | null;
 }
 
 interface DirectTransportOptions {
@@ -152,34 +136,12 @@ function toDirectMessages(
     if (message.role !== "user" && message.role !== "assistant") continue;
     const content = message.blocks
       .filter((block) => block.type === "text")
-      .filter((block) => !isAgentPocPlanBlockId(block.block_id))
       .map((block) => (block.type === "text" ? block.text : ""))
       .filter(Boolean)
       .join("\n\n");
     if (content) payload.push({ role: message.role, content });
   }
   return payload;
-}
-
-function toBoundedAgentPocMessages(
-  messages: readonly AssistantMessage[],
-): DirectAgentPocMessage[] {
-  const transcript = projectAgentPocMessages(messages);
-  const newestFirst: DirectAgentPocMessage[] = [];
-  let contentBytes = 0;
-  for (
-    let index = transcript.length - 1;
-    index >= 0 && newestFirst.length < MAX_OUTGOING_MESSAGES;
-    index -= 1
-  ) {
-    const message = transcript[index];
-    if (!message) continue;
-    const messageBytes = UTF8_ENCODER.encode(message.content).byteLength;
-    if (contentBytes + messageBytes > MAX_AGENT_POC_CONTENT_BYTES) break;
-    newestFirst.push(message);
-    contentBytes += messageBytes;
-  }
-  return newestFirst.reverse();
 }
 
 function toBoundedDirectMessages(
@@ -320,10 +282,6 @@ export class DirectAssistantTransport implements AssistantTransport {
     this.updateSettings(conversationId, { effort });
   }
 
-  setAgentPocMode(conversationId: string | undefined, agentPocMode: boolean): void {
-    this.updateSettings(conversationId, { agentPocMode });
-  }
-
   async listConversations(): Promise<Conversation[]> {
     this.ensureOwner();
     return [...this.conversations.values()]
@@ -437,10 +395,8 @@ export class DirectAssistantTransport implements AssistantTransport {
       llm_model: stored.settings.model,
     };
 
-    let request: DirectRequest | DirectAgentPocRequest = {
-      messages: stored.settings.agentPocMode
-        ? toBoundedAgentPocMessages(stored.turnState.messages)
-        : toBoundedDirectMessages(stored.turnState.messages),
+    let request: DirectRequest = {
+      messages: toBoundedDirectMessages(stored.turnState.messages),
       model: stored.settings.model,
       ...(stored.settings.skillSlug
         ? { skill_slug: stored.settings.skillSlug }
@@ -468,7 +424,6 @@ export class DirectAssistantTransport implements AssistantTransport {
       sawFinishReason: false,
       sawUpstreamError: false,
       sawDone: false,
-      agentPoc: null,
     };
     this.running.set(conversationId, run);
     this.emit(conversationId, run, {
@@ -477,22 +432,7 @@ export class DirectAssistantTransport implements AssistantTransport {
       turn_id: run.turnId,
       status: "running",
     });
-    if (stored.settings.agentPocMode) {
-      const runtime = createAgentPocRuntime(run.turnId, run.controller);
-      run.agentPoc = runtime;
-      void streamAgentPocTurn(runtime, {
-        request,
-        fetch: this.fetchFn,
-        firstByteTimeoutMs: this.firstByteTimeoutMs,
-        idleTimeoutMs: this.idleTimeoutMs,
-        now: this.now,
-        nextCursor: () => this.nextCursor(run),
-        emit: (event) => this.emit(conversationId, run, event),
-        finishDrain: () => this.finishDrain(conversationId, run),
-      });
-    } else {
-      void this.streamTurn(conversationId, run, request);
-    }
+    void this.streamTurn(conversationId, run, request);
     return {
       turnId: run.turnId,
       cancel: () => this.cancelRun(conversationId, run),
@@ -891,14 +831,6 @@ export class DirectAssistantTransport implements AssistantTransport {
 
   private cancelRun(conversationId: string, run: RunningTurn): void {
     if (run.discarded || run.drained) return;
-    if (run.agentPoc) {
-      cancelAgentPocTurn(run.agentPoc, {
-        nextCursor: () => this.nextCursor(run),
-        emit: (event) => this.emit(conversationId, run, event),
-        finishDrain: () => this.finishDrain(conversationId, run),
-      });
-      return;
-    }
     run.controller.abort();
     if (!run.terminalEmitted) {
       if (run.currentBlockId) {

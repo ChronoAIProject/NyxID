@@ -1,0 +1,77 @@
+{
+  "sync": {
+    "kind": "manually_synced_mirror",
+    "not_a_drift_detector": true,
+    "source_file": "agents/Aevatar.GAgents.NyxidChat/NyxIdAssistantActionRegistry.cs",
+    "maps": ["PinnedActionsByRevision", "ExecutableActionsByRevision"],
+    "verified_at": "2026-08-20",
+    "verified_revs": {
+      "origin/dev": "f3e1e81500bcaef8d26acbe6ed28452089edc2e4",
+      "origin/feature/integrate": "7d16dbcc5be96ace03e48bf80fdeae20547cf22e"
+    },
+    "note": "Checked-in copy of Aevatar's per-revision pinned and executable sets. CI does not read the Aevatar clone; if upstream changes a set, this file stays green until a human re-syncs it."
+  },
+  "lineages": {
+    "origin/dev": {
+      "supported_revision": "nyxid-assistant-actions.v7",
+      "revisions": {
+        "nyxid-assistant-actions.v4": {
+          "pinned": ["service.connect"],
+          "executable": ["service.connect"]
+        },
+        "nyxid-assistant-actions.v5": {
+          "pinned": [
+            "service.connect",
+            "service.reauthorize",
+            "key.create",
+            "key.rotate"
+          ],
+          "executable": ["service.connect"]
+        },
+        "nyxid-assistant-actions.v6": {
+          "pinned": ["service.connect", "key.create"],
+          "executable": ["service.connect", "key.create"]
+        },
+        "nyxid-assistant-actions.v7": {
+          "pinned": ["service.connect", "key.create", "key.rotate"],
+          "executable": ["service.connect", "key.create", "key.rotate"]
+        }
+      }
+    },
+    "origin/feature/integrate": {
+      "supported_revision": "nyxid-assistant-actions.v8",
+      "revisions": {
+        "nyxid-assistant-actions.v4": {
+          "pinned": ["service.connect"],
+          "executable": ["service.connect"]
+        },
+        "nyxid-assistant-actions.v5": {
+          "pinned": [
+            "service.connect",
+            "service.reauthorize",
+            "key.create",
+            "key.rotate"
+          ],
+          "executable": ["service.connect"]
+        },
+        "nyxid-assistant-actions.v6": {
+          "pinned": ["service.connect", "key.create"],
+          "executable": ["service.connect", "key.create"]
+        },
+        "nyxid-assistant-actions.v7": {
+          "pinned": ["service.connect", "key.create", "key.rotate"],
+          "executable": ["service.connect", "key.create", "key.rotate"]
+        },
+        "nyxid-assistant-actions.v8": {
+          "pinned": [
+            "service.connect",
+            "service.reauthorize",
+            "key.create",
+            "key.rotate"
+          ],
+          "executable": ["service.connect", "key.create", "key.rotate"]
+        }
+      }
+    }
+  }
+}

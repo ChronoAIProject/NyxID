@@ -51,9 +51,45 @@ pub struct UserProfileResponse {
     pub is_active: bool,
     pub social_provider: Option<String>,
     pub created_at: String,
+    pub updated_at: String,
     pub last_login_at: Option<String>,
     pub profile_config: ProfileConfigResponse,
     pub capabilities: UserCapabilitiesResponse,
+}
+
+/// Secret-free, free-text-free account state for assistant postconditions.
+///
+/// The full profile response contains user-controlled display text and is not
+/// safe for recursive evidence scanning. This projection is derived from that
+/// response and deliberately exposes only primitive state.
+#[derive(Debug, Serialize)]
+pub struct AccountAuthorizationEvidenceResponse {
+    pub id: String,
+    pub is_active: bool,
+    pub mfa_enabled: bool,
+    pub display_name_length: Option<usize>,
+    pub avatar_url_length: Option<usize>,
+    pub updated_at: String,
+}
+
+fn javascript_string_length(value: &str) -> usize {
+    value.encode_utf16().count()
+}
+
+impl AccountAuthorizationEvidenceResponse {
+    fn from_profile_response(profile: &UserProfileResponse) -> Self {
+        Self {
+            id: profile.id.clone(),
+            is_active: profile.is_active,
+            mfa_enabled: profile.mfa_enabled,
+            display_name_length: profile
+                .display_name
+                .as_deref()
+                .map(javascript_string_length),
+            avatar_url_length: profile.avatar_url.as_deref().map(javascript_string_length),
+            updated_at: profile.updated_at.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -116,6 +152,7 @@ pub async fn get_me(
         is_active: user_model.is_active,
         social_provider: user_model.social_provider,
         created_at: user_model.created_at.to_rfc3339(),
+        updated_at: user_model.updated_at.to_rfc3339(),
         last_login_at: user_model.last_login_at.map(|t| t.to_rfc3339()),
         profile_config: ProfileConfigResponse {
             onboarding: OnboardingStateResponse {
@@ -135,6 +172,21 @@ pub async fn get_me(
             enabled_features,
         },
     }))
+}
+
+/// GET /api/v1/users/me/authorization
+///
+/// Authoritative account postcondition projection. This must be mounted next
+/// to `GET /users/me` in both the normal and delegated `account:read` route
+/// inventories; it must never be served from the assistant-effect nest.
+pub async fn get_account_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+) -> AppResult<Json<AccountAuthorizationEvidenceResponse>> {
+    let Json(profile) = get_me(State(state), auth_user).await?;
+    Ok(Json(
+        AccountAuthorizationEvidenceResponse::from_profile_response(&profile),
+    ))
 }
 
 #[derive(Debug, Deserialize)]
@@ -401,6 +453,7 @@ mod tests {
             is_active: true,
             social_provider: Some("google".to_string()),
             created_at: "2025-01-01T00:00:00+00:00".to_string(),
+            updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: Some("2025-06-01T12:00:00+00:00".to_string()),
             profile_config: ProfileConfigResponse {
                 onboarding: OnboardingStateResponse {
@@ -449,6 +502,7 @@ mod tests {
             is_active: true,
             social_provider: None,
             created_at: "2025-06-01T00:00:00+00:00".to_string(),
+            updated_at: "2025-06-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
                 onboarding: OnboardingStateResponse {
@@ -469,6 +523,41 @@ mod tests {
         assert!(json["profile_config"]["onboarding"]["ai_services_completed_at"].is_null());
         assert_eq!(json["capabilities"]["billing_available"], false);
         assert_eq!(json["role"], "user");
+    }
+
+    #[test]
+    fn profile_update_verification_accepts_multibyte_display_name() {
+        // Falsifier: replace `javascript_string_length` with `str::len` and
+        // this reports UTF-8 bytes (10) instead of JavaScript code units (7).
+        let profile = UserProfileResponse {
+            id: "user-multibyte".to_string(),
+            email: "multibyte@example.com".to_string(),
+            display_name: Some("café 🧭".to_string()),
+            avatar_url: None,
+            email_verified: true,
+            mfa_enabled: false,
+            is_admin: false,
+            is_operator: false,
+            role: "user".to_string(),
+            is_active: true,
+            social_provider: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:01Z".to_string(),
+            last_login_at: None,
+            profile_config: ProfileConfigResponse {
+                onboarding: OnboardingStateResponse {
+                    ai_services_completed_at: None,
+                },
+            },
+            capabilities: UserCapabilitiesResponse {
+                billing_available: false,
+                enabled_features: vec![],
+            },
+        };
+
+        let evidence = AccountAuthorizationEvidenceResponse::from_profile_response(&profile);
+        assert_eq!(evidence.display_name_length, Some(7));
+        assert_ne!(evidence.display_name_length, Some("café 🧭".len()));
     }
 
     // --- Serialization tests: OnboardingStateResponse ---
@@ -631,6 +720,7 @@ mod tests {
             is_active: true,
             social_provider: None,
             created_at: "2025-01-01T00:00:00+00:00".to_string(),
+            updated_at: "2025-01-01T00:00:00+00:00".to_string(),
             last_login_at: None,
             profile_config: ProfileConfigResponse {
                 onboarding: OnboardingStateResponse {
@@ -658,6 +748,7 @@ mod tests {
             "is_active",
             "social_provider",
             "created_at",
+            "updated_at",
             "last_login_at",
             "profile_config",
             "capabilities",

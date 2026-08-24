@@ -1,7 +1,11 @@
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::bson::{self, doc};
 use mongodb::options::FindOptions;
+use mongodb::{
+    ClientSession, Database,
+    bson::{self, Document, doc},
+    options::ReturnDocument,
+};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
@@ -254,6 +258,79 @@ pub(crate) fn auth_key_name_required_message(auth_method: &str) -> String {
         "auth_key_name is required when auth_method is '{auth_method}' \
          (e.g. 'X-API-Key' for header, 'key' for query, 'app_secret' for body)"
     )
+}
+
+/// Validate the auth fields used by assistant service updates before any
+/// sibling endpoint write occurs. The full update path performs the same
+/// checks; this public helper lets transactional callers fail closed before
+/// starting their multi-document mutation.
+pub fn validate_service_auth_update(
+    current: &UserService,
+    auth_method: Option<&str>,
+    auth_key_name: Option<&str>,
+) -> AppResult<()> {
+    ensure_user_managed_service(current)?;
+    if let Some(am) = auth_method {
+        validate_auth_method(am)?;
+        if am != "none" && current.api_key_id.is_none() {
+            return Err(AppError::BadRequest(
+                "This service has no stored credential. Add one before changing auth_method."
+                    .to_string(),
+            ));
+        }
+    }
+    let effective_auth_method = auth_method.unwrap_or(&current.auth_method);
+    if auth_method_requires_key_name(effective_auth_method) {
+        let effective_auth_key_name = auth_key_name.unwrap_or(&current.auth_key_name);
+        if effective_auth_key_name.trim().is_empty() {
+            return Err(AppError::ValidationError(auth_key_name_required_message(
+                effective_auth_method,
+            )));
+        }
+    }
+    let has_node_route = current
+        .node_id
+        .as_deref()
+        .is_some_and(|node_id| !node_id.is_empty());
+    if effective_auth_method == "body" && has_node_route {
+        return Err(AppError::ValidationError(
+            "auth_method 'body' is not supported for node-routed services. \
+             Credential body injection only works for direct (non-node) routing."
+                .to_string(),
+        ));
+    }
+    if effective_auth_method == "token_exchange" && has_node_route {
+        return Err(AppError::ValidationError(
+            "auth_method 'token_exchange' is not supported for node-routed services. \
+             The token exchange runs server-side and does not flow through nodes."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Commit a UserService mutation with its authoritative timestamp and
+/// monotonic state-version increment inside a caller-owned transaction.
+pub async fn commit_user_service_mutation(
+    db: &Database,
+    session: &mut ClientSession,
+    owner_id: &str,
+    service_id: &str,
+    mut extra_set: Document,
+) -> AppResult<UserService> {
+    extra_set.insert("updated_at", bson::DateTime::from_chrono(Utc::now()));
+    db.collection::<UserService>(COLLECTION_NAME)
+        .find_one_and_update(
+            doc! { "_id": service_id, "user_id": owner_id },
+            doc! {
+                "$set": extra_set,
+                "$inc": { "state_version": 1_i64 },
+            },
+        )
+        .return_document(ReturnDocument::After)
+        .session(session)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User service not found".to_string()))
 }
 
 /// List all active user services for a user.
@@ -774,6 +851,8 @@ pub async fn create_user_service(
         source_app_id: source_app_id.map(str::to_string),
         created_at: now,
         updated_at: now,
+        state_version: 1,
+        rotation_predecessor_id: None,
     };
 
     db.collection::<UserService>(COLLECTION_NAME)
@@ -1057,7 +1136,10 @@ pub async fn update_user_service(
         .collection::<UserService>(COLLECTION_NAME)
         .update_one(
             doc! { "_id": service_id, "user_id": user_id },
-            doc! { "$set": set_doc },
+            doc! {
+                "$set": set_doc,
+                "$inc": { "state_version": 1_i64 },
+            },
         )
         .await?;
 

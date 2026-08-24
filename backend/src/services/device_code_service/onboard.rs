@@ -28,6 +28,16 @@ const DEVICE_ONBOARD_HW_ID: &str = "qr-onboard";
 const DEVICE_ONBOARD_TOKEN_PREFIX: &str = "nyx_obt_";
 pub(super) const DEVICE_ONBOARD_EXPIRES_IN_SECS: i64 = 15 * 60;
 
+#[derive(Clone, Debug)]
+pub struct DeviceOnboardAuthorizationState {
+    pub id: String,
+    pub owner_user_id: String,
+    pub used: bool,
+    pub redeemed_node_id: Option<String>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub expires_at: chrono::DateTime<Utc>,
+}
+
 /// Create a short-lived, single-use bootstrap token for QR provisioning.
 ///
 /// The returned QR payload contains only the bootstrap token and non-secret
@@ -39,6 +49,20 @@ pub async fn onboard(
     actor_user_id: &str,
     input: DeviceOnboardInput,
 ) -> AppResult<DeviceOnboard> {
+    onboard_with_id(db, actor_user_id, &uuid::Uuid::new_v4().to_string(), input).await
+}
+
+/// Create a short-lived bootstrap whose safe device identity was reserved by
+/// an assistant receipt before any one-time provisioning material was minted.
+pub async fn onboard_with_id(
+    db: &Database,
+    actor_user_id: &str,
+    bootstrap_id: &str,
+    input: DeviceOnboardInput,
+) -> AppResult<DeviceOnboard> {
+    let bootstrap_id = uuid::Uuid::parse_str(bootstrap_id)
+        .map_err(|_| AppError::ValidationError("bootstrap_id must be a UUID".to_string()))?
+        .to_string();
     let input = validate_onboard_input(input)?;
     let owner_user_id = input
         .org_id
@@ -57,7 +81,7 @@ pub async fn onboard(
     let now = Utc::now();
     let expires_at = now + Duration::seconds(DEVICE_ONBOARD_EXPIRES_IN_SECS);
     let credential = DeviceOnboardCredential {
-        id: uuid::Uuid::new_v4().to_string(),
+        id: bootstrap_id,
         owner_user_id,
         bootstrap_token_hash: hash_token(bootstrap_token.as_str()),
         label: input.label.clone(),
@@ -87,6 +111,35 @@ pub async fn onboard(
         label: input.label,
         expires_in: DEVICE_ONBOARD_EXPIRES_IN_SECS,
         expires_at,
+    })
+}
+
+/// Read the minimal secret-free authority state for a QR onboarding package.
+pub async fn get_onboard_authorization_state(
+    db: &Database,
+    actor_user_id: &str,
+    bootstrap_id: &str,
+) -> AppResult<DeviceOnboardAuthorizationState> {
+    let credential = db
+        .collection::<DeviceOnboardCredential>(DEVICE_ONBOARD_CREDENTIALS)
+        .find_one(doc! { "_id": bootstrap_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Device onboard bootstrap not found".to_string()))?;
+    let access =
+        org_service::resolve_owner_access(db, actor_user_id, &credential.owner_user_id).await?;
+    if !access.can_write() {
+        return Err(AppError::NotFound(
+            "Device onboard bootstrap not found".to_string(),
+        ));
+    }
+
+    Ok(DeviceOnboardAuthorizationState {
+        id: credential.id,
+        owner_user_id: credential.owner_user_id,
+        used: credential.used,
+        redeemed_node_id: credential.redeemed_node_id,
+        created_at: credential.created_at,
+        expires_at: credential.expires_at,
     })
 }
 
@@ -755,6 +808,8 @@ mod tests {
             source_app_id: None,
             created_at: now,
             updated_at: now,
+            state_version: 1,
+            rotation_predecessor_id: None,
         };
         db.collection::<UserService>(USER_SERVICES)
             .insert_one(&service)

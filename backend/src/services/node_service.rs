@@ -82,6 +82,34 @@ pub struct DeviceNodeInput<'a> {
     pub provisioning_source: &'a str,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeAuthorizationLifecycle {
+    RegistrationPending,
+    Active,
+}
+
+impl NodeAuthorizationLifecycle {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::RegistrationPending => "registration_pending",
+            Self::Active => "active",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct NodeAuthorizationState {
+    pub id: String,
+    pub owner_user_id: String,
+    pub lifecycle: NodeAuthorizationLifecycle,
+    pub is_active: bool,
+    pub state_version: i64,
+    pub access_revision: i64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub registration_expires_at: Option<DateTime<Utc>>,
+}
+
 impl fmt::Debug for DeviceNodeInput<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DeviceNodeInput")
@@ -114,6 +142,31 @@ pub async fn create_registration_token(
     max_nodes_per_user: u32,
     ttl_secs: i64,
 ) -> AppResult<(String, String, DateTime<Utc>)> {
+    create_registration_token_with_id(
+        db,
+        user_id,
+        name,
+        max_nodes_per_user,
+        ttl_secs,
+        &uuid::Uuid::new_v4().to_string(),
+    )
+    .await
+}
+
+/// Create a one-time registration token whose id is reserved by the caller.
+/// Assistant effects use the same UUID as the eventual node id so their safe
+/// `node` resource remains authoritative before and after token redemption.
+pub async fn create_registration_token_with_id(
+    db: &mongodb::Database,
+    user_id: &str,
+    name: &str,
+    max_nodes_per_user: u32,
+    ttl_secs: i64,
+    token_id: &str,
+) -> AppResult<(String, String, DateTime<Utc>)> {
+    let token_id = uuid::Uuid::parse_str(token_id)
+        .map_err(|_| AppError::ValidationError("token_id must be a UUID".to_string()))?
+        .to_string();
     // Validate name
     if name.is_empty() || name.len() > 64 {
         return Err(AppError::ValidationError(
@@ -159,8 +212,6 @@ pub async fn create_registration_token(
     let token_hash = hash_token(&raw_token);
     let now = Utc::now();
     let expires_at = now + Duration::seconds(ttl_secs);
-    let token_id = uuid::Uuid::new_v4().to_string();
-
     let token = NodeRegistrationToken {
         id: token_id.clone(),
         user_id: user_id.to_string(),
@@ -226,7 +277,10 @@ pub async fn register_node(
     let signing_secret_hash = hash_token(&raw_signing_secret);
 
     let node = Node {
-        id: uuid::Uuid::new_v4().to_string(),
+        // Registration-token ids are reserved as the future node identity.
+        // This gives callers one stable, secret-free resource reference for
+        // both the pending registration and the registered node.
+        id: token.id,
         user_id: token.user_id,
         name: token.name,
         status: NodeStatus::Online,
@@ -399,6 +453,66 @@ pub async fn get_node(db: &mongodb::Database, user_id: &str, node_id: &str) -> A
     Ok(node)
 }
 
+/// Return the secret-free authority state for a node resource. A freshly
+/// minted registration token is addressable by the same UUID that redemption
+/// will assign to the node, so one typed resource remains valid across the
+/// registration lifecycle. Used or expired registration rows never mask an
+/// absent/deleted node.
+pub async fn get_node_authorization_state(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    node_id: &str,
+) -> AppResult<NodeAuthorizationState> {
+    if let Some(node) = db
+        .collection::<Node>(NODES)
+        .find_one(doc! { "_id": node_id, "is_active": true })
+        .await?
+    {
+        ensure_node_readable_by_access(db, actor_user_id, &node).await?;
+        let authority = db
+            .collection::<bson::Document>(NODES)
+            .find_one(doc! { "_id": node_id, "is_active": true })
+            .await?
+            .ok_or_else(|| AppError::NodeNotFound("Node not found".to_string()))?;
+        let state_version = authority.get_i64("state_version").unwrap_or(1).max(1);
+        let access_revision = authority.get_i64("access_revision").unwrap_or(0).max(0);
+        return Ok(NodeAuthorizationState {
+            id: node.id,
+            owner_user_id: node.user_id,
+            lifecycle: NodeAuthorizationLifecycle::Active,
+            is_active: true,
+            state_version,
+            access_revision,
+            created_at: node.created_at,
+            updated_at: node.updated_at,
+            registration_expires_at: None,
+        });
+    }
+
+    let registration = db
+        .collection::<NodeRegistrationToken>(NODE_REG_TOKENS)
+        .find_one(doc! { "_id": node_id, "used": false })
+        .await?
+        .ok_or_else(|| AppError::NodeNotFound("Node not found".to_string()))?;
+    let access =
+        org_service::resolve_owner_access(db, actor_user_id, &registration.user_id).await?;
+    if !node_access_can_read(&access) {
+        return Err(AppError::NodeNotFound("Node not found".to_string()));
+    }
+
+    Ok(NodeAuthorizationState {
+        id: registration.id,
+        owner_user_id: registration.user_id,
+        lifecycle: NodeAuthorizationLifecycle::RegistrationPending,
+        is_active: registration.expires_at > Utc::now(),
+        state_version: 1,
+        access_revision: 0,
+        created_at: registration.created_at,
+        updated_at: registration.created_at,
+        registration_expires_at: Some(registration.expires_at),
+    })
+}
+
 /// Look up a node and verify the actor has write access to it -- either as
 /// the direct owner or as an admin of the org that owns it.
 ///
@@ -481,128 +595,196 @@ pub async fn transfer_node_owner(
         ));
     }
 
-    let destination_name_collision = db
-        .collection::<Node>(NODES)
-        .find_one(doc! {
-            "user_id": new_owner_user_id,
-            "name": &node.name,
-            "is_active": true,
-        })
-        .await?;
-    if destination_name_collision.is_some() {
-        return Err(AppError::BadRequest(format!(
-            "An active node named '{}' already exists for the destination owner. Rename one of them and retry.",
-            node.name
-        )));
-    }
+    let db = db.clone();
+    let node_id = node_id.to_string();
+    let previous_owner_user_id = node.user_id;
+    let node_name = node.name;
+    let new_owner_user_id = new_owner_user_id.to_string();
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation: AppResult<TransferNodeResult> = async {
+                let current = db
+                    .collection::<Node>(NODES)
+                    .find_one(doc! {
+                        "_id": &node_id,
+                        "user_id": &previous_owner_user_id,
+                        "is_active": true,
+                    })
+                    .session(&mut *session)
+                    .await?
+                    .ok_or_else(|| AppError::NodeNotFound("Node not found".to_string()))?;
 
-    let destination_node_count = db
-        .collection::<Node>(NODES)
-        .count_documents(doc! {
-            "user_id": new_owner_user_id,
-            "is_active": true,
-        })
-        .await?;
-    if destination_node_count >= max_nodes_per_user as u64 {
-        return Err(AppError::BadRequest(format!(
-            "Maximum of {max_nodes_per_user} nodes per user reached"
-        )));
-    }
-
-    let now = bson::DateTime::from_chrono(Utc::now());
-
-    // This deployment path does not use multi-document transactions elsewhere.
-    // Cleanup runs first so a partial failure leaves the source owner with
-    // stale-but-recoverable state, never cross-tenant routing through a node
-    // whose owner has already changed.
-    let pending_credential_result = db
-        .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
-        .update_many(
-            doc! { "node_id": node_id, "is_active": true },
-            doc! { "$set": { "is_active": false } },
-        )
-        .await?;
-
-    let service_result = db
-        .collection::<UserService>(USER_SERVICES)
-        .update_many(
-            doc! {
-                "node_id": node_id,
-                "user_id": { "$ne": new_owner_user_id },
-                "is_active": true,
-            },
-            doc! {
-                "$unset": { "node_id": "" },
-                "$set": { "updated_at": &now },
-            },
-        )
-        .await?;
-
-    let binding_result = db
-        .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-        .update_many(
-            doc! { "node_id": node_id, "is_active": true },
-            doc! { "$set": { "is_active": false, "updated_at": &now } },
-        )
-        .await?;
-
-    let update_result = db
-        .collection::<Node>(NODES)
-        .update_one(
-            doc! {
-                "_id": node_id,
-                "user_id": &node.user_id,
-                "is_active": true,
-            },
-            doc! {
-                "$set": {
-                    "user_id": new_owner_user_id,
-                    "updated_at": &now,
+                let destination_name_collision = db
+                    .collection::<Node>(NODES)
+                    .find_one(doc! {
+                        "_id": { "$ne": &node_id },
+                        "user_id": &new_owner_user_id,
+                        "name": &node_name,
+                        "is_active": true,
+                    })
+                    .session(&mut *session)
+                    .await?;
+                if destination_name_collision.is_some() {
+                    return Err(AppError::BadRequest(format!(
+                        "An active node named '{}' already exists for the destination owner. Rename one of them and retry.",
+                        current.name
+                    )));
                 }
-            },
-        )
-        .await?;
-    if update_result.matched_count == 0 {
-        return Err(AppError::NodeNotFound("Node not found".to_string()));
-    }
 
-    Ok(TransferNodeResult {
-        node_id: node_id.to_string(),
-        previous_owner_user_id: node.user_id,
-        new_owner_user_id: new_owner_user_id.to_string(),
-        deactivated_bindings_count: binding_result.modified_count,
-        cleared_user_service_count: service_result.modified_count,
-        deactivated_pending_credentials_count: pending_credential_result.modified_count,
-    })
+                let destination_node_count = db
+                    .collection::<Node>(NODES)
+                    .count_documents(doc! {
+                        "user_id": &new_owner_user_id,
+                        "is_active": true,
+                    })
+                    .session(&mut *session)
+                    .await?;
+                if destination_node_count >= max_nodes_per_user as u64 {
+                    return Err(AppError::BadRequest(format!(
+                        "Maximum of {max_nodes_per_user} nodes per user reached"
+                    )));
+                }
+
+                let now = bson::DateTime::from_chrono(Utc::now());
+                let pending_credential_result = db
+                    .collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+                    .update_many(
+                        doc! { "node_id": &node_id, "is_active": true },
+                        doc! { "$set": { "is_active": false } },
+                    )
+                    .session(&mut *session)
+                    .await?;
+                let service_result = db
+                    .collection::<UserService>(USER_SERVICES)
+                    .update_many(
+                        doc! {
+                            "node_id": &node_id,
+                            "user_id": { "$ne": &new_owner_user_id },
+                            "is_active": true,
+                        },
+                        doc! {
+                            "$unset": { "node_id": "" },
+                            "$set": { "updated_at": &now },
+                        },
+                    )
+                    .session(&mut *session)
+                    .await?;
+                let binding_result = db
+                    .collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                    .update_many(
+                        doc! { "node_id": &node_id, "is_active": true },
+                        doc! { "$set": { "is_active": false, "updated_at": &now } },
+                    )
+                    .session(&mut *session)
+                    .await?;
+                let update_result = db
+                    .collection::<Node>(NODES)
+                    .update_one(
+                        doc! {
+                            "_id": &node_id,
+                            "user_id": &previous_owner_user_id,
+                            "is_active": true,
+                        },
+                        doc! {
+                            "$set": {
+                                "user_id": &new_owner_user_id,
+                                "updated_at": &now,
+                            },
+                            "$inc": { "state_version": 1_i64 },
+                        },
+                    )
+                    .session(&mut *session)
+                    .await?;
+                if update_result.matched_count == 0 {
+                    return Err(AppError::NodeNotFound("Node not found".to_string()));
+                }
+
+                Ok(TransferNodeResult {
+                    node_id: node_id.clone(),
+                    previous_owner_user_id: previous_owner_user_id.clone(),
+                    new_owner_user_id: new_owner_user_id.clone(),
+                    deactivated_bindings_count: binding_result.modified_count,
+                    cleared_user_service_count: service_result.modified_count,
+                    deactivated_pending_credentials_count: pending_credential_result.modified_count,
+                })
+            }
+            .await;
+            crate::services::api_key_mutation_service::transaction_result(operation)
+        })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)
 }
 
 /// Soft-delete a node and its bindings.
 pub async fn delete_node(db: &mongodb::Database, user_id: &str, node_id: &str) -> AppResult<()> {
-    let now = bson::DateTime::from_chrono(Utc::now());
     let node = load_active_node(db, node_id).await?;
     ensure_node_writable_by_access(db, user_id, &node).await?;
 
-    let result = db
-        .collection::<Node>(NODES)
-        .update_one(
-            doc! { "_id": node_id, "is_active": true },
-            doc! { "$set": { "is_active": false, "status": NodeStatus::Offline.as_str(), "updated_at": &now } },
-        )
-        .await?;
+    let db = db.clone();
+    let node_id = node_id.to_string();
+    let tracing_node_id = node_id.clone();
+    let owner_user_id = node.user_id;
+    let mut session = db.client().start_session().await?;
+    session
+        .start_transaction()
+        .and_run2(async move |session| {
+            let operation: AppResult<()> = async {
+                let now = bson::DateTime::from_chrono(Utc::now());
+                let result = db
+                    .collection::<Node>(NODES)
+                    .update_one(
+                        doc! {
+                            "_id": &node_id,
+                            "user_id": &owner_user_id,
+                            "is_active": true,
+                        },
+                        doc! {
+                            "$set": {
+                                "is_active": false,
+                                "status": NodeStatus::Offline.as_str(),
+                                "updated_at": &now,
+                            },
+                            "$inc": { "state_version": 1_i64 },
+                        },
+                    )
+                    .session(&mut *session)
+                    .await?;
+                if result.matched_count == 0 {
+                    return Err(AppError::NodeNotFound("Node not found".to_string()));
+                }
 
-    if result.matched_count == 0 {
-        return Err(AppError::NodeNotFound("Node not found".to_string()));
-    }
+                db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
+                    .update_many(
+                        doc! { "node_id": &node_id, "is_active": true },
+                        doc! { "$set": { "is_active": false, "updated_at": &now } },
+                    )
+                    .session(&mut *session)
+                    .await?;
+                db.collection::<NodePendingCredential>(NODE_PENDING_CREDENTIALS)
+                    .delete_many(doc! { "node_id": &node_id })
+                    .session(&mut *session)
+                    .await?;
+                db.collection::<UserService>(USER_SERVICES)
+                    .update_many(
+                        doc! { "node_id": &node_id, "is_active": true },
+                        doc! {
+                            "$unset": { "node_id": "" },
+                            "$set": { "updated_at": &now },
+                        },
+                    )
+                    .session(&mut *session)
+                    .await?;
+                Ok(())
+            }
+            .await;
+            crate::services::api_key_mutation_service::transaction_result(operation)
+        })
+        .await
+        .map_err(crate::services::api_key_mutation_service::map_transaction_error)?;
 
-    // Deactivate all bindings for this node
-    db.collection::<NodeServiceBinding>(NODE_SERVICE_BINDINGS)
-        .update_many(
-            doc! { "node_id": node_id },
-            doc! { "$set": { "is_active": false, "updated_at": &now } },
-        )
-        .await?;
-
-    tracing::info!(node_id = %node_id, "Node deleted");
+    tracing::info!(node_id = %tracing_node_id, "Node deleted");
     Ok(())
 }
 
@@ -798,6 +980,9 @@ pub async fn rotate_auth_token(
                 },
                 "signing_secret_hash": &signing_secret_hash,
                 "updated_at": &now,
+            }, "$inc": {
+                "access_revision": 1_i64,
+                "state_version": 1_i64,
             } },
         )
         .await?;

@@ -1037,6 +1037,8 @@ pub(crate) fn test_user_service(
         source_app_id: None,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
+        state_version: 1,
+        rotation_predecessor_id: None,
     }
 }
 

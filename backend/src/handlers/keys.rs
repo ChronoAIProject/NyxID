@@ -526,6 +526,17 @@ pub struct KeyResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_message: Option<String>,
     pub created_at: String,
+    /// Authoritative timestamp of the latest committed user-service mutation.
+    /// Always serialized so evidence readers can consume it from the same
+    /// detail mapping the projection derives from.
+    pub updated_at: String,
+    /// Authoritative monotonic version for this user-service row. Legacy
+    /// rows without the field report zero.
+    pub state_version: i64,
+    /// Credential-rotation predecessor (`UserApiKey` id). Absent when this
+    /// service has never rotated its stored credential.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation_predecessor_id: Option<String>,
     // SSH fields
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ssh_host: Option<String>,
@@ -580,8 +591,9 @@ pub struct KeyResponse {
 /// consumed properties removes the tripwire surface instead of asking users
 /// not to configure supported features.
 ///
-/// Every property is serialized unconditionally except `api_key_id`, which
-/// mirrors `KeyResponse` (absent and null are equivalent to the reader).
+/// Every property is serialized unconditionally except `api_key_id` (mirrors
+/// `KeyResponse`: absent and null are equivalent to the reader) and the
+/// mutation-lineage trio, which is emitted all-together or not at all.
 /// Readers distinguish an explicit null from a missing property, so no
 /// `skip_serializing_if` may be added to the remaining fields.
 #[derive(Debug, Serialize, ToSchema)]
@@ -594,6 +606,22 @@ pub struct KeyAuthorizationEvidenceResponse {
     pub connection_status: Option<String>,
     pub granted_scopes: Option<Vec<String>>,
     pub last_authorized_at: Option<String>,
+    /// Node routing for `service.route`. Always serialized: JSON `null` means
+    /// unrouted. Never skipped — the reader distinguishes null from absent.
+    pub node_id: Option<String>,
+    /// Mutation lineage (`rotation_predecessor_id`, `state_version`,
+    /// `updated_at`). Emitted as a trio or not at all: the reader treats
+    /// all three absent as "no lineage evidence" but all three present with
+    /// `state_version <= 0` as a malformed document. Pre-lineage rows
+    /// (`state_version` 0) therefore omit the trio rather than serialize
+    /// a zero. `rotation_predecessor_id` is the previous `UserApiKey` id
+    /// after `service.rotate_credential`; it is never credential material.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rotation_predecessor_id: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_version: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
 }
 
 impl KeyAuthorizationEvidenceResponse {
@@ -601,8 +629,13 @@ impl KeyAuthorizationEvidenceResponse {
     ///
     /// Deriving from `KeyResponse` rather than from `KeyView` keeps the two
     /// representations from drifting: whatever `/keys/{id}` reports for these
-    /// seven properties is exactly what the evidence read reports.
+    /// properties is exactly what the evidence read reports.
     fn from_key_response(response: KeyResponse) -> Self {
+        // A row written before service lineage existed has no lineage to
+        // report. Serializing `state_version: 0` alongside two nulls is worse
+        // than silence: the reader reads it as a present-but-invalid trio and
+        // rejects the whole document.
+        let has_lineage = response.state_version >= 1;
         Self {
             id: response.id,
             api_key_id: response.api_key_id,
@@ -611,6 +644,10 @@ impl KeyAuthorizationEvidenceResponse {
             connection_status: response.connection_status,
             granted_scopes: response.granted_scopes,
             last_authorized_at: response.last_authorized_at,
+            node_id: response.node_id,
+            rotation_predecessor_id: has_lineage.then_some(response.rotation_predecessor_id),
+            state_version: has_lineage.then_some(response.state_version),
+            updated_at: has_lineage.then_some(response.updated_at),
         }
     }
 }
@@ -2351,6 +2388,9 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         last_used_at: None,
         error_message: None,
         created_at: result.service.created_at.to_rfc3339(),
+        updated_at: result.service.updated_at.to_rfc3339(),
+        state_version: result.service.state_version,
+        rotation_predecessor_id: result.service.rotation_predecessor_id.clone(),
         ssh_host: result.ssh_host.clone(),
         ssh_port: result.ssh_port,
         ssh_ca_public_key: result.ssh_ca_public_key.clone(),
@@ -2449,6 +2489,9 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         last_used_at: view.last_used_at,
         error_message: view.error_message,
         created_at: view.created_at,
+        updated_at: view.updated_at,
+        state_version: view.state_version,
+        rotation_predecessor_id: view.rotation_predecessor_id,
         ssh_host: view.ssh_host,
         ssh_port: view.ssh_port,
         ssh_ca_public_key: view.ssh_ca_public_key,
@@ -2864,8 +2907,8 @@ mod tests {
             "authorization evidence must never carry a secret-shaped value"
         );
 
-        // Exactly the consumed properties, nothing more: every additional
-        // property is new tripwire surface on a read that cannot afford it.
+        // Consumed properties plus the additive Wave-2 fields. No free-text
+        // carriers (`label`/`name`, header values, WS templates).
         let properties: std::collections::BTreeSet<&str> = evidence
             .as_object()
             .unwrap()
@@ -2881,11 +2924,26 @@ mod tests {
                 "id",
                 "is_active",
                 "last_authorized_at",
+                "node_id",
+                "rotation_predecessor_id",
+                "state_version",
                 "status",
+                "updated_at",
             ]
             .into_iter()
             .collect::<std::collections::BTreeSet<&str>>()
         );
+        assert_eq!(evidence.get("node_id"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            evidence.get("rotation_predecessor_id"),
+            Some(&serde_json::Value::Null)
+        );
+        assert!(
+            evidence["state_version"]
+                .as_i64()
+                .is_some_and(|value| value >= 1)
+        );
+        assert!(evidence["updated_at"].as_str().is_some());
     }
 
     #[test]
@@ -2915,9 +2973,58 @@ mod tests {
 
         // The reader distinguishes an explicit null from a missing property
         // and treats a missing one as a malformed response.
-        for property in ["connection_status", "granted_scopes", "last_authorized_at"] {
+        for property in [
+            "connection_status",
+            "granted_scopes",
+            "last_authorized_at",
+            "node_id",
+        ] {
             assert_eq!(evidence.get(property), Some(&serde_json::Value::Null));
         }
+    }
+
+    #[test]
+    fn authorization_evidence_omits_lineage_trio_for_pre_lineage_rows() {
+        let result = crate::services::unified_key_service::CreateKeyResult {
+            endpoint: test_user_endpoint(
+                "endpoint-1",
+                "user-1",
+                "Example",
+                "https://api.example.com",
+                None,
+                None,
+            ),
+            api_key: None,
+            service: {
+                let mut service =
+                    test_user_service("service-1", "user-1", "example", "endpoint-1", None, None);
+                service.state_version = 0;
+                service.rotation_predecessor_id = None;
+                service
+            },
+            ssh_host: None,
+            ssh_port: None,
+            ssh_ca_public_key: None,
+            ssh_allowed_principals: None,
+            ssh_certificate_ttl_minutes: None,
+        };
+        let evidence =
+            serde_json::to_value(super::KeyAuthorizationEvidenceResponse::from_key_response(
+                super::key_response_from_result(&result),
+            ))
+            .unwrap();
+
+        for property in ["rotation_predecessor_id", "state_version", "updated_at"] {
+            assert!(
+                evidence.get(property).is_none(),
+                "{property} must be omitted on pre-lineage rows"
+            );
+        }
+        assert_eq!(evidence.get("node_id"), Some(&serde_json::Value::Null));
+        assert_eq!(
+            crate::test_utils::aevatar_secret_free_violation(&evidence),
+            None
+        );
     }
 
     fn assert_aevatar_secret_free(value: &serde_json::Value) {

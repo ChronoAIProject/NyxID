@@ -1,16 +1,40 @@
 use chrono::Utc;
 use futures::TryStreamExt;
-use mongodb::bson::{self, doc};
+use mongodb::{
+    ClientSession, Database,
+    bson::{self, Document, doc},
+};
 use uuid::Uuid;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::user_endpoint::{COLLECTION_NAME, UserEndpoint};
 use crate::models::user_service::COLLECTION_NAME as USER_SERVICES;
-use crate::services::url_validation::{validate_base_url, validate_optional_spec_url};
+use crate::services::url_validation::{
+    reject_url_userinfo, validate_base_url, validate_optional_spec_url,
+};
 
 fn validate_endpoint_url(url: &str) -> AppResult<()> {
-    // Skip URL validation for node-resolved endpoints (empty URL) and SSH endpoints.
-    if url.is_empty() || url.starts_with("ssh://") {
+    // Node-resolved endpoints carry an empty URL.
+    if url.is_empty() {
+        return Ok(());
+    }
+
+    // `UserEndpoint.url` is echoed back in ordinary list and detail responses,
+    // so a credential embedded in userinfo is a disclosure path. Reject
+    // userinfo and fragments for EVERY accepted scheme. Previously `ssh://`
+    // skipped validation entirely, and `validate_base_url` never inspected
+    // userinfo at all, so `https://user:pass@host` was accepted too.
+    let parsed = url::Url::parse(url)
+        .map_err(|_| AppError::ValidationError("Invalid endpoint URL format".to_string()))?;
+    reject_url_userinfo(&parsed)?;
+    if parsed.fragment().is_some() {
+        return Err(AppError::ValidationError(
+            "Endpoint URL must not contain a fragment".to_string(),
+        ));
+    }
+
+    // SSH endpoints are otherwise exempt from the HTTP base-URL rules.
+    if url.starts_with("ssh://") {
         return Ok(());
     }
 
@@ -148,6 +172,53 @@ pub async fn update_endpoint(
     openapi_spec_url: OpenApiSpecUrlUpdate<'_>,
     recommended_skills: RecommendedSkillsUpdate,
 ) -> AppResult<()> {
+    let update_doc = build_endpoint_update(url, label, openapi_spec_url, recommended_skills)?;
+
+    let result = db
+        .collection::<UserEndpoint>(COLLECTION_NAME)
+        .update_one(doc! { "_id": endpoint_id, "user_id": user_id }, update_doc)
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound("Endpoint not found".to_string()));
+    }
+
+    Ok(())
+}
+
+/// Apply an endpoint update inside a caller-owned MongoDB transaction.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_endpoint_in_session(
+    db: &Database,
+    session: &mut ClientSession,
+    user_id: &str,
+    endpoint_id: &str,
+    url: Option<&str>,
+    label: Option<&str>,
+    openapi_spec_url: OpenApiSpecUrlUpdate<'_>,
+    recommended_skills: RecommendedSkillsUpdate,
+) -> AppResult<()> {
+    let update_doc = build_endpoint_update(url, label, openapi_spec_url, recommended_skills)?;
+
+    let result = db
+        .collection::<UserEndpoint>(COLLECTION_NAME)
+        .update_one(doc! { "_id": endpoint_id, "user_id": user_id }, update_doc)
+        .session(session)
+        .await?;
+
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound("Endpoint not found".to_string()));
+    }
+
+    Ok(())
+}
+
+fn build_endpoint_update(
+    url: Option<&str>,
+    label: Option<&str>,
+    openapi_spec_url: OpenApiSpecUrlUpdate<'_>,
+    recommended_skills: RecommendedSkillsUpdate,
+) -> AppResult<Document> {
     let spec_update = match openapi_spec_url {
         OpenApiSpecUrlUpdate::Leave => None,
         OpenApiSpecUrlUpdate::Clear => Some(None),
@@ -227,16 +298,7 @@ pub async fn update_endpoint(
         update_doc.insert("$unset", unset_doc);
     }
 
-    let result = db
-        .collection::<UserEndpoint>(COLLECTION_NAME)
-        .update_one(doc! { "_id": endpoint_id, "user_id": user_id }, update_doc)
-        .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound("Endpoint not found".to_string()));
-    }
-
-    Ok(())
+    Ok(update_doc)
 }
 
 /// Delete endpoint. Fails if any active UserService references it.
@@ -289,5 +351,37 @@ mod tests {
     #[test]
     fn validate_endpoint_url_rejects_non_http_non_ssh_urls() {
         assert!(validate_endpoint_url("ftp://example.com").is_err());
+    }
+
+    /// `UserEndpoint.url` is echoed back in ordinary list and detail
+    /// responses, so a credential embedded in userinfo is a disclosure path.
+    /// Every accepted scheme must reject it -- `ssh://` previously skipped
+    /// validation entirely and `validate_base_url` never checked userinfo.
+    #[test]
+    fn validate_endpoint_url_rejects_userinfo_in_every_accepted_scheme() {
+        assert!(validate_endpoint_url("https://user:pass@example.com").is_err());
+        assert!(validate_endpoint_url("http://user:pass@example.com").is_err());
+        assert!(validate_endpoint_url("https://user@example.com").is_err());
+        assert!(validate_endpoint_url("ssh://user:pass@example.com:22").is_err());
+        assert!(validate_endpoint_url("ssh://user@example.com:22").is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_url_rejects_percent_encoded_userinfo() {
+        assert!(validate_endpoint_url("ssh://%75ser:%70ass@example.com:22").is_err());
+        assert!(validate_endpoint_url("https://%75ser:%70ass@example.com").is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_url_rejects_fragments() {
+        assert!(validate_endpoint_url("https://example.com/base#frag").is_err());
+        assert!(validate_endpoint_url("ssh://example.internal:22#frag").is_err());
+    }
+
+    #[test]
+    fn validate_endpoint_url_still_accepts_credential_free_ssh_and_http() {
+        assert!(validate_endpoint_url("").is_ok());
+        assert!(validate_endpoint_url("ssh://example.internal:22").is_ok());
+        assert!(validate_endpoint_url("https://api.example.com").is_ok());
     }
 }

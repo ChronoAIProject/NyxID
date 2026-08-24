@@ -149,6 +149,99 @@ export const keyRotateActionParamsSchema = z
   })
   .strict();
 
+// ---- Wave 2 param shapes (WS-0; dormant until an Aevatar revision pins the
+// verbs). Journey resolution stays "unsupported" in action-registry until the
+// owning team lands its journey, so accepting the shapes here changes no
+// behavior. Optional members deliberately have NO defaults: protobuf elides
+// empty strings, and for update-shaped verbs absence means "leave unchanged".
+const optionalUpdateTextSchema = z.string().max(4_096).optional();
+
+export const keyUpdateActionParamsSchema = z
+  .object({
+    keyId: requiredActionIdentitySchema,
+    name: optionalUpdateTextSchema,
+    platform: optionalUpdateTextSchema,
+    description: optionalUpdateTextSchema,
+  })
+  .strict();
+
+export const keyDeleteActionParamsSchema = z
+  .object({
+    keyId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const keyExtendScopeActionParamsSchema = z
+  .object({
+    keyId: requiredActionIdentitySchema,
+    addServiceIds: allowedServiceIdsSchema,
+  })
+  .strict();
+
+export const keyBindCredentialActionParamsSchema = z
+  .object({
+    keyId: requiredActionIdentitySchema,
+    userServiceId: requiredActionIdentitySchema,
+    externalKeyId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const serviceUpdateActionParamsSchema = z
+  .object({
+    userServiceId: requiredActionIdentitySchema,
+    name: optionalUpdateTextSchema,
+    endpointUrl: optionalUpdateTextSchema,
+    authMethod: customServiceAuthMethodSchema.optional(),
+    authKeyName: optionalUpdateTextSchema,
+  })
+  .strict();
+
+export const serviceDeleteActionParamsSchema = z
+  .object({
+    userServiceId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const serviceRouteActionParamsSchema = z
+  .object({
+    userServiceId: requiredActionIdentitySchema,
+    viaNodeId: actionControlIdentitySchema.optional(),
+  })
+  .strict();
+
+export const serviceRotateCredentialActionParamsSchema = z
+  .object({
+    userServiceId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const endpointUpdateActionParamsSchema = z
+  .object({
+    endpointId: requiredActionIdentitySchema,
+    label: optionalUpdateTextSchema,
+    endpointUrl: optionalUpdateTextSchema,
+    openapiSpecUrl: optionalUpdateTextSchema,
+  })
+  .strict();
+
+export const endpointDeleteActionParamsSchema = z
+  .object({
+    endpointId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const externalKeyRotateActionParamsSchema = z
+  .object({
+    externalKeyId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const externalKeyDeleteActionParamsSchema = z
+  .object({
+    externalKeyId: requiredActionIdentitySchema,
+  })
+  .strict();
+
 const emptyActionParamsSchema = z.object({}).strict();
 
 export const assistantActionParamsSchema = z
@@ -157,6 +250,18 @@ export const assistantActionParamsSchema = z
     serviceReauthorizeActionParamsSchema,
     keyCreateActionParamsSchema,
     keyRotateActionParamsSchema,
+    keyUpdateActionParamsSchema,
+    keyDeleteActionParamsSchema,
+    keyExtendScopeActionParamsSchema,
+    keyBindCredentialActionParamsSchema,
+    serviceUpdateActionParamsSchema,
+    serviceDeleteActionParamsSchema,
+    serviceRouteActionParamsSchema,
+    serviceRotateCredentialActionParamsSchema,
+    endpointUpdateActionParamsSchema,
+    endpointDeleteActionParamsSchema,
+    externalKeyRotateActionParamsSchema,
+    externalKeyDeleteActionParamsSchema,
     emptyActionParamsSchema,
   ])
   .optional()
@@ -268,6 +373,68 @@ export type ActionCardParams =
       readonly variant: "key_rotate";
       readonly key_id: string;
     }
+  | {
+      readonly variant: "key_update";
+      readonly key_id: string;
+      readonly name?: string;
+      readonly platform?: string;
+      readonly description?: string;
+    }
+  | {
+      readonly variant: "key_delete";
+      readonly key_id: string;
+    }
+  | {
+      readonly variant: "key_extend_scope";
+      readonly key_id: string;
+      readonly add_service_ids: readonly string[];
+    }
+  | {
+      readonly variant: "key_bind_credential";
+      readonly key_id: string;
+      readonly user_service_id: string;
+      readonly external_key_id: string;
+    }
+  | {
+      readonly variant: "service_update";
+      readonly user_service_id: string;
+      readonly name?: string;
+      readonly endpoint_url?: string;
+      readonly auth_method?: z.infer<typeof customServiceAuthMethodSchema>;
+      readonly auth_key_name?: string;
+    }
+  | {
+      readonly variant: "service_delete";
+      readonly user_service_id: string;
+    }
+  | {
+      readonly variant: "service_route";
+      readonly user_service_id: string;
+      readonly via_node_id?: string;
+    }
+  | {
+      readonly variant: "service_rotate_credential";
+      readonly user_service_id: string;
+    }
+  | {
+      readonly variant: "endpoint_update";
+      readonly endpoint_id: string;
+      readonly label?: string;
+      readonly endpoint_url?: string;
+      readonly openapi_spec_url?: string;
+    }
+  | {
+      readonly variant: "endpoint_delete";
+      readonly endpoint_id: string;
+    }
+  | {
+      readonly variant: "external_key_rotate";
+      readonly external_key_id: string;
+    }
+  | {
+      readonly variant: "external_key_delete";
+      readonly external_key_id: string;
+    }
   | { readonly variant: "unknown" };
 
 export const actionDispositionSchema = z.enum([
@@ -286,7 +453,51 @@ const userServiceResourceSchema = z
   })
   .strict();
 const keyResourceSchema = z
-  .object({ key: z.object({ keyId: actionControlIdentitySchema }).strict() })
+  .object({
+    key: z
+      .object({
+        keyId: actionControlIdentitySchema,
+        // Present on key.bind_credential reports so the postcondition can
+        // address GET /api-keys/{keyId}/bindings/by-service/{userServiceId}/authorization.
+        // Other key verbs omit it.
+        userServiceId: actionControlIdentitySchema.optional(),
+      })
+      .strict(),
+  })
+  .strict();
+const pendingCredentialResourceSchema = z
+  .object({
+    pendingCredential: z
+      .object({ pendingCredentialId: actionControlIdentitySchema })
+      .strict(),
+  })
+  .strict();
+const orgResourceSchema = z
+  .object({ org: z.object({ orgId: actionControlIdentitySchema }).strict() })
+  .strict();
+const accountResourceSchema = z
+  .object({
+    account: z.object({ userId: actionControlIdentitySchema }).strict(),
+  })
+  .strict();
+const grantResourceSchema = z
+  .object({
+    grant: z.object({ grantId: actionControlIdentitySchema }).strict(),
+  })
+  .strict();
+const approvalConfigResourceSchema = z
+  .object({
+    approvalConfig: z
+      .object({ serviceId: actionControlIdentitySchema })
+      .strict(),
+  })
+  .strict();
+const notificationBindingResourceSchema = z
+  .object({
+    notificationBinding: z
+      .object({ bindingId: actionControlIdentitySchema })
+      .strict(),
+  })
   .strict();
 const nodeResourceSchema = z
   .object({ node: z.object({ nodeId: actionControlIdentitySchema }).strict() })
@@ -303,6 +514,21 @@ const developerAppResourceSchema = z
     developerApp: z.object({ clientId: actionControlIdentitySchema }).strict(),
   })
   .strict();
+const endpointResourceSchema = z
+  .object({
+    endpoint: z.object({ endpointId: actionControlIdentitySchema }).strict(),
+  })
+  .strict();
+// external_key.* reports MUST NOT reuse `key`: that variant addresses
+// api_keys via /api/v1/api-keys/{id}/authorization, while these are
+// user_api_keys rows read at /api/v1/api-keys/external/{id}/authorization.
+const externalKeyResourceSchema = z
+  .object({
+    externalKey: z
+      .object({ externalKeyId: actionControlIdentitySchema })
+      .strict(),
+  })
+  .strict();
 const deviceResourceSchema = z
   .object({
     device: z.object({ deviceId: actionControlIdentitySchema }).strict(),
@@ -312,7 +538,15 @@ const deviceResourceSchema = z
 export const actionResourceSchema = z.union([
   userServiceResourceSchema,
   keyResourceSchema,
+  endpointResourceSchema,
+  externalKeyResourceSchema,
   nodeResourceSchema,
+  pendingCredentialResourceSchema,
+  orgResourceSchema,
+  accountResourceSchema,
+  grantResourceSchema,
+  approvalConfigResourceSchema,
+  notificationBindingResourceSchema,
   serviceAccountResourceSchema,
   developerAppResourceSchema,
   deviceResourceSchema,
@@ -438,6 +672,27 @@ function assertReportMatchesAction(
       `${action} completed reports must include resource.key.keyId`,
     );
   }
+  if (action?.startsWith("endpoint.") && !("endpoint" in report.resource)) {
+    throw new Error(
+      `${action} completed reports must include resource.endpoint.endpointId`,
+    );
+  }
+  if (
+    action?.startsWith("external_key.") &&
+    !("externalKey" in report.resource)
+  ) {
+    throw new Error(
+      `${action} completed reports must include resource.externalKey.externalKeyId`,
+    );
+  }
+  if (
+    action === "key.bind_credential" &&
+    (!("key" in report.resource) || !report.resource.key.userServiceId)
+  ) {
+    throw new Error(
+      "key.bind_credential completed reports must include resource.key.userServiceId",
+    );
+  }
 }
 
 function copyResource(resource: ActionResource): ActionResource {
@@ -446,8 +701,45 @@ function copyResource(resource: ActionResource): ActionResource {
       userService: { userServiceId: resource.userService.userServiceId },
     };
   }
-  if ("key" in resource) return { key: { keyId: resource.key.keyId } };
+  if ("key" in resource) {
+    return {
+      key: {
+        keyId: resource.key.keyId,
+        ...(resource.key.userServiceId
+          ? { userServiceId: resource.key.userServiceId }
+          : {}),
+      },
+    };
+  }
+  if ("endpoint" in resource) {
+    return { endpoint: { endpointId: resource.endpoint.endpointId } };
+  }
+  if ("externalKey" in resource) {
+    return {
+      externalKey: { externalKeyId: resource.externalKey.externalKeyId },
+    };
+  }
   if ("node" in resource) return { node: { nodeId: resource.node.nodeId } };
+  if ("pendingCredential" in resource) {
+    return {
+      pendingCredential: {
+        pendingCredentialId: resource.pendingCredential.pendingCredentialId,
+      },
+    };
+  }
+  if ("org" in resource) return { org: { orgId: resource.org.orgId } };
+  if ("account" in resource) {
+    return { account: { userId: resource.account.userId } };
+  }
+  if ("grant" in resource) return { grant: { grantId: resource.grant.grantId } };
+  if ("approvalConfig" in resource) {
+    return { approvalConfig: { serviceId: resource.approvalConfig.serviceId } };
+  }
+  if ("notificationBinding" in resource) {
+    return {
+      notificationBinding: { bindingId: resource.notificationBinding.bindingId },
+    };
+  }
   if ("serviceAccount" in resource) {
     return {
       serviceAccount: {

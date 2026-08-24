@@ -132,15 +132,6 @@ macro_rules! assistant_direct_billing_routes {
                     crate::services::billing::BillingIngress::Proxy
                 )
             ),
-            (
-                "/direct/agent",
-                "/api/v1/assistant/direct/agent",
-                "handlers::assistant_direct_agent_poc::agent_completions",
-                post(handlers::assistant_direct_agent_poc::agent_completions),
-                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
-                    crate::services::billing::BillingIngress::Proxy
-                )
-            ),
         )
     };
 }
@@ -465,6 +456,14 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route("/me", get(handlers::users::get_me))
         .route("/me", put(handlers::users::update_me))
         .route("/me", delete(handlers::users::delete_me))
+        // Assistant postcondition evidence. These MUST be mounted on the
+        // production router: a browser journey that proves success by a 404
+        // cannot distinguish "resource absent" from "route absent", so an
+        // unmounted evidence route makes every absence proof vacuous.
+        .route(
+            "/me/authorization",
+            get(handlers::users::get_account_authorization),
+        )
         .route(
             "/me/onboarding/complete",
             post(handlers::users::complete_onboarding),
@@ -478,6 +477,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             delete(handlers::broker_bindings::revoke_my_broker_binding),
         )
         .route("/me/consents", get(handlers::consent::list_my_consents))
+        .route(
+            "/me/consents/{client_id}/authorization",
+            get(handlers::consent::get_my_consent_authorization),
+        )
         .route(
             "/me/consents/{client_id}",
             delete(handlers::consent::revoke_my_consent),
@@ -518,6 +521,14 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/{key_id}/bindings",
             get(handlers::agent_bindings::list_bindings)
                 .post(handlers::agent_bindings::create_binding),
+        )
+        .route(
+            "/{key_id}/bindings/by-service/{user_service_id}/authorization",
+            get(handlers::agent_bindings::get_binding_authorization_by_service),
+        )
+        .route(
+            "/{key_id}/bindings/{binding_id}/authorization",
+            get(handlers::agent_bindings::get_binding_authorization),
         )
         .route(
             "/{key_id}/bindings/{binding_id}",
@@ -685,6 +696,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             get(handlers::admin_service_accounts::get_service_account)
                 .put(handlers::admin_service_accounts::update_service_account)
                 .delete(handlers::admin_service_accounts::delete_service_account),
+        )
+        .route(
+            "/{sa_id}/authorization",
+            get(handlers::admin_service_accounts::get_service_account_authorization),
         )
         .route(
             "/{sa_id}/rotate-secret",
@@ -942,6 +957,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .put(handlers::notifications::update_settings),
         )
         .route(
+            "/settings/authorization",
+            get(handlers::notifications::get_settings_authorization),
+        )
+        .route(
             "/telegram/link",
             post(handlers::notifications::telegram_link),
         )
@@ -980,6 +999,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         )
         .route("/grants", get(handlers::approvals::list_grants))
         .route(
+            "/grants/{grant_id}/authorization",
+            get(handlers::approvals::get_grant_authorization),
+        )
+        .route(
             "/grants/{grant_id}",
             delete(handlers::approvals::revoke_grant),
         )
@@ -991,6 +1014,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/service-configs/{service_id}",
             put(handlers::approvals::set_service_config)
                 .delete(handlers::approvals::delete_service_config),
+        )
+        .route(
+            "/service-configs/{service_id}/authorization",
+            get(handlers::approvals::get_service_config_authorization),
         );
 
     let node_registration_routes = Router::new().route(
@@ -1153,6 +1180,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .delete(handlers::user_endpoints::delete_endpoint),
         )
         .route(
+            "/{endpoint_id}/authorization",
+            get(handlers::user_endpoints::get_endpoint_authorization),
+        )
+        .route(
             "/{endpoint_id}/openapi-endpoints",
             get(handlers::user_endpoints::list_openapi_endpoints),
         );
@@ -1170,6 +1201,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/{key_id}",
             put(handlers::user_api_keys_external::update_external_api_key)
                 .delete(handlers::user_api_keys_external::delete_external_api_key),
+        )
+        .route(
+            "/{key_id}/authorization",
+            get(handlers::user_api_keys_external::get_external_api_key_authorization),
         );
 
     let user_service_routes = Router::new()
@@ -1243,12 +1278,20 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
                 .delete(handlers::orgs::delete_org),
         )
         .route(
+            "/{org_id}/authorization",
+            get(handlers::orgs::get_org_authorization),
+        )
+        .route(
             "/{org_id}/members",
             get(handlers::orgs::list_members).post(handlers::orgs::add_member),
         )
         .route(
             "/{org_id}/members/{member_id}",
             patch(handlers::orgs::update_member).delete(handlers::orgs::remove_member),
+        )
+        .route(
+            "/{org_id}/members/{member_id}/authorization",
+            get(handlers::orgs::get_member_authorization),
         )
         .route(
             "/{org_id}/role-scopes",
@@ -1362,6 +1405,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             get(handlers::developer_apps::get_my_oauth_client)
                 .patch(handlers::developer_apps::update_my_oauth_client)
                 .delete(handlers::developer_apps::delete_my_oauth_client),
+        )
+        .route(
+            "/oauth-clients/{client_id}/authorization",
+            get(handlers::developer_apps::get_my_oauth_client_authorization),
         )
         .route(
             "/oauth-clients/{client_id}/rotate-secret",
@@ -1535,6 +1582,28 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route(
             "/actions/key-rotate",
             post(handlers::assistant_action_effects::rotate_key),
+        )
+        // Wave-2 effect families (WS-0): mounted empty so `routes.rs` stays
+        // single-writer while each workstream fills its own router file.
+        .nest(
+            "/actions/keys",
+            handlers::assistant_action_effects_keys::router(),
+        )
+        .nest(
+            "/actions/services",
+            handlers::assistant_action_effects_services::router(),
+        )
+        .nest(
+            "/actions/endpoints",
+            handlers::assistant_action_effects_endpoints::router(),
+        )
+        .nest(
+            "/actions/nodes",
+            handlers::assistant_action_effects_nodes::router(),
+        )
+        .nest(
+            "/actions/org",
+            handlers::assistant_action_effects_org::router(),
         )
         .merge(assistant_proxy_routes);
 
