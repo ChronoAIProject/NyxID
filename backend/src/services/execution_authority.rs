@@ -11,9 +11,18 @@ use serde::Serialize;
 use crate::models::default_request_header::DefaultRequestHeader;
 use crate::models::downstream_service::ProxyOperationPolicy;
 use crate::services::mcp_service;
+use crate::services::provider_token_exchange_service;
 use crate::services::proxy_service::UserServiceResolution;
 
-pub const CONTRACT_VERSION: &str = "nyxid-exact-execution-authority.v1";
+#[cfg(test)]
+pub const LEGACY_CONTRACT_VERSION: &str = "nyxid-exact-execution-authority.v1";
+pub const CONTRACT_VERSION: &str = "nyxid-exact-execution-authority.v2";
+
+/// Stored in the legacy digest slot for v2 approvals. A v1 replica compares
+/// this value with a sha256 digest and therefore fails closed instead of
+/// executing a projection whose added authority fields it cannot validate.
+pub const LEGACY_FAIL_CLOSED_MARKER: &str =
+    "projection-version-required:nyxid-exact-execution-authority.v2";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct CredentialProjection {
@@ -64,6 +73,12 @@ pub struct ExecutionAuthorityProjection {
     pub destination_base_url: String,
     pub auth_method: String,
     pub auth_key_name: String,
+    pub service_category: String,
+    pub requires_user_credential: bool,
+    /// Digest of the execution-relevant, server-side token-exchange config.
+    /// The config itself may contain literal admin values, so only this digest
+    /// is carried into the outer projection.
+    pub token_exchange_config_digest: Option<String>,
     pub credential: CredentialProjection,
     pub identity_injection: IdentityInjectionProjection,
     pub default_headers: DefaultHeadersProjection,
@@ -97,6 +112,12 @@ pub fn build_projection(
         destination_base_url: target.base_url.clone(),
         auth_method: target.auth_method.clone(),
         auth_key_name: target.auth_key_name.clone(),
+        service_category: service.service_category.clone(),
+        requires_user_credential: service.requires_user_credential,
+        token_exchange_config_digest: (target.auth_method == "token_exchange")
+            .then_some(service.token_exchange_config.as_ref())
+            .flatten()
+            .map(provider_token_exchange_service::execution_config_fingerprint),
         credential: CredentialProjection {
             api_key_id: resolution.api_key_id.clone(),
             credential_epoch: resolution.credential_epoch,
@@ -137,6 +158,25 @@ pub fn digest(projection: &ExecutionAuthorityProjection) -> String {
     )
 }
 
+/// Reproduce the exact v1 projection digest for regression evidence. This is
+/// never an approval authorization fallback: v1 omitted v2 authority fields,
+/// so new approvals are always authored and verified under `CONTRACT_VERSION`.
+#[cfg(test)]
+pub fn legacy_digest(projection: &ExecutionAuthorityProjection) -> String {
+    mcp_service::canonical_sha256(serde_json::json!({
+        "contract_version": LEGACY_CONTRACT_VERSION,
+        "user_service_id": &projection.user_service_id,
+        "destination_base_url": &projection.destination_base_url,
+        "auth_method": &projection.auth_method,
+        "auth_key_name": &projection.auth_key_name,
+        "credential": &projection.credential,
+        "identity_injection": &projection.identity_injection,
+        "default_headers": &projection.default_headers,
+        "proxy_operation_policy": &projection.proxy_operation_policy,
+        "node_route": &projection.node_route,
+    }))
+}
+
 fn project_headers(headers: &[DefaultRequestHeader]) -> Vec<HeaderProjection> {
     headers
         .iter()
@@ -160,6 +200,9 @@ mod tests {
             destination_base_url: "https://api.example.test".to_string(),
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
+            service_category: "connection".to_string(),
+            requires_user_credential: true,
+            token_exchange_config_digest: None,
             credential: CredentialProjection {
                 api_key_id: Some("key-1".to_string()),
                 credential_epoch: 1,
@@ -205,6 +248,28 @@ mod tests {
     }
 
     #[test]
+    fn legacy_digest_reproduces_v1_without_silently_accepting_v2_only_fields() {
+        let original = sample_projection();
+        let original_v1 = legacy_digest(&original);
+        let original_v2 = digest(&original);
+        assert_ne!(original_v1, original_v2);
+
+        let mut changed = original;
+        changed.service_category = "internal".to_string();
+        changed.requires_user_credential = false;
+        assert_eq!(
+            original_v1,
+            legacy_digest(&changed),
+            "v1 intentionally did not project the v2-only authority fields"
+        );
+        assert_ne!(
+            original_v2,
+            digest(&changed),
+            "v2 must reject authority changes that v1 cannot observe"
+        );
+    }
+
+    #[test]
     fn digest_is_insensitive_to_object_key_order() {
         let projection = sample_projection();
         let value = serde_json::to_value(&projection).unwrap();
@@ -224,5 +289,58 @@ mod tests {
         let mut changed = sample_projection();
         changed.default_headers.catalog[0].value = "two".to_string();
         assert_ne!(digest(&sample_projection()), digest(&changed));
+    }
+
+    #[test]
+    fn service_category_participates_in_the_digest() {
+        let mut changed = sample_projection();
+        changed.service_category = "internal".to_string();
+        assert_ne!(digest(&sample_projection()), digest(&changed));
+    }
+
+    #[test]
+    fn requires_user_credential_participates_in_the_digest() {
+        let mut changed = sample_projection();
+        changed.requires_user_credential = false;
+        assert_ne!(digest(&sample_projection()), digest(&changed));
+    }
+
+    #[test]
+    fn token_exchange_config_participates_without_exposing_literals() {
+        use crate::models::downstream_service::{CredentialFieldSpec, TokenExchangeConfig};
+
+        let config = TokenExchangeConfig {
+            endpoint: "{base_url}/token".to_string(),
+            request_encoding: "json".to_string(),
+            request_template: serde_json::json!({
+                "client_id": "$client_id",
+                "private_literal": "do-not-expose",
+            }),
+            token_response_path: "access_token".to_string(),
+            ttl_response_path: Some("expires_in".to_string()),
+            default_ttl_secs: 3600,
+            injection: "bearer".to_string(),
+            error_code_path: None,
+            error_message_path: None,
+            credential_fields: vec![CredentialFieldSpec {
+                name: "client_id".to_string(),
+                label: "Client ID".to_string(),
+                placeholder: None,
+                secret: false,
+            }],
+        };
+        let projected = provider_token_exchange_service::execution_config_fingerprint(&config);
+        let mut changed = config.clone();
+        changed.default_ttl_secs += 1;
+        assert_ne!(
+            projected,
+            provider_token_exchange_service::execution_config_fingerprint(&changed)
+        );
+
+        let mut outer = sample_projection();
+        outer.token_exchange_config_digest = Some(projected);
+        let serialized = serde_json::to_string(&outer).unwrap();
+        assert!(!serialized.contains("do-not-expose"));
+        assert_ne!(digest(&sample_projection()), digest(&outer));
     }
 }

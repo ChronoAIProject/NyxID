@@ -1280,6 +1280,7 @@ impl NodeWsManager {
     /// Send a proxy request to a node and wait for the response.
     /// If `signing_secret` is provided, the request is HMAC-signed.
     /// Returns either a complete response or a streaming channel.
+    #[cfg(test)]
     pub(crate) async fn send_proxy_request(
         &self,
         node_id: &str,

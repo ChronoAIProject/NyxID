@@ -93,7 +93,7 @@ pub async fn get_operation_catalog(
         .sum();
 
     Ok(Json(DelegatedOperationCatalogResponse {
-        contract_version: "nyxid-delegated-operation-catalog.v2",
+        contract_version: "nyxid-delegated-operation-catalog.v3",
         catalog_digest,
         exact_view_digest,
         resolved_at: resolved_at.to_rfc3339(),
@@ -516,7 +516,7 @@ mod tests {
         );
         assert_eq!(
             discovery["contract_version"],
-            "nyxid-delegated-operation-catalog.v2"
+            "nyxid-delegated-operation-catalog.v3"
         );
         let services: Vec<mcp_service::ExactOperationViewService> =
             serde_json::from_value(discovery["services"].clone())
@@ -654,12 +654,7 @@ mod tests {
             "endpoint_contract_digest": fixture.operation.endpoint_contract_digest,
             "operation_digest": fixture.operation_digest,
             "operation_id": fixture.operation.endpoint_id,
-            // Caller bookkeeping with no producer referent in discovery;
-            // validation as `>= 1` does not make this freshness evidence.
-            // AC4's response-derived-field requirement is met only if @eanz17
-            // exempts this field, and that exemption has not been granted.
-            // Producer-owned generation belongs to issue #1457 AC5.
-            "operation_generation": 1,
+            "operation_generation": fixture.operation.operation_generation,
             "idempotency_key": idempotency_key,
             "arguments": {},
         })
@@ -883,6 +878,34 @@ mod tests {
         );
     }
 
+    async fn assert_full_router_terminal_redemption(
+        fixture: &FullRouterFixture,
+        request_id: &str,
+        expected_status: crate::models::approval_request::ExactServiceRedemptionStatus,
+        expected_failure_code: &str,
+    ) {
+        let request = fixture
+            .db
+            .collection::<crate::models::approval_request::ApprovalRequest>(
+                crate::models::approval_request::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! { "_id": request_id })
+            .await
+            .expect("load full-router terminal request")
+            .expect("full-router terminal request exists");
+        let terminal = request
+            .exact_service
+            .and_then(|binding| binding.redemption)
+            .expect("terminal revalidation must be durable");
+        assert_eq!(terminal.status, expected_status);
+        assert_eq!(
+            terminal.failure_code.as_deref(),
+            Some(expected_failure_code)
+        );
+        assert!(terminal.completed_at.is_some());
+        assert!(terminal.receipt.is_none());
+    }
+
     fn assert_error_response(
         status: StatusCode,
         body: &serde_json::Value,
@@ -931,7 +954,7 @@ mod tests {
     #[test]
     fn operation_catalog_response_is_typed_and_secret_free() {
         let response = DelegatedOperationCatalogResponse {
-            contract_version: "nyxid-delegated-operation-catalog.v2",
+            contract_version: "nyxid-delegated-operation-catalog.v3",
             catalog_digest: "sha256:opaque".to_string(),
             exact_view_digest: "sha256:exact-view".to_string(),
             resolved_at: "2026-08-14T00:00:00Z".to_string(),
@@ -953,7 +976,10 @@ mod tests {
                     request_content_type: None,
                     request_body_required: false,
                     response: Default::default(),
+                    risk: Some(crate::models::service_endpoint::EndpointRisk::Write),
+                    supports_idempotency_key: true,
                     endpoint_contract_digest: "sha256:contract".to_string(),
+                    operation_generation: 7,
                 }],
             }],
             total_services: 1,
@@ -987,7 +1013,10 @@ mod tests {
                 request_content_type: None,
                 request_body_required: false,
                 response: response(),
+                risk: Some(crate::models::service_endpoint::EndpointRisk::Write),
+                supports_idempotency_key: true,
                 endpoint_contract_digest: endpoint_contract_digest.to_string(),
+                operation_generation: 7,
             }
         };
         mcp_service::ExactOperationView {
@@ -1036,7 +1065,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_fixture_binds_provider_identity_and_v2_digest_envelope() {
+    fn deterministic_fixture_binds_provider_identity_generation_and_v3_digest_envelope() {
         let view = deterministic_exact_view_fixture();
         assert_eq!(
             view.services[0].catalog_service_id.as_deref(),
@@ -1045,7 +1074,7 @@ mod tests {
         let digest = mcp_service::exact_operation_view_digest(&view);
         assert_eq!(
             digest,
-            "sha256:acfbddf689ec25828e01cb4c149f9fd5f3ab5c9f37fddc7d0891e088cf1030a5"
+            "sha256:43017726dbf7de94785e925e2e49f8cddad721c852ead8c8338164fc67753eff"
         );
         let mut provider_changed = view.clone();
         provider_changed.services[0].catalog_service_id =
@@ -1164,6 +1193,7 @@ mod tests {
             risk: None,
             supports_idempotency_key: false,
             is_active: true,
+            operation_generation: 1,
             created_at: now,
             updated_at: now,
         }
@@ -1358,13 +1388,23 @@ mod tests {
                 .await
                 .expect("resolve delegated operation catalog");
         let mut actual = serde_json::to_value(response).unwrap();
+        let returned_view = mcp_service::ExactOperationView {
+            services: serde_json::from_value(actual["services"].clone())
+                .expect("deserialize returned exact-operation view"),
+        };
+        let returned_digest = mcp_service::exact_operation_view_digest(&returned_view);
+        assert_eq!(
+            actual["exact_view_digest"].as_str(),
+            Some(returned_digest.as_str()),
+            "the digest must be recomputable from exactly the caller-visible services"
+        );
         actual["resolved_at"] = serde_json::json!("<resolved-at>");
         assert_eq!(
             actual["authority_expires_at"],
             grant.expires_at.to_rfc3339()
         );
         assert_eq!(
-            actual["contract_version"], "nyxid-delegated-operation-catalog.v2",
+            actual["contract_version"], "nyxid-delegated-operation-catalog.v3",
             "the response and exact-view digest envelope must move together"
         );
         let service_ids: Vec<&str> = actual["services"]
@@ -1395,9 +1435,9 @@ mod tests {
         assert_eq!(
             actual,
             serde_json::json!({
-                "contract_version": "nyxid-delegated-operation-catalog.v2",
+                "contract_version": "nyxid-delegated-operation-catalog.v3",
                 "catalog_digest": "sha256:ea55205436c9a87a35ec9d21072cff07e77dc2ef23409aeb16760f0d08662a62",
-                "exact_view_digest": "sha256:acfbddf689ec25828e01cb4c149f9fd5f3ab5c9f37fddc7d0891e088cf1030a5",
+                "exact_view_digest": "sha256:27afc4945fb1843f704b0979744d80ad55f00aab1404f1ed795b22004c75913f",
                 "resolved_at": "<resolved-at>",
                 "authority_expires_at": grant.expires_at.to_rfc3339(),
                 "services": [
@@ -1419,7 +1459,10 @@ mod tests {
                                 "request_content_type": null,
                                 "request_body_required": false,
                                 "response": {"content_types": ["application/json"], "binary_artifact": false},
-                                "endpoint_contract_digest": "sha256:44d63aba629068d100761faf33f1359e0837f554f691ea50fd30a69bb7b8ea5a"
+                                "risk": null,
+                                "supports_idempotency_key": false,
+                                "endpoint_contract_digest": "sha256:44d63aba629068d100761faf33f1359e0837f554f691ea50fd30a69bb7b8ea5a",
+                                "operation_generation": 1
                             },
                             {
                                 "endpoint_id": "00000000-0000-4000-8000-000000000402",
@@ -1431,7 +1474,10 @@ mod tests {
                                 "request_content_type": null,
                                 "request_body_required": false,
                                 "response": {"content_types": ["application/json"], "binary_artifact": false},
-                                "endpoint_contract_digest": "sha256:b33c78e543e5bd0db8ac01378ced3f1598ba15457c91b7526178fe91313e5021"
+                                "risk": null,
+                                "supports_idempotency_key": false,
+                                "endpoint_contract_digest": "sha256:b33c78e543e5bd0db8ac01378ced3f1598ba15457c91b7526178fe91313e5021",
+                                "operation_generation": 1
                             }
                         ]
                     },
@@ -1453,7 +1499,10 @@ mod tests {
                                 "request_content_type": null,
                                 "request_body_required": false,
                                 "response": {"content_types": ["application/json"], "binary_artifact": false},
-                                "endpoint_contract_digest": "sha256:3f488040e19cb9fdc9e9f2aefd9061058c16426a58a2ace0664373e5b9574d5f"
+                                "risk": null,
+                                "supports_idempotency_key": false,
+                                "endpoint_contract_digest": "sha256:3f488040e19cb9fdc9e9f2aefd9061058c16426a58a2ace0664373e5b9574d5f",
+                                "operation_generation": 1
                             }
                         ]
                     }
@@ -1752,7 +1801,7 @@ mod tests {
                 .expect("real delegated discovery handler");
         assert_eq!(
             discovery.contract_version,
-            "nyxid-delegated-operation-catalog.v2"
+            "nyxid-delegated-operation-catalog.v3"
         );
         let service = unique_fixture_service(&discovery.services);
         assert_eq!(service.user_service_id, TEST_SERVICE_A);
@@ -1817,9 +1866,6 @@ mod tests {
             generic_endpoint,
             &generic_arguments,
         );
-        // Create-side `operation_generation: 1` is client-originated
-        // bookkeeping (validated `>= 1`), not a fence echo. Redeem fences
-        // in this test copy `created.operation_generation`.
         let generic_create = |exact_view_digest: Option<String>, idempotency_key: &str| {
             crate::services::exact_service_approval_service::ExactServiceApprovalCreate {
                 user_service_id: TEST_GENERIC_SERVICE.to_string(),
@@ -1829,7 +1875,7 @@ mod tests {
                 endpoint_contract_digest: mcp_service::endpoint_contract_digest(generic_endpoint),
                 operation_digest: generic_operation_digest.clone(),
                 operation_id: generic_endpoint.endpoint_id.clone(),
-                operation_generation: 1,
+                operation_generation: Some(mcp_service::GENERIC_PROXY_OPERATION_GENERATION),
                 idempotency_key: idempotency_key.to_string(),
                 arguments: generic_arguments.clone(),
             }
@@ -1875,6 +1921,10 @@ mod tests {
         .await
         .expect("non-delegated generic target remains approvable");
         assert_eq!(row_3_created.exact_view_digest, None);
+        assert_eq!(
+            row_3_created.operation_generation,
+            mcp_service::GENERIC_PROXY_OPERATION_GENERATION
+        );
         let persisted_row_3 = approval_requests
             .find_one(mongodb::bson::doc! { "_id": &row_3_created.request_id })
             .await
@@ -1885,7 +1935,7 @@ mod tests {
                 .exact_service
                 .and_then(|binding| binding.exact_view_digest),
             None,
-            "matrix row 3 must not persist an unrelated exact-view fence"
+            "generic approval must not persist an unrelated exact-view fence"
         );
         approval_service::process_decision(
             &db,
@@ -1908,7 +1958,7 @@ mod tests {
             exact_fence(&row_3_created),
         )
         .await
-        .expect("matrix row 3: non-delegated generic request redeems");
+        .expect("non-delegated generic request redeems");
         assert_eq!(
             row_3_redeemed.state,
             crate::services::exact_service_approval_service::ExactServiceApprovalState::Redeemed
@@ -1952,7 +2002,7 @@ mod tests {
                     endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
                     operation_digest: operation_digest.clone(),
                     operation_id: operation.endpoint_id.clone(),
-                    operation_generation: 1,
+                    operation_generation: Some(operation.operation_generation),
                     idempotency_key: "integration-idempotency-key".to_string(),
                     arguments: arguments.clone(),
                 },
@@ -1974,6 +2024,57 @@ mod tests {
             "delegated digest omission must be rejected before persistence"
         );
 
+        let generation_input = |operation_generation: Option<i64>, idempotency_key: &str| {
+            crate::services::exact_service_approval_service::ExactServiceApprovalCreate {
+                user_service_id: TEST_SERVICE_A.to_string(),
+                endpoint_id: operation.endpoint_id.clone(),
+                catalog_digest: discovery.catalog_digest.clone(),
+                exact_view_digest: Some(discovery.exact_view_digest.clone()),
+                endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
+                operation_digest: operation_digest.clone(),
+                operation_id: operation.endpoint_id.clone(),
+                operation_generation,
+                idempotency_key: idempotency_key.to_string(),
+                arguments: arguments.clone(),
+            }
+        };
+        let missing_generation_error = exact_service_approvals::create_request(
+            State(state.clone()),
+            delegated_auth.clone(),
+            AxumJson(generation_input(None, "integration-generation-missing")),
+        )
+        .await
+        .expect_err("delegated create must be driven by discovery generation");
+        assert!(matches!(
+            missing_generation_error,
+            AppError::BadRequest(message)
+                if message
+                    == crate::services::exact_service_approval_service::OPERATION_GENERATION_REQUIRED
+        ));
+        let mismatched_generation_error = exact_service_approvals::create_request(
+            State(state.clone()),
+            delegated_auth.clone(),
+            AxumJson(generation_input(
+                Some(operation.operation_generation + 1),
+                "integration-generation-mismatch",
+            )),
+        )
+        .await
+        .expect_err("stale caller generation must fail before approval creation");
+        assert!(matches!(
+            mismatched_generation_error,
+            AppError::Conflict(message)
+                if message == "exact_service_operation_generation_drift"
+        ));
+        assert_eq!(
+            approval_requests
+                .count_documents(mongodb::bson::doc! {})
+                .await
+                .expect("count approvals after generation rejections"),
+            rows_before_omitted_create,
+            "missing or stale generation must not create an approval"
+        );
+
         let AxumJson(created) = exact_service_approvals::create_request(
             State(state.clone()),
             delegated_auth.clone(),
@@ -1986,7 +2087,7 @@ mod tests {
                     endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
                     operation_digest: operation_digest.clone(),
                     operation_id: operation.endpoint_id.clone(),
-                    operation_generation: 1,
+                    operation_generation: Some(operation.operation_generation),
                     idempotency_key: "integration-idempotency-key".to_string(),
                     arguments: arguments.clone(),
                 },
@@ -1999,6 +2100,10 @@ mod tests {
             Some(discovery.exact_view_digest.clone())
         );
         assert_eq!(created.catalog_digest, discovery.catalog_digest);
+        assert_eq!(
+            created.operation_generation, operation.operation_generation,
+            "create must persist the producer generation published by discovery"
+        );
 
         approval_service::process_decision(
             &db,
@@ -2058,7 +2163,7 @@ mod tests {
                     endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
                     operation_digest: operation_digest.clone(),
                     operation_id: operation.endpoint_id.clone(),
-                    operation_generation: 1,
+                    operation_generation: Some(operation.operation_generation),
                     idempotency_key: "integration-redeem-omission-key".to_string(),
                     arguments: arguments.clone(),
                 },
@@ -2116,7 +2221,7 @@ mod tests {
                     endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
                     operation_digest,
                     operation_id: operation.endpoint_id.clone(),
-                    operation_generation: 1,
+                    operation_generation: Some(operation.operation_generation),
                     idempotency_key: "provider-binding-drift-key".to_string(),
                     arguments,
                 },
@@ -2664,7 +2769,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "node mutation failed: {body}");
         assert_eq!(body["state"], "drifted");
         assert_eq!(body["failure_code"], "catalog_drift");
-        assert_no_full_router_redemption(&fixture, &node_request).await;
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &node_request,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+            "catalog_drift",
+        )
+        .await;
         assert_eq!(
             fixture.provider_calls.load(Ordering::SeqCst),
             calls_before,
@@ -2729,7 +2840,13 @@ mod tests {
         );
         assert_eq!(body["state"], "revoked");
         assert_eq!(body["failure_code"], "selector_revoked");
-        assert_no_full_router_redemption(&fixture, &out_of_scope_node_request).await;
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &out_of_scope_node_request,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Revoked,
+            "selector_revoked",
+        )
+        .await;
         assert_eq!(
             fixture.provider_calls.load(Ordering::SeqCst),
             calls_before,
@@ -2768,7 +2885,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "operation mutation failed: {body}");
         assert_eq!(body["state"], "drifted");
         assert_eq!(body["failure_code"], "catalog_drift");
-        assert_no_full_router_redemption(&fixture, &operation_request).await;
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &operation_request,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+            "catalog_drift",
+        )
+        .await;
         assert_eq!(
             fixture.provider_calls.load(Ordering::SeqCst),
             calls_before,
@@ -2802,7 +2925,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "endpoint mutation failed: {body}");
         assert_eq!(body["state"], "revoked");
         assert_eq!(body["failure_code"], "selector_revoked");
-        assert_no_full_router_redemption(&fixture, &endpoint_request).await;
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &endpoint_request,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Revoked,
+            "selector_revoked",
+        )
+        .await;
         assert_eq!(
             fixture.provider_calls.load(Ordering::SeqCst),
             calls_before,
@@ -2888,7 +3017,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "credential mutation failed: {body}");
         assert_eq!(body["state"], "revoked");
         assert_eq!(body["failure_code"], "selector_revoked");
-        assert_no_full_router_redemption(&fixture, &credential_request).await;
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &credential_request,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Revoked,
+            "selector_revoked",
+        )
+        .await;
         assert_eq!(
             fixture.provider_calls.load(Ordering::SeqCst),
             calls_before,
@@ -2948,7 +3083,13 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "provider mutation failed: {body}");
         assert_eq!(body["state"], "drifted");
         assert_eq!(body["failure_code"], "catalog_drift");
-        assert_no_full_router_redemption(&fixture, &provider_request).await;
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &provider_request,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+            "catalog_drift",
+        )
+        .await;
         assert_eq!(
             fixture.provider_calls.load(Ordering::SeqCst),
             calls_before,
@@ -2960,6 +3101,164 @@ mod tests {
             0,
             "every full-router mutation row must fail before downstream dispatch"
         );
+    }
+
+    #[tokio::test]
+    async fn full_router_producer_generation_only_drift_is_terminal_before_effect() {
+        let mut fixture = setup_full_router_fixture("exact_router_generation_only_drift").await;
+        refresh_full_router_delegation(&mut fixture).await;
+        let created = create_full_router_request(&fixture, "generation-only-drift").await;
+        let request_id = created["request_id"].as_str().unwrap().to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+
+        fixture
+            .db
+            .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": &fixture.operation.endpoint_id },
+                mongodb::bson::doc! { "$inc": { "operation_generation": 1 } },
+            )
+            .await
+            .expect("advance only the producer generation");
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        refresh_full_router_delegation(&mut fixture).await;
+        let (status, body) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "generation drift redeem: {body}");
+        assert_eq!(body["state"], "drifted");
+        assert_eq!(body["failure_code"], "catalog_drift");
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &request_id,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+            "catalog_drift",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn full_router_old_server_policy_update_drifts_without_generation_bump() {
+        let mut fixture = setup_full_router_fixture("exact_router_rolling_policy_drift").await;
+        refresh_full_router_delegation(&mut fixture).await;
+        let created = create_full_router_request(&fixture, "risk-generation-drift").await;
+        let request_id = created["request_id"].as_str().unwrap().to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+
+        let before = fixture
+            .db
+            .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .find_one(mongodb::bson::doc! { "_id": &fixture.operation.endpoint_id })
+            .await
+            .expect("load producer endpoint")
+            .expect("producer endpoint exists");
+        // Simulate the pre-generation endpoint writer that remains live during
+        // a rolling deployment: it updates producer policy with `$set` only.
+        fixture
+            .db
+            .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": &before.id },
+                mongodb::bson::doc! { "$set": {
+                    "risk": "write",
+                    "supports_idempotency_key": true,
+                } },
+            )
+            .await
+            .expect("publish old-server producer-policy update");
+        let after = fixture
+            .db
+            .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .find_one(mongodb::bson::doc! { "_id": &fixture.operation.endpoint_id })
+            .await
+            .expect("reload producer endpoint")
+            .expect("producer endpoint still exists");
+        assert_eq!(after.path, before.path);
+        assert_ne!(after.risk, before.risk);
+        assert_ne!(
+            after.supports_idempotency_key,
+            before.supports_idempotency_key
+        );
+        assert_eq!(
+            after.operation_generation, before.operation_generation,
+            "the regression must model an old writer that cannot bump generation"
+        );
+
+        let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+        refresh_full_router_delegation(&mut fixture).await;
+        let status_path = format!("/api/v1/approvals/exact-service/requests/{request_id}/status");
+        let (status, observed) = full_router_json_request(
+            &fixture.app,
+            Method::GET,
+            &status_path,
+            &fixture.delegated_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "policy drift observe: {observed}");
+        assert_eq!(observed["state"], "drifted");
+        assert_eq!(observed["failure_code"], "catalog_drift");
+        assert_no_full_router_redemption(&fixture, &request_id).await;
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
+
+        let (status, body) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "risk drift redeem: {body}");
+        assert_eq!(body["state"], "drifted");
+        assert_eq!(body["failure_code"], "catalog_drift");
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &request_id,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+            "catalog_drift",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn full_router_catalog_owned_execution_fields_are_live_authority() {
+        for (name, update, expected_failure) in [
+            (
+                "category",
+                mongodb::bson::doc! { "$set": { "service_category": "internal" } },
+                "execution_authority_drift",
+            ),
+            (
+                "credential-requirement",
+                mongodb::bson::doc! { "$set": { "requires_user_credential": false } },
+                "execution_authority_drift",
+            ),
+        ] {
+            let mut fixture =
+                setup_full_router_fixture(&format!("exact_router_catalog_authority_{name}")).await;
+            refresh_full_router_delegation(&mut fixture).await;
+            let created = create_full_router_request(&fixture, &format!("catalog-{name}")).await;
+            let request_id = created["request_id"].as_str().unwrap().to_string();
+            approve_full_router_request(&fixture, &request_id).await;
+
+            fixture
+                .db
+                .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .update_one(
+                    mongodb::bson::doc! { "_id": "00000000-0000-4000-8000-000000000301" },
+                    update,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("mutate catalog-owned {name}: {error}"));
+            let calls_before = fixture.provider_calls.load(Ordering::SeqCst);
+            refresh_full_router_delegation(&mut fixture).await;
+            let (status, body) = redeem_full_router_request(&fixture, &created).await;
+            assert_eq!(status, StatusCode::OK, "catalog {name} redeem: {body}");
+            assert_eq!(body["state"], "drifted", "{name}");
+            assert_eq!(body["failure_code"], expected_failure, "{name}");
+            assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
+            assert_full_router_terminal_redemption(
+                &fixture,
+                &request_id,
+                crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+                expected_failure,
+            )
+            .await;
+        }
     }
 
     #[tokio::test]
@@ -2978,7 +3277,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "discovery failed: {discovery}");
         assert_eq!(
             discovery["contract_version"],
-            "nyxid-delegated-operation-catalog.v2"
+            "nyxid-delegated-operation-catalog.v3"
         );
         let services: Vec<mcp_service::ExactOperationViewService> =
             serde_json::from_value(discovery["services"].clone())
@@ -3009,11 +3308,7 @@ mod tests {
                 "endpoint_contract_digest": operation.endpoint_contract_digest,
                 "operation_digest": operation_digest,
                 "operation_id": operation.endpoint_id,
-                // Caller bookkeeping with no producer referent in discovery.
-                // It is not freshness evidence, and AC4 needs an ungranted
-                // @eanz17 exemption for this one non-response-derived field.
-                // Producer-owned generation remains issue #1457 AC5 scope.
-                "operation_generation": 1,
+                "operation_generation": operation.operation_generation,
                 "idempotency_key": idempotency_key,
                 "arguments": arguments,
             })),
@@ -3112,7 +3407,13 @@ mod tests {
             diverted_before,
             "diverted spy must not receive the unapproved effect"
         );
-        assert_no_full_router_redemption(&fixture, &request_id).await;
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &request_id,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+            "execution_authority_drift",
+        )
+        .await;
     }
 
     async fn insert_bearer_credential(
@@ -3211,7 +3512,13 @@ mod tests {
         assert_eq!(body["state"], "drifted");
         assert_eq!(body["failure_code"], "execution_authority_drift");
         assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
-        assert_no_full_router_redemption(&fixture, &request_id).await;
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &request_id,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+            "execution_authority_drift",
+        )
+        .await;
 
         bind_service_credential(&fixture, "00000000-0000-4000-8000-000000000711").await;
         let rotated = fixture
@@ -3268,7 +3575,13 @@ mod tests {
         assert_eq!(body["state"], "drifted");
         assert_eq!(body["failure_code"], "execution_authority_drift");
         assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
-        assert_no_full_router_redemption(&fixture, &request_id).await;
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &request_id,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+            "execution_authority_drift",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -3436,7 +3749,13 @@ mod tests {
             assert_eq!(body["state"], "drifted", "{name}");
             assert_eq!(body["failure_code"], "execution_authority_drift", "{name}");
             assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
-            assert_no_full_router_redemption(&fixture, &request_id).await;
+            assert_full_router_terminal_redemption(
+                &fixture,
+                &request_id,
+                crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+                "execution_authority_drift",
+            )
+            .await;
             fixture
                 .db
                 .collection::<UserService>(USER_SERVICES)
@@ -3481,7 +3800,13 @@ mod tests {
         assert_eq!(body["state"], "drifted");
         assert_eq!(body["failure_code"], "execution_authority_drift");
         assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
-        assert_no_full_router_redemption(&fixture, &request_id).await;
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &request_id,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+            "execution_authority_drift",
+        )
+        .await;
         fixture
             .db
             .collection::<UserService>(USER_SERVICES)
@@ -3517,7 +3842,13 @@ mod tests {
         assert_eq!(body["state"], "drifted");
         assert_eq!(body["failure_code"], "execution_authority_drift");
         assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
-        assert_no_full_router_redemption(&fixture, &request_id).await;
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &request_id,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+            "execution_authority_drift",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -3554,7 +3885,13 @@ mod tests {
         assert_eq!(body["state"], "drifted");
         assert_eq!(body["failure_code"], "execution_authority_drift");
         assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
-        assert_no_full_router_redemption(&fixture, &request_id).await;
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &request_id,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+            "execution_authority_drift",
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -3589,7 +3926,13 @@ mod tests {
         assert_eq!(body["state"], "drifted");
         assert_eq!(body["failure_code"], "execution_authority_drift");
         assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), calls_before);
-        assert_no_full_router_redemption(&fixture, &request_id).await;
+        assert_full_router_terminal_redemption(
+            &fixture,
+            &request_id,
+            crate::models::approval_request::ExactServiceRedemptionStatus::Drifted,
+            "execution_authority_drift",
+        )
+        .await;
 
         fixture
             .db
@@ -3668,6 +4011,9 @@ mod tests {
     #[tokio::test]
     async fn full_router_observe_reports_execution_authority_drift_before_redeem() {
         let mut fixture = setup_full_router_fixture("exact_router_ac5_observe").await;
+        let credential_id = "00000000-0000-4000-8000-000000000719";
+        insert_bearer_credential(&fixture, credential_id, b"observe-secret", 1).await;
+        bind_service_credential(&fixture, credential_id).await;
         refresh_full_router_delegation(&mut fixture).await;
         let created = create_full_router_request(&fixture, "ac5-observe").await;
         let request_id = created["request_id"]
@@ -3675,6 +4021,21 @@ mod tests {
             .expect("create response request_id")
             .to_string();
         approve_full_router_request(&fixture, &request_id).await;
+        let original_url = fixture
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .find_one(mongodb::bson::doc! { "_id": TEST_USER_ENDPOINT_ID })
+            .await
+            .expect("load endpoint before observe drift")
+            .expect("endpoint exists before observe drift")
+            .url;
+        let credential_before = fixture
+            .db
+            .collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .find_one(mongodb::bson::doc! { "_id": credential_id })
+            .await
+            .expect("load credential before observe")
+            .expect("credential exists before observe");
         fixture
             .db
             .collection::<UserEndpoint>(USER_ENDPOINTS)
@@ -3699,6 +4060,51 @@ mod tests {
         assert_eq!(observed["failure_code"], "execution_authority_drift");
         assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
         assert_no_full_router_redemption(&fixture, &request_id).await;
+        let credential_after_drift = fixture
+            .db
+            .collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .find_one(mongodb::bson::doc! { "_id": credential_id })
+            .await
+            .expect("load credential after drift observe")
+            .expect("credential exists after drift observe");
+        assert_eq!(
+            credential_after_drift, credential_before,
+            "observe must not decrypt/touch/refresh credential state"
+        );
+
+        fixture
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_USER_ENDPOINT_ID },
+                mongodb::bson::doc! { "$set": { "url": original_url } },
+            )
+            .await
+            .expect("restore endpoint after transient observe drift");
+        let (status, recovered) = full_router_json_request(
+            &fixture.app,
+            Method::GET,
+            &status_path,
+            &fixture.delegated_token,
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "recovered observe failed: {recovered}"
+        );
+        assert_eq!(recovered["state"], "approved");
+        assert!(recovered.get("failure_code").is_none());
+        assert_no_full_router_redemption(&fixture, &request_id).await;
+        let credential_after_recovery = fixture
+            .db
+            .collection::<mongodb::bson::Document>(USER_API_KEYS)
+            .find_one(mongodb::bson::doc! { "_id": credential_id })
+            .await
+            .expect("load credential after recovered observe")
+            .expect("credential exists after recovered observe");
+        assert_eq!(credential_after_recovery, credential_before);
     }
 
     #[tokio::test]
@@ -3726,7 +4132,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "discovery failed: {discovery}");
         assert_eq!(
             discovery["contract_version"],
-            "nyxid-delegated-operation-catalog.v2"
+            "nyxid-delegated-operation-catalog.v3"
         );
         assert_full_router_delegated_token_unchanged(
             &fixture,
@@ -3762,11 +4168,7 @@ mod tests {
                 "endpoint_contract_digest": operation.endpoint_contract_digest,
                 "operation_digest": operation_digest,
                 "operation_id": operation.endpoint_id,
-                // Caller bookkeeping with no producer referent in discovery.
-                // It is not freshness evidence, and AC4 needs an ungranted
-                // @eanz17 exemption for this one non-response-derived field.
-                // Producer-owned generation remains issue #1457 AC5 scope.
-                "operation_generation": 1,
+                "operation_generation": operation.operation_generation,
                 "idempotency_key": "ac4-single-token",
                 "arguments": arguments,
             })),

@@ -1,7 +1,7 @@
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
 use mongodb::Database;
-use mongodb::bson::{self, doc};
+use mongodb::bson::{self, Document, doc};
 use mongodb::options::{FindOneAndUpdateOptions, FindOptions, ReturnDocument};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -482,6 +482,20 @@ pub async fn create_approval_request(
                 "exact_service_request_conflict".to_string(),
             ));
         }
+        if let Some(binding) = operation.exact_service.as_ref()
+            && collection
+                .find_one(exact_service_semantic_effect_filter(
+                    requester_type,
+                    requester_id,
+                    binding,
+                ))
+                .await?
+                .is_some()
+        {
+            return Err(AppError::Conflict(
+                "exact_service_request_conflict".to_string(),
+            ));
+        }
 
         // Check for existing pending request with the same idempotency key.
         // This handles normal idempotent retries and the winner in concurrent inserts.
@@ -547,8 +561,13 @@ pub async fn create_approval_request(
         }
     }
 
-    let request = inserted_request
-        .ok_or_else(|| AppError::Conflict("Approval request conflict, please retry".to_string()))?;
+    let request = inserted_request.ok_or_else(|| {
+        if operation.exact_service.is_some() {
+            AppError::Conflict("exact_service_request_conflict".to_string())
+        } else {
+            AppError::Conflict("Approval request conflict, please retry".to_string())
+        }
+    })?;
 
     // Fan out notifications to every recipient. The first recipient with a
     // configured channel "wins" the telegram_chat_id / telegram_message_id
@@ -671,8 +690,23 @@ fn same_exact_service_authority(
         && left.operation_digest == right.operation_digest
         && left.operation_id == right.operation_id
         && left.operation_generation == right.operation_generation
+        && left.producer_generation_bound == right.producer_generation_bound
         && left.effect_idempotency_key == right.effect_idempotency_key
         && left.arguments == right.arguments
+}
+
+fn exact_service_semantic_effect_filter(
+    requester_type: &str,
+    requester_id: &str,
+    binding: &ExactServiceApprovalBinding,
+) -> Document {
+    doc! {
+        "requester_type": requester_type,
+        "requester_id": requester_id,
+        "exact_service.actor_user_id": &binding.actor_user_id,
+        "exact_service.endpoint_id": &binding.endpoint_id,
+        "exact_service.effect_idempotency_key": &binding.effect_idempotency_key,
+    }
 }
 
 /// Create a tool approval request (from an external caller such as Aevatar).
@@ -1971,6 +2005,37 @@ mod tests {
         request.approval_mode = ApprovalMode::PerRequest;
         request.grant_scope = None;
         assert!(!requires_legacy_grant_mode_recheck(&request));
+    }
+
+    #[test]
+    fn exact_semantic_effect_lookup_uses_producer_endpoint_identity() {
+        let binding = ExactServiceApprovalBinding {
+            request_key: "request-key".to_string(),
+            actor_user_id: "actor-1".to_string(),
+            user_service_id: "user-service-1".to_string(),
+            endpoint_id: "producer-endpoint".to_string(),
+            catalog_digest: "catalog-digest".to_string(),
+            exact_view_digest: Some("view-digest".to_string()),
+            endpoint_contract_digest: "contract-digest".to_string(),
+            operation_digest: "operation-digest".to_string(),
+            operation_id: "legacy-caller-operation".to_string(),
+            operation_generation: 1,
+            producer_generation_bound: true,
+            effect_idempotency_key: "effect-key".to_string(),
+            arguments: serde_json::json!({}),
+            execution_authority_digest: None,
+            execution_authority_binding: None,
+            redemption: None,
+        };
+
+        let filter = exact_service_semantic_effect_filter("delegated", "client-1", &binding);
+        assert_eq!(
+            filter
+                .get_str("exact_service.endpoint_id")
+                .expect("semantic lookup uses endpoint identity"),
+            "producer-endpoint"
+        );
+        assert!(!filter.contains_key("exact_service.operation_id"));
     }
 
     #[test]

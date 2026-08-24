@@ -1318,6 +1318,28 @@ async fn lookup_service_pool_member(
     }
 }
 
+#[derive(Clone, Copy)]
+struct ProxyCredentialResolution<'a> {
+    connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
+    materialize_credentials: bool,
+}
+
+impl<'a> ProxyCredentialResolution<'a> {
+    fn materialize(connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>) -> Self {
+        Self {
+            connection_expiry_notifier,
+            materialize_credentials: true,
+        }
+    }
+
+    fn read_only_snapshot() -> Self {
+        Self {
+            connection_expiry_notifier: None,
+            materialize_credentials: false,
+        }
+    }
+}
+
 /// Resolve proxy target from the new UserService model.
 ///
 /// Resolution order (critical -- see ChronoAIProject/NyxID#209 Codex review):
@@ -1344,6 +1366,7 @@ pub async fn resolve_proxy_target_from_user_service(
     catalog_service_id: Option<&str>,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<UserServiceResolution>> {
+    let credential_resolution = ProxyCredentialResolution::materialize(connection_expiry_notifier);
     // NyxID#974 routing boundary: identical-instance service pools belong
     // here, before `finish_resolution()`, because this function is the
     // authoritative place that preserves personal/legacy/org precedence and
@@ -1361,7 +1384,7 @@ pub async fn resolve_proxy_target_from_user_service(
                 us,
                 None,
                 None,
-                connection_expiry_notifier,
+                credential_resolution,
             )
             .await?,
         ));
@@ -1385,7 +1408,7 @@ pub async fn resolve_proxy_target_from_user_service(
                 us,
                 None,
                 Some(pool_selection),
-                connection_expiry_notifier,
+                credential_resolution,
             )
             .await?,
         ));
@@ -1487,7 +1510,7 @@ pub async fn resolve_proxy_target_from_user_service(
                 org_us,
                 Some(routing),
                 pool_selection,
-                connection_expiry_notifier,
+                credential_resolution,
             )
             .await?,
         ));
@@ -1783,6 +1806,49 @@ pub async fn resolve_proxy_target_by_user_service_id(
     expected_catalog_service_id: Option<&str>,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<UserServiceResolution>> {
+    resolve_proxy_target_by_user_service_id_with_mode(
+        db,
+        encryption_keys,
+        actor_user_id,
+        user_service_id,
+        expected_slug,
+        expected_catalog_service_id,
+        ProxyCredentialResolution::materialize(connection_expiry_notifier),
+    )
+    .await
+}
+
+/// Read-only authority snapshot for approval observation. It follows the same
+/// identity and ownership resolver as execution without decrypting, refreshing,
+/// touching, or rate-limiting credential material.
+pub async fn read_proxy_authority_snapshot_by_user_service_id(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    actor_user_id: &str,
+    user_service_id: &str,
+    expected_slug: Option<&str>,
+) -> AppResult<Option<UserServiceResolution>> {
+    resolve_proxy_target_by_user_service_id_with_mode(
+        db,
+        encryption_keys,
+        actor_user_id,
+        user_service_id,
+        expected_slug,
+        None,
+        ProxyCredentialResolution::read_only_snapshot(),
+    )
+    .await
+}
+
+async fn resolve_proxy_target_by_user_service_id_with_mode(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    actor_user_id: &str,
+    user_service_id: &str,
+    expected_slug: Option<&str>,
+    expected_catalog_service_id: Option<&str>,
+    credential_resolution: ProxyCredentialResolution<'_>,
+) -> AppResult<Option<UserServiceResolution>> {
     let svc = match user_service_service::find_user_service_by_id(db, user_service_id).await? {
         Some(s) => s,
         None => return Ok(None),
@@ -1868,7 +1934,7 @@ pub async fn resolve_proxy_target_by_user_service_id(
             svc,
             org_routing,
             None,
-            connection_expiry_notifier,
+            credential_resolution,
         )
         .await?,
     ))
@@ -2300,8 +2366,10 @@ async fn finish_resolution(
     user_service: crate::models::user_service::UserService,
     org_routing: Option<OrgRouting>,
     pool_selection: Option<service_pool_service::PoolSelection>,
-    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
+    credential_resolution: ProxyCredentialResolution<'_>,
 ) -> AppResult<UserServiceResolution> {
+    let materialize_credentials = credential_resolution.materialize_credentials;
+    let connection_expiry_notifier = credential_resolution.connection_expiry_notifier;
     // For auto-provisioned services, verify the catalog entry is still eligible
     // before allowing the proxy request through.
     verify_auto_provision_eligibility(db, &user_service, effective_owner_id).await?;
@@ -2394,18 +2462,22 @@ async fn finish_resolution(
 
         let actor = EffectiveActor::from_user_id(effective_owner_id);
         let authorized = authorize_master_credential(db, &catalog_service, &actor).await?;
-        crate::mw::rate_limit::enforce_platform_user_limit(
-            crate::mw::rate_limit::platform_user_rate_limiter(),
-            &catalog_service.id,
-            &actor.user_id,
-        )?;
-        let decrypted_bytes = Zeroizing::new(
-            decrypt_authorized_master_credential(encryption_keys, &authorized).await?,
-        );
-        let credential = String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
-            tracing::error!("Credential UTF-8 decode failed: {e}");
-            AppError::Internal("Failed to decode credential".to_string())
-        })?;
+        let credential = if materialize_credentials {
+            crate::mw::rate_limit::enforce_platform_user_limit(
+                crate::mw::rate_limit::platform_user_rate_limiter(),
+                &catalog_service.id,
+                &actor.user_id,
+            )?;
+            let decrypted_bytes = Zeroizing::new(
+                decrypt_authorized_master_credential(encryption_keys, &authorized).await?,
+            );
+            String::from_utf8((*decrypted_bytes).clone()).map_err(|e| {
+                tracing::error!("Credential UTF-8 decode failed: {e}");
+                AppError::Internal("Failed to decode credential".to_string())
+            })?
+        } else {
+            String::new()
+        };
         let now = chrono::Utc::now();
         let mut minimal_service = build_minimal_downstream_service(
             &user_service,
@@ -2461,28 +2533,38 @@ async fn finish_resolution(
             AppError::Internal("Data integrity error: API key not found".to_string())
         })?;
 
-    let api_key = maybe_refresh_provider_backed_api_key(
-        db,
-        encryption_keys,
-        effective_owner_id,
-        api_key,
-        connection_expiry_notifier,
-    )
-    .await?;
+    let api_key = if materialize_credentials {
+        maybe_refresh_provider_backed_api_key(
+            db,
+            encryption_keys,
+            effective_owner_id,
+            api_key,
+            connection_expiry_notifier,
+        )
+        .await?
+    } else {
+        api_key
+    };
 
     // Node-routed services: resolve what we can but don't block on API key status
     // since the node agent handles credential injection locally.
     if user_service.node_id.is_some() {
-        let credential = match resolve_user_api_key_credential(&api_key, encryption_keys).await {
-            Ok(cred) => cred,
-            Err(e) => {
-                tracing::debug!(
-                    api_key_id = %api_key.id,
-                    error = %e,
-                    "Could not resolve server credential for node-routed service (non-fatal)"
-                );
-                None
+        let credential = if materialize_credentials {
+            match resolve_user_api_key_credential(&api_key, encryption_keys).await {
+                Ok(cred) => cred,
+                Err(e) => {
+                    tracing::debug!(
+                        api_key_id = %api_key.id,
+                        error = %e,
+                        "Could not resolve server credential for node-routed service (non-fatal)"
+                    );
+                    None
+                }
             }
+        } else {
+            credential_is_materializable(db, &api_key)
+                .await?
+                .then(String::new)
         };
         let has_server_credential = credential.is_some();
 
@@ -2529,17 +2611,23 @@ async fn finish_resolution(
         )));
     }
 
-    let credential = resolve_user_api_key_credential(&api_key, encryption_keys).await?;
+    let credential = if materialize_credentials {
+        let credential = resolve_user_api_key_credential(&api_key, encryption_keys).await?;
+        let credential =
+            credential.ok_or_else(|| missing_user_api_key_credential_error(&api_key))?;
 
-    // Direct routing: require a server-side credential.
-    let credential = credential.ok_or_else(|| missing_user_api_key_credential_error(&api_key))?;
-
-    // Fire-and-forget: update last_used_at
-    let db_clone = db.clone();
-    let key_id = api_key.id.clone();
-    tokio::spawn(async move {
-        user_api_key_service::touch_last_used(&db_clone, &key_id).await;
-    });
+        // Fire-and-forget: update last_used_at only for execution materialization.
+        let db_clone = db.clone();
+        let key_id = api_key.id.clone();
+        tokio::spawn(async move {
+            user_api_key_service::touch_last_used(&db_clone, &key_id).await;
+        });
+        credential
+    } else if credential_is_materializable(db, &api_key).await? {
+        String::new()
+    } else {
+        return Err(missing_user_api_key_credential_error(&api_key));
+    };
 
     let now = chrono::Utc::now();
     let token_exchange_config =
@@ -2605,6 +2693,8 @@ async fn load_catalog_service_for_user_service(
 #[derive(Clone, Default)]
 struct CatalogProxyAuthorization {
     policy: Option<ProxyOperationPolicy>,
+    service_category: Option<String>,
+    requires_user_credential: Option<bool>,
 }
 
 async fn load_catalog_proxy_authorization_for_user_service(
@@ -2626,6 +2716,8 @@ async fn load_catalog_proxy_authorization_for_user_service(
     };
     Ok(CatalogProxyAuthorization {
         policy: service.proxy_operation_policy,
+        service_category: Some(service.service_category),
+        requires_user_credential: Some(service.requires_user_credential),
     })
 }
 
@@ -2634,6 +2726,12 @@ fn apply_catalog_proxy_authorization(
     authorization: &CatalogProxyAuthorization,
 ) {
     service.proxy_operation_policy = authorization.policy.clone();
+    if let Some(service_category) = authorization.service_category.as_ref() {
+        service.service_category = service_category.clone();
+    }
+    if let Some(requires_user_credential) = authorization.requires_user_credential {
+        service.requires_user_credential = requires_user_credential;
+    }
 }
 
 /// Load the catalog `DownstreamService.default_request_headers` associated
@@ -2756,6 +2854,45 @@ pub struct AgentCredentialOverride {
     pub credential: String,
     pub api_key_id: String,
     pub credential_epoch: i64,
+}
+
+pub struct AgentCredentialOverrideIdentity {
+    pub api_key_id: String,
+    pub credential_epoch: i64,
+}
+
+/// Resolve only the producer-owned identity of an agent credential override.
+/// This path performs no refresh, decryption, last-used touch, or outbound I/O.
+pub async fn read_agent_credential_override_identity(
+    db: &mongodb::Database,
+    user_id: &str,
+    api_key_id: &str,
+    user_service_id: &str,
+) -> AppResult<Option<AgentCredentialOverrideIdentity>> {
+    let Some(override_key_id) = agent_binding_service::resolve_credential_override(
+        db,
+        api_key_id,
+        user_service_id,
+        user_id,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let api_key = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find_one(doc! { "_id": &override_key_id, "user_id": user_id })
+        .await?
+        .ok_or_else(|| AppError::Internal("Bound credential not found".to_string()))?;
+    if api_key.status != "active" || !credential_is_materializable(db, &api_key).await? {
+        return Err(AppError::BadRequest(
+            "Bound credential is not executable".to_string(),
+        ));
+    }
+    Ok(Some(AgentCredentialOverrideIdentity {
+        api_key_id: api_key.id,
+        credential_epoch: api_key.credential_epoch,
+    }))
 }
 
 pub async fn resolve_agent_credential_override_identity(
@@ -2970,6 +3107,58 @@ async fn resolve_user_api_key_credential(
         Ok(None)
     } else {
         Ok(Some(credential))
+    }
+}
+
+fn encrypted_material_present(material: Option<&Vec<u8>>) -> bool {
+    material.is_some_and(|bytes| !bytes.is_empty())
+}
+
+/// Read-only mirror of credential materialization eligibility. It checks only
+/// durable encrypted seeds and cached material; it never decrypts, refreshes,
+/// mints, touches usage timestamps, or performs provider I/O.
+async fn credential_is_materializable(
+    db: &mongodb::Database,
+    api_key: &UserApiKey,
+) -> AppResult<bool> {
+    let access_present = encrypted_material_present(api_key.access_token_encrypted.as_ref());
+    match api_key.credential_type.as_str() {
+        "oauth2" => {
+            if access_present {
+                return Ok(true);
+            }
+            if api_key.status != "active" {
+                return Ok(false);
+            }
+            if encrypted_material_present(api_key.refresh_token_encrypted.as_ref()) {
+                return Ok(true);
+            }
+            if api_key.connection_id.is_some() {
+                return Ok(false);
+            }
+            let Some(provider_config_id) = api_key.provider_config_id.as_deref() else {
+                return Ok(false);
+            };
+            let provider_token = db
+                .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+                .find_one(doc! {
+                    "user_id": &api_key.user_id,
+                    "provider_config_id": provider_config_id,
+                    "status": { "$in": ["active", "expired"] },
+                })
+                .await?;
+            Ok(provider_token.is_some_and(|token| {
+                encrypted_material_present(token.access_token_encrypted.as_ref())
+                    || encrypted_material_present(token.refresh_token_encrypted.as_ref())
+            }))
+        }
+        "gcp_service_account" => Ok(access_present
+            || (api_key.status == "active"
+                && encrypted_material_present(api_key.credential_encrypted.as_ref()))),
+        "node_managed" | "ssh_certificate" => Ok(false),
+        _ => Ok(encrypted_material_present(
+            api_key.credential_encrypted.as_ref(),
+        )),
     }
 }
 
@@ -4881,6 +5070,31 @@ mod tests {
             Some(override_secret),
             "bound agent must receive the decrypted override credential, not the service default"
         );
+
+        let mut refresh_only = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(doc! { "_id": &override_credential_id })
+            .await
+            .unwrap()
+            .unwrap();
+        refresh_only.credential_type = "oauth2".to_string();
+        refresh_only.credential_encrypted = None;
+        refresh_only.access_token_encrypted = None;
+        refresh_only.refresh_token_encrypted = Some(vec![9]);
+        refresh_only.provider_config_id = Some("provider-alpha".to_string());
+        refresh_only.connection_id = Some("connection-alpha".to_string());
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .replace_one(doc! { "_id": &override_credential_id }, refresh_only)
+            .await
+            .unwrap();
+
+        let read_only_identity =
+            read_agent_credential_override_identity(&db, &user_id, &api_key_id, &user_service_id)
+                .await
+                .expect("read-only override authority resolves from durable refresh material")
+                .expect("bound refresh-only override identity");
+        assert_eq!(read_only_identity.api_key_id, override_credential_id);
+        assert_eq!(read_only_identity.credential_epoch, 1);
     }
 
     // ---- credential_header_name tests (NyxID#356) ----
@@ -7104,6 +7318,83 @@ mod tests {
         extend_with_path_credential(&mut delegated, &target);
         assert_eq!(delegated.len(), 1);
         assert_eq!(delegated[0].injection_method, "path");
+    }
+
+    fn authority_test_key(credential_type: &str) -> UserApiKey {
+        UserApiKey {
+            credential_source: None,
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            label: "authority-test".to_string(),
+            credential_type: credential_type.to_string(),
+            credential_encrypted: None,
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            oauth_attempt_nonce: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            last_authorized_at: None,
+            error_message: None,
+            source: None,
+            source_id: None,
+            credential_epoch: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_materializability_covers_refresh_seed_cached_and_node_shapes() {
+        let Some(db) = connect_test_database("proxy_materializable_authority").await else {
+            return;
+        };
+
+        let mut oauth_refresh_only = authority_test_key("oauth2");
+        oauth_refresh_only.provider_config_id = Some("provider-alpha".to_string());
+        oauth_refresh_only.connection_id = Some("connection-alpha".to_string());
+        oauth_refresh_only.refresh_token_encrypted = Some(vec![1]);
+        assert!(
+            credential_is_materializable(&db, &oauth_refresh_only)
+                .await
+                .unwrap()
+        );
+
+        let mut oauth_expired_cached = oauth_refresh_only.clone();
+        oauth_expired_cached.access_token_encrypted = Some(vec![2]);
+        oauth_expired_cached.expires_at = Some(chrono::Utc::now() - chrono::Duration::minutes(1));
+        assert!(
+            credential_is_materializable(&db, &oauth_expired_cached)
+                .await
+                .unwrap(),
+            "an expired cached token remains executable via its durable refresh seed"
+        );
+
+        let mut gcp_seed_only = authority_test_key("gcp_service_account");
+        gcp_seed_only.credential_encrypted = Some(vec![3]);
+        assert!(
+            credential_is_materializable(&db, &gcp_seed_only)
+                .await
+                .unwrap(),
+            "GCP execution can mint from the durable service-account seed"
+        );
+
+        let node_managed = authority_test_key("node_managed");
+        assert!(
+            !credential_is_materializable(&db, &node_managed)
+                .await
+                .unwrap(),
+            "node-managed credentials are intentionally unavailable to server fallback"
+        );
+
+        let mut ordinary = authority_test_key("api_key");
+        ordinary.credential_encrypted = Some(vec![4]);
+        assert!(credential_is_materializable(&db, &ordinary).await.unwrap());
     }
 
     #[test]
