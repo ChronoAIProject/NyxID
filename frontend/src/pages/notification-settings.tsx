@@ -625,9 +625,11 @@ export function NotificationSettingsPage() {
             <CardHeader>
               <CardTitle>Approval Preferences</CardTitle>
               <CardDescription>
-                Configure approval settings. When enabled, every request
-                requires approval by default (per-request mode). You can
-                opt specific services into time-based grants below.
+                Configure approval settings. When enabled, requests require
+                approval by default (per-request mode). Auto-connected
+                services remain available unless you add an explicit
+                per-service policy. You can opt specific services into
+                time-based grants below.
               </CardDescription>
             </CardHeader>
             <CardContent>

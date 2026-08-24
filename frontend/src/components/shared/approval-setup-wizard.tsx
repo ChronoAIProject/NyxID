@@ -39,7 +39,7 @@ export function ApprovalSetupWizard({
     {
       label: "Turn on approval protection",
       description:
-        "Enable the global approval toggle. Programmatic proxy, LLM gateway, and SSH requests will require your approval.",
+        "Enable the global approval toggle. Requests will require your approval by default; auto-connected services remain available unless you add an explicit per-service policy.",
       done: approvalEnabled,
     },
   ];
@@ -56,7 +56,9 @@ export function ApprovalSetupWizard({
           </p>
           <p className="text-xs text-muted-foreground">
             Programmatic proxy, LLM gateway, and SSH requests require your
-            approval. You can approve via Telegram, the mobile app, or the{" "}
+            approval by default. Auto-connected services remain available
+            unless you add an explicit per-service policy. You can approve via
+            Telegram, the mobile app, or the{" "}
             <Link
               to="/approvals/history"
               className="underline underline-offset-2 hover:text-foreground"

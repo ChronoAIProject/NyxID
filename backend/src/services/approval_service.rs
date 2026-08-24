@@ -64,6 +64,8 @@ pub async fn user_requires_approval(db: &Database, user_id: &str) -> AppResult<b
 /// 2. Otherwise -- personal service, OR org-owned without an org policy --
 ///    the actor's per-service or global setting applies (existing behavior).
 ///    The request `primary_owner_user_id` is the actor.
+/// 3. For an auto-connected `UserService`, the global setting is not an
+///    implicit fallback. An explicit actor/org config still wins as above.
 ///
 /// This is the cleanest semantic: the resource owner's policy is
 /// authoritative when set, and falls back to the actor's preference when
@@ -110,6 +112,7 @@ pub async fn resolve_org_aware_approval(
     service_owner_user_id: &str,
     service_id: &str,
     descriptor: &OperationDescriptor,
+    is_auto_connected: bool,
 ) -> AppResult<ApprovalResolution> {
     // Step 1: if the resolved service is org-owned and the org has a
     // policy, use it. We detect "org-owned" by looking up the owner's
@@ -158,7 +161,16 @@ pub async fn resolve_org_aware_approval(
             decision.grant_scope,
         )
     } else {
-        let required = user_requires_approval(db, actor_user_id).await?;
+        // Auto-connected services are platform-managed and deliberately have
+        // no user credential. The global notification setting is an implicit
+        // fallback, so it must not turn these services into approval gates.
+        // Explicit actor/org ServiceApprovalConfig rows are handled above and
+        // still apply verbatim.
+        let required = if is_auto_connected {
+            false
+        } else {
+            user_requires_approval(db, actor_user_id).await?
+        };
         (
             required,
             ApprovalMode::default(),
@@ -187,6 +199,7 @@ pub async fn evaluate_deny_only(
     service_owner_user_id: &str,
     service_id: &str,
     descriptor: &OperationDescriptor,
+    is_auto_connected: bool,
 ) -> AppResult<bool> {
     let resolution = resolve_org_aware_approval(
         db,
@@ -194,6 +207,7 @@ pub async fn evaluate_deny_only(
         service_owner_user_id,
         service_id,
         descriptor,
+        is_auto_connected,
     )
     .await?;
     Ok(resolution.effect == ApprovalEffect::Deny)
@@ -209,6 +223,7 @@ pub async fn evaluate_and_check(
     requester_type: Option<&str>,
     requester_id: &str,
     bypass_approval_flow: bool,
+    is_auto_connected: bool,
 ) -> AppResult<ApprovalOutcome> {
     let resolution = resolve_org_aware_approval(
         db,
@@ -216,6 +231,7 @@ pub async fn evaluate_and_check(
         service_owner_user_id,
         service_id,
         descriptor,
+        is_auto_connected,
     )
     .await?;
 
@@ -3360,10 +3376,16 @@ mod tests {
         insert_config(&db, &actor_config).await;
 
         let operation = test_operation();
-        let resolution =
-            resolve_org_aware_approval(&db, &actor_id, &org_user_id, &service_id, &operation)
-                .await
-                .unwrap();
+        let resolution = resolve_org_aware_approval(
+            &db,
+            &actor_id,
+            &org_user_id,
+            &service_id,
+            &operation,
+            false,
+        )
+        .await
+        .unwrap();
         assert!(resolution.required);
         assert_eq!(resolution.mode, ApprovalMode::Grant);
         assert_eq!(resolution.primary_owner_user_id, actor_id);
@@ -3392,10 +3414,16 @@ mod tests {
         insert_config(&db, &org_config).await;
 
         let operation = test_operation();
-        let resolution =
-            resolve_org_aware_approval(&db, &actor_id, &org_user_id, &service_id, &operation)
-                .await
-                .unwrap();
+        let resolution = resolve_org_aware_approval(
+            &db,
+            &actor_id,
+            &org_user_id,
+            &service_id,
+            &operation,
+            false,
+        )
+        .await
+        .unwrap();
         assert!(resolution.required);
         assert_eq!(resolution.mode, ApprovalMode::Grant);
         assert_eq!(resolution.primary_owner_user_id, org_user_id);
@@ -3424,13 +3452,144 @@ mod tests {
 
         let operation = test_operation();
         let resolution =
-            resolve_org_aware_approval(&db, &actor_id, &actor_id, &service_id, &operation)
+            resolve_org_aware_approval(&db, &actor_id, &actor_id, &service_id, &operation, false)
                 .await
                 .unwrap();
         assert!(resolution.required);
         assert_eq!(resolution.mode, ApprovalMode::default());
         assert_eq!(resolution.primary_owner_user_id, actor_id);
         assert!(!resolution.from_org_policy);
+    }
+
+    #[tokio::test]
+    async fn resolve_org_aware_approval_skips_global_default_for_auto_connected_service() {
+        let Some(db) = connect_test_database("appr_svc_auto_global_default").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        insert_channel(&db, &make_channel(&actor_id, true)).await;
+
+        let resolution = resolve_org_aware_approval(
+            &db,
+            &actor_id,
+            &actor_id,
+            &service_id,
+            &test_operation(),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(!resolution.required);
+        assert_eq!(resolution.effect, ApprovalEffect::AutoAllow);
+
+        let outcome = evaluate_and_check(
+            &db,
+            &actor_id,
+            &actor_id,
+            &service_id,
+            &test_operation(),
+            Some("api_key"),
+            "agent-1",
+            false,
+            true,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            ApprovalOutcome::Allowed { required: false }
+        ));
+        assert_eq!(
+            db.collection::<ApprovalRequest>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_org_aware_approval_keeps_explicit_actor_config_for_auto_connected_service() {
+        let Some(db) = connect_test_database("appr_svc_auto_explicit_config").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        insert_channel(&db, &make_channel(&actor_id, true)).await;
+
+        let cases = [
+            (false, None, ApprovalEffect::AutoAllow, false),
+            (true, None, ApprovalEffect::RequireApproval, true),
+            (
+                false,
+                Some(ApprovalEffect::Deny),
+                ApprovalEffect::Deny,
+                false,
+            ),
+        ];
+        for (approval_required, default_effect, expected_effect, expected_required) in cases {
+            let service_id = uuid::Uuid::new_v4().to_string();
+            let mut config = make_service_config(
+                &actor_id,
+                &service_id,
+                approval_required,
+                ApprovalMode::PerRequest,
+            );
+            config.default_effect = default_effect;
+            insert_config(&db, &config).await;
+
+            let resolution = resolve_org_aware_approval(
+                &db,
+                &actor_id,
+                &actor_id,
+                &service_id,
+                &test_operation(),
+                true,
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(resolution.required, expected_required);
+            assert_eq!(resolution.effect, expected_effect);
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_org_aware_approval_keeps_explicit_org_config_for_auto_connected_service() {
+        let Some(db) = connect_test_database("appr_svc_auto_explicit_org_config").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let org_user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&org_user_id, UserType::Org))
+            .await
+            .unwrap();
+
+        let mut org_config =
+            make_service_config(&org_user_id, &service_id, false, ApprovalMode::PerRequest);
+        org_config.default_effect = Some(ApprovalEffect::Deny);
+        insert_config(&db, &org_config).await;
+
+        let resolution = resolve_org_aware_approval(
+            &db,
+            &actor_id,
+            &org_user_id,
+            &service_id,
+            &test_operation(),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert!(!resolution.required);
+        assert_eq!(resolution.effect, ApprovalEffect::Deny);
+        assert!(resolution.from_org_policy);
     }
 
     // --- list_grants ---

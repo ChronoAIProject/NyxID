@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, State},
 };
 use chrono::Utc;
+use futures::TryStreamExt;
 use mongodb::Collection;
 use mongodb::bson::{self, Document, doc};
 use serde::{Deserialize, Serialize};
@@ -91,9 +92,9 @@ pub async fn register_device(
         .filter(|prev| *prev != body.token.as_str());
 
     // Ensure one push token belongs to one user at a time (prevents account-switch leakage).
-    detach_token_from_other_users(&collection, &user_id, &body.token, bson_now).await?;
+    detach_token_from_other_users(&state.db, &collection, &user_id, &body.token, bson_now).await?;
     if let Some(prev) = resolved_prev {
-        detach_token_from_other_users(&collection, &user_id, prev, bson_now).await?;
+        detach_token_from_other_users(&state.db, &collection, &user_id, prev, bson_now).await?;
     }
 
     // Rotation path: replace `previous_token` with the new token on the same device record.
@@ -106,19 +107,12 @@ pub async fn register_device(
         ensure_platform_matches(existing, &body.platform)?;
 
         let device_id = existing.device_id.clone();
-        let mut update_doc = doc! {
-            "push_devices.$.token": &body.token,
-            "push_devices.$.platform": &body.platform,
-            "push_devices.$.registered_at": bson_now,
-            "updated_at": bson_now,
-        };
-
-        if let Some(ref name) = body.device_name {
-            update_doc.insert("push_devices.$.device_name", name);
-        }
-        if let Some(ref app_id) = body.app_id {
-            update_doc.insert("push_devices.$.app_id", app_id);
-        }
+        let update_doc = device_metadata_update_doc(
+            bson_now,
+            Some((&body.token, &body.platform)),
+            body.device_name.as_deref(),
+            body.app_id.as_deref(),
+        );
 
         collection
             .update_one(
@@ -161,17 +155,12 @@ pub async fn register_device(
 
         // Update existing device metadata
         let device_id = existing.device_id.clone();
-        let mut update_doc = doc! {
-            "push_devices.$.registered_at": bson_now,
-            "updated_at": bson_now,
-        };
-
-        if let Some(ref name) = body.device_name {
-            update_doc.insert("push_devices.$.device_name", name);
-        }
-        if let Some(ref app_id) = body.app_id {
-            update_doc.insert("push_devices.$.app_id", app_id);
-        }
+        let update_doc = device_metadata_update_doc(
+            bson_now,
+            None,
+            body.device_name.as_deref(),
+            body.app_id.as_deref(),
+        );
 
         collection
             .update_one(
@@ -228,17 +217,7 @@ pub async fn register_device(
                 "push_devices.9": { "$exists": false },
                 "push_devices.token": { "$ne": &body.token },
             },
-            doc! {
-                "$push": {
-                    "push_devices": bson::to_bson(&device_token)
-                        .map_err(|e| AppError::Internal(format!("BSON serialize failed: {e}")))?
-                },
-                "$set": {
-                    "push_enabled": true,
-                    "approval_required": true,
-                    "updated_at": bson_now,
-                }
-            },
+            new_device_update_doc(&device_token, bson_now)?,
         )
         .await?;
 
@@ -254,16 +233,12 @@ pub async fn register_device(
             ensure_platform_matches(existing, &body.platform)?;
 
             // Token already exists (likely concurrent request) -- refresh metadata and return it.
-            let mut update_doc = doc! {
-                "push_devices.$.registered_at": bson_now,
-                "updated_at": bson_now,
-            };
-            if let Some(ref name) = body.device_name {
-                update_doc.insert("push_devices.$.device_name", name);
-            }
-            if let Some(ref app_id) = body.app_id {
-                update_doc.insert("push_devices.$.app_id", app_id);
-            }
+            let update_doc = device_metadata_update_doc(
+                bson_now,
+                None,
+                body.device_name.as_deref(),
+                body.app_id.as_deref(),
+            );
 
             collection
                 .update_one(
@@ -427,7 +402,11 @@ pub async fn remove_device(
         )
         .await?;
 
-    let approval_auto_disabled = channel.push_devices.len() == 1 && should_auto_disable_approval;
+    let approval_auto_disabled = channel
+        .push_devices
+        .iter()
+        .all(|device| device.device_id == device_id)
+        && should_auto_disable_approval;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -512,7 +491,11 @@ pub async fn remove_current_device(
         )
         .await?;
 
-    let approval_auto_disabled = channel.push_devices.len() == 1
+    let approval_auto_disabled = token_was_present
+        && channel
+            .push_devices
+            .iter()
+            .all(|device| device.token == body.token)
         && should_auto_disable_approval_after_last_push_device_removed(&channel);
 
     audit_service::log_for_user(
@@ -521,7 +504,7 @@ pub async fn remove_current_device(
         "push_device_removed_on_logout",
         Some(serde_json::json!({
             "platform": body.platform,
-            "token_removed": true,
+            "token_removed": token_was_present,
             "approval_auto_disabled": approval_auto_disabled,
         })),
     );
@@ -550,17 +533,21 @@ pub async fn remove_current_device(
 }
 
 async fn detach_token_from_other_users(
+    db: &mongodb::Database,
     collection: &Collection<NotificationChannel>,
     user_id: &str,
     token: &str,
     now: bson::DateTime,
 ) -> AppResult<()> {
+    let filter = doc! {
+        "user_id": { "$ne": user_id },
+        "push_devices.token": token,
+    };
+    let affected_channels: Vec<NotificationChannel> =
+        collection.find(filter.clone()).await?.try_collect().await?;
     let removed = collection
         .update_many(
-            doc! {
-                "user_id": { "$ne": user_id },
-                "push_devices.token": token,
-            },
+            filter,
             doc! {
                 "$pull": {
                     "push_devices": { "token": token }
@@ -591,26 +578,54 @@ async fn detach_token_from_other_users(
             .await?;
 
         // Avoid leaving approvals enabled for users who no longer have any
-        // active notification channels after token detachment.
-        collection
-            .update_many(
-                doc! {
-                    "user_id": { "$ne": user_id },
-                    "approval_required": true,
-                    "push_devices.0": { "$exists": false },
-                    "$or": [
-                        { "telegram_enabled": { "$ne": true } },
-                        { "telegram_chat_id": bson::Bson::Null },
-                    ],
-                },
-                doc! {
-                    "$set": {
-                        "approval_required": false,
-                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                    }
-                },
-            )
-            .await?;
+        // active notification channels after token detachment. This is the
+        // lockout-prevention exception to the rule that registration never
+        // changes approval settings. Audit each actual auto-disable with
+        // metadata only; the push token itself is never recorded.
+        for channel in affected_channels.iter().filter(|channel| {
+            channel.approval_required
+                && !channel.push_devices.is_empty()
+                && channel
+                    .push_devices
+                    .iter()
+                    .all(|device| device.token == token)
+                && !telegram_channel_is_active(channel)
+        }) {
+            let result = collection
+                .update_one(
+                    doc! {
+                        "_id": &channel.id,
+                        "approval_required": true,
+                        "push_devices.0": { "$exists": false },
+                        "$or": [
+                            { "telegram_enabled": { "$ne": true } },
+                            { "telegram_chat_id": bson::Bson::Null },
+                        ],
+                    },
+                    doc! {
+                        "$set": {
+                            "approval_required": false,
+                            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                        }
+                    },
+                )
+                .await?;
+            if result.modified_count > 0 {
+                audit_service::log_async(
+                    db.clone(),
+                    Some(channel.user_id.clone()),
+                    "approval_auto_disabled_after_push_token_detach".to_string(),
+                    Some(serde_json::json!({
+                        "reason": "no_notification_channels",
+                        "detached_by_user_id": user_id,
+                    })),
+                    None,
+                    None,
+                    None,
+                    None,
+                );
+            }
+        }
     }
 
     Ok(())
@@ -640,6 +655,42 @@ async fn remove_duplicate_token_entries(
         )
         .await?;
     Ok(())
+}
+
+fn device_metadata_update_doc(
+    now: bson::DateTime,
+    token_and_platform: Option<(&str, &str)>,
+    device_name: Option<&str>,
+    app_id: Option<&str>,
+) -> Document {
+    let mut update = doc! {
+        "push_devices.$.registered_at": now,
+        "updated_at": now,
+    };
+    if let Some((token, platform)) = token_and_platform {
+        update.insert("push_devices.$.token", token);
+        update.insert("push_devices.$.platform", platform);
+    }
+    if let Some(name) = device_name {
+        update.insert("push_devices.$.device_name", name);
+    }
+    if let Some(app_id) = app_id {
+        update.insert("push_devices.$.app_id", app_id);
+    }
+    update
+}
+
+fn new_device_update_doc(device_token: &DeviceToken, now: bson::DateTime) -> AppResult<Document> {
+    Ok(doc! {
+        "$push": {
+            "push_devices": bson::to_bson(device_token)
+                .map_err(|e| AppError::Internal(format!("BSON serialize failed: {e}")))?
+        },
+        "$set": {
+            "push_enabled": true,
+            "updated_at": now,
+        }
+    })
 }
 
 // --- Validation ---
@@ -749,6 +800,7 @@ fn disable_push_update_doc(disable_approval: bool) -> Document {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::connect_test_database;
 
     #[test]
     fn validate_valid_fcm() {
@@ -1002,5 +1054,198 @@ mod tests {
         };
 
         assert!(!should_auto_disable_approval_after_last_push_device_removed(&channel));
+    }
+
+    #[tokio::test]
+    async fn registration_paths_leave_approval_required_untouched() {
+        let Some(db) = connect_test_database("device_registration_approval_untouched").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+
+        let old_device = DeviceToken {
+            device_id: "old-device".to_string(),
+            platform: "fcm".to_string(),
+            token: "old-token".to_string(),
+            device_name: None,
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+        let new_device = DeviceToken {
+            device_id: "new-device".to_string(),
+            platform: "fcm".to_string(),
+            token: "new-token".to_string(),
+            device_name: Some("new device".to_string()),
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+
+        for approval_required in [false, true] {
+            let paths = [
+                (
+                    "rotation",
+                    device_metadata_update_doc(
+                        bson::DateTime::from_chrono(Utc::now()),
+                        Some(("new-token", "fcm")),
+                        None,
+                        None,
+                    ),
+                    true,
+                ),
+                (
+                    "refresh",
+                    device_metadata_update_doc(
+                        bson::DateTime::from_chrono(Utc::now()),
+                        None,
+                        Some("refreshed"),
+                        None,
+                    ),
+                    true,
+                ),
+                (
+                    "concurrent-registration-recovery",
+                    device_metadata_update_doc(
+                        bson::DateTime::from_chrono(Utc::now()),
+                        None,
+                        None,
+                        Some("app-id"),
+                    ),
+                    true,
+                ),
+                (
+                    "new-device",
+                    new_device_update_doc(&new_device, bson::DateTime::from_chrono(Utc::now()))
+                        .unwrap(),
+                    false,
+                ),
+            ];
+
+            for (path, update, has_existing_device) in paths {
+                let update = if has_existing_device {
+                    doc! { "$set": update }
+                } else {
+                    update
+                };
+                let channel_id = uuid::Uuid::new_v4().to_string();
+                let user_id = uuid::Uuid::new_v4().to_string();
+                db.collection::<NotificationChannel>(COLLECTION_NAME)
+                    .insert_one(NotificationChannel {
+                        id: channel_id.clone(),
+                        user_id,
+                        telegram_chat_id: None,
+                        telegram_username: None,
+                        telegram_enabled: false,
+                        telegram_link_code: None,
+                        telegram_link_code_expires_at: None,
+                        approval_timeout_secs: 30,
+                        grant_expiry_days: 30,
+                        approval_required,
+                        push_enabled: has_existing_device,
+                        push_devices: if has_existing_device {
+                            vec![old_device.clone()]
+                        } else {
+                            vec![]
+                        },
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    })
+                    .await
+                    .unwrap();
+
+                let filter = if has_existing_device {
+                    doc! { "_id": &channel_id, "push_devices.token": "old-token" }
+                } else {
+                    doc! { "_id": &channel_id }
+                };
+                db.collection::<NotificationChannel>(COLLECTION_NAME)
+                    .update_one(filter, update)
+                    .await
+                    .unwrap_or_else(|error| panic!("{path} update failed: {error}"));
+
+                let saved = db
+                    .collection::<NotificationChannel>(COLLECTION_NAME)
+                    .find_one(doc! { "_id": &channel_id })
+                    .await
+                    .unwrap()
+                    .expect("registration channel");
+                assert_eq!(
+                    saved.approval_required, approval_required,
+                    "{path} path changed approval_required"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn detaching_last_device_auto_disables_previous_owner_approval() {
+        let Some(db) = connect_test_database("device_detach_auto_disable_approval").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let previous_user_id = uuid::Uuid::new_v4().to_string();
+        let registering_user_id = uuid::Uuid::new_v4().to_string();
+        let channel_id = uuid::Uuid::new_v4().to_string();
+        let device = DeviceToken {
+            device_id: "detached-device".to_string(),
+            platform: "fcm".to_string(),
+            token: "detached-token".to_string(),
+            device_name: None,
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+        let duplicate_device = DeviceToken {
+            device_id: "duplicate-device".to_string(),
+            ..device.clone()
+        };
+        db.collection::<NotificationChannel>(COLLECTION_NAME)
+            .insert_one(NotificationChannel {
+                id: channel_id.clone(),
+                user_id: previous_user_id.clone(),
+                telegram_chat_id: None,
+                telegram_username: None,
+                telegram_enabled: false,
+                telegram_link_code: None,
+                telegram_link_code_expires_at: None,
+                approval_timeout_secs: 30,
+                grant_expiry_days: 30,
+                approval_required: true,
+                push_enabled: true,
+                // `$pull` removes every matching token. Duplicate legacy rows
+                // must still count as losing the previous owner's last channel.
+                push_devices: vec![device, duplicate_device],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let audit_written = crate::services::audit_service::notify_on_audit_write_for_user(
+            "approval_auto_disabled_after_push_token_detach",
+            previous_user_id.clone(),
+        );
+        let collection = db.collection::<NotificationChannel>(COLLECTION_NAME);
+        detach_token_from_other_users(
+            &db,
+            &collection,
+            &registering_user_id,
+            "detached-token",
+            bson::DateTime::from_chrono(Utc::now()),
+        )
+        .await
+        .unwrap();
+
+        let saved = collection
+            .find_one(doc! { "_id": &channel_id })
+            .await
+            .unwrap()
+            .expect("previous owner channel");
+        assert!(!saved.approval_required);
+        tokio::time::timeout(std::time::Duration::from_secs(5), audit_written)
+            .await
+            .expect("approval auto-disable audit timeout")
+            .expect("approval auto-disable audit writer dropped");
     }
 }

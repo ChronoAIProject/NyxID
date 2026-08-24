@@ -9,6 +9,7 @@ pub(crate) struct McpApprovalTarget {
     pub(crate) service_name: String,
     pub(crate) service_slug: String,
     pub(crate) service_owner_user_id: String,
+    pub(crate) is_auto_connected: bool,
 }
 
 /// Resolve the approval policy identity for a loaded MCP service.
@@ -54,6 +55,7 @@ pub(crate) async fn approval_target_for_tool(
         service_name: service.service_name.clone(),
         service_slug: service.service_slug.clone(),
         service_owner_user_id: hint.service_owner_id,
+        is_auto_connected: hint.is_auto_connected,
     })
 }
 
@@ -70,6 +72,7 @@ mod tests {
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+    use mongodb::bson::doc;
 
     fn loaded_user_service(id: &str, owner_id: &str, slug: &str) -> mcp_service::McpToolService {
         mcp_service::McpToolService {
@@ -209,5 +212,47 @@ mod tests {
                 "approval target must yield denied_by_policy for org_owned={org_owned}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn auto_provisioned_mcp_target_carries_auto_connected_hint() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("mcp_auto_connected_approval_target").await
+        else {
+            eprintln!(
+                "skipping MCP auto-connected approval target test: no local MongoDB available"
+            );
+            return;
+        };
+
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let slug = "auto-mcp-service";
+        insert_deny_fixture(
+            &db,
+            &actor_id,
+            &actor_id,
+            &catalog_id,
+            &user_service_id,
+            slug,
+            false,
+        )
+        .await;
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &user_service_id },
+                doc! { "$set": { "source": crate::models::user_service::AUTO_PROVISION_SOURCE } },
+            )
+            .await
+            .unwrap();
+
+        let service = loaded_user_service(&user_service_id, &actor_id, slug);
+        let target = approval_target_for_tool(&db, &actor_id, &service)
+            .await
+            .unwrap();
+
+        assert_eq!(target.service_id, catalog_id);
+        assert!(target.is_auto_connected);
     }
 }

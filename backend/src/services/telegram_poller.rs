@@ -222,18 +222,12 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
         return;
     }
 
-    // Update the channel with the Telegram details and auto-enable approval
+    // Link Telegram without changing the user's global approval preference.
+    // Approval protection is enabled only through the explicit notification
+    // settings endpoint; linking a delivery channel must not opt the user in.
     let now = bson::DateTime::from_chrono(chrono::Utc::now());
     let update = doc! {
-        "$set": {
-            "telegram_chat_id": chat_id,
-            "telegram_username": &username,
-            "telegram_enabled": true,
-            "approval_required": true,
-            "telegram_link_code": bson::Bson::Null,
-            "telegram_link_code_expires_at": bson::Bson::Null,
-            "updated_at": now,
-        }
+        "$set": telegram_link_update_fields(chat_id, &username, now)
     };
 
     match collection
@@ -245,7 +239,7 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
                 &state.http_client,
                 bot_token,
                 chat_id,
-                "Your Telegram account has been linked to NyxID. Global approval protection has been enabled, and services without per-service overrides will now send approval requests here.",
+                "Your Telegram account has been linked to NyxID. Approval protection remains controlled by your notification settings.",
             )
             .await;
 
@@ -256,7 +250,6 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
                 Some(serde_json::json!({
                     "telegram_username": username,
                     "telegram_chat_id": chat_id,
-                    "approval_auto_enabled": true,
                 })),
                 None,
                 None,
@@ -274,6 +267,21 @@ async fn handle_link_message(state: &AppState, message: telegram_service::Telegr
             )
             .await;
         }
+    }
+}
+
+fn telegram_link_update_fields(
+    chat_id: i64,
+    username: &Option<String>,
+    now: bson::DateTime,
+) -> bson::Document {
+    doc! {
+        "telegram_chat_id": chat_id,
+        "telegram_username": username,
+        "telegram_enabled": true,
+        "telegram_link_code": bson::Bson::Null,
+        "telegram_link_code_expires_at": bson::Bson::Null,
+        "updated_at": now,
     }
 }
 
@@ -333,5 +341,21 @@ mod tests {
             decision_callback_message(&error),
             "Server error, please try again"
         );
+    }
+
+    #[test]
+    fn telegram_link_update_preserves_approval_preference() {
+        let update =
+            telegram_link_update_fields(1234, &Some("nyx".to_string()), bson::DateTime::now());
+
+        assert!(!update.contains_key("approval_required"));
+        for approval_required in [false, true] {
+            let mut persisted = doc! { "approval_required": approval_required };
+            persisted.extend(update.clone());
+            assert_eq!(
+                persisted.get_bool("approval_required").unwrap(),
+                approval_required
+            );
+        }
     }
 }

@@ -1581,6 +1581,7 @@ async fn authorize_mcp_operation(
         auth.approval_requester_type(),
         &auth.approval_requester_id(),
         auth.auth_method == AuthMethod::Session,
+        target.is_auto_connected,
     )
     .await
     .map_err(|e| {
@@ -2897,6 +2898,8 @@ async fn handle_mcp_ssh_exec(
             service_name: service.name,
             service_slug: service.slug,
             service_owner_user_id,
+            // SSH services are not auto-provisioned.
+            is_auto_connected: false,
         },
         &operation,
         request_id.clone(),

@@ -241,9 +241,9 @@ export function NotificationSetupCard() {
 
             {!hasChannel && (
               <p className="text-xs text-muted-foreground">
-                Connect Telegram or download the mobile app to enable approval
-                protection. Approval is enabled automatically when you set up a
-                channel.
+                Connect Telegram or download the mobile app to receive approval
+                requests. Then explicitly enable approval protection in this
+                card or Approval Settings.
               </p>
             )}
           </div>

@@ -5993,6 +5993,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn discover_services_excludes_auto_provisioned_user_service() {
+        let Some(db) = connect_test_database("mcp_discover_auto_user_service").await else {
+            eprintln!("skipping MCP auto-provision discovery test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "auto-provisioned-catalog".to_string();
+        catalog.requires_user_credential = false;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .expect("insert auto catalog service");
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &user_id,
+                "Auto service",
+                "https://auto.example.com",
+                None,
+                Some(&catalog_id),
+            ))
+            .await
+            .expect("insert auto endpoint");
+        let mut user_service = test_user_service(
+            &user_service_id,
+            &user_id,
+            "auto-service",
+            &endpoint_id,
+            Some(&catalog_id),
+            None,
+        );
+        user_service.source = Some(crate::models::user_service::AUTO_PROVISION_SOURCE.to_string());
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .expect("insert auto user service");
+
+        let discovered = discover_services(&db, &user_id, None, Some("connection"))
+            .await
+            .expect("discover services");
+        let discovered_ids: Vec<&str> = discovered["services"]
+            .as_array()
+            .expect("services array")
+            .iter()
+            .filter_map(|service| service["service_id"].as_str())
+            .collect();
+        assert!(!discovered_ids.contains(&catalog_id.as_str()));
+        assert!(!discovered_ids.contains(&user_service_id.as_str()));
+    }
+
     // -- generate_tool_definitions tests --
 
     #[test]
@@ -8072,6 +8131,7 @@ mod tests {
                 membership_id: "membership".to_string(),
             }),
             pool_selection: None,
+            is_auto_connected: false,
         }
     }
 
