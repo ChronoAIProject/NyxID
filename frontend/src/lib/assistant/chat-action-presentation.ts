@@ -1,4 +1,5 @@
 import { resolveAssistantAction } from "@/lib/assistant/action-registry";
+import { actionOutcomeNote } from "@/lib/assistant/action-notes";
 import type { ChatActionSummary } from "@/lib/assistant/chat-actor-state";
 import type { ActionCardContentBlock } from "@/types/assistant";
 
@@ -33,6 +34,7 @@ export function actionSummaryBlock(
   const overrideStatus = override?.status as
     | ActionCardContentBlock["status"]
     | undefined;
+  const status = overrideStatus ?? computedStatus;
   return {
     type: "action_card",
     block_id: `current-action:${summary.actionRequestId}`,
@@ -43,11 +45,11 @@ export function actionSummaryBlock(
     task_id: summary.taskId,
     step_id: summary.stepId,
     params: resolved.params,
-    status: overrideStatus ?? computedStatus,
-    outcome_note:
-      override?.note ??
-      (computedStatus === "completed"
-        ? "Reported - awaiting assistant verification."
-        : ""),
+    status,
+    outcome_note: actionOutcomeNote(
+      status,
+      reportDisposition(summary),
+      override?.note,
+    ),
   };
 }

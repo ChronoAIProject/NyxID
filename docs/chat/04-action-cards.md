@@ -295,6 +295,22 @@ dispositions to the corresponding settled card. Until that fact arrives, the
 request remains pending; a locally blocked journey is held only as a
 conversation-local presentation override.
 
+Accepted delivery uses these stable messages:
+
+- completed: “Reported — awaiting assistant verification.”
+- declined: “You declined this request. The assistant received the decision;
+  no credential was shared.”
+- failed, cancelled, or expired: “The assistant received the connection
+  failure. Ask it to request the service again.”
+- conflicted: “This action request was reissued with conflicting details. NyxID
+  kept the first request and disabled this card.” If its latest report is
+  `completed`, the unreported-completed warning is appended.
+
+Blocked and unsupported cards retain their conversation-local override note.
+`frontend/src/lib/assistant/action-notes.ts:actionOutcomeNote` is the single copy
+source; `frontend/src/lib/assistant/chat-action-presentation.ts:actionSummaryBlock`
+maps projected state and local overrides into the card.
+
 Implementation: `frontend/src/hooks/use-assistant-chat-controls.ts:reportAction`,
 `frontend/src/lib/assistant/chat-stream-orchestrator.ts:runChatStream`, and
 `frontend/src/lib/assistant/chat-action-presentation.ts:actionSummaryBlock`.
