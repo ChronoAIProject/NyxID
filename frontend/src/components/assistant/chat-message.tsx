@@ -1,16 +1,21 @@
-import { useEffect, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type UIEvent,
+} from "react";
 import {
   Brain,
   Check,
   ChevronRight,
   CircleAlert,
   MessageSquare,
-  ShieldAlert,
   Sparkles,
   Wrench,
   X,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { TextBlock } from "@/components/assistant/blocks/text-block";
 import { sanitizeAssistantMessageContent } from "@/lib/assistant/chat-content";
 import type {
@@ -19,16 +24,7 @@ import type {
 } from "@/lib/assistant/chat-types";
 import { cn } from "@/lib/utils";
 
-type InterventionAction =
-  | { readonly kind: "resume"; readonly value?: string }
-  | { readonly kind: "approve"; readonly value?: string }
-  | { readonly kind: "reject"; readonly value?: string }
-  | { readonly kind: "signal"; readonly value?: string };
-
-export interface ChatMessageActions {
-  readonly onApproval?: (requestId: string, approved: boolean) => void;
-  readonly onIntervention?: (action: InterventionAction) => void;
-}
+const EMPTY_MESSAGES: readonly ChatMessage[] = [];
 
 function PulseDot({ className }: { readonly className?: string }) {
   return (
@@ -142,115 +138,7 @@ function ActivityBlock({ message }: { readonly message: ChatMessage }) {
   );
 }
 
-function RuntimeApprovalCard({
-  message,
-  onApproval,
-}: {
-  readonly message: ChatMessage;
-  readonly onApproval?: ChatMessageActions["onApproval"];
-}) {
-  const approval = message.pendingApproval;
-  if (!approval) return null;
-  return (
-    <section className="mb-2 overflow-hidden rounded-lg border border-warning/30 bg-warning/[0.05]">
-      <div className="flex items-start gap-2 border-b border-warning/20 px-3 py-2.5">
-        <ShieldAlert className="mt-0.5 h-4 w-4 text-warning" />
-        <div className="min-w-0 flex-1">
-          <h3 className="text-[12px] font-semibold text-foreground">
-            Tool approval required
-          </h3>
-          <p className="mt-0.5 break-words font-mono text-[10px] text-muted-foreground">
-            {approval.toolName || approval.toolCallId || approval.requestId}
-          </p>
-        </div>
-      </div>
-      {approval.argumentsJson ? (
-        <pre className="max-h-40 overflow-auto whitespace-pre-wrap px-3 py-2 font-mono text-[10px] text-muted-foreground">
-          {approval.argumentsJson}
-        </pre>
-      ) : null}
-      <div className="flex justify-end gap-2 border-t border-warning/20 px-3 py-2">
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          onClick={() => onApproval?.(approval.requestId, false)}
-        >
-          <X /> Reject
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          onClick={() => onApproval?.(approval.requestId, true)}
-        >
-          <Check /> Approve
-        </Button>
-      </div>
-    </section>
-  );
-}
-
-function RunInterventionCard({
-  message,
-  onSubmit,
-}: {
-  readonly message: ChatMessage;
-  readonly onSubmit?: ChatMessageActions["onIntervention"];
-}) {
-  const intervention = message.pendingRunIntervention;
-  const [value, setValue] = useState("");
-  if (!intervention) return null;
-  const approval = intervention.kind === "human_approval";
-  const signal = intervention.kind === "wait_signal";
-  return (
-    <section className="mb-2 rounded-lg border border-border bg-card p-3">
-      <h3 className="text-[12px] font-semibold text-foreground">
-        {approval ? "Approval required" : signal ? "Signal required" : "Input required"}
-      </h3>
-      {intervention.prompt ? (
-        <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
-          {intervention.prompt}
-        </p>
-      ) : null}
-      <textarea
-        value={value}
-        onChange={(event) => setValue(event.target.value)}
-        className="mt-2 min-h-16 w-full resize-y rounded-md border border-hairline bg-background px-2.5 py-2 text-[12px] outline-none focus:border-hairline-strong"
-        placeholder={approval || signal ? "Optional note" : "Response"}
-      />
-      <div className="mt-2 flex justify-end gap-2">
-        {approval ? (
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            onClick={() => onSubmit?.({ kind: "reject", value: value.trim() || undefined })}
-          >
-            <X /> Reject
-          </Button>
-        ) : null}
-        <Button
-          type="button"
-          size="sm"
-          onClick={() =>
-            onSubmit?.({
-              kind: approval ? "approve" : signal ? "signal" : "resume",
-              value: value.trim() || undefined,
-            })
-          }
-        >
-          <Check /> {approval ? "Approve" : signal ? "Send signal" : "Resume"}
-        </Button>
-      </div>
-    </section>
-  );
-}
-
-export function ChatMessageBubble({
-  message,
-  onApproval,
-  onIntervention,
-}: { readonly message: ChatMessage } & ChatMessageActions) {
+export function ChatMessageBubble({ message }: { readonly message: ChatMessage }) {
   const streaming = message.status === "streaming";
   const content =
     message.role === "assistant"
@@ -263,29 +151,32 @@ export function ChatMessageBubble({
       </div>
     );
   }
+  const printable = Boolean(
+    content || message.steps?.length || message.toolCalls?.length,
+  );
+  const thinking = streaming && !printable;
   return (
-    <div className="flex items-start gap-2.5">
-      <div
-        data-assistant-halo
+    <article
+      role={thinking ? "status" : undefined}
+      aria-label={thinking ? "Assistant is thinking" : undefined}
+      className="flex items-start gap-2.5"
+    >
+      <span
+        {...(thinking ? { "data-assistant-halo": "" } : {})}
+        aria-hidden="true"
         className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-nyx-secondary-400/25 bg-nyx-secondary-400/10 text-nyx-secondary-400"
       >
         <Sparkles className="h-3 w-3" />
-      </div>
+      </span>
       <div className="min-w-0 max-w-[min(84%,758px)] flex-1 pt-0.5">
         <ThinkingBlock text={message.thinking ?? ""} streaming={streaming} />
-        <RuntimeApprovalCard message={message} onApproval={onApproval} />
-        <RunInterventionCard
-          key={message.pendingRunIntervention?.key}
-          message={message}
-          onSubmit={onIntervention}
-        />
         <ActivityBlock message={message} />
         {content ? <TextBlock text={content} streaming={streaming} /> : null}
         {streaming && !content ? (
           <div
             data-streaming-dots
             role="status"
-            aria-label="Assistant is responding"
+            aria-label="Assistant is answering"
             className="flex h-5 items-center gap-1"
           >
             <PulseDot />
@@ -300,14 +191,13 @@ export function ChatMessageBubble({
           </div>
         ) : null}
       </div>
-    </div>
+    </article>
   );
 }
 
 export function ChatMessageEntry({
   message,
-  ...actions
-}: { readonly message: ChatMessage } & ChatMessageActions) {
+}: { readonly message: ChatMessage }) {
   const authorName = message.authorName?.trim() ?? "";
   if (message.role === "user" || message.role === "assistant") {
     return (
@@ -322,7 +212,7 @@ export function ChatMessageEntry({
             {authorName}
           </div>
         ) : null}
-        <ChatMessageBubble message={message} {...actions} />
+        <ChatMessageBubble message={message} />
       </div>
     );
   }
@@ -361,15 +251,23 @@ export function ChatMessageList({
   bottomInset,
   emptyDescription,
   footer,
-  ...actions
+  notice,
+  projectionVersion,
 }: {
   readonly session: ChatSessionState | null;
   readonly bottomInset: number;
   readonly emptyDescription?: ReactNode;
   readonly footer?: ReactNode;
-} & ChatMessageActions) {
+  readonly notice?: ReactNode;
+  readonly projectionVersion?: string | number;
+}) {
   const [detectedMessageId, setDetectedMessageId] = useState<string>();
-  const messages = session?.messages ?? [];
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const followingRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
+  const previousConversationRef = useRef<string | undefined>(undefined);
+  const previousUserMessageRef = useRef<string | undefined>(undefined);
+  const messages = session?.messages ?? EMPTY_MESSAGES;
   const terminalAssistant = messages.at(-1);
   const emptyTerminal = Boolean(
     session &&
@@ -390,15 +288,63 @@ export function ChatMessageList({
   const emptyTurnDetected =
     emptyTerminal && detectedMessageId === terminalAssistant?.id;
 
-  if (!messages.length) return <EmptyState>{emptyDescription}</EmptyState>;
+  const latestUserMessageId = [...messages]
+    .reverse()
+    .find((message) => message.role === "user")?.id;
+  useLayoutEffect(() => {
+    const conversationChanged =
+      previousConversationRef.current !== session?.conversationId;
+    const newUserMessage = Boolean(
+      latestUserMessageId &&
+        previousUserMessageRef.current &&
+        previousUserMessageRef.current !== latestUserMessageId,
+    );
+    if (conversationChanged || newUserMessage) followingRef.current = true;
+    previousConversationRef.current = session?.conversationId;
+    previousUserMessageRef.current = latestUserMessageId;
+    const element = scrollRef.current;
+    if (!element || !followingRef.current) return;
+    element.scrollTop = element.scrollHeight;
+    lastScrollTopRef.current = element.scrollTop;
+  }, [
+    bottomInset,
+    latestUserMessageId,
+    messages,
+    projectionVersion,
+    session?.conversationId,
+  ]);
+
+  function handleScroll(event: UIEvent<HTMLDivElement>) {
+    const element = event.currentTarget;
+    const distance = element.scrollHeight - element.clientHeight - element.scrollTop;
+    if (distance <= 48) followingRef.current = true;
+    else if (element.scrollTop < lastScrollTopRef.current - 1) {
+      followingRef.current = false;
+    }
+    lastScrollTopRef.current = element.scrollTop;
+  }
+
   return (
-    <div className="min-h-0 flex-1 overflow-y-auto px-4 sm:px-6">
+    <div
+      ref={scrollRef}
+      onScroll={handleScroll}
+      className="min-h-0 flex-1 overflow-y-auto px-4 sm:px-6"
+    >
       <div
-        className="mx-auto flex w-full max-w-[758px] flex-col gap-4 pt-6"
+        className="mx-auto flex min-h-full w-full max-w-[758px] flex-col gap-4 pt-6"
         style={{ paddingBottom: Math.max(bottomInset + 24, 96) }}
       >
+        {notice ? (
+          <div
+            role="status"
+            className="rounded-lg border border-border bg-overlay px-3 py-2 text-[11px] text-muted-foreground"
+          >
+            {notice}
+          </div>
+        ) : null}
+        {!messages.length ? <EmptyState>{emptyDescription}</EmptyState> : null}
         {messages.map((message) => (
-          <ChatMessageEntry key={message.id} message={message} {...actions} />
+          <ChatMessageEntry key={message.id} message={message} />
         ))}
         {footer}
         {emptyTurnDetected ? (

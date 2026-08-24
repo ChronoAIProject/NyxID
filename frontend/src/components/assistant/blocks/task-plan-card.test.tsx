@@ -160,4 +160,31 @@ describe("TaskPlanCard", () => {
     expect(onResolve).toHaveBeenNthCalledWith(1, true);
     expect(onResolve).toHaveBeenNthCalledWith(2, false);
   });
+
+  it("disables plan, step, and stop controls behind the state-version fence", () => {
+    render(
+      <TaskPlanCard
+        block={block(
+          { retry: true, skip: true, stop: true },
+          {
+            mode: "confirm",
+            status: "pending",
+            requestId: "plan-gate-alpha",
+            taskId: "task-alpha",
+            planId: "plan-alpha",
+            planRevision: 3,
+          },
+        )}
+        disabled
+        onStop={vi.fn()}
+        onRetry={vi.fn()}
+        onSkip={vi.fn()}
+        onResolve={vi.fn()}
+      />,
+    );
+
+    for (const button of screen.getAllByRole("button")) {
+      expect(button).toBeDisabled();
+    }
+  });
 });

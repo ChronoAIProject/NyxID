@@ -22,7 +22,6 @@ export interface AssistantHttpRequest {
   readonly body?: unknown;
   readonly headers?: Readonly<Record<string, string>>;
   readonly method?: AssistantMethod;
-  readonly preserveSessionOn401?: boolean;
   readonly signal?: AbortSignal;
 }
 

@@ -105,6 +105,17 @@ describe("ChatComposer drafts", () => {
     expect(baseProps.onStop).not.toHaveBeenCalled();
   });
 
+  it("explains and enforces a read-only legacy conversation", () => {
+    render(<ChatComposer {...baseProps} disabled draftKey="conv:chatc-legacy" />);
+
+    expect(screen.getByRole("textbox")).toBeDisabled();
+    expect(screen.getByRole("textbox")).toHaveAttribute(
+      "placeholder",
+      "This conversation is read-only.",
+    );
+    expect(screen.getByRole("button", { name: "Send message" })).toBeDisabled();
+  });
+
   it("restores the typed text and draft when the send rejects [guard]", async () => {
     // A dead backend must not eat the message: a rejected send puts the text
     // back in the field and re-saves the draft, so retry is one keypress.

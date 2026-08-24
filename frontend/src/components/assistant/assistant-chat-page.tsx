@@ -14,6 +14,7 @@ import { ChatActorControls } from "@/components/assistant/chat-actor-controls";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatMessageList } from "@/components/assistant/chat-message";
 import { useAssistantChat } from "@/hooks/use-assistant-chat";
+import { isLegacyConversationId } from "@/lib/assistant/aevatar-transport";
 import { markChatActivity } from "@/lib/assistant/connect-watch";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { useAuthStore } from "@/stores/auth-store";
@@ -60,9 +61,13 @@ export function AssistantChatPage() {
     },
     [navigate],
   );
+  const repairMissingConversation = useCallback(() => {
+    void navigate({ to: "/assistant" as never, search: {} as never, replace: true });
+  }, [navigate]);
   const chat = useAssistantChat({
     selectedConversationId: selectedId,
     onConversationAdopted: adoptConversation,
+    onConversationMissing: repairMissingConversation,
   });
 
   useLayoutEffect(() => {
@@ -84,12 +89,15 @@ export function AssistantChatPage() {
       chat.projection?.task?.status === "active",
   );
   const title = chat.session?.title ?? "New chat";
+  const readOnly = Boolean(
+    chat.session?.conversationId &&
+      isLegacyConversationId(chat.session.conversationId),
+  );
   const draftKey = chat.session?.conversationId
     ? `conv:${chat.session.conversationId}`
     : null;
 
   function selectConversation(conversationId: string) {
-    if (chat.isStreaming) return;
     setComposerFocusRequest((value) => value + 1);
     void navigate({
       to: "/assistant" as never,
@@ -98,8 +106,8 @@ export function AssistantChatPage() {
   }
 
   function createNewChat() {
-    if (chat.isStreaming) return;
     setComposerFocusRequest((value) => value + 1);
+    chat.newChat();
     void navigate({
       to: "/assistant" as never,
       search: { draft: true } as never,
@@ -107,6 +115,7 @@ export function AssistantChatPage() {
   }
 
   async function deleteConversation(conversationId: string) {
+    if (chat.isConversationStreaming(conversationId)) return;
     try {
       await chat.deleteConversation(conversationId);
       if (selectedId === conversationId) {
@@ -139,10 +148,10 @@ export function AssistantChatPage() {
     }
   }
 
-  const actorControls = (
+  const actorControls = readOnly ? null : (
     <ChatActorControls
       projection={chat.projection}
-      disabled={chat.controlBusy || (chat.projection?.stateVersion ?? 0) === 0}
+      disabled={chat.controlBusy || !chat.controlReady}
       actionOverrides={chat.actionOverrides}
       onResolveInput={chat.resolveInput}
       onResolveApproval={chat.resolveApproval}
@@ -165,8 +174,16 @@ export function AssistantChatPage() {
       onNewChat={createNewChat}
       onSelect={selectConversation}
       onDelete={deleteConversation}
+      notice={chat.listError ? `Could not load chats. ${chat.listError}` : undefined}
     />
   );
+  const threadNotice = readOnly
+    ? "This legacy conversation is read-only. You can view or delete it, but it cannot be continued."
+    : chat.detailState.status === "missing"
+      ? "This chat has no saved transcript yet. You can keep chatting."
+      : chat.detailState.status === "error"
+        ? `Could not load earlier messages. ${chat.detailState.message}`
+        : undefined;
 
   return (
     <AssistantShell
@@ -184,48 +201,27 @@ export function AssistantChatPage() {
           <div className="flex flex-1 items-center justify-center text-[12px] text-text-tertiary">
             Loading conversation...
           </div>
-        ) : chat.detailState.status === "error" ? (
-          <div className="m-auto max-w-md rounded-lg border border-destructive/25 bg-destructive/[0.04] px-4 py-3 text-[12px] text-destructive">
-            {chat.detailState.message}
-          </div>
         ) : (
           <ChatMessageList
             session={chat.session}
             bottomInset={composerHeight}
             footer={actorControls}
-            onApproval={(requestId, approved) =>
-              void chat.resolveApproval(requestId, approved)
-            }
-            onIntervention={(action) => {
-              const pendingInput = chat.projection?.pendingInput;
-              const pendingApproval = chat.projection?.pendingApproval;
-              if (
-                (action.kind === "approve" || action.kind === "reject") &&
-                pendingApproval
-              ) {
-                void chat.resolveApproval(
-                  pendingApproval.approvalRequestId,
-                  action.kind === "approve",
-                  action.value,
-                );
-              } else if (pendingInput?.allowFreeText && action.value) {
-                void chat.resolveInput({ freeText: action.value }, pendingInput);
-              } else if (action.value) {
-                void chat.steer(action.value);
-              }
-            }}
+            notice={threadNotice}
+            projectionVersion={`${String(chat.projection?.stateVersion ?? 0)}:${String(chat.projection?.progressSequence ?? 0)}`}
           />
         )}
         <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
           <ChatComposer
             active={chat.isStreaming || actorActive}
-            allowActiveInput={actorActive}
+            allowActiveInput={actorActive && chat.controlReady}
             sending={chat.isStreaming || chat.controlBusy}
+            disabled={readOnly}
             ownerUserId={user?.id ?? null}
             draftKey={draftKey}
             focusRequest={composerFocusRequest}
             onSend={send}
             onStop={chat.stop}
+            stopDisabled={!chat.controlReady}
           />
         </div>
       </div>

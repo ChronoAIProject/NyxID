@@ -1,109 +1,179 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { AGUIEventType } from "@/lib/assistant/agui-types";
-import {
-  actorCan,
   applyCurrentStateResult,
   createChatActorProjection,
-  decodeActorFrame,
-  reduceActorFrame,
   type ChatActorProjection,
-  type ChatActorStep,
-  type ChatPendingInput,
 } from "@/lib/assistant/chat-actor-state";
 import {
-  extractChatStreamArtifacts,
-  readChatStreamFrames,
   sendChatCommand,
   type ChatCommand,
-  type ChatInputAnswer,
 } from "@/lib/assistant/chat-api";
-import { chatHistoryApi } from "@/lib/assistant/chat-history-api";
 import {
-  buildAssistantMessagePatch,
-  createChatMessage,
+  chatHistoryApi,
+  ChatHistoryApiError,
+} from "@/lib/assistant/chat-history-api";
+import {
+  runChatStream,
+  STREAM_PROGRESS_TIMEOUT_MS,
+  type ChatEntryPatch,
+} from "@/lib/assistant/chat-stream-orchestrator";
+import {
   createClientId,
   createDraftChatSession,
   hydrateStoredMessages,
   resolveStoredConversationStatus,
-  stringField,
-  trimChatTitle,
 } from "@/lib/assistant/chat-session-state";
 import {
   chatErrorMessage,
   ChatProgressTimeoutError,
   currentActorTurnId,
-  isKeepaliveEvent,
-  isRunStoppedEvent,
   ReaderStoppedError,
-  updateSessionMessage,
 } from "@/lib/assistant/chat-session-runtime";
 import type {
-  ChatMessage,
+  ChatConversationDetail,
   ChatSessionState,
   ConversationMeta,
 } from "@/lib/assistant/chat-types";
-import {
-  applyRuntimeEvent,
-  createRuntimeEventAccumulator,
-  isRawObserved,
-} from "@/lib/assistant/runtime-event-semantics";
-import type { ChatPlanGate } from "@/lib/assistant/chat-task-plan";
-import type { ActionReport } from "@/schemas/assistant-actions";
+import { isLegacyConversationId } from "@/lib/assistant/aevatar-transport";
+import { useAssistantChatControls } from "@/hooks/use-assistant-chat-controls";
 
 export const ACTIVE_STATE_REFRESH_DELAYS_MS = [250, 500, 1_000, 2_000] as const;
-export const STREAM_PROGRESS_TIMEOUT_MS = 120_000;
-export { ChatProgressTimeoutError };
+export { ChatProgressTimeoutError, STREAM_PROGRESS_TIMEOUT_MS };
 
-type DetailState =
+export type ChatDetailState =
   | { readonly status: "idle" }
   | { readonly status: "loading" }
+  | { readonly status: "missing" }
   | { readonly status: "error"; readonly message: string };
 
+interface ChatEntry {
+  readonly session: ChatSessionState;
+  readonly projection: ChatActorProjection | null;
+  readonly detailState: ChatDetailState;
+  readonly actionOverrides: ReadonlyMap<
+    string,
+    { readonly status?: string; readonly note?: string }
+  >;
+}
+
 type ControlCommand = Exclude<ChatCommand, { readonly type: "text" }>;
+
 interface UseAssistantChatOptions {
   readonly selectedConversationId?: string;
   readonly onConversationAdopted?: (conversationId: string) => void;
+  readonly onConversationMissing?: (conversationId: string) => void;
+}
+
+function createEntry(
+  session: ChatSessionState,
+  projection: ChatActorProjection | null = null,
+  detailState: ChatDetailState = { status: "idle" },
+): ChatEntry {
+  return {
+    session,
+    projection,
+    detailState,
+    actionOverrides: new Map(),
+  };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function loadTranscriptWithPendingRetry(
+  conversationId: string,
+): Promise<{ detail: ChatConversationDetail; pendingExhausted: boolean }> {
+  let detail = await chatHistoryApi.loadConversation(conversationId);
+  for (const retryDelay of ACTIVE_STATE_REFRESH_DELAYS_MS) {
+    if (detail.projectionStatus !== "pending" || detail.messages.length > 0) {
+      return { detail, pendingExhausted: false };
+    }
+    await delay(retryDelay);
+    detail = await chatHistoryApi.loadConversation(conversationId);
+  }
+  return {
+    detail,
+    pendingExhausted:
+      detail.projectionStatus === "pending" && detail.messages.length === 0,
+  };
 }
 
 export function useAssistantChat({
   selectedConversationId,
   onConversationAdopted,
+  onConversationMissing,
 }: UseAssistantChatOptions) {
   const [conversations, setConversations] = useState<ConversationMeta[]>([]);
   const [listLoading, setListLoading] = useState(true);
   const [listError, setListError] = useState<string>();
-  const [session, setSession] = useState<ChatSessionState | null>(null);
-  const [projection, setProjection] = useState<ChatActorProjection | null>(null);
-  const [detailState, setDetailState] = useState<DetailState>({ status: "idle" });
-  const [controlBusy, setControlBusy] = useState(false);
-  const [actionOverrides, setActionOverrides] = useState<
-    ReadonlyMap<string, { readonly status?: string; readonly note?: string }>
-  >(() => new Map());
-  const sessionRef = useRef(session);
-  const projectionRef = useRef(projection);
-  const streamControllerRef = useRef<AbortController | null>(null);
+  const [entries, setEntries] = useState<ReadonlyMap<string, ChatEntry>>(
+    () => new Map(),
+  );
+  const [selectedKey, setSelectedKey] = useState<string>();
+  const [controlBusyKey, setControlBusyKey] = useState<string>();
+  const entriesRef = useRef(entries);
+  const selectedKeyRef = useRef(selectedKey);
+  const routeSelectionRef = useRef<string | null | undefined>(undefined);
+  const detailRequestsRef = useRef(new Map<string, string>());
+  const streamControllersRef = useRef(new Map<string, AbortController>());
+  const activeRefreshesRef = useRef(new Map<string, AbortController>());
   const controlControllerRef = useRef<AbortController | null>(null);
-  const detailRequestRef = useRef("");
-  const selectionRef = useRef<string | undefined | null>(null);
 
-  sessionRef.current = session;
-  projectionRef.current = projection;
+  entriesRef.current = entries;
+  selectedKeyRef.current = selectedKey;
 
-  const commitSession = useCallback((next: ChatSessionState | null) => {
-    sessionRef.current = next;
-    setSession(next);
+  const commitEntries = useCallback((next: ReadonlyMap<string, ChatEntry>) => {
+    entriesRef.current = next;
+    setEntries(next);
   }, []);
 
-  const commitProjection = useCallback((next: ChatActorProjection | null) => {
-    projectionRef.current = next;
-    setProjection(next);
+  const putEntry = useCallback(
+    (key: string, entry: ChatEntry) => {
+      const next = new Map(entriesRef.current);
+      next.set(key, entry);
+      commitEntries(next);
+    },
+    [commitEntries],
+  );
+
+  const updateEntry = useCallback(
+    (key: string, update: Partial<ChatEntry>) => {
+      const entry = entriesRef.current.get(key);
+      if (!entry) return;
+      const next = new Map(entriesRef.current);
+      next.set(key, { ...entry, ...update });
+      commitEntries(next);
+    },
+    [commitEntries],
+  );
+
+  const updateStreamEntry = useCallback(
+    (key: string, patch: ChatEntryPatch) => {
+      const entry = entriesRef.current.get(key);
+      if (!entry) return;
+      updateEntry(key, {
+        ...(patch.session ? { session: patch.session } : {}),
+        ...(Object.hasOwn(patch, "projection")
+          ? { projection: patch.projection }
+          : {}),
+      });
+    },
+    [updateEntry],
+  );
+
+  const selectKey = useCallback((key: string) => {
+    selectedKeyRef.current = key;
+    setSelectedKey(key);
   }, []);
+
+  const createNewChat = useCallback(() => {
+    const session = createDraftChatSession();
+    routeSelectionRef.current = null;
+    putEntry(session.clientId, createEntry(session));
+    selectKey(session.clientId);
+    return session.clientId;
+  }, [putEntry, selectKey]);
 
   const refreshConversations = useCallback(async (signal?: AbortSignal) => {
     setListLoading(true);
@@ -124,6 +194,7 @@ export function useAssistantChat({
       current: ChatActorProjection | null,
       signal?: AbortSignal,
       useCursor = true,
+      entryKey = conversationId,
     ): Promise<ChatActorProjection> => {
       const turnId = currentActorTurnId(current);
       const cursor =
@@ -157,17 +228,19 @@ export function useAssistantChat({
           await chatHistoryApi.loadConversationState(conversationId, {}, signal),
         );
       }
-      if (sessionRef.current?.conversationId === conversationId) {
-        commitProjection(result.projection);
+      const entry = entriesRef.current.get(entryKey);
+      if (entry?.session.conversationId === conversationId) {
+        updateEntry(entryKey, { projection: result.projection });
       }
       return result.projection;
     },
-    [commitProjection],
+    [updateEntry],
   );
 
   const restoreConversation = useCallback(
     async (conversationId: string) => {
-      if (sessionRef.current?.status === "streaming") return;
+      const existing = entriesRef.current.get(conversationId);
+      if (existing) return;
       const meta = conversations.find((item) => item.id === conversationId);
       const requestId = createClientId();
       const placeholder: ChatSessionState = {
@@ -178,47 +251,86 @@ export function useAssistantChat({
         status: "completed_text",
         title: meta?.title || "New chat",
       };
-      detailRequestRef.current = requestId;
-      commitSession(placeholder);
-      commitProjection(createChatActorProjection(conversationId));
-      setActionOverrides(new Map());
-      setDetailState({ status: "loading" });
-      try {
-        const [detail, stateEnvelope] = await Promise.all([
-          chatHistoryApi.loadConversation(conversationId),
-          chatHistoryApi.loadConversationState(conversationId),
-        ]);
-        if (detailRequestRef.current !== requestId) return;
-        let state = applyCurrentStateResult(
+      detailRequestsRef.current.set(conversationId, requestId);
+      putEntry(
+        conversationId,
+        createEntry(
+          placeholder,
           createChatActorProjection(conversationId),
-          stateEnvelope,
-        );
-        if (state.reloadWithoutCursor) {
-          state = applyCurrentStateResult(
-            state.projection,
-            await chatHistoryApi.loadConversationState(conversationId),
-          );
-        }
+          { status: "loading" },
+        ),
+      );
+      const [detailResult, stateResult] = await Promise.allSettled([
+        loadTranscriptWithPendingRetry(conversationId),
+        loadActorState(
+          conversationId,
+          createChatActorProjection(conversationId),
+          undefined,
+          false,
+          conversationId,
+        ),
+      ]);
+      if (detailRequestsRef.current.get(conversationId) !== requestId) return;
+      const current = entriesRef.current.get(conversationId);
+      if (!current || current.session.status === "streaming") return;
+      const projection =
+        stateResult.status === "fulfilled"
+          ? stateResult.value
+          : current.projection ?? createChatActorProjection(conversationId);
+      if (detailResult.status === "fulfilled") {
+        const { detail, pendingExhausted } = detailResult.value;
         const restored: ChatSessionState = {
           ...placeholder,
-          latestTurnId: currentActorTurnId(state.projection) || undefined,
+          latestTurnId: currentActorTurnId(projection) || undefined,
           messages: hydrateStoredMessages(detail.messages),
           status: resolveStoredConversationStatus(detail.messages),
           runtime: {
-            actorId: state.projection.actorId ?? undefined,
-            runId: currentActorTurnId(state.projection) || undefined,
+            actorId: projection.actorId ?? undefined,
+            runId: currentActorTurnId(projection) || undefined,
           },
         };
-        commitSession(restored);
-        commitProjection(state.projection);
-        setDetailState({ status: "idle" });
-      } catch (error) {
-        if (detailRequestRef.current === requestId) {
-          setDetailState({ status: "error", message: chatErrorMessage(error) });
-        }
+        updateEntry(conversationId, {
+          detailState: pendingExhausted
+            ? { status: "missing" }
+            : { status: "idle" },
+          projection,
+          session: restored,
+        });
+        return;
       }
+      const error = detailResult.reason;
+      if (error instanceof ChatHistoryApiError && error.status === 404) {
+        if (!meta && !listError) {
+          const next = new Map(entriesRef.current);
+          next.delete(conversationId);
+          commitEntries(next);
+          if (selectedKeyRef.current === conversationId) {
+            createNewChat();
+            onConversationMissing?.(conversationId);
+          }
+          return;
+        }
+        updateEntry(conversationId, {
+          detailState: { status: "missing" },
+          projection,
+        });
+        return;
+      }
+      updateEntry(conversationId, {
+        detailState: { status: "error", message: chatErrorMessage(error) },
+        projection,
+      });
     },
-    [commitProjection, commitSession, conversations],
+    [
+      commitEntries,
+      conversations,
+      createNewChat,
+      listError,
+      loadActorState,
+      onConversationMissing,
+      putEntry,
+      updateEntry,
+    ],
   );
 
   useEffect(() => {
@@ -228,308 +340,189 @@ export function useAssistantChat({
   }, [refreshConversations]);
 
   useEffect(() => {
-    if (selectedConversationId && listLoading) return;
-    if (selectionRef.current === selectedConversationId) return;
-    selectionRef.current = selectedConversationId;
+    if (listLoading) return;
+    const routeKey = selectedConversationId ?? null;
+    if (routeSelectionRef.current === routeKey) return;
+    routeSelectionRef.current = routeKey;
     if (!selectedConversationId) {
-      if (sessionRef.current?.status !== "streaming") {
-        detailRequestRef.current = createClientId();
-        commitSession(createDraftChatSession());
-        commitProjection(null);
-        setDetailState({ status: "idle" });
-        setActionOverrides(new Map());
-      }
+      createNewChat();
       return;
     }
-    if (
-      sessionRef.current?.conversationId === selectedConversationId &&
-      sessionRef.current.status !== "draft"
-    ) {
-      return;
-    }
+    selectKey(selectedConversationId);
     void restoreConversation(selectedConversationId);
   }, [
-    commitProjection,
-    commitSession,
+    createNewChat,
     listLoading,
     restoreConversation,
+    selectKey,
     selectedConversationId,
   ]);
 
   useEffect(() => {
-    const conversationId = session?.conversationId?.trim();
-    if (
-      session?.status !== "streaming" ||
-      !conversationId ||
-      (projection?.stateVersion ?? 0) > 0
-    ) {
-      return;
+    const candidates = new Set<string>();
+    for (const [key, entry] of entries) {
+      if (
+        entry.session.status === "streaming" &&
+        entry.session.conversationId &&
+        !isLegacyConversationId(entry.session.conversationId) &&
+        (entry.projection?.stateVersion ?? 0) === 0
+      ) {
+        candidates.add(key);
+      }
     }
-    const controller = new AbortController();
-    let index = 0;
-    let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const refresh = async () => {
-      const current = projectionRef.current;
-      if (
-        controller.signal.aborted ||
-        !current ||
-        current.actorId !== conversationId ||
-        current.stateVersion > 0
-      ) {
-        return;
+    for (const [key, controller] of activeRefreshesRef.current) {
+      if (!candidates.has(key)) {
+        controller.abort();
+        activeRefreshesRef.current.delete(key);
       }
-      try {
-        await loadActorState(conversationId, current, controller.signal, false);
-      } catch {
-        // The bounded refresh window keeps version-fenced controls disabled.
+    }
+    for (const key of candidates) {
+      if (activeRefreshesRef.current.has(key)) continue;
+      const controller = new AbortController();
+      activeRefreshesRef.current.set(key, controller);
+      void (async () => {
+        try {
+          for (const refreshDelay of ACTIVE_STATE_REFRESH_DELAYS_MS) {
+            await delay(refreshDelay);
+            if (controller.signal.aborted) return;
+            const entry = entriesRef.current.get(key);
+            const conversationId = entry?.session.conversationId;
+            const projection = entry?.projection;
+            if (!entry || !conversationId || !projection) return;
+            if (projection.stateVersion > 0 || entry.session.status !== "streaming") {
+              return;
+            }
+            try {
+              await loadActorState(
+                conversationId,
+                projection,
+                controller.signal,
+                false,
+                key,
+              );
+            } catch {
+              // The bounded window leaves unavailable controls version-fenced.
+            }
+          }
+        } finally {
+          if (activeRefreshesRef.current.get(key) === controller) {
+            activeRefreshesRef.current.delete(key);
+          }
+        }
+      })();
+    }
+  }, [entries, loadActorState]);
+
+  const adoptEntry = useCallback(
+    (
+      previousKey: string,
+      conversationId: string,
+      session: ChatSessionState,
+      projection: ChatActorProjection,
+      controller: AbortController,
+    ): string => {
+      const previous = entriesRef.current.get(previousKey);
+      if (!previous) return previousKey;
+      const next = new Map(entriesRef.current);
+      next.delete(previousKey);
+      next.set(conversationId, { ...previous, session, projection });
+      commitEntries(next);
+      if (streamControllersRef.current.get(previousKey) === controller) {
+        streamControllersRef.current.delete(previousKey);
+        streamControllersRef.current.set(conversationId, controller);
       }
-      if (
-        !controller.signal.aborted &&
-        (projectionRef.current?.stateVersion ?? 0) === 0 &&
-        index < ACTIVE_STATE_REFRESH_DELAYS_MS.length
-      ) {
-        timeoutId = setTimeout(
-          () => void refresh(),
-          ACTIVE_STATE_REFRESH_DELAYS_MS[index++] ?? 0,
-        );
+      if (previousKey !== conversationId && selectedKeyRef.current === previousKey) {
+        selectKey(conversationId);
+        onConversationAdopted?.(conversationId);
       }
-    };
-    timeoutId = setTimeout(
-      () => void refresh(),
-      ACTIVE_STATE_REFRESH_DELAYS_MS[index++] ?? 0,
-    );
-    return () => {
-      controller.abort();
-      if (timeoutId) clearTimeout(timeoutId);
-    };
-  }, [loadActorState, projection?.stateVersion, session?.conversationId, session?.status]);
+      return conversationId;
+    },
+    [commitEntries, onConversationAdopted, selectKey],
+  );
 
   const streamCommand = useCallback(
     async (
+      entryKey: string,
       base: ChatSessionState,
       command: ChatCommand,
       safeUserText: string,
-    ): Promise<string | undefined> => {
-      if (sessionRef.current?.status === "streaming") return undefined;
-      const assistantMessageId = createClientId();
-      const assistantMessage: ChatMessage = {
-        content: "",
-        events: [],
-        id: assistantMessageId,
-        role: "assistant",
-        status: "streaming",
-        steps: [],
-        thinking: "",
-        timestamp: Date.now(),
-        toolCalls: [],
-      };
-      let streaming: ChatSessionState = {
-        ...base,
-        messages: [
-          ...base.messages,
-          createChatMessage("user", safeUserText),
-          assistantMessage,
-        ],
-        status: "streaming",
-        title: base.title === "New chat" ? trimChatTitle(safeUserText) : base.title,
-      };
-      let actorState =
-        projectionRef.current?.actorId === (base.conversationId ?? null)
-          ? projectionRef.current
-          : createChatActorProjection(base.conversationId ?? null);
-      const accumulator = createRuntimeEventAccumulator();
-      const rawFrames: unknown[] = [];
-      let authoritativeConversationId = "";
-      let authoritativeTurnId = "";
-      let serverStopped = false;
-      let watchdog: ReturnType<typeof setTimeout> | undefined;
+    ) => {
+      if (streamControllersRef.current.has(entryKey)) return;
+      const entry = entriesRef.current.get(entryKey);
+      if (!entry || entry.session.status === "streaming") return;
       const controller = new AbortController();
-      streamControllerRef.current?.abort(new ReaderStoppedError());
-      streamControllerRef.current = controller;
-      detailRequestRef.current = createClientId();
-      setDetailState({ status: "idle" });
-      commitSession(streaming);
-
-      const bestEffortStop = () => {
-        if (!authoritativeConversationId || !authoritativeTurnId) return;
-        const stateVersion = Math.max(actorState.stateVersion, 0);
-        void sendChatCommand(
-          {
-            type: "task.stop",
-            conversationId: authoritativeConversationId,
-            turnId: authoritativeTurnId,
-            stopRequestId: createClientId(),
-            clientRequestId: createClientId(),
-            expectedStateVersion: stateVersion,
-          },
-          new AbortController().signal,
-        ).catch(() => undefined);
-      };
-      const armWatchdog = () => {
-        if (watchdog) clearTimeout(watchdog);
-        watchdog = setTimeout(() => {
-          bestEffortStop();
-          controller.abort(new ChatProgressTimeoutError());
-        }, STREAM_PROGRESS_TIMEOUT_MS);
-      };
-      armWatchdog();
-
+      streamControllersRef.current.set(entryKey, controller);
+      detailRequestsRef.current.set(entryKey, createClientId());
+      updateEntry(entryKey, { detailState: { status: "idle" } });
+      const initialProjection =
+        entry.projection?.actorId === (base.conversationId ?? null)
+          ? entry.projection
+          : createChatActorProjection(base.conversationId ?? null);
       try {
-        const response = await sendChatCommand(command, controller.signal);
-        for await (const frame of readChatStreamFrames(response, {
-          signal: controller.signal,
-        })) {
-          rawFrames.push(frame.raw);
-          const actorFrame = decodeActorFrame(frame.raw);
-          if (actorFrame.type !== "ignored") {
-            armWatchdog();
-            actorState = reduceActorFrame(actorState, actorFrame);
-            commitProjection(actorState);
-          }
-          if (!frame.event) continue;
-          if (!isKeepaliveEvent(frame.event)) armWatchdog();
-          applyRuntimeEvent(accumulator, frame.event);
-          serverStopped ||= isRunStoppedEvent(frame.event);
-          if (frame.event.type === AGUIEventType.RUN_STARTED) {
-            const conversationId = accumulator.actorId.trim();
-            const turnId = accumulator.runId.trim();
-            if (!conversationId || !turnId) {
-              throw new Error(
-                "Chat RUN_STARTED did not contain authoritative conversation and turn identities.",
-              );
-            }
-            if (command.conversationId && command.conversationId !== conversationId) {
-              throw new Error("Chat returned a different conversation identity.");
-            }
-            if (
-              (authoritativeConversationId &&
-                authoritativeConversationId !== conversationId) ||
-              (authoritativeTurnId && authoritativeTurnId !== turnId)
-            ) {
-              throw new Error("Chat RUN_STARTED identity changed during the stream.");
-            }
-            authoritativeConversationId = conversationId;
-            authoritativeTurnId = turnId;
-            if (actorState.actorId && actorState.actorId !== conversationId) {
-              throw new Error("Actor state does not match the chat conversation.");
-            }
-            actorState = { ...actorState, actorId: conversationId };
-            commitProjection(actorState);
-            try {
-              actorState = await loadActorState(
-                conversationId,
-                actorState,
-                controller.signal,
-                false,
-              );
-              commitProjection(actorState);
-            } catch {
-              // Live facts remain visible while controls remain version-fenced.
-            }
-            streaming = {
-              ...streaming,
+        return await runChatStream({
+          adoptEntry,
+          base,
+          command,
+          controller,
+          entryKey,
+          initialProjection,
+          loadActorState: async (
+            conversationId,
+            current,
+            signal,
+            useCursor,
+            targetKey,
+          ) =>
+            loadActorState(
               conversationId,
-              expectedTurnCount: base.expectedTurnCount + 1,
-              latestTurnId: turnId,
-              runtime: {
-                actorId: conversationId,
-                commandId: accumulator.commandId || undefined,
-                runId: turnId,
-              },
-            };
-            commitSession(streaming);
-            onConversationAdopted?.(conversationId);
-          }
-          if (isRawObserved(frame.event)) continue;
-          streaming = updateSessionMessage(
-            {
-              ...streaming,
-              runtime: {
-                actorId: accumulator.actorId || undefined,
-                commandId: accumulator.commandId || undefined,
-                runId: accumulator.runId || undefined,
-              },
-            },
-            assistantMessageId,
-            buildAssistantMessagePatch(
-              accumulator,
-              accumulator.errorText ? "error" : "streaming",
+              current,
+              signal,
+              useCursor,
+              targetKey,
             ),
-          );
-          commitSession(streaming);
-        }
-        if (controller.signal.aborted) throw controller.signal.reason;
-        if (!authoritativeConversationId || !authoritativeTurnId) {
-          throw new Error(
-            "Chat stream ended without authoritative conversation and turn identities.",
-          );
-        }
-        const artifacts = extractChatStreamArtifacts(rawFrames);
-        const stopped = serverStopped;
-        const final = updateSessionMessage(
-          {
-            ...streaming,
-            status: stopped
-              ? "stopped"
-              : accumulator.errorText
-                ? "error"
-                : "completed_text",
-            target: artifacts.target ?? streaming.target,
-            usage: artifacts.usage ?? streaming.usage,
-          },
-          assistantMessageId,
-          buildAssistantMessagePatch(
-            accumulator,
-            stopped ? "complete" : accumulator.errorText ? "error" : "complete",
-          ),
-        );
-        commitSession(final);
-        await refreshConversations();
-        try {
-          actorState = await loadActorState(
-            authoritativeConversationId,
-            actorState,
-            controller.signal,
-            false,
-          );
-          commitProjection(actorState);
-        } catch {
-          // Terminal state materialization is eventually consistent.
-        }
-        return authoritativeConversationId;
-      } catch (error) {
-        const reason = controller.signal.aborted ? controller.signal.reason : error;
-        const stopped = reason instanceof ReaderStoppedError || serverStopped;
-        if (!stopped) accumulator.errorText = chatErrorMessage(reason);
-        const failed = updateSessionMessage(
-          { ...streaming, status: stopped ? "stopped" : "error" },
-          assistantMessageId,
-          buildAssistantMessagePatch(accumulator, stopped ? "complete" : "error"),
-        );
-        commitSession(failed);
-        if (!stopped) throw reason;
-        return authoritativeConversationId || undefined;
+          refreshConversations: () => refreshConversations(),
+          safeUserText,
+          updateEntry: updateStreamEntry,
+        });
       } finally {
-        if (watchdog) clearTimeout(watchdog);
-        if (streamControllerRef.current === controller) {
-          streamControllerRef.current = null;
+        for (const [key, activeController] of streamControllersRef.current) {
+          if (activeController === controller) {
+            streamControllersRef.current.delete(key);
+          }
         }
       }
     },
-    [commitProjection, commitSession, loadActorState, onConversationAdopted, refreshConversations],
+    [
+      adoptEntry,
+      loadActorState,
+      refreshConversations,
+      updateEntry,
+      updateStreamEntry,
+    ],
   );
 
   const send = useCallback(
     async (content: string) => {
       const value = content.trim();
-      const current = sessionRef.current ?? createDraftChatSession();
-      if (!value || current.status === "streaming") return;
+      const key = selectedKeyRef.current;
+      const entry = key ? entriesRef.current.get(key) : undefined;
+      if (
+        !value ||
+        !key ||
+        !entry ||
+        entry.session.status === "streaming" ||
+        (entry.session.conversationId &&
+          isLegacyConversationId(entry.session.conversationId))
+      ) {
+        return;
+      }
       await streamCommand(
-        current,
+        key,
+        entry.session,
         {
           type: "text",
-          ...(current.conversationId
-            ? { conversationId: current.conversationId }
+          ...(entry.session.conversationId
+            ? { conversationId: entry.session.conversationId }
             : {}),
           clientRequestId: createClientId(),
           prompt: value,
@@ -540,250 +533,154 @@ export function useAssistantChat({
     [streamCommand],
   );
 
+  const controlContext = useCallback(() => {
+    const key = selectedKeyRef.current;
+    const entry = key ? entriesRef.current.get(key) : undefined;
+    const conversationId = entry?.session.conversationId;
+    const state = entry?.projection;
+    if (
+      !key ||
+      !conversationId ||
+      isLegacyConversationId(conversationId) ||
+      !state ||
+      state.stateVersion <= 0
+    ) {
+      return null;
+    }
+    return { conversationId, key, session: entry.session, state };
+  }, []);
+
   const dispatchAcceptedCommand = useCallback(
-    async (command: ControlCommand) => {
-      if (controlBusy) return;
+    async (key: string, command: ControlCommand) => {
+      if (controlControllerRef.current) return;
       const controller = new AbortController();
-      controlControllerRef.current?.abort();
       controlControllerRef.current = controller;
-      setControlBusy(true);
+      setControlBusyKey(key);
       try {
         await sendChatCommand(command, controller.signal);
+        const projection = entriesRef.current.get(key)?.projection ?? null;
         try {
           await loadActorState(
             command.conversationId,
-            projectionRef.current,
+            projection,
             controller.signal,
+            true,
+            key,
           );
         } catch {
-          // A 202 receipt is dispatch-only; stale state remains honest.
+          // A 202 receipt is dispatch-only; stale actor state remains honest.
         }
       } finally {
         if (controlControllerRef.current === controller) {
           controlControllerRef.current = null;
+          setControlBusyKey(undefined);
         }
-        setControlBusy(false);
       }
     },
-    [controlBusy, loadActorState],
+    [loadActorState],
   );
 
-  const controlContext = useCallback(() => {
-    const conversationId = sessionRef.current?.conversationId;
-    const state = projectionRef.current;
-    return conversationId && state ? { conversationId, state } : null;
+  const abortStream = useCallback((key: string, reason: ReaderStoppedError) => {
+    streamControllersRef.current.get(key)?.abort(reason);
   }, []);
-
-  const resolveInput = useCallback(
-    async (answer: ChatInputAnswer, input: ChatPendingInput) => {
-      const context = controlContext();
-      if (!context || context.state.pendingInput?.requestId !== input.requestId) return;
-      await dispatchAcceptedCommand({
-        type: "input.resolve",
-        conversationId: context.conversationId,
-        requestId: input.requestId,
-        clientRequestId: createClientId(),
-        answer,
-        expectedStateVersion: context.state.stateVersion,
-      });
-    },
-    [controlContext, dispatchAcceptedCommand],
-  );
-
-  const resolveApproval = useCallback(
-    async (requestId: string, approved: boolean, reason?: string) => {
-      const context = controlContext();
-      const pendingId =
-        context?.state.pendingApproval?.approvalRequestId ??
-        context?.state.pendingApproval?.requestId;
-      if (!context || pendingId !== requestId) return;
-      await dispatchAcceptedCommand({
-        type: "approval.resolve",
-        conversationId: context.conversationId,
-        requestId,
-        clientRequestId: createClientId(),
-        approved,
-        ...(reason?.trim() ? { reason: reason.trim() } : {}),
-        expectedStateVersion: context.state.stateVersion,
-      });
-    },
-    [controlContext, dispatchAcceptedCommand],
-  );
-
-  const resolvePlan = useCallback(
-    async (confirmed: boolean, gate: ChatPlanGate) => {
-      const context = controlContext();
-      if (
-        !context ||
-        gate.mode !== "confirm" ||
-        gate.status !== "pending" ||
-        !gate.requestId ||
-        !gate.taskId ||
-        !gate.planId ||
-        gate.planRevision === undefined
-      ) return;
-      await dispatchAcceptedCommand({
-        type: "plan.resolve",
-        conversationId: context.conversationId,
-        taskId: gate.taskId,
-        planId: gate.planId,
-        requestId: gate.requestId,
-        clientRequestId: createClientId(),
-        planRevision: gate.planRevision,
-        confirmed,
-        expectedStateVersion: context.state.stateVersion,
-      });
-    },
-    [controlContext, dispatchAcceptedCommand],
-  );
-
-  const stop = useCallback(async () => {
-    const context = controlContext();
-    const turnId = currentActorTurnId(context?.state ?? null);
-    if (context && turnId && actorCan(context.state, "stop")) {
-      await dispatchAcceptedCommand({
-        type: "task.stop",
-        conversationId: context.conversationId,
-        turnId,
-        stopRequestId: createClientId(),
-        clientRequestId: createClientId(),
-        expectedStateVersion: context.state.stateVersion,
-      });
-    }
-    streamControllerRef.current?.abort(new ReaderStoppedError());
-  }, [controlContext, dispatchAcceptedCommand]);
-
-  const steer = useCallback(
-    async (instruction: string) => {
-      const context = controlContext();
-      const turnId = currentActorTurnId(context?.state ?? null);
-      if (!context || !turnId || !instruction.trim()) return;
-      await dispatchAcceptedCommand({
-        type: "task.steer",
-        conversationId: context.conversationId,
-        turnId,
-        steeringId: createClientId(),
-        clientRequestId: createClientId(),
-        instruction,
-        expectedStateVersion: context.state.stateVersion,
-      });
-    },
-    [controlContext, dispatchAcceptedCommand],
-  );
-
-  const controlStep = useCallback(
-    async (type: "step.retry" | "step.skip", step: ChatActorStep) => {
-      const context = controlContext();
-      const turnId =
-        stringField(step.operation, "turnId") || currentActorTurnId(context?.state ?? null);
-      const taskId =
-        stringField(step.operation, "taskId") ||
-        stringField(context?.state.task as unknown as Record<string, unknown>, "taskId");
-      const generation = step.operation?.operationGeneration;
-      if (
-        !context ||
-        !turnId ||
-        !taskId ||
-        typeof generation !== "number" ||
-        !actorCan(context.state, type === "step.retry" ? "retry" : "skip", step.stepId)
-      ) return;
-      const requestId = createClientId();
-      await dispatchAcceptedCommand({
-        type,
-        conversationId: context.conversationId,
-        turnId,
-        taskId,
-        stepId: step.stepId,
-        ...(type === "step.retry"
-          ? { retryRequestId: requestId }
-          : { skipRequestId: requestId }),
-        clientRequestId: createClientId(),
-        expectedOperationGeneration: generation,
-        expectedStateVersion: context.state.stateVersion,
-      });
-    },
-    [controlContext, dispatchAcceptedCommand],
-  );
-
-  const reportAction = useCallback(
-    async (report: ActionReport) => {
-      const current = sessionRef.current;
-      if (!current?.conversationId) return;
-      await streamCommand(
-        current,
-        {
-          type: "action.continue",
-          conversationId: current.conversationId,
-          originTurnId: report.originTurnId,
-          clientRequestId: createClientId(),
-          actions: [report],
-        },
-        `NyxID action update: ${report.disposition}.`,
-      );
-    },
-    [streamCommand],
-  );
+  const currentSelectedKey = useCallback(() => selectedKeyRef.current, []);
+  const {
+    controlStep,
+    reportAction,
+    resolveApproval,
+    resolveInput,
+    resolvePlan,
+    steer,
+    stop,
+  } = useAssistantChatControls({
+    abortStream,
+    controlContext,
+    dispatchAcceptedCommand,
+    selectedKey: currentSelectedKey,
+    streamCommand,
+  });
 
   const deleteConversation = useCallback(
     async (conversationId: string) => {
+      if (streamControllersRef.current.has(conversationId)) return;
       await chatHistoryApi.deleteConversation(conversationId);
-      setConversations((current) => current.filter((item) => item.id !== conversationId));
-      if (sessionRef.current?.conversationId === conversationId) {
-        commitSession(createDraftChatSession());
-        commitProjection(null);
+      setConversations((current) =>
+        current.filter((item) => item.id !== conversationId),
+      );
+      const next = new Map(entriesRef.current);
+      next.delete(conversationId);
+      commitEntries(next);
+      if (selectedKeyRef.current === conversationId) {
+        createNewChat();
+        // Keep the route value acknowledged until the page's post-delete
+        // navigation lands, or this deleted id is immediately restored.
+        routeSelectionRef.current = conversationId;
       }
     },
-    [commitProjection, commitSession],
+    [commitEntries, createNewChat],
   );
 
   const setActionOverride = useCallback(
     (actionRequestId: string, status?: string, note?: string) => {
-      setActionOverrides((current) => {
-        const next = new Map(current);
-        if (!status && !note) next.delete(actionRequestId);
-        else next.set(actionRequestId, { status, note });
-        return next;
-      });
+      const key = selectedKeyRef.current;
+      const entry = key ? entriesRef.current.get(key) : undefined;
+      if (!key || !entry) return;
+      const overrides = new Map(entry.actionOverrides);
+      if (!status && !note) overrides.delete(actionRequestId);
+      else overrides.set(actionRequestId, { status, note });
+      updateEntry(key, { actionOverrides: overrides });
     },
-    [],
+    [updateEntry],
   );
 
   useEffect(
     () => () => {
-      streamControllerRef.current?.abort(new ReaderStoppedError());
+      for (const controller of streamControllersRef.current.values()) {
+        controller.abort(new ReaderStoppedError());
+      }
+      for (const controller of activeRefreshesRef.current.values()) {
+        controller.abort();
+      }
       controlControllerRef.current?.abort();
     },
     [],
   );
 
+  const selectedEntry = selectedKey ? entries.get(selectedKey) : undefined;
+  const session = selectedEntry?.session ?? null;
+  const projection = selectedEntry?.projection ?? null;
   const visibleConversations = useMemo(() => {
-    const current = session;
-    if (
-      !current?.conversationId ||
-      conversations.some((item) => item.id === current.conversationId)
-    ) return conversations;
-    const timestamps = current.messages.map((message) => message.timestamp);
-    return [
-      {
+    const visible = [...conversations];
+    const known = new Set(visible.map((item) => item.id));
+    for (const entry of entries.values()) {
+      const current = entry.session;
+      if (!current.conversationId || known.has(current.conversationId)) continue;
+      const timestamps = current.messages.map((message) => message.timestamp);
+      visible.push({
         createdAt: new Date(timestamps[0] ?? Date.now()).toISOString(),
         id: current.conversationId,
         messageCount: current.expectedTurnCount,
         title: current.title,
         updatedAt: new Date(timestamps.at(-1) ?? Date.now()).toISOString(),
-      },
-      ...conversations,
-    ];
-  }, [conversations, session]);
+      });
+      known.add(current.conversationId);
+    }
+    return visible;
+  }, [conversations, entries]);
 
   return {
-    actionOverrides,
-    controlBusy,
+    actionOverrides: selectedEntry?.actionOverrides ?? new Map(),
+    controlBusy: controlBusyKey === selectedKey,
+    controlReady: Boolean(projection && projection.stateVersion > 0),
     controlStep,
     deleteConversation,
-    detailState,
+    detailState: selectedEntry?.detailState ?? { status: "idle" as const },
+    isConversationStreaming: (conversationId: string) =>
+      entriesRef.current.get(conversationId)?.session.status === "streaming",
     isStreaming: session?.status === "streaming",
     listError,
     listLoading,
+    newChat: createNewChat,
     projection,
     refreshConversations,
     reportAction,

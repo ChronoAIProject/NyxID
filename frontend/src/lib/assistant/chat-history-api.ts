@@ -58,7 +58,6 @@ async function requestJson<T>(
     return decoder(
       await assistantJson<unknown>(endpoint, {
         headers: { Accept: "application/json" },
-        preserveSessionOn401: true,
         signal,
       }),
     );
@@ -120,11 +119,13 @@ export const chatHistoryApi = {
         `${conversationPath(conversationId)}/state${suffix}`,
         {
           headers: { Accept: "application/json" },
-          preserveSessionOn401: true,
           signal,
         },
       );
     } catch (error) {
+      if (error instanceof ApiError && error.status === 404) {
+        return { status: "not_found" };
+      }
       return apiError(error);
     }
   },
@@ -134,7 +135,6 @@ export const chatHistoryApi = {
       await assistantHttp(conversationPath(conversationId), {
         headers: { Accept: "application/json" },
         method: "DELETE",
-        preserveSessionOn401: true,
       });
     } catch (error) {
       return apiError(error);

@@ -405,6 +405,22 @@ function expectNoBlueAccent(card: HTMLElement | null) {
 }
 
 describe("ActionCard", () => {
+  it("disables all action controls behind the state-version fence", () => {
+    renderCard(
+      <ActionCard
+        block={keyRotateBlock()}
+        disabled
+        onProgress={vi.fn()}
+        onBlock={vi.fn()}
+        onResolve={vi.fn()}
+      />,
+    );
+
+    for (const button of screen.getAllByRole("button")) {
+      expect(button).toBeDisabled();
+    }
+  });
+
   it("opens exact reconnect mode with every requested scope and reports only the service id", async () => {
     mockReauthorizationReads();
     const onProgress = vi.fn();

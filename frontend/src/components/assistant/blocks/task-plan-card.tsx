@@ -180,12 +180,14 @@ function StepDetails({ step }: { readonly step: TaskStep }) {
 
 export function TaskPlanCard({
   block,
+  disabled = false,
   onStop,
   onRetry,
   onSkip,
   onResolve,
 }: {
   readonly block: TaskPlanContentBlock;
+  readonly disabled?: boolean;
   readonly onStop: () => Promise<void>;
   readonly onRetry: (stepId: string) => Promise<void>;
   readonly onSkip: (stepId: string) => Promise<void>;
@@ -198,7 +200,7 @@ export function TaskPlanCard({
     plan.gate?.mode === "confirm" && plan.gate.status === "pending";
 
   async function run(control: TaskControl, action: () => Promise<void>) {
-    if (pending) return;
+    if (disabled || pending) return;
     setPending(control);
     try {
       await action();
@@ -244,7 +246,7 @@ export function TaskPlanCard({
             type="button"
             size="sm"
             variant="primary"
-            disabled={pending !== null}
+            disabled={disabled || pending !== null}
             onClick={() =>
               void run("plan:confirm", () => onResolve(true))
             }
@@ -260,7 +262,7 @@ export function TaskPlanCard({
             type="button"
             size="sm"
             variant="destructive"
-            disabled={pending !== null}
+            disabled={disabled || pending !== null}
             onClick={() => void run("plan:reject", () => onResolve(false))}
           >
             {pending === "plan:reject" ? (
@@ -293,7 +295,7 @@ export function TaskPlanCard({
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={pending !== null}
+                      disabled={disabled || pending !== null}
                       aria-label={`Retry ${step.description}`}
                       onClick={() =>
                         void run(`retry:${step.stepId}`, () =>
@@ -314,7 +316,7 @@ export function TaskPlanCard({
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={pending !== null}
+                      disabled={disabled || pending !== null}
                       aria-label={`Skip ${step.description}`}
                       onClick={() =>
                         void run(`skip:${step.stepId}`, () =>
@@ -342,7 +344,7 @@ export function TaskPlanCard({
             type="button"
             size="sm"
             variant="outline"
-            disabled={pending !== null}
+            disabled={disabled || pending !== null}
             onClick={() => void run("stop", onStop)}
           >
             {pending === "stop" ? (

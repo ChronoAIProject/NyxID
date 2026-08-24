@@ -66,6 +66,7 @@ function renderSidebar(
   onDelete: (id: string) => void | Promise<void> = vi.fn(),
   conversations: readonly Conversation[] = [CONVERSATION],
   activeConversationId: string | undefined = CONVERSATION.id,
+  notice?: string,
 ) {
   const onSelect = vi.fn();
   const view = render(
@@ -76,6 +77,7 @@ function renderSidebar(
         onNewChat={vi.fn()}
         onSelect={onSelect}
         onDelete={onDelete}
+        notice={notice}
       />
     </TooltipProvider>,
   );
@@ -117,6 +119,20 @@ afterEach(() => {
 });
 
 describe("AssistantSidebar conversation rows", () => {
+  it("surfaces a conversation-list failure without hiding cached rows", () => {
+    renderSidebar(
+      vi.fn(),
+      [CONVERSATION],
+      CONVERSATION.id,
+      "Could not load chats. Network unavailable",
+    );
+
+    expect(
+      screen.getByText("Could not load chats. Network unavailable"),
+    ).toHaveAttribute("role", "status");
+    expect(screen.getByText("Quarterly digest")).toBeVisible();
+  });
+
   it("opens a menu -- not a delete prompt -- and only deletes after confirm", async () => {
     const user = userEvent.setup();
     const onDelete = vi.fn();

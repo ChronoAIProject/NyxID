@@ -12,10 +12,7 @@ import type {
 import type { ChatInputAnswer } from "@/lib/assistant/chat-api";
 import type { ChatPlanGate } from "@/lib/assistant/chat-task-plan";
 import type { ActionReport } from "@/schemas/assistant-actions";
-import type {
-  InputCardContentBlock,
-  TaskPlanContentBlock,
-} from "@/types/assistant";
+import type { InputCardContentBlock } from "@/types/assistant";
 
 function inputBlock(input: ChatPendingInput, stateVersion: number): InputCardContentBlock {
   return {
@@ -92,17 +89,21 @@ export function ChatActorControls({
 
   return (
     <section aria-label="Actor controls" className="space-y-3">
+      {disabled ? (
+        <p role="status" className="text-[11px] text-muted-foreground">
+          Waiting for current state before controls can be used.
+        </p>
+      ) : null}
       {projection.task ? (
         <TaskPlanCard
-          block={
-            {
-              type: "task_plan",
-              block_id: `current-task:${projection.task.taskId}`,
-              state_version: projection.stateVersion,
-              progress_sequence: projection.progressSequence,
-              plan: projection.task,
-            } as unknown as TaskPlanContentBlock
-          }
+          block={{
+            type: "task_plan",
+            block_id: `current-task:${projection.task.taskId}`,
+            state_version: projection.stateVersion,
+            progress_sequence: projection.progressSequence,
+            plan: projection.task,
+          }}
+          disabled={disabled}
           onStop={onStop}
           onRetry={(stepId) => {
             const step = projection.steps.get(stepId);
@@ -122,6 +123,7 @@ export function ChatActorControls({
       {projection.pendingInput ? (
         <InputCard
           block={inputBlock(projection.pendingInput, projection.stateVersion)}
+          disabled={disabled}
           onResolve={(answer) =>
             onResolveInput(answer, projection.pendingInput as ChatPendingInput)
           }
@@ -213,6 +215,7 @@ export function ChatActorControls({
           <ActionCard
             key={summary.actionRequestId}
             block={block}
+            disabled={disabled}
             onProgress={(_, active) => onActionProgress(summary.actionRequestId, active)}
             onBlock={(_, note) => onBlockAction(summary.actionRequestId, note)}
             onResolve={onResolveAction}

@@ -136,7 +136,6 @@ export async function sendChatCommand(
         "Idempotency-Key": clientRequestId,
       },
       method: "POST",
-      preserveSessionOn401: true,
       signal,
     });
   } catch (error) {

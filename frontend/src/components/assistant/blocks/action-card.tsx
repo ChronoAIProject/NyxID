@@ -37,6 +37,7 @@ import type { KeyInfo } from "@/types/keys";
 
 interface ActionCardProps {
   readonly block: ActionCardContentBlock;
+  readonly disabled?: boolean;
   readonly onProgress: (blockId: string, inProgress: boolean) => void;
   readonly onBlock: (blockId: string, note: string) => Promise<void> | void;
   readonly onResolve: (report: ActionReport) => Promise<void> | void;
@@ -450,6 +451,7 @@ function StatusNotice({ block }: { readonly block: ActionCardContentBlock }) {
 
 export function ActionCard({
   block,
+  disabled = false,
   onProgress,
   onBlock,
   onResolve,
@@ -657,13 +659,13 @@ export function ActionCard({
   const awaitingAuthorization = pendingAuth !== null && !dialogOpen;
   const blocked = block.status === "blocked";
   const conflicted = block.status === "conflicted";
-  const primaryDisabled = busy || blocked || conflicted;
+  const primaryDisabled = disabled || busy || blocked || conflicted;
   // Decline stays live through `in_progress`. Abandoning a connection the user
   // started is always their call, and it is the manual floor under every
   // automatic settlement: with it disabled, a busy card that lost its watch
   // had no reachable control at all. `report` supersedes any watch still
   // running, and the transport de-duplicates a report already queued.
-  const secondaryDisabled = conflicted;
+  const secondaryDisabled = disabled || conflicted;
   const params = block.params;
 
   function setOpen(next: boolean) {

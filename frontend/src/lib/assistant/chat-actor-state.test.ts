@@ -161,28 +161,34 @@ describe("chatActorState", () => {
     },
     { suggestedValue: 70, minimumValue: 80, maximumValue: 100 },
     { suggestedValue: 101, minimumValue: 0, maximumValue: 100 },
-  ])("rejects an invalid live numeric threshold %#", (numericThreshold) => {
-    expect(() =>
+  ])("records an invalid live numeric threshold as a conflict %#", (numericThreshold) => {
+    const projection = reduceActorFrame(
+      createChatActorProjection("conversation-alpha"),
       decodeActorFrame({
         sequence: 1,
         custom: {
           name: "nyxid.input.request",
           payload: {
             requestId: "input-threshold",
+            prompt: "Choose the threshold",
+            options: [],
+            allowFreeText: true,
+            multiSelect: false,
             numericThreshold,
           },
         },
       }),
-    ).toThrow(
-      expect.objectContaining({
-        code: "NYXID_INPUT_NUMERIC_THRESHOLD_INVALID",
-      }),
     );
+    expect(projection.pendingInput).toBeNull();
+    expect(projection.conflicts).toContainEqual({
+      code: "NYXID_INPUT_NUMERIC_THRESHOLD_INVALID",
+    });
   });
 
-  it("rejects an invalid reloaded numeric threshold", () => {
-    expect(() =>
-      applyCurrentStateResult(createChatActorProjection("conversation-alpha"), {
+  it("records an invalid reloaded numeric threshold as a conflict", () => {
+    const projection = applyCurrentStateResult(
+      createChatActorProjection("conversation-alpha"),
+      {
         status: "current",
         stateVersion: 5,
         snapshot: {
@@ -196,6 +202,10 @@ describe("chatActorState", () => {
           activeTask: null,
           pendingInput: {
             requestId: "input-threshold",
+            prompt: "Choose the threshold",
+            options: [],
+            allowFreeText: true,
+            multiSelect: false,
             numericThreshold: {
               suggestedValue: 70,
               minimumValue: 80,
@@ -205,12 +215,61 @@ describe("chatActorState", () => {
           pendingApproval: null,
           pendingActions: [],
         },
-      }),
-    ).toThrow(
-      expect.objectContaining({
-        code: "NYXID_INPUT_NUMERIC_THRESHOLD_INVALID",
+      },
+    ).projection;
+    expect(projection.pendingInput).toBeNull();
+    expect(projection.conflicts).toContainEqual({
+      code: "NYXID_INPUT_NUMERIC_THRESHOLD_INVALID",
+    });
+  });
+
+  it("fails closed on a live input request without options or another answer mode", () => {
+    const projection = reduceActorFrame(
+      createChatActorProjection("conversation-alpha"),
+      decodeActorFrame({
+        sequence: 1,
+        custom: {
+          name: "nyxid.input.request",
+          payload: {
+            requestId: "input-malformed",
+            prompt: "Choose a region",
+          },
+        },
       }),
     );
+
+    expect(projection.pendingInput).toBeNull();
+    expect(projection.conflicts).toContainEqual({ code: "NYXID_INPUT_INVALID" });
+  });
+
+  it("fails closed on a malformed reloaded input request", () => {
+    const projection = applyCurrentStateResult(
+      createChatActorProjection("conversation-alpha"),
+      {
+        status: "current",
+        stateVersion: 5,
+        snapshot: {
+          actorId: "conversation-alpha",
+          scopeId: "scope-alpha",
+          stateVersion: 5,
+          progressSequence: 1,
+          activeTurn: null,
+          latestTurn: null,
+          recentTerminalTurns: [],
+          activeTask: null,
+          pendingInput: {
+            requestId: "input-malformed",
+            prompt: "Choose a region",
+            options: "not-an-array",
+          },
+          pendingApproval: null,
+          pendingActions: [],
+        },
+      },
+    ).projection;
+
+    expect(projection.pendingInput).toBeNull();
+    expect(projection.conflicts).toContainEqual({ code: "NYXID_INPUT_INVALID" });
   });
 
   it("uses the same typed TaskPlan decoder for live frames and current-state reload", () => {

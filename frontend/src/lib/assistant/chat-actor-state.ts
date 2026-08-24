@@ -11,6 +11,10 @@ import {
   validateActionRequest,
 } from "./chat-action-validation";
 import type { AssistantActionRequest } from "@/schemas/assistant-actions";
+import {
+  assistantInputRequestSchema,
+  type AssistantInputRequest,
+} from "@/schemas/assistant-input";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -31,12 +35,7 @@ export { ChatActorProtocolError, validateActionRequest };
 
 export type { ChatActorStep, ChatAvailableActions } from "./chat-task-plan";
 
-export type ChatPendingInput = JsonRecord & {
-  requestId: string;
-  prompt: string;
-  options: readonly { optionId: string; label: string; description?: string }[];
-  allowFreeText: boolean;
-  multiSelect: boolean;
+export type ChatPendingInput = AssistantInputRequest & {
   numericThreshold?: {
     suggestedValue: number;
     minimumValue: number;
@@ -94,6 +93,11 @@ export type ChatActorProjection = {
 
 export type ChatActorFrame =
   | { type: "ignored" }
+  | {
+      type: "input_invalid";
+      sequence: number;
+      code: "NYXID_INPUT_INVALID" | "NYXID_INPUT_NUMERIC_THRESHOLD_INVALID";
+    }
   | {
       type:
         | "task_snapshot"
@@ -156,9 +160,20 @@ export function decodeActorFrame(raw: unknown): ChatActorFrame {
   }
   const payload = unpackAny(custom?.payload);
   if (type === "input_request") {
-    const pendingInput = decodePendingInput(payload);
-    if (!pendingInput) throw invalidNumericThreshold();
-    return { type, sequence, payload: pendingInput };
+    try {
+      const pendingInput = decodePendingInput(payload);
+      if (!pendingInput) throw invalidInput();
+      return { type, sequence, payload: pendingInput };
+    } catch (error) {
+      if (
+        error instanceof ChatActorProtocolError &&
+        (error.code === "NYXID_INPUT_INVALID" ||
+          error.code === "NYXID_INPUT_NUMERIC_THRESHOLD_INVALID")
+      ) {
+        return { type: "input_invalid", sequence, code: error.code };
+      }
+      throw error;
+    }
   }
   return type === "action_request"
     ? { type, sequence, validation: validateActionRequest(payload) }
@@ -199,6 +214,10 @@ export function reduceActorFrame(
       break;
     case "input_request":
       next.pendingInput = decodePendingInput(frame.payload);
+      break;
+    case "input_invalid":
+      next.pendingInput = null;
+      next.conflicts = [...next.conflicts, { code: frame.code }];
       break;
     case "input_changed":
       next.latestInputResolution = cloneRecord(frame.payload);
@@ -305,6 +324,7 @@ export function applyCurrentStateResult(
   next.scopeId = scopeId;
   next.stateVersion = envelope.stateVersion;
   next.progressSequence = snapshot.progressSequence;
+  next.conflicts = [...projection.conflicts];
   next.activeTurn = cloneNullableRecord(snapshot.activeTurn);
   next.latestTurn = cloneNullableRecord(snapshot.latestTurn);
   next.recentTerminalTurns = Array.isArray(snapshot.recentTerminalTurns)
@@ -313,7 +333,7 @@ export function applyCurrentStateResult(
         .filter((value): value is JsonRecord => Boolean(value))
         .map(cloneRecord)
     : [];
-  next.pendingInput = decodePendingInput(snapshot.pendingInput);
+  applyPendingInput(next, snapshot.pendingInput);
   next.pendingApproval = normalizePendingApproval(snapshot.pendingApproval);
   next.controlFence = cloneNullableRecord(snapshot.controlFence);
   next.latestControlResult = cloneNullableRecord(snapshot.latestControlResult);
@@ -336,7 +356,6 @@ export function applyCurrentStateResult(
   next.latestApprovalResolution = cloneNullableRecord(
     snapshot.latestApprovalResolution,
   );
-  next.conflicts = [...projection.conflicts];
   const activeTask = optionalRecord(snapshot.activeTask);
   if (activeTask) applyTask(next, activeTask);
   applyActionSummaries(
@@ -544,9 +563,12 @@ function normalizePendingApproval(input: unknown): ChatPendingApproval | null {
 function decodePendingInput(input: unknown): ChatPendingInput | null {
   const value = optionalRecord(input);
   if (!value) return null;
-  const numericThreshold = value.numericThreshold;
+  const parsed = assistantInputRequestSchema.safeParse(value);
+  if (!parsed.success) throw invalidInput();
+  const normalized = cloneRecord(parsed.data) as ChatPendingInput;
+  const numericThreshold = parsed.data.numericThreshold;
   if (numericThreshold === undefined || numericThreshold === null) {
-    return cloneRecord(value) as ChatPendingInput;
+    return normalized;
   }
   const threshold = optionalRecord(numericThreshold);
   const suggestedValue = threshold?.suggestedValue;
@@ -563,13 +585,33 @@ function decodePendingInput(input: unknown): ChatPendingInput | null {
     throw invalidNumericThreshold();
   }
   return {
-    ...cloneRecord(value),
+    ...normalized,
     numericThreshold: {
       suggestedValue,
       minimumValue,
       maximumValue,
     },
   } as ChatPendingInput;
+}
+
+function applyPendingInput(
+  projection: ChatActorProjection,
+  input: unknown,
+): void {
+  try {
+    projection.pendingInput = decodePendingInput(input);
+  } catch (error) {
+    if (
+      error instanceof ChatActorProtocolError &&
+      (error.code === "NYXID_INPUT_INVALID" ||
+        error.code === "NYXID_INPUT_NUMERIC_THRESHOLD_INVALID")
+    ) {
+      projection.pendingInput = null;
+      projection.conflicts = [...projection.conflicts, { code: error.code }];
+      return;
+    }
+    throw error;
+  }
 }
 
 function actionIdentityMatches(
@@ -627,6 +669,13 @@ function invalidNumericThreshold(): ChatActorProtocolError {
   return new ChatActorProtocolError(
     "NyxID numeric threshold is invalid.",
     "NYXID_INPUT_NUMERIC_THRESHOLD_INVALID",
+  );
+}
+
+function invalidInput(): ChatActorProtocolError {
+  return new ChatActorProtocolError(
+    "NyxID input request is invalid.",
+    "NYXID_INPUT_INVALID",
   );
 }
 

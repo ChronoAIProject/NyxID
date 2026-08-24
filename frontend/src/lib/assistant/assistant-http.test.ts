@@ -33,9 +33,7 @@ describe("assistantHttp", () => {
     const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await assistantHttp("/assistant/conversations", {
-      preserveSessionOn401: true,
-    });
+    await assistantHttp("/assistant/conversations");
 
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/v1/assistant/conversations",
@@ -60,27 +58,8 @@ describe("assistantHttp", () => {
     );
 
     await expect(
-      assistantHttp("/assistant/chat", { preserveSessionOn401: true }),
+      assistantHttp("/assistant/chat"),
     ).rejects.toMatchObject({ status: 401, errorCode: -1 });
-    expect(setUser).not.toHaveBeenCalled();
-  });
-
-  it("never clears an unattributed 401 through the compatibility option", async () => {
-    const setUser = vi.fn();
-    useAuthStore.setState({ setUser });
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ error: "upstream_auth", message: "No" }), {
-          status: 401,
-          headers: { "Content-Type": "application/json" },
-        }),
-      ),
-    );
-
-    await expect(
-      assistantHttp("/assistant/chat", { preserveSessionOn401: false }),
-    ).rejects.toBeInstanceOf(ApiError);
     expect(setUser).not.toHaveBeenCalled();
   });
 
@@ -104,7 +83,7 @@ describe("assistantHttp", () => {
       );
 
       await expect(
-        assistantHttp("/assistant/chat", { preserveSessionOn401: true }),
+        assistantHttp("/assistant/chat"),
       ).rejects.toBeInstanceOf(ApiError);
       expect(setUser).toHaveBeenCalledWith(null);
     },

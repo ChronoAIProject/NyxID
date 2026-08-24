@@ -67,4 +67,20 @@ describe("chat history API", () => {
       "/api/v1/assistant/conversations/nyxid-chat-alpha/state?afterStateVersion=7&turnId=turn-alpha",
     );
   });
+
+  it("treats a missing actor state as an expected not-found envelope", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response("actor is not materialized", {
+          status: 404,
+          headers: { "Content-Type": "text/plain" },
+        }),
+      ),
+    );
+
+    await expect(
+      chatHistoryApi.loadConversationState("chatc-legacy-alpha"),
+    ).resolves.toEqual({ status: "not_found" });
+  });
 });
