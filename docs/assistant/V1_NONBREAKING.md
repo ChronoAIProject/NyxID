@@ -165,9 +165,10 @@ doubly unaffected.
    `service_category == "internal"`), require `proxy_operation_policy` to be **present** in the
    same request (empty `rules` is acceptable — it means "actor traffic denied at the operation
    layer, server-chosen passthrough", the correct configuration for an assistant-only row).
-   This makes a live-but-unrestricted platform row **impossible to create** regardless of the
-   flag, which is the actual safety goal; the runtime flag only covers rows that predate the
-   rule. This is a write-path contract change — see §7.
+   This would make a live-but-unrestricted platform row **impossible to create** regardless of
+   the flag. **NOT IMPLEMENTED AS SHIPPED** — the create path carries no such check, so the
+   runtime flag is currently the only protection and it covers all rows, not just pre-existing
+   ones. Recorded here as proposed follow-up, not as a property of `af175760`.
 5. **Test rework** (the shipped tests assert always-on denial and will fail once the default is
    off):
    - `master_credential_without_policy_is_server_chosen_only`
@@ -341,14 +342,15 @@ no response-shape change on any existing endpoint, no frontend or CLI change, no
 
 1. **New-create 400s (write path, admin API only).** After this rework, `POST /api/v1/services`
    rejects: (a) `connection` category with a non-empty credential, (b) `auth_method "none"`
-   with a non-empty credential, (c) master-credential rows without `proxy_operation_policy`
-   present (§2.4), and (d) master + `provider_config_id` (unreachable today). (a) and (b)
-   previously succeeded while storing an inert secret; (c) previously succeeded and produced
-   the exact hazard class this PR exists to close. No shipped client can send any of them; only
+   with a non-empty credential, and (d) master + `provider_config_id` (unreachable today).
+   **(c) — rejecting master-credential rows without `proxy_operation_policy` — was proposed in
+   §2.4 but is NOT implemented; the create path has no such check.** (a) and (b) previously
+   succeeded while storing an inert secret. No shipped client can send any of them; only
    direct API automation is exposed. **Existing rows, runtime traffic, and every read/update
    path are untouched.** If even this is above the bar, (a)–(c) can be gated on the §2 flag —
-   at the cost of the "unrestricted platform rows are impossible to create" guarantee, which is
-   the strongest property in the PR. Recommendation: keep them on.
+   at the cost of the "unrestricted platform rows are impossible to create" guarantee — which,
+   given (c) is unimplemented, the PR does **not** currently provide. Recommendation: keep (a)
+   and (b) on, and treat (c) as follow-up work.
 2. **Boot no longer resurrects deactivated endpoints** (§6.3). A behaviour change by
    definition, visible only to an operator who relied on the defect as a feature. There is no
    such workflow in the repo, docs, or CLI; the supported path is the admin endpoint update.

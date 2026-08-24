@@ -3797,7 +3797,6 @@ mod tests {
         service.service_category = "internal".to_string();
         service.auth_method = "bearer".to_string();
         service.credential_encrypted = vec![1, 2, 3];
-        service.proxy_operation_policy = Some(ProxyOperationPolicy { rules: vec![] });
         let actor = EffectiveActor::from_user_id(actor_id.clone());
 
         assert!(
@@ -3946,7 +3945,6 @@ mod tests {
         service.inject_delegation_token = true;
         service.visibility = "public".to_string();
         service.provider_config_id = None;
-        service.proxy_operation_policy = Some(ProxyOperationPolicy { rules: vec![] });
         service.credential_encrypted = test_encryption_keys()
             .encrypt(b"catalog-secret")
             .await
