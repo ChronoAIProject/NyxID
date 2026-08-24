@@ -56,6 +56,10 @@ pub mod oracle_worker;
 pub mod org_invite;
 pub mod org_membership;
 pub mod org_role_scope;
+#[allow(dead_code)] // Removed when the platform operation handlers are mounted.
+pub mod platform_op_usage;
+#[allow(dead_code)] // Removed when the platform operation handlers are mounted.
+pub mod platform_operation;
 pub mod platform_settings;
 pub mod provider_config;
 pub mod pushed_authorization_request;
