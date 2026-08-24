@@ -3875,41 +3875,54 @@ mod wave4_effect_tests {
             Uuid::new_v4().to_string(),
         )
         .await;
-        crate::services::user_service_service::create_user_service_with_id(
-            &db,
-            &actor_id,
-            &actor_id,
-            "llm-openclaw",
-            "endpoint-reserved",
-            None,
-            "none",
-            "",
-            None,
-            None,
-            0,
-            "http",
-            crate::models::ssh_auth_mode::SshAuthMode::ProxyOnly,
-            None,
-            None,
-            None,
-            &crate::services::user_service_service::IdentityConfig {
-                identity_propagation_mode: "none".to_string(),
-                identity_include_user_id: false,
-                identity_include_email: false,
-                identity_include_name: false,
+        let state = crate::test_utils::test_app_state(db.clone());
+        crate::services::provider_service::seed_default_providers(&db, &state.encryption_keys)
+            .await
+            .expect("seed OpenClaw provider");
+        crate::services::provider_service::seed_default_services(&db, &state.encryption_keys)
+            .await
+            .expect("seed OpenClaw catalog service");
+        let _ = keys::create_key_with_service_id(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&actor_id),
+            TelemetryContext::default(),
+            Json(keys::CreateKeyRequest {
+                service_slug: Some("llm-openclaw".to_string()),
+                credential: Some(body.credential.clone()),
+                label: body.label.clone().unwrap_or_else(|| "OpenClaw".to_string()),
+                endpoint_url: Some(body.gateway_url.clone()),
+                slug: None,
+                auth_method: Some("bearer".to_string()),
+                auth_key_name: Some("Authorization".to_string()),
+                node_id: None,
+                admin_only: None,
+                ssh_host: None,
+                ssh_port: None,
+                ssh_certificate_auth: None,
+                ssh_auth_mode: None,
+                ssh_principals: None,
+                ssh_certificate_ttl_minutes: None,
+                identity_propagation_mode: None,
+                identity_include_user_id: None,
+                identity_include_email: None,
+                identity_include_name: None,
                 identity_jwt_audience: None,
-                forward_access_token: false,
-                inject_delegation_token: false,
-                delegation_token_scope: "llm:proxy".to_string(),
-            },
-            None,
-            false,
+                forward_access_token: None,
+                inject_delegation_token: None,
+                delegation_token_scope: None,
+                target_org_id: None,
+                openapi_spec_url: None,
+                ws_frame_injections: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                copy_oauth_client_from: None,
+            }),
             Some(&receipt.resource_id),
         )
         .await
         .expect("commit OpenClaw service create");
         let replay = connect_openclaw_action(
-            State(crate::test_utils::test_app_state(db.clone())),
+            State(state),
             crate::test_utils::test_auth_user(&actor_id),
             Json(body),
         )
