@@ -1,11 +1,17 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { formatWebAuthDeviceRemaining } from "@/lib/auth-device-time";
 import { WebDeviceLogin } from "./web-device-login";
 
-const { deviceState, mockStart, mockGenerateNew, mockClose, mockNavigate } =
-  vi.hoisted(() => ({
+const {
+  deviceState,
+  mockStart,
+  mockGenerateNew,
+  mockClose,
+  mockNavigate,
+  mockQrToDataURL,
+} = vi.hoisted(() => ({
     deviceState: {
       phase: "idle" as string,
       request: null as Record<string, unknown> | null,
@@ -16,6 +22,17 @@ const { deviceState, mockStart, mockGenerateNew, mockClose, mockNavigate } =
     mockGenerateNew: vi.fn(),
     mockClose: vi.fn(),
     mockNavigate: vi.fn(),
+    mockQrToDataURL: vi.fn(
+      (
+        _payload: string,
+        _options: {
+          errorCorrectionLevel: string;
+          margin: number;
+          width: number;
+          color: { dark: string; light: string };
+        },
+      ) => Promise.resolve("data:image/png;base64,qr"),
+    ),
   }));
 
 vi.mock("@/hooks/use-auth-device", () => ({
@@ -32,8 +49,23 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 vi.mock("qrcode", () => ({
-  default: { toDataURL: vi.fn().mockResolvedValue("data:image/png;base64,qr") },
+  default: { toDataURL: mockQrToDataURL },
 }));
+
+function relativeLuminance(color: string): number {
+  const linearChannel = (start: number) => {
+    const channel = Number.parseInt(color.slice(start, start + 2), 16) / 255;
+    return channel <= 0.04045
+      ? channel / 12.92
+      : ((channel + 0.055) / 1.055) ** 2.4;
+  };
+
+  return (
+    0.2126 * linearChannel(1) +
+    0.7152 * linearChannel(3) +
+    0.0722 * linearChannel(5)
+  );
+}
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -60,13 +92,14 @@ describe("WebDeviceLogin", () => {
   });
 
   it("shows the QR code, formatted user code, and manual-entry URI", async () => {
+    const qrPayload =
+      "https://id.example/login/device?user_code=ABCD-EFGH";
     deviceState.phase = "pending";
     deviceState.request = {
       device_code: "nyx_adc_test",
       user_code: "ABCDEFGH",
       verification_uri: "https://id.example/login/device",
-      verification_uri_complete:
-        "https://id.example/login/device?user_code=ABCD-EFGH",
+      verification_uri_complete: qrPayload,
       expires_in: 600,
       interval: 5,
     };
@@ -79,6 +112,22 @@ describe("WebDeviceLogin", () => {
     expect(screen.getByText("https://id.example/login/device")).toBeInTheDocument();
     expect(screen.getByAltText("Scan this QR code with the NyxID app")).toBeInTheDocument();
     expect(screen.getByText("Expires in 9:57")).toBeInTheDocument();
+
+    const expectedOptions = {
+      errorCorrectionLevel: "M",
+      margin: 4,
+      width: 208,
+      color: { dark: "#0c0b14", light: "#e8e4f0" },
+    };
+    await waitFor(() => {
+      expect(mockQrToDataURL.mock.calls).toEqual([
+        [qrPayload, expectedOptions],
+      ]);
+    });
+
+    expect(relativeLuminance(expectedOptions.color.dark)).toBeLessThan(
+      relativeLuminance(expectedOptions.color.light),
+    );
   });
 
   it("renders a denied terminal state with an explicit regenerate action", async () => {

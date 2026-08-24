@@ -64,10 +64,10 @@ export function MfaSetupDialog({ open, onOpenChange }: MfaSetupDialogProps) {
       setSetupData(data);
       const dataUrl = await QRCode.toDataURL(data.qr_code_url, {
         width: 200,
-        margin: 2,
+        margin: 4,
         color: {
-          dark: "#f0eeff",
-          light: "#0d0b14",
+          dark: "#0d0b14",
+          light: "#f0eeff",
         },
       });
       setQrDataUrl(dataUrl);
