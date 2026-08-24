@@ -148,6 +148,33 @@ fn auth_kind_label(method: &crate::mw::auth::AuthMethod) -> &'static str {
     }
 }
 
+/// Sign the delegation token with the downstream's canonical catalog identity.
+///
+/// UserService slugs may be disambiguated aliases, while downstream services
+/// validate `act.sub` against the catalog service they implement. Custom and
+/// legacy services have no separate catalog identity and keep their own slug.
+fn generate_proxy_delegation_token(
+    keys: &crate::crypto::jwt::JwtKeys,
+    config: &crate::config::AppConfig,
+    user_id: &uuid::Uuid,
+    scope: &str,
+    service_slug: &str,
+    catalog_service_slug: Option<&str>,
+    restrictions: Option<&crate::crypto::jwt::TokenRestrictionClaims>,
+) -> AppResult<String> {
+    let acting_service_slug = catalog_service_slug.unwrap_or(service_slug);
+
+    crate::crypto::jwt::generate_delegated_access_token(
+        keys,
+        config,
+        user_id,
+        scope,
+        acting_service_slug,
+        crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+        restrictions,
+    )
+}
+
 /// Fire-and-forget emission of `TelemetryEvent::ProxySuccess` from the
 /// outer proxy wrappers when the upstream returned 2xx. Mirror of
 /// `emit_proxy_error_telemetry`: `resolved_slug` MUST be the slug of the
@@ -2439,13 +2466,13 @@ async fn execute_proxy_inner(
         let user_uuid = auth_user.user_id;
         let restrictions = crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(auth_user);
 
-        match crate::crypto::jwt::generate_delegated_access_token(
+        match generate_proxy_delegation_token(
             &state.jwt_keys,
             &state.config,
             &user_uuid,
             &target.service.delegation_token_scope,
             &target.service.slug,
-            crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+            catalog_service_slug.as_deref(),
             Some(&restrictions),
         ) {
             Ok(delegation_token) => {
@@ -4109,24 +4136,10 @@ fn platform_metric_for_target(
     target: &proxy_service::ProxyTarget,
     is_connection: bool,
 ) -> BillingMetric {
-    // An admin-selected metric on the service's billing config wins;
-    // the slug/transport heuristic is only the fallback, so billing
-    // classification does not depend on service naming conventions.
-    if let Some(metric) = target
-        .service
-        .billing
-        .as_ref()
-        .and_then(|billing| billing.platform_metric)
-    {
-        return metric;
-    }
-    if is_connection || target.service.service_type == "ssh" {
-        BillingMetric::Bytes
-    } else if target.service.slug.starts_with("llm-") {
-        BillingMetric::Tokens
-    } else {
-        BillingMetric::Requests
-    }
+    crate::services::billing::metric_resolution::platform_metric_for_request(
+        &target.service,
+        is_connection,
+    )
 }
 
 fn should_capture_llm_usage(service_slug: &str, platform_metric: BillingMetric) -> bool {
@@ -5741,10 +5754,10 @@ mod tests {
         apply_proxy_request_id_header, auth_kind_label, caller_bearer_token_for_downstream,
         collect_ws_forward_headers, compose_pre_resolved_node_ids, enforce_node_route_scope,
         ensure_proxy_request_id, final_credential_class, forwarded_response_header_value,
-        is_chat_completions_proxy_path, is_codex_transport_path, is_ws_upgrade_request,
-        read_proxy_request_body, should_enforce_runtime_approval, should_retry_node_failure,
-        single_system_header, strip_durable_idempotency_defaults, validate_range_header,
-        websocket_realtime_usage_enabled, websocket_resale_usage,
+        generate_proxy_delegation_token, is_chat_completions_proxy_path, is_codex_transport_path,
+        is_ws_upgrade_request, read_proxy_request_body, should_enforce_runtime_approval,
+        should_retry_node_failure, single_system_header, strip_durable_idempotency_defaults,
+        validate_range_header, websocket_realtime_usage_enabled, websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -5780,6 +5793,56 @@ mod tests {
             payload["message"]
                 .as_str()
                 .is_some_and(|message| message.contains(&max_body_size.to_string()))
+        );
+    }
+
+    #[test]
+    fn proxy_delegation_token_uses_catalog_slug_for_disambiguated_alias() {
+        let keys = crate::test_utils::cached_test_jwt_keys();
+        let config = crate::test_utils::test_app_config();
+        let user_id = uuid::Uuid::new_v4();
+
+        let token = generate_proxy_delegation_token(
+            &keys,
+            &config,
+            &user_id,
+            "proxy:*",
+            "chrono-sandbox-aevatar",
+            Some("chrono-sandbox"),
+            None,
+        )
+        .expect("catalog-backed alias should mint a delegation token");
+        let claims = crate::crypto::jwt::verify_token(&keys, &config, &token)
+            .expect("delegation token should verify");
+
+        assert_eq!(
+            claims.act.expect("delegation actor should be present").sub,
+            "chrono-sandbox"
+        );
+    }
+
+    #[test]
+    fn proxy_delegation_token_uses_service_slug_for_custom_service() {
+        let keys = crate::test_utils::cached_test_jwt_keys();
+        let config = crate::test_utils::test_app_config();
+        let user_id = uuid::Uuid::new_v4();
+
+        let token = generate_proxy_delegation_token(
+            &keys,
+            &config,
+            &user_id,
+            "proxy:*",
+            "custom-sandbox",
+            None,
+            None,
+        )
+        .expect("custom service should mint a delegation token");
+        let claims = crate::crypto::jwt::verify_token(&keys, &config, &token)
+            .expect("delegation token should verify");
+
+        assert_eq!(
+            claims.act.expect("delegation actor should be present").sub,
+            "custom-sandbox"
         );
     }
 
@@ -6172,6 +6235,8 @@ mod tests {
         let billing = ServiceBilling {
             platform_billable: false,
             platform_metric: None,
+            platform_pricing: None,
+            platform_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -6814,6 +6879,47 @@ mod tests {
             super::platform_metric_for_target(&target, true),
             BillingMetric::Tokens
         );
+    }
+
+    #[tokio::test]
+    async fn plain_http_llm_proxy_and_allowance_creation_use_the_same_metric() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("proxy_allowance_metric_agreement").await
+        else {
+            return;
+        };
+        let mut target = make_target("http://localhost:8080");
+        target.service.id = uuid::Uuid::new_v4().to_string();
+        target.service.slug = "llm-websocket-capable".to_string();
+        target.service.capabilities =
+            Some(crate::models::downstream_service::ServiceCapabilities {
+                supports_websocket: true,
+                ..Default::default()
+            });
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&target.service)
+        .await
+        .expect("insert catalog service");
+
+        let allowance = crate::services::billing::allowances::create_allowance(
+            &db,
+            crate::services::billing::allowances::CreateAllowanceInput {
+                service_ref: target.service.id.clone(),
+                quantity: 1_000,
+                recurrence: crate::models::usage_allowance::AllowanceRecurrence::Monthly,
+                target_kind: crate::models::billing_target::BillingTargetKind::AllUsers,
+                target_user_ids: Vec::new(),
+                created_by: "admin-1".to_string(),
+            },
+        )
+        .await
+        .expect("create allowance");
+        let proxy_metric = super::platform_metric_for_target(&target, false);
+
+        assert_eq!(proxy_metric, BillingMetric::Tokens);
+        assert_eq!(allowance.metric, proxy_metric);
     }
 
     #[test]
@@ -8267,15 +8373,35 @@ mod proxy_resolution_integration_tests {
         .expect("clear the wire-log flag override");
     }
 
-    fn assistant_echoes(response: &Response) -> Vec<serde_json::Value> {
-        let Some(value) = response.headers().get("x-nyxid-debug-upstream-log") else {
+    async fn assistant_echoes(
+        db: &mongodb::Database,
+        user_id: &str,
+        response: &Response,
+    ) -> Vec<serde_json::Value> {
+        let wrapper: serde_json::Value = if let Some(id) = response
+            .headers()
+            .get("x-nyxid-debug-upstream-id")
+            .and_then(|value| value.to_str().ok())
+        {
+            assert!(
+                response
+                    .headers()
+                    .get("x-nyxid-debug-upstream-log")
+                    .is_none()
+            );
+            let row = crate::services::assistant_wire_log_service::fetch_for_user(db, user_id, id)
+                .await
+                .expect("fetch assistant wire log")
+                .expect("assistant wire log exists");
+            serde_json::from_str(&row.payload).expect("stored assistant echo is JSON")
+        } else if let Some(value) = response.headers().get("x-nyxid-debug-upstream-log") {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(value.as_bytes())
+                .expect("assistant echo header is base64");
+            serde_json::from_slice(&decoded).expect("assistant echo header is JSON")
+        } else {
             return Vec::new();
         };
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(value.as_bytes())
-            .expect("assistant echo header is base64");
-        let wrapper: serde_json::Value =
-            serde_json::from_slice(&decoded).expect("assistant echo header is JSON");
         assert_eq!(wrapper["version"], 2);
         assert_eq!(wrapper["droppedEchoCount"], 0);
         wrapper["echoes"]
@@ -8832,6 +8958,7 @@ mod proxy_resolution_integration_tests {
                 source_id: None,
                 created_at: now,
                 updated_at: now,
+                credential_epoch: 1,
             })
             .await
             .expect("insert org GCP SA key");
@@ -10019,7 +10146,7 @@ mod proxy_resolution_integration_tests {
             .await
             .expect("typed chat handler must forward");
             assert_eq!(response.status(), StatusCode::OK);
-            debug_echoes.push(assistant_echoes(&response));
+            debug_echoes.push(assistant_echoes(&db, &user_id, &response).await);
         }
 
         let mut list_request = request(Method::GET, "/api/v1/assistant/conversations", None);
@@ -10035,7 +10162,48 @@ mod proxy_resolution_integration_tests {
         .await
         .expect("list conversations handler must forward");
         assert_eq!(list_response.status(), StatusCode::OK);
-        debug_echoes.push(assistant_echoes(&list_response));
+        assert!(
+            list_response
+                .headers()
+                .get("x-nyxid-debug-upstream-id")
+                .is_none()
+        );
+        assert!(
+            list_response
+                .headers()
+                .get("x-nyxid-debug-upstream-log")
+                .is_none()
+        );
+        let wire_logs = db.collection::<crate::models::assistant_wire_log::AssistantWireLog>(
+            crate::models::assistant_wire_log::AssistantWireLog::COLLECTION_NAME,
+        );
+        assert_eq!(
+            wire_logs
+                .count_documents(doc! { "user_id": &user_id })
+                .await
+                .expect("count stored assistant wire logs"),
+            11
+        );
+        assert_eq!(
+            wire_logs
+                .count_documents(doc! {
+                    "user_id": &user_id,
+                    "conversation_id": mongodb::bson::Bson::Null,
+                })
+                .await
+                .expect("count unattributed assistant wire logs"),
+            1
+        );
+        assert_eq!(
+            wire_logs
+                .count_documents(doc! {
+                    "user_id": &user_id,
+                    "conversation_id": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
+                })
+                .await
+                .expect("count conversation-scoped assistant wire logs"),
+            10
+        );
 
         let malformed_typed_id = "nyxid-chat-not-a-guid";
         let calls_before_malformed_resources = captured.lock().unwrap().len();
@@ -10259,7 +10427,7 @@ mod proxy_resolution_integration_tests {
             ]
         );
         assert!(paths.iter().any(|path| path.contains("chat-history")));
-        assert_eq!(debug_echoes.last().map(Vec::len), Some(2));
+        assert!(debug_echoes.iter().all(|echoes| echoes.len() == 1));
 
         let expected_chat_bodies = [
             serde_json::json!({
@@ -10409,8 +10577,8 @@ mod proxy_resolution_integration_tests {
             );
         }
 
-        assert_eq!(debug_echoes.len(), 12);
-        for (call_index, envelope_array) in debug_echoes[..11].iter().enumerate() {
+        assert_eq!(debug_echoes.len(), 11);
+        for (call_index, envelope_array) in debug_echoes.iter().enumerate() {
             assert_eq!(envelope_array.len(), 1);
             let envelope = &envelope_array[0];
             let (method, path, body, _) = &calls[call_index];
@@ -10449,23 +10617,6 @@ mod proxy_resolution_integration_tests {
             }
         }
 
-        let list_echoes = &debug_echoes[11];
-        assert_eq!(list_echoes.len(), 2);
-        for (envelope, call) in list_echoes.iter().zip(&calls[11..13]) {
-            assert_eq!(envelope["method"], "GET");
-            let expected_path = if call.1 == "/api/chat/conversations" {
-                "api/chat/conversations?pageSize=50"
-            } else {
-                call.1.trim_start_matches('/')
-            };
-            assert_eq!(envelope["path"], expected_path);
-            assert!(envelope["commandType"].is_null());
-            assert!(envelope["body"].is_null());
-            assert_eq!(envelope["truncated"], false);
-            assert_eq!(envelope["upstreamOutcome"], "response");
-            assert_eq!(envelope["response"]["status"], 200);
-            assert_eq!(envelope["response"]["sse"], false);
-        }
         let serialized_echoes = serde_json::to_string(&debug_echoes).unwrap();
         for forbidden in [
             "caller-secret",
@@ -10502,7 +10653,7 @@ mod proxy_resolution_integration_tests {
         )
         .await
         .expect("typed chat without debug opt-in must forward");
-        assert!(assistant_echoes(&no_opt_in).is_empty());
+        assert!(assistant_echoes(&db, &user_id, &no_opt_in).await.is_empty());
         let no_opt_in_calls = std::mem::take(&mut *captured.lock().unwrap());
         assert_eq!(no_opt_in_calls.len(), 1);
         assert!(no_opt_in_calls[0].3.get("x-nyxid-debug-upstream").is_none());
@@ -10524,7 +10675,7 @@ mod proxy_resolution_integration_tests {
         )
         .await
         .expect("feature-disabled typed chat must forward");
-        assert!(assistant_echoes(&flag_off).is_empty());
+        assert!(assistant_echoes(&db, &user_id, &flag_off).await.is_empty());
         let flag_off_calls = std::mem::take(&mut *captured.lock().unwrap());
         assert_eq!(flag_off_calls.len(), 1);
         assert!(flag_off_calls[0].3.get("x-nyxid-debug-upstream").is_none());
@@ -10551,13 +10702,16 @@ mod proxy_resolution_integration_tests {
         )
         .await
         .expect("authenticated non-admin must capture their own exchange");
-        assert_eq!(assistant_echoes(&non_admin).len(), 1);
+        assert_eq!(
+            assistant_echoes(&db, &non_admin_id, &non_admin).await.len(),
+            1
+        );
 
         server.abort();
     }
 
     #[tokio::test]
-    async fn assistant_list_drains_mixed_history_pages_and_captures_every_upstream_call() {
+    async fn assistant_list_drains_mixed_history_pages_without_wire_log_headers() {
         use std::sync::Mutex as StdMutex;
         use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -10759,7 +10913,18 @@ mod proxy_resolution_integration_tests {
         .await
         .expect("list conversations handler must drain both pages");
         assert_eq!(response.status(), StatusCode::OK);
-        let echoes = assistant_echoes(&response);
+        assert!(
+            response
+                .headers()
+                .get("x-nyxid-debug-upstream-id")
+                .is_none()
+        );
+        assert!(
+            response
+                .headers()
+                .get("x-nyxid-debug-upstream-log")
+                .is_none()
+        );
         let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let rows = body["conversations"].as_array().unwrap();
@@ -10801,18 +10966,7 @@ mod proxy_resolution_integration_tests {
                 (Method::GET, format!("{history_path}?cursor=page-2"), true,),
             ]
         );
-        assert_eq!(echoes.len(), 4);
-        for (envelope, (method, path, accepts_json)) in echoes.iter().zip(&calls) {
-            assert_eq!(envelope["method"], method.as_str());
-            // The drained page's cursor rides along in the echo: without it
-            // every page echoes the same path and the wire log hides the
-            // pagination behind what look like duplicate calls.
-            assert_eq!(envelope["path"], path.trim_start_matches('/'));
-            assert!(envelope["commandType"].is_null());
-            assert!(envelope["body"].is_null());
-            assert_eq!(envelope["upstreamOutcome"], "response");
-            assert_eq!(envelope["response"]["status"], 200);
-            assert_eq!(envelope["response"]["sse"], false);
+        for (_, _, accepts_json) in &calls {
             assert!(*accepts_json, "every drained page must request JSON");
         }
 

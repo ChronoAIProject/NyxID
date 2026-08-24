@@ -19,7 +19,7 @@ use axum::{
     body::{Body, to_bytes},
     extract::{Path, State},
     http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header},
-    response::Response,
+    response::{Json, Response},
 };
 use base64::Engine as _;
 use serde::Serialize;
@@ -33,7 +33,7 @@ use crate::errors::{AppError, AppResult};
 use crate::handlers::proxy::execute_admin_proxy;
 use crate::models::downstream_service::DownstreamService;
 use crate::mw::auth::{AuthMethod, AuthUser, PROXY_SCOPE, scope_allows_rest_proxy};
-use crate::services::{assistant_service, feature_flag_service};
+use crate::services::{assistant_service, assistant_wire_log_service, feature_flag_service};
 
 /// Conversation indexes carry titles, timestamps, and counts per row, so the
 /// list route gets its own buffering headroom before any merge/reshape.
@@ -49,16 +49,26 @@ const MAX_HISTORY_INDEX_PAGES: usize = 40;
 
 const DEBUG_UPSTREAM_REQUEST_HEADER: &str = "x-nyxid-debug-upstream";
 const DEBUG_UPSTREAM_RESPONSE_HEADER: &str = "x-nyxid-debug-upstream-log";
-// Node's default `http.maxHeaderSize` limits the whole response header block,
-// which includes this value when Vite's development proxy parses it. Leave
-// about 4 KiB for the status line and security headers; production nginx is
-// configured for 32 KiB, so local development is the binding constraint.
-const DEBUG_UPSTREAM_HEADER_MAX_BYTES: usize = 12 * 1024;
+const DEBUG_UPSTREAM_ID_RESPONSE_HEADER: &str = "x-nyxid-debug-upstream-id";
+// Inline payloads are degraded fallback only. Keep them below every known
+// proxy response-header buffer so a failed diagnostic write cannot fail the
+// user request it was observing.
+const DEBUG_UPSTREAM_HEADER_MAX_BYTES: usize = 4 * 1024;
 const DEBUG_UPSTREAM_MAX_ECHOES: usize = 8;
 const DEBUG_UPSTREAM_PATH_MAX_BYTES: usize = 256;
 const DEBUG_UPSTREAM_COMMAND_TYPE_MAX_BYTES: usize = 64;
 const DEBUG_UPSTREAM_HEADER_VALUE_MAX_BYTES: usize = 256;
 const DEBUG_UPSTREAM_MIN_TRUNCATED_BODY_BYTES: usize = 16;
+
+const WIRE_LOG_NOT_FOUND_MESSAGE: &str = "Wire log not found.";
+
+#[derive(Serialize)]
+pub struct WireLogResponse {
+    id: String,
+    conversation_id: Option<String>,
+    created_at: String,
+    payload: serde_json::Value,
+}
 
 #[derive(Clone, Debug, Serialize)]
 struct UpstreamIdentityEcho {
@@ -127,7 +137,7 @@ enum EncodedUpstreamEcho {
     Minimal(MinimalUpstreamEcho),
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct UpstreamEchoHeader {
     version: u8,
@@ -200,6 +210,47 @@ async fn upstream_echo_collector(
         return None;
     }
     Some(Vec::new())
+}
+
+/// Fetch one immutable, short-lived assistant wire log for its owner.
+pub async fn get_wire_log(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<WireLogResponse>> {
+    uuid::Uuid::parse_str(&id)
+        .map_err(|_| AppError::NotFound(WIRE_LOG_NOT_FOUND_MESSAGE.to_string()))?;
+    let user_id = auth_user.user_id.to_string();
+    let enabled =
+        match feature_flag_service::aevatar_chat_wire_log_enabled(&state.db, &user_id).await {
+            Ok(enabled) => enabled,
+            Err(_) => {
+                tracing::warn!(
+                    wire_log_id = %id,
+                    "assistant: wire-log fetch flag resolution failed"
+                );
+                false
+            }
+        };
+    if !enabled {
+        return Err(AppError::NotFound(WIRE_LOG_NOT_FOUND_MESSAGE.to_string()));
+    }
+
+    let row = assistant_wire_log_service::fetch_for_user(&state.db, &user_id, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound(WIRE_LOG_NOT_FOUND_MESSAGE.to_string()))?;
+    let payload = serde_json::from_str(&row.payload).map_err(|_| {
+        AppError::Internal("assistant: stored wire-log payload is invalid".to_string())
+    })?;
+
+    Ok(Json(WireLogResponse {
+        id: row.id,
+        conversation_id: row.conversation_id,
+        created_at: row
+            .created_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        payload,
+    }))
 }
 
 fn echoed_headers(
@@ -335,16 +386,19 @@ fn encode_header(header: &UpstreamEchoHeader) -> Option<String> {
     Some(base64::engine::general_purpose::STANDARD.encode(serialize_echoes(header).ok()?))
 }
 
-fn encoded_header_if_fits(
+fn selected_header_if_fits<F>(
     header: &UpstreamEchoHeader,
     rung: EchoEncodingRung,
     max_bytes: usize,
-) -> Option<(HeaderValue, EchoEncodingRung)> {
-    let encoded = encode_header(header)?;
-    if encoded.len() > max_bytes {
+    measure_bytes: F,
+) -> Option<(UpstreamEchoHeader, EchoEncodingRung)>
+where
+    F: Fn(&UpstreamEchoHeader) -> Option<usize>,
+{
+    if measure_bytes(header)? > max_bytes {
         return None;
     }
-    Some((HeaderValue::from_str(&encoded).ok()?, rung))
+    Some((header.clone(), rung))
 }
 
 fn encode_echo_header_with_rung(
@@ -357,11 +411,29 @@ fn encode_echo_header_with_limit(
     echoes: &[UpstreamEcho],
     max_bytes: usize,
 ) -> Option<(HeaderValue, EchoEncodingRung)> {
+    let measure_encoded_bytes =
+        |header: &UpstreamEchoHeader| encode_header(header).map(|v| v.len());
+    let (header, rung) = select_echo_header(echoes, max_bytes, measure_encoded_bytes)?;
+    let encoded = encode_header(&header)?;
+    Some((HeaderValue::from_str(&encoded).ok()?, rung))
+}
+
+fn select_echo_header<F>(
+    echoes: &[UpstreamEcho],
+    max_bytes: usize,
+    measure_bytes: F,
+) -> Option<(UpstreamEchoHeader, EchoEncodingRung)>
+where
+    F: Fn(&UpstreamEchoHeader) -> Option<usize> + Copy,
+{
     let mut candidates = echoes.to_vec();
-    if let Some(encoded) =
-        encoded_header_if_fits(&full_header(&candidates), EchoEncodingRung::Full, max_bytes)
-    {
-        return Some(encoded);
+    if let Some(selected) = selected_header_if_fits(
+        &full_header(&candidates),
+        EchoEncodingRung::Full,
+        max_bytes,
+        measure_bytes,
+    ) {
+        return Some(selected);
     }
 
     let mut bodies = candidates
@@ -378,10 +450,11 @@ fn encode_echo_header_with_limit(
     for (index, body) in bodies {
         candidates[index].body = serde_json::Value::String(String::new());
         candidates[index].truncated = true;
-        if encoded_header_if_fits(
+        if selected_header_if_fits(
             &full_header(&candidates),
             EchoEncodingRung::TruncatedBodies,
             max_bytes,
+            measure_bytes,
         )
         .is_none()
         {
@@ -395,10 +468,11 @@ fn encode_echo_header_with_limit(
             let middle = low + (high - low) / 2;
             let (prefix, _) = truncate_utf8(&body, middle);
             candidates[index].body = serde_json::Value::String(prefix);
-            if encoded_header_if_fits(
+            if selected_header_if_fits(
                 &full_header(&candidates),
                 EchoEncodingRung::TruncatedBodies,
                 max_bytes,
+                measure_bytes,
             )
             .is_some()
             {
@@ -416,10 +490,11 @@ fn encode_echo_header_with_limit(
         }
         candidates[index].body = serde_json::Value::String(best.clone());
         if best.len() >= DEBUG_UPSTREAM_MIN_TRUNCATED_BODY_BYTES {
-            return encoded_header_if_fits(
+            return selected_header_if_fits(
                 &full_header(&candidates),
                 EchoEncodingRung::TruncatedBodies,
                 max_bytes,
+                measure_bytes,
             );
         }
     }
@@ -435,12 +510,13 @@ fn encode_echo_header_with_limit(
             echo.truncated = true;
         }
     }
-    if let Some(encoded) = encoded_header_if_fits(
+    if let Some(selected) = selected_header_if_fits(
         &full_header(&candidates),
         EchoEncodingRung::DroppedBodies,
         max_bytes,
+        measure_bytes,
     ) {
-        return Some(encoded);
+        return Some(selected);
     }
 
     for echo in &mut candidates {
@@ -450,12 +526,13 @@ fn encode_echo_header_with_limit(
         }
         echo.dropped_headers = Some(true);
     }
-    if let Some(encoded) = encoded_header_if_fits(
+    if let Some(selected) = selected_header_if_fits(
         &full_header(&candidates),
         EchoEncodingRung::DroppedHeaders,
         max_bytes,
+        measure_bytes,
     ) {
-        return Some(encoded);
+        return Some(selected);
     }
 
     let mut minimal = UpstreamEchoHeader {
@@ -467,8 +544,13 @@ fn encode_echo_header_with_limit(
             .collect(),
         dropped_echo_count: 0,
     };
-    if let Some(encoded) = encoded_header_if_fits(&minimal, EchoEncodingRung::Minimal, max_bytes) {
-        return Some(encoded);
+    if let Some(selected) = selected_header_if_fits(
+        &minimal,
+        EchoEncodingRung::Minimal,
+        max_bytes,
+        measure_bytes,
+    ) {
+        return Some(selected);
     }
 
     let dropped = minimal
@@ -477,7 +559,12 @@ fn encode_echo_header_with_limit(
         .saturating_sub(DEBUG_UPSTREAM_MAX_ECHOES);
     minimal.echoes.truncate(DEBUG_UPSTREAM_MAX_ECHOES);
     minimal.dropped_echo_count = u32::try_from(dropped).unwrap_or(u32::MAX);
-    encoded_header_if_fits(&minimal, EchoEncodingRung::DroppedEchoes, max_bytes)
+    selected_header_if_fits(
+        &minimal,
+        EchoEncodingRung::DroppedEchoes,
+        max_bytes,
+        measure_bytes,
+    )
 }
 
 fn encode_echo_header(echoes: &[UpstreamEcho]) -> Option<HeaderValue> {
@@ -485,15 +572,73 @@ fn encode_echo_header(echoes: &[UpstreamEcho]) -> Option<HeaderValue> {
 }
 
 fn attach_upstream_echoes(mut response: Response, echoes: Option<&[UpstreamEcho]>) -> Response {
-    if let Some(value) = echoes
-        .filter(|echoes| !echoes.is_empty())
-        .and_then(encode_echo_header)
-    {
-        response
-            .headers_mut()
-            .insert(DEBUG_UPSTREAM_RESPONSE_HEADER, value);
+    let Some(echoes) = echoes.filter(|echoes| !echoes.is_empty()) else {
+        return response;
+    };
+    let value = encode_echo_header(echoes);
+    let headers = response.headers_mut();
+    headers.remove(DEBUG_UPSTREAM_ID_RESPONSE_HEADER);
+    headers.remove(DEBUG_UPSTREAM_RESPONSE_HEADER);
+    if let Some(value) = value {
+        headers.insert(DEBUG_UPSTREAM_RESPONSE_HEADER, value);
     }
     response
+}
+
+async fn attach_wire_log(
+    state: &AppState,
+    auth_user: &AuthUser,
+    conversation_id: Option<&str>,
+    mut response: Response,
+    echoes: Option<&[UpstreamEcho]>,
+) -> Response {
+    let Some(echoes) = echoes.filter(|echoes| !echoes.is_empty()) else {
+        return response;
+    };
+    let measure_json_bytes =
+        |header: &UpstreamEchoHeader| serialize_echoes(header).ok().map(|payload| payload.len());
+    let Some((header, _)) = select_echo_header(
+        echoes,
+        assistant_wire_log_service::WIRE_LOG_MAX_PAYLOAD_BYTES,
+        measure_json_bytes,
+    ) else {
+        tracing::warn!(
+            echo_count = echoes.len(),
+            "assistant: wire-log payload selection failed; using inline fallback"
+        );
+        return attach_upstream_echoes(response, Some(echoes));
+    };
+    let Ok(payload_bytes) = serialize_echoes(&header) else {
+        tracing::warn!(
+            echo_count = echoes.len(),
+            "assistant: wire-log payload serialization failed; using inline fallback"
+        );
+        return attach_upstream_echoes(response, Some(echoes));
+    };
+    let payload_len = payload_bytes.len();
+    let payload_json = String::from_utf8(payload_bytes)
+        .expect("serde_json serializes assistant wire logs as UTF-8");
+    let user_id = auth_user.user_id.to_string();
+
+    match assistant_wire_log_service::store(&state.db, &user_id, conversation_id, payload_json)
+        .await
+    {
+        Ok(id) => {
+            let value = HeaderValue::from_str(&id).expect("wire-log UUID is a valid header value");
+            let headers = response.headers_mut();
+            headers.remove(DEBUG_UPSTREAM_RESPONSE_HEADER);
+            headers.insert(DEBUG_UPSTREAM_ID_RESPONSE_HEADER, value);
+            response
+        }
+        Err(_) => {
+            tracing::warn!(
+                echo_count = echoes.len(),
+                payload_bytes = payload_len,
+                "assistant: wire-log storage failed; using inline fallback"
+            );
+            attach_upstream_echoes(response, Some(echoes))
+        }
+    }
 }
 
 /// Server-initiated upstream request derived from a caller request (the
@@ -618,6 +763,14 @@ impl<'a> ForwardEcho<'a> {
             collector,
         }
     }
+
+    fn disabled() -> Self {
+        Self {
+            command_type: None,
+            body: None,
+            collector: None,
+        }
+    }
 }
 
 async fn forward(
@@ -713,7 +866,6 @@ pub async fn list_conversations(
     request: Request<Body>,
 ) -> AppResult<Response> {
     let authorization = request.headers().get(header::AUTHORIZATION).cloned();
-    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
     let user_id = auth_user.user_id.to_string();
     let mut response_parts = None;
     let mut conversations = Vec::new();
@@ -768,11 +920,11 @@ pub async fn list_conversations(
                 path.clone(),
                 page_request,
                 Vec::new(),
-                ForwardEcho::enabled(None, None, echoes.as_mut()),
+                ForwardEcho::disabled(),
             )
             .await?;
             if !response.status().is_success() {
-                return Ok(attach_upstream_echoes(response, echoes.as_deref()));
+                return Ok(response);
             }
             let (parts, body) = response.into_parts();
             if response_parts.is_none() {
@@ -826,10 +978,7 @@ pub async fn list_conversations(
         AppError::Internal("assistant: conversation index returned no pages".to_string())
     })?;
     parts.headers.remove(header::CONTENT_LENGTH);
-    Ok(attach_upstream_echoes(
-        Response::from_parts(parts, Body::from(filtered)),
-        echoes.as_deref(),
-    ))
+    Ok(Response::from_parts(parts, Body::from(filtered)))
 }
 
 /// `GET /api/v1/assistant/conversations/{id}` -- family-aware conversation
@@ -866,7 +1015,14 @@ pub async fn get_history(
         ForwardEcho::enabled(None, None, echoes.as_mut()),
     )
     .await?;
-    Ok(attach_upstream_echoes(response, echoes.as_deref()))
+    Ok(attach_wire_log(
+        &state,
+        &auth_user,
+        Some(&conversation_id),
+        response,
+        echoes.as_deref(),
+    )
+    .await)
 }
 
 /// `DELETE /api/v1/assistant/conversations/{id}` -- typed composite lifecycle
@@ -904,12 +1060,23 @@ pub async fn delete_conversation(
         parts.status = StatusCode::NO_CONTENT;
         parts.headers.remove(header::CONTENT_LENGTH);
         parts.headers.remove(header::CONTENT_TYPE);
-        return Ok(attach_upstream_echoes(
+        return Ok(attach_wire_log(
+            &state,
+            &auth_user,
+            Some(&conversation_id),
             Response::from_parts(parts, Body::empty()),
             echoes.as_deref(),
-        ));
+        )
+        .await);
     }
-    Ok(attach_upstream_echoes(response, echoes.as_deref()))
+    Ok(attach_wire_log(
+        &state,
+        &auth_user,
+        Some(&conversation_id),
+        response,
+        echoes.as_deref(),
+    )
+    .await)
 }
 
 /// `GET /api/v1/assistant/conversations/{id}/state` -- conditional
@@ -941,7 +1108,14 @@ pub async fn get_state(
         ForwardEcho::enabled(None, None, echoes.as_mut()),
     )
     .await?;
-    Ok(attach_upstream_echoes(response, echoes.as_deref()))
+    Ok(attach_wire_log(
+        &state,
+        &auth_user,
+        Some(&conversation_id),
+        response,
+        echoes.as_deref(),
+    )
+    .await)
 }
 
 /// `POST /api/v1/assistant/completions` -- OpenAI-compatible SSE stream.
@@ -960,7 +1134,7 @@ pub async fn completions(
         ForwardEcho::enabled(None, None, echoes.as_mut()),
     )
     .await?;
-    Ok(attach_upstream_echoes(response, echoes.as_deref()))
+    Ok(attach_wire_log(&state, &auth_user, None, response, echoes.as_deref()).await)
 }
 
 /// Bounds caller chat bodies: a 32k-char prompt is at most 128 KiB of UTF-8,
@@ -982,6 +1156,7 @@ pub async fn typed_chat(
         super::body_limit::read_body(body, MAX_ASSISTANT_CHAT_REQUEST_BYTES, "Assistant chat")
             .await?;
     let command = assistant_service::parse_assistant_chat_command(&bytes)?;
+    let conversation_id = command.conversation_id().map(str::to_string);
     let prepared = assistant_service::prepare_assistant_chat_command(&command)?;
     let payload = serde_json::to_vec(&prepared.body).map_err(|_| {
         AppError::Internal("assistant: failed to encode the assistant chat body".to_string())
@@ -1020,7 +1195,14 @@ pub async fn typed_chat(
         ),
     )
     .await?;
-    Ok(attach_upstream_echoes(response, echoes.as_deref()))
+    Ok(attach_wire_log(
+        &state,
+        &auth_user,
+        conversation_id.as_deref(),
+        response,
+        echoes.as_deref(),
+    )
+    .await)
 }
 
 #[cfg(test)]
@@ -1310,6 +1492,136 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn get_wire_log_enforces_flag_owner_id_and_expiry() {
+        use crate::models::assistant_wire_log::AssistantWireLog;
+        use crate::services::assistant_wire_log_service;
+        use crate::services::feature_flag_service::{
+            AEVATAR_CHAT_WIRE_LOG_FLAG_KEY, FlagTarget, clear_platform_override,
+            set_platform_override,
+        };
+        use chrono::{Duration, Utc};
+
+        let Some(db) = crate::test_utils::connect_test_database("assistant_wire_log_fetch").await
+        else {
+            eprintln!("skipping assistant wire-log handler test: no local MongoDB available");
+            return;
+        };
+        let owner_id = seed_flag_user(&db).await;
+        let other_id = seed_flag_user(&db).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        set_platform_override(
+            &db,
+            AEVATAR_CHAT_WIRE_LOG_FLAG_KEY,
+            &FlagTarget::Global,
+            true,
+            "admin",
+        )
+        .await
+        .expect("enable the wire-log flag globally");
+
+        let payload = serde_json::json!({
+            "version": 2,
+            "echoes": [],
+            "droppedEchoCount": 0,
+        });
+        let id = assistant_wire_log_service::store(
+            &db,
+            &owner_id,
+            Some("nyxchat-fetch-test"),
+            serde_json::to_string(&payload).unwrap(),
+        )
+        .await
+        .expect("store handler test wire log");
+
+        let Json(response) = get_wire_log(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&owner_id),
+            Path(id.clone()),
+        )
+        .await
+        .expect("owner fetches wire log");
+        assert_eq!(response.id, id);
+        assert_eq!(
+            response.conversation_id.as_deref(),
+            Some("nyxchat-fetch-test")
+        );
+        assert!(response.created_at.ends_with('Z'));
+        assert_eq!(response.payload, payload);
+
+        for (user_id, requested_id) in [
+            (other_id.as_str(), id.clone()),
+            (owner_id.as_str(), uuid::Uuid::new_v4().to_string()),
+            (owner_id.as_str(), "not-a-uuid".to_string()),
+        ] {
+            let result = get_wire_log(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(user_id),
+                Path(requested_id),
+            )
+            .await;
+            assert!(matches!(
+                result,
+                Err(AppError::NotFound(ref message)) if message == WIRE_LOG_NOT_FOUND_MESSAGE
+            ));
+        }
+
+        let expired = AssistantWireLog {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: owner_id.clone(),
+            conversation_id: Some("nyxchat-expired".to_string()),
+            payload: serde_json::to_string(&payload).unwrap(),
+            created_at: Utc::now() - Duration::seconds(2),
+            expires_at: Utc::now() - Duration::seconds(1),
+        };
+        db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)
+            .insert_one(&expired)
+            .await
+            .expect("insert expired wire log");
+        let expired_result = get_wire_log(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&owner_id),
+            Path(expired.id),
+        )
+        .await;
+        assert!(matches!(
+            expired_result,
+            Err(AppError::NotFound(ref message)) if message == WIRE_LOG_NOT_FOUND_MESSAGE
+        ));
+
+        clear_platform_override(&db, AEVATAR_CHAT_WIRE_LOG_FLAG_KEY, &FlagTarget::Global)
+            .await
+            .expect("disable the wire-log flag globally");
+        let flag_off_result = get_wire_log(
+            State(state),
+            crate::test_utils::test_auth_user(&owner_id),
+            Path(id),
+        )
+        .await;
+        assert!(matches!(
+            flag_off_result,
+            Err(AppError::NotFound(ref message)) if message == WIRE_LOG_NOT_FOUND_MESSAGE
+        ));
+    }
+
+    #[tokio::test]
+    async fn get_wire_log_flag_resolution_failure_is_not_found() {
+        let state = unreachable_db_state().await;
+        let auth_user = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
+
+        let result = get_wire_log(
+            State(state),
+            auth_user,
+            Path(uuid::Uuid::new_v4().to_string()),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::NotFound(ref message)) if message == WIRE_LOG_NOT_FOUND_MESSAGE
+        ));
+    }
+
     /// An `AppState` whose MongoDB handle points at a closed loopback port, so
     /// any database access costs at least the server-selection timeout and
     /// then fails.
@@ -1423,16 +1735,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn echo_header_leaves_sse_and_json_response_bodies_unmodified() {
+    async fn stored_wire_log_leaves_response_body_unmodified_and_round_trips() {
+        let Some(db) = crate::test_utils::connect_test_database("assistant_wire_log_attach").await
+        else {
+            eprintln!("skipping assistant wire-log attach test: no local MongoDB available");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let auth_user = crate::test_utils::test_auth_user(&user_id);
+        let upstream = b"data: {\"type\":\"RUN_FINISHED\"}\n\n";
+        let echo = test_echo(serde_json::json!({ "type": "text", "prompt": "hello" }));
+        let response = Response::builder()
+            .header(header::CONTENT_TYPE, "text/event-stream; charset=utf-8")
+            .header(header::CONTENT_LENGTH, upstream.len())
+            .header(DEBUG_UPSTREAM_RESPONSE_HEADER, "stale-inline-value")
+            .body(Body::from(upstream.as_slice()))
+            .unwrap();
+
+        let response = attach_wire_log(
+            &state,
+            &auth_user,
+            Some("nyxchat-attach-test"),
+            response,
+            Some(std::slice::from_ref(&echo)),
+        )
+        .await;
+
+        let wire_log_id = response
+            .headers()
+            .get(DEBUG_UPSTREAM_ID_RESPONSE_HEADER)
+            .and_then(|value| value.to_str().ok())
+            .expect("stored wire log returns its id")
+            .to_string();
+        assert!(
+            response
+                .headers()
+                .get(DEBUG_UPSTREAM_RESPONSE_HEADER)
+                .is_none()
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_LENGTH),
+            Some(&HeaderValue::from_static("31"))
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(bytes.as_ref(), upstream);
+
+        let stored = assistant_wire_log_service::fetch_for_user(&db, &user_id, &wire_log_id)
+            .await
+            .expect("fetch stored wire log")
+            .expect("stored wire log exists");
+        assert_eq!(
+            stored.conversation_id.as_deref(),
+            Some("nyxchat-attach-test")
+        );
+        let payload: serde_json::Value = serde_json::from_str(&stored.payload).unwrap();
+        assert_eq!(payload["version"], 2);
+        assert_eq!(payload["echoes"][0]["body"]["prompt"], "hello");
+    }
+
+    #[tokio::test]
+    async fn wire_log_storage_failure_uses_bounded_inline_fallback() {
+        let state = unreachable_db_state().await;
+        let auth_user = crate::test_utils::test_auth_user(&uuid::Uuid::new_v4().to_string());
         let upstream = b"data: {\"type\":\"RUN_FINISHED\"}\n\n";
         let echo = test_echo(serde_json::json!({ "type": "text", "prompt": "hello" }));
         for content_type in ["text/event-stream; charset=utf-8", "application/json"] {
             let response = Response::builder()
                 .header(header::CONTENT_TYPE, content_type)
                 .header(header::CONTENT_LENGTH, upstream.len())
+                .header(DEBUG_UPSTREAM_ID_RESPONSE_HEADER, "stale-id-value")
                 .body(Body::from(upstream.as_slice()))
                 .unwrap();
-            let response = attach_upstream_echoes(response, Some(std::slice::from_ref(&echo)));
+            let response = attach_wire_log(
+                &state,
+                &auth_user,
+                Some("nyxchat-fallback-test"),
+                response,
+                Some(std::slice::from_ref(&echo)),
+            )
+            .await;
             assert_eq!(
                 response.headers().get(header::CONTENT_LENGTH),
                 Some(&HeaderValue::from_static("31"))
@@ -1440,9 +1822,14 @@ mod tests {
             assert!(
                 response
                     .headers()
-                    .get(DEBUG_UPSTREAM_RESPONSE_HEADER)
-                    .is_some()
+                    .get(DEBUG_UPSTREAM_ID_RESPONSE_HEADER)
+                    .is_none()
             );
+            let inline = response
+                .headers()
+                .get(DEBUG_UPSTREAM_RESPONSE_HEADER)
+                .expect("storage failure returns inline fallback");
+            assert!(inline.as_bytes().len() <= DEBUG_UPSTREAM_HEADER_MAX_BYTES);
             let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
             assert_eq!(bytes.as_ref(), upstream);
         }
@@ -1564,7 +1951,7 @@ mod tests {
             .find_map(|identity_bytes| {
                 let mut echo = test_echo(serde_json::json!({ "prompt": "x".repeat(20_000) }));
                 echo.identity.mode = "i".repeat(identity_bytes);
-                let encoded = encode_echo_header_with_rung(&[echo])?;
+                let encoded = encode_echo_header_with_limit(&[echo], 12 * 1024)?;
                 (encoded.1 == EchoEncodingRung::DroppedBodies).then_some(encoded)
             })
             .expect("drop-body rung must be reachable");
@@ -1622,7 +2009,7 @@ mod tests {
             header_heavy.push(echo);
         }
         let (dropped_headers, dropped_headers_rung) =
-            encode_echo_header_with_rung(&header_heavy).unwrap();
+            encode_echo_header_with_limit(&header_heavy, 12 * 1024).unwrap();
         assert_eq!(dropped_headers_rung, EchoEncodingRung::DroppedHeaders);
         assert!(
             decode_echo_header(&dropped_headers)["echoes"]
@@ -1647,7 +2034,7 @@ mod tests {
                 echo
             })
             .collect::<Vec<_>>();
-        let (dropped, dropped_rung) = encode_echo_header_with_rung(&many).unwrap();
+        let (dropped, dropped_rung) = encode_echo_header_with_limit(&many, 12 * 1024).unwrap();
         assert_eq!(dropped_rung, EchoEncodingRung::DroppedEchoes);
         let dropped = decode_echo_header(&dropped);
         assert_eq!(dropped["echoes"].as_array().unwrap().len(), 8);
@@ -1718,7 +2105,7 @@ mod tests {
     }
 
     #[test]
-    fn worst_case_minimal_header_fits_with_total_header_headroom() {
+    fn worst_case_minimal_header_is_rejected_above_the_fallback_cap() {
         // Methods are validated HTTP tokens, paths come from axum URI paths,
         // and command types are fixed server literals. Raw control characters
         // that would expand under JSON escaping cannot reach these fields.
@@ -1740,8 +2127,37 @@ mod tests {
         let encoded = base64::engine::general_purpose::STANDARD.encode(&json);
 
         assert!(encoded.len() >= json.len() * 4 / 3);
-        assert!(encoded.len() <= DEBUG_UPSTREAM_HEADER_MAX_BYTES);
-        assert!(encoded.len() + 4 * 1024 <= 16 * 1024);
+        assert!(encoded.len() > DEBUG_UPSTREAM_HEADER_MAX_BYTES);
+        assert!(
+            selected_header_if_fits(
+                &header,
+                EchoEncodingRung::DroppedEchoes,
+                DEBUG_UPSTREAM_HEADER_MAX_BYTES,
+                |candidate| encode_header(candidate).map(|value| value.len()),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn forty_eight_list_echoes_still_fit_the_four_kib_fallback_cap() {
+        let echoes = (0..48)
+            .map(|index| {
+                let mut echo = test_echo(serde_json::Value::Null);
+                echo.method = "GET".to_string();
+                echo.path = format!("api/chat/conversations?pageSize=50&cursor=page-{index}");
+                echo.command_type = None;
+                echo
+            })
+            .collect::<Vec<_>>();
+
+        let (header, rung) = encode_echo_header_with_rung(&echoes).unwrap();
+
+        assert_eq!(rung, EchoEncodingRung::DroppedEchoes);
+        assert!(header.as_bytes().len() <= 4 * 1024);
+        let decoded = decode_echo_header(&header);
+        assert_eq!(decoded["echoes"].as_array().unwrap().len(), 8);
+        assert_eq!(decoded["droppedEchoCount"], 40);
     }
 
     #[test]

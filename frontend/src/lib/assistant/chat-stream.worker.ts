@@ -302,6 +302,8 @@ async function runRequest(
           requestId,
           status: response.status,
           body: captured.text,
+          debugUpstreamId:
+            response.headers.get("x-nyxid-debug-upstream-id") ?? undefined,
           debugUpstream:
             response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
         });
@@ -315,6 +317,8 @@ async function runRequest(
           requestId,
           status: response.status,
           body,
+          debugUpstreamId:
+            response.headers.get("x-nyxid-debug-upstream-id") ?? undefined,
           debugUpstream:
             response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
         });
@@ -327,6 +331,8 @@ async function runRequest(
       requestId,
       status: response.status,
       contentType,
+      debugUpstreamId:
+        response.headers.get("x-nyxid-debug-upstream-id") ?? undefined,
       debugUpstream:
         response.headers.get("x-nyxid-debug-upstream-log") ?? undefined,
     });

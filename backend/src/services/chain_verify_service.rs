@@ -256,6 +256,7 @@ mod tests {
             model: None,
             quantity: Some(1),
             amount_credits: Some(5),
+            amount_micros: None,
             balance_credits: None,
             dedupe_key: None,
             wallet_id: Some("wallet-sweep".to_string()),

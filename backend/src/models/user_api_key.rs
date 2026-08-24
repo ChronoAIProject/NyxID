@@ -88,10 +88,20 @@ pub struct UserApiKey {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
 
+    /// Monotonic epoch bumped only on user-initiated credential-material
+    /// replacement. Not bumped on background or lazy OAuth token refresh.
+    /// Legacy rows without the field deserialize as `1`.
+    #[serde(default = "default_credential_epoch")]
+    pub credential_epoch: i64,
+
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+
+pub fn default_credential_epoch() -> i64 {
+    1
 }
 
 #[cfg(test)]
@@ -127,6 +137,7 @@ mod tests {
             error_message: None,
             source: Some("user_created".to_string()),
             source_id: None,
+            credential_epoch: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -136,6 +147,41 @@ mod tests {
         assert_eq!(key.credential_type, restored.credential_type);
         assert_eq!(key.status, restored.status);
         assert!(restored.connection_id.is_none());
+        assert_eq!(restored.credential_epoch, 1);
+    }
+
+    #[test]
+    fn missing_credential_epoch_defaults_to_one() {
+        let key = UserApiKey {
+            credential_source: None,
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            label: "Legacy".to_string(),
+            credential_type: "api_key".to_string(),
+            credential_encrypted: Some(vec![1]),
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            oauth_attempt_nonce: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            last_authorized_at: None,
+            error_message: None,
+            source: None,
+            source_id: None,
+            credential_epoch: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let mut doc = bson::to_document(&key).expect("serialize");
+        doc.remove("credential_epoch");
+        let restored: UserApiKey = bson::from_document(doc).expect("deserialize legacy key");
+        assert_eq!(restored.credential_epoch, 1);
     }
 
     #[test]
@@ -163,6 +209,7 @@ mod tests {
             error_message: None,
             source: Some("migration_provider_token".to_string()),
             source_id: Some("old-token-id".to_string()),
+            credential_epoch: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

@@ -169,6 +169,28 @@ describe("updateServiceSchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("accepts exact per-unit prices up to the supported bound", () => {
+    expect(
+      updateServiceSchema.safeParse({
+        ...validData,
+        platform_price: "1000000.000000",
+      }).success,
+    ).toBe(true);
+    expect(
+      updateServiceSchema.safeParse({ ...validData, platform_price: "" })
+        .success,
+    ).toBe(true);
+  });
+
+  it("rejects negative, over-precise, and excessive per-unit prices", () => {
+    for (const platform_price of ["-1", "0.0000001", "1000000.000001"]) {
+      expect(
+        updateServiceSchema.safeParse({ ...validData, platform_price })
+          .success,
+      ).toBe(false);
+    }
+  });
+
   it("accepts update with identity propagation fields", () => {
     const result = updateServiceSchema.safeParse({
       ...validData,

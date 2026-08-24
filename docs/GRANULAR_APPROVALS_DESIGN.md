@@ -284,6 +284,101 @@ endpoint.
 - Approval prompt (history + Telegram/push + mobile) shows structured method/resource
   from the new `ApprovalRequest` fields.
 
+## Execution authority binding
+
+Approval fences bind *what* operation was approved. They do not bind *where the
+effect goes* or *which credential pays for it*. Those are the execution inputs,
+and they stay owner-mutable while an approval is pending: a
+`PUT /api/v1/keys/{key_id}` can repoint the destination URL, swap the
+credential, change the auth method or rewrite injection config without moving
+any operation-shape digest.
+
+`services/execution_authority.rs` closes that with a producer-owned digest over
+the resolved execution inputs:
+
+- destination base URL, auth method, auth key name
+- credential identity: `api_key_id`, `credential_epoch`, whether it is the
+  catalog master credential, and any per-agent override id and epoch
+- identity injection: propagation mode, which claims are included, JWT
+  audience, access-token forwarding, delegation-token injection and scope,
+  custom User-Agent
+- both default-header layers (catalog and user-service), values included
+- the effective proxy operation policy
+- the *configured* node binding set (primary plus fallbacks)
+
+The projection serializes under `nyxid-exact-execution-authority.v1` and is
+hashed with `canonical_sha256`, so key order cannot change the digest. Header
+values participate in the hash but are never persisted in plaintext.
+
+The projection is built from the resolved `ProxyTarget`, which is the same
+struct the execution path consults, rather than from independently re-read
+rows. Re-reading would reintroduce exactly the producer/consumer split the
+digest exists to close.
+
+Create stores the digest on the approval binding. Redeem resolves the proxy
+target once, digests *that* resolution, compares, then executes the same
+resolution object. Because the outbound request is built from the bytes just
+digested, there is no check-then-re-resolve window to race. Drift returns HTTP
+200 with `state: "drifted"` and `failure_code: "execution_authority_drift"`,
+and dispatches no provider call.
+
+The digest binds the **configured** node set, not the dispatchable one. A node
+dropping its WebSocket between approval and redemption is a connectivity event,
+not an authority change, and must not fail the redemption; at execution the
+frozen route is the attested set filtered to currently-dispatchable nodes.
+
+### Freshness semantics
+
+Content-addressed fields accept A→B→A. If an owner changes the destination away
+and back before redemption, redemption proceeds: the approver attested to
+configuration content, and at effect time the live content is byte-identical to
+what they saw. The interim state never received an effect.
+
+Credential material cannot be safely content-addressed. Hashing ciphertext
+would drift on encryption-key rotation and KMS migration; hashing plaintext
+would place a secret-derived digest on an approval row. `UserApiKey.credential_epoch`
+is used instead — a monotonic counter incremented **only** on user-initiated
+credential replacement: rotation through `PUT /keys/{key_id}`, node-managed
+credential promotion, and fresh OAuth authorization (which can change granted
+scopes, so invalidating pending approvals is the fail-closed bias). It
+deliberately does *not* increment on background or lazy OAuth token refresh,
+which is authority-neutral; binding `updated_at` instead would drift every
+pending approval on each refresh sweep. Being a counter rather than a hash, it
+does not accept A→B→A: rotating a credential away and back bumps twice.
+
+Any new write path that replaces credential material must bump the epoch, and
+must do so with a **pipeline** update (`vec![doc! { "$set": ... }]`). The bump
+is an aggregation expression; in a classic update document MongoDB stores the
+literal expression sub-document instead of evaluating it, which both skips the
+bump and makes the row fail to deserialize.
+
+Approvals created before the digest existed store `execution_authority_digest:
+null` and skip the gate. That window is bounded by approval expiry.
+
+### Known limitations
+
+- `token_exchange_config` and the `service_category` / `requires_user_credential`
+  pair are consulted at execution but are not in the projection. Both are
+  catalog fields, administrator-owned rather than owner-mutable, so they sit
+  outside the owner-retargeting threat this digest addresses — but coverage is
+  not total.
+- The digest binds HTTP execution inputs. `ws_frame_injections` is not
+  projected; it is unreachable from the exact-approval execution path.
+
+### Two gates, not one
+
+Drift is checked in two places and both are load-bearing:
+
+- `execution_authority_mismatch` covers the **observe** path, so a status poll
+  reports `drifted` before any redemption is attempted.
+- `redeem_request` re-checks inline, after claiming the redemption and against
+  the resolution it is about to execute.
+
+The helper's name suggests it is the single gate. It is not. Removing the
+inline check in `redeem_request` because "the helper already covers it" would
+silently reopen the retargeting hole: the helper runs before the claim and
+never sees the resolution that actually executes.
+
 ## Security notes
 
 - `Deny` rules must short-circuit **before** credential resolution and before the

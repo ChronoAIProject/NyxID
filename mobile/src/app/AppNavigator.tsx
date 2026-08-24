@@ -2,6 +2,7 @@ import { createNativeStackNavigator } from "@react-navigation/native-stack";
 import { StyleSheet, View } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { AuthHomeScreen } from "../features/auth/AuthHomeScreen";
+import { DeviceLoginScreen } from "../features/auth/DeviceLoginScreen";
 import { useAuthSession } from "../features/auth/AuthSessionContext";
 import { AccountSettingsScreen } from "../features/account/AccountSettingsScreen";
 import { ActivityScreen } from "../features/activity/ActivityScreen";
@@ -21,6 +22,7 @@ export type RootStackParamList = {
   AccountSettings: undefined;
   TermsOfService: undefined;
   PrivacyPolicy: undefined;
+  DeviceLogin: { user_code?: string } | undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -47,7 +49,13 @@ export function AppNavigator({ currentRouteName, onMainTabPress, onNyxPress }: A
   const activeMainTab = resolveActiveMainTab(currentRouteName);
   const isLegalRoute = currentRouteName === "TermsOfService" || currentRouteName === "PrivacyPolicy";
   const isDetailRoute = currentRouteName === "ActivityDetail";
-  const showGlobalBottomNav = isAuthenticated && Boolean(onMainTabPress) && !isLegalRoute && !isDetailRoute;
+  const isDeviceLoginRoute = currentRouteName === "DeviceLogin";
+  const showGlobalBottomNav =
+    isAuthenticated &&
+    Boolean(onMainTabPress) &&
+    !isLegalRoute &&
+    !isDetailRoute &&
+    !isDeviceLoginRoute;
 
   if (isRestoring) {
     return <FullScreenLoading title="Restoring session..." subtitle="Validating local secure session" />;
@@ -97,6 +105,11 @@ export function AppNavigator({ currentRouteName, onMainTabPress, onNyxPress }: A
             name="PrivacyPolicy"
             component={PrivacyPolicyScreen}
             options={{ title: "Privacy Policy", animation: "slide_from_left" }}
+          />
+          <Stack.Screen
+            name="DeviceLogin"
+            component={DeviceLoginScreen}
+            options={{ title: "Approve Device Login", animation: "slide_from_right" }}
           />
         </Stack.Navigator>
       </View>

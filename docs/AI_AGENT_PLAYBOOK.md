@@ -115,7 +115,8 @@ nyxid login --base-url http://localhost:3001
 
 # Headless / SSH / no $DISPLAY: bare `nyxid login` auto-falls-back to
 # device-code, or force it explicitly. The CLI prints a one-time code +
-# verification URL; you approve in any signed-in browser (phone, laptop).
+# verification URL; you review the requester IP/time and approve or reject
+# in any signed-in browser (phone, laptop). Rejection stops the CLI poll.
 nyxid login --base-url http://localhost:3001 --device
 
 # Sanity check the session.
@@ -1129,7 +1130,7 @@ Users add services and manage credentials from the AI Services page: http://loca
 
 > Three distinct "device-code" features exist in NyxID — pick the right one:
 > 1. **Provider device-code OAuth** (section 10) — connect a user's downstream OAuth provider credential.
-> 2. **Auth device-code login** (`nyxid login --device`, endpoints under `/api/v1/auth/device/*`) — RFC 8628 flow that lets the CLI authenticate a user on a headless box (WSL / SSH / no `$DISPLAY`).
+> 2. **Auth device-code login** (`nyxid login --device`, endpoints under `/api/v1/auth/device/*`) -- RFC 8628 flow that lets the CLI authenticate a user on a headless box after an explicit browser or mobile approve/reject decision.
 > 3. **Device-code grant** (this section, endpoints under `/api/v1/devices/code/*`) — provision a headless IoT device with its own scoped NyxID API key, node id, and one-time refresh token.
 
 This is not the provider device-code OAuth flow above. Provider device-code connects a user's downstream OAuth provider credential. Device-code grant gives the device its own NyxID API key, node id, and one-time refresh token.

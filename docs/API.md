@@ -522,7 +522,82 @@ Poll no faster than the `interval` returned by `/request`. A `11202` response me
 | `11206` | `auth_device_rate_limited` | 429 | Endpoint rate limit was exceeded |
 | `11207` | `auth_device_user_code_invalid` | 400 | The first-party review UI supplied an invalid user code |
 
-`POST /api/v1/auth/device/preview` and `POST /api/v1/auth/device/approve` support the first-party browser review surface. Integrators should direct users to `verification_uri`; they should not call those UI endpoints. Approval requires a human session and rejects API-key, service-account, delegated, and relay credentials.
+#### POST /api/v1/auth/device/poll-web
+
+First-party browser delivery variant for the NyxID web login page. Integrators and desktop/CLI clients must continue using `/auth/device/poll`, which returns the token pair.
+
+**Auth:** None (the response establishes the browser session)
+
+```json
+{
+  "device_code": "nyx_adc_<opaque-secret>"
+}
+```
+
+On a successful approved claim, the endpoint atomically marks the request delivered, revokes the approval-created JWT session, creates a fresh browser session using the polling browser's IP and user agent, and returns:
+
+```json
+{ "ok": true }
+```
+
+The response sets the standard `nyx_session` cookie (`HttpOnly`, `SameSite=Lax`, `Path=/`, and the deployment's normal `Secure`/`Domain` settings). Access and refresh tokens are never returned in the body. Pending, denied, expired, already-delivered, and rate-limit outcomes use the same `11200`-`11207` error contract as `/poll`; a claim delivered through either variant makes the other variant return `11205`.
+
+#### POST /api/v1/auth/device/preview
+
+Fetch the non-mutating anti-phishing context shown by first-party review surfaces.
+
+**Auth:** None
+
+```json
+{
+  "user_code": "7KM2-RQ9D"
+}
+```
+
+**Response (200):**
+
+```json
+{
+  "client_label": "Desktop workstation",
+  "client_user_agent": "desktop-app/1.4",
+  "client_ip": "203.0.113.24",
+  "initiated_at": "2026-08-20T08:15:00Z",
+  "expires_at": "2026-08-20T08:25:00Z",
+  "status": "pending"
+}
+```
+
+`client_label` and `client_user_agent` are requester-supplied free text. `client_ip` is the server-resolved request address observed at `/request`; legacy rows return `null`. All auth-device rows expire after 10 minutes.
+
+#### POST /api/v1/auth/device/approve
+
+Atomically approve a pending request and prepare a first-party token pair for one poller.
+
+**Auth:** Human JWT session only
+
+```json
+{
+  "user_code": "7KM2-RQ9D"
+}
+```
+
+**Response (200):** `{ "ok": true }`
+
+#### POST /api/v1/auth/device/deny
+
+Atomically reject a pending request. No tokens are minted, and the requester's next poll returns `11204` immediately.
+
+**Auth:** Human JWT session only
+
+```json
+{
+  "user_code": "7KM2-RQ9D"
+}
+```
+
+**Response (200):** `{ "ok": true }`
+
+Approve and deny use the same pending-status guard, so exactly one wins a concurrent decision. API-key, service-account, delegated, and relay credentials are rejected before either decision handler runs. Integrators should direct users to `verification_uri`; these are first-party review endpoints.
 
 ---
 
@@ -4375,6 +4450,30 @@ before the request is loaded or claimed; a supplied empty or mismatched digest
 returns `exact_service_redemption_conflict`. For **nondelegated** callers
 omission remains accepted, and the server still re-resolves the catalog and
 revalidates the digest persisted in the approval binding.
+
+Redeem and observe also revalidate a producer-owned **execution-authority
+digest** persisted on the approval binding at create. It binds the resolved
+destination URL, auth method, credential identity plus `credential_epoch`,
+identity-injection config, default headers, proxy operation policy, and the
+configured node-binding set. A mismatch returns HTTP 200 with
+`state: "drifted"` and `failure_code: "execution_authority_drift"` and does
+not dispatch downstream. Catalog/shape drift still uses `catalog_drift`.
+Rows created before this field existed (`execution_authority_digest: null`)
+skip the new gate until they expire.
+
+| Redeem / observe outcome | `state` | `failure_code` | Downstream effect |
+|---|---|---|---|
+| Catalog / exact-view / operation identity changed | `drifted` | `catalog_drift` | None |
+| Destination, credential identity/epoch, injection, headers, policy, or configured node set changed | `drifted` | `execution_authority_drift` | None |
+| Selector gone / out of scope | `revoked` | `selector_revoked` | None |
+| Background OAuth token refresh (epoch unchanged) | `redeemed` | omitted | Exactly one |
+| URL changed away and back (ABA) | `redeemed` | omitted | Exactly one |
+
+The current implementation keeps `operation_generation` as caller bookkeeping
+for wire compatibility. Its producer-freshness rationale (live
+`endpoint_contract_digest` plus the execution-authority digest) is the
+implementation's proposed interpretation, not a ratified contract decision.
+It remains open.
 
 Existing stored rows with no exact-view digest remain compatible for
 nondelegated callers and continue to use the other live fences. A delegated

@@ -1,7 +1,7 @@
 import * as Notifications from "expo-notifications";
 import * as SecureStore from "expo-secure-store";
 import * as TaskManager from "expo-task-manager";
-import { Platform } from "react-native";
+import { AppState, Platform } from "react-native";
 import { mobileApi } from "../api/mobileApi";
 
 type PushActivateResult = {
@@ -45,21 +45,107 @@ let isBootstrapped = false;
 const NOTIFICATION_DEDUPE_WINDOW_MS = 2000;
 const lastShownAtByNotificationKey = new Map<string, number>();
 
+/**
+ * Behaviour returned when a notification must not surface as an OS alert.
+ * Also keeps it out of Notification Center: an approval the user has already
+ * seen (or acted on) in-app should not linger in the shade as a stale entry.
+ */
+const SUPPRESS_OS_NOTIFICATION = {
+  shouldShowAlert: false,
+  shouldShowBanner: false,
+  shouldShowList: false,
+  shouldPlaySound: false,
+  shouldSetBadge: false,
+} as const;
+
+const PRESENT_OS_NOTIFICATION = {
+  shouldShowAlert: true,
+  shouldShowBanner: true,
+  shouldShowList: true,
+  shouldPlaySound: true,
+  shouldSetBadge: false,
+} as const;
+
+/**
+ * Notification content that arrived while the app was in front of the user.
+ * The OS banner for it was suppressed, so the app owes them an in-app
+ * equivalent -- the app shell renders it through `ToastOverlay`.
+ */
+export type ForegroundNotification = {
+  title: string | null;
+  body: string | null;
+  challengeId: string | null;
+  type: PushSyncSignalType | null;
+};
+
+type ForegroundNotificationHandler = (notification: ForegroundNotification) => void;
+
+let foregroundNotificationHandler: ForegroundNotificationHandler | null = null;
+
+/**
+ * Registered by the app shell. Unlike `setPushSyncHandler`, there is no
+ * persist-for-later fallback: an in-app toast is only meaningful while the
+ * app is actually on screen, and the cache refresh + Activity list already
+ * cover the "user comes back later" case.
+ */
+export function setForegroundNotificationHandler(
+  handler: ForegroundNotificationHandler
+): () => void {
+  foregroundNotificationHandler = handler;
+  return () => {
+    if (foregroundNotificationHandler === handler) {
+      foregroundNotificationHandler = null;
+    }
+  };
+}
+
+// The approval the user currently has open (detail sheet or detail screen).
+// Set by those screens; `null` whenever nothing specific is being viewed.
+let activeChallengeId: string | null = null;
+
+export function setActiveChallengeId(challengeId: string | null): void {
+  activeChallengeId = challengeId;
+}
+
+function pruneNotificationDedupeKeys(now: number): void {
+  for (const [key, shownAt] of lastShownAtByNotificationKey) {
+    if (now - shownAt >= NOTIFICATION_DEDUPE_WINDOW_MS) {
+      lastShownAtByNotificationKey.delete(key);
+    }
+  }
+}
+
+/**
+ * Decide whether a notification arriving right now should be shown by the OS.
+ *
+ * `handleNotification` is only consulted while the JS runtime is live -- in
+ * practice, while the app is foregrounded. Background and killed delivery is
+ * rendered by the OS without asking us, so nothing here can suppress those.
+ */
 function configureNotificationHandler() {
   if (isNotificationHandlerConfigured) return;
 
   Notifications.setNotificationHandler({
     handleNotification: async (notification) => {
       const content = notification.request.content;
+
+      // Data-only pushes carry no user-visible copy; showing them yields an
+      // empty alert.
       const isSilent = !content.title && !content.body;
       if (isSilent) {
-        return {
-          shouldShowAlert: false,
-          shouldShowBanner: false,
-          shouldShowList: false,
-          shouldPlaySound: false,
-          shouldSetBadge: false,
-        };
+        return SUPPRESS_OS_NOTIFICATION;
+      }
+
+      // The app is open and in front of the user. An OS banner here would
+      // cover the very screen that is already reacting to this event (the
+      // Activity list refreshes off the same push). Suppress it and let the
+      // in-app toast present it instead, which is also what the platform
+      // conventions expect. Note this deliberately tests `active` and not
+      // merely "not background": during a transition (`inactive` -- app
+      // switcher, Control Centre pulled down, incoming call) the user is not
+      // looking at our UI, so the OS banner is still the right surface.
+      if (AppState.currentState === "active") {
+        return SUPPRESS_OS_NOTIFICATION;
       }
 
       const signal = parsePushSyncSignalFromData(content.data, "foreground");
@@ -71,27 +157,46 @@ function configureNotificationHandler() {
       const now = Date.now();
       const lastShownAt = lastShownAtByNotificationKey.get(notificationKey);
       if (lastShownAt && now - lastShownAt < NOTIFICATION_DEDUPE_WINDOW_MS) {
-        return {
-          shouldShowAlert: false,
-          shouldShowBanner: false,
-          shouldShowList: false,
-          shouldPlaySound: false,
-          shouldSetBadge: false,
-        };
+        return SUPPRESS_OS_NOTIFICATION;
       }
+      pruneNotificationDedupeKeys(now);
       lastShownAtByNotificationKey.set(notificationKey, now);
 
-      return {
-        shouldShowAlert: true,
-        shouldShowBanner: true,
-        shouldShowList: true,
-        shouldPlaySound: true,
-        shouldSetBadge: false,
-      };
+      return PRESENT_OS_NOTIFICATION;
     },
   });
 
   isNotificationHandlerConfigured = true;
+}
+
+/**
+ * Stand-in for the OS banner we suppressed above. Called for every
+ * notification received while the runtime is live; bails out unless the app
+ * really is on screen, so a backgrounded-but-live runtime does not end up
+ * showing both an OS banner and an in-app one.
+ */
+function presentForegroundNotification(
+  content: Notifications.NotificationContent,
+  signal: PushSyncSignal | null
+): void {
+  if (AppState.currentState !== "active") return;
+
+  const title = asNonEmptyString(content.title);
+  const body = asNonEmptyString(content.body);
+  if (!title && !body) return;
+
+  // The user already has this exact approval open. Announcing it on top of
+  // the screen they are acting on is pure noise.
+  if (signal && activeChallengeId && signal.challengeId === activeChallengeId) {
+    return;
+  }
+
+  foregroundNotificationHandler?.({
+    title,
+    body,
+    challengeId: signal?.challengeId ?? null,
+    type: signal?.type ?? null,
+  });
 }
 
 /**
@@ -408,12 +513,16 @@ export async function initializeNotificationRuntime(): Promise<() => void> {
 
     foregroundSubscription = Notifications.addNotificationReceivedListener(
       (notification) => {
-        const signal = parsePushSyncSignalFromData(
-          notification.request.content.data,
-          "foreground"
-        );
-        if (!signal) return;
-        void emitOrPersistPushSyncSignal(signal);
+        const content = notification.request.content;
+        const signal = parsePushSyncSignalFromData(content.data, "foreground");
+
+        if (signal) {
+          void emitOrPersistPushSyncSignal(signal);
+        }
+
+        // Runs for non-approval pushes too -- those have no sync signal but
+        // still deserve the in-app toast that replaced their OS one.
+        presentForegroundNotification(content, signal);
       }
     );
 

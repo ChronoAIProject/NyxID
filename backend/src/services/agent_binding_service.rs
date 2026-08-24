@@ -678,6 +678,7 @@ mod tests {
             error_message: None,
             source: None,
             source_id: None,
+            credential_epoch: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

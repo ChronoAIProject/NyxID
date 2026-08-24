@@ -3,6 +3,7 @@ import { z } from "zod";
 export const AUTH_DEVICE_ERROR_MESSAGES: Record<number, string> = {
   11200: "That code is no longer valid. Run `nyxid login --device` again.",
   11201: "This code has expired.",
+  11204: "This login request was already denied.",
   11205: "This code was already used.",
   11206: "Too many attempts. Try again in a few minutes.",
   11207: "That code is no longer valid. Run `nyxid login --device` again.",
@@ -17,13 +18,44 @@ export const approveBodySchema = z.object({
   user_code: userCodeSchema,
 });
 
+export const denyBodySchema = z.object({
+  user_code: userCodeSchema,
+});
+
 export const approveResponseSchema = z.object({
+  ok: z.literal(true),
+});
+
+export const requestBodySchema = z.object({
+  client_label: z.string().trim().min(1).max(128),
+  client_user_agent: z.string().trim().min(1).max(512),
+});
+
+export const requestResponseSchema = z.object({
+  device_code: z.string().min(1),
+  user_code: z.string().min(1),
+  verification_uri: z.string().url(),
+  verification_uri_complete: z.string().url(),
+  expires_in: z.number().int().positive(),
+  interval: z.number().int().positive(),
+});
+
+export const pollBodySchema = z.object({
+  device_code: z.string().min(1),
+});
+
+export const pollWebResponseSchema = z.object({
   ok: z.literal(true),
 });
 
 export const previewResponseSchema = z.object({
   client_label: z.string().nullable(),
   client_user_agent: z.string().nullable(),
+  client_ip: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
   initiated_at: z.string().datetime(),
   expires_at: z.string().datetime(),
   status: z.enum(["pending", "approved", "denied", "expired", "delivered"]),
@@ -37,6 +69,11 @@ export const errorEnvelopeSchema = z.object({
 
 export type ApproveAuthDeviceBody = z.output<typeof approveBodySchema>;
 export type ApproveAuthDeviceResponse = z.infer<typeof approveResponseSchema>;
+export type DenyAuthDeviceBody = z.output<typeof denyBodySchema>;
+export type AuthDeviceRequestBody = z.output<typeof requestBodySchema>;
+export type AuthDeviceRequestResponse = z.infer<typeof requestResponseSchema>;
+export type AuthDevicePollBody = z.output<typeof pollBodySchema>;
+export type AuthDevicePollWebResponse = z.infer<typeof pollWebResponseSchema>;
 export type PreviewAuthDeviceResponse = z.infer<typeof previewResponseSchema>;
 export type AuthDeviceErrorEnvelope = z.infer<typeof errorEnvelopeSchema>;
 
@@ -79,4 +116,20 @@ export function friendlyAuthDeviceErrorMessage(error: unknown): string {
   return typeof maybeApiError.message === "string"
     ? maybeApiError.message
     : "Device login failed.";
+}
+
+export function friendlyAuthDeviceStatusMessage(
+  status: PreviewAuthDeviceResponse["status"],
+): string | null {
+  switch (status) {
+    case "pending":
+      return null;
+    case "denied":
+      return AUTH_DEVICE_ERROR_MESSAGES[11204] ?? null;
+    case "expired":
+      return AUTH_DEVICE_ERROR_MESSAGES[11201] ?? null;
+    case "approved":
+    case "delivered":
+      return AUTH_DEVICE_ERROR_MESSAGES[11205] ?? null;
+  }
 }

@@ -316,6 +316,22 @@ pub enum AssistantChatCommand {
     StepSkip(StepSkipCommand),
 }
 
+impl AssistantChatCommand {
+    pub fn conversation_id(&self) -> Option<&str> {
+        match self {
+            Self::Text(command) => command.conversation_id.as_deref(),
+            Self::InputResolve(command) => Some(&command.conversation_id),
+            Self::ActionContinue(command) => Some(&command.conversation_id),
+            Self::ApprovalResolve(command) => Some(&command.conversation_id),
+            Self::PlanResolve(command) => Some(&command.conversation_id),
+            Self::TaskStop(command) => Some(&command.conversation_id),
+            Self::TaskSteer(command) => Some(&command.conversation_id),
+            Self::StepRetry(command) => Some(&command.conversation_id),
+            Self::StepSkip(command) => Some(&command.conversation_id),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextChatCommand {
     pub prompt: String,

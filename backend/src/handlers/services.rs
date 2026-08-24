@@ -17,7 +17,7 @@ use crate::models::downstream_service::{
     ProxyOperationPolicy, ServiceCapabilities, TokenExchangeConfig,
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
-use crate::models::service_billing::ServiceBilling;
+use crate::models::service_billing::{BillingMetric, ServiceBilling};
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::{AuthUser, SERVICE_DELEGATION_SCOPES};
@@ -176,6 +176,9 @@ pub struct ServiceResponse {
     pub capabilities: Option<ServiceCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billing: Option<ServiceBilling>,
+    /// Resolved allowance and platform metering unit after applying the
+    /// service's explicit billing override or protocol/slug heuristic.
+    pub effective_platform_metric: BillingMetric,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -708,7 +711,7 @@ pub async fn create_service(
     State(state): State<AppState>,
     auth_user: AuthUser,
     tele: TelemetryContext,
-    Json(body): Json<CreateServiceRequest>,
+    Json(mut body): Json<CreateServiceRequest>,
 ) -> AppResult<Json<ServiceResponse>> {
     require_admin(&state, &auth_user).await?;
 
@@ -1058,6 +1061,9 @@ pub async fn create_service(
         .clone()
         .map(crate::services::proxy_authorization::normalize_policy)
         .transpose()?;
+    if let Some(billing) = body.billing.as_mut() {
+        crate::services::billing::pricing::normalize_platform_pricing(&slug, None, billing)?;
+    }
     validate_service_billing(body.billing.as_ref())?;
 
     let new_service = DownstreamService {
@@ -1118,6 +1124,26 @@ pub async fn create_service(
         .insert_one(&new_service)
         .await?;
 
+    if new_service
+        .billing
+        .as_ref()
+        .and_then(|billing| billing.platform_pricing.as_ref())
+        .is_some()
+    {
+        state.billing.sync_service_price(&new_service).await?;
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "service_platform_price_set",
+            Some(serde_json::json!({
+                "service_id": &id,
+                "metric_code": new_service.billing.as_ref()
+                    .and_then(|billing| billing.platform_pricing.as_ref())
+                    .map(|pricing| pricing.lago_metric_code.as_str()),
+            })),
+        );
+    }
+
     tracing::info!(service_id = %id, name = %body.name, created_by = %auth_user.user_id, "Service created");
 
     // CR-1: Audit log for service creation
@@ -1152,7 +1178,8 @@ pub async fn create_service(
     // Brand-new catalog row -- no `UserService` can reference it yet,
     // so the viewer-routing fields default to "no binding" without a
     // lookup query.
-    Ok(Json(service_to_response_with_viewer(new_service, None)))
+    let created = fetch_service(&state, &id).await?;
+    Ok(Json(service_to_response_with_viewer(created, None)))
 }
 
 /// DELETE /api/v1/services/:service_id
@@ -1313,10 +1340,38 @@ pub async fn update_service(
     auth_user: AuthUser,
     tele: TelemetryContext,
     Path(service_id): Path<String>,
-    Json(body): Json<UpdateServiceRequest>,
+    Json(mut body): Json<UpdateServiceRequest>,
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    let mut platform_price_changed = false;
+    if let Some(billing) = body.billing.as_mut() {
+        let current_pricing = service
+            .billing
+            .as_ref()
+            .and_then(|current| current.platform_pricing.as_ref());
+        platform_price_changed = billing
+            .platform_pricing
+            .as_ref()
+            .map(|pricing| pricing.credits_per_unit.trim())
+            != current_pricing.map(|pricing| pricing.credits_per_unit.as_str());
+        if platform_price_changed {
+            require_admin(&state, &auth_user).await?;
+            crate::services::billing::pricing::normalize_platform_pricing(
+                &service.slug,
+                service.billing.as_ref(),
+                billing,
+            )?;
+        } else {
+            // Sync state and Lago metric identity are server-owned. Preserve
+            // them when ordinary service edits echo an unchanged price.
+            billing.platform_pricing = current_pricing.cloned();
+            billing.platform_pricing_cleanup_metric_code = service
+                .billing
+                .as_ref()
+                .and_then(|current| current.platform_pricing_cleanup_metric_code.clone());
+        }
+    }
 
     // Build the $set document with only provided fields
     let mut set_doc = doc! {};
@@ -1631,6 +1686,8 @@ pub async fn update_service(
         let next_billing = body.billing.clone().filter(|billing| {
             billing.platform_billable
                 || billing.platform_metric.is_some()
+                || billing.platform_pricing.is_some()
+                || billing.platform_pricing_cleanup_metric_code.is_some()
                 || billing.resale_billable
                 || billing.lago_resale_metric_code.is_some()
         });
@@ -1925,6 +1982,31 @@ pub async fn update_service(
                 AppError::NotFound("Service not found".to_string())
             }
         })?;
+
+    if platform_price_changed {
+        let has_price = committed_service
+            .billing
+            .as_ref()
+            .and_then(|billing| billing.platform_pricing.as_ref())
+            .is_some();
+        state.billing.sync_service_price(&committed_service).await?;
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            if has_price {
+                "service_platform_price_set"
+            } else {
+                "service_platform_price_cleared"
+            },
+            Some(serde_json::json!({
+                "service_id": &service_id,
+                "metric_code": committed_service.billing.as_ref()
+                    .and_then(|billing| billing.platform_pricing.as_ref()
+                        .map(|pricing| pricing.lago_metric_code.as_str())
+                        .or(billing.platform_pricing_cleanup_metric_code.as_deref())),
+            })),
+        );
+    }
 
     if identity_changed {
         catalog_identity_service::propagate_catalog_update(
@@ -2353,8 +2435,9 @@ mod tests {
         derive_ssh_service_category, derive_visibility, identity_update_fields,
         normalize_service_type, resolve_spec_url_update, resync_service_identity, update_service,
     };
-    use crate::errors::AppError;
+    use crate::errors::{AppError, AppResult};
     use crate::models::audit_log::COLLECTION_NAME as AUDIT_LOGS;
+    use crate::models::billing_rate_cache::BillingRateCache;
     use crate::models::catalog_identity_reconciliation::{
         CatalogIdentityReconciliation, CatalogIdentityReconciliationStatus,
         FIELD_NAME as RECONCILIATION_FIELD,
@@ -2363,17 +2446,96 @@ mod tests {
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
     };
+    use crate::models::service_billing::{
+        BillingMetric, PricingSyncStatus, ServiceBilling, ServicePlatformPricing,
+    };
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+    use crate::services::billing::lago_client::{
+        Entitlement, LagoAck, LagoApi, LagoError, LagoEvent, LagoUsage, OwnerProvisionInput,
+    };
+    use crate::services::billing::reconcile::BillingReconciler;
     use crate::services::role_service;
     use crate::test_utils::{
-        connect_test_database, test_app_state, test_auth_user, test_user, test_user_service,
+        connect_test_database, test_app_config, test_app_state, test_app_state_with_config,
+        test_auth_user, test_user, test_user_service,
     };
+    use async_trait::async_trait;
     use axum::Json;
     use axum::extract::{Path, State};
     use futures::TryStreamExt;
     use mongodb::bson::{self, doc};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
+
+    #[derive(Default)]
+    struct PriceRemovalLago {
+        removals: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl LagoApi for PriceRemovalLago {
+        async fn ensure_customer(&self, owner: &OwnerProvisionInput) -> AppResult<String> {
+            Ok(owner.external_customer_id.clone())
+        }
+
+        async fn ensure_subscription(
+            &self,
+            customer_id: &str,
+            plan_code: &str,
+        ) -> AppResult<String> {
+            Ok(format!("{customer_id}:{plan_code}"))
+        }
+
+        async fn record_event(&self, event: &LagoEvent) -> Result<LagoAck, LagoError> {
+            Ok(LagoAck {
+                transaction_id: event.transaction_id.clone(),
+            })
+        }
+
+        async fn record_events_batch(
+            &self,
+            events: &[LagoEvent],
+        ) -> Result<Vec<LagoAck>, LagoError> {
+            Ok(events
+                .iter()
+                .map(|event| LagoAck {
+                    transaction_id: event.transaction_id.clone(),
+                })
+                .collect())
+        }
+
+        async fn current_usage(
+            &self,
+            customer_id: &str,
+            subscription_id: &str,
+        ) -> AppResult<LagoUsage> {
+            Ok(LagoUsage {
+                customer_id: customer_id.to_string(),
+                subscription_id: subscription_id.to_string(),
+                raw: serde_json::json!({}),
+            })
+        }
+
+        async fn wallet_balance(&self, _customer_id: &str) -> AppResult<i64> {
+            Ok(0)
+        }
+
+        async fn entitlements(&self, _subscription_id: &str) -> AppResult<Vec<Entitlement>> {
+            Ok(Vec::new())
+        }
+
+        async fn remove_standard_charge(
+            &self,
+            plan_code: &str,
+            metric_code: &str,
+        ) -> AppResult<()> {
+            assert_eq!(plan_code, "standard");
+            assert_eq!(metric_code, "platform_svc_cleanup-only");
+            self.removals.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
 
     async fn seed_user(db: &mongodb::Database, is_admin: bool) -> String {
         role_service::seed_system_roles(db)
@@ -2509,12 +2671,110 @@ mod tests {
         assert_eq!(response.name, "Admin Service");
         assert_eq!(response.slug, "admin-service");
         assert_eq!(response.visibility, "public");
+        assert_eq!(response.effective_platform_metric, BillingMetric::Requests);
         let service_count = db
             .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .count_documents(doc! { "_id": &response.id })
             .await
             .expect("count created downstream service");
         assert_eq!(service_count, 1);
+    }
+
+    #[tokio::test]
+    async fn clearing_only_price_retains_cleanup_marker_until_reconcile_removes_charge() {
+        let Some(db) = connect_test_database("h_services_price_cleanup_marker").await else {
+            return;
+        };
+        let admin_id = seed_user(&db, true).await;
+        let mut config = test_app_config();
+        config.billing_enabled = true;
+        config.lago_plan_code = "standard".to_string();
+        let state = test_app_state_with_config(db.clone(), config.clone());
+        let metric_code = "platform_svc_cleanup-only";
+        let mut service = dummy_service();
+        service.id = "cleanup-only-service".to_string();
+        service.slug = "cleanup-only".to_string();
+        service.created_by = admin_id.clone();
+        service.billing = Some(ServiceBilling {
+            platform_pricing: Some(ServicePlatformPricing {
+                credits_per_unit: "0.125".to_string(),
+                lago_metric_code: metric_code.to_string(),
+                sync_status: PricingSyncStatus::Synced,
+                sync_error: None,
+            }),
+            ..Default::default()
+        });
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert priced service");
+        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .insert_one(BillingRateCache {
+                id: BillingRateCache::cache_id(metric_code, None),
+                lago_metric_code: metric_code.to_string(),
+                model: None,
+                credits_per_unit_micros: 125_000,
+                synced_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert service rate");
+
+        let body: UpdateServiceRequest =
+            serde_json::from_value(serde_json::json!({ "billing": {} }))
+                .expect("parse price clear");
+        let Json(_) = update_service(
+            State(state),
+            test_auth_user(&admin_id),
+            crate::telemetry::TelemetryContext::default(),
+            Path(service.id.clone()),
+            Json(body),
+        )
+        .await
+        .expect("clear service price while Lago is unavailable");
+
+        let pending = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": &service.id })
+            .await
+            .expect("find pending cleanup service")
+            .expect("pending cleanup service exists");
+        assert_eq!(
+            pending
+                .billing
+                .as_ref()
+                .and_then(|billing| billing.platform_pricing_cleanup_metric_code.as_deref()),
+            Some(metric_code),
+            "an otherwise-empty billing block must retain its cleanup marker"
+        );
+
+        let lago = std::sync::Arc::new(PriceRemovalLago::default());
+        let stats =
+            BillingReconciler::new(db.clone(), Some(lago.clone()), std::sync::Arc::new(config))
+                .run_once()
+                .await
+                .expect("reconcile pending price removal");
+
+        let cleaned = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": &service.id })
+            .await
+            .expect("find cleaned service")
+            .expect("cleaned service exists");
+        assert_eq!(stats.service_price_syncs, 1);
+        assert_eq!(lago.removals.load(Ordering::SeqCst), 1);
+        assert!(
+            cleaned
+                .billing
+                .as_ref()
+                .is_some_and(|billing| billing.platform_pricing_cleanup_metric_code.is_none())
+        );
+        assert_eq!(
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME,)
+                .count_documents(doc! { "lago_metric_code": metric_code })
+                .await
+                .expect("count stale rates"),
+            0
+        );
     }
 
     #[test]

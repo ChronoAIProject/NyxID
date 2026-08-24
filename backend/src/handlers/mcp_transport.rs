@@ -385,6 +385,7 @@ fn mcp_extract_user_agent(headers: &HeaderMap) -> Option<String> {
 /// access-token TTL without forcing re-authentication.
 ///
 /// On failure returns an MCP-formatted 401 response with `WWW-Authenticate`.
+#[allow(clippy::result_large_err)]
 async fn authenticate_mcp(
     state: &AppState,
     headers: &HeaderMap,
@@ -560,6 +561,7 @@ async fn authenticate_mcp(
 }
 
 /// Check that a user account exists and is active.
+#[allow(clippy::result_large_err)]
 async fn verify_user_active(state: &AppState, user_id: String) -> Result<String, Response> {
     let user = state
         .db
@@ -575,6 +577,7 @@ async fn verify_user_active(state: &AppState, user_id: String) -> Result<String,
 }
 
 /// Check that a service account exists and is active.
+#[allow(clippy::result_large_err)]
 async fn verify_service_account_active(
     state: &AppState,
     sa_id: String,

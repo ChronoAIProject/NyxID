@@ -85,8 +85,10 @@ type ScenarioActionComponent =
 
 export function AssistantHeaderActions({
   scenarioAction = MockScenariosAction,
+  activeConversationId = null,
 }: {
   readonly scenarioAction?: ScenarioActionComponent | null;
+  readonly activeConversationId?: string | null;
 } = {}) {
   const ScenarioAction = scenarioAction;
   return (
@@ -96,7 +98,7 @@ export function AssistantHeaderActions({
           <ScenarioAction />
         </Suspense>
       ) : null}
-      <AssistantWireLogAction />
+      <AssistantWireLogAction activeConversationId={activeConversationId} />
     </>
   );
 }
@@ -732,7 +734,7 @@ export function AssistantPage({
       <AssistantShell
         title={title}
         sidebar={sidebar}
-        headerActions={<AssistantHeaderActions />}
+        headerActions={<AssistantHeaderActions activeConversationId={null} />}
       >
         {view === "plugins" ? <PluginsView /> : <ApprovalsView />}
       </AssistantShell>
@@ -743,7 +745,13 @@ export function AssistantPage({
     <AssistantShell
       title={title}
       sidebar={sidebar}
-      headerActions={<AssistantHeaderActions />}
+      headerActions={
+        <AssistantHeaderActions
+          activeConversationId={
+            history.data?.conversation.id ?? selectedId ?? null
+          }
+        />
+      }
     >
       <div className="relative flex h-full min-h-0 flex-col bg-background">
         {directChatEnabled ? (

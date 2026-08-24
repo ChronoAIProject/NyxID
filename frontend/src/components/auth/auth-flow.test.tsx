@@ -109,8 +109,8 @@ describe("AuthFlow — login", () => {
       .spyOn(window.location, "assign")
       .mockImplementation(() => {});
     const user = userEvent.setup();
-    // Open-redirect guard: an off-origin return_to must NOT be assigned.
-    render(<AuthFlow initialPanel={0} returnTo="https://evil.example/keys" />);
+    // Open-redirect guard: a protocol-relative return_to must NOT be assigned.
+    render(<AuthFlow initialPanel={0} returnTo="//evil.example/keys" />);
 
     await fillLoginAndSubmit(user);
 

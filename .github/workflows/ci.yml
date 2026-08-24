@@ -65,8 +65,10 @@ jobs:
       cli: ${{ steps.filter.outputs.cli }}
       rust: ${{ steps.filter.outputs.rust }}
       frontend: ${{ steps.filter.outputs.frontend }}
+      mobile: ${{ steps.filter.outputs.mobile }}
       sdk: ${{ steps.filter.outputs.sdk }}
       wizard: ${{ steps.filter.outputs.wizard }}
+      cursor_plugin: ${{ steps.filter.outputs.cursor_plugin }}
       ci: ${{ steps.filter.outputs.ci }}
     steps:
       - uses: actions/checkout@v6
@@ -125,6 +127,9 @@ jobs:
             frontend:
               - 'frontend/**'
               - '.node-version'
+            mobile:
+              - 'mobile/**'
+              - '.node-version'
             sdk:
               - 'sdk/**'
               - '.node-version'
@@ -142,12 +147,29 @@ jobs:
               - '.node-version'
               - 'cli/src/wizard/**'
               - 'cli/tests/wizard_bundle_freshness.rs'
+            cursor_plugin:
+              - 'integrations/cursor-plugin/**'
+              - '.cursor-plugin/**'
+              - 'scripts/validate-cursor-plugin.py'
             # Any workflow change forces a full run -- stops a broken
             # publish-gate or release pipeline from sneaking through under
             # path filtering.
             ci:
               - '.github/workflows/**'
               - '.github/actions/**'
+
+  # ---------------------------------------------------------------------------
+  # Cursor plugin: manifest, component, MCP variable, and marketplace checks.
+  # ---------------------------------------------------------------------------
+  cursor-plugin-validate:
+    name: Cursor Plugin Validate
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.cursor_plugin == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate Cursor plugin
+        run: python3 scripts/validate-cursor-plugin.py
 
   # ---------------------------------------------------------------------------
   # Rust: format check
@@ -338,6 +360,32 @@ jobs:
       - run: npm run lint
       - run: npm run test
       - run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # Mobile: committed native state, unit tests, and type-check
+  # ---------------------------------------------------------------------------
+  mobile:
+    name: Mobile
+    needs: changes
+    if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.mobile == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.17.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          cache-dependency-path: mobile/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm check:native-sync
+      - run: pnpm test
+      - run: pnpm typecheck
 
   # ---------------------------------------------------------------------------
   # CLI wizard bundle: source-closure freshness check.
@@ -759,6 +807,7 @@ jobs:
     if: always()
     needs:
       - changes
+      - cursor-plugin-validate
       - rust-fmt
       - rust-clippy
       - backend-test
@@ -780,6 +829,7 @@ jobs:
           # coverage drops below the enforced threshold.
           RESULTS: |
             changes=${{ needs.changes.result }}
+            cursor-plugin-validate=${{ needs.cursor-plugin-validate.result }}
             rust-fmt=${{ needs.rust-fmt.result }}
             rust-clippy=${{ needs.rust-clippy.result }}
             backend-test=${{ needs.backend-test.result }}

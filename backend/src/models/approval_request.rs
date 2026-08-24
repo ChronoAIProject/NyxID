@@ -57,6 +57,11 @@ pub struct ExactServiceApprovalBinding {
     pub operation_generation: i64,
     pub effect_idempotency_key: String,
     pub arguments: serde_json::Value,
+    /// Producer-owned digest of the resolved execution inputs at create.
+    /// `None` on legacy rows created before this field existed; redeem
+    /// skips the execution-authority gate for those rows.
+    #[serde(default)]
+    pub execution_authority_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redemption: Option<ExactServiceApprovalRedemption>,
 }
@@ -303,12 +308,37 @@ mod tests {
             operation_generation: 1,
             effect_idempotency_key: "effect".to_string(),
             arguments: serde_json::json!({}),
+            execution_authority_digest: None,
             redemption: None,
         };
         let mut doc = bson::to_document(&binding).expect("serialize exact binding");
         doc.remove("exact_view_digest");
         binding = bson::from_document(doc).expect("deserialize legacy exact binding");
         assert!(binding.exact_view_digest.is_none());
+    }
+
+    #[test]
+    fn missing_execution_authority_digest_defaults_to_none_for_legacy_rows() {
+        let mut binding = ExactServiceApprovalBinding {
+            request_key: "request-key".to_string(),
+            actor_user_id: "actor".to_string(),
+            user_service_id: "service".to_string(),
+            endpoint_id: "endpoint".to_string(),
+            catalog_digest: "sha256:catalog".to_string(),
+            exact_view_digest: None,
+            endpoint_contract_digest: "sha256:endpoint".to_string(),
+            operation_digest: "sha256:operation".to_string(),
+            operation_id: "operation".to_string(),
+            operation_generation: 1,
+            effect_idempotency_key: "effect".to_string(),
+            arguments: serde_json::json!({}),
+            execution_authority_digest: Some("sha256:exec".to_string()),
+            redemption: None,
+        };
+        let mut doc = bson::to_document(&binding).expect("serialize exact binding");
+        doc.remove("execution_authority_digest");
+        binding = bson::from_document(doc).expect("deserialize legacy execution-authority binding");
+        assert!(binding.execution_authority_digest.is_none());
     }
 
     #[test]

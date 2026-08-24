@@ -8,7 +8,9 @@
     "android": "APP_ENV=dev expo run:android",
     "ios": "APP_ENV=dev expo run:ios",
     "web": "APP_ENV=dev expo start --web",
+    "test": "tsx --test \"src/**/*.test.ts\"",
     "typecheck": "tsc --noEmit",
+    "check:native-sync": "node scripts/check-native-sync.js",
     "build:ios": "APP_ENV=prod node scripts/build-ios.js",
     "build:ios:dev": "APP_ENV=dev node scripts/build-ios.js",
     "build:android": "APP_ENV=prod node scripts/build-android.js",
@@ -54,6 +56,7 @@
     "@tanstack/react-query": "^5.96.2",
     "expo": "~55.0.12",
     "expo-blur": "~55.0.13",
+    "expo-camera": "~55.0.22",
     "expo-clipboard": "~55.0.12",
     "expo-dev-client": "~55.0.23",
     "expo-font": "~55.0.6",
@@ -79,9 +82,11 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@expo/plist": "^0.5.2",
     "@types/react": "~19.2.14",
     "dotenv": "^16.4.5",
     "googleapis": "^144.0.0",
+    "tsx": "^4.23.12",
     "typescript": "~5.9.3"
   }
 }

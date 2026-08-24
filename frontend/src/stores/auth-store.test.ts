@@ -175,8 +175,13 @@ describe("logout", () => {
       .getState()
       .saveDraft("u1", "conv:conversation-private", "Private draft");
     useAssistantWireLogStore.getState().setCaptureEnabled(true);
-    useAssistantWireLogStore.getState().recordExchange(
-      [
+    useAssistantWireLogStore.getState().recordExchange({
+      kind: "sse",
+      status: 200,
+      conversationId: "conversation-private",
+      wireLogId: null,
+      label: "POST /assistant/chat",
+      envelopes: [
         {
           degraded: false,
           method: "POST",
@@ -195,9 +200,7 @@ describe("logout", () => {
           upstreamOutcome: "no_response",
         },
       ],
-      "sse",
-      200,
-    );
+    });
     await useAuthStore.getState().logout();
 
     const state = useAuthStore.getState();

@@ -1,3 +1,5 @@
+import type { BillingMetric } from "@/schemas/billing";
+
 /// Resolved platform role for a user. `admin` is full read+write,
 /// `operator` is read-only platform admin (issue #715), `user` is a
 /// regular user with no platform admin access.
@@ -243,6 +245,8 @@ export interface DownstreamService {
   readonly issues_url?: string | null;
   readonly capabilities?: ServiceCapabilities | null;
   readonly billing?: ServiceBilling | null;
+  /** Backend-resolved unit used by service allowances and platform metering. */
+  readonly effective_platform_metric: BillingMetric;
   readonly auth_notes?: string | null;
   readonly known_limitations?: string | null;
   readonly required_permissions?: readonly string[] | null;
@@ -339,9 +343,18 @@ export interface ServiceBilling {
   readonly platform_billable?: boolean;
   /** Admin-selected metering unit; unset falls back to the slug heuristic. */
   readonly platform_metric?: string;
+  /** NyxID-authored price and its synchronization state in Lago. */
+  readonly platform_pricing?: ServicePlatformPricing | null;
   readonly resale_billable?: boolean;
   readonly resale_metric?: string;
   readonly lago_resale_metric_code?: string | null;
+}
+
+export interface ServicePlatformPricing {
+  readonly credits_per_unit: string;
+  readonly lago_metric_code?: string;
+  readonly sync_status?: "pending" | "synced" | "failed";
+  readonly sync_error?: string | null;
 }
 
 export interface SshServiceConfig {

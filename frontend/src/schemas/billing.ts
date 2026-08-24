@@ -1,12 +1,26 @@
 import { z } from "zod";
 
-export const BILLING_USAGE_PERIODS = ["24h", "7d", "30d", "90d", "all"] as const;
+export const BILLING_USAGE_PERIODS = [
+  "24h",
+  "7d",
+  "30d",
+  "90d",
+  "all",
+] as const;
 
 export type BillingUsagePeriod = (typeof BILLING_USAGE_PERIODS)[number];
 
 export const billingMetricSchema = z.enum(["tokens", "requests", "bytes"]);
-export const billingPlanKindSchema = z.enum(["prepaid", "subscription", "hybrid"]);
-export const billingCollectionStateSchema = z.enum(["good", "past_due", "suspended"]);
+export const billingPlanKindSchema = z.enum([
+  "prepaid",
+  "subscription",
+  "hybrid",
+]);
+export const billingCollectionStateSchema = z.enum([
+  "good",
+  "past_due",
+  "suspended",
+]);
 export const billingTopUpStatusSchema = z.enum([
   "pending",
   "checkout_created",
@@ -71,6 +85,7 @@ export const billingWalletResponseSchema = z.object({
   balance_credits: z.number().int(),
   reserved_credits: z.number().int(),
   pending_lago_debits: z.number().int(),
+  pending_topup_expiry_credits: z.number().int().nonnegative().default(0),
   available_credits: z.number().int(),
   available_with_overdraft_credits: z.number().int(),
   has_payment_instrument: z.boolean(),
@@ -109,7 +124,9 @@ export const topUpBillingResponseSchema = z.object({
 
 export type BillingMetric = z.infer<typeof billingMetricSchema>;
 export type BillingPlanKind = z.infer<typeof billingPlanKindSchema>;
-export type BillingCollectionState = z.infer<typeof billingCollectionStateSchema>;
+export type BillingCollectionState = z.infer<
+  typeof billingCollectionStateSchema
+>;
 export type BillingTopUpStatus = z.infer<typeof billingTopUpStatusSchema>;
 export type BillingReadOnlyBlock = z.infer<typeof billingReadOnlyBlockSchema>;
 export type BillingTokenBreakdown = z.infer<typeof billingTokenBreakdownSchema>;
@@ -125,6 +142,10 @@ export const topUpHistoryEntrySchema = z.object({
   lago_invoice_id: z.string().nullable().optional(),
   checkout_url: z.string().nullable().optional(),
   receipt_available: z.boolean(),
+  paid_at: z.string().nullable().optional(),
+  credits_expire_at: z.string().nullable().optional(),
+  expired_credits_micros: z.number().int().nonnegative().default(0),
+  credits_expired_at: z.string().nullable().optional(),
 });
 
 export const topUpHistoryResponseSchema = z.object({
@@ -145,6 +166,8 @@ export type TopUpHistoryEntry = z.infer<typeof topUpHistoryEntrySchema>;
 export type TopUpHistoryResponse = z.infer<typeof topUpHistoryResponseSchema>;
 
 export type BillingWalletResponse = z.infer<typeof billingWalletResponseSchema>;
-export type ProvisionBillingWalletRequest = z.infer<typeof provisionBillingWalletRequestSchema>;
+export type ProvisionBillingWalletRequest = z.infer<
+  typeof provisionBillingWalletRequestSchema
+>;
 export type TopUpBillingRequest = z.infer<typeof topUpBillingRequestSchema>;
 export type TopUpBillingResponse = z.infer<typeof topUpBillingResponseSchema>;

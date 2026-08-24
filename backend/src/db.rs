@@ -9,10 +9,12 @@ use mongodb::{Client, Database, IndexModel};
 
 use crate::config::AppConfig;
 use crate::models::anonymous_endpoint_usage::COLLECTION_NAME as ANONYMOUS_ENDPOINT_USAGE;
+use crate::models::assistant_wire_log::AssistantWireLog;
 use crate::models::auth_device_code::{AuthDeviceCode, COLLECTION_NAME as AUTH_DEVICE_CODES};
 use crate::models::billing_topup_session::COLLECTION_NAME as BILLING_TOPUP_SESSIONS;
 use crate::models::catalog_delegation_grant::COLLECTION_NAME as CATALOG_DELEGATION_GRANTS;
 use crate::models::connect_link::{COLLECTION_NAME as CONNECT_LINKS, ConnectLink};
+use crate::models::credit_grant::COLLECTION_NAME as CREDIT_GRANTS;
 use crate::models::device_code::COLLECTION_NAME as DEVICE_CODES;
 use crate::models::device_onboard_credential::COLLECTION_NAME as DEVICE_ONBOARD_CREDENTIALS;
 use crate::models::downstream_service::{
@@ -31,6 +33,8 @@ use crate::models::trigger::{COLLECTION_NAME as TRIGGERS, Trigger};
 use crate::models::trigger_delivery::{
     COLLECTION_NAME as TRIGGER_DELIVERIES, TriggerDeliveryRecord,
 };
+use crate::models::usage_allowance::COLLECTION_NAME as USAGE_ALLOWANCES;
+use crate::models::usage_allowance_period::COLLECTION_NAME as USAGE_ALLOWANCE_PERIODS;
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_provider_credentials::{
@@ -90,6 +94,20 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    // ── assistant_wire_logs ──
+    db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // ── users ──
     let users = db.collection::<mongodb::bson::Document>("users");
     // Backfill user_type before changing the email index. Without this, legacy
@@ -2242,6 +2260,17 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    billing_wallet
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "topup_expiry_checked_at": 1,
+                    "updated_at": 1,
+                    "lago_wallet_id": 1,
+                })
+                .build(),
+        )
+        .await?;
 
     // ── billing_topup_sessions ──
     let billing_topup_sessions = db.collection::<Document>(BILLING_TOPUP_SESSIONS);
@@ -2256,7 +2285,108 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     billing_topup_sessions
         .create_index(
             IndexModel::builder()
+                .keys(doc! { "lago_wallet_transaction_id": 1 })
+                // Historical deployments may contain duplicate backfill rows.
+                // Lookup performance matters for expiry reconciliation, but a
+                // new unique index must not make startup fail on legacy data.
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+    billing_topup_sessions
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! { "owner_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+
+    // ── credit_grants ──
+    let credit_grants = db.collection::<Document>(CREDIT_GRANTS);
+    credit_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "recipient_user_id": 1,
+                    "status": 1,
+                    "expires_at": 1,
+                    "created_at": 1,
+                })
+                .build(),
+        )
+        .await?;
+    credit_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "active_settlement.updated_at": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+    credit_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "batch_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    credit_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "status": 1, "expires_at": 1 })
+                .build(),
+        )
+        .await?;
+    credit_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "issued_ledgered_at": 1,
+                    "terminal_ledgered_at": 1,
+                    "created_at": 1,
+                })
+                .build(),
+        )
+        .await?;
+
+    // ── usage_allowances / usage_allowance_periods ──
+    let usage_allowances = db.collection::<Document>(USAGE_ALLOWANCES);
+    usage_allowances
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "is_active": 1, "service_id": 1 })
+                .build(),
+        )
+        .await?;
+    usage_allowances
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "target_user_ids": 1, "is_active": 1 })
+                .build(),
+        )
+        .await?;
+
+    let allowance_periods = db.collection::<Document>(USAGE_ALLOWANCE_PERIODS);
+    allowance_periods
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "allowance_id": 1, "owner_user_id": 1, "period_start": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    allowance_periods
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "active_settlement.updated_at": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+    allowance_periods
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_user_id": 1, "period_end": 1 })
                 .build(),
         )
         .await?;
@@ -2278,6 +2408,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    ensure_billing_ledger_dedupe_index(&billing_ledger).await?;
     billing_ledger
         .create_index(
             IndexModel::builder()
@@ -2333,6 +2464,59 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     purge_legacy_channel_message_content(db).await?;
 
     Ok(())
+}
+
+async fn ensure_billing_ledger_dedupe_index(
+    billing_ledger: &mongodb::Collection<Document>,
+) -> Result<(), mongodb::error::Error> {
+    let unique = IndexModel::builder()
+        .keys(doc! { "dedupe_key": 1 })
+        .options(
+            IndexOptions::builder()
+                .name("billing_ledger_dedupe_unique".to_string())
+                .unique(true)
+                .sparse(true)
+                .build(),
+        )
+        .build();
+    match billing_ledger.create_index(unique).await {
+        Ok(_) => Ok(()),
+        Err(error) if is_duplicate_key_error_including_commands(&error) => {
+            // dedupe_key participates in canonical ledger hashes, so repairing
+            // historical duplicates in place would invalidate the chain. Boot
+            // with a lookup index and retain best-effort check-then-append
+            // behavior until operators investigate the duplicate delivery.
+            tracing::error!(
+                error = %error,
+                "Cannot create unique billing_ledger dedupe index because immutable historical dedupe_key duplicates exist. The server will boot with a non-unique lookup index. Remediation: verify the billing ledger, investigate duplicate Lago webhook delivery, and rebuild the unique index only after an append-only migration; never edit existing ledger rows."
+            );
+            billing_ledger
+                .create_index(
+                    IndexModel::builder()
+                        .keys(doc! { "dedupe_key": 1 })
+                        .options(
+                            IndexOptions::builder()
+                                .name("billing_ledger_dedupe_lookup".to_string())
+                                .sparse(true)
+                                .build(),
+                        )
+                        .build(),
+                )
+                .await?;
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn is_duplicate_key_error_including_commands(error: &mongodb::error::Error) -> bool {
+    match error.kind.as_ref() {
+        mongodb::error::ErrorKind::Command(command) => command.code == 11000,
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write)) => {
+            write.code == 11000
+        }
+        _ => false,
+    }
 }
 
 /// Name of the `schema_migrations` collection used to track one-off
@@ -3158,6 +3342,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             source_id: Some(token.id.clone()),
             created_at: now,
             updated_at: now,
+            credential_epoch: 1,
         };
         if let Err(e) = db
             .collection::<UserApiKey>(USER_API_KEYS)
@@ -3402,6 +3587,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
             source_id: Some(conn.id.clone()),
             created_at: now,
             updated_at: now,
+            credential_epoch: 1,
         };
         if let Err(e) = db
             .collection::<UserApiKey>(USER_API_KEYS)
@@ -3662,6 +3848,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             source_id: Some(binding.id.clone()),
             created_at: now,
             updated_at: now,
+            credential_epoch: 1,
         };
         if let Err(e) = db
             .collection::<UserApiKey>(USER_API_KEYS)
@@ -3752,6 +3939,56 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn billing_ledger_dedupe_index_falls_back_on_historical_duplicates() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("ledger_dedupe_index_fallback").await
+        else {
+            return;
+        };
+        let ledger = db.collection::<Document>(crate::models::billing_ledger::COLLECTION_NAME);
+        ledger
+            .insert_many([
+                doc! { "_id": "legacy-1", "dedupe_key": "invoice:duplicate" },
+                doc! { "_id": "legacy-2", "dedupe_key": "invoice:duplicate" },
+            ])
+            .await
+            .expect("insert historical duplicates");
+
+        ensure_billing_ledger_dedupe_index(&ledger)
+            .await
+            .expect("fallback index must keep startup viable");
+
+        let indexes: Vec<IndexModel> = ledger
+            .list_indexes()
+            .await
+            .expect("list indexes")
+            .try_collect()
+            .await
+            .expect("collect indexes");
+        let fallback = indexes
+            .iter()
+            .find(|index| {
+                index
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.name.as_deref())
+                    == Some("billing_ledger_dedupe_lookup")
+            })
+            .expect("non-unique fallback index");
+        assert_ne!(
+            fallback.options.as_ref().and_then(|options| options.unique),
+            Some(true)
+        );
+        assert!(indexes.iter().all(|index| {
+            index
+                .options
+                .as_ref()
+                .and_then(|options| options.name.as_deref())
+                != Some("billing_ledger_dedupe_unique")
+        }));
+    }
 
     fn sample_downstream_service() -> DownstreamService {
         DownstreamService {

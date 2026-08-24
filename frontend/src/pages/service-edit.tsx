@@ -79,6 +79,7 @@ export function ServiceEditPage() {
       inject_delegation_token: false,
       platform_billable: false,
       platform_metric: "auto" as const,
+      platform_price: "",
       delegation_token_scope: "",
       homepage_url: "",
       repository_url: "",
@@ -130,6 +131,8 @@ export function ServiceEditPage() {
         platform_metric:
           (service.billing?.platform_metric as UpdateServiceFormData["platform_metric"]) ??
           "auto",
+        platform_price:
+          service.billing?.platform_pricing?.credits_per_unit ?? "",
         delegation_token_scope: service.delegation_token_scope || "llm:proxy",
         homepage_url: service.homepage_url ?? "",
         repository_url: service.repository_url ?? "",
@@ -263,6 +266,19 @@ export function ServiceEditPage() {
                     data.platform_metric && data.platform_metric !== "auto"
                       ? data.platform_metric
                       : undefined,
+                  platform_pricing: data.platform_price?.trim()
+                    ? {
+                        credits_per_unit: data.platform_price.trim(),
+                        lago_metric_code:
+                          service.billing?.platform_pricing?.lago_metric_code ??
+                          "",
+                        sync_status:
+                          service.billing?.platform_pricing?.sync_status ??
+                          "pending",
+                        sync_error:
+                          service.billing?.platform_pricing?.sync_error ?? null,
+                      }
+                    : undefined,
                 },
                 ws_frame_injections: data.ws_frame_injections ?? [],
                 ...(defaultRequestHeadersPayload !== undefined
@@ -968,37 +984,82 @@ export function ServiceEditPage() {
                         />
                       </div>
 
-                      <div className="space-y-2">
-                        <Label className="text-[12px] font-normal">
-                          Charge by
-                        </Label>
-                        <Select
-                          value={form.watch("platform_metric") ?? "auto"}
-                          onValueChange={(v) =>
-                            form.setValue(
-                              "platform_metric",
-                              v as UpdateServiceFormData["platform_metric"],
-                            )
-                          }
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder="Auto (derived from service)" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="auto">
-                              Auto (derived from service)
-                            </SelectItem>
-                            <SelectItem value="tokens">Tokens</SelectItem>
-                            <SelectItem value="requests">Requests</SelectItem>
-                            <SelectItem value="bytes">Bytes</SelectItem>
-                          </SelectContent>
-                        </Select>
-                        <p className="text-xs text-muted-foreground">
-                          The metering unit for platform billing. Auto meters
-                          tokens for llm- services, bytes for SSH and
-                          WebSocket connections, and requests otherwise.
-                        </p>
+                      <div className="grid gap-4 sm:grid-cols-2">
+                        <div className="space-y-2">
+                          <Label className="text-[12px] font-normal">
+                            Charge by
+                          </Label>
+                          <Select
+                            value={form.watch("platform_metric") ?? "auto"}
+                            onValueChange={(v) =>
+                              form.setValue(
+                                "platform_metric",
+                                v as UpdateServiceFormData["platform_metric"],
+                              )
+                            }
+                          >
+                            <SelectTrigger>
+                              <SelectValue placeholder="Auto (derived from service)" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="auto">
+                                Auto (derived from service)
+                              </SelectItem>
+                              <SelectItem value="tokens">Tokens</SelectItem>
+                              <SelectItem value="requests">Requests</SelectItem>
+                              <SelectItem value="bytes">Bytes</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        </div>
+
+                        {user?.is_admin && (
+                          <FormField
+                            control={form.control}
+                            name="platform_price"
+                            render={({ field }) => (
+                              <FormItem>
+                                <div className="flex min-h-5 items-center justify-between gap-2">
+                                  <FormLabel>Credits per unit</FormLabel>
+                                  {service.billing?.platform_pricing && (
+                                    <Badge
+                                      variant={
+                                        service.billing.platform_pricing
+                                          .sync_status === "synced"
+                                          ? "success"
+                                          : service.billing.platform_pricing
+                                                .sync_status === "failed"
+                                            ? "destructive"
+                                            : "warning"
+                                      }
+                                    >
+                                      {service.billing.platform_pricing
+                                        .sync_status ?? "pending"}
+                                    </Badge>
+                                  )}
+                                </div>
+                                <FormControl>
+                                  <Input
+                                    {...field}
+                                    inputMode="decimal"
+                                    placeholder="Uses Lago plan rate"
+                                  />
+                                </FormControl>
+                                <FormMessage />
+                              </FormItem>
+                            )}
+                          />
+                        )}
                       </div>
+                      {service.billing?.platform_pricing?.sync_error && (
+                        <p className="text-xs text-destructive">
+                          {service.billing.platform_pricing.sync_error}
+                        </p>
+                      )}
+                      <p className="text-xs text-muted-foreground">
+                        Auto meters tokens for llm- services, bytes for SSH
+                        and WebSocket connections, and requests otherwise. An
+                        empty price keeps the Lago-authored plan rate.
+                      </p>
                     </div>
 
                     <Separator className="my-2" />

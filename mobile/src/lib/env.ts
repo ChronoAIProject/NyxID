@@ -7,6 +7,17 @@
 export const IS_DEV_BUILD = process.env.EXPO_PUBLIC_DEV_MODE === "true";
 
 /**
+ * Trusted URL inputs embedded by app.config.ts. The device-login QR parser
+ * consumes these values directly so a scanned URL can never choose its own
+ * backend or expand the set of accepted frontend origins.
+ */
+export const NYXID_API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? "";
+export const NYXID_FRONTEND_URL = process.env.EXPO_PUBLIC_FRONTEND_URL ?? "";
+export const NYXID_UNIVERSAL_LINK_HOST =
+  process.env.EXPO_PUBLIC_UNIVERSAL_LINK_HOST ?? "";
+export const NYXID_APP_SCHEME = process.env.EXPO_PUBLIC_APP_SCHEME ?? "nyxid";
+
+/**
  * Comma-separated list of emails allowed to use the mobile app.
  * If empty or unset, all authenticated users are allowed.
  */

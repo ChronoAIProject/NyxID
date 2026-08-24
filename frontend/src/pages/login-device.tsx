@@ -1,24 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { AlertTriangle, CheckCircle2, ShieldCheck } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  CircleX,
+  ShieldCheck,
+  ShieldX,
+} from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { Button, ButtonIcon } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   useApproveAuthDevice,
+  useDenyAuthDevice,
   usePreviewAuthDevice,
 } from "@/hooks/use-auth-device";
 import {
   formatAuthDeviceUserCodeInput,
   friendlyAuthDeviceErrorMessage,
+  friendlyAuthDeviceStatusMessage,
   userCodeSchema,
 } from "@/schemas/auth-device";
 import { useAuthStore } from "@/stores/auth-store";
@@ -30,7 +33,7 @@ export function LoginDevicePage() {
   const navigate = useNavigate();
   const { isAuthenticated, isLoading } = useAuthStore();
   const [userCode, setUserCode] = useState("");
-  const [approved, setApproved] = useState(false);
+  const [decision, setDecision] = useState<"approved" | "denied" | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const lastClickAtRef = useRef(0);
   const normalizedCode = useMemo(() => {
@@ -39,8 +42,13 @@ export function LoginDevicePage() {
   }, [userCode]);
   const preview = usePreviewAuthDevice();
   const approve = useApproveAuthDevice();
-  const step: "enter-code" | "review" | "approved" = approved
-    ? "approved"
+  const deny = useDenyAuthDevice();
+  const isDecisionPending = approve.isPending || deny.isPending;
+  const previewStatusMessage = preview.data
+    ? friendlyAuthDeviceStatusMessage(preview.data.status)
+    : null;
+  const step: "enter-code" | "review" | "terminal" = decision
+    ? "terminal"
     : preview.data
       ? "review"
       : "enter-code";
@@ -60,6 +68,7 @@ export function LoginDevicePage() {
   function resetToEnterCode() {
     preview.reset();
     approve.reset();
+    deny.reset();
     setSubmitError(null);
   }
 
@@ -74,11 +83,22 @@ export function LoginDevicePage() {
   }
 
   async function handleApprove() {
-    if (!normalizedCode || approve.isPending || withinCooldown()) return;
+    if (!normalizedCode || isDecisionPending || withinCooldown()) return;
     setSubmitError(null);
     try {
       await approve.mutateAsync(normalizedCode);
-      setApproved(true);
+      setDecision("approved");
+    } catch (error) {
+      setSubmitError(friendlyAuthDeviceErrorMessage(error));
+    }
+  }
+
+  async function handleReject() {
+    if (!normalizedCode || isDecisionPending || withinCooldown()) return;
+    setSubmitError(null);
+    try {
+      await deny.mutateAsync(normalizedCode);
+      setDecision("denied");
     } catch (error) {
       setSubmitError(friendlyAuthDeviceErrorMessage(error));
     }
@@ -116,8 +136,8 @@ export function LoginDevicePage() {
         </div>
       </header>
 
-      {approved ? (
-        <SuccessPanel />
+      {decision ? (
+        <TerminalPanel decision={decision} />
       ) : (
         <Card className="border-border/50">
           <CardHeader>
@@ -140,11 +160,11 @@ export function LoginDevicePage() {
                 placeholder="ABCD-EFGH"
                 value={userCode}
                 disabled={
-                  step === "review" || preview.isPending || approve.isPending
+                  step === "review" || preview.isPending || isDecisionPending
                 }
                 onChange={(event) => {
                   setSubmitError(null);
-                  setApproved(false);
+                  setDecision(null);
                   resetToEnterCode();
                   setUserCode(
                     formatAuthDeviceUserCodeInput(event.target.value),
@@ -169,16 +189,21 @@ export function LoginDevicePage() {
               <PreviewPanel
                 clientLabel={preview.data.client_label}
                 clientUserAgent={preview.data.client_user_agent}
+                clientIp={preview.data.client_ip}
                 initiatedAt={preview.data.initiated_at}
                 expiresAt={preview.data.expires_at}
                 status={preview.data.status}
               />
+            ) : null}
+            {previewStatusMessage ? (
+              <ErrorBanner message={previewStatusMessage} />
             ) : null}
 
             <div className="flex flex-col gap-2 sm:flex-row sm:justify-end">
               <Button
                 type="button"
                 variant="outline"
+                disabled={preview.isPending || isDecisionPending}
                 onClick={() => void navigate({ to: "/dashboard" })}
               >
                 Cancel
@@ -196,20 +221,34 @@ export function LoginDevicePage() {
                   </ButtonIcon>
                   Continue
                 </Button>
-              ) : (
-                <Button
-                  type="button"
-                  variant="primary"
-                  disabled={approve.isPending}
-                  isLoading={approve.isPending}
-                  onClick={() => void handleApprove()}
-                >
-                  <ButtonIcon variant="primary">
-                    <ShieldCheck />
-                  </ButtonIcon>
-                  Approve
-                </Button>
-              )}
+              ) : step === "review" && preview.data?.status === "pending" ? (
+                <>
+                  <Button
+                    type="button"
+                    variant="destructive"
+                    disabled={isDecisionPending}
+                    isLoading={deny.isPending}
+                    onClick={() => void handleReject()}
+                  >
+                    <ButtonIcon variant="destructive">
+                      <ShieldX />
+                    </ButtonIcon>
+                    Reject
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="primary"
+                    disabled={isDecisionPending}
+                    isLoading={approve.isPending}
+                    onClick={() => void handleApprove()}
+                  >
+                    <ButtonIcon variant="primary">
+                      <ShieldCheck />
+                    </ButtonIcon>
+                    Approve
+                  </Button>
+                </>
+              ) : null}
             </div>
           </CardContent>
         </Card>
@@ -218,7 +257,11 @@ export function LoginDevicePage() {
   );
 }
 
-function LoginDeviceShell({ children }: { readonly children: React.ReactNode }) {
+function LoginDeviceShell({
+  children,
+}: {
+  readonly children: React.ReactNode;
+}) {
   return (
     <main className="flex min-h-dvh items-start justify-center bg-background px-4 py-8 text-foreground sm:items-center sm:py-10">
       <div className="flex w-full max-w-xl flex-col gap-5">{children}</div>
@@ -233,8 +276,8 @@ function WarningBanner() {
         <AlertTriangle className="h-4 w-4 text-warning" />
       </div>
       <p className="text-[12px] leading-relaxed text-warning">
-        Only enter a code you generated yourself. If someone sent you this
-        code, cancel and start a fresh login from your own terminal.
+        Only enter a code you generated yourself. If someone sent you this code,
+        cancel and start a fresh login from your own terminal.
       </p>
     </div>
   );
@@ -243,12 +286,14 @@ function WarningBanner() {
 function PreviewPanel({
   clientLabel,
   clientUserAgent,
+  clientIp,
   initiatedAt,
   expiresAt,
   status,
 }: {
   readonly clientLabel: string | null;
   readonly clientUserAgent: string | null;
+  readonly clientIp: string | null;
   readonly initiatedAt: string | null;
   readonly expiresAt: string | null;
   readonly status: string;
@@ -266,15 +311,22 @@ function PreviewPanel({
         </div>
       </div>
       <div className="divide-y divide-border/30">
+        <div className="px-4 py-3 text-[12px] leading-relaxed text-warning">
+          Requested from{" "}
+          <span className="font-mono text-foreground">
+            {clientIp ?? "an unknown IP"}
+          </span>{" "}
+          at{" "}
+          <span className="font-medium text-foreground">
+            {initiatedAt ? formatRequestedAt(initiatedAt) : "an unknown time"}
+          </span>
+          . Reject this request if you do not recognize it.
+        </div>
         <PreviewRow label="Client" value={clientLabel ?? "Unknown device"} />
         <PreviewRow
           label="User agent"
           value={clientUserAgent ?? "Not provided"}
           mono
-        />
-        <PreviewRow
-          label="Started"
-          value={initiatedAt ? formatStartedAt(initiatedAt) : "Unknown"}
         />
         <PreviewRow
           label="Expires"
@@ -310,46 +362,67 @@ function PreviewRow({
   );
 }
 
-function SuccessPanel() {
+function TerminalPanel({
+  decision,
+}: {
+  readonly decision: "approved" | "denied";
+}) {
+  const approved = decision === "approved";
   return (
-    <Card className="border-success/25 bg-success/[0.03]">
+    <Card
+      className={
+        approved
+          ? "border-success/25 bg-success/[0.03]"
+          : "border-destructive/25 bg-destructive/[0.03]"
+      }
+    >
       <CardContent className="flex flex-col items-center gap-4 p-5 text-center">
-        <div className="flex h-11 w-11 items-center justify-center rounded-xl border border-success/30 bg-success/10">
-          <CheckCircle2 className="h-5 w-5 text-success" />
+        <div
+          className={
+            approved
+              ? "flex h-11 w-11 items-center justify-center rounded-xl border border-success/30 bg-success/10"
+              : "flex h-11 w-11 items-center justify-center rounded-xl border border-destructive/30 bg-destructive/10"
+          }
+        >
+          {approved ? (
+            <CheckCircle2 className="h-5 w-5 text-success" />
+          ) : (
+            <CircleX className="h-5 w-5 text-destructive" />
+          )}
         </div>
         <div className="space-y-1">
           <h2 className="text-[15px] font-semibold text-foreground">
-            Signed in
+            {approved ? "Signed in" : "Request denied"}
           </h2>
           <p className="text-[12px] text-muted-foreground">
-            Return to your terminal. The CLI should finish automatically.
+            {approved
+              ? "Return to your terminal. The CLI should finish automatically."
+              : "The requesting device cannot complete this login."}
           </p>
         </div>
-        <Button asChild variant="outline">
-          <Link to="/settings" search={{ tab: "sessions" }}>
-            Manage sessions
-          </Link>
-        </Button>
+        {approved ? (
+          <Button asChild variant="outline">
+            <Link to="/settings" search={{ tab: "sessions" }}>
+              Manage sessions
+            </Link>
+          </Button>
+        ) : (
+          <Button asChild variant="outline">
+            <Link to="/dashboard">Back to dashboard</Link>
+          </Button>
+        )}
       </CardContent>
     </Card>
   );
 }
 
-function formatRelativeAge(value: string): string {
+function formatRequestedAt(value: string): string {
   const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return "just now";
-  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (seconds < 5) return "just now";
-  if (seconds < 60) return `${seconds} seconds`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours} hour${hours === 1 ? "" : "s"}`;
-}
-
-function formatStartedAt(value: string): string {
-  const relativeAge = formatRelativeAge(value);
-  return relativeAge === "just now" ? relativeAge : `${relativeAge} ago`;
+  if (!Number.isFinite(timestamp)) return "an unknown time";
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(timestamp);
 }
 
 function formatAbsoluteTime(value: string): string {

@@ -32,6 +32,8 @@ function makeService(
     created_at: "2026-03-10T00:00:00Z",
     updated_at: "2026-03-10T00:00:00Z",
     ...overrides,
+    effective_platform_metric:
+      overrides.effective_platform_metric ?? "requests",
   };
 }
 

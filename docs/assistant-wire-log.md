@@ -6,9 +6,11 @@ the `experimental:aevatar-chat-wire-log` runtime feature flag, which defaults
 to off; where it is enabled, each authenticated assistant caller can opt into
 capturing their own exchanges with the panel's **Capture** switch.
 
-The wire log is diagnostic data, not an audit log. Backend echoes may persist
-in browser storage, while delivered response bodies and SSE captures remain in
-session memory only.
+The wire log is diagnostic data, not an audit log. Backend echoes normally live
+in a short-lived MongoDB record and are fetched only when a panel row expands.
+Browser storage contains entry metadata and, only on the MongoDB-failure
+fallback path, the bounded inline echo. Fetched echoes, delivered response
+bodies, and SSE captures remain in browser memory only.
 
 ## Accuracy Contract
 
@@ -59,8 +61,8 @@ Both gates must pass:
    (`PUT /api/v1/admin/feature-flags/{flag_key}`). No redeploy or restart is
    involved: the next request resolves the new value. Assistant chat is a
    personal surface, so resolution uses the same grant-union chain as
-   `/users/me` (`personal user override ?? (global ?? default) || any org
-   grant`).
+   `/users/me`: a personal user override takes precedence over the
+   global/default value, while any organization grant enables the flag.
 2. The authenticated caller must enable the per-browser **Capture** switch,
    which causes the frontend to send `X-NyxID-Debug-Upstream: 1`.
 
@@ -72,7 +74,7 @@ zero additional database work. A flag-resolution failure fails **closed**: no
 echo is emitted.
 
 The feature flag is the sole authorization gate for the diagnostic and does
-not require a platform-admin role — a platform admin decides *who* gets it,
+not require a platform-admin role — a platform admin decides _who_ gets it,
 but an enabled non-admin caller uses it exactly like anyone else. The backend
 echo is constructed only from the assistant request currently being handled,
 so a caller can capture their own exchange but can never observe another
@@ -83,16 +85,79 @@ redaction and may contain sensitive upstream payloads verbatim. Leave the flag
 off for any user or environment where browser retention of unredacted raw
 payloads is unacceptable.
 
-On handler paths that return a final `Response` through the assistant echo
-attachment path, NyxID sends a Base64-encoded UTF-8 JSON value in
-`X-NyxID-Debug-Upstream-Log`.
+Except for the conversation-list route, handler paths that return a final
+`Response` through the assistant echo attachment path first store the selected
+echo envelope in MongoDB. When that succeeds, NyxID sends its UUID in
+`X-NyxID-Debug-Upstream-Id` and does not send an inline log header. The UUID
+value is about 36 bytes regardless of the number or size of captured echoes.
 
-The current payload is version 2:
+Expanding an ID-backed panel row lazily calls:
+
+```text
+GET /api/v1/assistant/wire-logs/{id}
+```
+
+The response is:
+
+```json
+{
+  "id": "8c38949c-69c4-4be2-92ab-b451e2bda321",
+  "conversation_id": "nyxchat-example",
+  "created_at": "2026-08-20T12:00:00Z",
+  "payload": {
+    "version": 2,
+    "echoes": [
+      {
+        "degraded": true,
+        "method": "POST",
+        "path": "api/chat",
+        "commandType": "text",
+        "upstreamOutcome": "response",
+        "status": 200
+      }
+    ],
+    "droppedEchoCount": 0
+  }
+}
+```
+
+Records expire 15 minutes after creation. The fetch filters on both `_id` and
+the authenticated owner and also checks `expires_at` directly instead of
+waiting for MongoDB's TTL sweep. A malformed or unknown ID, another user's ID,
+an expired record, a disabled feature flag, or a flag-resolution failure all
+return the same not-found response. The route is outside assistant billing and
+the frontend suppresses the debug request header on this endpoint, so fetching
+a wire log cannot recursively create another wire log.
+
+If envelope selection, serialization, or MongoDB insertion fails, NyxID
+attempts a bounded inline fallback in the legacy
+`X-NyxID-Debug-Upstream-Log` response header. It contains a Base64-encoded
+UTF-8 JSON envelope capped at 4 KiB. A response carries either the ID header or
+the inline fallback header, never both. If no envelope fits the inline budget,
+NyxID emits neither debug header. The fallback path never fails the assistant
+request.
+
+`GET /api/v1/assistant/conversations` is deliberately silent even when both
+capture gates pass: it sends neither debug response header and does not create
+a stored record. This suppression also covers the frontend's background list
+membership reads and removes wire-log header growth from the list path
+entirely.
+
+The stored and inline payload envelope remains version 2:
 
 ```json
 {
   "version": 2,
-  "echoes": [],
+  "echoes": [
+    {
+      "degraded": true,
+      "method": "POST",
+      "path": "api/chat",
+      "commandType": "text",
+      "upstreamOutcome": "response",
+      "status": 200
+    }
+  ],
   "droppedEchoCount": 0
 }
 ```
@@ -114,18 +179,17 @@ Compatibility is one-directional by design:
 - **New frontend + flag-aware backend with the old echo payload** — supported.
   The decoder accepts the legacy bare array and normalises it, leaving
   `upstreamOutcome` and `response` absent.
-- **Old frontend + new backend** — the panel shows no entries. A pre-version-2
-  frontend expects a top-level JSON array and rejects the version 2 wrapper, so
-  `captureAssistantWireLogHeader` discards the header.
+- **Old frontend + new backend** — a pre-ID frontend ignores the healthy-path
+  ID header and therefore shows no entry. A version-2-capable frontend can
+  still decode the inline header if the backend takes the MongoDB-failure
+  fallback path.
 
-The panel-hidden and header-format cases are transient,
-authenticated-caller, capture-only diagnostic gaps during a rolling deploy.
-They clear once the browser reaches the matching backend and frontend bundle.
-They do not affect chat delivery, and no other surface reads the debug header.
-The wrapper is deliberately *not* emitted conditionally to preserve
-old-frontend parsing: a dual wire format would leave the degraded path
-exercised only in rare production cases, which is worse than a self-healing
-empty panel.
+The panel-hidden and header-format cases are transient, authenticated-caller,
+capture-only diagnostic gaps during a rolling deploy. They clear once the
+browser reaches the matching backend and frontend bundle. They do not affect
+chat delivery, and no other surface reads either debug response header. The
+version 2 payload contract remains the same across stored and fallback
+transport so degradation does not introduce a second envelope format.
 
 ## Echo Shapes
 
@@ -175,10 +239,12 @@ means the backend did not report the outcome, and the frontend must not guess.
 }
 ```
 
-## Header Size Degradation
+## Payload Size Degradation
 
-The encoded header value is capped at 12 KiB. NyxID applies this deterministic
-ladder until the value fits:
+NyxID applies the same deterministic ladder to two explicit budgets. The
+normal stored envelope is capped at 1 MiB of plain JSON. If storage fails, the
+inline fallback repeats selection against a 4 KiB cap measured on the final
+Base64 header value:
 
 1. Binary-search truncate the largest request bodies.
 2. Replace request bodies with `null` and mark them truncated.
@@ -190,20 +256,25 @@ ladder until the value fits:
 
 Retained paths are capped at 256 bytes, command types at 64 bytes, and header
 values at 256 bytes on UTF-8 boundaries. The backend test suite proves the
-worst-case eight-minimal-echo wrapper remains below the 12 KiB value cap with
-aggregate response-header headroom.
+inline header never exceeds 4 KiB. The true worst-case eight-minimal-echo
+wrapper does not fit that budget, so it is rejected and no debug header is
+emitted. The healthy path emits only the UUID header, and a stored document
+that exceeds the 1 MiB service limit is rejected and attempts the same bounded
+inline fallback.
 
 ## Browser Exchange Model
 
 One browser HTTP exchange creates one panel entry only after a valid backend
-echo is decoded. Client captures can attach to that backend-created exchange;
-they can never create an entry independently.
+wire-log ID or inline echo is received. Client captures can attach to that
+backend-created exchange; they can never create an entry independently.
 
 An exchange records:
 
+- a client-derived label and transport kind
 - the NyxID-to-browser status
-- one or more chronological upstream request echoes
-- any count removed by degradation
+- the owning conversation ID, or `null` for unattributed routes such as
+  completions
+- the server wire-log ID, or a bounded inline fallback envelope
 - an optional session-only delivered capture
 
 Capture terminal outcomes are `complete`, `cancelled`, `network_error`,
@@ -227,11 +298,29 @@ The per-response limits are:
 - 32 KiB maximum serialized worker wire message, using line fragments when a
   single logical line exceeds the message limit
 
-The persisted request-echo envelope budget is 2 MiB. The separate session
-capture budget is 4 MiB; oldest captures become `evicted` stubs without
-removing persisted request history.
+The Zustand persistence schema is version 3 under the existing
+`nyxid.assistant.wirelog.v1` local-storage key. Pre-v3 entries are discarded.
+The 100-entry, 2 MiB persistence budget covers metadata and inline fallback
+envelopes only; payloads fetched by ID are never written to local storage. The
+separate session capture budget is 4 MiB; oldest captures become `evicted`
+stubs without removing persisted request history. The immutable TanStack Query
+cache is keyed by wire-log ID, so collapse and re-expansion reuse one lazy fetch
+for the life of that browser query cache. Logout and authenticated-user changes
+reset the browser wire-log store so metadata or inline fallback payloads cannot
+cross owners.
 
 ## Panel Views
+
+The panel receives the active conversation ID from the assistant page and, by
+default, shows only entries attributed to that conversation. The **All
+conversations** switch reveals every retained entry, including entries whose
+conversation ID is `null`. Rows render immediately from metadata: timestamp,
+transport kind, NyxID status, and the client-derived route label.
+
+Expanding an ID-backed row starts its lazy fetch and renders loading, loaded,
+expired-or-unavailable, or generic error state. Inline fallback rows render
+their envelope directly without a fetch. Loaded echoes use the same request,
+response-metadata, raw SSE, delivered-response, and replay views as before.
 
 The **Responses** switch at the top of the panel hides or shows every
 response-derived surface, including Aevatar status badges, backend-observed
@@ -254,21 +343,31 @@ placeholder shows the original source frame JSON from the replay sidecar and
 is explicitly marked "Not replayed." No live controls, queries, navigation, or
 assistant-store writes are mounted by replay.
 
-Raw captures and placeholder JSON may contain sensitive upstream payloads
-verbatim. They bypass the chat renderer's credential redaction. Where the
-feature flag is enabled, any authenticated assistant caller — admin or not —
-can capture their own exchanges; no caller can observe another user's traffic.
-Raw captures are session-only, excluded from persistence, telemetry, audit
-logs, and crash reports, and leave the browser only through an explicit copy
-action. Leave the flag off for any user or environment where browser retention
-of unredacted raw payloads is unacceptable.
+Raw captures, fetched request echoes, and placeholder JSON may contain
+sensitive upstream payloads verbatim. They bypass the chat renderer's
+credential redaction. Echo construction still occurs before credential and
+identity injection and uses fixed request/response header allowlists, so
+stored payloads do not contain injected authorization values, cookies,
+delegation tokens, or downstream credentials.
+
+Where the feature flag is enabled, any authenticated assistant caller — admin
+or not — can capture and fetch only their own exchanges; no caller can observe
+another user's traffic. Stored echoes expire after 15 minutes. Fetched echoes
+and raw delivered captures are excluded from local-storage persistence,
+telemetry, audit logs, and crash reports. Backend warnings and tracing around
+storage and fetch contain metadata such as IDs, byte counts, and outcomes, not
+payload bodies. Fetched echoes enter the browser only through the owner-scoped
+endpoint; browser-held data leaves only through an explicit copy action. Leave
+the flag off for any user or environment where short-lived retention of
+unredacted request payloads is unacceptable.
 
 ## Deliberate Non-Goals
 
 - The WebSocket workflow channel is not captured.
+- The conversation-list route never captures or emits a wire log, even when
+  the feature and browser capture gates are enabled.
 - A final `AppError` has no assistant debug echo because no final handler
-  `Response` passes through the attachment path. This includes post-upstream
-  failures such as a conversation-list response exceeding its buffer cap.
+  `Response` passes through the attachment path.
 - Production interactive cards are not replayed. Read-only card variants are
   a possible follow-up.
 - Literal upstream response octets are not captured or persisted server-side.

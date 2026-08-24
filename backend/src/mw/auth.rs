@@ -1526,6 +1526,7 @@ mod tests {
             "/api/v1/ssh/service-id",
             "/api/v1/ssh/service-id/terminal",
             "/api/v1/assistant/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae/state",
+            "/api/v1/assistant/wire-logs/7d6f176c-45c6-4efa-95b2-12dc58a7341f",
             "/api/v1/auth/social/github",
             "/api/v1/devices/code/poll",
             "/api/v1/cli-pairings/pairing-id/poll",
@@ -2255,6 +2256,7 @@ mod tests {
                 source_id: None,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
+                credential_epoch: 1,
             })
             .await
             .unwrap();

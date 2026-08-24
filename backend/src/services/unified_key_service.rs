@@ -4068,6 +4068,7 @@ mod tests {
             error_message: None,
             source: None,
             source_id: None,
+            credential_epoch: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -7290,6 +7291,7 @@ mod tests {
                 source_id: None,
                 created_at: now,
                 updated_at: now,
+                credential_epoch: 1,
             })
             .await
             .unwrap();

@@ -38,6 +38,13 @@
         crate::handlers::connect_links::preview_connect_link,
         crate::handlers::connect_links::cancel_hosted_connect_link,
         crate::handlers::connect_links::complete_connect_link,
+        // Auth Device Login
+        crate::handlers::auth_device::request_auth_device,
+        crate::handlers::auth_device::poll_auth_device,
+        crate::handlers::auth_device::poll_auth_device_web,
+        crate::handlers::auth_device::preview_auth_device,
+        crate::handlers::auth_device::approve_auth_device,
+        crate::handlers::auth_device::deny_auth_device,
         // Catalog
         crate::handlers::catalog::list_catalog,
         crate::handlers::catalog::get_catalog_entry,
@@ -76,6 +83,14 @@
         crate::handlers::billing::create_topup,
         crate::handlers::billing::list_topups,
         crate::handlers::billing::download_invoice,
+        crate::handlers::billing_credits::issue_grant,
+        crate::handlers::billing_credits::admin_list_grants,
+        crate::handlers::billing_credits::revoke_grant,
+        crate::handlers::billing_credits::user_list_grants,
+        crate::handlers::billing_credits::create_allowance,
+        crate::handlers::billing_credits::admin_list_allowances,
+        crate::handlers::billing_credits::update_allowance,
+        crate::handlers::billing_credits::user_list_allowances,
         // Demo
         crate::handlers::demo::get_demo
     ),
@@ -114,6 +129,16 @@
             crate::handlers::connect_links::CancelHostedConnectLinkRequest,
             crate::handlers::connect_links::CompleteConnectLinkRequest,
             crate::handlers::connect_links::CompleteConnectLinkResponse,
+            // Auth Device Login
+            crate::handlers::auth_device::AuthDeviceRequestBody,
+            crate::handlers::auth_device::AuthDeviceRequestResponse,
+            crate::handlers::auth_device::AuthDevicePollBody,
+            crate::handlers::auth_device::AuthDevicePollResponse,
+            crate::handlers::auth_device::AuthDevicePreviewBody,
+            crate::handlers::auth_device::AuthDevicePreviewResponse,
+            crate::handlers::auth_device::AuthDeviceApproveBody,
+            crate::handlers::auth_device::AuthDeviceDenyBody,
+            crate::handlers::auth_device::AuthDeviceDecisionResponse,
             // Catalog
             crate::handlers::catalog::CatalogEntryResponse,
             crate::handlers::catalog::CatalogListResponse,
@@ -184,6 +209,20 @@
             crate::handlers::billing::TopUpRequest,
             crate::handlers::billing::BillingWalletResponse,
             crate::handlers::billing::TopUpResponse,
+            crate::handlers::billing_credits::IssueGrantRequest,
+            crate::handlers::billing_credits::IssueGrantResponse,
+            crate::handlers::billing_credits::CreditGrantResponse,
+            crate::handlers::billing_credits::CreditGrantListResponse,
+            crate::handlers::billing_credits::CreateAllowanceRequest,
+            crate::handlers::billing_credits::UpdateAllowanceRequest,
+            crate::handlers::billing_credits::UsageAllowanceResponse,
+            crate::handlers::billing_credits::UsageAllowanceListResponse,
+            crate::handlers::billing_credits::UserAllowanceBalanceResponse,
+            crate::handlers::billing_credits::UserAllowanceListResponse,
+            crate::models::billing_target::BillingTargetKind,
+            crate::models::billing_target::BillingServiceScope,
+            crate::models::credit_grant::CreditGrantStatus,
+            crate::models::usage_allowance::AllowanceRecurrence,
             // Demo
             crate::handlers::demo::DemoResponse
         )
@@ -196,12 +235,14 @@
         (name = "SSH", description = "SSH certificate issuance and WebSocket tunnel endpoints"),
         (name = "AI Services", description = "Unified key management: auto-provisions endpoint, credential, and proxy routing from catalog or custom input"),
         (name = "Connect Links", description = "Hosted single-use service credential connection flows"),
+        (name = "Auth Device Login", description = "First-party device-code login review and decisions"),
         (name = "Catalog", description = "Read-only service catalog for users (admin-created services and providers)"),
         (name = "Endpoints", description = "User-managed target URLs"),
         (name = "External API Keys", description = "User's external API keys and credentials"),
         (name = "User Services", description = "User's proxy routing configuration"),
         (name = "API Keys", description = "NyxID API keys with service and node scope"),
         (name = "Billing", description = "Owner billing wallet and usage endpoints"),
+        (name = "Admin Credits", description = "Promotional credit grants and recurring usage allowances"),
         (name = "Demo", description = "First-success verification: returns 200 with no downstream call")
     )
 )]

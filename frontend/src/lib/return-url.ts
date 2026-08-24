@@ -1,16 +1,44 @@
-/** Trusted origins for auth return_to redirect validation. */
-const BACKEND_URL = (
-  (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
-  (import.meta.env.VITE_API_URL as string | undefined) ??
-  ""
-).replace(/\/+$/, "");
+/** Resolve a return_to value only when it targets an allowed browser origin. */
+function configuredBackendOrigin(): string | null {
+  const configuredUrl = (
+    (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
+    (import.meta.env.VITE_API_URL as string | undefined) ??
+    ""
+  ).trim();
 
-const FRONTEND_ORIGIN = window.location.origin;
+  if (!configuredUrl) return null;
 
-export function isTrustedAuthReturnTo(value: string | undefined): value is string {
-  return Boolean(
-    value &&
-      (value.startsWith(FRONTEND_ORIGIN + "/") ||
-        value.startsWith(BACKEND_URL + "/")),
-  );
+  try {
+    const url = new URL(configuredUrl);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.origin
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveTrustedAuthReturnTo(
+  value: string | undefined,
+): string | null {
+  if (!value) return null;
+
+  let url: URL;
+  try {
+    url = new URL(value, window.location.origin);
+  } catch {
+    return null;
+  }
+
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return null;
+  }
+
+  const frontendOrigin = window.location.origin;
+  const backendOrigin = configuredBackendOrigin();
+  if (url.origin !== frontendOrigin && url.origin !== backendOrigin) {
+    return null;
+  }
+
+  return url.href;
 }

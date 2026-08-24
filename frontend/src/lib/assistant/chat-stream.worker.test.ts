@@ -74,6 +74,7 @@ describe("chat stream worker", () => {
         status: 200,
         headers: {
           "Content-Type": "text/event-stream",
+          "X-NyxID-Debug-Upstream-Id": "wire-log-id",
           "X-NyxID-Debug-Upstream-Log": "encoded-envelope-array",
         },
       }),
@@ -92,6 +93,7 @@ describe("chat stream worker", () => {
     });
     expect(messages(scope)[0]).toMatchObject({
       type: "stream.response",
+      debugUpstreamId: "wire-log-id",
       debugUpstream: "encoded-envelope-array",
     });
     expect((fetchMock.mock.calls[0]?.[1] as RequestInit).headers).toMatchObject(
@@ -247,6 +249,7 @@ describe("chat stream worker", () => {
         new Response('{"code":"UPSTREAM_DOWN"}', {
           status: 502,
           headers: {
+            "X-NyxID-Debug-Upstream-Id": "error-wire-log-id",
             "X-NyxID-Debug-Upstream-Log": "encoded-error-envelope-array",
           },
         }),
@@ -275,6 +278,7 @@ describe("chat stream worker", () => {
             requestId: "request-http",
             status: 502,
             body: '{"code":"UPSTREAM_DOWN"}',
+            debugUpstreamId: "error-wire-log-id",
             debugUpstream: "encoded-error-envelope-array",
           },
           {
@@ -403,9 +407,7 @@ describe("chat stream worker", () => {
     });
     await Promise.resolve();
     push(
-      encoder.encode(
-        'data: {"type":"RUN_STARTED","turnId":"turn-cancel"}\n\n',
-      ),
+      encoder.encode('data: {"type":"RUN_STARTED","turnId":"turn-cancel"}\n\n'),
     );
     for (let index = 0; index < 5; index += 1) await Promise.resolve();
     expect(messages(scope)).toContainEqual(
@@ -586,6 +588,7 @@ describe("chat stream worker", () => {
           status: 502,
           headers: {
             "Content-Type": "application/json",
+            "X-NyxID-Debug-Upstream-Id": "error-wire-log-id",
             "X-NyxID-Debug-Upstream-Log": "encoded",
           },
         }),
@@ -606,6 +609,7 @@ describe("chat stream worker", () => {
         requestId: "request-error-capture",
         status: 502,
         body: '{"code":"DOWN"}',
+        debugUpstreamId: "error-wire-log-id",
         debugUpstream: "encoded",
       });
     });

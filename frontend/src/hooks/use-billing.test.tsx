@@ -106,6 +106,7 @@ describe("billing wallet hooks", () => {
     balance_credits: 100,
     reserved_credits: 10,
     pending_lago_debits: 5,
+    pending_topup_expiry_credits: 0,
     available_credits: 85,
     available_with_overdraft_credits: 85,
     has_payment_instrument: false,

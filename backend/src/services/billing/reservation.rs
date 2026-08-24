@@ -9,11 +9,11 @@ use crate::errors::{AppError, AppResult};
 use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as BILLING_RATE_CACHE};
 use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET, PlanKind};
 use crate::models::usage_meter::{
-    BillingLayer, COLLECTION_NAME as USAGE_METER, UsageMeterRow, UsageStatus,
+    AllowanceReservationAllocation, BillingLayer, COLLECTION_NAME as USAGE_METER,
+    GrantReservationAllocation, UsageMeterRow, UsageStatus,
 };
 
 use super::lago_client::{Entitlement, LagoApi};
-use super::meter::platform_metric_code;
 use super::route_context::BillingRouteContext;
 
 const CREDIT_MICROS: i64 = 1_000_000;
@@ -42,7 +42,11 @@ pub(crate) enum SettlementFailureDisposition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayerReservation {
     pub layer: BillingLayer,
+    pub estimated_quantity: i64,
+    pub credits_per_unit_micros: i64,
     pub reserved_credits: i64,
+    pub allowance_reservations: Vec<AllowanceReservationAllocation>,
+    pub grant_reservations: Vec<GrantReservationAllocation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,7 +128,8 @@ pub async fn gate_and_reserve(
         ));
     }
 
-    let layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
+    let mut layers = estimate_layer_reservations(db, ctx, rate_cache_ttl_secs).await?;
+    super::funding::reserve_estimated_funding(db, ctx, &mut layers).await?;
     let total_reserved_credits = layers
         .iter()
         .map(|reservation| reservation.reserved_credits)
@@ -140,10 +145,12 @@ pub async fn gate_and_reserve(
     }
 
     if wallet.available_with_overdraft_credits() <= 0 && wallet.plan_kind != PlanKind::Prepaid {
+        super::funding::release_layer_reservations(db, &layers).await?;
         suspend_wallet(db, &wallet.owner_id).await?;
         return Err(AppError::WalletSuspended);
     }
     if wallet.available_credits() <= 0 && wallet.plan_kind == PlanKind::Prepaid {
+        super::funding::release_layer_reservations(db, &layers).await?;
         return Err(AppError::InsufficientCredits);
     }
 
@@ -160,6 +167,7 @@ pub async fn gate_and_reserve(
     }
 
     if wallet.plan_kind == PlanKind::Prepaid {
+        super::funding::release_layer_reservations(db, &layers).await?;
         return Err(AppError::InsufficientCredits);
     }
 
@@ -177,10 +185,12 @@ pub async fn gate_and_reserve(
     }
 
     if wallet.has_payment_instrument {
+        super::funding::release_layer_reservations(db, &layers).await?;
         suspend_wallet(db, &wallet.owner_id).await?;
         return Err(AppError::WalletSuspended);
     }
 
+    super::funding::release_layer_reservations(db, &layers).await?;
     Err(AppError::InsufficientCredits)
 }
 
@@ -213,7 +223,12 @@ pub async fn try_reserve_prepaid(
                                         "$reserved_credits"
                                     ]
                                 },
-                                "$pending_lago_debits"
+                                {
+                                    "$add": [
+                                        "$pending_lago_debits",
+                                        { "$ifNull": ["$pending_topup_expiry_credits", 0_i64] }
+                                    ]
+                                }
                             ]
                         },
                         credits
@@ -263,7 +278,12 @@ pub async fn try_reserve_overdraft(
                                 {
                                     "$add": [
                                         "$reserved_credits",
-                                        "$pending_lago_debits"
+                                        {
+                                            "$add": [
+                                                "$pending_lago_debits",
+                                                { "$ifNull": ["$pending_topup_expiry_credits", 0_i64] }
+                                            ]
+                                        }
                                     ]
                                 }
                             ]
@@ -308,6 +328,19 @@ pub async fn release_wallet_hold(
         )
         .await?;
     Ok(())
+}
+
+pub async fn release_billing_reservation(
+    db: &mongodb::Database,
+    reservation: &BillingReservation,
+) -> AppResult<()> {
+    release_wallet_hold(
+        db,
+        &reservation.owner_id,
+        reservation.total_reserved_credits,
+    )
+    .await?;
+    super::funding::release_layer_reservations(db, &reservation.layers).await
 }
 
 pub async fn actual_credits_for_row(
@@ -711,9 +744,8 @@ pub async fn claim_released_and_settle(
     db: &mongodb::Database,
     row: &UsageMeterRow,
 ) -> AppResult<bool> {
-    let quantity = row.quantity.unwrap_or(0);
-    let actual_credits = actual_credits_for_row(db, row, quantity, row.model.as_deref()).await?;
-    apply_settlement_for_row(db, row, actual_credits).await
+    let funding = super::funding::settle_usage_funding(db, row).await?;
+    apply_settlement_for_row(db, row, funding.wallet_charge_credits).await
 }
 
 pub(crate) async fn record_settlement_failure(
@@ -1063,17 +1095,40 @@ async fn estimate_layer_reservations(
     let mut reservations = Vec::new();
 
     if ctx.platform_billable {
-        let metric_code = platform_metric_code(ctx.platform_metric);
         reservations.push(LayerReservation {
             layer: BillingLayer::Platform,
-            reserved_credits: estimate_fresh_credits(db, metric_code, None, 1, rate_cache_ttl_secs)
-                .await?,
+            estimated_quantity: 1,
+            credits_per_unit_micros: fresh_rate_micros(
+                db,
+                &ctx.platform_lago_metric_code,
+                None,
+                rate_cache_ttl_secs,
+            )
+            .await?,
+            reserved_credits: estimate_fresh_credits(
+                db,
+                &ctx.platform_lago_metric_code,
+                None,
+                1,
+                rate_cache_ttl_secs,
+            )
+            .await?,
+            allowance_reservations: Vec::new(),
+            grant_reservations: Vec::new(),
         });
     }
 
     if let Some(resale) = &ctx.resale {
         reservations.push(LayerReservation {
             layer: BillingLayer::Resale,
+            estimated_quantity: 1,
+            credits_per_unit_micros: fresh_rate_micros(
+                db,
+                &resale.lago_metric_code,
+                None,
+                rate_cache_ttl_secs,
+            )
+            .await?,
             reserved_credits: estimate_fresh_credits(
                 db,
                 &resale.lago_metric_code,
@@ -1082,6 +1137,8 @@ async fn estimate_layer_reservations(
                 rate_cache_ttl_secs,
             )
             .await?,
+            allowance_reservations: Vec::new(),
+            grant_reservations: Vec::new(),
         });
     }
 
@@ -1116,6 +1173,28 @@ async fn estimate_fresh_credits(
     Ok(credits_from_micros(rate.credits_per_unit_micros, quantity))
 }
 
+async fn fresh_rate_micros(
+    db: &mongodb::Database,
+    lago_metric_code: &str,
+    model: Option<&str>,
+    rate_cache_ttl_secs: u64,
+) -> AppResult<i64> {
+    let rate = find_rate(db, lago_metric_code, model)
+        .await?
+        .ok_or_else(|| {
+            AppError::BillingNotConfigured(format!(
+                "billing rate cache is missing for metric {lago_metric_code}"
+            ))
+        })?;
+    let max_age_secs = i64::try_from(rate_cache_ttl_secs).unwrap_or(i64::MAX);
+    if rate.synced_at < Utc::now() - Duration::seconds(max_age_secs) {
+        return Err(AppError::BillingNotConfigured(format!(
+            "billing rate cache is stale for metric {lago_metric_code}"
+        )));
+    }
+    Ok(rate.credits_per_unit_micros.max(0))
+}
+
 async fn estimate_credits(
     db: &mongodb::Database,
     lago_metric_code: &str,
@@ -1136,7 +1215,7 @@ async fn estimate_credits(
     Ok(credits_from_micros(rate.credits_per_unit_micros, quantity))
 }
 
-async fn find_rate(
+pub(crate) async fn find_rate(
     db: &mongodb::Database,
     lago_metric_code: &str,
     model: Option<&str>,
@@ -1155,13 +1234,21 @@ async fn find_rate(
         .map_err(Into::into)
 }
 
-fn credits_from_micros(credits_per_unit_micros: i64, quantity: i64) -> i64 {
+pub(crate) fn credits_from_micros(credits_per_unit_micros: i64, quantity: i64) -> i64 {
     if credits_per_unit_micros <= 0 || quantity <= 0 {
         return 0;
     }
 
     let micros = i128::from(credits_per_unit_micros) * i128::from(quantity);
     let credits = (micros + i128::from(CREDIT_MICROS - 1)) / i128::from(CREDIT_MICROS);
+    credits.min(i128::from(i64::MAX)) as i64
+}
+
+pub(crate) fn whole_credits_for_micros(micros: i64) -> i64 {
+    if micros <= 0 {
+        return 0;
+    }
+    let credits = (i128::from(micros) + i128::from(CREDIT_MICROS - 1)) / i128::from(CREDIT_MICROS);
     credits.min(i128::from(i64::MAX)) as i64
 }
 
@@ -1206,6 +1293,7 @@ async fn release_one_unforwarded_row(
     };
 
     release_wallet_hold(db, &claimed.billing_owner_id, claimed.reserved_credits).await?;
+    super::funding::release_usage_reservations(db, &claimed).await?;
     Ok(true)
 }
 
@@ -1345,10 +1433,13 @@ mod tests {
             balance_credits,
             reserved_credits: 0,
             pending_lago_debits: 0,
+            pending_topup_expiry_credits: 0,
             has_payment_instrument: false,
             overdraft_cap_credits: 0,
             suspended: false,
             collection_state: CollectionState::Good,
+            topup_expiry_checked_at: None,
+            active_topup_expiry: None,
             balance_synced_at: now,
             created_at: now,
             updated_at: now,

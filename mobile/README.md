@@ -293,6 +293,9 @@ All under `/api/v1` on the configured `*_API_BASE_URL`:
 | --- | --- |
 | `POST /auth/login` | Email + password login |
 | `POST /auth/mfa/verify` | MFA second-factor verification |
+| `POST /auth/device/preview` | Preview a login request's requester context |
+| `POST /auth/device/approve` | Approve a device login with the human session |
+| `POST /auth/device/deny` | Reject a device login with the human session |
 | `GET /approvals/requests?status=pending` | Pending challenges list |
 | `GET /approvals/requests/{id}` | Challenge detail |
 | `POST /approvals/requests/{id}/decide` | Approve / deny a challenge |
@@ -304,6 +307,8 @@ All under `/api/v1` on the configured `*_API_BASE_URL`:
 ## Deep links & push
 
 - Custom URL scheme: `{APP_SCHEME}://challenge/{challenge_id}` → opens the challenge detail screen
+- Device login scheme: `nyxid://login/device?user_code=...` -> prefills the confirmation screen without previewing or approving
+- The QR scanner accepts HTTPS or `nyxid://` login URLs but extracts only `user_code`; API calls always use `*_API_BASE_URL`
 - Supported push payload fields: `deeplink`, `url`, `challenge_id`, `challengeId`
 - Universal Links: when `*_UNIVERSAL_LINK_HOST` is set, that host is added to iOS `associatedDomains` and Android's intent filter. The host of `*_API_BASE_URL` is also auto-added to iOS `associatedDomains` so backend-issued links open in the app.
 

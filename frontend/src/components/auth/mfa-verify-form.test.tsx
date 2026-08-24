@@ -94,9 +94,9 @@ describe("MfaVerifyForm", () => {
     const assignSpy = vi
       .spyOn(window.location, "assign")
       .mockImplementation(() => undefined);
-    // A returnTo whose origin is neither the frontend nor the backend must
-    // be discarded -- the user lands on /dashboard, not the attacker host.
-    const returnTo = "https://evil.example/x";
+    // A protocol-relative returnTo must be discarded -- the user lands on
+    // /dashboard, not the attacker host.
+    const returnTo = "//evil.example/x";
 
     render(<MfaVerifyForm returnTo={returnTo} />);
 

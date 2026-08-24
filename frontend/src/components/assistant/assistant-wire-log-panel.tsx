@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { ChevronDown, Copy, Network, Trash2 } from "lucide-react";
 import { AssistantWireReplayView } from "@/components/assistant/assistant-wire-replay-view";
 import { Badge } from "@/components/ui/badge";
@@ -21,6 +22,8 @@ import type {
   AssistantUpstreamEnvelope,
   AssistantWireLogExchange,
 } from "@/schemas/assistant-wire-log";
+import { useAssistantWireLog } from "@/hooks/use-assistant-wire-log";
+import type { AssistantWireLogResult } from "@/hooks/use-assistant-wire-log";
 import { useFeature } from "@/hooks/use-feature-flag";
 import { FEATURE_FLAG } from "@/lib/feature-flags";
 import { useAssistantWireLogStore } from "@/stores/assistant-wire-log-store";
@@ -60,11 +63,6 @@ function requestJson(envelope: AssistantUpstreamEnvelope): string {
 
 function entryJson(entry: AssistantWireLogExchange): string {
   return JSON.stringify(entry, null, 2);
-}
-
-function upstreamStatus(envelope: AssistantUpstreamEnvelope): number | null {
-  if (envelope.degraded) return envelope.status ?? null;
-  return envelope.response?.status ?? null;
 }
 
 function UpstreamResponse({
@@ -116,7 +114,7 @@ function UpstreamResponse({
           </dl>
           {!envelope.degraded && envelope.droppedHeaders ? (
             <p className="mt-2 text-[10px] text-warning">
-              Allowlisted response headers were dropped by the wire-header size
+              Allowlisted response headers were dropped by the wire-log size
               ladder.
             </p>
           ) : null}
@@ -266,7 +264,227 @@ function ResponseCapture({
   );
 }
 
-export function AssistantWireLogPanel() {
+function WireLogPayload({
+  upstreamEchoes,
+  droppedEchoCount,
+  showResponses,
+}: {
+  readonly upstreamEchoes: readonly AssistantUpstreamEnvelope[];
+  readonly droppedEchoCount: number | undefined;
+  readonly showResponses: boolean;
+}) {
+  return (
+    <>
+      {upstreamEchoes.map((envelope, index) => (
+        <section
+          key={`${envelope.path}-${String(index)}`}
+          className="space-y-2"
+        >
+          <h4 className="text-[10px] font-semibold uppercase text-text-tertiary">
+            Request {index + 1} - backend echo
+          </h4>
+          <p className="text-[11px] leading-5 text-muted-foreground">
+            Reconstructed request assembled by NyxID before credential and
+            identity injection; headers are an allowlisted subset.
+          </p>
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-[10px] leading-5 text-muted-foreground">
+            {requestJson(envelope)}
+          </pre>
+        </section>
+      ))}
+      {droppedEchoCount ? (
+        <p className="text-[11px] text-warning">
+          {droppedEchoCount} later backend echo
+          {droppedEchoCount === 1 ? " was" : "es were"} dropped by the wire-log
+          size ladder.
+        </p>
+      ) : null}
+      {showResponses
+        ? upstreamEchoes.map((envelope, index) => (
+            <UpstreamResponse
+              key={`${envelope.path}-response-${String(index)}`}
+              envelope={envelope}
+              index={index}
+            />
+          ))
+        : null}
+    </>
+  );
+}
+
+function LazyWireLogPayload({
+  wireLogId,
+  showResponses,
+}: {
+  readonly wireLogId: string;
+  readonly showResponses: boolean;
+}) {
+  const wireLog = useAssistantWireLog(wireLogId, true);
+
+  if (wireLog.isPending) {
+    return (
+      <p className="text-[11px] text-muted-foreground">Loading wire log...</p>
+    );
+  }
+  if (wireLog.isError) {
+    return (
+      <p className="text-[11px] text-destructive">Could not load wire log.</p>
+    );
+  }
+  if (wireLog.data?.status === "expired") {
+    return (
+      <p className="text-[11px] text-warning">
+        Wire log expired or unavailable.
+      </p>
+    );
+  }
+  if (wireLog.data?.status !== "loaded") return null;
+
+  return (
+    <WireLogPayload
+      upstreamEchoes={wireLog.data.record.payload.echoes}
+      droppedEchoCount={wireLog.data.record.payload.droppedEchoCount}
+      showResponses={showResponses}
+    />
+  );
+}
+
+function WireLogEntry({
+  entry,
+  isExpanded,
+  showResponses,
+  rendered,
+  visibleLines,
+  onExpandedChange,
+  onRenderedChange,
+  onShowMore,
+}: {
+  readonly entry: AssistantWireLogExchange;
+  readonly isExpanded: boolean;
+  readonly showResponses: boolean;
+  readonly rendered: boolean;
+  readonly visibleLines: number;
+  readonly onExpandedChange: () => void;
+  readonly onRenderedChange: (rendered: boolean) => void;
+  readonly onShowMore: () => void;
+}) {
+  const queryClient = useQueryClient();
+
+  function copyExchange() {
+    const cached = entry.wireLogId
+      ? queryClient.getQueryData<AssistantWireLogResult>([
+          "assistant-wire-log",
+          entry.wireLogId,
+        ])
+      : undefined;
+    const copyEntry =
+      cached?.status === "loaded"
+        ? {
+            ...entry,
+            upstreamEchoes: cached.record.payload.echoes,
+            droppedEchoCount: cached.record.payload.droppedEchoCount,
+          }
+        : entry;
+    void navigator.clipboard.writeText(entryJson(copyEntry));
+  }
+
+  return (
+    <article className="overflow-hidden rounded-lg border border-border/70 bg-surface">
+      <div className="flex items-start gap-2 p-3">
+        <button
+          type="button"
+          onClick={onExpandedChange}
+          aria-expanded={isExpanded}
+          aria-label={`Toggle ${entry.label} details`}
+          className="flex min-w-0 flex-1 items-start gap-2 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        >
+          <ChevronDown
+            className={cn(
+              "mt-0.5 h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform",
+              isExpanded && "rotate-180",
+            )}
+          />
+          <span className="min-w-0 flex-1">
+            <span className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[10px] tabular-nums text-text-tertiary">
+                {new Date(entry.ts).toLocaleTimeString([], {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  second: "2-digit",
+                })}
+              </span>
+              <Badge variant="secondary">
+                {entry.kind === "sse" ? "SSE" : "Header"}
+              </Badge>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Badge variant={statusVariant(entry.status)}>
+                    NyxID {entry.status}
+                  </Badge>
+                </TooltipTrigger>
+                <TooltipContent>NyxID response to this browser</TooltipContent>
+              </Tooltip>
+            </span>
+            <span className="mt-1 block break-all font-mono text-[11px] leading-5 text-muted-foreground">
+              {entry.label}
+            </span>
+          </span>
+        </button>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon"
+              aria-label={`Copy ${entry.label} exchange as JSON`}
+              className="h-7 w-7 shrink-0"
+              onClick={copyExchange}
+            >
+              <Copy />
+            </Button>
+          </TooltipTrigger>
+          <TooltipContent>Copy exchange as JSON</TooltipContent>
+        </Tooltip>
+      </div>
+      {isExpanded ? (
+        <div className="space-y-4 border-t border-border/60 bg-background/20 p-3">
+          {entry.wireLogId ? (
+            <LazyWireLogPayload
+              wireLogId={entry.wireLogId}
+              showResponses={showResponses}
+            />
+          ) : entry.upstreamEchoes ? (
+            <WireLogPayload
+              upstreamEchoes={entry.upstreamEchoes}
+              droppedEchoCount={entry.droppedEchoCount}
+              showResponses={showResponses}
+            />
+          ) : (
+            <p className="text-[11px] text-warning">
+              Wire log payload unavailable.
+            </p>
+          )}
+          {showResponses ? (
+            <ResponseCapture
+              entry={entry}
+              rendered={rendered}
+              onRenderedChange={onRenderedChange}
+              visibleLines={visibleLines}
+              onShowMore={onShowMore}
+            />
+          ) : null}
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+export function AssistantWireLogPanel({
+  activeConversationId,
+}: {
+  readonly activeConversationId: string | null;
+}) {
+  const queryClient = useQueryClient();
   const entries = useAssistantWireLogStore((state) => state.entries);
   const captureEnabled = useAssistantWireLogStore(
     (state) => state.captureEnabled,
@@ -281,6 +499,7 @@ export function AssistantWireLogPanel() {
     (state) => state.setShowResponses,
   );
   const clear = useAssistantWireLogStore((state) => state.clear);
+  const [allConversations, setAllConversations] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [rendered, setRendered] = useState<ReadonlySet<string>>(new Set());
   const [lineWindows, setLineWindows] = useState<
@@ -299,6 +518,17 @@ export function AssistantWireLogPanel() {
       else next.delete(id);
       return next;
     });
+  }
+
+  const visibleEntries = allConversations
+    ? entries
+    : activeConversationId
+      ? entries.filter((entry) => entry.conversationId === activeConversationId)
+      : [];
+
+  function clearWireLogs() {
+    queryClient.removeQueries({ queryKey: ["assistant-wire-log"] });
+    clear();
   }
 
   return (
@@ -357,12 +587,24 @@ export function AssistantWireLogPanel() {
             />
             Responses
           </label>
+          <label
+            htmlFor="wire-log-all-conversations"
+            className="flex items-center gap-2 text-[12px] font-medium text-foreground"
+          >
+            <Switch
+              id="wire-log-all-conversations"
+              checked={allConversations}
+              onCheckedChange={setAllConversations}
+              aria-label="Show all conversations"
+            />
+            All conversations
+          </label>
           <Button
             type="button"
             variant="ghost"
             size="sm"
             className="ml-auto"
-            onClick={clear}
+            onClick={clearWireLogs}
             disabled={entries.length === 0}
           >
             <Trash2 />
@@ -375,156 +617,37 @@ export function AssistantWireLogPanel() {
             <div className="flex min-h-40 items-center justify-center px-6 text-center text-[12px] text-text-tertiary">
               No captured requests
             </div>
+          ) : visibleEntries.length === 0 ? (
+            <div className="flex min-h-40 items-center justify-center px-6 text-center text-[12px] text-text-tertiary">
+              No captured requests for this conversation
+            </div>
           ) : (
             <div className="space-y-2">
-              {[...entries].reverse().map((entry) => {
+              {[...visibleEntries].reverse().map((entry) => {
                 const isExpanded = expanded.has(entry.id);
-                const primary = entry.upstreamEchoes[0];
-                if (!primary) return null;
-                const aevatarStatus = upstreamStatus(primary);
                 return (
-                  <article
+                  <WireLogEntry
                     key={entry.id}
-                    className="overflow-hidden rounded-lg border border-border/70 bg-surface"
-                  >
-                    <div className="flex items-start gap-2 p-3">
-                      <button
-                        type="button"
-                        onClick={() => toggleSet(setExpanded, entry.id)}
-                        aria-expanded={isExpanded}
-                        className="flex min-w-0 flex-1 items-start gap-2 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                      >
-                        <ChevronDown
-                          className={cn(
-                            "mt-0.5 h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform",
-                            isExpanded && "rotate-180",
-                          )}
-                        />
-                        <span className="min-w-0 flex-1">
-                          <span className="flex flex-wrap items-center gap-1.5">
-                            <span className="text-[10px] tabular-nums text-text-tertiary">
-                              {new Date(entry.ts).toLocaleTimeString([], {
-                                hour: "2-digit",
-                                minute: "2-digit",
-                                second: "2-digit",
-                              })}
-                            </span>
-                            {primary.commandType ? (
-                              <Badge variant="secondary">
-                                {primary.commandType}
-                              </Badge>
-                            ) : null}
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Badge variant={statusVariant(entry.status)}>
-                                  NyxID {entry.status}
-                                </Badge>
-                              </TooltipTrigger>
-                              <TooltipContent>
-                                NyxID response to this browser
-                              </TooltipContent>
-                            </Tooltip>
-                            {showResponses && aevatarStatus ? (
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Badge variant={statusVariant(aevatarStatus)}>
-                                    Aevatar {aevatarStatus}
-                                  </Badge>
-                                </TooltipTrigger>
-                                <TooltipContent>
-                                  Backend-observed Aevatar status
-                                </TooltipContent>
-                              </Tooltip>
-                            ) : null}
-                          </span>
-                          <span className="mt-1 block break-all font-mono text-[11px] leading-5 text-muted-foreground">
-                            <strong className="font-semibold text-foreground">
-                              {primary.method}
-                            </strong>{" "}
-                            {normalizedPath(primary.path)}
-                          </span>
-                        </span>
-                      </button>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon"
-                            aria-label={`Copy ${primary.method} ${primary.path} exchange as JSON`}
-                            className="h-7 w-7 shrink-0"
-                            onClick={() =>
-                              void navigator.clipboard.writeText(
-                                entryJson(entry),
-                              )
-                            }
-                          >
-                            <Copy />
-                          </Button>
-                        </TooltipTrigger>
-                        <TooltipContent>Copy exchange as JSON</TooltipContent>
-                      </Tooltip>
-                    </div>
-                    {isExpanded ? (
-                      <div className="space-y-4 border-t border-border/60 bg-background/20 p-3">
-                        {entry.upstreamEchoes.map((envelope, index) => (
-                          <section
-                            key={`${envelope.path}-${String(index)}`}
-                            className="space-y-2"
-                          >
-                            <h4 className="text-[10px] font-semibold uppercase text-text-tertiary">
-                              Request {index + 1} - backend echo
-                            </h4>
-                            <p className="text-[11px] leading-5 text-muted-foreground">
-                              Reconstructed request assembled by NyxID before
-                              credential and identity injection; headers are an
-                              allowlisted subset.
-                            </p>
-                            <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-border/60 bg-background/60 p-3 font-mono text-[10px] leading-5 text-muted-foreground">
-                              {requestJson(envelope)}
-                            </pre>
-                          </section>
-                        ))}
-                        {entry.droppedEchoCount ? (
-                          <p className="text-[11px] text-warning">
-                            {entry.droppedEchoCount} later backend echo
-                            {entry.droppedEchoCount === 1 ? " was" : "es were"}{" "}
-                            dropped by the header size ladder.
-                          </p>
-                        ) : null}
-                        {showResponses ? (
-                          <>
-                            {entry.upstreamEchoes.map((envelope, index) => (
-                              <UpstreamResponse
-                                key={`${envelope.path}-response-${String(index)}`}
-                                envelope={envelope}
-                                index={index}
-                              />
-                            ))}
-                            <ResponseCapture
-                              entry={entry}
-                              rendered={rendered.has(entry.id)}
-                              onRenderedChange={(value) =>
-                                toggleSet(setRendered, entry.id, value)
-                              }
-                              visibleLines={
-                                lineWindows[entry.id] ?? INITIAL_RAW_LINE_WINDOW
-                              }
-                              onShowMore={() =>
-                                setLineWindows((current) => ({
-                                  ...current,
-                                  [entry.id]:
-                                    (current[entry.id] ??
-                                      INITIAL_RAW_LINE_WINDOW) +
-                                    RAW_LINE_WINDOW_STEP,
-                                }))
-                              }
-                            />
-                          </>
-                        ) : null}
-                      </div>
-                    ) : null}
-                  </article>
+                    entry={entry}
+                    isExpanded={isExpanded}
+                    showResponses={showResponses}
+                    rendered={rendered.has(entry.id)}
+                    visibleLines={
+                      lineWindows[entry.id] ?? INITIAL_RAW_LINE_WINDOW
+                    }
+                    onExpandedChange={() => toggleSet(setExpanded, entry.id)}
+                    onRenderedChange={(value) =>
+                      toggleSet(setRendered, entry.id, value)
+                    }
+                    onShowMore={() =>
+                      setLineWindows((current) => ({
+                        ...current,
+                        [entry.id]:
+                          (current[entry.id] ?? INITIAL_RAW_LINE_WINDOW) +
+                          RAW_LINE_WINDOW_STEP,
+                      }))
+                    }
+                  />
                 );
               })}
             </div>
@@ -534,8 +657,8 @@ export function AssistantWireLogPanel() {
         <div className="shrink-0 space-y-1 border-t border-border/60 px-5 py-3 text-[11px] leading-4 text-text-tertiary">
           <p>
             Raw captures are session-only and may contain sensitive payloads
-            verbatim without the chat renderer's credential redaction,
-            including in replay placeholders.
+            verbatim without the chat renderer's credential redaction, including
+            in replay placeholders.
           </p>
           <p>WebSocket exchanges are not captured.</p>
           <p>
@@ -548,7 +671,11 @@ export function AssistantWireLogPanel() {
   );
 }
 
-export function AssistantWireLogAction() {
+export function AssistantWireLogAction({
+  activeConversationId,
+}: {
+  readonly activeConversationId: string | null;
+}) {
   // Runtime feature flag (`experimental:aevatar-chat-wire-log`), resolved
   // server-side for this user on the personal surface. Fail-closed: unknown,
   // loading, or an older backend that omits the key all read as off.
@@ -562,5 +689,5 @@ export function AssistantWireLogAction() {
   }, [featureEnabled, setFeatureEnabled]);
 
   if (!featureEnabled) return null;
-  return <AssistantWireLogPanel />;
+  return <AssistantWireLogPanel activeConversationId={activeConversationId} />;
 }

@@ -110,6 +110,7 @@ pub struct BillingWalletResponse {
     pub balance_credits: i64,
     pub reserved_credits: i64,
     pub pending_lago_debits: i64,
+    pub pending_topup_expiry_credits: i64,
     pub available_credits: i64,
     pub available_with_overdraft_credits: i64,
     pub has_payment_instrument: bool,
@@ -156,6 +157,10 @@ pub struct TopUpHistoryEntry {
     pub checkout_url: Option<String>,
     /// True when a receipt PDF can be downloaded for this top-up.
     pub receipt_available: bool,
+    pub paid_at: Option<chrono::DateTime<Utc>>,
+    pub credits_expire_at: Option<chrono::DateTime<Utc>>,
+    pub expired_credits_micros: i64,
+    pub credits_expired_at: Option<chrono::DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -239,6 +244,20 @@ pub async fn get_usage(
                     "billable": { "$ne": [{ "$ifNull": ["$wallet_id", null] }, null] },
                 },
                 "quantity": { "$sum": "$quantity" },
+                // Benefit-aware rows persist the exact wallet debit. Legacy
+                // rows retain rate-based estimation for historical parity.
+                "wallet_charge_credits": {
+                    "$sum": { "$ifNull": ["$funding.wallet_charge_credits", 0_i64] }
+                },
+                "legacy_quantity": {
+                    "$sum": {
+                        "$cond": [
+                            { "$eq": [{ "$ifNull": ["$funding", null] }, null] },
+                            "$quantity",
+                            0_i64,
+                        ]
+                    }
+                },
                 "events": { "$sum": 1 },
                 // Token-class observability sums; absent on non-LLM rows
                 // and rows written before breakdown capture shipped.
@@ -270,9 +289,17 @@ pub async fn get_usage(
         let lago_metric_code = id_doc.get_str("lago_metric_code").unwrap_or("").to_string();
         let billable = id_doc.get_bool("billable").unwrap_or(false);
         let estimated_credits_micros = if billable {
+            let wallet_charge_micros = doc_i64(&doc, "wallet_charge_credits")
+                .unwrap_or(0)
+                .saturating_mul(1_000_000);
+            let legacy_quantity = doc_i64(&doc, "legacy_quantity").unwrap_or(0);
             find_rate(&state.db, &lago_metric_code, None)
                 .await?
-                .map(|rate| rate.credits_per_unit_micros.saturating_mul(quantity))
+                .map(|rate| {
+                    wallet_charge_micros.saturating_add(
+                        rate.credits_per_unit_micros.saturating_mul(legacy_quantity),
+                    )
+                })
         } else {
             Some(0)
         };
@@ -329,7 +356,11 @@ pub async fn get_usage(
 }
 
 /// Reject wallet surfaces for owners outside the staged billing rollout.
-async fn ensure_billing_rollout(state: &AppState, owner_id: &str, actor_id: &str) -> AppResult<()> {
+pub(crate) async fn ensure_billing_rollout(
+    state: &AppState,
+    owner_id: &str,
+    actor_id: &str,
+) -> AppResult<()> {
     if crate::services::feature_flag_service::billing_rollout_enabled(&state.db, owner_id, actor_id)
         .await?
     {
@@ -572,6 +603,10 @@ pub async fn list_topups(
                     .then_some(session.payment_url)
                     .flatten(),
                 receipt_available: status == "paid",
+                paid_at: session.paid_at,
+                credits_expire_at: session.credits_expire_at,
+                expired_credits_micros: session.expired_credits_micros,
+                credits_expired_at: session.credits_expired_at,
             }
         })
         .collect();
@@ -852,6 +887,7 @@ impl BillingWalletResponse {
             balance_credits: wallet.balance_credits,
             reserved_credits: wallet.reserved_credits,
             pending_lago_debits: wallet.pending_lago_debits,
+            pending_topup_expiry_credits: wallet.pending_topup_expiry_credits,
             available_credits,
             available_with_overdraft_credits,
             has_payment_instrument: wallet.has_payment_instrument,

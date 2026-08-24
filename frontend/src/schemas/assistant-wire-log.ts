@@ -71,6 +71,15 @@ export const assistantUpstreamEnvelopeHeaderSchema = z
   })
   .strict();
 
+export const assistantWireLogRecordSchema = z
+  .object({
+    id: z.string(),
+    conversation_id: z.string().nullable(),
+    created_at: z.string(),
+    payload: assistantUpstreamEnvelopeHeaderSchema,
+  })
+  .strict();
+
 const legacyAssistantUpstreamEnvelopeSchema = z.object({
   method: z.string(),
   path: z.string(),
@@ -178,7 +187,10 @@ const assistantWireExchangeBaseSchema = z
     ts: z.number().finite(),
     kind: z.enum(["sse", "header"]),
     status: z.number().int().min(100).max(599),
-    upstreamEchoes: z.array(assistantUpstreamEnvelopeSchema).min(1),
+    conversationId: z.string().nullable(),
+    wireLogId: z.string().nullable(),
+    label: z.string(),
+    upstreamEchoes: z.array(assistantUpstreamEnvelopeSchema).optional(),
     droppedEchoCount: z.number().int().nonnegative().optional(),
   })
   .strict();
@@ -203,6 +215,9 @@ export type AssistantUpstreamEnvelope = z.infer<
 >;
 export type AssistantUpstreamEnvelopeHeader = z.infer<
   typeof assistantUpstreamEnvelopeHeaderSchema
+>;
+export type AssistantWireLogRecord = z.infer<
+  typeof assistantWireLogRecordSchema
 >;
 export type AssistantWireLine = z.infer<typeof assistantWireLineSchema>;
 export type AssistantWireCaptureOutcome = z.infer<

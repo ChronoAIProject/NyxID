@@ -1,0 +1,27 @@
+{
+  "name": "nyxid",
+  "description": "NyxID Cursor plugins for credential brokering, service discovery, and proxied downstream API calls.",
+  "owner": {
+    "name": "ChronoAIProject"
+  },
+  "plugins": [
+    {
+      "name": "nyxid",
+      "source": "integrations/cursor-plugin",
+      "description": "Connect Cursor agents to NyxID for credential brokering, service discovery, and proxied downstream API calls without exposing upstream secrets.",
+      "version": "0.1.0",
+      "category": "developer-tools",
+      "tags": [
+        "credentials",
+        "mcp",
+        "api-proxy"
+      ],
+      "author": {
+        "name": "ChronoAIProject"
+      },
+      "homepage": "https://github.com/ChronoAIProject/NyxID",
+      "repository": "https://github.com/ChronoAIProject/NyxID",
+      "license": "Apache-2.0"
+    }
+  ]
+}

@@ -82,6 +82,7 @@ import type {
 import { isTurnActive } from "@/types/assistant";
 import {
   captureAssistantWireLogHeader,
+  captureAssistantWireLogId,
   useAssistantWireLogStore,
 } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
@@ -93,24 +94,58 @@ import { useAuthStore } from "@/stores/auth-store";
 // personally connected aevatar.
 const ASSISTANT_PREFIX = "/assistant";
 const DEBUG_UPSTREAM_REQUEST_HEADER = "X-NyxID-Debug-Upstream";
+const DEBUG_UPSTREAM_ID_RESPONSE_HEADER = "X-NyxID-Debug-Upstream-Id";
 const DEBUG_UPSTREAM_RESPONSE_HEADER = "X-NyxID-Debug-Upstream-Log";
 
-function assistantWireLogOptions(): {
+type AssistantWireLogMethod = "GET" | "POST" | "DELETE";
+
+function wireLogConversationId(endpoint: string): string | null {
+  const match = /^\/assistant\/conversations\/([^/?]+)/.exec(endpoint);
+  if (!match?.[1]) return null;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return match[1];
+  }
+}
+
+function suppressAssistantWireLog(endpoint: string): boolean {
+  return (
+    endpoint === `${ASSISTANT_PREFIX}/conversations` ||
+    endpoint.startsWith(`${ASSISTANT_PREFIX}/wire-logs/`)
+  );
+}
+
+function assistantWireLogOptions(
+  endpoint: string,
+  method: AssistantWireLogMethod,
+): {
   readonly headers?: Record<string, string>;
   readonly onResponse?: (response: Response) => void;
 } {
+  if (suppressAssistantWireLog(endpoint)) return {};
   const { featureEnabled, captureEnabled } =
     useAssistantWireLogStore.getState();
   if (!featureEnabled || !captureEnabled) return {};
+  const meta = {
+    kind: "header" as const,
+    conversationId: wireLogConversationId(endpoint),
+    label: `${method} ${endpoint}`,
+  };
   return {
     headers: { [DEBUG_UPSTREAM_REQUEST_HEADER]: "1" },
     onResponse: (response) => {
       try {
-        const exchangeId = captureAssistantWireLogHeader(
-          response.headers.get(DEBUG_UPSTREAM_RESPONSE_HEADER),
-          "header",
-          response.status,
+        const wireLogId = response.headers.get(
+          DEBUG_UPSTREAM_ID_RESPONSE_HEADER,
         );
+        const responseMeta = { ...meta, status: response.status };
+        const exchangeId = wireLogId
+          ? captureAssistantWireLogId(wireLogId, responseMeta)
+          : captureAssistantWireLogHeader(
+              response.headers.get(DEBUG_UPSTREAM_RESPONSE_HEADER),
+              responseMeta,
+            );
         if (!exchangeId) return;
         const clone = response.clone();
         void captureDeliveredResponseBody(exchangeId, clone).catch(() => {
@@ -199,9 +234,9 @@ function attachStreamWireEvent(
 // failure surfaces as a normal query error (toast + error state) instead of a
 // redirect to /login. Scoped to this transport; the rest of the app keeps
 // strict 401 handling.
-const assistantApi = {
+export const assistantApi = {
   get<T>(endpoint: string, signal?: AbortSignal): Promise<T> {
-    const wireLog = assistantWireLogOptions();
+    const wireLog = assistantWireLogOptions(endpoint, "GET");
     return apiClient<T>(endpoint, {
       headers: {
         Accept: "application/json",
@@ -218,14 +253,14 @@ const assistantApi = {
       body,
       preserveSessionOn401: true,
       signal,
-      ...assistantWireLogOptions(),
+      ...assistantWireLogOptions(endpoint, "POST"),
     });
   },
   del<T>(endpoint: string): Promise<T> {
     return apiClient<T>(endpoint, {
       method: "DELETE",
       preserveSessionOn401: true,
-      ...assistantWireLogOptions(),
+      ...assistantWireLogOptions(endpoint, "DELETE"),
     });
   },
 } as const;
@@ -1628,15 +1663,13 @@ export class AevatarAssistantTransport implements AssistantTransport {
         DELETE_REQUEST_DEADLINE_MS,
       );
       try {
-        await apiClient<unknown>(
-          `${ASSISTANT_PREFIX}/conversations/${conversationId}`,
-          {
-            method: "DELETE",
-            preserveSessionOn401: true,
-            signal: deadline.signal,
-            ...assistantWireLogOptions(),
-          },
-        );
+        const endpoint = `${ASSISTANT_PREFIX}/conversations/${conversationId}`;
+        await apiClient<unknown>(endpoint, {
+          method: "DELETE",
+          preserveSessionOn401: true,
+          signal: deadline.signal,
+          ...assistantWireLogOptions(endpoint, "DELETE"),
+        });
       } finally {
         clearTimeout(deadlineTimer);
         this.releaseScopeController(deadline);
@@ -4294,6 +4327,16 @@ export class AevatarAssistantTransport implements AssistantTransport {
     run.activeWireTelemetry = wireTelemetry;
     const bufferedWireEvents = new Map<string, ChatStreamWireEvent[]>();
     let wireExchangeId: string | null | undefined;
+    let wireConversationId = conversationId;
+    const assignAuthoritativeWireConversation = () => {
+      if (!wireExchangeId) return;
+      const authoritativeId = this.canonicalConversationId(conversationId);
+      if (authoritativeId === wireConversationId) return;
+      useAssistantWireLogStore
+        .getState()
+        .assignConversation(wireExchangeId, authoritativeId);
+      wireConversationId = authoritativeId;
+    };
     const onWire = wireLogEnabled
       ? (event: ChatStreamWireEvent) => {
           try {
@@ -4337,6 +4380,7 @@ export class AevatarAssistantTransport implements AssistantTransport {
         for (const frame of frames) {
           const printableEventsBefore = wireTelemetry?.printableTurnEvents ?? 0;
           this.handleAgUiFrame(conversationId, run, frame);
+          assignAuthoritativeWireConversation();
           if (
             wireTelemetry &&
             wireTelemetry.printableTurnEvents > printableEventsBefore
@@ -4360,11 +4404,19 @@ export class AevatarAssistantTransport implements AssistantTransport {
             bufferedWireEvents.clear();
             return;
           }
-          wireExchangeId = captureAssistantWireLogHeader(
-            response.debugUpstream,
-            "sse",
-            response.status,
-          );
+          wireConversationId = this.canonicalConversationId(conversationId);
+          const responseMeta = {
+            kind: "sse" as const,
+            status: response.status,
+            conversationId: wireConversationId,
+            label: "POST /assistant/chat",
+          };
+          wireExchangeId = response.debugUpstreamId
+            ? captureAssistantWireLogId(response.debugUpstreamId, responseMeta)
+            : captureAssistantWireLogHeader(
+                response.debugUpstream,
+                responseMeta,
+              );
           if (!wireExchangeId) {
             if (wireTelemetry) wireTelemetry.exchangeId = null;
             bufferedWireEvents.clear();

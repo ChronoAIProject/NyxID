@@ -21,6 +21,37 @@ pub enum CollectionState {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PurchasedCreditExpiryItem {
+    pub lago_purchase_transaction_id: String,
+    pub reference_id: String,
+    pub amount_micros: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub settled_at: DateTime<Utc>,
+}
+
+/// Durable crash bridge for one Lago purchased-credit expiry debit.
+///
+/// This stays embedded on the wallet until the provider debit, exact balance,
+/// top-up history, and billing-ledger entries have all been reconciled.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PurchasedCreditExpiryOperation {
+    pub operation_id: String,
+    pub processing_token: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub lease_until: DateTime<Utc>,
+    pub amount_micros: i64,
+    pub items: Vec<PurchasedCreditExpiryItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lago_void_transaction_id: Option<String>,
+    #[serde(default)]
+    pub wallet_balance_applied: bool,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub created_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct BillingWallet {
     #[serde(rename = "_id")]
     pub id: String,
@@ -37,6 +68,11 @@ pub struct BillingWallet {
     pub reserved_credits: i64,
     #[serde(default)]
     pub pending_lago_debits: i64,
+    /// Whole-credit conservative hold while an external expiry debit is in
+    /// flight. The exact microcredit balance is read back from Lago before
+    /// this hold is released.
+    #[serde(default)]
+    pub pending_topup_expiry_credits: i64,
     #[serde(default)]
     pub has_payment_instrument: bool,
     #[serde(default)]
@@ -44,6 +80,12 @@ pub struct BillingWallet {
     #[serde(default)]
     pub suspended: bool,
     pub collection_state: CollectionState,
+    /// Fairness cursor for the bounded purchased-credit expiry sweep.
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub topup_expiry_checked_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(ignore)]
+    pub active_topup_expiry: Option<PurchasedCreditExpiryOperation>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub balance_synced_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -57,6 +99,7 @@ impl BillingWallet {
         self.balance_credits
             .saturating_sub(self.reserved_credits)
             .saturating_sub(self.pending_lago_debits)
+            .saturating_sub(self.pending_topup_expiry_credits)
     }
 
     pub fn available_with_overdraft_credits(&self) -> i64 {
@@ -64,6 +107,7 @@ impl BillingWallet {
             .saturating_add(self.overdraft_cap_credits)
             .saturating_sub(self.reserved_credits)
             .saturating_sub(self.pending_lago_debits)
+            .saturating_sub(self.pending_topup_expiry_credits)
     }
 
     pub fn is_suspended(&self) -> bool {
@@ -90,15 +134,18 @@ mod tests {
             balance_credits: 100,
             reserved_credits: 30,
             pending_lago_debits: 25,
+            pending_topup_expiry_credits: 5,
             has_payment_instrument: false,
             overdraft_cap_credits: 0,
             suspended: false,
             collection_state: CollectionState::Good,
+            topup_expiry_checked_at: None,
+            active_topup_expiry: None,
             balance_synced_at: now,
             created_at: now,
             updated_at: now,
         };
 
-        assert_eq!(wallet.available_credits(), 45);
+        assert_eq!(wallet.available_credits(), 40);
     }
 }

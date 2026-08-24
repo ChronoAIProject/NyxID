@@ -10,7 +10,7 @@ import {
 import { useLogin, useRegister } from "@/hooks/use-auth";
 import { ApiError } from "@/lib/api-client";
 import { openExternal } from "@/lib/navigation";
-import { isTrustedAuthReturnTo } from "@/lib/return-url";
+import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import {
   useAppForm,
   Form,
@@ -24,6 +24,7 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { usePublicConfig } from "@/hooks/use-public-config";
+import { WebDeviceLogin } from "@/components/auth/web-device-login";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -233,8 +234,9 @@ export function AuthFlow({
     try {
       const result = await loginMutation.mutateAsync(data);
       if (!result.mfaRequired) {
-        if (isTrustedAuthReturnTo(returnTo)) {
-          window.location.assign(returnTo);
+        const trustedReturnTo = resolveTrustedAuthReturnTo(returnTo);
+        if (trustedReturnTo) {
+          window.location.assign(trustedReturnTo);
           return;
         }
         void navigate({ to: "/dashboard" as string });
@@ -444,6 +446,8 @@ export function AuthFlow({
               </form>
             </Form>
           )}
+
+          <WebDeviceLogin returnTo={returnTo} />
 
           {/* Footer */}
           <div className="mt-8 text-center text-[13px] text-muted-foreground">

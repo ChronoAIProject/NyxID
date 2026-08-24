@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use axum::body::{Body, to_bytes};
@@ -716,6 +717,7 @@ async fn billing_route_coverage_smoke() {
                 operation_generation,
                 effect_idempotency_key: effect_idempotency_key.clone(),
                 arguments: exact_arguments,
+                execution_authority_digest: None,
                 redemption: None,
             }),
             created_at: now,
@@ -1511,11 +1513,13 @@ async fn start_billing_downstream() -> (
 
 // Async settlement can lag far behind the request under coverage
 // instrumentation (llvm-cov roughly halves throughput), so the assertion
-// polls with a generous budget instead of the 2s that flaked in CI.
-const SETTLEMENT_POLL_ATTEMPTS: u32 = 500;
+// polls until a generous wall-clock deadline instead of a fixed iteration
+// budget that can be exhausted by slow shared CI runners.
+const SETTLEMENT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 async fn assert_direct_reported_usage(db: &mongodb::Database, service: &DownstreamService) {
-    for _ in 0..SETTLEMENT_POLL_ATTEMPTS {
+    let started = Instant::now();
+    let (saw_usage, saw_provenance) = loop {
         let usage = db
             .collection::<UsageMeterRow>(USAGE_METER)
             .find_one(doc! {
@@ -1536,6 +1540,8 @@ async fn assert_direct_reported_usage(db: &mongodb::Database, service: &Downstre
             .await
             .expect("query direct assistant reported-usage audit");
 
+        let saw_usage = usage.is_some();
+        let saw_provenance = provenance.is_some();
         if let (Some(usage), Some(provenance)) = (usage, provenance) {
             assert_eq!(usage.quantity, Some(149));
             let data = provenance.event_data.expect("reported usage audit data");
@@ -1545,9 +1551,17 @@ async fn assert_direct_reported_usage(db: &mongodb::Database, service: &Downstre
             assert_eq!(data["path"], "chat/completions");
             return;
         }
+        if started.elapsed() >= SETTLEMENT_DEADLINE {
+            break (saw_usage, saw_provenance);
+        }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    panic!("direct assistant route did not settle from the fixture's reported usage provenance");
+    };
+    panic!(
+        "direct assistant route did not settle from the fixture's reported usage provenance (saw_usage={}, saw_provenance={}) after {:.1}s",
+        saw_usage,
+        saw_provenance,
+        started.elapsed().as_secs_f64()
+    );
 }
 
 async fn assert_direct_settled_usage_count(
@@ -1555,7 +1569,8 @@ async fn assert_direct_settled_usage_count(
     service: &DownstreamService,
     expected_count: u64,
 ) {
-    for _ in 0..SETTLEMENT_POLL_ATTEMPTS {
+    let started = Instant::now();
+    let last_count = loop {
         let count = db
             .collection::<UsageMeterRow>(USAGE_METER)
             .count_documents(doc! {
@@ -1570,9 +1585,17 @@ async fn assert_direct_settled_usage_count(
         if count == expected_count {
             return;
         }
+        if started.elapsed() >= SETTLEMENT_DEADLINE {
+            break count;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    panic!("expected {expected_count} finalized direct-assistant token usage rows");
+    };
+    panic!(
+        "expected {} finalized direct-assistant token usage rows, saw {} after {:.1}s",
+        expected_count,
+        last_count,
+        started.elapsed().as_secs_f64()
+    );
 }
 
 async fn start_controlled_billing_downstream() -> (
@@ -2277,7 +2300,8 @@ async fn assert_route_settled_count(
     metric: BillingMetric,
     expected_count: u64,
 ) {
-    for _ in 0..SETTLEMENT_POLL_ATTEMPTS {
+    let started = Instant::now();
+    let last_count = loop {
         let count = db
             .collection::<UsageMeterRow>(USAGE_METER)
             .count_documents(doc! {
@@ -2292,9 +2316,19 @@ async fn assert_route_settled_count(
         if count == expected_count {
             return;
         }
+        if started.elapsed() >= SETTLEMENT_DEADLINE {
+            break count;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    panic!("expected {expected_count} finalized {metric:?} rows for route {service_slug}");
+    };
+    panic!(
+        "expected {} finalized {:?} rows for route {}, saw {} after {:.1}s",
+        expected_count,
+        metric,
+        service_slug,
+        last_count,
+        started.elapsed().as_secs_f64()
+    );
 }
 
 fn assert_route_inventory_matches_router() {
@@ -2524,14 +2558,24 @@ async fn wait_for_route_usage_status(
     service_slug: &str,
     expected: UsageStatus,
 ) -> UsageMeterRow {
-    for _ in 0..SETTLEMENT_POLL_ATTEMPTS {
+    let started = Instant::now();
+    let last_status = loop {
         let row = usage_row_for_service(db, service_slug).await;
         if row.status == expected {
             return row;
         }
+        if started.elapsed() >= SETTLEMENT_DEADLINE {
+            break row.status;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    panic!("route {service_slug} did not reach {expected:?}");
+    };
+    panic!(
+        "route {} did not reach {:?}, saw {:?} after {:.1}s",
+        service_slug,
+        expected,
+        last_status,
+        started.elapsed().as_secs_f64()
+    );
 }
 
 async fn assert_no_usage_row(db: &mongodb::Database, request_id: &str) {

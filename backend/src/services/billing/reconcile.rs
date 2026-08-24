@@ -39,6 +39,11 @@ pub struct ReconcileStats {
     pub drift_alerts: u64,
     pub wallet_balance_refreshes: u64,
     pub rate_cache_refreshes: u64,
+    pub service_price_syncs: u64,
+    pub funding_releases_recovered: u64,
+    pub grants_expired: u64,
+    pub grant_ledger_recoveries: u64,
+    pub topups_expired: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +65,11 @@ impl BillingReconciler {
     pub async fn run_once(&self) -> AppResult<ReconcileStats> {
         let mut stats = ReconcileStats::default();
         stats.abandoned += self.abandon_unforwarded_reserved().await?;
+        stats.funding_releases_recovered +=
+            super::funding::recover_terminal_releases(&self.db).await?;
+        stats.grants_expired += super::grants::expire_due_grants(&self.db, Utc::now()).await?;
+        stats.grant_ledger_recoveries +=
+            super::grants::recover_unledgered_events(&self.db, Utc::now()).await?;
         // Anchor the billing-ledger head into the audit chain whenever it
         // advanced, so tail truncation of the ledger is detectable. Best
         // effort: an anchor failure must not stall the sweep.
@@ -78,6 +88,16 @@ impl BillingReconciler {
             return Ok(stats);
         };
 
+        stats.topups_expired +=
+            super::topup_expiry::expire_purchased_credits(&self.db, lago.as_ref(), Utc::now())
+                .await?;
+
+        stats.service_price_syncs += super::pricing::retry_pending_service_prices(
+            &self.db,
+            lago.as_ref(),
+            &self.config.lago_plan_code,
+        )
+        .await?;
         self.push_unacked(lago.as_ref(), &mut stats).await?;
         self.compare_finalized_usage(lago.as_ref(), &mut stats)
             .await?;
@@ -226,6 +246,7 @@ impl BillingReconciler {
             .collection::<UsageMeterRow>(USAGE_METER)
             .find(doc! {
                 "status": "finalized",
+                "released": true,
                 "lago_acked": false,
                 "wallet_id": { "$ne": null },
                 "quantity": { "$ne": null },
@@ -243,6 +264,12 @@ impl BillingReconciler {
         // from the local wallet, memoized for the batch.
         let mut subscriptions: BTreeMap<String, Option<String>> = BTreeMap::new();
         for row in rows {
+            if row.funding.as_ref().is_some_and(|funding| {
+                funding.settled && funding.lago_billable_quantity_micros.unwrap_or_default() <= 0
+            }) {
+                mark_lago_acked(&self.db, &row.id).await?;
+                continue;
+            }
             let subscription_id = match subscriptions.get(&row.billing_owner_id) {
                 Some(cached) => cached.clone(),
                 None => {
@@ -297,7 +324,7 @@ impl BillingReconciler {
             let Ok(usage) = lago.current_usage(&owner_id, "").await else {
                 continue;
             };
-            let remote_quantity = extract_metric_quantity(&usage.raw, &metric_code);
+            let remote_quantity = extract_metric_quantity_micros(&usage.raw, &metric_code);
             if let Some(remote) = remote_quantity
                 && remote != local_quantity
             {
@@ -305,8 +332,8 @@ impl BillingReconciler {
                 tracing::warn!(
                     owner_id = %owner_id,
                     metric_code = %metric_code,
-                    local_quantity,
-                    remote_quantity = remote,
+                    local_quantity_micros = local_quantity,
+                    remote_quantity_micros = remote,
                     "Billing Lago usage drift detected"
                 );
             }
@@ -423,16 +450,29 @@ async fn finalized_sums_by_owner_metric(
             doc! {
                 "$match": {
                     "status": "finalized",
+                    "released": true,
+                    "wallet_id": { "$ne": null },
                     "quantity": { "$ne": null },
                 }
             },
+            doc! {
+                "$set": {
+                    "lago_billable_quantity_micros": {
+                        "$ifNull": [
+                            "$funding.lago_billable_quantity_micros",
+                            { "$multiply": ["$quantity", 1_000_000_i64] },
+                        ]
+                    }
+                }
+            },
+            doc! { "$match": { "lago_billable_quantity_micros": { "$gt": 0_i64 } } },
             doc! {
                 "$group": {
                     "_id": {
                         "owner": "$billing_owner_id",
                         "metric": "$lago_metric_code",
                     },
-                    "quantity": { "$sum": "$quantity" },
+                    "quantity": { "$sum": "$lago_billable_quantity_micros" },
                 }
             },
         ])
@@ -456,12 +496,12 @@ async fn finalized_sums_by_owner_metric(
     Ok(out)
 }
 
-pub fn extract_metric_quantity(value: &serde_json::Value, metric_code: &str) -> Option<i64> {
+fn extract_metric_quantity_micros(value: &serde_json::Value, metric_code: &str) -> Option<i64> {
     let mut seen = BTreeSet::new();
-    extract_metric_quantity_inner(value, metric_code, &mut seen)
+    extract_metric_quantity_micros_inner(value, metric_code, &mut seen)
 }
 
-fn extract_metric_quantity_inner(
+fn extract_metric_quantity_micros_inner(
     value: &serde_json::Value,
     metric_code: &str,
     seen: &mut BTreeSet<usize>,
@@ -470,35 +510,35 @@ fn extract_metric_quantity_inner(
     if !seen.insert(ptr) {
         return None;
     }
-
     match value {
         serde_json::Value::Array(items) => items
             .iter()
-            .find_map(|item| extract_metric_quantity_inner(item, metric_code, seen)),
+            .find_map(|item| extract_metric_quantity_micros_inner(item, metric_code, seen)),
         serde_json::Value::Object(map) => {
             let matches_metric = ["code", "metric_code", "billable_metric_code"]
                 .iter()
                 .any(|key| map.get(*key).and_then(serde_json::Value::as_str) == Some(metric_code));
             if matches_metric {
                 for key in ["units", "quantity", "amount", "usage"] {
-                    if let Some(quantity) = json_i64(map.get(key)) {
+                    if let Some(quantity) = json_decimal_micros(map.get(key)) {
                         return Some(quantity);
                     }
                 }
             }
             map.values()
-                .find_map(|item| extract_metric_quantity_inner(item, metric_code, seen))
+                .find_map(|item| extract_metric_quantity_micros_inner(item, metric_code, seen))
         }
         _ => None,
     }
 }
 
-fn json_i64(value: Option<&serde_json::Value>) -> Option<i64> {
-    match value? {
-        serde_json::Value::Number(n) => n.as_i64().or_else(|| n.as_f64().map(|f| f.round() as i64)),
-        serde_json::Value::String(s) => s.parse::<i64>().ok(),
-        _ => None,
-    }
+fn json_decimal_micros(value: Option<&serde_json::Value>) -> Option<i64> {
+    let text = match value? {
+        serde_json::Value::Number(number) => number.to_string(),
+        serde_json::Value::String(value) => value.clone(),
+        _ => return None,
+    };
+    super::lago_client::decimal_credits_to_micros(&text)
 }
 
 fn doc_i64(doc: &Document, key: &str) -> Option<i64> {
@@ -527,7 +567,7 @@ mod tests {
     };
     use crate::test_utils::{connect_test_database, test_app_config};
 
-    use super::{BillingReconciler, LagoPushDecision, decide_lago_push, extract_metric_quantity};
+    use super::{BillingReconciler, LagoPushDecision, decide_lago_push};
 
     /// Reconcile pushes usage to Lago only when billing is enabled (the
     /// `if !self.config.billing_enabled { return }` gate in `run_once`).
@@ -617,6 +657,7 @@ mod tests {
             model: None,
             token_breakdown: None,
             reserved_credits: 0,
+            funding: None,
             quantity: Some(1),
             pending_resale_quantity: None,
             status: UsageStatus::Finalized,
@@ -670,26 +711,63 @@ mod tests {
     }
 
     #[test]
-    fn current_usage_quantity_is_extracted_by_metric_code() {
+    fn current_usage_decimal_quantity_supports_fractional_and_large_units() {
         let usage = json!({
             "customer_usage": {
-                "charges_usage": [
-                    {
-                        "billable_metric": { "code": "other" },
-                        "units": "1"
-                    },
-                    {
-                        "billable_metric_code": "platform_requests",
-                        "units": "42"
-                    }
-                ]
+                "charges_usage": [{
+                    "billable_metric_code": "platform_requests",
+                    "units": "1000000001.250000"
+                }]
             }
         });
 
         assert_eq!(
-            extract_metric_quantity(&usage, "platform_requests"),
-            Some(42)
+            super::extract_metric_quantity_micros(&usage, "platform_requests"),
+            Some(1_000_000_001_250_000)
         );
+    }
+
+    #[tokio::test]
+    async fn reconcile_locally_acks_fully_benefit_funded_usage() {
+        let Some(db) = connect_test_database("billing_reconcile_benefit_funded_ack").await else {
+            return;
+        };
+        let mut row = finalized_row("tx-benefit-funded");
+        row.funding = Some(crate::models::usage_meter::UsageFunding {
+            settled: true,
+            wallet_charge_credits: Some(0),
+            lago_billable_quantity_micros: Some(0),
+            settled_at: Some(Utc::now()),
+            ..Default::default()
+        });
+        let row_id = row.id.clone();
+        db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .insert_one(&row)
+            .await
+            .expect("insert row");
+        let reconciler = BillingReconciler::new(
+            db.clone(),
+            Some(std::sync::Arc::new(StaticLago {
+                result: Err(LagoError::dead_letter(
+                    "must_not_push",
+                    "fully funded usage must stay local",
+                )),
+            })),
+            std::sync::Arc::new(billing_enabled_config()),
+        );
+
+        let stats = reconciler.run_once().await.expect("run reconcile");
+        let saved = db
+            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+            .find_one(doc! { "_id": row_id })
+            .await
+            .expect("find row")
+            .expect("row exists");
+
+        assert_eq!(stats.pushed, 0);
+        assert_eq!(stats.dead_lettered, 0);
+        assert!(saved.lago_acked);
+        assert_eq!(saved.status, UsageStatus::Finalized);
     }
 
     #[tokio::test]

@@ -43,6 +43,64 @@ pub enum CredentialClass {
     NoAuth,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct AllowanceReservationAllocation {
+    pub allowance_id: String,
+    pub period_id: String,
+    pub quantity: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct GrantReservationAllocation {
+    pub grant_id: String,
+    pub amount_micros: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct AllowanceConsumptionAllocation {
+    pub operation_id: String,
+    pub allowance_id: String,
+    pub period_id: String,
+    pub quantity: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct GrantConsumptionAllocation {
+    pub operation_id: String,
+    pub grant_id: String,
+    pub amount_micros: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct UsageFunding {
+    /// Reservation-time rate used as a settlement fallback when the cache is
+    /// temporarily unavailable. Model-specific rates still win at settlement.
+    #[serde(default)]
+    pub credits_per_unit_micros: i64,
+    #[serde(default)]
+    pub allowance_reservations: Vec<AllowanceReservationAllocation>,
+    #[serde(default)]
+    pub grant_reservations: Vec<GrantReservationAllocation>,
+    #[serde(default)]
+    pub allowance_consumptions: Vec<AllowanceConsumptionAllocation>,
+    #[serde(default)]
+    pub grant_consumptions: Vec<GrantConsumptionAllocation>,
+    #[serde(default)]
+    pub settled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settlement_claim_id: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub settlement_claimed_at: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wallet_charge_credits: Option<i64>,
+    /// Lago quantity funded by the wallet, in millionths of one metered
+    /// unit. None preserves legacy whole-quantity event behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lago_billable_quantity_micros: Option<i64>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub settled_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct UsageMeterRow {
     #[serde(rename = "_id")]
@@ -73,6 +131,8 @@ pub struct UsageMeterRow {
     pub token_breakdown: Option<crate::models::service_billing::TokenBreakdown>,
     #[serde(default)]
     pub reserved_credits: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub funding: Option<UsageFunding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quantity: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

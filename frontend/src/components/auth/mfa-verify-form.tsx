@@ -5,6 +5,7 @@ import { mfaVerifySchema, type MfaVerifyFormData } from "@/schemas/auth";
 import { useMfaVerify } from "@/hooks/use-auth";
 import { useAuthStore } from "@/stores/auth-store";
 import { ApiError } from "@/lib/api-client";
+import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import {
   useAppForm,
   Form,
@@ -17,15 +18,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { ShieldCheck } from "lucide-react";
-
-/** Trusted origins for return_to redirect validation (open-redirect prevention). */
-const BACKEND_URL = (
-  (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
-  (import.meta.env.VITE_API_URL as string | undefined) ??
-  ""
-).replace(/\/+$/, "");
-
-const FRONTEND_ORIGIN = window.location.origin;
 
 interface MfaVerifyFormProps {
   readonly returnTo?: string;
@@ -56,12 +48,9 @@ export function MfaVerifyForm({ returnTo }: MfaVerifyFormProps) {
         code: data.code,
         mfa_token: mfaToken,
       });
-      if (
-        returnTo &&
-        (returnTo.startsWith(FRONTEND_ORIGIN + "/") ||
-          returnTo.startsWith(BACKEND_URL + "/"))
-      ) {
-        window.location.assign(returnTo);
+      const trustedReturnTo = resolveTrustedAuthReturnTo(returnTo);
+      if (trustedReturnTo) {
+        window.location.assign(trustedReturnTo);
         return;
       }
       void navigate({ to: "/dashboard" as string });
