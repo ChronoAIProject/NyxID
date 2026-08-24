@@ -6,7 +6,7 @@ Assistant action cards are a typed NyxIdChat protocol for asking the browser to 
 
 The current shipped action is `service.connect`. The card can open NyxID's catalog-service or custom-service connection journey, then report a disposition and a safe `UserService` identity to the typed actor.
 
-The rendering reference remains [assistant-action-cards-showcase.html](../assistant-action-cards-showcase.html). The executable contract is implemented by `frontend/src/schemas/assistant-actions.ts`, `frontend/src/lib/assistant/action-registry.ts`, `frontend/src/lib/assistant/aevatar-transport.ts`, `frontend/src/components/assistant/blocks/action-card.tsx`, and `backend/src/services/assistant_service.rs`.
+The rendering reference remains [assistant-action-cards-showcase.html](../assistant-action-cards-showcase.html). The executable contract is implemented by `frontend/src/schemas/assistant-actions.ts`, `frontend/src/lib/assistant/action-registry.ts:resolveAssistantAction`, `frontend/src/lib/assistant/chat-action-validation.ts:validateActionRequest`, `frontend/src/lib/assistant/chat-actor-state.ts:reduceActorFrame`, `frontend/src/components/assistant/blocks/action-card.tsx:ActionCard`, and `backend/src/services/assistant_service.rs`.
 
 ## Upstream producer constraint
 
@@ -168,7 +168,7 @@ The card remains interactive after the origin run reaches its normal terminal. I
 
 ## Idempotency and conflict rules
 
-`actionRequestId` is the stable identity. The transport retains both the committed card fields and a stable fingerprint of the original request parameters.
+`actionRequestId` is the stable identity. The actor projection retains both the committed card fields and the validated original request parameters.
 
 ### Exact duplicate
 
@@ -190,7 +190,8 @@ An exact reissue of a `blocked` card re-arms it. If the request still resolves t
 
 A changed blocked reissue conflicts; it does not re-arm. This preserves first-commit semantics while allowing the typed actor to repeat the identical request after the environment changes.
 
-Implementation: `frontend/src/lib/assistant/aevatar-transport.ts:addActionCard`, `fingerprintStableRequestInput`, and `matchesCommittedActionRequest`.
+Implementation: `frontend/src/lib/assistant/chat-actor-state.ts:decodeActorFrame`,
+`applyActionRequest`, and `actionIdentityMatches`.
 
 ## Connection journey
 
@@ -274,85 +275,29 @@ For a conflict, this is composed with the first-request conflict note. The servi
 
 Decline or failure remains the escape path for blocked and unsupported cards when their actor identity is valid.
 
-## Queueing and delivery
+## Delivery and settlement
 
-Reports are grouped by `originTurnId` and typed actor. A report is inserted at most once across queued batches. A batch receives one `clientRequestId`, which is preserved for all of its delivery attempts and becomes the NyxID/Aevatar idempotency key.
+The browser sends one selected outcome through a typed `action.continue`
+command containing one report. Dispatch requires the current typed actor
+identity and a positive state version; no report is redirected to another
+engine. The report receives a fresh `clientRequestId`, which is also the
+NyxID/Aevatar idempotency key.
 
-Delivery waits until:
+The browser does not queue or automatically replay a failed report. A
+pre-stream HTTP or network failure rejects the operation, restores the card to
+an actionable state, and lets the user retry. Once the continuation has adopted
+its authoritative actor and turn identity, a later stream failure settles as a
+visible turn error without resubmitting the report.
 
-- the conversation is not being deleted;
-- no normal turn is active;
-- no prior stop ordering fence remains;
-- immediate action draining is not blocked; and
-- the batch has a typed actor identity.
+The actor's projected action summary is authoritative for terminal card state.
+Its latest committed report maps `completed`, `declined`, and failure-like
+dispositions to the corresponding settled card. Until that fact arrives, the
+request remains pending; a locally blocked journey is held only as a
+conversation-local presentation override.
 
-The typed stream has at most two idempotent delivery attempts. A finished or stopped terminal proves the continuation ran and removes the batch. An approval-gate EOF also accepts it. An error terminal, retry exhaustion, incompatible non-SSE response, or ambiguous stream completion keeps the batch queued because admission is not proven.
-
-An undelivered batch is marked blocked from immediate retry. It is re-armed after the next ordinary, non-action turn terminal. This avoids a tight resend loop while preserving eventual delivery opportunity. The same batch identity and report set are reused.
-
-Cards update optimistically when reports are queued, then show delivery-aware copy.
-
-### Completion copy
-
-Before settlement:
-
-```text
-Reporting the new service reference to the assistant.
-```
-
-After accepted delivery:
-
-```text
-Reported — awaiting assistant verification.
-```
-
-After ambiguous delivery:
-
-```text
-The new service reference has not reached the assistant; delivery will retry after the next turn.
-```
-
-### Decline copy
-
-Before settlement:
-
-```text
-You declined this request. Sending the decision to the assistant; no credential was shared.
-```
-
-After accepted delivery:
-
-```text
-You declined this request. The assistant received the decision; no credential was shared.
-```
-
-After ambiguous delivery:
-
-```text
-You declined this request. The decision has not reached the assistant; delivery will retry after the next turn.
-```
-
-### Failure copy
-
-Before settlement:
-
-```text
-The connection could not be completed. Sending the failure to the assistant.
-```
-
-After accepted delivery:
-
-```text
-The assistant received the connection failure. Ask it to request the service again.
-```
-
-After ambiguous delivery:
-
-```text
-The connection failure has not reached the assistant; delivery will retry after the next turn.
-```
-
-The copy source is `frontend/src/lib/assistant/aevatar-transport.ts:settledActionOutcomeNote` and `frontend/src/lib/assistant/action-notes.ts`.
+Implementation: `frontend/src/hooks/use-assistant-chat-controls.ts:reportAction`,
+`frontend/src/lib/assistant/chat-stream-orchestrator.ts:runChatStream`, and
+`frontend/src/lib/assistant/chat-action-presentation.ts:actionSummaryBlock`.
 
 ## Security and fail-closed rules
 

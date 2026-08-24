@@ -664,7 +664,8 @@ export function ActionCard({
   // started is always their call, and it is the manual floor under every
   // automatic settlement: with it disabled, a busy card that lost its watch
   // had no reachable control at all. `report` supersedes any watch still
-  // running, and the transport de-duplicates a report already queued.
+  // running, and resolvingRef prevents duplicate local submission while that
+  // report is in flight.
   const secondaryDisabled = disabled || conflicted;
   const params = block.params;
 
@@ -718,11 +719,9 @@ export function ActionCard({
         ),
       )
       .catch(() => {
-        // The transport retains failed/rejected reports for retry, and the
-        // page has already toasted the delivery failure. Unlock dismissal AND
-        // roll the card out of any busy projection: a completed-connection
-        // report that dies must not strand the card at "Connecting" with its
-        // controls disabled — back to actionable is what makes retry possible.
+        // A rejected pre-stream report remains unresolved in actor state, and
+        // the page has already toasted the delivery failure. Unlock dismissal
+        // and roll the card out of any busy projection so the user can retry.
         resolvingRef.current = false;
         onProgress(block.block_id, false);
       });

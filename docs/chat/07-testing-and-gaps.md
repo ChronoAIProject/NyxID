@@ -137,10 +137,16 @@ do not replace those server-side security boundaries.
 
 ## Remaining operational gaps
 
-- Live producer verification needs the credentialed environment above.
+- Live producer verification needs the credentialed environment above and is a
+  manual contract check, not a credentialed CI job.
 - Chat history does not serialize `MEDIA_CONTENT`, so live artifacts are not
   restored after reload.
+- Terminal settlement does not automatically reconcile the local transcript
+  against a fresh server history read.
+- `nyxid.authorization.required` connect cards are live-only and are not
+  reconstructed from transcript history or typed actor state.
 - Wire-log replay is diagnostic and inert; it does not mount approval,
   connection, action, or actor-control side effects.
-- The Direct engine is stateless and memory-only; it is a deliberate seam, not
-  a durable-history alternative.
+- The Direct engine is stateless and memory-only. Its seam deliberately carries
+  a separate text-only turn reducer rather than using the typed actor reducer;
+  it is not a durable-history alternative.
