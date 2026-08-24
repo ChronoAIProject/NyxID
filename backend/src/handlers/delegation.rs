@@ -23,8 +23,8 @@ pub struct DelegatedOperationCatalogResponse {
     /// of this filtered response body. Unrelated catalog metadata can therefore
     /// cause a drift rejection without changing the listed operations.
     pub catalog_digest: String,
-    /// Representation validator over exactly `services`, using the same
-    /// canonical projection as exact approval create and redemption.
+    /// Opaque v2 representation validator. During the bounded rolling window
+    /// it uses the pre-additive projection understood by old replicas.
     pub exact_view_digest: String,
     pub resolved_at: String,
     pub authority_expires_at: String,
@@ -83,7 +83,9 @@ pub async fn get_operation_catalog(
     // validator over exactly the generic-free response below.
     let view = mcp_service::exact_operation_view(&catalog.services);
     let catalog_digest = mcp_service::operation_catalog_digest(&catalog.services);
-    let exact_view_digest = mcp_service::exact_operation_view_digest(&view);
+    // Keep the v2 fence consumable by pre-deploy replicas during the bounded
+    // mixed-version window. The additive operation fields remain in `services`.
+    let exact_view_digest = mcp_service::legacy_exact_operation_view_digest(&view);
     let resolved_at = Utc::now();
     let services = view.services;
     let total_services = services.len();
@@ -93,7 +95,7 @@ pub async fn get_operation_catalog(
         .sum();
 
     Ok(Json(DelegatedOperationCatalogResponse {
-        contract_version: "nyxid-delegated-operation-catalog.v3",
+        contract_version: "nyxid-delegated-operation-catalog.v2",
         catalog_digest,
         exact_view_digest,
         resolved_at: resolved_at.to_rfc3339(),
@@ -516,7 +518,7 @@ mod tests {
         );
         assert_eq!(
             discovery["contract_version"],
-            "nyxid-delegated-operation-catalog.v3"
+            "nyxid-delegated-operation-catalog.v2"
         );
         let services: Vec<mcp_service::ExactOperationViewService> =
             serde_json::from_value(discovery["services"].clone())
@@ -818,6 +820,22 @@ mod tests {
         assert_eq!(body["status"], "approved", "decide body: {body}");
     }
 
+    async fn reshape_full_router_request_as_main_v1(fixture: &FullRouterFixture, request_id: &str) {
+        fixture
+            .db
+            .collection::<mongodb::bson::Document>(crate::models::approval_request::COLLECTION_NAME)
+            .update_one(
+                mongodb::bson::doc! { "_id": request_id },
+                mongodb::bson::doc! { "$unset": {
+                    "exact_service.execution_authority_binding": "",
+                    "exact_service.producer_generation_bound": "",
+                    "exact_service.exact_view_digest_binding": "",
+                } },
+            )
+            .await
+            .expect("reshape request as current-main v1 row");
+    }
+
     async fn create_full_router_request(
         fixture: &FullRouterFixture,
         idempotency_key: &str,
@@ -954,7 +972,7 @@ mod tests {
     #[test]
     fn operation_catalog_response_is_typed_and_secret_free() {
         let response = DelegatedOperationCatalogResponse {
-            contract_version: "nyxid-delegated-operation-catalog.v3",
+            contract_version: "nyxid-delegated-operation-catalog.v2",
             catalog_digest: "sha256:opaque".to_string(),
             exact_view_digest: "sha256:exact-view".to_string(),
             resolved_at: "2026-08-14T00:00:00Z".to_string(),
@@ -979,7 +997,7 @@ mod tests {
                     risk: Some(crate::models::service_endpoint::EndpointRisk::Write),
                     supports_idempotency_key: true,
                     endpoint_contract_digest: "sha256:contract".to_string(),
-                    operation_generation: 7,
+                    operation_generation: Some(7),
                 }],
             }],
             total_services: 1,
@@ -1016,7 +1034,7 @@ mod tests {
                 risk: Some(crate::models::service_endpoint::EndpointRisk::Write),
                 supports_idempotency_key: true,
                 endpoint_contract_digest: endpoint_contract_digest.to_string(),
-                operation_generation: 7,
+                operation_generation: Some(7),
             }
         };
         mcp_service::ExactOperationView {
@@ -1065,7 +1083,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_fixture_binds_provider_identity_generation_and_v3_digest_envelope() {
+    fn deterministic_fixture_binds_provider_identity_generation_and_v2_digest_envelope() {
         let view = deterministic_exact_view_fixture();
         assert_eq!(
             view.services[0].catalog_service_id.as_deref(),
@@ -1074,7 +1092,12 @@ mod tests {
         let digest = mcp_service::exact_operation_view_digest(&view);
         assert_eq!(
             digest,
-            "sha256:43017726dbf7de94785e925e2e49f8cddad721c852ead8c8338164fc67753eff"
+            "sha256:bb033ad66809eca3f8225eadff97226de98311856a211ca80be91f2797730bb9"
+        );
+        assert_eq!(
+            mcp_service::legacy_exact_operation_view_digest(&view),
+            "sha256:acfbddf689ec25828e01cb4c149f9fd5f3ab5c9f37fddc7d0891e088cf1030a5",
+            "the pre-additive v2 representation stays pinned during rolling compatibility"
         );
         let mut provider_changed = view.clone();
         provider_changed.services[0].catalog_service_id =
@@ -1392,7 +1415,7 @@ mod tests {
             services: serde_json::from_value(actual["services"].clone())
                 .expect("deserialize returned exact-operation view"),
         };
-        let returned_digest = mcp_service::exact_operation_view_digest(&returned_view);
+        let returned_digest = mcp_service::legacy_exact_operation_view_digest(&returned_view);
         assert_eq!(
             actual["exact_view_digest"].as_str(),
             Some(returned_digest.as_str()),
@@ -1404,7 +1427,7 @@ mod tests {
             grant.expires_at.to_rfc3339()
         );
         assert_eq!(
-            actual["contract_version"], "nyxid-delegated-operation-catalog.v3",
+            actual["contract_version"], "nyxid-delegated-operation-catalog.v2",
             "the response and exact-view digest envelope must move together"
         );
         let service_ids: Vec<&str> = actual["services"]
@@ -1435,9 +1458,9 @@ mod tests {
         assert_eq!(
             actual,
             serde_json::json!({
-                "contract_version": "nyxid-delegated-operation-catalog.v3",
+                "contract_version": "nyxid-delegated-operation-catalog.v2",
                 "catalog_digest": "sha256:ea55205436c9a87a35ec9d21072cff07e77dc2ef23409aeb16760f0d08662a62",
-                "exact_view_digest": "sha256:27afc4945fb1843f704b0979744d80ad55f00aab1404f1ed795b22004c75913f",
+                "exact_view_digest": "sha256:acfbddf689ec25828e01cb4c149f9fd5f3ab5c9f37fddc7d0891e088cf1030a5",
                 "resolved_at": "<resolved-at>",
                 "authority_expires_at": grant.expires_at.to_rfc3339(),
                 "services": [
@@ -1801,7 +1824,7 @@ mod tests {
                 .expect("real delegated discovery handler");
         assert_eq!(
             discovery.contract_version,
-            "nyxid-delegated-operation-catalog.v3"
+            "nyxid-delegated-operation-catalog.v2"
         );
         let service = unique_fixture_service(&discovery.services);
         assert_eq!(service.user_service_id, TEST_SERVICE_A);
@@ -2002,7 +2025,7 @@ mod tests {
                     endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
                     operation_digest: operation_digest.clone(),
                     operation_id: operation.endpoint_id.clone(),
-                    operation_generation: Some(operation.operation_generation),
+                    operation_generation: operation.operation_generation,
                     idempotency_key: "integration-idempotency-key".to_string(),
                     arguments: arguments.clone(),
                 },
@@ -2038,41 +2061,59 @@ mod tests {
                 arguments: arguments.clone(),
             }
         };
-        let missing_generation_error = exact_service_approvals::create_request(
+        let AxumJson(missing_generation) = exact_service_approvals::create_request(
             State(state.clone()),
             delegated_auth.clone(),
             AxumJson(generation_input(None, "integration-generation-missing")),
         )
         .await
-        .expect_err("delegated create must be driven by discovery generation");
-        assert!(matches!(
-            missing_generation_error,
-            AppError::BadRequest(message)
-                if message
-                    == crate::services::exact_service_approval_service::OPERATION_GENERATION_REQUIRED
-        ));
-        let mismatched_generation_error = exact_service_approvals::create_request(
+        .expect("delegated create may omit the advisory generation");
+        assert_eq!(
+            Some(missing_generation.operation_generation),
+            operation.operation_generation
+        );
+        let AxumJson(mismatched_generation) = exact_service_approvals::create_request(
             State(state.clone()),
             delegated_auth.clone(),
             AxumJson(generation_input(
-                Some(operation.operation_generation + 1),
+                Some(operation.operation_generation.unwrap() + 1),
                 "integration-generation-mismatch",
             )),
         )
         .await
-        .expect_err("stale caller generation must fail before approval creation");
-        assert!(matches!(
-            mismatched_generation_error,
-            AppError::Conflict(message)
-                if message == "exact_service_operation_generation_drift"
-        ));
+        .expect("caller generation mismatch is advisory at create");
+        assert_eq!(
+            Some(mismatched_generation.operation_generation),
+            operation.operation_generation,
+            "NyxID persists the producer generation, never the caller value"
+        );
+        let current_exact_view_digest =
+            mcp_service::exact_operation_view_digest(&mcp_service::ExactOperationView {
+                services: discovery.services.clone(),
+            });
+        assert_ne!(current_exact_view_digest, discovery.exact_view_digest);
+        let mut current_digest_input =
+            generation_input(None, "integration-current-exact-view-digest");
+        current_digest_input.exact_view_digest = Some(current_exact_view_digest);
+        let AxumJson(current_digest_created) = exact_service_approvals::create_request(
+            State(state.clone()),
+            delegated_auth.clone(),
+            AxumJson(current_digest_input),
+        )
+        .await
+        .expect("create accepts the additive v2 digest during rolling compatibility");
+        assert_eq!(
+            current_digest_created.exact_view_digest.as_deref(),
+            Some(discovery.exact_view_digest.as_str()),
+            "new rows retain the pre-additive v2 slot for old replicas"
+        );
         assert_eq!(
             approval_requests
                 .count_documents(mongodb::bson::doc! {})
                 .await
-                .expect("count approvals after generation rejections"),
-            rows_before_omitted_create,
-            "missing or stale generation must not create an approval"
+                .expect("count approvals after advisory generation creates"),
+            rows_before_omitted_create + 3,
+            "advisory generations and both v2 digest projections create approvals"
         );
 
         let AxumJson(created) = exact_service_approvals::create_request(
@@ -2087,7 +2128,7 @@ mod tests {
                     endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
                     operation_digest: operation_digest.clone(),
                     operation_id: operation.endpoint_id.clone(),
-                    operation_generation: Some(operation.operation_generation),
+                    operation_generation: operation.operation_generation,
                     idempotency_key: "integration-idempotency-key".to_string(),
                     arguments: arguments.clone(),
                 },
@@ -2101,7 +2142,8 @@ mod tests {
         );
         assert_eq!(created.catalog_digest, discovery.catalog_digest);
         assert_eq!(
-            created.operation_generation, operation.operation_generation,
+            Some(created.operation_generation),
+            operation.operation_generation,
             "create must persist the producer generation published by discovery"
         );
 
@@ -2163,7 +2205,7 @@ mod tests {
                     endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
                     operation_digest: operation_digest.clone(),
                     operation_id: operation.endpoint_id.clone(),
-                    operation_generation: Some(operation.operation_generation),
+                    operation_generation: operation.operation_generation,
                     idempotency_key: "integration-redeem-omission-key".to_string(),
                     arguments: arguments.clone(),
                 },
@@ -2221,7 +2263,7 @@ mod tests {
                     endpoint_contract_digest: operation.endpoint_contract_digest.clone(),
                     operation_digest,
                     operation_id: operation.endpoint_id.clone(),
-                    operation_generation: Some(operation.operation_generation),
+                    operation_generation: operation.operation_generation,
                     idempotency_key: "provider-binding-drift-key".to_string(),
                     arguments,
                 },
@@ -3277,7 +3319,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "discovery failed: {discovery}");
         assert_eq!(
             discovery["contract_version"],
-            "nyxid-delegated-operation-catalog.v3"
+            "nyxid-delegated-operation-catalog.v2"
         );
         let services: Vec<mcp_service::ExactOperationViewService> =
             serde_json::from_value(discovery["services"].clone())
@@ -4108,6 +4150,273 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_router_main_v1_authority_rows_roll_forward_and_detect_v1_drift() {
+        let fixture = setup_full_router_fixture("exact_router_rolling_v1_authority").await;
+        let created = create_full_router_request(&fixture, "rolling-v1-unchanged").await;
+        let request_id = created["request_id"].as_str().unwrap().to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+
+        let resolution =
+            crate::services::proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+                &fixture.db,
+                &fixture.state.encryption_keys,
+                TEST_USER_ID,
+                &fixture.user_service_id,
+                Some("alpha"),
+            )
+            .await
+            .expect("resolve live authority snapshot")
+            .expect("fixture authority snapshot");
+        let configured_fallbacks =
+            crate::services::node_routing_service::list_configured_binding_node_ids(
+                &fixture.db,
+                TEST_USER_ID,
+                &resolution.target.service.id,
+            )
+            .await
+            .expect("resolve configured fallback set");
+        let projection = crate::services::execution_authority::build_projection(
+            &resolution,
+            None,
+            configured_fallbacks,
+        );
+        let expected_v1 = crate::services::execution_authority::legacy_digest(&projection);
+        let persisted = fixture
+            .db
+            .collection::<crate::models::approval_request::ApprovalRequest>(
+                crate::models::approval_request::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! { "_id": &request_id })
+            .await
+            .expect("load new v2 request")
+            .expect("new v2 request exists");
+        let binding = persisted.exact_service.expect("exact binding");
+        assert_eq!(
+            binding.execution_authority_digest.as_deref(),
+            Some(expected_v1.as_str())
+        );
+        assert_eq!(
+            binding
+                .execution_authority_binding
+                .as_ref()
+                .map(|value| value.projection_version.as_str()),
+            Some(crate::services::execution_authority::CONTRACT_VERSION),
+        );
+
+        reshape_full_router_request_as_main_v1(&fixture, &request_id).await;
+        let status_path = format!("/api/v1/approvals/exact-service/requests/{request_id}/status");
+        let (status, observed) = full_router_json_request(
+            &fixture.app,
+            Method::GET,
+            &status_path,
+            &fixture.delegated_token,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "v1 observe failed: {observed}");
+        assert_eq!(observed["state"], "approved");
+        let (status, redeemed) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "v1 redeem failed: {redeemed}");
+        assert_eq!(redeemed["state"], "redeemed");
+
+        let drift_created = create_full_router_request(&fixture, "rolling-v1-drift").await;
+        let drift_request_id = drift_created["request_id"].as_str().unwrap().to_string();
+        approve_full_router_request(&fixture, &drift_request_id).await;
+        reshape_full_router_request_as_main_v1(&fixture, &drift_request_id).await;
+        fixture
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_USER_ENDPOINT_ID },
+                mongodb::bson::doc! { "$set": { "url": "http://127.0.0.1:9" } },
+            )
+            .await
+            .expect("mutate v1-visible destination");
+        let drift_status_path =
+            format!("/api/v1/approvals/exact-service/requests/{drift_request_id}/status");
+        let (status, observed) = full_router_json_request(
+            &fixture.app,
+            Method::GET,
+            &drift_status_path,
+            &fixture.delegated_token,
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "v1 drift observe failed: {observed}"
+        );
+        assert_eq!(observed["state"], "drifted");
+        assert_eq!(observed["failure_code"], "execution_authority_drift");
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn full_router_closed_port_is_failed_provider_unreachable() {
+        let fixture = setup_full_router_fixture("exact_router_provider_unreachable").await;
+        let created = create_full_router_request(&fixture, "provider-unreachable").await;
+        let request_id = created["request_id"].as_str().unwrap().to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+        fixture.provider.abort();
+        tokio::task::yield_now().await;
+
+        let (status, result) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "closed-port redeem failed: {result}"
+        );
+        assert_eq!(result["state"], "failed");
+        assert_eq!(result["failure_code"], "provider_unreachable");
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn full_router_truncated_provider_body_is_outcome_unknown() {
+        let fixture = setup_full_router_fixture("exact_router_truncated_body").await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind truncated-body provider");
+        let address = listener.local_addr().expect("truncated-body address");
+        let provider = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt as _;
+
+            let (mut stream, _) = listener.accept().await.expect("accept provider request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 64\r\nConnection: close\r\n\r\n{\"partial\":true}",
+                )
+                .await
+                .expect("write truncated provider response");
+            stream.shutdown().await.expect("close truncated response");
+        });
+        fixture
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_USER_ENDPOINT_ID },
+                mongodb::bson::doc! { "$set": { "url": format!("http://{address}") } },
+            )
+            .await
+            .expect("point fixture at truncated-body provider");
+        let created = create_full_router_request(&fixture, "truncated-body").await;
+        let request_id = created["request_id"].as_str().unwrap().to_string();
+        approve_full_router_request(&fixture, &request_id).await;
+
+        let (status, result) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "truncated-body redeem failed: {result}"
+        );
+        assert_eq!(result["state"], "failed");
+        assert_eq!(result["failure_code"], "provider_outcome_unknown");
+        provider.await.expect("truncated-body provider task");
+    }
+
+    #[tokio::test]
+    async fn full_router_instance_spec_operation_is_discoverable_and_redeemable() {
+        let fixture = setup_full_router_fixture("exact_router_instance_spec").await;
+        let _cache_guard = crate::services::api_docs_service::SpecCacheTestGuard::acquire();
+        const SPEC_URL: &str = "https://example.com/exact-instance-spec.json";
+        crate::services::api_docs_service::cache_test_spec(
+            SPEC_URL,
+            Some(TEST_USER_ID),
+            serde_json::json!({
+                "openapi": "3.1.0",
+                "info": { "title": "Exact instance", "version": "1.0.0" },
+                "paths": {
+                    "/items": {
+                        "get": {
+                            "operationId": FIXTURE_OPERATION_NAME,
+                            "responses": {
+                                "200": {
+                                    "description": "ok",
+                                    "content": { "application/json": {
+                                        "schema": { "type": "object" }
+                                    } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }),
+        );
+        fixture
+            .db
+            .collection::<UserEndpoint>(USER_ENDPOINTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": TEST_USER_ENDPOINT_ID },
+                mongodb::bson::doc! { "$set": { "openapi_spec_url": SPEC_URL } },
+            )
+            .await
+            .expect("mount instance spec");
+
+        let (status, discovery) = full_router_json_request(
+            &fixture.app,
+            Method::GET,
+            "/api/v1/delegation/operation-catalog",
+            &fixture.delegated_token,
+            None,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "instance discovery failed: {discovery}"
+        );
+        let services: Vec<mcp_service::ExactOperationViewService> =
+            serde_json::from_value(discovery["services"].clone()).unwrap();
+        let service = unique_fixture_service(&services);
+        let operation = fixture_operation(service);
+        assert_eq!(operation.operation_generation, None);
+        let arguments = serde_json::json!({});
+        let operation_digest = mcp_service::exact_operation_digest_from_parts(
+            &service.user_service_id,
+            &operation.endpoint_id,
+            &operation.endpoint_contract_digest,
+            &arguments,
+        );
+        let (status, created) = full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            CREATE_PATH,
+            &fixture.delegated_token,
+            Some(serde_json::json!({
+                "user_service_id": service.user_service_id,
+                "endpoint_id": operation.endpoint_id,
+                "catalog_digest": discovery["catalog_digest"],
+                "exact_view_digest": discovery["exact_view_digest"],
+                "endpoint_contract_digest": operation.endpoint_contract_digest,
+                "operation_digest": operation_digest,
+                "operation_id": operation.endpoint_id,
+                "idempotency_key": "instance-spec-operation",
+                "arguments": arguments,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "instance create failed: {created}");
+        assert_eq!(created["operation_generation"], 0);
+        let request_id = created["request_id"].as_str().unwrap().to_string();
+        let persisted = fixture
+            .db
+            .collection::<crate::models::approval_request::ApprovalRequest>(
+                crate::models::approval_request::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! { "_id": &request_id })
+            .await
+            .expect("load instance approval")
+            .expect("instance approval exists");
+        assert!(!persisted.exact_service.unwrap().producer_generation_bound);
+        approve_full_router_request(&fixture, &request_id).await;
+        let (status, redeemed) = redeem_full_router_request(&fixture, &created).await;
+        assert_eq!(status, StatusCode::OK, "instance redeem failed: {redeemed}");
+        assert_eq!(redeemed["state"], "redeemed");
+        assert_eq!(fixture.provider_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
     async fn full_router_single_token_discovery_create_decide_status_redeem() {
         let fixture = setup_full_router_fixture("exact_router_ac4_single_token").await;
         let delegated_token = fixture.delegated_token.clone();
@@ -4132,7 +4441,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "discovery failed: {discovery}");
         assert_eq!(
             discovery["contract_version"],
-            "nyxid-delegated-operation-catalog.v3"
+            "nyxid-delegated-operation-catalog.v2"
         );
         assert_full_router_delegated_token_unchanged(
             &fixture,

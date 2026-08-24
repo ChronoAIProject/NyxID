@@ -61,25 +61,30 @@ pub struct ExactServiceApprovalBinding {
     pub catalog_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exact_view_digest: Option<String>,
+    /// Current additive v2 projection digest. During the bounded rolling
+    /// window, `exact_view_digest` retains the pre-additive v2 value for old
+    /// replicas while current replicas enforce this slot as well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_view_digest_binding: Option<String>,
     pub endpoint_contract_digest: String,
     pub operation_digest: String,
     pub operation_id: String,
     pub operation_generation: i64,
     /// True only when NyxID resolved and persisted the generation from a live
-    /// producer referent. Legacy caller-owned generations remain unratified.
+    /// producer referent. Dynamic instance-spec operations and legacy
+    /// caller-owned generations have no producer generation to compare.
     #[serde(default)]
     pub producer_generation_bound: bool,
     pub effect_idempotency_key: String,
     pub arguments: serde_json::Value,
-    /// Legacy v1 execution-authority slot. Newer projection versions write a
-    /// fail-closed marker here so a v1 replica cannot execute authority that it
-    /// does not understand. Rows created by v1 contain the actual v1 digest.
+    /// Legacy v1 execution-authority slot. New rows retain a real v1 digest so
+    /// v1 and v2 replicas can safely validate their respective projections
+    /// during a rolling deployment.
     #[serde(default)]
     pub execution_authority_digest: Option<String>,
-    /// Explicitly versioned execution-authority binding. Its absence permits
-    /// legacy deserialization but not execution: v1 did not bind every v2
-    /// authority field, so missing, old, unknown, or incomplete bindings fail
-    /// closed during live revalidation.
+    /// Explicitly versioned execution-authority binding. Its absence selects
+    /// the legacy v1 digest when present; rows predating authority digests skip
+    /// this gate and remain bounded by approval expiry and the other fences.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_authority_binding: Option<ExactServiceExecutionAuthorityBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -322,6 +327,7 @@ mod tests {
             endpoint_id: "endpoint".to_string(),
             catalog_digest: "sha256:catalog".to_string(),
             exact_view_digest: Some("sha256:exact-view".to_string()),
+            exact_view_digest_binding: Some("sha256:additive-exact-view".to_string()),
             endpoint_contract_digest: "sha256:endpoint".to_string(),
             operation_digest: "sha256:operation".to_string(),
             operation_id: "operation".to_string(),
@@ -335,8 +341,10 @@ mod tests {
         };
         let mut doc = bson::to_document(&binding).expect("serialize exact binding");
         doc.remove("exact_view_digest");
+        doc.remove("exact_view_digest_binding");
         binding = bson::from_document(doc).expect("deserialize legacy exact binding");
         assert!(binding.exact_view_digest.is_none());
+        assert!(binding.exact_view_digest_binding.is_none());
     }
 
     #[test]
@@ -348,6 +356,7 @@ mod tests {
             endpoint_id: "endpoint".to_string(),
             catalog_digest: "sha256:catalog".to_string(),
             exact_view_digest: None,
+            exact_view_digest_binding: None,
             endpoint_contract_digest: "sha256:endpoint".to_string(),
             operation_digest: "sha256:operation".to_string(),
             operation_id: "operation".to_string(),
@@ -377,6 +386,7 @@ mod tests {
             endpoint_id: "endpoint".to_string(),
             catalog_digest: "sha256:catalog".to_string(),
             exact_view_digest: None,
+            exact_view_digest_binding: None,
             endpoint_contract_digest: "sha256:endpoint".to_string(),
             operation_digest: "sha256:operation".to_string(),
             operation_id: "operation".to_string(),

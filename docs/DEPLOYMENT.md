@@ -10,7 +10,7 @@ This guide covers deploying NyxID in development, staging, and production enviro
 - [Local Development](#local-development)
 - [Building for Production](#building-for-production)
 - [Docker Deployment](#docker-deployment)
-- [Delegated Catalog v3 and Exact Authority v2 Upgrade](#delegated-catalog-v3-and-exact-authority-v2-upgrade)
+- [Delegated Catalog v2 and Exact Authority v2 Rollout](#delegated-catalog-v2-and-exact-authority-v2-rollout)
 - [Environment Configuration](#environment-configuration)
 - [Database Setup](#database-setup)
 - [RSA Key Management](#rsa-key-management)
@@ -325,62 +325,44 @@ If using cert-manager for automatic TLS certificates:
 
 ---
 
-## Delegated Catalog v3 and Exact Authority v2 Upgrade
+## Delegated Catalog v2 and Exact Authority v2 Rollout
 
-The delegated catalog v3 and exact execution-authority v2 release is **not
-compatible with an ordinary rolling backend deployment**. Catalog v3 changes
-the only delegated discovery response, and authority v2 deliberately refuses
-to execute legacy v1 approval bindings. Do not deploy the NyxID change by
-itself and do not allow v1 and v2 NyxID replicas to serve exact-approval traffic
-at the same time.
+This change is safe under an ordinary rolling backend deployment. No traffic
+pause, approval drain, or coordinated Aevatar release is required:
 
-Treat the upgrade as a coordinated maintenance event:
+- The delegated discovery contract remains
+  `nyxid-delegated-operation-catalog.v2`. The new `risk`,
+  `supports_idempotency_key`, and nullable `operation_generation` fields are
+  additive. During the bounded compatibility window, discovery publishes the
+  pre-additive v2 digest and new replicas accept both that digest and the full
+  additive projection. Existing clients and replicas therefore continue to
+  create and revalidate the same fence while new clients can consume the added
+  metadata. New approval rows keep that pre-additive digest in the legacy
+  `exact_view_digest` slot and also persist the full projection in the
+  server-owned `exact_view_digest_binding` slot. Old replicas validate the
+  former; new replicas enforce both, so an old writer changing additive policy
+  fields without a generation bump is still detected.
+- New approvals store both execution-authority projections: the real v1 digest
+  in `execution_authority_digest` and the versioned v2 binding in
+  `execution_authority_binding`. An old replica validates the v1 slot exactly
+  as before; a new replica validates v2. Existing main-era rows with only a v1
+  digest are compared against the live v1 projection, and older rows with no
+  digest retain their expiry-bounded behavior.
+- Producer generation is resolved by the server. Durable endpoint rows bind
+  their positive generation; instance-mounted specification operations have no
+  durable generation and keep the endpoint-contract digest as their shape
+  fence.
 
-1. Release an Aevatar/client build that accepts both catalog v2 and v3 during
-   the transition, validates the v3 producer generation and digest fields, and
-   has passed the real delegated discovery/create/redeem flow against v3.
-2. Stop admission of new exact approvals at the traffic or maintenance layer.
-   The NyxID binary does not provide a mixed-version issuance flag.
-3. Drain every v1 NyxID replica. Confirm that no v1 process can receive create,
-   status, or redeem requests before starting a v2 replica.
-4. Enumerate nonterminal legacy exact approvals with a read-only query such as:
+Deploy backend replicas with the normal rolling strategy and verify `/health`
+reports the intended release commit as each replica becomes ready. A rollback
+is also safe: old code can validate the real v1 slot written by new replicas.
 
-   ```javascript
-   db.approval_requests.find({
-     exact_service: { $exists: true },
-     "exact_service.redemption.status": {
-       $nin: ["completed", "drifted", "revoked", "failed"]
-     },
-     $or: [
-       { "exact_service.producer_generation_bound": { $ne: true } },
-       {
-         "exact_service.execution_authority_binding.projection_version": {
-           $ne: "nyxid-exact-execution-authority.v2"
-         }
-       }
-     ]
-   })
-   ```
-
-   Terminate or reconcile every result against its approval decision,
-   redemption receipt, and provider evidence. Do not bulk delete or rewrite
-   these rows; an executing row may represent an effect whose provider outcome
-   is unknown.
-5. Run the semantic-effect duplicate preflight documented under
-   `GET /api/v1/delegation/operation-catalog` in the [API reference](API.md).
-   Resolve every duplicate group through an audited operator migration before
-   startup; the v2 process intentionally refuses to install a weaker index.
-6. Start only v2-capable NyxID replicas. Verify startup backfilled only missing
-   endpoint generations and installed the required unique index, then confirm
-   `/health` reports the intended release commit.
-7. With a real delegated identity, verify catalog v3 and the complete
-   discovery/create/decision/status/redeem flow from the coordinated Aevatar
-   build before reopening exact-approval admission.
-
-After any v2 approval has been issued, rolling back to a v1 binary is unsafe:
-v1 cannot validate the v2-only authority fields. Use a v2-capable forward fix,
-or return to maintenance mode and reconcile every v2 approval before changing
-the serving version.
+Startup checks the exact-approval semantic-effect unique index. Duplicate
+legacy data or a duplicate write racing the index build no longer blocks
+process startup: NyxID logs the audited remediation, leaves the index absent,
+and activates a diagnostic on the admin Integrity page. The service-level
+semantic replay checks remain active until an operator reconciles the duplicate
+groups and restarts to install the unique index.
 
 ---
 

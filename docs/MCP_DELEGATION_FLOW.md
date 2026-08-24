@@ -457,14 +457,18 @@ discovery, create, human decision, redeem.
    declared typed operations, with generic-proxy targets excluded. The response
    carries `catalog_digest` over the whole catalog, `exact_view_digest` over the
    sorted generic-free projection, and an `endpoint_contract_digest` per
-   operation. Version 3 also publishes the producer-owned
-   `operation_generation` for each operation.
+   operation. The v2 contract additively publishes `risk`,
+   `supports_idempotency_key`, and `operation_generation`. The generation is a
+   positive producer revision for durable endpoint rows and `null` for
+   operations parsed from an instance-mounted specification.
 2. **Create** — the caller submits the operation it intends to run, echoing the
    digests from the discovery response. Every field is derivable from that
    response: `operation_digest` is `canonical_sha256` over the contract version,
    `user_service_id`, `endpoint_id`, `endpoint_contract_digest` and the caller's
-   arguments, so no second catalog read is needed. Delegated create must echo
-   the matching `operation_generation`; omission or drift fails closed.
+   arguments, so no second catalog read is needed. `operation_generation` is
+   advisory at create: the caller may omit it, and NyxID always persists the
+   live producer value when one exists. A mismatched supplied value is logged
+   at debug level but does not reject otherwise fresh digest evidence.
 3. **Decision** — a human approves or denies using their own first-party
    session. The delegated bearer is never used for the decision and does not
    change across the journey.
@@ -477,6 +481,16 @@ Observe is non-mutating and may recover after content-addressed A-to-B-to-A
 configuration. Redeem claims first, persists terminal revalidation failures,
 then materializes credentials and compares execution authority once more before
 dispatch.
+
+The rollout requires no maintenance window. New approvals retain a real v1
+execution-authority digest for old replicas and also store the versioned v2
+binding. Exact-view validation accepts the current additive v2 digest and the
+bounded pre-additive v2 digest, so old and new NyxID replicas and clients can
+serve the same journey during a rolling deploy. New rows retain the
+pre-additive digest for old replicas and also store a server-owned current
+digest that new replicas enforce, preserving drift detection when an old
+writer changes additive policy without a generation bump. For generationless
+instance-spec operations, observe and redeem skip only the generation check.
 
 The digests fence two different things. `catalog_digest` and `exact_view_digest`
 bind what the caller was *shown*; `endpoint_contract_digest` and

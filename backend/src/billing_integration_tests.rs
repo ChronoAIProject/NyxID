@@ -597,13 +597,15 @@ async fn billing_route_coverage_smoke() {
         )
         .await
         .expect("resolve exact redemption configured node authority");
-    let execution_authority_digest = crate::services::execution_authority::digest(
-        &crate::services::execution_authority::build_projection(
-            &execution_resolution,
-            None,
-            configured_fallback_node_ids,
-        ),
+    let execution_authority_projection = crate::services::execution_authority::build_projection(
+        &execution_resolution,
+        None,
+        configured_fallback_node_ids,
     );
+    let execution_authority_digest =
+        crate::services::execution_authority::digest(&execution_authority_projection);
+    let legacy_execution_authority_digest =
+        crate::services::execution_authority::legacy_digest(&execution_authority_projection);
     let request_id = Uuid::new_v4().to_string();
     let operation_id = "billing-exact-operation".to_string();
     let operation_generation = 1;
@@ -656,6 +658,7 @@ async fn billing_route_coverage_smoke() {
                 endpoint_id,
                 catalog_digest: catalog_digest.clone(),
                 exact_view_digest: None,
+                exact_view_digest_binding: None,
                 endpoint_contract_digest,
                 operation_digest: operation_digest.clone(),
                 operation_id: operation_id.clone(),
@@ -663,9 +666,7 @@ async fn billing_route_coverage_smoke() {
                 producer_generation_bound: true,
                 effect_idempotency_key: effect_idempotency_key.clone(),
                 arguments: exact_arguments,
-                execution_authority_digest: Some(
-                    crate::services::execution_authority::LEGACY_FAIL_CLOSED_MARKER.to_string(),
-                ),
+                execution_authority_digest: Some(legacy_execution_authority_digest),
                 execution_authority_binding: Some(ExactServiceExecutionAuthorityBinding {
                     projection_version: crate::services::execution_authority::CONTRACT_VERSION
                         .to_string(),

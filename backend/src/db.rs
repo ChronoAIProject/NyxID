@@ -29,6 +29,9 @@ use crate::models::oauth_broker_binding::{
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::pushed_authorization_request::COLLECTION_NAME as PAR_COLLECTION;
 use crate::models::ssh_auth_mode::SshAuthMode;
+use crate::models::startup_diagnostic::{
+    COLLECTION_NAME as STARTUP_DIAGNOSTICS, EXACT_SERVICE_SEMANTIC_EFFECT_INDEX,
+};
 use crate::models::trigger::{COLLECTION_NAME as TRIGGERS, Trigger};
 use crate::models::trigger_delivery::{
     COLLECTION_NAME as TRIGGER_DELIVERIES, TriggerDeliveryRecord,
@@ -2512,6 +2515,7 @@ async fn ensure_exact_service_semantic_effect_index(
                     && options.partial_filter_expression.as_ref() == Some(&expected_partial)
             })
     }) {
+        clear_exact_service_semantic_effect_diagnostic(approval_requests).await;
         return Ok(());
     }
 
@@ -2557,11 +2561,15 @@ async fn ensure_exact_service_semantic_effect_index(
              each group to one authoritative request through an audited migration, then restart. \
              Do not blindly delete approval rows."
         );
-        return Err(mongodb::error::Error::custom(
-            "approval_requests has duplicate exact-service semantic effect identities; \
-             see the startup diagnostic for audited remediation"
-                .to_string(),
-        ));
+        persist_exact_service_semantic_effect_diagnostic(
+            approval_requests,
+            format!(
+                "Detected at least {} duplicate semantic-effect group(s) during startup preflight.",
+                duplicate_groups.len()
+            ),
+        )
+        .await;
+        return Ok(());
     }
 
     if existing_named.is_some() {
@@ -2592,6 +2600,7 @@ async fn ensure_exact_service_semantic_effect_index(
             let _ = approval_requests
                 .drop_index("exact_service_legacy_replay_lookup")
                 .await;
+            clear_exact_service_semantic_effect_diagnostic(approval_requests).await;
             Ok(())
         }
         Err(error) if is_duplicate_key_error_including_commands(&error) => {
@@ -2603,11 +2612,75 @@ async fn ensure_exact_service_semantic_effect_index(
                  group through an audited migration, and restart. No non-unique fallback \
                  index will be installed."
             );
-            Err(mongodb::error::Error::custom(format!(
-                "exact-service semantic effect unique-index build raced with a duplicate write: {error}"
-            )))
+            persist_exact_service_semantic_effect_diagnostic(
+                approval_requests,
+                "A duplicate semantic-effect write raced the unique-index build.".to_string(),
+            )
+            .await;
+            Ok(())
         }
         Err(error) => Err(error),
+    }
+}
+
+const EXACT_SERVICE_SEMANTIC_EFFECT_REMEDIATION: &str = "Pause exact-approval creates, inspect every duplicate group including terminal and redeemed effects, reconcile each group to one authoritative request through an audited migration, then restart. Do not blindly delete approval rows.";
+
+fn startup_diagnostics_for(
+    collection: &mongodb::Collection<Document>,
+) -> mongodb::Collection<Document> {
+    let namespace = collection.namespace();
+    collection
+        .client()
+        .database(&namespace.db)
+        .collection(STARTUP_DIAGNOSTICS)
+}
+
+async fn persist_exact_service_semantic_effect_diagnostic(
+    approval_requests: &mongodb::Collection<Document>,
+    detail: String,
+) {
+    let now = mongodb::bson::DateTime::from_chrono(Utc::now());
+    if let Err(error) = startup_diagnostics_for(approval_requests)
+        .update_one(
+            doc! { "_id": EXACT_SERVICE_SEMANTIC_EFFECT_INDEX },
+            doc! {
+                "$set": {
+                    "active": true,
+                    "code": EXACT_SERVICE_SEMANTIC_EFFECT_INDEX,
+                    "summary": "Exact-approval semantic uniqueness is not enforced by a database index.",
+                    "detail": detail,
+                    "remediation": EXACT_SERVICE_SEMANTIC_EFFECT_REMEDIATION,
+                    "detected_at": now,
+                    "updated_at": now,
+                },
+                "$unset": { "resolved_at": "" },
+            },
+        )
+        .upsert(true)
+        .await
+    {
+        tracing::error!(
+            error = %error,
+            "Failed to persist exact-service semantic-effect startup diagnostic; startup will continue"
+        );
+    }
+}
+
+async fn clear_exact_service_semantic_effect_diagnostic(
+    approval_requests: &mongodb::Collection<Document>,
+) {
+    let now = mongodb::bson::DateTime::from_chrono(Utc::now());
+    if let Err(error) = startup_diagnostics_for(approval_requests)
+        .update_one(
+            doc! { "_id": EXACT_SERVICE_SEMANTIC_EFFECT_INDEX, "active": true },
+            doc! { "$set": { "active": false, "resolved_at": now, "updated_at": now } },
+        )
+        .await
+    {
+        tracing::error!(
+            error = %error,
+            "Failed to resolve exact-service semantic-effect startup diagnostic"
+        );
     }
 }
 
@@ -4295,7 +4368,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_service_semantic_effect_index_refuses_duplicates_with_remediation() {
+    async fn exact_service_semantic_effect_index_records_duplicates_and_continues() {
         let Some(db) =
             crate::test_utils::connect_test_database("db_exact_semantic_duplicates").await
         else {
@@ -4336,18 +4409,9 @@ mod tests {
             .await
             .expect("insert duplicate semantic effect fixtures");
 
-        let error = ensure_exact_service_semantic_effect_index(&approval_requests)
+        ensure_exact_service_semantic_effect_index(&approval_requests)
             .await
-            .expect_err("duplicate semantic effects must block the unique-index rollout");
-        let message = error.to_string();
-        assert!(
-            message.contains("duplicate exact-service semantic effect identities"),
-            "unexpected rollout diagnostic: {message}"
-        );
-        assert!(
-            message.contains("startup diagnostic"),
-            "unexpected rollout diagnostic: {message}"
-        );
+            .expect("duplicate semantic effects must not block startup");
         let indexes: Vec<IndexModel> = approval_requests
             .list_indexes()
             .await
@@ -4362,6 +4426,23 @@ mod tests {
                 .and_then(|options| options.name.as_deref())
                 != Some("exact_service_semantic_effect_unique")
         }));
+        let diagnostic = db
+            .collection::<crate::models::startup_diagnostic::StartupDiagnostic>(
+                crate::models::startup_diagnostic::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! {
+                "_id": crate::models::startup_diagnostic::EXACT_SERVICE_SEMANTIC_EFFECT_INDEX,
+            })
+            .await
+            .expect("load startup diagnostic")
+            .expect("duplicate data persists an operator diagnostic");
+        assert!(diagnostic.active);
+        assert!(
+            diagnostic
+                .detail
+                .contains("duplicate semantic-effect group")
+        );
+        assert!(diagnostic.remediation.contains("audited migration"));
     }
 
     #[tokio::test]

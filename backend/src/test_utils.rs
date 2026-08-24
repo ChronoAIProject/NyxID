@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{
     Arc, OnceLock,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -77,6 +77,7 @@ const TEST_DB_LEGACY_CANDIDATES_COLLECTION: &str = "__test_db_legacy_candidates"
 const TEST_DB_SWEEP_LEASE_ID: &str = "stale-test-database-sweep";
 
 static TEST_DB_NAME_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+static NEXT_PROCESS_LOCAL_STALE_SWEEP_AT_SECS: AtomicU64 = AtomicU64::new(0);
 static TEST_DB_PROCESS: OnceLock<TestDbProcess> = OnceLock::new();
 static TEST_DB_PINNED_URI: OnceLock<String> = OnceLock::new();
 static TEST_DB_HEARTBEAT: std::sync::Mutex<Option<TestDbHeartbeat>> = std::sync::Mutex::new(None);
@@ -940,6 +941,9 @@ async fn prune_test_db_metadata_collections(
 }
 
 async fn sweep_stale_test_databases_once(client: &mongodb::Client, now_secs: u64) {
+    if !claim_process_local_stale_sweep_attempt(&NEXT_PROCESS_LOCAL_STALE_SWEEP_AT_SECS, now_secs) {
+        return;
+    }
     let owner_id = test_db_process().run_id.clone();
     let lease_collection = test_db_metadata_collection(client, TEST_DB_SWEEP_LEASES_COLLECTION);
     let acquired = matches!(
@@ -956,6 +960,25 @@ async fn sweep_stale_test_databases_once(client: &mongodb::Client, now_secs: u64
 
     sweep_stale_test_databases_under_lease(client, now_secs).await;
     release_test_db_sweep_lease(&lease_collection, &owner_id, unix_time_secs()).await;
+}
+
+fn claim_process_local_stale_sweep_attempt(next_attempt_at: &AtomicU64, now_secs: u64) -> bool {
+    let next = now_secs.saturating_add(STALE_TEST_DB_SWEEP_COOLDOWN.as_secs());
+    let mut observed = next_attempt_at.load(Ordering::Relaxed);
+    loop {
+        if now_secs < observed {
+            return false;
+        }
+        match next_attempt_at.compare_exchange_weak(
+            observed,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => observed = actual,
+        }
+    }
 }
 
 /// Recover logical test databases left by killed or crashed test processes.
@@ -2297,6 +2320,45 @@ pub(crate) fn aevatar_secret_free_violation(value: &serde_json::Value) -> Option
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    #[test]
+    fn process_local_stale_sweep_cooldown_skips_repeated_attempts() {
+        let next_attempt_at = AtomicU64::new(0);
+        let now_secs = 10_000;
+        assert!(claim_process_local_stale_sweep_attempt(
+            &next_attempt_at,
+            now_secs
+        ));
+        assert!(!claim_process_local_stale_sweep_attempt(
+            &next_attempt_at,
+            now_secs + STALE_TEST_DB_SWEEP_COOLDOWN.as_secs() - 1,
+        ));
+        assert!(claim_process_local_stale_sweep_attempt(
+            &next_attempt_at,
+            now_secs + STALE_TEST_DB_SWEEP_COOLDOWN.as_secs(),
+        ));
+    }
+
+    #[test]
+    fn concurrent_process_local_stale_sweep_admission_has_one_winner() {
+        let next_attempt_at = Arc::new(AtomicU64::new(0));
+        let winners = std::thread::scope(|scope| {
+            let attempts = (0..16)
+                .map(|_| {
+                    let next_attempt_at = next_attempt_at.clone();
+                    scope.spawn(move || {
+                        claim_process_local_stale_sweep_attempt(&next_attempt_at, 20_000)
+                    })
+                })
+                .collect::<Vec<_>>();
+            attempts
+                .into_iter()
+                .map(|attempt| attempt.join().expect("cooldown participant"))
+                .filter(|won| *won)
+                .count()
+        });
+        assert_eq!(winners, 1);
+    }
 
     #[test]
     fn managed_test_db_name_round_trips_run_lease_identity_and_fits_mongodb_limit() {

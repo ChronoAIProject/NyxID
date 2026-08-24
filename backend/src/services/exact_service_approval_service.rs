@@ -30,7 +30,6 @@ const PROVIDER_OUTCOME_UNKNOWN: &str = "provider_outcome_unknown";
 pub const DELEGATED_REQUESTER_TYPE: &str = "delegated";
 pub const EXACT_VIEW_DIGEST_REQUIRED: &str = "exact_view_digest_required";
 pub const DELEGATED_CATALOG_SCOPE_REQUIRED: &str = "delegated_catalog_scope_required";
-pub const OPERATION_GENERATION_REQUIRED: &str = "operation_generation_required";
 
 #[derive(Clone, Debug)]
 pub struct ExactServiceApprovalCaller {
@@ -58,9 +57,9 @@ pub struct ExactServiceApprovalCreate {
     pub endpoint_contract_digest: String,
     pub operation_digest: String,
     pub operation_id: String,
-    /// Discovery generation asserted by the caller. Delegated callers must
-    /// provide it; NyxID validates it against the live producer generation and
-    /// persists only that producer-owned value.
+    /// Optional discovery generation echoed by the caller. NyxID always uses
+    /// the live producer value when one exists; this field is informational at
+    /// create because the digest and endpoint-contract fences prove freshness.
     #[serde(default)]
     pub operation_generation: Option<i64>,
     pub idempotency_key: String,
@@ -119,10 +118,12 @@ struct ExactCatalogResolution<'a> {
     endpoint_index: usize,
     catalog_digest: String,
     exact_view_digest: String,
+    legacy_exact_view_digest: String,
     in_exact_view: bool,
     endpoint_contract_digest: String,
     operation_digest: String,
     operation_generation: i64,
+    producer_generation_bound: bool,
     marker: std::marker::PhantomData<&'a ()>,
 }
 
@@ -168,11 +169,7 @@ pub async fn create_request(
     if resolution.in_exact_view {
         ensure_delegated_exact_authority(caller, input.exact_view_digest.as_deref(), true)?;
         if let Some(exact_view_digest) = input.exact_view_digest.as_deref() {
-            ensure_digest(
-                "exact_view_digest",
-                exact_view_digest,
-                &resolution.exact_view_digest,
-            )?;
+            ensure_exact_view_digest(exact_view_digest, &resolution)?;
         }
     } else if input.exact_view_digest.is_some() {
         return Err(AppError::BadRequest(
@@ -189,11 +186,17 @@ pub async fn create_request(
         &input.operation_digest,
         &resolution.operation_digest,
     )?;
-    ensure_operation_generation(
-        caller,
-        input.operation_generation,
-        resolution.operation_generation,
-    )?;
+    if input
+        .operation_generation
+        .is_some_and(|provided| provided != resolution.operation_generation)
+    {
+        tracing::debug!(
+            provided_operation_generation = input.operation_generation,
+            producer_operation_generation = resolution.operation_generation,
+            producer_generation_bound = resolution.producer_generation_bound,
+            "Ignoring caller operation_generation mismatch at exact-approval create"
+        );
+    }
     let request_key = request_key(
         caller,
         &producer_operation_id,
@@ -281,22 +284,24 @@ pub async fn create_request(
         user_service_id: input.user_service_id,
         endpoint_id: input.endpoint_id,
         catalog_digest: resolution.catalog_digest,
+        // Store the pre-additive v2 digest during the bounded rolling window so
+        // a pre-deploy replica can revalidate a row created by this replica.
         exact_view_digest: resolution
+            .in_exact_view
+            .then(|| resolution.legacy_exact_view_digest.clone()),
+        exact_view_digest_binding: resolution
             .in_exact_view
             .then(|| resolution.exact_view_digest.clone()),
         endpoint_contract_digest: resolution.endpoint_contract_digest,
         operation_digest: resolution.operation_digest,
         operation_id: producer_operation_id,
         operation_generation: resolution.operation_generation,
-        producer_generation_bound: true,
+        producer_generation_bound: resolution.producer_generation_bound,
         effect_idempotency_key: input.idempotency_key,
         arguments: input.arguments,
-        // A v1 replica must not execute a v2 approval while ignoring fields
-        // added to the projection. The legacy slot is therefore an intentional
-        // mismatch; current replicas validate the explicit binding below.
-        execution_authority_digest: Some(
-            execution_authority::LEGACY_FAIL_CLOSED_MARKER.to_string(),
-        ),
+        // Old and new replicas validate the same resolved target through the
+        // projection each understands during an ordinary rolling deployment.
+        execution_authority_digest: Some(execution_authority.legacy_digest),
         execution_authority_binding: Some(ExactServiceExecutionAuthorityBinding {
             projection_version: execution_authority::CONTRACT_VERSION.to_string(),
             digest: execution_authority.digest,
@@ -803,6 +808,7 @@ struct ResolvedExecution {
     resolution: proxy_service::UserServiceResolution,
     configured_fallback_node_ids: Vec<String>,
     digest: String,
+    legacy_digest: String,
 }
 
 #[derive(Clone, Copy)]
@@ -901,10 +907,12 @@ async fn resolve_execution_authority(
         configured_fallback_node_ids.clone(),
     );
     let digest = execution_authority::digest(&projection);
+    let legacy_digest = execution_authority::legacy_digest(&projection);
     Ok(ResolvedExecution {
         resolution,
         configured_fallback_node_ids,
         digest,
+        legacy_digest,
     })
 }
 
@@ -923,7 +931,6 @@ enum ExecutionAuthorityEvaluation {
 enum ExecutionAuthorityDigestDecision {
     Matched,
     Drifted,
-    UnboundVersion,
     UnsupportedVersion,
 }
 
@@ -952,7 +959,7 @@ fn evaluate_authority(
     binding: &ExactServiceApprovalBinding,
     live: ResolvedExecution,
 ) -> ExecutionAuthorityEvaluation {
-    match execution_authority_digest_decision(binding, &live.digest) {
+    match execution_authority_digest_decision(binding, &live.digest, &live.legacy_digest) {
         ExecutionAuthorityDigestDecision::Matched => {
             ExecutionAuthorityEvaluation::Matched(Box::new(live))
         }
@@ -960,11 +967,6 @@ fn evaluate_authority(
             ExactServiceApprovalState::Drifted,
             ExactServiceRedemptionStatus::Drifted,
             "execution_authority_drift",
-        ),
-        ExecutionAuthorityDigestDecision::UnboundVersion => execution_authority_terminal(
-            ExactServiceApprovalState::Drifted,
-            ExactServiceRedemptionStatus::Drifted,
-            "execution_authority_version_unbound",
         ),
         ExecutionAuthorityDigestDecision::UnsupportedVersion => execution_authority_terminal(
             ExactServiceApprovalState::Drifted,
@@ -977,6 +979,7 @@ fn evaluate_authority(
 fn execution_authority_digest_decision(
     binding: &ExactServiceApprovalBinding,
     live_digest: &str,
+    live_legacy_digest: &str,
 ) -> ExecutionAuthorityDigestDecision {
     match binding.execution_authority_binding.as_ref() {
         Some(stored) if stored.projection_version == execution_authority::CONTRACT_VERSION => {
@@ -986,8 +989,25 @@ fn execution_authority_digest_decision(
                 ExecutionAuthorityDigestDecision::Drifted
             }
         }
+        Some(stored)
+            if stored.projection_version == execution_authority::LEGACY_CONTRACT_VERSION =>
+        {
+            if stored.digest == live_legacy_digest {
+                ExecutionAuthorityDigestDecision::Matched
+            } else {
+                ExecutionAuthorityDigestDecision::Drifted
+            }
+        }
         Some(_) => ExecutionAuthorityDigestDecision::UnsupportedVersion,
-        None => ExecutionAuthorityDigestDecision::UnboundVersion,
+        None => match binding.execution_authority_digest.as_deref() {
+            Some(stored) if stored == live_legacy_digest => {
+                ExecutionAuthorityDigestDecision::Matched
+            }
+            Some(_) => ExecutionAuthorityDigestDecision::Drifted,
+            // Rows created before execution-authority digests existed retain
+            // main's expiry-bounded behavior and skip this one gate.
+            None => ExecutionAuthorityDigestDecision::Matched,
+        },
     }
 }
 
@@ -1100,8 +1120,8 @@ async fn resolve_exact_catalog(
         })
         .ok_or_else(|| AppError::NotFound("exact_user_service_not_found".to_string()))?;
     // Delegated callers must be in the exact view. Non-delegated callers may
-    // select an out-of-view service, but exact approval still requires the
-    // selected operation to have a durable producer generation below.
+    // select an out-of-view service. A durable producer generation is bound
+    // when available; instance-spec operations deliberately have none.
     let in_exact_view = exact_view_membership(caller, &catalog.services[service_index])?;
     let endpoint_index = catalog.services[service_index]
         .endpoints
@@ -1112,13 +1132,13 @@ async fn resolve_exact_catalog(
     // projection is shared with delegated discovery; the broad catalog fence
     // stays byte-compatible with `/api/v1/mcp/config`.
     let catalog_digest = mcp_service::operation_catalog_digest(&catalog.services);
-    let exact_view_digest = mcp_service::exact_operation_view_digest(
-        &mcp_service::exact_operation_view(&catalog.services),
-    );
+    let exact_view = mcp_service::exact_operation_view(&catalog.services);
+    let exact_view_digest = mcp_service::exact_operation_view_digest(&exact_view);
+    let legacy_exact_view_digest = mcp_service::legacy_exact_operation_view_digest(&exact_view);
     let endpoint = &catalog.services[service_index].endpoints[endpoint_index];
-    let operation_generation =
-        mcp_service::producer_operation_generation(&catalog.services[service_index], endpoint)
-            .ok_or_else(|| AppError::NotFound("exact_operation_not_in_exact_view".to_string()))?;
+    let producer_operation_generation =
+        mcp_service::producer_operation_generation(&catalog.services[service_index], endpoint);
+    let operation_generation = producer_operation_generation.unwrap_or(0);
     let endpoint_contract_digest = mcp_service::endpoint_contract_digest(endpoint);
     let operation_digest =
         mcp_service::exact_operation_digest(user_service_id, endpoint, arguments);
@@ -1128,10 +1148,12 @@ async fn resolve_exact_catalog(
         endpoint_index,
         catalog_digest,
         exact_view_digest,
+        legacy_exact_view_digest,
         in_exact_view,
         endpoint_contract_digest,
         operation_digest,
         operation_generation,
+        producer_generation_bound: producer_operation_generation.is_some(),
         marker: std::marker::PhantomData,
     })
 }
@@ -1372,6 +1394,7 @@ async fn evaluate_live_authority(
         endpoint_id: &resolution.endpoint().endpoint_id,
         catalog_digest: &resolution.catalog_digest,
         exact_view_digest: &resolution.exact_view_digest,
+        legacy_exact_view_digest: &resolution.legacy_exact_view_digest,
         endpoint_contract_digest: &resolution.endpoint_contract_digest,
         operation_digest: &resolution.operation_digest,
         operation_generation: resolution.operation_generation,
@@ -1478,6 +1501,7 @@ struct ExactAuthoritySnapshot<'a> {
     endpoint_id: &'a str,
     catalog_digest: &'a str,
     exact_view_digest: &'a str,
+    legacy_exact_view_digest: &'a str,
     endpoint_contract_digest: &'a str,
     operation_digest: &'a str,
     operation_generation: i64,
@@ -1487,17 +1511,20 @@ fn exact_authority_has_drift(
     binding: &ExactServiceApprovalBinding,
     live: &ExactAuthoritySnapshot<'_>,
 ) -> bool {
-    !binding.producer_generation_bound
-        || binding.user_service_id != live.user_service_id
+    binding.user_service_id != live.user_service_id
         || binding.endpoint_id != live.endpoint_id
         || binding.catalog_digest != live.catalog_digest
+        || binding.exact_view_digest.as_deref().is_some_and(|stored| {
+            stored != live.exact_view_digest && stored != live.legacy_exact_view_digest
+        })
         || binding
-            .exact_view_digest
+            .exact_view_digest_binding
             .as_deref()
             .is_some_and(|stored| stored != live.exact_view_digest)
         || binding.endpoint_contract_digest != live.endpoint_contract_digest
         || binding.operation_digest != live.operation_digest
-        || binding.operation_generation != live.operation_generation
+        || (binding.producer_generation_bound
+            && binding.operation_generation != live.operation_generation)
 }
 
 fn ensure_fence(request: &ApprovalRequest, fence: &ExactServiceApprovalFence) -> AppResult<()> {
@@ -1588,20 +1615,18 @@ fn ensure_digest(field: &str, provided: &str, authoritative: &str) -> AppResult<
     }
 }
 
-fn ensure_operation_generation(
-    caller: &ExactServiceApprovalCaller,
-    provided: Option<i64>,
-    authoritative: i64,
+fn ensure_exact_view_digest(
+    provided: &str,
+    authoritative: &ExactCatalogResolution<'_>,
 ) -> AppResult<()> {
-    match provided {
-        Some(value) if value == authoritative => Ok(()),
-        Some(_) => Err(AppError::Conflict(
-            "exact_service_operation_generation_drift".to_string(),
-        )),
-        None if caller.requester_type == DELEGATED_REQUESTER_TYPE => Err(AppError::BadRequest(
-            OPERATION_GENERATION_REQUIRED.to_string(),
-        )),
-        None => Ok(()),
+    if provided == authoritative.exact_view_digest
+        || provided == authoritative.legacy_exact_view_digest
+    {
+        Ok(())
+    } else {
+        Err(AppError::Conflict(
+            "exact_service_exact_view_digest_drift".to_string(),
+        ))
     }
 }
 
@@ -1650,6 +1675,7 @@ async fn reject_legacy_request_replay(
 
 fn safe_execution_failure_code(error: &AppError) -> &'static str {
     match error {
+        AppError::Internal(message) if message == "provider_unreachable" => "provider_unreachable",
         AppError::ApiKeyScopeForbidden(_)
         | AppError::ApiKeyScopeInactive
         | AppError::ApiKeyScopeNotFound(_) => "authorization_revoked",
@@ -1707,6 +1733,7 @@ mod tests {
     fn binding() -> ExactServiceApprovalBinding {
         let input = create();
         let operation_generation = 3;
+        let exact_view_digest_binding = input.exact_view_digest.clone();
         ExactServiceApprovalBinding {
             request_key: request_key(
                 &caller(),
@@ -1719,6 +1746,7 @@ mod tests {
             endpoint_id: input.endpoint_id,
             catalog_digest: input.catalog_digest,
             exact_view_digest: input.exact_view_digest,
+            exact_view_digest_binding,
             endpoint_contract_digest: input.endpoint_contract_digest,
             operation_digest: input.operation_digest,
             operation_id: input.operation_id,
@@ -1733,17 +1761,17 @@ mod tests {
     }
 
     #[test]
-    fn execution_authority_version_binding_is_explicit_and_fail_closed() {
+    fn execution_authority_versions_are_rolling_compatible() {
         let live_v2 = "sha256:live-v2";
+        let live_v1 = "sha256:live-v1";
         let mut current = binding();
-        current.execution_authority_digest =
-            Some(execution_authority::LEGACY_FAIL_CLOSED_MARKER.to_string());
+        current.execution_authority_digest = Some(live_v1.to_string());
         current.execution_authority_binding = Some(ExactServiceExecutionAuthorityBinding {
             projection_version: execution_authority::CONTRACT_VERSION.to_string(),
             digest: live_v2.to_string(),
         });
         assert_eq!(
-            execution_authority_digest_decision(&current, live_v2),
+            execution_authority_digest_decision(&current, live_v2, live_v1),
             ExecutionAuthorityDigestDecision::Matched
         );
 
@@ -1751,28 +1779,35 @@ mod tests {
         drifted.execution_authority_binding.as_mut().unwrap().digest =
             "sha256:changed-v2".to_string();
         assert_eq!(
-            execution_authority_digest_decision(&drifted, live_v2),
+            execution_authority_digest_decision(&drifted, live_v2, live_v1),
             ExecutionAuthorityDigestDecision::Drifted
         );
 
         let mut old_projection = current.clone();
-        old_projection
-            .execution_authority_binding
-            .as_mut()
-            .unwrap()
-            .projection_version = execution_authority::LEGACY_CONTRACT_VERSION.to_string();
+        let old_binding = old_projection.execution_authority_binding.as_mut().unwrap();
+        old_binding.projection_version = execution_authority::LEGACY_CONTRACT_VERSION.to_string();
+        old_binding.digest = live_v1.to_string();
         assert_eq!(
-            execution_authority_digest_decision(&old_projection, live_v2),
-            ExecutionAuthorityDigestDecision::UnsupportedVersion,
-            "v1 did not bind all v2 authority fields and cannot authorize execution"
+            execution_authority_digest_decision(&old_projection, live_v2, live_v1),
+            ExecutionAuthorityDigestDecision::Matched
         );
 
         let mut legacy_row = binding();
-        legacy_row.execution_authority_digest = Some("sha256:matching-v1".to_string());
+        legacy_row.execution_authority_digest = Some(live_v1.to_string());
         assert_eq!(
-            execution_authority_digest_decision(&legacy_row, "sha256:matching-v1"),
-            ExecutionAuthorityDigestDecision::UnboundVersion,
-            "an unversioned legacy digest must deserialize but never execute"
+            execution_authority_digest_decision(&legacy_row, live_v2, live_v1),
+            ExecutionAuthorityDigestDecision::Matched
+        );
+        assert_eq!(
+            execution_authority_digest_decision(&legacy_row, live_v2, "sha256:changed-v1"),
+            ExecutionAuthorityDigestDecision::Drifted
+        );
+
+        let pre_digest_row = binding();
+        assert_eq!(
+            execution_authority_digest_decision(&pre_digest_row, live_v2, live_v1),
+            ExecutionAuthorityDigestDecision::Matched,
+            "pre-digest rows retain main's expiry-bounded authority behavior"
         );
     }
 
@@ -1781,7 +1816,12 @@ mod tests {
             user_service_id: &binding.user_service_id,
             endpoint_id: &binding.endpoint_id,
             catalog_digest: &binding.catalog_digest,
-            exact_view_digest: binding.exact_view_digest.as_deref().unwrap(),
+            exact_view_digest: binding
+                .exact_view_digest_binding
+                .as_deref()
+                .or(binding.exact_view_digest.as_deref())
+                .unwrap(),
+            legacy_exact_view_digest: binding.exact_view_digest.as_deref().unwrap(),
             endpoint_contract_digest: &binding.endpoint_contract_digest,
             operation_digest: &binding.operation_digest,
             operation_generation: binding.operation_generation,
@@ -1905,32 +1945,6 @@ mod tests {
     }
 
     #[test]
-    fn create_generation_must_match_the_live_producer_for_delegated_callers() {
-        let delegated = caller();
-        ensure_operation_generation(&delegated, Some(3), 3)
-            .expect("discovery generation matches the live producer");
-        assert!(matches!(
-            ensure_operation_generation(&delegated, None, 3),
-            Err(AppError::BadRequest(message)) if message == OPERATION_GENERATION_REQUIRED
-        ));
-        assert!(matches!(
-            ensure_operation_generation(&delegated, Some(2), 3),
-            Err(AppError::Conflict(message))
-                if message == "exact_service_operation_generation_drift"
-        ));
-
-        let mut legacy = delegated;
-        legacy.requester_type = "access_token".to_string();
-        ensure_operation_generation(&legacy, None, 3)
-            .expect("non-delegated legacy callers may omit the discovery generation");
-        assert!(matches!(
-            ensure_operation_generation(&legacy, Some(-99), 3),
-            Err(AppError::Conflict(message))
-                if message == "exact_service_operation_generation_drift"
-        ));
-    }
-
-    #[test]
     fn redemption_fence_rejects_conflicting_replay() {
         let input = create();
         let request = approval_request(
@@ -1979,11 +1993,13 @@ mod tests {
             &binding,
             &ExactAuthoritySnapshot {
                 exact_view_digest: "sha256:changed-exact-view",
+                legacy_exact_view_digest: "sha256:changed-legacy-exact-view",
                 ..live
             },
         ));
         let mut legacy_binding = binding.clone();
         legacy_binding.exact_view_digest = None;
+        legacy_binding.exact_view_digest_binding = None;
         assert!(!exact_authority_has_drift(
             &legacy_binding,
             &ExactAuthoritySnapshot {
@@ -1993,15 +2009,41 @@ mod tests {
         ));
         let mut unratified = binding.clone();
         unratified.producer_generation_bound = false;
-        assert!(exact_authority_has_drift(
+        assert!(!exact_authority_has_drift(
             &unratified,
-            &authority_snapshot(&unratified),
+            &ExactAuthoritySnapshot {
+                operation_generation: unratified.operation_generation + 1,
+                ..authority_snapshot(&unratified)
+            },
         ));
         assert!(exact_authority_has_drift(
             &binding,
             &ExactAuthoritySnapshot {
                 operation_generation: binding.operation_generation + 1,
                 ..live
+            },
+        ));
+        let mut legacy_exact_view = binding.clone();
+        legacy_exact_view.exact_view_digest = Some("sha256:legacy-exact-view".to_string());
+        legacy_exact_view.exact_view_digest_binding = None;
+        assert!(!exact_authority_has_drift(
+            &legacy_exact_view,
+            &ExactAuthoritySnapshot {
+                exact_view_digest: "sha256:current-exact-view",
+                legacy_exact_view_digest: "sha256:legacy-exact-view",
+                ..authority_snapshot(&legacy_exact_view)
+            },
+        ));
+        let mut dual_digest_binding = binding.clone();
+        dual_digest_binding.exact_view_digest = Some("sha256:legacy-exact-view".to_string());
+        dual_digest_binding.exact_view_digest_binding =
+            Some("sha256:current-exact-view".to_string());
+        assert!(exact_authority_has_drift(
+            &dual_digest_binding,
+            &ExactAuthoritySnapshot {
+                exact_view_digest: "sha256:changed-current-exact-view",
+                legacy_exact_view_digest: "sha256:legacy-exact-view",
+                ..authority_snapshot(&dual_digest_binding)
             },
         ));
         assert_eq!(
@@ -2062,6 +2104,7 @@ mod tests {
             &binding,
             &ExactAuthoritySnapshot {
                 exact_view_digest: "sha256:provider-rebound-exact-view",
+                legacy_exact_view_digest: "sha256:provider-rebound-legacy-view",
                 ..live
             },
         ));

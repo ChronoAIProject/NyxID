@@ -4360,7 +4360,7 @@ other effect authority. The existing approval endpoints intentionally return
 
 ```json
 {
-  "contract_version": "nyxid-delegated-operation-catalog.v3",
+  "contract_version": "nyxid-delegated-operation-catalog.v2",
   "catalog_digest": "sha256:opaque-admission-token",
   "exact_view_digest": "sha256:exact-caller-visible-view",
   "resolved_at": "2026-08-14T00:00:00Z",
@@ -4402,20 +4402,25 @@ other effect authority. The existing approval endpoints intentionally return
 
 `exact_view_digest` is the representation validator for the exact
 caller-visible `services` array. It is SHA-256 over canonical compact JSON
-containing `contract_version: "nyxid-delegated-operation-catalog.v3"` and the
+containing `contract_version: "nyxid-delegated-operation-catalog.v2"` and the
 returned `services`; services are sorted by `user_service_id`, operations by
 `endpoint_id`, and object keys recursively in lexicographic order. The dynamic
 timestamps, totals, and `catalog_digest` are excluded. Delegated discovery and
 exact approval create, observe, and redeem use this same projection.
 
-Version 3 adds the producer-owned `operation_generation`, `risk`, and
-`supports_idempotency_key` to every operation and therefore intentionally
-changes `exact_view_digest` from version 2 even when the remaining operation
-fields are unchanged. Clients must refetch a v3
-response and use its fields as one unit; a cached v2 digest or a digest rebuilt
-with a v2 envelope is stale. Pre-v3 pending approvals cannot cross this rollout
-boundary: their live revalidation fails closed rather than interpreting their
-caller-owned generation as producer evidence.
+The producer-owned `operation_generation`, `risk`, and
+`supports_idempotency_key` fields are additive to v2. During the bounded mixed-
+replica compatibility window, discovery emits the v2 digest of the same
+projection with those three fields omitted. New replicas accept either that
+pre-additive digest or the full additive digest at create and live
+revalidation. New rows retain the pre-additive value in the legacy
+`exact_view_digest` slot so an old replica can revalidate them, and persist the
+full projection in a server-owned `exact_view_digest_binding` slot that new
+replicas also enforce. This catches additive policy changes written by an old
+replica even though that writer cannot bump `operation_generation`. Clients
+must treat the response digest as opaque and echo the server value rather than
+rebuilding it. This lets existing clients and old and new NyxID replicas
+coexist during an ordinary rolling deploy.
 
 Each service also carries the producer-owned `catalog_service_id` used to
 resolve its catalog provider. This field is included in `exact_view_digest` and
@@ -4423,13 +4428,15 @@ is nullable: a custom user service with typed operations has no catalog
 provider, so its value is `null` and `user_service_id` is its canonical
 identity.
 
-`operation_generation` is the positive, producer-owned revision of the
+`operation_generation` is the positive, producer-owned revision of a durable
 `ServiceEndpoint`. It starts at 1, increments when the endpoint contract or
 active state changes, remains stable across no-op reconciliation, and is paired
 with the opaque `endpoint_id` so delete/recreate cannot form an ABA identity.
 Startup backfill assigns 1 only to legacy rows where the generation field is
-missing. Explicit zero or negative values are not repaired: they remain invalid,
-fail closed, and are omitted from the exact view.
+missing. Operations parsed from an instance-mounted `openapi_spec_url` have no
+durable producer row; they remain discoverable with `operation_generation:
+null`, persist `producer_generation_bound: false`, and use
+`endpoint_contract_digest` as their shape fence.
 
 `catalog_digest` remains the pre-existing broad approval fence. For wire
 compatibility with #1424 (commit `d1a042c2`), it is exactly
@@ -4464,14 +4471,15 @@ A mismatched in-view digest returns the existing
 `exact_service_exact_view_digest_drift` conflict, and an empty supplied value is
 rejected as a bad request.
 
-Create also validates `operation_generation` against that same live producer
-row. A delegated caller must submit the exact value from discovery; omission
-returns `400 operation_generation_required`, while any supplied mismatch
-returns `409 exact_service_operation_generation_drift`. A nondelegated caller
-may omit the field for request compatibility, but NyxID still resolves and
-persists the live producer value; a supplied mismatch is rejected for every
-caller. The stored approval is marked producer-bound, and observe/redeem compare
-that stored value with the current producer generation.
+Create never requires or rejects `operation_generation`. NyxID resolves and
+persists the live producer generation for a durable endpoint regardless of
+caller input; a supplied mismatch is debug telemetry only. Freshness at create
+is already established by `catalog_digest`, `exact_view_digest`, and
+`endpoint_contract_digest`. The stored producer value is used to detect drift
+between create and redeem. Instance-spec operations persist generation `0` with
+`producer_generation_bound: false`, so observe and redeem skip only the
+generation comparison while retaining every digest fence. Clients redeem with
+the value returned by create/status.
 
 At redeem the fence follows the same split. For **delegated** callers an
 omitted `exact_view_digest` is rejected with `400 exact_view_digest_required`
@@ -4489,9 +4497,14 @@ digest of the execution-relevant `token_exchange_config`. A mismatch returns
 HTTP 200 with `state: "drifted"` and
 `failure_code: "execution_authority_drift"` and does not dispatch downstream.
 Catalog, shape, or producer-generation drift uses `catalog_drift`.
-Missing versioned bindings return `execution_authority_version_unbound`; v1 or
-unknown versions return `execution_authority_version_unsupported`. Neither path
-falls back to the legacy unversioned digest.
+New rows also store the real v1 projection digest in the legacy
+`execution_authority_digest` slot. Old replicas validate that slot exactly as
+before, while new replicas validate the v2 binding. For main-era rows with no
+versioned binding and a v1 digest, new replicas recompute and compare the live
+v1 projection. A versioned v1 binding is handled the same way. Rows with neither
+field predate authority digests and skip this one gate within their approval
+expiry. `execution_authority_version_unsupported` is reserved for genuinely
+unknown future projection versions.
 
 Observe and redeem use one ordered live evaluator: catalog and exact-generation
 checks, then approval-policy revalidation, then a read-only execution-authority
@@ -4518,20 +4531,19 @@ receipt write while preserving at-most-once dispatch.
 |---|---|---|---|
 | Catalog / exact-view / operation identity changed | `drifted` | `catalog_drift` | None |
 | Destination, credential identity/epoch, injection, headers, policy, or configured node set changed | `drifted` | `execution_authority_drift` | None |
-| Missing v2 authority binding | `drifted` | `execution_authority_version_unbound` | None |
-| v1 or unknown authority binding | `drifted` | `execution_authority_version_unsupported` | None |
+| Unknown future authority projection | `drifted` | `execution_authority_version_unsupported` | None |
 | Selector gone / out of scope | `revoked` | `selector_revoked` | None |
-| Effect timeout or stale `executing` recovery | `failed` | `provider_outcome_unknown` | Never replayed; reconcile provider state |
+| Direct DNS/connect/TLS/build/request failure known to precede dispatch | `failed` | `provider_unreachable` | None; terminal request may be recreated only with a new effect key |
+| Effect timeout, response-body/decode/stream failure, or stale `executing` recovery | `failed` | `provider_outcome_unknown` | Never replayed; reconcile provider state |
 | Background OAuth token refresh (epoch unchanged) | `redeemed` | omitted | Exactly one |
 | URL changed away and back before redeem (ABA) | `redeemed` | omitted | Exactly one |
 
-Legacy approval rows without `producer_generation_bound: true` or without an
-explicit v2 execution-authority binding fail closed on live
-observation/redemption; an old v1 digest remains deserializable for audit but is
-not execution authority. New rows put a fail-closed marker in the old digest
-slot so a v1 replica cannot ignore v2-only fields. Operators must drain all v1
-replicas and terminate or reconcile outstanding v1 approvals before v2
-issuance; mixed v1/v2 redeem traffic is unsupported. Create keeps the existing
+Legacy and instance-spec approval rows without
+`producer_generation_bound: true` skip only the producer-generation
+comparison. Main-era v1 authority digests remain executable authority for the
+v1 field set, while new rows carry both the real v1 digest and the stronger v2
+binding. This makes mixed v1/v2 create, observe, redeem, and rollback safe.
+Create keeps the existing
 `nyxid-exact-approval-request.v1` identity but derives its generation from the
 producer. A semantic pre-upgrade row for the same requester, operation and
 idempotency key is detected across pending and terminal states and returns
@@ -4545,10 +4557,14 @@ precheck and insert when old and new pods overlap. A losing new pod returns the
 typed conflict. A pre-upgrade pod may surface its older database-error response,
 but it still cannot create a duplicate effect.
 
-Before first installing or repairing this index, startup runs a bounded duplicate
-preflight. If duplicates already exist, startup fails with an explicit diagnostic
-and does not install a non-unique fallback. Pause exact-approval creates and use
-the following aggregation to enumerate every conflicting group:
+Before first installing or repairing this index, startup runs a bounded
+duplicate preflight. If duplicates already exist, or a duplicate write races
+the index build, startup logs the remediation, leaves the unique index absent,
+persists an active `exact_service_semantic_effect_index` startup diagnostic,
+and continues boot. The admin Integrity page surfaces the diagnostic. The
+service-level semantic pre-insert check and legacy-replay rejection remain the
+guard until an operator resolves the data and restarts. Pause exact-approval
+creates and use the following aggregation to enumerate every conflicting group:
 
 ```javascript
 db.approval_requests.aggregate([

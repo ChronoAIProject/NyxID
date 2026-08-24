@@ -9,7 +9,10 @@ import {
   useChainVerification,
   useRunChainVerification,
 } from "@/hooks/use-admin-chain-verification";
-import type { ChainVerifyStatus } from "@/schemas/admin-chain-verification";
+import type {
+  ChainVerifyStatus,
+  StartupDiagnostic,
+} from "@/schemas/admin-chain-verification";
 import { useAuthStore } from "@/stores/auth-store";
 import { canAdminWrite } from "@/types/api";
 
@@ -112,6 +115,42 @@ function ChainCard({ status }: { readonly status: ChainVerifyStatus }) {
   );
 }
 
+function StartupDiagnostics({
+  diagnostics,
+}: {
+  readonly diagnostics: readonly StartupDiagnostic[];
+}) {
+  if (diagnostics.length === 0) return null;
+
+  return (
+    <Card className="border-destructive/50">
+      <CardHeader className="flex flex-row items-center justify-between space-y-0">
+        <div className="flex items-center gap-2">
+          <ShieldAlert className="h-5 w-5 text-destructive" />
+          <CardTitle className="text-base">Startup diagnostics</CardTitle>
+        </div>
+        <Badge variant="destructive">Action required</Badge>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {diagnostics.map((diagnostic) => (
+          <div key={diagnostic.code} className="space-y-2 text-sm">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <p className="font-medium text-destructive">
+                {diagnostic.summary}
+              </p>
+              <span className="text-xs text-muted-foreground">
+                {formatTimestamp(diagnostic.detected_at)}
+              </span>
+            </div>
+            <p className="text-muted-foreground">{diagnostic.detail}</p>
+            <p>{diagnostic.remediation}</p>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  );
+}
+
 export function AdminIntegrityPage() {
   const { data, isLoading, error } = useChainVerification();
   const runVerification = useRunChainVerification();
@@ -162,6 +201,10 @@ export function AdminIntegrityPage() {
           ) : undefined
         }
       />
+
+      {data ? (
+        <StartupDiagnostics diagnostics={data.startup_diagnostics} />
+      ) : null}
 
       {error ? (
         <Card>

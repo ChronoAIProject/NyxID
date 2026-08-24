@@ -189,14 +189,15 @@ pub struct McpToolService {
 pub struct McpDurableEndpointMetadata {
     pub risk: Option<EndpointRisk>,
     pub supports_idempotency_key: bool,
-    /// Producer-owned operation revision. Zero means no durable producer
-    /// referent exists and delegated exact approval must fail closed.
+    /// Producer-owned operation revision. Zero means the operation came from a
+    /// dynamic instance spec and has no durable producer-generation referent.
     pub operation_generation: i64,
 }
 
 /// Resolve the operation revision published by the owning producer. Missing or
 /// non-positive values are intentionally unavailable rather than inferred from
-/// caller input or endpoint shape.
+/// caller input or endpoint shape. The endpoint contract remains authoritative
+/// for dynamic instance-spec operations.
 pub fn producer_operation_generation(
     service: &McpToolService,
     endpoint: &McpToolEndpoint,
@@ -357,7 +358,9 @@ pub struct ExactOperationViewOperation {
     /// Producer-owned idempotency capability used by durable write approval.
     pub supports_idempotency_key: bool,
     pub endpoint_contract_digest: String,
-    pub operation_generation: i64,
+    /// Null for operations parsed from an instance-mounted spec because there
+    /// is no durable `ServiceEndpoint` row whose generation can be compared.
+    pub operation_generation: Option<i64>,
 }
 
 /// One service in the canonical delegated exact-operation view.
@@ -405,8 +408,6 @@ pub fn exact_operation_view(services: &[McpToolService]) -> ExactOperationView {
                     let metadata = service
                         .durable_endpoint_metadata
                         .get(&endpoint.endpoint_id)?;
-                    let operation_generation = (metadata.operation_generation > 0)
-                        .then_some(metadata.operation_generation)?;
                     Some(ExactOperationViewOperation {
                         endpoint_id: endpoint.endpoint_id.clone(),
                         name: endpoint.name.clone(),
@@ -420,14 +421,12 @@ pub fn exact_operation_view(services: &[McpToolService]) -> ExactOperationView {
                         risk: metadata.risk,
                         supports_idempotency_key: metadata.supports_idempotency_key,
                         endpoint_contract_digest: endpoint_contract_digest(endpoint),
-                        operation_generation,
+                        operation_generation: (metadata.operation_generation > 0)
+                            .then_some(metadata.operation_generation),
                     })
                 })
                 .collect::<Vec<_>>();
             operations.sort_by(|left, right| left.endpoint_id.cmp(&right.endpoint_id));
-            if operations.is_empty() {
-                return None;
-            }
             Some(ExactOperationViewService {
                 user_service_id: user_service_id.clone(),
                 catalog_service_id: catalog_service_id.clone(),
@@ -450,8 +449,54 @@ pub fn exact_operation_view(services: &[McpToolService]) -> ExactOperationView {
 /// `catalog_digest` are intentionally outside this representation validator.
 pub fn exact_operation_view_digest(view: &ExactOperationView) -> String {
     canonical_sha256(serde_json::json!({
-        "contract_version": "nyxid-delegated-operation-catalog.v3",
+        "contract_version": "nyxid-delegated-operation-catalog.v2",
         "services": &view.services,
+    }))
+}
+
+/// Digest emitted before `risk`, `supports_idempotency_key`, and
+/// `operation_generation` were added to the v2 operation representation.
+///
+/// TODO(2026-09-01): remove this compatibility digest and publish/store
+/// `exact_operation_view_digest` after every pre-deploy replica has drained and
+/// the longest five-minute approval TTL has elapsed.
+pub fn legacy_exact_operation_view_digest(view: &ExactOperationView) -> String {
+    let services = view
+        .services
+        .iter()
+        .map(|service| {
+            let operations = service
+                .operations
+                .iter()
+                .map(|operation| {
+                    serde_json::json!({
+                        "endpoint_id": operation.endpoint_id,
+                        "name": operation.name,
+                        "method": operation.method,
+                        "path": operation.path,
+                        "parameters": operation.parameters,
+                        "request_body_schema": operation.request_body_schema,
+                        "request_content_type": operation.request_content_type,
+                        "request_body_required": operation.request_body_required,
+                        "response": operation.response,
+                        "endpoint_contract_digest": operation.endpoint_contract_digest,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "user_service_id": service.user_service_id,
+                "catalog_service_id": service.catalog_service_id,
+                "service_slug": service.service_slug,
+                "service_name": service.service_name,
+                "description": service.description,
+                "node_id": service.node_id,
+                "operations": operations,
+            })
+        })
+        .collect::<Vec<_>>();
+    canonical_sha256(serde_json::json!({
+        "contract_version": "nyxid-delegated-operation-catalog.v2",
+        "services": services,
     }))
 }
 
@@ -1368,8 +1413,8 @@ async fn fetch_and_parse_user_spec(
                 risk: parsed_endpoint.risk,
                 supports_idempotency_key: parsed_endpoint.supports_idempotency_key,
                 // Remote instance specs have no durable producer revision.
-                // They remain ordinary MCP tools but are excluded from the
-                // delegated exact-operation approval view.
+                // Their endpoint-contract digest remains the exact approval
+                // fence, while the caller-visible generation is null.
                 operation_generation: 0,
             },
         );
@@ -4019,11 +4064,28 @@ pub async fn execute_tool_resolved(
     .await
     {
         Ok(response) => response,
-        Err(error) => {
-            // `reqwest::send` cannot prove whether bytes crossed the provider
-            // boundary. Exact approvals therefore terminalize this outcome as
-            // unknown instead of treating it as a retryable pre-dispatch error.
-            return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
+        Err(proxy_service::ForwardRequestError::Application(error)) => return Err(error),
+        Err(proxy_service::ForwardRequestError::Transport(error))
+            if direct_transport_failure_is_pre_dispatch(&error) =>
+        {
+            tracing::warn!(
+                connect = error.is_connect(),
+                builder = error.is_builder(),
+                request = error.is_request(),
+                "Provider was unreachable before direct dispatch"
+            );
+            return Err(AppError::Internal("provider_unreachable".to_string()));
+        }
+        Err(proxy_service::ForwardRequestError::Transport(error)) => {
+            tracing::error!(
+                timeout = error.is_timeout(),
+                body = error.is_body(),
+                decode = error.is_decode(),
+                "Direct provider outcome is unknown"
+            );
+            return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
+                AppError::Internal("Direct provider outcome is unknown".to_string()),
+            ));
         }
     };
 
@@ -4031,7 +4093,12 @@ pub async fn execute_tool_resolved(
     let body_text = match response.text().await {
         Ok(body) => body,
         Err(error) => {
-            tracing::error!("Failed to read downstream response: {error}");
+            tracing::error!(
+                timeout = error.is_timeout(),
+                body = error.is_body(),
+                decode = error.is_decode(),
+                "Failed to read downstream response"
+            );
             return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
                 AppError::Internal("Failed to read downstream response".to_string()),
             ));
@@ -4047,6 +4114,10 @@ pub async fn execute_tool_resolved(
         .await?;
 
     Ok(McpToolExecutionOutcome::Response((status, body_text)))
+}
+
+fn direct_transport_failure_is_pre_dispatch(error: &reqwest::Error) -> bool {
+    !error.is_timeout() && (error.is_connect() || error.is_builder() || error.is_request())
 }
 
 /// Build proxy arguments from a generic proxy tool call.
@@ -5474,6 +5545,9 @@ mod tests {
         assert_eq!(service.endpoints[0].name, "im_message_create");
         assert_eq!(service.endpoints[0].method, "POST");
         assert_eq!(service.endpoints[0].path, "/open-apis/im/v1/messages");
+        let view = exact_operation_view(&catalog_result.services);
+        let operation = &view.services[0].operations[0];
+        assert_eq!(operation.operation_generation, None);
     }
 
     #[tokio::test]

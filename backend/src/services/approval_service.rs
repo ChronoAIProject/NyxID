@@ -2016,6 +2016,7 @@ mod tests {
             endpoint_id: "producer-endpoint".to_string(),
             catalog_digest: "catalog-digest".to_string(),
             exact_view_digest: Some("view-digest".to_string()),
+            exact_view_digest_binding: None,
             endpoint_contract_digest: "contract-digest".to_string(),
             operation_digest: "operation-digest".to_string(),
             operation_id: "legacy-caller-operation".to_string(),

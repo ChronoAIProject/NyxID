@@ -267,12 +267,14 @@ endpoint.
 - Exact-service effect admission is atomic across rolling versions. The partial unique
   `exact_service_semantic_effect_unique` index binds requester type/id, actor user,
   operation id, and effect idempotency key, intentionally excluding caller or producer
-  generation. Startup first checks for historical duplicate groups and refuses the
-  rollout with an explicit remediation diagnostic; it never silently deletes requests
-  or falls back to a non-unique index. Operators must pause creates, reconcile each
-  group against decision/redemption/provider evidence in an audited migration, and
-  then restart. Once the correctly shaped index exists, later startups verify its
-  metadata and skip the full duplicate scan.
+  generation. Startup first checks for historical duplicate groups. If duplicates are
+  present, or a duplicate write races the unique-index build, startup logs and persists
+  an Integrity-page remediation diagnostic, skips index creation, and continues; it
+  never silently deletes requests or falls back to a non-unique index. The pre-insert
+  semantic lookup and legacy replay guard remain active until operators reconcile each
+  group against decision/redemption/provider evidence and restart. Once the correctly
+  shaped index exists, later startups verify its metadata and skip the full duplicate
+  scan.
 
 ## API & CLI surface
 
@@ -371,19 +373,31 @@ is an aggregation expression; in a classic update document MongoDB stores the
 literal expression sub-document instead of evaluating it, which both skips the
 bump and makes the row fail to deserialize.
 
-Approvals created before producer-owned generation binding or the explicit v2
-execution-authority binding existed fail closed during live revalidation. A
-missing binding reports `execution_authority_version_unbound`; v1 or unknown
-versions report `execution_authority_version_unsupported`. The old unversioned
-digest remains readable for audit only and is never execution authority.
+The authority rollout is rolling-safe. New approvals store the real v1 digest
+in the legacy slot and the explicit v2 `{ projection_version, digest }` binding.
+A v1 replica therefore validates exactly the projection it understands, while
+a v2 replica validates the stronger projection. When a v2 replica reads a
+main-era row with only the unversioned v1 digest, it recomputes and compares the
+live v1 projection. A versioned v1 binding uses the same comparison. Rows that
+predate authority digests skip this one gate, bounded by approval expiry and all
+other fences; only genuinely unknown future projection versions return
+`execution_authority_version_unsupported`.
 
-The v2 rollout is intentionally fail closed rather than rolling-permissive. New
-rows write a non-digest marker into the legacy v1 digest slot, so a v1 binary
-cannot execute a v2 approval while ignoring the three v2-only authority inputs.
-Before v2 creates are admitted, operators must stop/drain every v1 exact-
-approval replica and terminate or explicitly reconcile outstanding v1
-approvals. Mixed v1/v2 redeem traffic is unsupported; this ordering is an
-availability constraint, not permission to fall back to v1 validation.
+The additive exact-view fields retain the v2 catalog contract. During the
+bounded mixed-replica window, discovery and the legacy `exact_view_digest` row
+slot carry the pre-additive digest, while new rows also persist the full digest
+in `exact_view_digest_binding`. Old replicas validate the legacy slot; new
+replicas validate both. Main-era rows without the second slot accept either the
+live full or pre-additive digest, allowing pending approvals to roll forward.
+
+Producer generation follows the same compatibility rule. New approvals bind
+the live positive generation of a durable `ServiceEndpoint`. Main-era and
+instance-spec rows with `producer_generation_bound: false` skip only the
+generation comparison; catalog, exact-view, endpoint-contract, operation, and
+execution-authority fences remain active. Instance-spec endpoints have no
+durable producer row, so their delegated view publishes
+`operation_generation: null` and their endpoint-contract digest is the shape
+fence.
 
 `ws_frame_injections` is not projected because it is unreachable from the HTTP
 exact-approval execution path.

@@ -14,15 +14,8 @@ use crate::services::mcp_service;
 use crate::services::provider_token_exchange_service;
 use crate::services::proxy_service::UserServiceResolution;
 
-#[cfg(test)]
 pub const LEGACY_CONTRACT_VERSION: &str = "nyxid-exact-execution-authority.v1";
 pub const CONTRACT_VERSION: &str = "nyxid-exact-execution-authority.v2";
-
-/// Stored in the legacy digest slot for v2 approvals. A v1 replica compares
-/// this value with a sha256 digest and therefore fails closed instead of
-/// executing a projection whose added authority fields it cannot validate.
-pub const LEGACY_FAIL_CLOSED_MARKER: &str =
-    "projection-version-required:nyxid-exact-execution-authority.v2";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct CredentialProjection {
@@ -158,10 +151,9 @@ pub fn digest(projection: &ExecutionAuthorityProjection) -> String {
     )
 }
 
-/// Reproduce the exact v1 projection digest for regression evidence. This is
-/// never an approval authorization fallback: v1 omitted v2 authority fields,
-/// so new approvals are always authored and verified under `CONTRACT_VERSION`.
-#[cfg(test)]
+/// Reproduce the exact v1 projection digest for rolling compatibility. New
+/// approvals store this in the legacy slot while authorizing current replicas
+/// through the explicit v2 binding.
 pub fn legacy_digest(projection: &ExecutionAuthorityProjection) -> String {
     mcp_service::canonical_sha256(serde_json::json!({
         "contract_version": LEGACY_CONTRACT_VERSION,

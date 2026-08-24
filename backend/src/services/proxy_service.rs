@@ -3400,6 +3400,44 @@ pub async fn forward_request(
         _billing_egress_permit,
     )
     .await
+    .map_err(ForwardRequestError::into_app_error)
+}
+
+#[derive(Debug)]
+pub(crate) enum ForwardRequestError {
+    Application(AppError),
+    Transport(reqwest::Error),
+}
+
+impl ForwardRequestError {
+    pub(crate) fn into_app_error(self) -> AppError {
+        match self {
+            Self::Application(error) => error,
+            Self::Transport(error) => {
+                tracing::error!(
+                    timeout = error.is_timeout(),
+                    connect = error.is_connect(),
+                    request = error.is_request(),
+                    body = error.is_body(),
+                    decode = error.is_decode(),
+                    "Downstream proxy transport failed"
+                );
+                AppError::Internal("Proxy request failed".to_string())
+            }
+        }
+    }
+}
+
+impl From<AppError> for ForwardRequestError {
+    fn from(error: AppError) -> Self {
+        Self::Application(error)
+    }
+}
+
+impl From<reqwest::Error> for ForwardRequestError {
+    fn from(error: reqwest::Error) -> Self {
+        Self::Transport(error)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3418,7 +3456,7 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     cloud_response_cache: &CloudResponseCache,
     extra_outbound_headers: Vec<(String, String)>,
     _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
-) -> AppResult<reqwest::Response> {
+) -> Result<reqwest::Response, ForwardRequestError> {
     let mut all_delegated = delegated_credentials;
     extend_with_path_credential(&mut all_delegated, target);
     let prepared = prepare_delegated_request(path, query, &all_delegated)?;
@@ -3487,7 +3525,8 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
         if target.auth_key_name.is_empty() {
             return Err(AppError::Internal(
                 "Body auth method requires a non-empty auth_key_name".to_string(),
-            ));
+            )
+            .into());
         }
         match body {
             ProxyBody::Buffered(existing) => {
@@ -3578,7 +3617,8 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             } else {
                 return Err(AppError::Internal(
                     "Basic auth credential must be in 'username:password' format".to_string(),
-                ));
+                )
+                .into());
             }
         }
         "body" => {
@@ -3656,10 +3696,9 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
             }
         }
         _ => {
-            return Err(AppError::Internal(format!(
-                "Unknown auth method: {}",
-                target.auth_method
-            )));
+            return Err(
+                AppError::Internal(format!("Unknown auth method: {}", target.auth_method)).into(),
+            );
         }
     }
 
@@ -3683,10 +3722,7 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
         ProxyBody::Buffered(None) => {}
     }
 
-    let response = request.send().await.map_err(|e| {
-        tracing::error!("Proxy request to {} failed: {e}", target.base_url);
-        AppError::Internal("Proxy request failed".to_string())
-    })?;
+    let response = request.send().await?;
 
     // Cache successful billing-API responses so a follow-up request
     // with the same body replays from memory. Non-2xx responses are
@@ -3694,11 +3730,7 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     if let Some(key) = cache_key {
         let replayed = cloud_response_cache
             .insert_and_replay(key, response)
-            .await
-            .map_err(|e| {
-                tracing::error!("cloud_response_cache buffer failed: {e}");
-                AppError::Internal("Failed to buffer cacheable response".to_string())
-            })?;
+            .await?;
         return Ok(replayed);
     }
 
