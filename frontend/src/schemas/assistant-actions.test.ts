@@ -257,8 +257,45 @@ describe("assistant action request schema", () => {
         action,
         params,
       });
-      // Dormant by design: the shapes parse so team journeys can build on
-      // them, but resolution must stay unsupported until each journey lands.
+      // Wave 2's journeys have landed, so these now resolve to a real
+      // variant. Dormancy still holds where it matters: these verbs are
+      // absent from every Aevatar pinned revision set, so no card for them
+      // can arrive until the v9 bump. The browser being ready is the point.
+      //
+      // Falsifier: drop a Wave-2 registry row and its entry here resolves to
+      // `unknown` again, failing this assertion.
+      const resolved = resolveAssistantAction(request);
+      expect(resolved.supported).toBe(true);
+      expect(resolved.params.variant).not.toBe("unknown");
+    }
+  });
+
+  it("keeps Wave-3 and Wave-4 journeys unsupported until they are wired", () => {
+    // The guard the Wave-2 case above used to provide. Wiring a verb makes a
+    // dormant backend effect reachable the instant a revision pins it, so a
+    // verb must not gain a journey before its family is review-closed.
+    //
+    // Falsifier: add a registry row for any name below and this fails.
+    const deferred = [
+      ["node.delete", { nodeId: "node-1" }],
+      ["node.transfer", { nodeId: "node-1", newOwnerUserId: "user-2" }],
+      ["device.onboard", { label: "Kitchen" }],
+      ["org.delete", { orgId: "org-1" }],
+      ["account.delete", {}],
+      ["service_account.rotate_secret", { serviceAccountId: "sa-1" }],
+    ] as const;
+
+    for (const [index, [action, params]] of deferred.entries()) {
+      // Built directly rather than via `assistantActionRequestSchema.parse`:
+      // these verbs have no param schema precisely because they are unwired,
+      // so parsing would fail before resolution — which is the thing under
+      // test here.
+      const request = {
+        ...BASE_REQUEST,
+        actionRequestId: `deferred-${String(index)}`,
+        action,
+        params,
+      } as unknown as Parameters<typeof resolveAssistantAction>[0];
       expect(resolveAssistantAction(request)).toMatchObject({
         supported: false,
         journey: null,
