@@ -786,7 +786,10 @@ mod tests {
         let (notification_done_tx, mut notification_done_rx) = oneshot::channel::<()>();
 
         let result = tokio::time::timeout(
-            Duration::from_millis(200),
+            // The assertion is about not awaiting notification dispatch. The
+            // handler still performs several MongoDB writes, which can exceed
+            // 200ms when the full database-backed suite runs concurrently.
+            Duration::from_secs(2),
             approve_device_code_with_notification_dispatcher(
                 state,
                 auth_user,
