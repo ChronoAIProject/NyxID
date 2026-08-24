@@ -148,6 +148,33 @@ fn auth_kind_label(method: &crate::mw::auth::AuthMethod) -> &'static str {
     }
 }
 
+/// Sign the delegation token with the downstream's canonical catalog identity.
+///
+/// UserService slugs may be disambiguated aliases, while downstream services
+/// validate `act.sub` against the catalog service they implement. Custom and
+/// legacy services have no separate catalog identity and keep their own slug.
+fn generate_proxy_delegation_token(
+    keys: &crate::crypto::jwt::JwtKeys,
+    config: &crate::config::AppConfig,
+    user_id: &uuid::Uuid,
+    scope: &str,
+    service_slug: &str,
+    catalog_service_slug: Option<&str>,
+    restrictions: Option<&crate::crypto::jwt::TokenRestrictionClaims>,
+) -> AppResult<String> {
+    let acting_service_slug = catalog_service_slug.unwrap_or(service_slug);
+
+    crate::crypto::jwt::generate_delegated_access_token(
+        keys,
+        config,
+        user_id,
+        scope,
+        acting_service_slug,
+        crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+        restrictions,
+    )
+}
+
 /// Fire-and-forget emission of `TelemetryEvent::ProxySuccess` from the
 /// outer proxy wrappers when the upstream returned 2xx. Mirror of
 /// `emit_proxy_error_telemetry`: `resolved_slug` MUST be the slug of the
@@ -2439,13 +2466,13 @@ async fn execute_proxy_inner(
         let user_uuid = auth_user.user_id;
         let restrictions = crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(auth_user);
 
-        match crate::crypto::jwt::generate_delegated_access_token(
+        match generate_proxy_delegation_token(
             &state.jwt_keys,
             &state.config,
             &user_uuid,
             &target.service.delegation_token_scope,
             &target.service.slug,
-            crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+            catalog_service_slug.as_deref(),
             Some(&restrictions),
         ) {
             Ok(delegation_token) => {
@@ -5727,10 +5754,10 @@ mod tests {
         apply_proxy_request_id_header, auth_kind_label, caller_bearer_token_for_downstream,
         collect_ws_forward_headers, compose_pre_resolved_node_ids, enforce_node_route_scope,
         ensure_proxy_request_id, final_credential_class, forwarded_response_header_value,
-        is_chat_completions_proxy_path, is_codex_transport_path, is_ws_upgrade_request,
-        read_proxy_request_body, should_enforce_runtime_approval, should_retry_node_failure,
-        single_system_header, strip_durable_idempotency_defaults, validate_range_header,
-        websocket_realtime_usage_enabled, websocket_resale_usage,
+        generate_proxy_delegation_token, is_chat_completions_proxy_path, is_codex_transport_path,
+        is_ws_upgrade_request, read_proxy_request_body, should_enforce_runtime_approval,
+        should_retry_node_failure, single_system_header, strip_durable_idempotency_defaults,
+        validate_range_header, websocket_realtime_usage_enabled, websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -5766,6 +5793,56 @@ mod tests {
             payload["message"]
                 .as_str()
                 .is_some_and(|message| message.contains(&max_body_size.to_string()))
+        );
+    }
+
+    #[test]
+    fn proxy_delegation_token_uses_catalog_slug_for_disambiguated_alias() {
+        let keys = crate::test_utils::cached_test_jwt_keys();
+        let config = crate::test_utils::test_app_config();
+        let user_id = uuid::Uuid::new_v4();
+
+        let token = generate_proxy_delegation_token(
+            &keys,
+            &config,
+            &user_id,
+            "proxy:*",
+            "chrono-sandbox-aevatar",
+            Some("chrono-sandbox"),
+            None,
+        )
+        .expect("catalog-backed alias should mint a delegation token");
+        let claims = crate::crypto::jwt::verify_token(&keys, &config, &token)
+            .expect("delegation token should verify");
+
+        assert_eq!(
+            claims.act.expect("delegation actor should be present").sub,
+            "chrono-sandbox"
+        );
+    }
+
+    #[test]
+    fn proxy_delegation_token_uses_service_slug_for_custom_service() {
+        let keys = crate::test_utils::cached_test_jwt_keys();
+        let config = crate::test_utils::test_app_config();
+        let user_id = uuid::Uuid::new_v4();
+
+        let token = generate_proxy_delegation_token(
+            &keys,
+            &config,
+            &user_id,
+            "proxy:*",
+            "custom-sandbox",
+            None,
+            None,
+        )
+        .expect("custom service should mint a delegation token");
+        let claims = crate::crypto::jwt::verify_token(&keys, &config, &token)
+            .expect("delegation token should verify");
+
+        assert_eq!(
+            claims.act.expect("delegation actor should be present").sub,
+            "custom-sandbox"
         );
     }
 
