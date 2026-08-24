@@ -33,6 +33,8 @@ pub struct DeviceOnboardAuthorizationState {
     pub id: String,
     pub owner_user_id: String,
     pub used: bool,
+    /// Monotonic evidence version: one before redemption, two after use.
+    pub state_version: i64,
     pub redeemed_node_id: Option<String>,
     pub created_at: chrono::DateTime<Utc>,
     pub expires_at: chrono::DateTime<Utc>,
@@ -137,6 +139,7 @@ pub async fn get_onboard_authorization_state(
         id: credential.id,
         owner_user_id: credential.owner_user_id,
         used: credential.used,
+        state_version: if credential.used { 2 } else { 1 },
         redeemed_node_id: credential.redeemed_node_id,
         created_at: credential.created_at,
         expires_at: credential.expires_at,
