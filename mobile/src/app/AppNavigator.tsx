@@ -22,7 +22,7 @@ export type RootStackParamList = {
   AccountSettings: undefined;
   TermsOfService: undefined;
   PrivacyPolicy: undefined;
-  DeviceLogin: { user_code?: string } | undefined;
+  DeviceLogin: { user_code?: string; start_scanner?: boolean } | undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();

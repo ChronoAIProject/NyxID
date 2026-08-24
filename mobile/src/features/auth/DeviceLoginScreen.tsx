@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -10,10 +11,17 @@ import {
   View,
 } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { ScanQrCode, ShieldCheck, ShieldX, TriangleAlert } from "lucide-react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
+import {
+  ChevronLeft,
+  ScanQrCode,
+  ShieldCheck,
+  ShieldX,
+  TriangleAlert,
+  X,
+} from "lucide-react-native";
 
 import type { RootStackParamList } from "../../app/AppNavigator";
-import { BlurBackButton } from "../../components/BlurBackButton";
 import { PrimaryButton } from "../../components/PrimaryButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
@@ -35,7 +43,9 @@ const ACTION_THROTTLE_MS = 750;
 
 function formatTimestamp(value: string): string {
   const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? "Unknown time" : parsed.toLocaleString();
+  return Number.isNaN(parsed.getTime())
+    ? "Unknown time"
+    : parsed.toLocaleString();
 }
 
 function formatRemaining(seconds: number): string {
@@ -45,7 +55,11 @@ function formatRemaining(seconds: number): string {
   return `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
-function DetailRow({ label, value, styles }: {
+function DetailRow({
+  label,
+  value,
+  styles,
+}: {
   label: string;
   value: string;
   styles: ReturnType<typeof createDeviceLoginStyles>;
@@ -58,31 +72,162 @@ function DetailRow({ label, value, styles }: {
   );
 }
 
+function ManualCodeModal({
+  visible,
+  value,
+  errorMessage,
+  isPending,
+  colors,
+  styles,
+  onChange,
+  onDismiss,
+  onSubmit,
+}: {
+  visible: boolean;
+  value: string;
+  errorMessage: string | null;
+  isPending: boolean;
+  colors: ReturnType<typeof useTheme>["colors"];
+  styles: ReturnType<typeof createDeviceLoginStyles>;
+  onChange: (value: string) => void;
+  onDismiss: () => void;
+  onSubmit: () => void;
+}) {
+  const inputRef = useRef<TextInput>(null);
+  const insets = useSafeAreaInsets();
+  const normalizedCode = normalizeAuthDeviceUserCode(value);
+
+  useEffect(() => {
+    if (!visible) return;
+    const timeout = setTimeout(() => inputRef.current?.focus(), 180);
+    return () => clearTimeout(timeout);
+  }, [visible]);
+
+  return (
+    <Modal
+      visible={visible}
+      transparent
+      animationType="slide"
+      statusBarTranslucent
+      onRequestClose={onDismiss}
+    >
+      <KeyboardAvoidingView
+        accessibilityViewIsModal
+        style={styles.modalRoot}
+        behavior={Platform.OS === "ios" ? "padding" : undefined}
+      >
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="Close manual code entry"
+          style={styles.modalBackdrop}
+          onPress={onDismiss}
+        />
+        <View
+          style={[
+            styles.modalCard,
+            { paddingBottom: Math.max(insets.bottom, 16) },
+          ]}
+        >
+          <View style={styles.modalHeader}>
+            <View style={styles.modalHeaderCopy}>
+              <Text style={styles.modalTitle}>Enter login code</Text>
+              <Text style={styles.modalDescription}>
+                Enter the eight-character code shown on the device requesting
+                access.
+              </Text>
+            </View>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Close manual code entry"
+              disabled={isPending}
+              onPress={onDismiss}
+              style={({ pressed }) => [
+                styles.modalCloseButton,
+                pressed && styles.pressed,
+                isPending && styles.disabled,
+              ]}
+            >
+              <X size={20} color={colors.textSecondary} />
+            </Pressable>
+          </View>
+
+          <View style={styles.modalField}>
+            <Text style={styles.inputLabel}>Login code</Text>
+            <TextInput
+              ref={inputRef}
+              accessibilityLabel="Login code"
+              accessibilityHint="Eight-character code shown on the requesting device"
+              value={value}
+              onChangeText={onChange}
+              onSubmitEditing={onSubmit}
+              editable={!isPending}
+              autoCapitalize="characters"
+              autoCorrect={false}
+              textContentType="oneTimeCode"
+              maxLength={9}
+              returnKeyType="done"
+              selectionColor={colors.primary}
+              placeholder="ABCD-EFGH"
+              placeholderTextColor={colors.textTertiary}
+              selectTextOnFocus
+              style={[
+                styles.codeInput,
+                errorMessage ? styles.codeInputError : null,
+              ]}
+            />
+            {errorMessage ? (
+              <Text accessibilityRole="alert" style={styles.fieldErrorText}>
+                {errorMessage}
+              </Text>
+            ) : null}
+          </View>
+
+          <PrimaryButton
+            label={isPending ? "Checking..." : "Continue"}
+            disabled={isPending || !normalizedCode}
+            onPress={onSubmit}
+          />
+        </View>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+}
+
 export function DeviceLoginScreen({ navigation, route }: Props) {
   const { colors } = useTheme();
   const styles = useMemo(() => createDeviceLoginStyles(colors), [colors]);
   const { isAuthenticated } = useAuthSession();
   const [userCode, setUserCode] = useState(() =>
-    formatAuthDeviceUserCode(route.params?.user_code ?? "")
+    formatAuthDeviceUserCode(route.params?.user_code ?? ""),
   );
   const [confirmedCode, setConfirmedCode] = useState<string | null>(null);
   const [preview, setPreview] = useState<AuthDevicePreview | null>(null);
   const [terminal, setTerminal] = useState<TerminalState>(null);
-  const [isScanning, setIsScanning] = useState(false);
+  const [isScanning, setIsScanning] = useState(
+    () => route.params?.start_scanner === true && !route.params?.user_code,
+  );
+  const [manualEntryVisible, setManualEntryVisible] = useState(false);
   const [isPreviewing, setIsPreviewing] = useState(false);
-  const [decisionPending, setDecisionPending] = useState<"approve" | "deny" | null>(null);
+  const [decisionPending, setDecisionPending] = useState<
+    "approve" | "deny" | null
+  >(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [clockMs, setClockMs] = useState(Date.now());
   const lastActionAt = useRef(0);
 
   useEffect(() => {
-    if (route.params?.user_code === undefined) return;
+    if (route.params?.user_code === undefined) {
+      if (route.params?.start_scanner === true) setIsScanning(true);
+      return;
+    }
     setUserCode(formatAuthDeviceUserCode(route.params.user_code));
     setConfirmedCode(null);
     setPreview(null);
     setTerminal(null);
     setErrorMessage(null);
-  }, [route.params?.user_code]);
+    setManualEntryVisible(false);
+    setIsScanning(false);
+  }, [route.params?.start_scanner, route.params?.user_code]);
 
   useEffect(() => {
     if (!preview || terminal) return;
@@ -97,50 +242,63 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     return true;
   }, []);
 
-  const runPreview = useCallback(async (candidate: string) => {
-    if (!claimAction()) {
-      setErrorMessage("Please wait a moment before trying again.");
-      return;
-    }
-
-    const normalized = normalizeAuthDeviceUserCode(candidate);
-    if (!normalized) {
-      setErrorMessage("Enter a valid eight-character login code.");
-      return;
-    }
-
-    setIsPreviewing(true);
-    setErrorMessage(null);
-    try {
-      const result = await mobileApi.previewAuthDevice(normalized);
-      if (result.status === "denied") {
-        setTerminal("denied");
-        return;
-      }
-      if (result.status !== "pending") {
-        setErrorMessage(
-          result.status === "expired"
-            ? "This login request has expired."
-            : "This login request was already completed."
-        );
-        return;
+  const runPreview = useCallback(
+    async (candidate: string): Promise<boolean> => {
+      if (!claimAction()) {
+        setErrorMessage("Please wait a moment before trying again.");
+        return false;
       }
 
-      setConfirmedCode(normalized);
-      setPreview(result);
-      setClockMs(Date.now());
-    } catch (error) {
-      setErrorMessage(resolveErrorMessage(error));
-    } finally {
-      setIsPreviewing(false);
-    }
-  }, [claimAction]);
+      const normalized = normalizeAuthDeviceUserCode(candidate);
+      if (!normalized) {
+        setErrorMessage("Enter a valid eight-character login code.");
+        return false;
+      }
+
+      setIsPreviewing(true);
+      setErrorMessage(null);
+      try {
+        const result = await mobileApi.previewAuthDevice(normalized);
+        if (result.status === "denied") {
+          setTerminal("denied");
+          return true;
+        }
+        if (result.status !== "pending") {
+          setErrorMessage(
+            result.status === "expired"
+              ? "This login request has expired."
+              : "This login request was already completed.",
+          );
+          return false;
+        }
+
+        setConfirmedCode(normalized);
+        setPreview(result);
+        setClockMs(Date.now());
+        return true;
+      } catch (error) {
+        setErrorMessage(resolveErrorMessage(error));
+        return false;
+      } finally {
+        setIsPreviewing(false);
+      }
+    },
+    [claimAction],
+  );
 
   const handleScannedCode = (normalized: string) => {
     const formatted = formatAuthDeviceUserCode(normalized);
     setUserCode(formatted);
+    setManualEntryVisible(false);
     setIsScanning(false);
     void runPreview(formatted);
+  };
+
+  const handleManualSubmit = async () => {
+    const accepted = await runPreview(userCode);
+    if (!accepted) return;
+    setManualEntryVisible(false);
+    setIsScanning(false);
   };
 
   const handleDecision = async (decision: "approve" | "deny") => {
@@ -182,19 +340,46 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   };
 
   const resetRequest = () => {
+    setUserCode("");
     setConfirmedCode(null);
     setPreview(null);
     setTerminal(null);
     setErrorMessage(null);
     setClockMs(Date.now());
+    setManualEntryVisible(false);
+    setIsScanning(true);
   };
 
   if (isScanning) {
     return (
-      <DeviceCodeScanner
-        onCancel={() => setIsScanning(false)}
-        onCode={handleScannedCode}
-      />
+      <>
+        <DeviceCodeScanner
+          paused={manualEntryVisible || isPreviewing}
+          onCancel={handleBack}
+          onCode={handleScannedCode}
+          onManualEntry={() => {
+            setErrorMessage(null);
+            setManualEntryVisible(true);
+          }}
+        />
+        <ManualCodeModal
+          visible={manualEntryVisible}
+          value={userCode}
+          errorMessage={errorMessage}
+          isPending={isPreviewing}
+          colors={colors}
+          styles={styles}
+          onChange={(value) => {
+            setUserCode(formatAuthDeviceUserCode(value));
+            setErrorMessage(null);
+          }}
+          onDismiss={() => {
+            setManualEntryVisible(false);
+            setErrorMessage(null);
+          }}
+          onSubmit={() => void handleManualSubmit()}
+        />
+      </>
     );
   }
 
@@ -210,7 +395,12 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     return (
       <ScreenContainer>
         <View style={styles.terminalScreen}>
-          <View style={[styles.terminalIcon, approved ? styles.successIcon : styles.deniedIcon]}>
+          <View
+            style={[
+              styles.terminalIcon,
+              approved ? styles.successIcon : styles.deniedIcon,
+            ]}
+          >
             {approved ? (
               <ShieldCheck size={36} color={colors.success} />
             ) : (
@@ -241,10 +431,24 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
           contentContainerStyle={styles.content}
           keyboardShouldPersistTaps="handled"
         >
-          <BlurBackButton onPress={handleBack} />
-          <Text style={styles.title}>Approve device login</Text>
+          <View style={styles.screenHeader}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Back"
+              hitSlop={4}
+              onPress={handleBack}
+              style={({ pressed }) => [
+                styles.headerBackButton,
+                pressed && styles.pressed,
+              ]}
+            >
+              <ChevronLeft size={24} color={colors.textPrimary} />
+            </Pressable>
+            <Text style={styles.title}>Approve device login</Text>
+          </View>
           <Text style={styles.subtitle}>
-            Review where the request started before allowing another device to sign in.
+            Review where the request started before allowing another device to
+            sign in.
           </Text>
 
           {!preview ? (
@@ -260,15 +464,30 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 editable={!isPending}
                 autoCapitalize="characters"
                 autoCorrect={false}
+                textContentType="oneTimeCode"
                 maxLength={9}
+                returnKeyType="done"
+                onSubmitEditing={() => {
+                  if (normalizeAuthDeviceUserCode(userCode))
+                    void runPreview(userCode);
+                }}
+                selectionColor={colors.primary}
                 placeholder="ABCD-EFGH"
                 placeholderTextColor={colors.textTertiary}
-                style={styles.codeInput}
+                style={[
+                  styles.codeInput,
+                  errorMessage ? styles.codeInputError : null,
+                ]}
               />
+              {errorMessage ? (
+                <Text accessibilityRole="alert" style={styles.fieldErrorText}>
+                  {errorMessage}
+                </Text>
+              ) : null}
               <PrimaryButton
                 label={isPreviewing ? "Checking request..." : "Continue"}
                 onPress={() => void runPreview(userCode)}
-                disabled={isPending}
+                disabled={isPending || !normalizeAuthDeviceUserCode(userCode)}
               />
               <Pressable
                 accessibilityRole="button"
@@ -290,7 +509,8 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
               <View style={styles.warningBanner}>
                 <TriangleAlert size={20} color={colors.warningTone.text} />
                 <Text style={styles.warningText}>
-                  Reject this request if you do not recognize the device, IP address, or time.
+                  Reject this request if you do not recognize the device, IP
+                  address, or time.
                 </Text>
               </View>
 
@@ -312,7 +532,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 />
                 <DetailRow
                   label="Expires in"
-                  value={isExpired ? "Expired" : formatRemaining(secondsRemaining)}
+                  value={
+                    isExpired ? "Expired" : formatRemaining(secondsRemaining)
+                  }
                   styles={styles}
                 />
               </View>
@@ -321,7 +543,9 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 <View style={styles.decisionRow}>
                   <View style={styles.decisionButton}>
                     <PrimaryButton
-                      label={decisionPending === "deny" ? "Rejecting..." : "Reject"}
+                      label={
+                        decisionPending === "deny" ? "Rejecting..." : "Reject"
+                      }
                       kind="danger"
                       disabled={isPending || isExpired}
                       onPress={() => void handleDecision("deny")}
@@ -329,7 +553,11 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   </View>
                   <View style={styles.decisionButton}>
                     <PrimaryButton
-                      label={decisionPending === "approve" ? "Approving..." : "Approve"}
+                      label={
+                        decisionPending === "approve"
+                          ? "Approving..."
+                          : "Approve"
+                      }
                       disabled={isPending || isExpired}
                       onPress={() => void handleDecision("approve")}
                     />
@@ -337,8 +565,13 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 </View>
               ) : (
                 <View style={styles.signInNotice}>
-                  <Text style={styles.signInText}>Sign in to approve or reject this request.</Text>
-                  <PrimaryButton label="Sign in" onPress={() => navigation.navigate("Auth")} />
+                  <Text style={styles.signInText}>
+                    Sign in to approve or reject this request.
+                  </Text>
+                  <PrimaryButton
+                    label="Sign in"
+                    onPress={() => navigation.navigate("Auth")}
+                  />
                 </View>
               )}
 
@@ -351,7 +584,11 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
             </View>
           )}
 
-          {errorMessage ? <Text style={styles.errorText}>{errorMessage}</Text> : null}
+          {errorMessage && preview ? (
+            <Text accessibilityRole="alert" style={styles.errorText}>
+              {errorMessage}
+            </Text>
+          ) : null}
           {isPending ? <ActivityIndicator color={colors.primary} /> : null}
         </ScrollView>
       </KeyboardAvoidingView>

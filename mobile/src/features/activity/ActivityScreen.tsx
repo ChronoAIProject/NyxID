@@ -636,7 +636,7 @@ export function ActivityScreen() {
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="Scan login QR code"
-          onPress={() => navigation.navigate("DeviceLogin")}
+          onPress={() => navigation.navigate("DeviceLogin", { start_scanner: true })}
           style={({ pressed }) => [styles.scanLoginButton, pressed && styles.scanLoginButtonPressed]}
         >
           <ScanQrCode size={21} color={colors.primary} />
