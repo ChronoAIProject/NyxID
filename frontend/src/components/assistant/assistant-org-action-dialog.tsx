@@ -13,7 +13,15 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { api } from "@/lib/api-client";
+import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
 import {
   assertSecretFreeReadBack,
   assertNoSensitiveActionParams,
@@ -69,8 +77,12 @@ const responseSchema = z
   .object({
     resource: z.object({ orgId: z.string().min(1) }).strict(),
     replayed: z.boolean(),
+    oneTimeMaterial: assistantOneTimeMaterialSchema,
   })
   .strict();
+
+const orgRoles = ["admin", "member", "viewer"] as const;
+type OrgRole = (typeof orgRoles)[number];
 
 function actionTitle(action: AssistantOrgAction): string {
   return {
@@ -88,6 +100,22 @@ function actionTitle(action: AssistantOrgAction): string {
 function textParam(params: Record<string, unknown>, key: string): string {
   const value = params[key];
   return typeof value === "string" ? value : "";
+}
+
+function roleParam(params: Record<string, unknown>): OrgRole {
+  const value = params.role;
+  return orgRoles.find((role) => role === value) ?? "member";
+}
+
+function stringListParam(
+  params: Record<string, unknown>,
+  key: string,
+): string[] | undefined {
+  const value = params[key];
+  return Array.isArray(value) &&
+    value.every((entry) => typeof entry === "string")
+    ? value
+    : undefined;
 }
 
 export interface AssistantOrgActionDialogProps {
@@ -119,7 +147,7 @@ export function AssistantOrgActionDialog({
     textParam(params, "memberId") || textParam(params, "userId"),
   );
   const [userId, setUserId] = useState(textParam(params, "userId"));
-  const [role, setRole] = useState(textParam(params, "role") || "member");
+  const [role, setRole] = useState<OrgRole>(roleParam(params));
   const [ttlHours, setTtlHours] = useState(String(params.ttlHours ?? "24"));
   const [confirmed, setConfirmed] = useState(false);
   const [pending, setPending] = useState(false);
@@ -128,6 +156,7 @@ export function AssistantOrgActionDialog({
   const pendingRef = useRef(false);
   const destructive = action === "delete" || action === "member_remove";
   const orgId = textParam(params, "orgId");
+  const allowedServiceIds = stringListParam(params, "allowedServiceIds");
 
   function close() {
     pendingRef.current = false;
@@ -226,7 +255,13 @@ export function AssistantOrgActionDialog({
           case "delete":
             return { actionRequestId, orgId, confirmed };
           case "member_add":
-            return { actionRequestId, orgId, userId, role };
+            return {
+              actionRequestId,
+              orgId,
+              userId,
+              role,
+              ...(allowedServiceIds !== undefined ? { allowedServiceIds } : {}),
+            };
           case "member_remove":
             return { actionRequestId, orgId, memberId, confirmed };
           case "member_update_role":
@@ -242,6 +277,7 @@ export function AssistantOrgActionDialog({
               actionRequestId,
               orgId,
               role,
+              ...(allowedServiceIds !== undefined ? { allowedServiceIds } : {}),
               ttlHours: Number(ttlHours),
             };
           case "set_primary":
@@ -402,11 +438,21 @@ export function AssistantOrgActionDialog({
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="org-member-role">Role</Label>
-                  <Input
-                    id="org-member-role"
+                  <Select
                     value={role}
-                    onChange={(event) => setRole(event.target.value)}
-                  />
+                    onValueChange={(value) => setRole(value as OrgRole)}
+                  >
+                    <SelectTrigger id="org-member-role">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {orgRoles.map((value) => (
+                        <SelectItem key={value} value={value}>
+                          {value}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
               </>
             )}
@@ -424,22 +470,42 @@ export function AssistantOrgActionDialog({
             {action === "member_update_role" && (
               <div className="space-y-2">
                 <Label htmlFor="org-role">Role</Label>
-                <Input
-                  id="org-role"
+                <Select
                   value={role}
-                  onChange={(event) => setRole(event.target.value)}
-                />
+                  onValueChange={(value) => setRole(value as OrgRole)}
+                >
+                  <SelectTrigger id="org-role">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {orgRoles.map((value) => (
+                      <SelectItem key={value} value={value}>
+                        {value}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
             )}
             {action === "invite" && (
               <>
                 <div className="space-y-2">
                   <Label htmlFor="invite-role">Invite role</Label>
-                  <Input
-                    id="invite-role"
+                  <Select
                     value={role}
-                    onChange={(event) => setRole(event.target.value)}
-                  />
+                    onValueChange={(value) => setRole(value as OrgRole)}
+                  >
+                    <SelectTrigger id="invite-role">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {orgRoles.map((value) => (
+                        <SelectItem key={value} value={value}>
+                          {value}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="invite-ttl">Invite lifetime (hours)</Label>
@@ -454,6 +520,17 @@ export function AssistantOrgActionDialog({
                 </div>
               </>
             )}
+            {(action === "member_add" || action === "invite") &&
+            allowedServiceIds !== undefined ? (
+              <div className="space-y-1.5">
+                <p className="text-xs font-medium">Allowed services</p>
+                <p className="break-all font-mono text-xs text-muted-foreground">
+                  {allowedServiceIds.length > 0
+                    ? allowedServiceIds.join(", ")
+                    : "No services"}
+                </p>
+              </div>
+            ) : null}
             {action !== "create" &&
             action !== "update" &&
             action !== "member_add" &&

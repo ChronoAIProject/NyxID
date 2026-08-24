@@ -1,17 +1,14 @@
 import { z } from "zod";
 import { api } from "@/lib/api-client";
+import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
 import { assertSecretFreeReadBack } from "./assistant-action-dialog-utils";
-
-export const oneTimeMaterialSchema = z
-  .enum(["delivered", "unavailable"])
-  .optional();
 
 export const assistantNodeEffectResponseSchema = z
   .object({
     resource: z.object({ nodeId: z.string().min(1) }).strict(),
     replayed: z.boolean(),
     requestedAt: z.string(),
-    oneTimeMaterial: oneTimeMaterialSchema,
+    oneTimeMaterial: assistantOneTimeMaterialSchema,
     registrationToken: z.string().min(1).optional(),
     authToken: z.string().min(1).optional(),
     signingSecret: z.string().min(1).optional(),
@@ -32,7 +29,7 @@ export const assistantDeviceEffectResponseSchema = z
     resource: z.object({ deviceId: z.string().min(1) }).strict(),
     replayed: z.boolean(),
     requestedAt: z.string(),
-    oneTimeMaterial: oneTimeMaterialSchema,
+    oneTimeMaterial: assistantOneTimeMaterialSchema,
     qrPayload: z.string().min(1).optional(),
     expiresAt: z.string().optional(),
   })
@@ -63,6 +60,7 @@ export const pendingCredentialAuthorizationEvidenceSchema = z
     expires_at: z.string(),
     consumed_at: z.string().nullable(),
     declined_at: z.string().nullable(),
+    state_version: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -74,6 +72,7 @@ export const deviceAuthorizationEvidenceSchema = z
     redeemed_node_id: z.string().nullable(),
     created_at: z.string(),
     expires_at: z.string(),
+    state_version: z.number().int().positive().optional(),
   })
   .strict();
 
@@ -83,7 +82,7 @@ export type NodeAuthorizationEvidence = z.infer<
 
 export async function readNodeAuthorization(nodeId: string) {
   const value = await api.get<unknown>(
-    `/nodes/${encodeURIComponent(nodeId)}/authorization`,
+    `/assistant/actions/nodes/${encodeURIComponent(nodeId)}/authorization`,
   );
   assertSecretFreeReadBack(value);
   return nodeAuthorizationEvidenceSchema.parse(value);
@@ -94,7 +93,7 @@ export async function readPendingCredentialAuthorization(
   pendingCredentialId: string,
 ) {
   const value = await api.get<unknown>(
-    `/nodes/${encodeURIComponent(nodeId)}/credentials/pending/${encodeURIComponent(pendingCredentialId)}/authorization`,
+    `/assistant/actions/nodes/${encodeURIComponent(nodeId)}/pending/${encodeURIComponent(pendingCredentialId)}/authorization`,
   );
   assertSecretFreeReadBack(value);
   return pendingCredentialAuthorizationEvidenceSchema.parse(value);
@@ -102,7 +101,7 @@ export async function readPendingCredentialAuthorization(
 
 export async function readDeviceAuthorization(deviceId: string) {
   const value = await api.get<unknown>(
-    `/devices/onboard/${encodeURIComponent(deviceId)}/authorization`,
+    `/assistant/actions/nodes/devices/${encodeURIComponent(deviceId)}/authorization`,
   );
   assertSecretFreeReadBack(value);
   return deviceAuthorizationEvidenceSchema.parse(value);

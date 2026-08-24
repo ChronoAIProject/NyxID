@@ -14,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
+import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
 import {
   assertSecretFreeReadBack,
   assertNoSensitiveActionParams,
@@ -41,6 +42,7 @@ const responseSchema = z
     resource: z.object({ serviceAccountId: z.string().min(1) }).strict(),
     replayed: z.boolean(),
     clientSecret: z.string().min(1).optional(),
+    oneTimeMaterial: assistantOneTimeMaterialSchema,
   })
   .strict();
 
@@ -88,12 +90,15 @@ export function AssistantServiceAccountActionDialog({
   const [confirmed, setConfirmed] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ id: string; secret?: string } | null>(
-    null,
-  );
+  const [result, setResult] = useState<{
+    id: string;
+    secret?: string;
+    unavailable: boolean;
+  } | null>(null);
   const pendingRef = useRef(false);
   const destructive = action === "delete" || action === "revoke_tokens";
   const serviceAccountId = textParam(params, "serviceAccountId");
+  const targetOrgId = textParam(params, "targetOrgId");
 
   function close() {
     pendingRef.current = false;
@@ -151,6 +156,7 @@ export function AssistantServiceAccountActionDialog({
               name: name.trim(),
               description: description.trim() || undefined,
               allowedScopes: allowedScopes.trim(),
+              targetOrgId: targetOrgId || undefined,
             };
           case "update":
             return {
@@ -179,22 +185,17 @@ export function AssistantServiceAccountActionDialog({
       const after = await readEvidence(id);
       if (after.id !== id)
         throw new Error("NyxID returned a different service-account identity.");
-      if (
-        action === "create" &&
-        (!after.is_active ||
-          (response.replayed === false && !response.clientSecret))
-      ) {
-        throw new Error(
-          "NyxID did not return the active account and its one-time secret.",
-        );
+      if (action === "create" && !after.is_active) {
+        throw new Error("NyxID did not return the active service account.");
       }
-      if (
-        action === "rotate_secret" &&
-        response.replayed === false &&
-        !response.clientSecret
-      ) {
+      const expectsSecret = action === "create" || action === "rotate_secret";
+      const unavailable =
+        expectsSecret &&
+        !response.clientSecret &&
+        (response.replayed || response.oneTimeMaterial === "unavailable");
+      if (expectsSecret && !response.clientSecret && !unavailable) {
         throw new Error(
-          "NyxID did not return the rotated secret to the browser.",
+          "NyxID did not return the one-time secret to the browser.",
         );
       }
       if (action === "delete" && after.is_active) {
@@ -209,6 +210,7 @@ export function AssistantServiceAccountActionDialog({
       }
       setResult({
         id,
+        unavailable,
         ...(response.clientSecret ? { secret: response.clientSecret } : {}),
       });
     } catch (caught) {
@@ -241,11 +243,13 @@ export function AssistantServiceAccountActionDialog({
           <DialogDescription>
             {result?.secret
               ? "Save this secret now. It will not be shown again."
-              : result
-                ? "The canonical service-account projection confirms the change."
-                : destructive
-                  ? "This change revokes access and must be confirmed every time."
-                  : "NyxID keeps the service-account secret out of chat."}
+              : result?.unavailable
+                ? "The one-time secret was unavailable and was not captured by this browser. Rotate the secret again to receive a new value."
+                : result
+                  ? "The canonical service-account projection confirms the change."
+                  : destructive
+                    ? "This change revokes access and must be confirmed every time."
+                    : "NyxID keeps the service-account secret out of chat."}
           </DialogDescription>
         </DialogHeader>
         {result ? (
@@ -292,14 +296,24 @@ export function AssistantServiceAccountActionDialog({
               </p>
             )}
             {action === "create" ? (
-              <div className="space-y-2">
-                <Label htmlFor="sa-scopes">Allowed scopes</Label>
-                <Input
-                  id="sa-scopes"
-                  value={allowedScopes}
-                  onChange={(event) => setAllowedScopes(event.target.value)}
-                />
-              </div>
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="sa-scopes">Allowed scopes</Label>
+                  <Input
+                    id="sa-scopes"
+                    value={allowedScopes}
+                    onChange={(event) => setAllowedScopes(event.target.value)}
+                  />
+                </div>
+                {targetOrgId ? (
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium">Target organization</p>
+                    <p className="break-all font-mono text-xs text-muted-foreground">
+                      {targetOrgId}
+                    </p>
+                  </div>
+                ) : null}
+              </>
             ) : null}
             {destructive ? (
               <label className="flex items-start gap-2 text-xs">
@@ -329,7 +343,7 @@ export function AssistantServiceAccountActionDialog({
                 close();
               }}
             >
-              Done
+              {result.unavailable ? "Acknowledge" : "Done"}
             </Button>
           ) : (
             <>

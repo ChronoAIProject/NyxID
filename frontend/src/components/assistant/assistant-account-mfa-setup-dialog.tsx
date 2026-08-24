@@ -5,6 +5,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Input } from "@/components/ui/input";
 import { api } from "@/lib/api-client";
 import { actionControlIdentitySchema } from "@/schemas/assistant-actions";
+import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
 import { assertSecretFreeReadBack, errorMessage } from "./assistant-action-dialog-utils";
 
 const responseSchema = z.object({
@@ -15,6 +16,7 @@ const responseSchema = z.object({
   qrCodeUrl: z.string().url().nullable().optional(),
   recoveryValues: z.array(z.string().min(1)).nullable().optional(),
   replayed: z.boolean(),
+  oneTimeMaterial: assistantOneTimeMaterialSchema,
 }).strict();
 
 const evidenceSchema = z.object({

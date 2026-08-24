@@ -77,6 +77,7 @@ function pendingEvidence(overrides: Readonly<Record<string, unknown>> = {}) {
     expires_at: "2026-08-26T00:00:00Z",
     consumed_at: null,
     declined_at: null,
+    state_version: 1,
     ...overrides,
   };
 }
@@ -125,7 +126,9 @@ describe("AssistantNodeRegisterTokenDialog", () => {
         targetOrgId: OWNER_ID,
       },
     );
-    expect(mockGet).toHaveBeenCalledWith(`/nodes/${NODE_ID}/authorization`);
+    expect(mockGet).toHaveBeenCalledWith(
+      `/assistant/actions/nodes/${NODE_ID}/authorization`,
+    );
     expect(
       await screen.findByDisplayValue("nyx_nreg_one_time_value"),
     ).toBeInTheDocument();
@@ -206,11 +209,11 @@ describe("AssistantNodeRotateTokenDialog", () => {
     );
     expect(mockGet).toHaveBeenNthCalledWith(
       1,
-      `/nodes/${NODE_ID}/authorization`,
+      `/assistant/actions/nodes/${NODE_ID}/authorization`,
     );
     expect(mockGet).toHaveBeenNthCalledWith(
       2,
-      `/nodes/${NODE_ID}/authorization`,
+      `/assistant/actions/nodes/${NODE_ID}/authorization`,
     );
     expect(
       await screen.findByDisplayValue("nyx_nauth_one_time_value"),
@@ -322,6 +325,48 @@ describe("AssistantNodeTransferDialog", () => {
     await userEvent.click(screen.getByRole("button", { name: "Done" }));
     expect(onComplete).toHaveBeenCalledWith(NODE_ID);
   });
+
+  it("completes a non-replayed transfer when the node leaves the actor's read scope", async () => {
+    mockGet
+      .mockResolvedValueOnce(nodeEvidence({ state_version: 6 }))
+      .mockRejectedValueOnce(
+        new ApiError(404, {
+          error: "not_found",
+          error_code: 8000,
+          message: "node not found",
+        }),
+      );
+    mockPost.mockResolvedValue({
+      resource: { nodeId: NODE_ID },
+      replayed: false,
+      requestedAt: REQUESTED_AT,
+    });
+    const onComplete = vi.fn();
+    render(
+      <AssistantNodeTransferDialog
+        open
+        onOpenChange={vi.fn()}
+        actionRequestId="act-transfer-out-of-scope"
+        params={{ nodeId: NODE_ID, newOwnerUserId: NEW_OWNER_ID }}
+        onComplete={onComplete}
+      />,
+    );
+
+    await userEvent.click(
+      screen.getByRole("checkbox", {
+        name: /current owner will lose control/i,
+      }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Transfer node" }),
+    );
+
+    expect(
+      await screen.findByText(/ownership moved out of its access scope/i),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Done" }));
+    expect(onComplete).toHaveBeenCalledWith(NODE_ID);
+  });
 });
 
 describe("AssistantNodeInjectCredentialDialog", () => {
@@ -353,6 +398,13 @@ describe("AssistantNodeInjectCredentialDialog", () => {
     );
 
     await userEvent.click(
+      screen.getByRole("combobox", { name: "Injection method" }),
+    );
+    await userEvent.click(
+      await screen.findByRole("option", { name: "Query parameter" }),
+    );
+
+    await userEvent.click(
       screen.getByRole("button", { name: "Inject credential" }),
     );
 
@@ -362,7 +414,7 @@ describe("AssistantNodeInjectCredentialDialog", () => {
         actionRequestId: "act-inject",
         nodeId: NODE_ID,
         serviceSlug: "github",
-        injectionMethod: "header",
+        injectionMethod: "query-param",
         fieldName: "Authorization",
         targetUrl: "https://api.github.test",
         label: "GitHub production",
@@ -370,11 +422,11 @@ describe("AssistantNodeInjectCredentialDialog", () => {
     );
     expect(mockGet).toHaveBeenNthCalledWith(
       1,
-      `/nodes/${NODE_ID}/authorization`,
+      `/assistant/actions/nodes/${NODE_ID}/authorization`,
     );
     expect(mockGet).toHaveBeenNthCalledWith(
       2,
-      `/nodes/${NODE_ID}/credentials/pending/${PENDING_ID}/authorization`,
+      `/assistant/actions/nodes/${NODE_ID}/pending/${PENDING_ID}/authorization`,
     );
     await userEvent.click(await screen.findByRole("button", { name: "Done" }));
     expect(onComplete).toHaveBeenCalledWith(PENDING_ID);
@@ -425,6 +477,37 @@ describe("AssistantPendingCredentialPushDialog", () => {
     );
     await userEvent.click(await screen.findByRole("button", { name: "Done" }));
     expect(onComplete).toHaveBeenCalledWith(PENDING_ID);
+  });
+
+  it("rejects a secret-shaped edited label before any request", async () => {
+    render(
+      <AssistantPendingCredentialPushDialog
+        open
+        onOpenChange={vi.fn()}
+        actionRequestId="act-push-secret-label"
+        params={{
+          nodeId: NODE_ID,
+          serviceSlug: "openai",
+          injectionMethod: "header",
+          fieldName: "Authorization",
+        }}
+        onComplete={vi.fn()}
+      />,
+    );
+
+    await userEvent.type(
+      screen.getByLabelText("Label (optional)"),
+      "nyxid_ag_1234567890abcdef",
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Push credential" }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Labels cannot contain secret-shaped values.",
+    );
+    expect(mockGet).not.toHaveBeenCalled();
+    expect(mockPost).not.toHaveBeenCalled();
   });
 });
 
@@ -490,6 +573,7 @@ describe("AssistantDeviceOnboardDialog", () => {
       redeemed_node_id: null,
       created_at: "2026-08-25T00:00:00Z",
       expires_at: "2026-08-25T01:00:00Z",
+      state_version: 1,
     });
     const onComplete = vi.fn();
     render(
@@ -520,7 +604,7 @@ describe("AssistantDeviceOnboardDialog", () => {
       },
     );
     expect(mockGet).toHaveBeenCalledWith(
-      `/devices/onboard/${DEVICE_ID}/authorization`,
+      `/assistant/actions/nodes/devices/${DEVICE_ID}/authorization`,
     );
     expect(mockToDataURL).toHaveBeenCalledWith(
       "nyx-device-provisioning-payload",

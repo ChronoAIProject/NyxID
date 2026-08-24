@@ -53,6 +53,7 @@ interface AssistantDialogProps {
   readonly onComplete: (completion: unknown) => void;
   readonly action?: unknown;
   readonly params?: unknown;
+  // Dialog-specific fragments include discriminators such as `action`.
   readonly [key: string]: unknown;
 }
 
@@ -289,6 +290,7 @@ export const ACTION_DIALOGS: {
         orgId: params.org_id,
         userId: params.user_id,
         role: params.role,
+        allowedServiceIds: params.allowed_service_ids,
       },
     }),
   },
@@ -314,7 +316,11 @@ export const ACTION_DIALOGS: {
     Dialog: AssistantOrgActionDialog as ComponentType<AssistantDialogProps>,
     toProps: (params) => ({
       action: "invite",
-      params: { orgId: params.org_id, role: params.role },
+      params: {
+        orgId: params.org_id,
+        role: params.role,
+        allowedServiceIds: params.allowed_service_ids,
+      },
     }),
   },
   org_set_primary: {
@@ -388,7 +394,11 @@ export const ACTION_DIALOGS: {
       AssistantServiceAccountActionDialog as ComponentType<AssistantDialogProps>,
     toProps: (params) => ({
       action: "create",
-      params: { name: params.name, description: params.description },
+      params: {
+        name: params.name,
+        description: params.description,
+        targetOrgId: params.target_org_id,
+      },
     }),
   },
   service_account_update: {
@@ -468,7 +478,7 @@ export const ACTION_DIALOGS: {
       AssistantOrgIntegrationActionDialog as ComponentType<AssistantDialogProps>,
     toProps: (params) => ({
       action: "external_key.add_gcp_service_account",
-      params: { label: params.label },
+      params: { label: params.label, targetOrgId: params.target_org_id },
     }),
   },
   openclaw_connect: {

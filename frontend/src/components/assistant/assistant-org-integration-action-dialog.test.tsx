@@ -15,8 +15,8 @@ const SERVICE_ID = "00000000-0000-4000-8000-000000000082";
 beforeEach(() => { mockGet.mockReset(); mockPost.mockReset(); });
 
 describe("AssistantOrgIntegrationActionDialog", () => {
-  it("runs external_key.add_gcp_service_account and reads the canonical external-key projection", async () => {
-    mockPost.mockResolvedValue({ resource: { externalKeyId: EXTERNAL_ID }, replayed: false });
+  it("shows and forwards the GCP targetOrgId while dropping unsupported isAdmin", async () => {
+    mockPost.mockResolvedValue({ resource: { externalKeyId: EXTERNAL_ID }, replayed: false, oneTimeMaterial: "delivered" });
     mockGet.mockResolvedValue({
       id: EXTERNAL_ID,
       credential_type: "gcp_service_account",
@@ -25,7 +25,8 @@ describe("AssistantOrgIntegrationActionDialog", () => {
       last_used_at: null,
       updated_at: "2026-01-01T00:00:00Z",
     });
-    render(<AssistantOrgIntegrationActionDialog open onOpenChange={vi.fn()} actionRequestId="request-gcp" action="external_key.add_gcp_service_account" params={{ label: "GCP prod" }} onComplete={vi.fn()} />);
+    render(<AssistantOrgIntegrationActionDialog open onOpenChange={vi.fn()} actionRequestId="request-gcp" action="external_key.add_gcp_service_account" params={{ label: "GCP prod", targetOrgId: "org-production", isAdmin: true }} onComplete={vi.fn()} />);
+    expect(screen.getByText("org-production")).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Service-account JSON"), {
       target: { value: '{"type":"service_account","private_key":"private"}' },
     });
@@ -33,10 +34,13 @@ describe("AssistantOrgIntegrationActionDialog", () => {
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
     expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/external-key/add-gcp-service-account", expect.objectContaining({ keyJson: expect.stringContaining("private_key") }));
     expect(mockGet).toHaveBeenCalledWith(`/api-keys/external/${EXTERNAL_ID}/authorization`);
+    const requestBody = mockPost.mock.calls[0]?.[1];
+    expect(requestBody).toEqual({ actionRequestId: "request-gcp", label: "GCP prod", keyJson: '{"type":"service_account","private_key":"private"}', scopes: "https://www.googleapis.com/auth/cloud-platform", serviceSlugs: [], targetOrgId: "org-production" });
+    expect(requestBody).not.toHaveProperty("isAdmin");
   });
 
   it("runs openclaw.connect with browser-only credential entry and canonical service evidence", async () => {
-    mockPost.mockResolvedValue({ resource: { userServiceId: SERVICE_ID }, replayed: false });
+    mockPost.mockResolvedValue({ resource: { userServiceId: SERVICE_ID }, replayed: false, oneTimeMaterial: "delivered" });
     mockGet.mockResolvedValue({
       id: SERVICE_ID,
       api_key_id: "00000000-0000-4000-8000-000000000083",

@@ -380,6 +380,7 @@ export const serviceAccountCreateActionParamsSchema = z
   .object({
     name: z.string().trim().min(1).max(200),
     description: optionalActionTextSchema,
+    targetOrgId: optionalActionIdentitySchema,
   })
   .strict();
 
@@ -415,7 +416,10 @@ export const developerAppIdentityActionParamsSchema = z
   .strict();
 
 export const externalKeyAddGcpActionParamsSchema = z
-  .object({ label: optionalActionTextSchema })
+  .object({
+    label: optionalActionTextSchema,
+    targetOrgId: optionalActionIdentitySchema,
+  })
   .strict();
 
 export const openClawConnectActionParamsSchema = z
@@ -750,6 +754,7 @@ export type ActionCardParams =
       readonly variant: "service_account_create";
       readonly name: string;
       readonly description?: string;
+      readonly target_org_id?: string;
     }
   | {
       readonly variant: "service_account_update";
@@ -788,6 +793,7 @@ export type ActionCardParams =
   | {
       readonly variant: "external_key_add_gcp_service_account";
       readonly label?: string;
+      readonly target_org_id?: string;
     }
   | {
       readonly variant: "openclaw_connect";

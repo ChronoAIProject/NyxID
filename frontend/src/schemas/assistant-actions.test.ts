@@ -179,7 +179,11 @@ const WAVE_3_4_ACTIONS = [
   },
   {
     action: "service_account.create",
-    params: { name: "Deploy agent", description: "Production deploys" },
+    params: {
+      name: "Deploy agent",
+      description: "Production deploys",
+      targetOrgId: "org-1",
+    },
     variant: "service_account_create",
   },
   {
@@ -231,7 +235,7 @@ const WAVE_3_4_ACTIONS = [
   },
   {
     action: "external_key.add_gcp_service_account",
-    params: { label: "GCP production" },
+    params: { label: "GCP production", targetOrgId: "org-1" },
     variant: "external_key_add_gcp_service_account",
   },
   {

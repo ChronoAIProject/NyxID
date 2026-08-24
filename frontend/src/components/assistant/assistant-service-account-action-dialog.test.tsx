@@ -74,6 +74,7 @@ describe("AssistantServiceAccountActionDialog", () => {
       resource: { serviceAccountId: ID },
       replayed: false,
       clientSecret: "sa-secret-once",
+      oneTimeMaterial: "delivered",
     });
     mockGet.mockResolvedValue(evidence());
     renderDialog("create", { name: "Deploy bot" });
@@ -86,14 +87,19 @@ describe("AssistantServiceAccountActionDialog", () => {
     ).toBeInTheDocument();
   });
 
-  it("does not forward a model-supplied owner that the create dialog does not show", async () => {
+  it("shows and forwards targetOrgId while dropping unsupported isAdmin", async () => {
     mockPost.mockResolvedValue({
       resource: { serviceAccountId: ID },
       replayed: false,
       clientSecret: "sa-secret-once",
     });
     mockGet.mockResolvedValue(evidence());
-    renderDialog("create", { name: "Deploy bot", targetOrgId: "hidden-org" });
+    renderDialog("create", {
+      name: "Deploy bot",
+      targetOrgId: "org-production",
+      isAdmin: true,
+    });
+    expect(screen.getByText("org-production")).toBeInTheDocument();
     await submit();
     const requestBody = mockPost.mock.calls[0]?.[1];
     expect(requestBody).toEqual({
@@ -101,8 +107,9 @@ describe("AssistantServiceAccountActionDialog", () => {
       name: "Deploy bot",
       description: undefined,
       allowedScopes: "proxy",
+      targetOrgId: "org-production",
     });
-    expect(requestBody).not.toHaveProperty("targetOrgId");
+    expect(requestBody).not.toHaveProperty("isAdmin");
   });
 
   it("runs service_account.update and proves a newer projection", async () => {
@@ -158,6 +165,23 @@ describe("AssistantServiceAccountActionDialog", () => {
       expect.objectContaining({ expectedUpdatedAt: "2026-01-01T00:00:00Z" }),
     );
     expect(await screen.findByDisplayValue("rotated-once")).toBeInTheDocument();
+  });
+
+  it("warns when a replayed create cannot return the one-time secret", async () => {
+    mockPost.mockResolvedValue({
+      resource: { serviceAccountId: ID },
+      replayed: true,
+    });
+    mockGet.mockResolvedValue(evidence());
+    renderDialog("create", { name: "Deploy bot" });
+
+    await submit();
+
+    expect(
+      await screen.findByText(/one-time secret was unavailable/i),
+    ).toHaveTextContent(/rotate the secret again/i);
+    expect(screen.getByRole("button", { name: "Acknowledge" })).toBeEnabled();
+    expect(screen.queryByLabelText("One-time secret")).toBeNull();
   });
 
   it("runs service_account.revoke_tokens and proves the revocation timestamp advance", async () => {

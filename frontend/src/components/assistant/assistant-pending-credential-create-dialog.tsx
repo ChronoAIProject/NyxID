@@ -12,11 +12,19 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { api } from "@/lib/api-client";
 import { nodeCredentialActionParamsSchema } from "@/schemas/assistant-actions";
 import {
   assertNoSensitiveActionParams,
   errorMessage,
+  SECRET_VALUE_PATTERN,
 } from "./assistant-action-dialog-utils";
 import {
   assistantPendingCredentialEffectResponseSchema,
@@ -75,6 +83,9 @@ export function AssistantPendingCredentialCreateDialog({
     setError(null);
     try {
       assertNoSensitiveActionParams(params);
+      if (SECRET_VALUE_PATTERN.test(label)) {
+        throw new Error("Labels cannot contain secret-shaped values.");
+      }
       const reviewed = nodeCredentialActionParamsSchema.parse({
         nodeId: params.nodeId,
         serviceSlug,
@@ -180,20 +191,21 @@ export function AssistantPendingCredentialCreateDialog({
                 <Label htmlFor={`${mode}-injection-method`}>
                   Injection method
                 </Label>
-                <select
-                  id={`${mode}-injection-method`}
-                  className="h-8 w-full rounded-lg border border-input bg-background px-3 text-[12px]"
+                <Select
                   value={injectionMethod}
-                  onChange={(event) =>
-                    setInjectionMethod(
-                      event.target.value as typeof injectionMethod,
-                    )
+                  onValueChange={(value) =>
+                    setInjectionMethod(value as typeof injectionMethod)
                   }
                 >
-                  <option value="header">Header</option>
-                  <option value="query-param">Query parameter</option>
-                  <option value="path-prefix">Path prefix</option>
-                </select>
+                  <SelectTrigger id={`${mode}-injection-method`}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="header">Header</SelectItem>
+                    <SelectItem value="query-param">Query parameter</SelectItem>
+                    <SelectItem value="path-prefix">Path prefix</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
             <div className="space-y-1.5">

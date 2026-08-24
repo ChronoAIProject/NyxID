@@ -14,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
+import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
 import {
   assertSecretFreeReadBack,
   assertNoSensitiveActionParams,
@@ -39,6 +40,7 @@ const responseSchema = z
     resource: z.object({ clientId: z.string().min(1) }).strict(),
     replayed: z.boolean(),
     clientSecret: z.string().min(1).optional(),
+    oneTimeMaterial: assistantOneTimeMaterialSchema,
   })
   .strict();
 
@@ -80,9 +82,11 @@ export function AssistantDeveloperAppActionDialog({
   const [confirmed, setConfirmed] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ id: string; secret?: string } | null>(
-    null,
-  );
+  const [result, setResult] = useState<{
+    id: string;
+    secret?: string;
+    unavailable: boolean;
+  } | null>(null);
   const pendingRef = useRef(false);
   const destructive = action === "delete";
   const clientId = textParam(params, "clientId");
@@ -148,7 +152,10 @@ export function AssistantDeveloperAppActionDialog({
               actionRequestId,
               clientId,
               name: name.trim() || undefined,
-              redirectUris: reviewedRedirectUris,
+              redirectUris:
+                reviewedRedirectUris.length > 0
+                  ? reviewedRedirectUris
+                  : undefined,
             };
           case "delete":
             return { actionRequestId, clientId, confirmed };
@@ -174,11 +181,12 @@ export function AssistantDeveloperAppActionDialog({
           "NyxID did not show the created application as active.",
         );
       }
-      if (
-        (action === "create" || action === "rotate_secret") &&
-        !response.replayed &&
-        !response.clientSecret
-      ) {
+      const expectsSecret = action === "create" || action === "rotate_secret";
+      const unavailable =
+        expectsSecret &&
+        !response.clientSecret &&
+        (response.replayed || response.oneTimeMaterial === "unavailable");
+      if (expectsSecret && !response.clientSecret && !unavailable) {
         throw new Error(
           "NyxID did not return the one-time secret to the browser.",
         );
@@ -195,6 +203,7 @@ export function AssistantDeveloperAppActionDialog({
       }
       setResult({
         id,
+        unavailable,
         ...(response.clientSecret ? { secret: response.clientSecret } : {}),
       });
     } catch (caught) {
@@ -227,11 +236,13 @@ export function AssistantDeveloperAppActionDialog({
           <DialogDescription>
             {result?.secret
               ? "Save this secret now. It will not be shown again."
-              : result
-                ? "The canonical developer-app projection confirms the change."
-                : destructive
-                  ? "Deleting the app revokes OAuth access and must be confirmed every time."
-                  : "NyxID keeps client secrets out of chat."}
+              : result?.unavailable
+                ? "The one-time secret was unavailable and was not captured by this browser. Rotate the secret again to receive a new value."
+                : result
+                  ? "The canonical developer-app projection confirms the change."
+                  : destructive
+                    ? "Deleting the app revokes OAuth access and must be confirmed every time."
+                    : "NyxID keeps client secrets out of chat."}
           </DialogDescription>
         </DialogHeader>
         {result ? (
@@ -306,7 +317,7 @@ export function AssistantDeveloperAppActionDialog({
                 close();
               }}
             >
-              Done
+              {result.unavailable ? "Acknowledge" : "Done"}
             </Button>
           ) : (
             <>

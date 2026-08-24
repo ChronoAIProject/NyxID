@@ -623,6 +623,7 @@ function normalizeServiceAccountCreate(raw: unknown): ActionCardParams | null {
     variant: "service_account_create",
     name: parsed.data.name,
     description: parsed.data.description,
+    target_org_id: parsed.data.targetOrgId,
   };
 }
 
@@ -711,6 +712,7 @@ function normalizeExternalKeyAddGcp(raw: unknown): ActionCardParams | null {
     ? {
         variant: "external_key_add_gcp_service_account",
         label: parsed.data.label,
+        target_org_id: parsed.data.targetOrgId,
       }
     : null;
 }
@@ -1690,7 +1692,10 @@ const serviceAccountCreateDescriptor = createDialogDescriptor({
   icon: "key",
   normalize: normalizeServiceAccountCreate,
   resourceKind: "serviceAccount",
-  fields: [{ label: "Name", key: "name" }],
+  fields: [
+    { label: "Name", key: "name" },
+    { label: "Organization", key: "target_org_id", mono: true },
+  ],
 });
 
 const serviceAccountUpdateDescriptor = createDialogDescriptor({
@@ -1792,7 +1797,10 @@ const externalKeyAddGcpDescriptor = createDialogDescriptor({
   icon: "key",
   normalize: normalizeExternalKeyAddGcp,
   resourceKind: "externalKey",
-  fields: [{ label: "Label", key: "label" }],
+  fields: [
+    { label: "Label", key: "label" },
+    { label: "Organization", key: "target_org_id", mono: true },
+  ],
 });
 
 const openClawConnectDescriptor = createDialogDescriptor({

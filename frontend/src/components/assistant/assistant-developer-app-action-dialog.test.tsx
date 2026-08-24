@@ -71,6 +71,7 @@ describe("AssistantDeveloperAppActionDialog", () => {
       resource: { clientId: ID },
       replayed: false,
       clientSecret: "client-secret-once",
+      oneTimeMaterial: "delivered",
     });
     mockGet.mockResolvedValue(evidence());
     renderDialog("create", {
@@ -100,6 +101,26 @@ describe("AssistantDeveloperAppActionDialog", () => {
     expect(mockPost).toHaveBeenCalledWith(
       "/assistant/actions/org/developer-app/update",
       expect.objectContaining({ clientId: ID, name: "Renamed" }),
+    );
+  });
+
+  it("does not clear redirect URIs when an update textarea is empty", async () => {
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
+    mockPost.mockResolvedValue({ resource: { clientId: ID }, replayed: false });
+    renderDialog("update", { clientId: ID, name: "Renamed" });
+
+    await submit();
+
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/developer-app/update",
+      {
+        actionRequestId: "request-update",
+        clientId: ID,
+        name: "Renamed",
+        redirectUris: undefined,
+      },
     );
   });
 
@@ -161,5 +182,23 @@ describe("AssistantDeveloperAppActionDialog", () => {
     expect(
       await screen.findByDisplayValue("rotated-client-secret"),
     ).toBeInTheDocument();
+  });
+
+  it("warns when a replayed rotate cannot return the one-time secret", async () => {
+    mockGet.mockResolvedValue(evidence());
+    mockPost.mockResolvedValue({
+      resource: { clientId: ID },
+      replayed: true,
+      oneTimeMaterial: "unavailable",
+    });
+    renderDialog("rotate_secret", { clientId: ID });
+
+    await submit();
+
+    expect(
+      await screen.findByText(/one-time secret was unavailable/i),
+    ).toHaveTextContent(/rotate the secret again/i);
+    expect(screen.getByRole("button", { name: "Acknowledge" })).toBeEnabled();
+    expect(screen.queryByLabelText("One-time client secret")).toBeNull();
   });
 });

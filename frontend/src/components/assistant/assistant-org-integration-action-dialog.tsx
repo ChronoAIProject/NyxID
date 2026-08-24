@@ -13,6 +13,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
+import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
 import {
   assertNoSensitiveActionParams,
   assertSecretFreeReadBack,
@@ -27,6 +28,7 @@ const externalResponseSchema = z
   .object({
     resource: z.object({ externalKeyId: z.string().min(1) }).strict(),
     replayed: z.boolean(),
+    oneTimeMaterial: assistantOneTimeMaterialSchema,
   })
   .strict();
 const externalEvidenceSchema = z
@@ -44,6 +46,7 @@ const serviceResponseSchema = z
   .object({
     resource: z.object({ userServiceId: z.string().min(1) }).strict(),
     replayed: z.boolean(),
+    oneTimeMaterial: assistantOneTimeMaterialSchema,
   })
   .strict();
 const serviceEvidenceSchema = z
@@ -93,6 +96,7 @@ export function AssistantOrgIntegrationActionDialog({
   const [resultId, setResultId] = useState<string | null>(null);
   const pendingRef = useRef(false);
   const gcp = action === "external_key.add_gcp_service_account";
+  const targetOrgId = textParam(params, "targetOrgId");
 
   function close() {
     pendingRef.current = false;
@@ -127,6 +131,7 @@ export function AssistantOrgIntegrationActionDialog({
             keyJson,
             scopes: scopes.trim() || undefined,
             serviceSlugs: serviceSlugs.split(",").map((slug) => slug.trim()).filter(Boolean),
+            targetOrgId: targetOrgId || undefined,
           }),
         );
         const raw = await api.get<unknown>(
@@ -177,7 +182,7 @@ export function AssistantOrgIntegrationActionDialog({
         {!resultId ? (
           <div className="space-y-4 border-y border-border py-4">
             <div className="space-y-2"><Label htmlFor="integration-label">Label</Label><Input id="integration-label" value={label} onChange={(event) => setLabel(event.target.value)} autoComplete="off" /></div>
-            {gcp ? <><div className="space-y-2"><Label htmlFor="gcp-key-json">Service-account JSON</Label><textarea id="gcp-key-json" value={keyJson} onChange={(event) => setKeyJson(event.target.value)} className="min-h-32 w-full border border-input bg-background px-3 py-2 font-mono text-xs" autoComplete="off" /></div><div className="space-y-2"><Label htmlFor="gcp-scopes">OAuth scopes</Label><Input id="gcp-scopes" value={scopes} onChange={(event) => setScopes(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="gcp-services">Service slugs</Label><Input id="gcp-services" value={serviceSlugs} onChange={(event) => setServiceSlugs(event.target.value)} /></div></> : <><div className="space-y-2"><Label htmlFor="openclaw-url">Gateway URL</Label><Input id="openclaw-url" type="url" value={gatewayUrl} onChange={(event) => setGatewayUrl(event.target.value)} autoComplete="url" /></div><div className="space-y-2"><Label htmlFor="openclaw-credential">Bearer credential</Label><Input id="openclaw-credential" type="password" value={credential} onChange={(event) => setCredential(event.target.value)} autoComplete="new-password" /></div></>}
+            {gcp ? <><div className="space-y-2"><Label htmlFor="gcp-key-json">Service-account JSON</Label><textarea id="gcp-key-json" value={keyJson} onChange={(event) => setKeyJson(event.target.value)} className="min-h-32 w-full border border-input bg-background px-3 py-2 font-mono text-xs" autoComplete="off" /></div><div className="space-y-2"><Label htmlFor="gcp-scopes">OAuth scopes</Label><Input id="gcp-scopes" value={scopes} onChange={(event) => setScopes(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="gcp-services">Service slugs</Label><Input id="gcp-services" value={serviceSlugs} onChange={(event) => setServiceSlugs(event.target.value)} /></div>{targetOrgId ? <div className="space-y-1.5"><p className="text-xs font-medium">Target organization</p><p className="break-all font-mono text-xs text-muted-foreground">{targetOrgId}</p></div> : null}</> : <><div className="space-y-2"><Label htmlFor="openclaw-url">Gateway URL</Label><Input id="openclaw-url" type="url" value={gatewayUrl} onChange={(event) => setGatewayUrl(event.target.value)} autoComplete="url" /></div><div className="space-y-2"><Label htmlFor="openclaw-credential">Bearer credential</Label><Input id="openclaw-credential" type="password" value={credential} onChange={(event) => setCredential(event.target.value)} autoComplete="new-password" /></div></>}
           </div>
         ) : <p className="border-y border-border py-4 font-mono text-xs text-muted-foreground">{resultId}</p>}
         {error ? <p role="alert" className="text-xs text-destructive">{error}</p> : null}

@@ -17,6 +17,7 @@ import {
   assertNoSensitiveActionParams,
   errorMessage,
   isNewerTimestamp,
+  isNotFound,
 } from "./assistant-action-dialog-utils";
 import {
   assistantNodeEffectResponseSchema,
@@ -45,19 +46,22 @@ export function AssistantNodeTransferDialog({
   const [confirmed, setConfirmed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [resultId, setResultId] = useState<string | null>(null);
+  const [result, setResult] = useState<{
+    id: string;
+    movedOutOfScope: boolean;
+  } | null>(null);
 
   function close() {
     submittingRef.current = false;
     setConfirmed(false);
     setSubmitting(false);
     setError(null);
-    setResultId(null);
+    setResult(null);
     onOpenChange(false);
   }
 
   async function submit() {
-    if (submittingRef.current || resultId || !confirmed) return;
+    if (submittingRef.current || result || !confirmed) return;
     submittingRef.current = true;
     setSubmitting(true);
     setError(null);
@@ -81,18 +85,34 @@ export function AssistantNodeTransferDialog({
           expectedStateVersion: before.state_version,
         }),
       );
-      const after = await readNodeAuthorization(response.resource.nodeId);
-      if (
-        after.id !== expected.nodeId ||
-        after.owner_user_id !== expected.newOwnerUserId ||
-        !after.is_active ||
-        (!response.replayed &&
-          (after.state_version !== before.state_version + 1 ||
-            !isNewerTimestamp(before.updated_at, after.updated_at)))
-      ) {
-        throw new Error("NyxID could not verify the node ownership transfer.");
+      if (response.resource.nodeId !== expected.nodeId) {
+        throw new Error("NyxID returned a different node identity.");
       }
-      setResultId(after.id);
+      try {
+        const after = await readNodeAuthorization(response.resource.nodeId);
+        if (
+          after.id !== expected.nodeId ||
+          after.owner_user_id !== expected.newOwnerUserId ||
+          !after.is_active ||
+          (!response.replayed &&
+            (after.state_version !== before.state_version + 1 ||
+              !isNewerTimestamp(before.updated_at, after.updated_at)))
+        ) {
+          throw new Error(
+            "NyxID could not verify the node ownership transfer.",
+          );
+        }
+        setResult({ id: after.id, movedOutOfScope: false });
+      } catch (caught) {
+        if (!response.replayed && isNotFound(caught)) {
+          setResult({
+            id: response.resource.nodeId,
+            movedOutOfScope: true,
+          });
+        } else {
+          throw caught;
+        }
+      }
     } catch (caught) {
       setError(errorMessage(caught, "NyxID could not transfer this node."));
     } finally {
@@ -106,18 +126,20 @@ export function AssistantNodeTransferDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
-            {resultId
+            {result
               ? "Credential node transferred"
               : "Transfer credential node"}
           </DialogTitle>
           <DialogDescription>
-            {resultId
-              ? "The canonical node projection confirms the new owner."
-              : "The new owner receives control of this node, its routing authority, and its active bindings."}
+            {result?.movedOutOfScope
+              ? "The node is no longer readable from this account, confirming that ownership moved out of its access scope."
+              : result
+                ? "The canonical node projection confirms the new owner."
+                : "The new owner receives control of this node, its routing authority, and its active bindings."}
           </DialogDescription>
         </DialogHeader>
 
-        {!resultId ? (
+        {!result ? (
           <div className="space-y-3 border-y border-border py-4 text-[12px]">
             <div className="flex items-center justify-between gap-3">
               <Badge
@@ -153,12 +175,12 @@ export function AssistantNodeTransferDialog({
           </p>
         ) : null}
         <DialogFooter>
-          {resultId ? (
+          {result ? (
             <Button
               type="button"
               variant="primary"
               onClick={() => {
-                onComplete(resultId);
+                onComplete(result.id);
                 close();
               }}
             >

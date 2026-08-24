@@ -92,6 +92,7 @@ describe("AssistantOrgActionDialog", () => {
     mockPost.mockResolvedValue({
       resource: { orgId: ORG_ID },
       replayed: false,
+      oneTimeMaterial: "delivered",
     });
     mockGet.mockResolvedValue(orgEvidence());
     renderDialog("create", { displayName: "Acme" });
@@ -177,7 +178,7 @@ describe("AssistantOrgActionDialog", () => {
     );
   });
 
-  it("does not forward model-supplied member fields that the dialog does not show", async () => {
+  it("shows and forwards org.member_add allowedServiceIds while dropping unsupported isAdmin", async () => {
     mockGet
       .mockResolvedValueOnce(orgEvidence())
       .mockResolvedValueOnce(orgEvidence({ member_count: 2 }));
@@ -189,8 +190,10 @@ describe("AssistantOrgActionDialog", () => {
       orgId: ORG_ID,
       userId: USER_ID,
       role: "member",
-      allowedServiceIds: ["hidden-service"],
+      allowedServiceIds: ["service-alpha", "service-beta"],
+      isAdmin: true,
     });
+    expect(screen.getByText("service-alpha, service-beta")).toBeInTheDocument();
     await clickSubmit();
     const requestBody = mockPost.mock.calls[0]?.[1];
     expect(requestBody).toEqual({
@@ -198,8 +201,9 @@ describe("AssistantOrgActionDialog", () => {
       orgId: ORG_ID,
       userId: USER_ID,
       role: "member",
+      allowedServiceIds: ["service-alpha", "service-beta"],
     });
-    expect(requestBody).not.toHaveProperty("allowedServiceIds");
+    expect(requestBody).not.toHaveProperty("isAdmin");
   });
 
   it("runs org.member_remove and proves a terminal revoked membership", async () => {
@@ -247,7 +251,7 @@ describe("AssistantOrgActionDialog", () => {
     );
   });
 
-  it("runs org.invite and proves the active invite count increased", async () => {
+  it("shows and forwards org.invite allowedServiceIds", async () => {
     mockGet
       .mockResolvedValueOnce(orgEvidence())
       .mockResolvedValueOnce(orgEvidence({ active_invite_count: 1 }));
@@ -255,11 +259,19 @@ describe("AssistantOrgActionDialog", () => {
       resource: { orgId: ORG_ID },
       replayed: false,
     });
-    renderDialog("invite", { orgId: ORG_ID, role: "viewer" });
+    renderDialog("invite", {
+      orgId: ORG_ID,
+      role: "viewer",
+      allowedServiceIds: ["service-invite"],
+    });
+    expect(screen.getByText("service-invite")).toBeInTheDocument();
     await clickSubmit();
     expect(mockPost).toHaveBeenCalledWith(
       "/assistant/actions/org/org/invite",
-      expect.objectContaining({ ttlHours: 24 }),
+      expect.objectContaining({
+        allowedServiceIds: ["service-invite"],
+        ttlHours: 24,
+      }),
     );
   });
 
