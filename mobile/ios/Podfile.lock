@@ -185,6 +185,10 @@ PODS:
     - ExpoModulesCore
   - ExpoCamera (55.0.22):
     - ExpoModulesCore
+  - ExpoCameraBarcodeScanning (55.0.22):
+    - ExpoCamera
+    - ZXingObjC/OneD
+    - ZXingObjC/PDF417
   - ExpoClipboard (55.0.12):
     - ExpoModulesCore
   - ExpoDomWebView (55.0.5):
@@ -2397,6 +2401,11 @@ PODS:
     - Yoga
   - UMAppLoader (55.0.4)
   - Yoga (0.0.0)
+  - ZXingObjC/Core (3.6.9)
+  - ZXingObjC/OneD (3.6.9):
+    - ZXingObjC/Core
+  - ZXingObjC/PDF417 (3.6.9):
+    - ZXingObjC/Core
 
 DEPENDENCIES:
   - EXApplication (from `../node_modules/expo-application/ios`)
@@ -2411,6 +2420,7 @@ DEPENDENCIES:
   - ExpoAsset (from `../node_modules/expo-asset/ios`)
   - ExpoBlur (from `../node_modules/expo-blur/ios`)
   - ExpoCamera (from `../node_modules/expo-camera/ios`)
+  - ExpoCameraBarcodeScanning (from `../node_modules/expo-camera/ios`)
   - ExpoClipboard (from `../node_modules/expo-clipboard/ios`)
   - "ExpoDomWebView (from `../node_modules/@expo/dom-webview/ios`)"
   - ExpoFileSystem (from `../node_modules/expo-file-system/ios`)
@@ -2509,6 +2519,12 @@ DEPENDENCIES:
   - RNWorklets (from `../node_modules/react-native-worklets`)
   - UMAppLoader (from `../node_modules/unimodules-app-loader/ios`)
   - Yoga (from `../node_modules/react-native/ReactCommon/yoga`)
+  - ZXingObjC/OneD
+  - ZXingObjC/PDF417
+
+SPEC REPOS:
+  trunk:
+    - ZXingObjC
 
 EXTERNAL SOURCES:
   EXApplication:
@@ -2534,6 +2550,8 @@ EXTERNAL SOURCES:
   ExpoBlur:
     :path: "../node_modules/expo-blur/ios"
   ExpoCamera:
+    :path: "../node_modules/expo-camera/ios"
+  ExpoCameraBarcodeScanning:
     :path: "../node_modules/expo-camera/ios"
   ExpoClipboard:
     :path: "../node_modules/expo-clipboard/ios"
@@ -2744,6 +2762,7 @@ SPEC CHECKSUMS:
   ExpoAsset: 3636e70a874487efd0a677f6c064dbc9fc8f174b
   ExpoBlur: 7d0cba2858a2dc88c4eef56a170116ea74f33a42
   ExpoCamera: f357b3d607bf8b31bf1b9e78ce9467d5ae5926f4
+  ExpoCameraBarcodeScanning: 4fbbd257833da0fcc60983c532d078586aa24ba6
   ExpoClipboard: 7c8c987388fcde07e799050a8c7a7d84ece2c919
   ExpoDomWebView: 2b2fbd9a07de8790569257cbf9dfdaa31cf95c70
   ExpoFileSystem: d40374bc7b6e990e2640e5dc3350fc83b1d74a40
@@ -2841,7 +2860,8 @@ SPEC CHECKSUMS:
   RNWorklets: 0e736f568c3c61cb3326cdcda767c4daee56a8a9
   UMAppLoader: 6f70977c93a7033f0dc7cf2f0de9b49ce006f7bd
   Yoga: acd565934addf7423687593ec490bd4491b2a802
+  ZXingObjC: 8898711ab495761b2dbbdec76d90164a6d7e14c5
 
-PODFILE CHECKSUM: 1ed94a814c1357ac08f46ec31b251b724059443d
+PODFILE CHECKSUM: 7f17595201dac86cf35a712c17cf89ace8ef5e41
 
 COCOAPODS: 1.16.2

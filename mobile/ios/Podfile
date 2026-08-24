@@ -23,6 +23,14 @@ prepare_react_native_project!
 target 'NyxIDMobile' do
   use_expo_modules!
 
+  # expo-camera 55 gates ALL inline barcode scanning (incl. native AVFoundation QR) behind
+  # this optional provider pod, and neither autolinking nor the config plugin adds it for
+  # source-pod builds. Without it, onBarcodeScanned never fires (silent). Do not remove.
+  # NOTE: `expo prebuild --clean` regenerates the Podfile and would drop this line.
+  pod 'ExpoCameraBarcodeScanning', :path => '../node_modules/expo-camera/ios'
+  pod 'ZXingObjC/PDF417', :modular_headers => true
+  pod 'ZXingObjC/OneD', :modular_headers => true
+
   if ENV['EXPO_USE_COMMUNITY_AUTOLINKING'] == '1'
     config_command = ['node', '-e', "process.argv=['', '', 'config'];require('@react-native-community/cli').run()"];
   else
