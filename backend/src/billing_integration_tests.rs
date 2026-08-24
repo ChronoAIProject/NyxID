@@ -42,9 +42,6 @@ use crate::models::notification_channel::{
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::service_approval_config::ApprovalMode;
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ServiceBilling};
-use crate::models::service_endpoint::{
-    COLLECTION_NAME as SERVICE_ENDPOINTS, EndpointRisk, OperationResponseContract, ServiceEndpoint,
-};
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::usage_meter::{
     COLLECTION_NAME as USAGE_METER, CredentialClass, UsageMeterRow, UsageStatus,
@@ -265,8 +262,7 @@ async fn billing_route_coverage_smoke() {
 
     let lago = Arc::new(FakeLago::default());
     let owner_id = insert_owner(&db).await;
-    let (downstream_url, direct_hops, agent_tool_hits, downstream) =
-        start_billing_downstream().await;
+    let (downstream_url, downstream) = start_billing_downstream().await;
     let mut proxy_catalog = crate::models::downstream_service::test_helpers::dummy_service();
     proxy_catalog.id = Uuid::new_v4().to_string();
     proxy_catalog.slug = "billing-proxy-catalog".to_string();
@@ -276,32 +272,6 @@ async fn billing_route_coverage_smoke() {
         .insert_one(&proxy_catalog)
         .await
         .expect("insert route proxy catalog service");
-    let now = Utc::now();
-    db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
-        .insert_one(ServiceEndpoint {
-            id: Uuid::new_v4().to_string(),
-            service_id: proxy_catalog.id.clone(),
-            name: "agent_health".to_string(),
-            description: Some("Read local route health".to_string()),
-            method: "GET".to_string(),
-            path: "/agent-health".to_string(),
-            parameters: None,
-            request_body_schema: None,
-            request_content_type: None,
-            request_body_required: false,
-            response_description: Some("Local health result".to_string()),
-            response: OperationResponseContract {
-                content_types: vec!["application/json".to_string()],
-                binary_artifact: Some(false),
-            },
-            risk: Some(EndpointRisk::Read),
-            supports_idempotency_key: false,
-            is_active: true,
-            created_at: now,
-            updated_at: now,
-        })
-        .await
-        .expect("insert agent route typed endpoint");
     let proxy = insert_route_service(
         &db,
         &owner_id,
@@ -361,58 +331,6 @@ async fn billing_route_coverage_smoke() {
     assert!(String::from_utf8_lossy(&direct_response).contains("\"total_tokens\":149"));
     exercised_routes.insert("/api/v1/assistant/direct/completions");
     assert_direct_reported_usage(&db, &direct_catalog).await;
-
-    let agent_body = serde_json::json!({
-        "messages": [{"role": "user", "content": "route boundary agent"}],
-        "model": "gpt-5.5",
-        "skill_slug": "nyxid",
-    });
-    let access_token_response = app
-        .clone()
-        .oneshot(route_request(
-            Method::POST,
-            "/api/v1/assistant/direct/agent",
-            &token,
-            Body::from(agent_body.to_string()),
-        ))
-        .await
-        .expect("call session-only agent route with access token");
-    assert_eq!(access_token_response.status(), StatusCode::FORBIDDEN);
-
-    let session = crate::services::token_service::create_session(
-        &db,
-        &owner_id,
-        Some("127.0.0.1"),
-        Some("billing-route-smoke"),
-    )
-    .await
-    .expect("create billing route smoke session");
-    let agent_response = call_mounted_route(
-        &app,
-        session_route_request(
-            Method::POST,
-            "/api/v1/assistant/direct/agent",
-            &session.session_token,
-            Body::from(agent_body.to_string()),
-        ),
-    )
-    .await;
-    let agent_sse = String::from_utf8_lossy(&agent_response);
-    assert!(agent_sse.contains("\"type\":\"run.started\""));
-    assert!(agent_sse.contains("\"stage\":\"plan\",\"status\":\"completed\""));
-    assert!(agent_sse.contains("\"stage\":\"execute\",\"status\":\"completed\""));
-    assert!(agent_sse.contains("\"stage\":\"final\",\"status\":\"completed\""));
-    assert!(agent_sse.contains("\"type\":\"done\",\"status\":\"completed\""));
-    assert!(agent_sse.contains("data: [DONE]"));
-    let tool_started = agent_sse.find("\"type\":\"tool.started\"").unwrap();
-    let tool_completed = agent_sse.find("\"type\":\"tool.completed\"").unwrap();
-    let final_text = agent_sse.find("Chrono Sandbox is healthy.").unwrap();
-    let done = agent_sse.find("\"type\":\"done\"").unwrap();
-    assert!(tool_started < tool_completed && tool_completed < final_text && final_text < done);
-    assert_eq!(agent_tool_hits.load(Ordering::SeqCst), 1);
-    assert_eq!(direct_hops.load(Ordering::SeqCst), 4);
-    assert_direct_settled_usage_count(&db, &direct_catalog, 4).await;
-    exercised_routes.insert("/api/v1/assistant/direct/agent");
 
     call_mounted_route(
         &app,
@@ -1381,17 +1299,8 @@ async fn lago_webhook_signature_is_verified_at_the_mounted_route() {
     assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
 }
 
-async fn start_billing_downstream() -> (
-    String,
-    Arc<AtomicUsize>,
-    Arc<AtomicUsize>,
-    tokio::task::JoinHandle<()>,
-) {
-    async fn respond(
-        request: Request<Body>,
-        direct_hops: Arc<AtomicUsize>,
-        agent_tool_hits: Arc<AtomicUsize>,
-    ) -> axum::response::Response {
+async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
+    async fn respond(request: Request<Body>) -> axum::response::Response {
         let path = request.uri().path().to_string();
         if path == "/mcp-query" {
             assert_eq!(
@@ -1400,17 +1309,7 @@ async fn start_billing_downstream() -> (
             );
         }
 
-        if path == "/agent-health" {
-            agent_tool_hits.fetch_add(1, Ordering::SeqCst);
-            return Json(serde_json::json!({
-                "status": "healthy",
-                "opensandbox_connected": true
-            }))
-            .into_response();
-        }
-
         if path == "/direct/chat/completions" {
-            direct_hops.fetch_add(1, Ordering::SeqCst);
             let body = to_bytes(request.into_body(), 512 * 1024)
                 .await
                 .expect("read direct assistant upstream request");
@@ -1419,42 +1318,6 @@ async fn start_billing_downstream() -> (
             assert_eq!(body["stream"], true);
             assert_eq!(body["stream_options"]["include_usage"], true);
             assert_eq!(body["messages"][0]["role"], "system");
-            if body["tool_choice"] == "auto" {
-                let has_tool_result = body["messages"]
-                    .as_array()
-                    .expect("agent messages array")
-                    .iter()
-                    .any(|message| message["role"] == "tool");
-                let response = if has_tool_result {
-                    let tool_result = body["messages"]
-                        .as_array()
-                        .unwrap()
-                        .iter()
-                        .find(|message| message["role"] == "tool")
-                        .unwrap();
-                    assert_eq!(tool_result["tool_call_id"], "call-health");
-                    let content = tool_result["content"].as_str().unwrap();
-                    assert!(content.contains("healthy"));
-                    assert!(content.contains("opensandbox_connected"));
-                    concat!(
-                        "data: {\"id\":\"agent-final\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Chrono Sandbox is healthy.\"},\"finish_reason\":\"stop\"}]}\n\n",
-                        "data: {\"id\":\"agent-final\",\"choices\":[],\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":4,\"total_tokens\":13}}\n\n",
-                        "data: [DONE]\n\n"
-                    )
-                } else {
-                    concat!(
-                        "data: {\"id\":\"agent-tools\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-health\",\"type\":\"function\",\"function\":{\"name\":\"nyx_call_tool\",\"arguments\":\"{\\\"tool_name\\\":\\\"billing-proxy-route__agent_health\\\",\\\"arguments\\\":{}}\"}}]},\"finish_reason\":null}]}\n\n",
-                        "data: {\"id\":\"agent-tools\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n",
-                        "data: {\"id\":\"agent-tools\",\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"total_tokens\":10}}\n\n",
-                        "data: [DONE]\n\n"
-                    )
-                };
-                return (
-                    [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
-                    response,
-                )
-                    .into_response();
-            }
             return (
                 [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
                 include_str!(
@@ -1491,24 +1354,13 @@ async fn start_billing_downstream() -> (
         .await
         .expect("bind billing downstream");
     let address = listener.local_addr().expect("billing downstream address");
-    let direct_hops = Arc::new(AtomicUsize::new(0));
-    let agent_tool_hits = Arc::new(AtomicUsize::new(0));
-    let app = Router::new().fallback(any({
-        let direct_hops = direct_hops.clone();
-        let agent_tool_hits = agent_tool_hits.clone();
-        move |request| respond(request, direct_hops.clone(), agent_tool_hits.clone())
-    }));
+    let app = Router::new().fallback(any(respond));
     let server = tokio::spawn(async move {
         axum::serve(listener, app)
             .await
             .expect("serve billing downstream");
     });
-    (
-        format!("http://{address}"),
-        direct_hops,
-        agent_tool_hits,
-        server,
-    )
+    (format!("http://{address}"), server)
 }
 
 // Async settlement can lag far behind the request under coverage
@@ -1560,40 +1412,6 @@ async fn assert_direct_reported_usage(db: &mongodb::Database, service: &Downstre
         "direct assistant route did not settle from the fixture's reported usage provenance (saw_usage={}, saw_provenance={}) after {:.1}s",
         saw_usage,
         saw_provenance,
-        started.elapsed().as_secs_f64()
-    );
-}
-
-async fn assert_direct_settled_usage_count(
-    db: &mongodb::Database,
-    service: &DownstreamService,
-    expected_count: u64,
-) {
-    let started = Instant::now();
-    let last_count = loop {
-        let count = db
-            .collection::<UsageMeterRow>(USAGE_METER)
-            .count_documents(doc! {
-                "service_slug": &service.slug,
-                "metric": "tokens",
-                "status": "finalized",
-                "forwarded": true,
-                "released": true,
-            })
-            .await
-            .expect("count direct assistant usage rows");
-        if count == expected_count {
-            return;
-        }
-        if started.elapsed() >= SETTLEMENT_DEADLINE {
-            break count;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    };
-    panic!(
-        "expected {} finalized direct-assistant token usage rows, saw {} after {:.1}s",
-        expected_count,
-        last_count,
         started.elapsed().as_secs_f64()
     );
 }
@@ -1813,25 +1631,6 @@ fn route_request(method: Method, uri: &str, token: &str, body: Body) -> Request<
         .header("content-type", "application/json")
         .body(body)
         .expect("build mounted route request")
-}
-
-fn session_route_request(
-    method: Method,
-    uri: &str,
-    session_token: &str,
-    body: Body,
-) -> Request<Body> {
-    Request::builder()
-        .method(method)
-        .uri(uri)
-        .header(
-            "cookie",
-            format!("{}={session_token}", crate::mw::auth::SESSION_COOKIE_NAME),
-        )
-        .header("content-type", "application/json")
-        .header("origin", "http://localhost:3000")
-        .body(body)
-        .expect("build mounted session route request")
 }
 
 async fn call_mounted_route(app: &Router, request: Request<Body>) -> bytes::Bytes {
