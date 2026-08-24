@@ -1389,11 +1389,19 @@ mod tests {
                 first.get(one_time_property).is_some(),
                 "first {uri}: {first}"
             );
+            assert_eq!(
+                first["oneTimeMaterial"], "delivered",
+                "first {uri}: {first}"
+            );
 
             let (retry_status, retry) =
                 request(state.clone(), &token, Method::POST, uri, body).await;
             assert_eq!(retry_status, StatusCode::OK, "retry {uri}: {retry}");
             assert_eq!(retry["replayed"], true, "retry {uri}: {retry}");
+            assert_eq!(
+                retry["oneTimeMaterial"], "unavailable",
+                "retry {uri}: {retry}"
+            );
             for forbidden in [
                 "registrationToken",
                 "authToken",

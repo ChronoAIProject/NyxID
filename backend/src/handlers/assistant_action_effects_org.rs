@@ -4005,6 +4005,10 @@ mod wave4_effect_tests {
         assert!(replayed_service_account.replayed);
         assert!(replayed_service_account.client_secret.is_none());
         assert_eq!(
+            replayed_service_account.one_time_material,
+            OneTimeMaterialAvailability::Unavailable
+        );
+        assert_eq!(
             db.collection::<mongodb::bson::Document>(
                 crate::models::service_account::COLLECTION_NAME,
             )
@@ -4163,6 +4167,10 @@ mod wave4_effect_tests {
                 .0;
         assert!(replayed_developer_app.replayed);
         assert!(replayed_developer_app.client_secret.is_none());
+        assert_eq!(
+            replayed_developer_app.one_time_material,
+            OneTimeMaterialAvailability::Unavailable
+        );
         assert_eq!(
             db.collection::<mongodb::bson::Document>(crate::models::oauth_client::COLLECTION_NAME,)
                 .count_documents(doc! {
