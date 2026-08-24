@@ -93,13 +93,33 @@ export interface ChatConversationDetail {
   readonly projectionStatus: "current" | "pending";
 }
 
+export interface ChatUsageSummary {
+  readonly completionTokens?: number;
+  readonly cost?: number;
+  readonly latencyMs?: number;
+  readonly model?: string;
+  readonly promptTokens?: number;
+  readonly totalTokens?: number;
+}
+
+export interface ChatTarget {
+  readonly memberId?: string;
+  readonly runId?: string;
+  readonly scopeId?: string;
+  readonly studioUrl?: string;
+  readonly teamId?: string;
+  readonly workflowId?: string;
+}
+
 export interface ChatHistoryIndex {
   readonly conversations: ConversationMeta[];
   readonly nextCursor?: string | null;
 }
 
 export interface ChatSessionState {
+  readonly clientId: string;
   readonly conversationId?: string;
+  readonly expectedTurnCount: number;
   readonly latestTurnId?: string;
   readonly messages: readonly ChatMessage[];
   readonly status:
@@ -108,4 +128,8 @@ export interface ChatSessionState {
     | "completed_text"
     | "error"
     | "stopped";
+  readonly target?: ChatTarget;
+  readonly title: string;
+  readonly usage?: ChatUsageSummary;
+  readonly runtime?: ConversationRuntimeIdentity;
 }

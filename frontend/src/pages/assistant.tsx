@@ -13,6 +13,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { toast } from "sonner";
 import { AssistantShell } from "@/components/assistant/assistant-shell";
+import { AssistantChatPage } from "@/components/assistant/assistant-chat-page";
 import { AssistantSidebar } from "@/components/assistant/assistant-sidebar";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatThread } from "@/components/assistant/chat-thread";
@@ -166,6 +167,28 @@ function belongsToOtherEngine(
 }
 
 export function AssistantPage({
+  view = "chat",
+}: {
+  readonly view?: "chat" | "plugins" | "approvals";
+}) {
+  const directChatFlagEnabled = useFeature(FEATURE_FLAG.DIRECT_CHAT_ENGINE);
+  const transportKind = selectAssistantTransportKind({
+    mode: import.meta.env.MODE,
+    dev: import.meta.env.DEV,
+    search: typeof window === "undefined" ? "" : window.location.search,
+  });
+  if (
+    view === "chat" &&
+    import.meta.env.MODE !== "test" &&
+    transportKind !== "mock" &&
+    !directChatFlagEnabled
+  ) {
+    return <AssistantChatPage />;
+  }
+  return <LegacyAssistantPage view={view} />;
+}
+
+function LegacyAssistantPage({
   view = "chat",
 }: {
   readonly view?: "chat" | "plugins" | "approvals";
