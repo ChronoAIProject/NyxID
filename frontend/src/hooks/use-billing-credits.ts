@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import {
   allowanceFormSchema,
+  adminCreditGrantListSchema,
   creditGrantListSchema,
   creditGrantSchema,
   issueGrantFormSchema,
@@ -22,12 +23,14 @@ function benefitPath(path: "grants" | "allowances", ownerId?: string): string {
     : `/billing/${path}`;
 }
 
-export function useAdminCreditGrants() {
+export function useAdminCreditGrants(page = 1, perPage = 50) {
   return useQuery({
-    queryKey: [...ADMIN_CREDITS_KEY, "grants"],
+    queryKey: [...ADMIN_CREDITS_KEY, "grants", page, perPage],
     queryFn: async () =>
-      creditGrantListSchema.parse(
-        await api.get<unknown>("/admin/credits/grants?per_page=500"),
+      adminCreditGrantListSchema.parse(
+        await api.get<unknown>(
+          `/admin/credits/grants?page=${String(page)}&per_page=${String(perPage)}`,
+        ),
       ),
   });
 }

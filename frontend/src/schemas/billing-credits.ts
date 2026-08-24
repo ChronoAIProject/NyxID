@@ -8,6 +8,10 @@ export const creditGrantStatusSchema = z.enum([
   "expired",
   "revoked",
 ]);
+export const creditGrantActivationStateSchema = z.enum([
+  "active",
+  "pending_activation",
+]);
 export const allowanceRecurrenceSchema = z.enum([
   "one_time",
   "daily",
@@ -27,6 +31,8 @@ export const creditGrantSchema = z.object({
   recipient_user_id: z.string(),
   recipient_email: z.string().nullable().optional(),
   recipient_display_name: z.string().nullable().optional(),
+  recipient_billing_enabled: z.boolean().optional(),
+  activation_state: creditGrantActivationStateSchema,
   target_kind: billingTargetKindSchema,
   amount_credits: z.number().int().positive(),
   amount_micros: z.number().int().nonnegative(),
@@ -49,6 +55,14 @@ export const creditGrantListSchema = z.object({
   page: z.number().int().positive(),
   per_page: z.number().int().nonnegative(),
   total: z.number().int().nonnegative(),
+});
+
+export const adminCreditGrantSchema = creditGrantSchema.extend({
+  recipient_billing_enabled: z.boolean(),
+});
+
+export const adminCreditGrantListSchema = creditGrantListSchema.extend({
+  grants: z.array(adminCreditGrantSchema),
 });
 
 export const issueGrantFormSchema = z
@@ -102,6 +116,13 @@ export const issueGrantResponseSchema = z.object({
   created_count: z.number().int().positive(),
   activated_count: z.number().int().nonnegative(),
   pending_activation_count: z.number().int().nonnegative(),
+  recipients: z.array(
+    z.object({
+      recipient_user_id: z.string(),
+      recipient_billing_enabled: z.boolean(),
+      activation_state: creditGrantActivationStateSchema,
+    }),
+  ),
 });
 
 export const usageAllowanceSchema = z.object({
@@ -158,7 +179,9 @@ export const userAllowanceListSchema = z.object({
 });
 
 export type CreditGrant = z.infer<typeof creditGrantSchema>;
+export type AdminCreditGrant = z.infer<typeof adminCreditGrantSchema>;
 export type CreditGrantList = z.infer<typeof creditGrantListSchema>;
+export type IssueGrantResponse = z.infer<typeof issueGrantResponseSchema>;
 export type IssueGrantForm = z.infer<typeof issueGrantFormSchema>;
 export type UsageAllowance = z.infer<typeof usageAllowanceSchema>;
 export type AllowanceForm = z.infer<typeof allowanceFormSchema>;
