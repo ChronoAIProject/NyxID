@@ -1,4 +1,0 @@
-data: {"type":"run.started","run_id":"run-5","model":"gpt-5.5","skill_slug":null,"effort":null,"limits":{"max_tool_calls":8,"max_llm_calls":8,"deadline_ms":180000}}
-
-data: {"type":"stage","stage":"executee","status":"started","detail":"Bad"}
-

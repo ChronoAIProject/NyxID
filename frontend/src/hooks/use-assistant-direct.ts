@@ -59,7 +59,6 @@ export function useDirectConversationSettings(
   readonly setModel: (model: string) => void;
   readonly setSkill: (skillSlug: string | null) => void;
   readonly setEffort: (effort: string | null) => void;
-  readonly setAgentPocMode: (enabled: boolean) => void;
 } {
   if (defaultModel) {
     directAssistantTransport.seedDefaultModel(conversationId, defaultModel);
@@ -81,9 +80,6 @@ export function useDirectConversationSettings(
     },
     setEffort: (effort) => {
       directAssistantTransport.setEffort(conversationId, effort);
-    },
-    setAgentPocMode: (enabled) => {
-      directAssistantTransport.setAgentPocMode(conversationId, enabled);
     },
   };
 }

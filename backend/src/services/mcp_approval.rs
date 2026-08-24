@@ -161,10 +161,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn poc_deny_target_uses_catalog_identity_and_personal_or_org_owner() {
-        let Some(db) = crate::test_utils::connect_test_database("agent_poc_deny_parity").await
+    async fn deny_target_uses_catalog_identity_and_personal_or_org_owner() {
+        let Some(db) = crate::test_utils::connect_test_database("mcp_approval_deny_target").await
         else {
-            eprintln!("skipping POC deny parity test: no local MongoDB available");
+            eprintln!("skipping MCP approval deny-target test: no local MongoDB available");
             return;
         };
         let actor_id = uuid::Uuid::new_v4().to_string();
@@ -206,14 +206,7 @@ mod tests {
                 )
                 .await
                 .unwrap(),
-                "POC target must yield denied_by_policy for org_owned={org_owned}"
-            );
-            assert_eq!(
-                crate::services::assistant_direct_agent_poc::enforce_deny_only(
-                    &db, &actor_id, &actor_id, &service, &operation,
-                )
-                .await,
-                Err("denied_by_policy"),
+                "approval target must yield denied_by_policy for org_owned={org_owned}"
             );
         }
     }

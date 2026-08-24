@@ -644,7 +644,6 @@ describe("DirectAssistantTransport identity isolation", () => {
       model: "gpt-5.5",
       skillSlug: null,
       effort: null,
-      agentPocMode: false,
     });
     expect(useAssistantDraftStore.getState().drafts).toEqual({});
     await expect(transport.getHistory(conversationId)).rejects.toThrow(

@@ -1,11 +1,10 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DirectChatControls,
   DirectModeBanner,
-  AGENT_POC_MODE_COPY,
   DIRECT_MODE_COPY,
 } from "@/components/assistant/direct-chat-controls";
 import { api } from "@/lib/api-client";
@@ -81,7 +80,6 @@ describe("DirectChatControls", () => {
         model: "gpt-5.4",
         skillSlug: null,
         effort: null,
-        agentPocMode: false,
       }),
     );
 
@@ -100,14 +98,12 @@ describe("DirectChatControls", () => {
       model: "gpt-5.2",
       skillSlug: "nyxid",
       effort: "xhigh",
-      agentPocMode: false,
     });
     const conversation = await directAssistantTransport.createConversation();
     expect(directAssistantTransport.getSettings(conversation.id)).toEqual({
       model: "gpt-5.2",
       skillSlug: "nyxid",
       effort: "xhigh",
-      agentPocMode: false,
     });
   });
 
@@ -184,7 +180,6 @@ describe("DirectChatControls", () => {
       model: "gpt-5.5",
       skillSlug: null,
       effort: null,
-      agentPocMode: false,
     });
   });
 
@@ -227,46 +222,5 @@ describe("DirectModeBanner", () => {
     view.unmount();
     render(<DirectModeBanner />);
     expect(screen.queryByText(DIRECT_MODE_COPY)).not.toBeInTheDocument();
-  });
-
-  it("uses the POC copy for a conversation whose agent mode is enabled", async () => {
-    const conversation = await directAssistantTransport.createConversation();
-    directAssistantTransport.setAgentPocMode(conversation.id, true);
-
-    render(<DirectModeBanner conversationId={conversation.id} />);
-
-    expect(screen.getByText(AGENT_POC_MODE_COPY)).toBeVisible();
-    expect(screen.queryByText(DIRECT_MODE_COPY)).not.toBeInTheDocument();
-  });
-
-  it("updates the banner immediately when a sibling control toggles agent mode", async () => {
-    const conversation = await directAssistantTransport.createConversation();
-    vi.spyOn(api, "get").mockImplementation(async (endpoint) => {
-      if (endpoint === "/assistant/direct/models") {
-        return [{ id: "gpt-5.5", label: "GPT-5.5", default: true }] as never;
-      }
-      return [] as never;
-    });
-    const event = userEvent.setup();
-
-    renderWithQuery(
-      <>
-        <DirectModeBanner conversationId={conversation.id} />
-        <DirectChatControls conversationId={conversation.id} />
-      </>,
-    );
-
-    const banner = screen.getByRole("status", {
-      name: "Direct chat mode notice",
-    });
-    expect(within(banner).getByText(DIRECT_MODE_COPY)).toBeVisible();
-    const toggle = await screen.findByRole("switch", { name: "Agent POC" });
-    await event.click(toggle);
-    expect(within(banner).getByText(AGENT_POC_MODE_COPY)).toBeVisible();
-    expect(within(banner).queryByText(DIRECT_MODE_COPY)).not.toBeInTheDocument();
-
-    await event.click(toggle);
-    expect(within(banner).getByText(DIRECT_MODE_COPY)).toBeVisible();
-    expect(within(banner).queryByText(AGENT_POC_MODE_COPY)).not.toBeInTheDocument();
   });
 });

@@ -273,7 +273,7 @@ fn compose_system_prompt(skill_slug: Option<&str>) -> String {
     prompt
 }
 
-pub(crate) fn find_skill(slug: &str) -> Option<&'static DirectSkill> {
+fn find_skill(slug: &str) -> Option<&'static DirectSkill> {
     DIRECT_SKILLS.iter().find(|skill| skill.slug == slug)
 }
 

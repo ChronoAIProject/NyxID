@@ -15,7 +15,6 @@ pub mod assistant;
 pub mod assistant_action_effects;
 pub mod assistant_actions;
 pub mod assistant_direct;
-pub mod assistant_direct_agent_poc;
 pub mod assistant_readiness;
 pub mod auth;
 pub mod auth_device;

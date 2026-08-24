@@ -487,7 +487,7 @@ I also checked the new parameter is inert for this PR: `connection_expiry_notifi
 
 **Consequence:** the pre-merge readback I have been carrying since cycle 1 now covers two slugs, not one. This is a deployment check, not a code defect.
 
-`execute_admin_proxy` — and therefore `resolve_admin_proxy_target` and the server-chosen gate — has two new production callers from mainline: `handlers/assistant_direct.rs:170` and `services/assistant_direct_agent_poc.rs:488`. Both target slug `chrono-llm-public` (`services/assistant_direct.rs:6`) via `assistant_service::resolve_admin_service_by_slug`. That row is not seeded in code (no hits in `provider_service.rs`, `catalog_service.rs`, or `db.rs`), so it is admin-created per environment.
+`execute_admin_proxy` — and therefore `resolve_admin_proxy_target` and the server-chosen gate — has a production caller from the direct Chrono-LLM surface at `handlers/assistant_direct.rs:170`. It targets slug `chrono-llm-public` (`services/assistant_direct.rs:6`) via `assistant_service::resolve_admin_service_by_slug`. That row is not seeded in code (no hits in `provider_service.rs`, `catalog_service.rs`, or `db.rs`), so it is admin-created per environment.
 
 If `chrono-llm-public` carries `auth_method != "none"`, it must satisfy the same six clauses as any other server-chosen row: `public` + `internal` + `provider_config_id: null` + non-empty credential + active + http. Both test fixtures (`handlers/assistant_direct.rs:308-316`, `billing_integration_tests.rs:315-321`) build it from `dummy_service()` and leave `auth_method: "none"`, so in tests it takes the early return at `proxy_service.rs:736` and never reaches the gate — the same shape as the assistant row. Whether production matches is the readback below.
 
@@ -536,7 +536,7 @@ Master **plaintext** is therefore produced at exactly four sites, each immediate
 
 Cross-checked from the consumer side: every non-test `ProxyTarget` construction that carries a non-empty credential is one of those four (`:759`, `:892`, `:1035`, `:2196`), two `UserApiKey` branches (`:2275`, `:2327`), or `llm_gateway.rs:852`, which moves an already-resolved `target.credential` into a base-URL-overridden copy. `public_proxy.rs:152` and `mcp_service.rs:6973` construct empty credentials — and `mcp_service.rs:6973` is inside `#[cfg(test)]` (mod opens at `:3956`).
 
-Entry-point convergence re-confirmed post-rebase: REST UUID/slug, `_nyxid_via`, WS, and node fallback at `handlers/proxy.rs:647, 708, 869, 930, 1195, 1218`; server-chosen at `:1626`; both LLM gateway paths at `llm_gateway.rs:292, 328, 653, 726`; MCP at `mcp_service.rs:3084, 3226, 3234`; assistant surfaces at `handlers/assistant.rs:693`, `handlers/assistant_direct.rs:170`, `services/assistant_direct_agent_poc.rs:488`.
+Entry-point convergence re-confirmed post-rebase: REST UUID/slug, `_nyxid_via`, WS, and node fallback at `handlers/proxy.rs:647, 708, 869, 930, 1195, 1218`; server-chosen at `:1626`; both LLM gateway paths at `llm_gateway.rs:292, 328, 653, 726`; MCP at `mcp_service.rs:3084, 3226, 3234`; assistant surfaces at `handlers/assistant.rs:693` and `handlers/assistant_direct.rs:170`.
 
 ### 3. Nothing certified in cycle 3 was dropped or weakened by the rebase
 
