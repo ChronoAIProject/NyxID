@@ -67,6 +67,9 @@ export type ThemeColors = {
    */
   successTone: ToneTriple;
   warningTone: ToneTriple;
+  /** DESIGN.md important-context warning surface: 4% fill with a 15% border. */
+  warningContextBg: string;
+  warningContextBorder: string;
   dangerTone: ToneTriple;
   infoTone: ToneTriple;
   /** Purple-accent (identity) tone — used for `modeChip`, `connectedPill`, etc. */
@@ -147,6 +150,8 @@ export const darkColors: ThemeColors = {
   // Semantic tone triples (10% fill / 30% border / brand text).
   successTone: { bg: "rgba(52, 211, 153, 0.10)", text: SUCCESS_DARK, border: "rgba(52, 211, 153, 0.30)" },
   warningTone: { bg: "rgba(245, 158, 11, 0.10)", text: WARNING_DARK, border: "rgba(245, 158, 11, 0.30)" },
+  warningContextBg: "rgba(245, 158, 11, 0.04)",
+  warningContextBorder: "rgba(245, 158, 11, 0.15)",
   dangerTone:  { bg: "rgba(248, 113, 113, 0.10)", text: DANGER_DARK,  border: "rgba(248, 113, 113, 0.30)" },
   infoTone:    { bg: "rgba(96, 165, 250, 0.10)", text: INFO_DARK,    border: "rgba(96, 165, 250, 0.30)" },
   primaryTone: { bg: "rgba(151, 117, 250, 0.15)", text: PRIMARY_LIGHT, border: "rgba(151, 117, 250, 0.30)" },
@@ -198,6 +203,8 @@ export const lightColors: ThemeColors = {
   shadowColor: "rgba(30, 20, 60, 0.15)",
   successTone: { bg: "rgba(16, 185, 129, 0.10)", text: SUCCESS_LIGHT, border: "rgba(16, 185, 129, 0.30)" },
   warningTone: { bg: "rgba(217, 119, 6, 0.10)",  text: WARNING_LIGHT, border: "rgba(217, 119, 6, 0.30)" },
+  warningContextBg: "rgba(217, 119, 6, 0.04)",
+  warningContextBorder: "rgba(217, 119, 6, 0.15)",
   dangerTone:  { bg: "rgba(220, 38, 38, 0.08)",  text: DANGER_LIGHT,  border: "rgba(220, 38, 38, 0.25)" },
   infoTone:    { bg: "rgba(59, 130, 246, 0.10)", text: INFO_LIGHT,    border: "rgba(59, 130, 246, 0.30)" },
   primaryTone: { bg: "rgba(151, 117, 250, 0.12)", text: PRIMARY, border: "rgba(151, 117, 250, 0.30)" },

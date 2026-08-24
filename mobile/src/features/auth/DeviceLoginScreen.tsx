@@ -27,6 +27,7 @@ import { ScreenContainer } from "../../components/ScreenContainer";
 import { resolveErrorMessage } from "../../lib/api/errorMessages";
 import { mobileApi } from "../../lib/api/mobileApi";
 import type { AuthDevicePreview } from "../../lib/api/authDeviceApi";
+import { spacing } from "../../theme/designTokens";
 import { useTheme } from "../../theme/ThemeContext";
 import { DeviceCodeScanner } from "./DeviceCodeScanner";
 import { createDeviceLoginStyles } from "./deviceLoginStyles";
@@ -58,16 +59,22 @@ function formatRemaining(seconds: number): string {
 function DetailRow({
   label,
   value,
+  mono = false,
   styles,
 }: {
   label: string;
   value: string;
+  mono?: boolean;
   styles: ReturnType<typeof createDeviceLoginStyles>;
 }) {
   return (
     <View style={styles.detailRow}>
       <Text style={styles.detailLabel}>{label}</Text>
-      <Text style={styles.detailValue}>{value}</Text>
+      <Text
+        style={[styles.detailValue, mono ? styles.detailValueMono : null]}
+      >
+        {value}
+      </Text>
     </View>
   );
 }
@@ -339,17 +346,6 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     }
   };
 
-  const resetRequest = () => {
-    setUserCode("");
-    setConfirmedCode(null);
-    setPreview(null);
-    setTerminal(null);
-    setErrorMessage(null);
-    setClockMs(Date.now());
-    setManualEntryVisible(false);
-    setIsScanning(true);
-  };
-
   if (isScanning) {
     return (
       <>
@@ -389,6 +385,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     : 0;
   const isExpired = Boolean(preview) && secondsRemaining === 0;
   const isPending = isPreviewing || decisionPending !== null;
+  const loginCode = formatAuthDeviceUserCode(confirmedCode ?? userCode);
 
   if (terminal) {
     const approved = terminal === "approved";
@@ -402,18 +399,19 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
             ]}
           >
             {approved ? (
-              <ShieldCheck size={36} color={colors.success} />
+              <ShieldCheck
+                size={spacing.huge * 2 + spacing.xs}
+                color={colors.success}
+              />
             ) : (
-              <ShieldX size={36} color={colors.danger} />
+              <ShieldX
+                size={spacing.huge * 2 + spacing.xs}
+                color={colors.danger}
+              />
             )}
           </View>
           <Text style={styles.terminalTitle}>
             {approved ? "Login approved" : "Request denied"}
-          </Text>
-          <Text style={styles.terminalBody}>
-            {approved
-              ? "The requesting device can now complete sign-in."
-              : "The requesting device cannot use this login request."}
           </Text>
           <PrimaryButton label="Done" onPress={handleBack} />
         </View>
@@ -507,7 +505,12 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
           ) : (
             <View style={styles.previewSection}>
               <View style={styles.warningBanner}>
-                <TriangleAlert size={20} color={colors.warningTone.text} />
+                <View style={styles.warningIcon}>
+                  <TriangleAlert
+                    size={spacing.xxxl}
+                    color={colors.warningTone.text}
+                  />
+                </View>
                 <Text style={styles.warningText}>
                   Reject this request if you do not recognize the device, IP
                   address, or time.
@@ -515,6 +518,14 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
               </View>
 
               <View style={styles.detailPanel}>
+                {loginCode ? (
+                  <DetailRow
+                    label="Login code"
+                    value={loginCode}
+                    mono
+                    styles={styles}
+                  />
+                ) : null}
                 <DetailRow
                   label="Reported device"
                   value={preview.client_label ?? "Not provided"}
@@ -574,13 +585,6 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   />
                 </View>
               )}
-
-              <PrimaryButton
-                label="Use another code"
-                kind="ghost"
-                disabled={isPending}
-                onPress={resetRequest}
-              />
             </View>
           )}
 
