@@ -6,31 +6,15 @@ import {
   getAssistantIdentityUserId,
   subscribeAssistantIdentity,
 } from "@/lib/assistant/identity";
-import { drainSseBuffer, flushSseBuffer } from "@/lib/assistant/sse";
-import {
-  applyTurnEvent,
-  EMPTY_TURN_STATE,
-  toTerminalBlock,
-} from "@/lib/assistant/stream";
+import { DIRECT_CONVERSATION_PREFIX } from "@/lib/assistant/conversation-ids";
 import {
   isNyxidErrorEnvelope,
   parseJsonErrorResponse,
 } from "@/lib/assistant/direct-http-error";
 import { useAuthStore } from "@/stores/auth-store";
-import type {
-  AssistantMessage,
-  AssistantTransport,
-  Conversation,
-  ConversationHistory,
-  ProjectionReconcileOutcome,
-  TurnEvent,
-  TurnHandle,
-  TurnReducerState,
-} from "@/types/assistant";
-import { isTurnActive } from "@/types/assistant";
+import type { Conversation } from "@/types/assistant";
 
 const DIRECT_COMPLETIONS_URL = "/api/v1/assistant/direct/completions";
-export const DIRECT_CONVERSATION_PREFIX = "direct-";
 const DEFAULT_DIRECT_MODEL = "gpt-5.5";
 const MAX_MESSAGE_CHARS = 32_768;
 const MAX_OUTGOING_MESSAGES = 63;
@@ -40,6 +24,224 @@ const TITLE_CHARS = 40;
 const FIRST_BYTE_TIMEOUT_MS = 30_000;
 const IDLE_TIMEOUT_MS = 120_000;
 const UTF8_ENCODER = new TextEncoder();
+
+export type DirectTurnStatus =
+  | "running"
+  | "waiting"
+  | "blocked"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export interface DirectTextBlock {
+  readonly type: "text";
+  readonly block_id: string;
+  readonly text: string;
+}
+
+export interface DirectAssistantMessage {
+  readonly id: string;
+  readonly role: "user" | "assistant";
+  readonly schema_version: 1;
+  readonly blocks: DirectTextBlock[];
+  readonly created_at: string;
+}
+
+interface DirectActiveTurn {
+  readonly turnId: string | null;
+  readonly status: DirectTurnStatus;
+  readonly error: { readonly code: string; readonly message: string } | null;
+}
+
+interface DirectTurnState {
+  readonly messages: DirectAssistantMessage[];
+  readonly activeTurn: DirectActiveTurn | null;
+  readonly lastCursor: number;
+}
+
+interface DirectTurnEventBase {
+  readonly cursor: number;
+}
+
+export type DirectTurnEvent =
+  | (DirectTurnEventBase & {
+      readonly event: "turn.status";
+      readonly turn_id: string;
+      readonly status: DirectTurnStatus;
+    })
+  | (DirectTurnEventBase & {
+      readonly event: "message.started";
+      readonly message_id: string;
+      readonly role: "assistant";
+    })
+  | (DirectTurnEventBase & {
+      readonly event: "block.started";
+      readonly message_id: string;
+      readonly block_id: string;
+      readonly index: number;
+      readonly block: DirectTextBlock;
+    })
+  | (DirectTurnEventBase & {
+      readonly event: "block.delta";
+      readonly block_id: string;
+      readonly text: string;
+    })
+  | (DirectTurnEventBase & {
+      readonly event: "block.completed";
+      readonly block_id: string;
+      readonly block: DirectTextBlock;
+    })
+  | (DirectTurnEventBase & {
+      readonly event: "message.completed";
+      readonly message_id: string;
+    })
+  | (DirectTurnEventBase & {
+      readonly event: "turn.completed";
+      readonly turn_id: string | null;
+      readonly status: "blocked" | "completed" | "failed" | "cancelled";
+      readonly error: {
+        readonly code: string;
+        readonly message: string;
+      } | null;
+    });
+
+export interface DirectTurnHandle {
+  readonly turnId: string;
+  cancel(): void;
+}
+
+export interface DirectConversationHistory {
+  readonly conversation: Conversation;
+  readonly messages: DirectAssistantMessage[];
+  readonly activeTurn: DirectActiveTurn | null;
+  readonly has_more: false;
+}
+
+const EMPTY_DIRECT_TURN_STATE: DirectTurnState = {
+  messages: [],
+  activeTurn: null,
+  lastCursor: 0,
+};
+
+function isDirectTurnActive(status: DirectTurnStatus | undefined): boolean {
+  return status === "running" || status === "waiting";
+}
+
+function applyDirectTurnEvent(
+  state: DirectTurnState,
+  event: DirectTurnEvent,
+  receivedAt = new Date().toISOString(),
+): DirectTurnState {
+  if (event.cursor <= state.lastCursor) return state;
+  const nextBase = { ...state, lastCursor: event.cursor };
+
+  switch (event.event) {
+    case "turn.status":
+      return {
+        ...nextBase,
+        activeTurn: {
+          turnId: event.turn_id,
+          status: event.status,
+          error: null,
+        },
+      };
+    case "message.started":
+      if (state.messages.some((message) => message.id === event.message_id)) {
+        return nextBase;
+      }
+      return {
+        ...nextBase,
+        messages: [
+          ...state.messages,
+          {
+            id: event.message_id,
+            role: event.role,
+            schema_version: 1,
+            blocks: [],
+            created_at: receivedAt,
+          },
+        ],
+      };
+    case "block.started":
+      return {
+        ...nextBase,
+        messages: state.messages.map((message) => {
+          if (message.id !== event.message_id) return message;
+          const blocks = [...message.blocks];
+          const existingIndex = blocks.findIndex(
+            (block) => block.block_id === event.block_id,
+          );
+          if (existingIndex >= 0) blocks[existingIndex] = event.block;
+          else blocks.splice(Math.min(event.index, blocks.length), 0, event.block);
+          return { ...message, blocks };
+        }),
+      };
+    case "block.delta":
+      return {
+        ...nextBase,
+        messages: state.messages.map((message) => ({
+          ...message,
+          blocks: message.blocks.map((block) =>
+            block.block_id === event.block_id
+              ? { ...block, text: block.text + event.text }
+              : block,
+          ),
+        })),
+      };
+    case "block.completed":
+      return {
+        ...nextBase,
+        messages: state.messages.map((message) => ({
+          ...message,
+          blocks: message.blocks.map((block) =>
+            block.block_id === event.block_id ? event.block : block,
+          ),
+        })),
+      };
+    case "message.completed":
+      return nextBase;
+    case "turn.completed":
+      return {
+        ...nextBase,
+        activeTurn: {
+          turnId: event.turn_id,
+          status: event.status,
+          error: event.error,
+        },
+      };
+  }
+}
+
+function drainDirectSseBuffer(buffer: string): {
+  readonly payloads: string[];
+  readonly rest: string;
+} {
+  let working = buffer;
+  let heldCr = "";
+  if (working.endsWith("\r")) {
+    heldCr = "\r";
+    working = working.slice(0, -1);
+  }
+  const segments = working
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split("\n\n");
+  const rest = segments.pop() ?? "";
+  const payloads = segments
+    .map((segment) =>
+      segment
+        .split("\n")
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice("data:".length).trimStart())
+        .join("\n"),
+    )
+    .filter(Boolean);
+  return { payloads, rest: rest + heldCr };
+}
+
+function flushDirectSseBuffer(rest: string): string[] {
+  return rest.trim() ? drainDirectSseBuffer(`${rest}\n\n`).payloads : [];
+}
 
 interface CompletionChunk {
   readonly id?: string;
@@ -82,7 +284,7 @@ const DEFAULT_DIRECT_SETTINGS: DirectConversationSettings = {
 
 interface StoredConversation {
   conversation: Conversation;
-  turnState: TurnReducerState;
+  turnState: DirectTurnState;
   settings: DirectConversationSettings;
   modelSelected: boolean;
 }
@@ -90,7 +292,7 @@ interface StoredConversation {
 interface RunningTurn {
   readonly turnId: string;
   readonly controller: AbortController;
-  readonly onEvent: (event: TurnEvent) => void;
+  readonly onEvent: (event: DirectTurnEvent) => void;
   cursor: number;
   currentMessageId: string | null;
   currentBlockId: string | null;
@@ -129,7 +331,7 @@ function newId(prefix: string): string {
 }
 
 function toDirectMessages(
-  messages: readonly AssistantMessage[],
+  messages: readonly DirectAssistantMessage[],
 ): DirectMessage[] {
   const payload: DirectMessage[] = [];
   for (const message of messages) {
@@ -145,7 +347,7 @@ function toDirectMessages(
 }
 
 function toBoundedDirectMessages(
-  messages: readonly AssistantMessage[],
+  messages: readonly DirectAssistantMessage[],
 ): DirectMessage[] {
   const transcript = toDirectMessages(messages);
   const newestFirst: DirectMessage[] = [];
@@ -180,10 +382,11 @@ function unavailableMessage(status: number): string {
   return "The direct model stream could not be started.";
 }
 
-export class DirectAssistantTransport implements AssistantTransport {
+export class DirectAssistantTransport {
   private readonly conversations = new Map<string, StoredConversation>();
   private readonly running = new Map<string, RunningTurn>();
   private readonly settingsListeners = new Set<() => void>();
+  private readonly stateListeners = new Set<() => void>();
   private readonly fetchFn: typeof fetch;
   private readonly firstByteTimeoutMs: number;
   private readonly idleTimeoutMs: number;
@@ -193,6 +396,7 @@ export class DirectAssistantTransport implements AssistantTransport {
     ...DEFAULT_DIRECT_SETTINGS,
   };
   private draftModelSelected = false;
+  private revision = 0;
 
   constructor(options: DirectTransportOptions = {}) {
     // Wrap rather than alias the global: a detached `fetch` reference
@@ -218,6 +422,7 @@ export class DirectAssistantTransport implements AssistantTransport {
     this.draftModelSelected = false;
     this.ownerUserId = userId;
     this.notifySettingsListeners();
+    this.notifyStateListeners();
   }
 
   getOwnerUserId(): string | null {
@@ -234,6 +439,39 @@ export class DirectAssistantTransport implements AssistantTransport {
     this.settingsListeners.add(listener);
     return () => this.settingsListeners.delete(listener);
   };
+
+  readonly subscribeState = (listener: () => void): (() => void) => {
+    this.stateListeners.add(listener);
+    return () => this.stateListeners.delete(listener);
+  };
+
+  readonly getRevision = (): number => {
+    this.ensureOwner();
+    return this.revision;
+  };
+
+  getConversationsSnapshot(): readonly Conversation[] {
+    this.ensureOwner();
+    return [...this.conversations.values()]
+      .map((stored) => stored.conversation)
+      .sort((left, right) =>
+        right.last_message_at.localeCompare(left.last_message_at),
+      );
+  }
+
+  getHistorySnapshot(
+    conversationId: string,
+  ): DirectConversationHistory | null {
+    this.ensureOwner();
+    const stored = this.conversations.get(conversationId);
+    if (!stored) return null;
+    return {
+      conversation: stored.conversation,
+      messages: stored.turnState.messages,
+      activeTurn: stored.turnState.activeTurn,
+      has_more: false,
+    };
+  }
 
   canUpdateSettings(conversationId?: string): boolean {
     this.ensureOwner();
@@ -283,12 +521,7 @@ export class DirectAssistantTransport implements AssistantTransport {
   }
 
   async listConversations(): Promise<Conversation[]> {
-    this.ensureOwner();
-    return [...this.conversations.values()]
-      .map((stored) => stored.conversation)
-      .sort((left, right) =>
-        right.last_message_at.localeCompare(left.last_message_at),
-      );
+    return [...this.getConversationsSnapshot()];
   }
 
   async createConversation(): Promise<Conversation> {
@@ -303,37 +536,20 @@ export class DirectAssistantTransport implements AssistantTransport {
     };
     this.conversations.set(conversation.id, {
       conversation,
-      turnState: EMPTY_TURN_STATE,
+      turnState: EMPTY_DIRECT_TURN_STATE,
       settings: { ...this.draftSettings },
       modelSelected: this.draftModelSelected,
     });
     this.draftSettings = { ...DEFAULT_DIRECT_SETTINGS };
     this.draftModelSelected = false;
+    this.notifyStateListeners();
     return conversation;
   }
 
-  async getHistory(conversationId: string): Promise<ConversationHistory> {
-    this.ensureOwner();
-    const stored = this.conversations.get(conversationId);
-    if (!stored) throw new AssistantConversationNotFoundError();
-    return {
-      conversation: stored.conversation,
-      messages: stored.turnState.messages,
-      has_more: false,
-    };
-  }
-
-  async reconcileProjection(
-    conversationId: string,
-  ): Promise<ProjectionReconcileOutcome> {
-    this.ensureOwner();
-    return this.conversations.has(conversationId)
-      ? { status: "materialized", conversationId }
-      : { status: "absent", conversationId };
-  }
-
-  releaseProjectionWaiter(conversationId: string): void {
-    void conversationId;
+  async getHistory(conversationId: string): Promise<DirectConversationHistory> {
+    const history = this.getHistorySnapshot(conversationId);
+    if (!history) throw new AssistantConversationNotFoundError();
+    return history;
   }
 
   async deleteConversation(conversationId: string): Promise<void> {
@@ -342,19 +558,20 @@ export class DirectAssistantTransport implements AssistantTransport {
     if (!this.conversations.delete(conversationId)) {
       throw new AssistantConversationNotFoundError();
     }
+    this.notifyStateListeners();
   }
 
   sendMessage(
     conversationId: string,
     content: string,
-    onEvent: (event: TurnEvent) => void,
-  ): TurnHandle {
+    onEvent: (event: DirectTurnEvent) => void,
+  ): DirectTurnHandle {
     this.ensureSignedInOwner();
     const stored = this.conversations.get(conversationId);
     if (!stored) throw new AssistantConversationNotFoundError();
     if (
       this.running.has(conversationId) ||
-      isTurnActive(stored.turnState.activeTurn?.status)
+      isDirectTurnActive(stored.turnState.activeTurn?.status)
     ) {
       throw new AssistantTurnActiveError();
     }
@@ -444,53 +661,6 @@ export class DirectAssistantTransport implements AssistantTransport {
     if (run) this.cancelRun(conversationId, run);
   }
 
-  // Task/plan/input controls belong to the Aevatar typed actor. Direct chat is
-  // a stateless completion stream with no actor-owned task to stop, steer, or
-  // step through, so these reject rather than silently doing nothing.
-  async stopTask(): Promise<void> {
-    throw new Error("Task controls are not available in direct model chat.");
-  }
-
-  async steerTask(): Promise<void> {
-    throw new Error("Task controls are not available in direct model chat.");
-  }
-
-  async retryStep(): Promise<void> {
-    throw new Error("Task controls are not available in direct model chat.");
-  }
-
-  async skipStep(): Promise<void> {
-    throw new Error("Task controls are not available in direct model chat.");
-  }
-
-  async resolvePlan(): Promise<void> {
-    throw new Error("Plans are not available in direct model chat.");
-  }
-
-  async decideApproval(): Promise<TurnHandle | null> {
-    throw new Error("Approvals are not available in direct model chat.");
-  }
-
-  async resolveInput(): Promise<TurnHandle | null> {
-    throw new Error("Input requests are not available in direct model chat.");
-  }
-
-  setActionCardInProgress(): void {
-    throw new Error("Actions are not available in direct model chat.");
-  }
-
-  blockActionCard(): void {
-    throw new Error("Actions are not available in direct model chat.");
-  }
-
-  continueActions(): TurnHandle | null {
-    throw new Error("Actions are not available in direct model chat.");
-  }
-
-  wakeActions(): TurnHandle {
-    throw new Error("Actions are not available in direct model chat.");
-  }
-
   private ensureOwner(): void {
     const current = getAssistantIdentityUserId();
     if (current !== this.ownerUserId) this.resetForIdentity(current);
@@ -523,11 +693,17 @@ export class DirectAssistantTransport implements AssistantTransport {
       llm_model: stored.settings.model,
     };
     this.notifySettingsListeners();
+    this.notifyStateListeners();
     return true;
   }
 
   private notifySettingsListeners(): void {
     for (const listener of this.settingsListeners) listener();
+  }
+
+  private notifyStateListeners(): void {
+    this.revision += 1;
+    for (const listener of this.stateListeners) listener();
   }
 
   private nextCursor(run: RunningTurn): number {
@@ -538,12 +714,12 @@ export class DirectAssistantTransport implements AssistantTransport {
   private emit(
     conversationId: string,
     run: RunningTurn,
-    event: TurnEvent,
+    event: DirectTurnEvent,
   ): void {
     if (run.discarded || run.drained) return;
     const stored = this.conversations.get(conversationId);
     if (stored) {
-      stored.turnState = applyTurnEvent(stored.turnState, event);
+      stored.turnState = applyDirectTurnEvent(stored.turnState, event);
       stored.conversation = {
         ...stored.conversation,
         last_message_at: new Date(this.now()).toISOString(),
@@ -551,6 +727,7 @@ export class DirectAssistantTransport implements AssistantTransport {
     }
     if (event.event === "turn.completed") run.terminalEmitted = true;
     run.onEvent(event);
+    this.notifyStateListeners();
   }
 
   private async withTimeout<T>(
@@ -653,7 +830,7 @@ export class DirectAssistantTransport implements AssistantTransport {
         firstRead = false;
         if (result.done) break;
         buffer += decoder.decode(result.value, { stream: true });
-        const drained = drainSseBuffer(buffer);
+        const drained = drainDirectSseBuffer(buffer);
         buffer = drained.rest;
         for (const payload of drained.payloads) {
           if (this.handlePayload(conversationId, run, payload)) break;
@@ -671,7 +848,7 @@ export class DirectAssistantTransport implements AssistantTransport {
 
       if (!run.sawDone && !run.sawUpstreamError) {
         buffer += decoder.decode();
-        for (const payload of flushSseBuffer(buffer)) {
+        for (const payload of flushDirectSseBuffer(buffer)) {
           this.handlePayload(conversationId, run, payload);
         }
       }
@@ -843,7 +1020,7 @@ export class DirectAssistantTransport implements AssistantTransport {
             cursor: this.nextCursor(run),
             event: "block.completed",
             block_id: run.currentBlockId,
-            block: toTerminalBlock(openBlock),
+            block: openBlock,
           });
         }
         if (run.currentMessageId) {

@@ -1,7 +1,6 @@
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { decodeTaskPlan } from "@/lib/assistant/task-plan";
-import type { TaskPlanContentBlock } from "@/types/assistant";
+import { decodeChatTaskPlan } from "@/lib/assistant/chat-task-plan";
 import { TaskPlanCard } from "./task-plan-card";
 
 function block(
@@ -11,13 +10,13 @@ function block(
     status: "satisfied",
     reason: "Read-only steps run automatically.",
   },
-): TaskPlanContentBlock {
+) {
   return {
-    type: "task_plan",
+    type: "task_plan" as const,
     block_id: "task-plan-alpha",
     state_version: 17,
     progress_sequence: 9,
-    plan: decodeTaskPlan({
+    plan: decodeChatTaskPlan({
       schemaVersion: 4,
       actorId: "nyxid-chat-actor-alpha",
       taskId: "task-alpha",

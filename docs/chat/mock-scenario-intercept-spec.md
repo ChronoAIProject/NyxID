@@ -1,5 +1,8 @@
 # Assistant Mock Scenario Interception — Implementation Spec
 
+> Superseded by the HTTP fixture world (this PR). This document is retained as
+> historical design context; it no longer describes the production test seam.
+
 Status: **IMPLEMENTED (v2)** — code and test commits `4fe63f71..1a7f6f6b`
 (2026-08-04).
 Author: Claude (Fable). Adversarial review: CodexSol — 14/14 findings accepted

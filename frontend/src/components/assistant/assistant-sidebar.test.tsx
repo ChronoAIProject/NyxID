@@ -15,8 +15,8 @@ import type { Conversation } from "@/types/assistant";
 import type { User } from "@/types/api";
 import { AssistantSidebar } from "./assistant-sidebar";
 
-vi.mock("@/hooks/use-assistant", () => ({
-  useWorkspaceCounts: () => ({
+vi.mock("@/hooks/use-assistant-workspace", () => ({
+  useAssistantWorkspaceCounts: () => ({
     data: { artifacts: 0, pendingApprovals: 0 },
   }),
 }));

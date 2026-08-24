@@ -1,7 +1,6 @@
 # Assistant Stream Protocol
 
-Last verified against Aevatar `0a86713671fcf551dc19ad86b1b6aa8ae6cb980b` and the
-production typed-chat probe (2026-08-11).
+Last verified against Aevatar console and SDK commit `e7ba2e6eb` (2026-08-25).
 
 The Assistant consumes Aevatar AG-UI Server-Sent Events only from the typed
 `NyxIdChat` route. The stream is an ordered actor-observation protocol, not an
@@ -20,6 +19,12 @@ removed and multiple values are joined with a newline before JSON parsing.
 Comments and non-data fields do not contribute. `data: [DONE]`, malformed JSON,
 scalars, and arrays are ignored as individual frames. A malformed frame does not
 poison later valid frames.
+
+`SsePayloadDecoder` owns framing. `normalizeBackendSseFrame` converts backend
+oneof/camel-case frames to AG-UI events, `RuntimeEventAccumulator` builds the
+visible message, and the actor-state reducer independently applies committed
+`nyxid.*` facts. The transcript and actor projection therefore share the same
+wire observation but never infer state from each other.
 
 Every proxy in front of `/api/v1/assistant/**` must disable buffering for
 `text/event-stream`. NyxID marks SSE responses with `X-Accel-Buffering: no`.
@@ -41,7 +46,8 @@ custom frame to one authoritative ActorProjection reducer:
 - `nyxid.continuation.changed`;
 - `nyxid.input.request` and `nyxid.input.changed`;
 - `nyxid.approval.request` and `nyxid.approval.changed`; and
-- `nyxid.action.request`.
+- `nyxid.action.request`; and
+- `nyxid.authorization.required`.
 
 Task snapshots and state reads use one TaskPlan decoder and one step decoder.
 The reducer never infers task, plan, request, actor, turn, or operation identity
@@ -57,7 +63,8 @@ browser-safe integers. A stale, fractional, unsafe, or identity-conflicting
 frame cannot advance the projection.
 
 `RUN_FINISHED` accepts absent/`completed` or `blocked` status. `RUN_ERROR`
-records a bounded, sanitised failure and `RUN_STOPPED` records cancellation.
+records a bounded, sanitised failure. `RUN_STOPPED` and a local reader abort
+settle the NyxID session as `stopped`, which is intentionally quiet in the UI.
 Exactly one terminal is permitted. Nonterminal typed data after a terminal is a
 protocol error; a keepalive is harmless but never proves execution progress.
 
@@ -68,15 +75,20 @@ normal assistant text. A content delta without an open text block is ignored;
 terminal settlement closes an open block.
 
 `TOOL_CALL_START` and `TOOL_CALL_END` contribute a safe activity summary.
-`USAGE` is metadata only. `MEDIA_CONTENT` is an artifact block, subject to the
-existing inline-size limit. Reasoning, raw provider envelopes, prompts, kernel
+`USAGE` is metadata only. The NyxID `mediaContent` oneof normalizes to
+`MEDIA_CONTENT` and appends an artifact block. Inline media is capped at
+8,000,000 characters. An oversize item becomes a bounded notice rather than
+being retained. History does not currently carry artifacts, so live media is
+not reconstructed after reload. Reasoning, raw provider envelopes, prompts, kernel
 state, delegated credentials, Authorization headers, secret action parameters,
 and unknown opaque telemetry are never rendered or retained in the transcript.
 
 The actor projection, not the text transcript, owns pending input, approval,
-action, stop/steer control, task status, and continuation state. Existing
-TurnEvent/card reducers and history reconciliation may render the projection but
-must not independently mutate or replace it for a typed conversation.
+action, stop/steer control, task status, authorization recovery, and
+continuation state. A typed authorization blocker becomes a connect card. A
+strict readiness-shaped `TOOL_CALL_END` result may do the same; arbitrary tool
+results never do. History rendering must not independently mutate or replace
+the actor projection.
 
 ## Current-state convergence
 
@@ -107,19 +119,28 @@ may update visible persisted text but cannot overwrite ActorProjection facts. A
 reload test must cover a mixed transcript plus pending typed input, approval, or
 action and demonstrate that the actor-owned card remains actionable.
 
-## Delivery retry and timeout
+The client does not perform an automatic transcript reconciliation after every
+terminal. The local runtime message remains authoritative until a later route
+selection or reload reads history, matching the console orchestration.
 
-Typed `text` and `action.continue` use `clientRequestId` as the upstream
-`Idempotency-Key`. They allow one replay after a network/header failure, an HTTP
-`408`, `425`, `429`, `500`, `502`, `503`, or `504`, or a retryable pre-settlement
-stream result. A cancellation, terminal settlement, nonretryable HTTP response,
-or protocol failure forbids replay. No failure class retries through Workflow.
+## Delivery deadlines and watchdog
 
-Every meaningful frame rearms the 120-second progress watchdog; keepalives do
-not. On expiry the transport makes a best-effort typed `task.stop` when it has a
+Typed commands use `clientRequestId` as the upstream `Idempotency-Key`. The
+browser does not automatically replay a failed command. An HTTP failure before
+the stream starts rejects the send and restores the prior composer state.
+
+A 30-second start deadline is armed before `POST /assistant/chat`. If neither
+the response nor a meaningful frame arrives, the session gets the visible error
+`The assistant did not start replying in time. Try again.` and the composer is
+freed without duplicating the submitted text.
+
+After the first meaningful frame, every meaningful frame rearms the 120-second
+progress watchdog; keepalives do not. On expiry the orchestrator makes a
+best-effort typed `task.stop` when it has a
 valid actor and turn identity, marks the activity failed, and aborts the local
-stream. A waiting input or approval suspends the watchdog because the next
-action belongs to the user.
+stream. Local Stop is never state-version-fenced; it always aborts the reader.
+The optional server `task.stop` is sent only when a positive current state
+version is available.
 
 ## Workflow exclusion
 

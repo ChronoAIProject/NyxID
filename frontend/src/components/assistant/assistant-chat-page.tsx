@@ -2,6 +2,7 @@ import {
   lazy,
   Suspense,
   useCallback,
+  useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
@@ -15,9 +16,16 @@ import { AssistantWireLogAction } from "@/components/assistant/assistant-wire-lo
 import { ChatActorControls } from "@/components/assistant/chat-actor-controls";
 import { ChatComposer } from "@/components/assistant/chat-composer";
 import { ChatMessageList } from "@/components/assistant/chat-message";
+import {
+  DirectChatControls,
+  DirectModeBanner,
+  DIRECT_MODE_COPY,
+} from "@/components/assistant/direct-chat-controls";
 import { useAssistantChat } from "@/hooks/use-assistant-chat";
-import { isLegacyConversationId } from "@/lib/assistant/aevatar-transport";
+import { useDirectAssistantChat } from "@/hooks/use-assistant-direct";
+import { isLegacyConversationId } from "@/lib/assistant/conversation-ids";
 import { markChatActivity } from "@/lib/assistant/connect-watch";
+import { directAssistantTransport } from "@/lib/assistant/direct-transport";
 import { parseAssistantSearch } from "@/lib/assistant/search";
 import { useAuthStore } from "@/stores/auth-store";
 import type { Conversation } from "@/types/assistant";
@@ -261,6 +269,161 @@ export function AssistantChatPage() {
             ownerUserId={user?.id ?? null}
             draftKey={draftKey}
             focusRequest={composerFocusRequest}
+            onSend={send}
+            onStop={chat.stop}
+          />
+        </div>
+      </div>
+    </AssistantShell>
+  );
+}
+
+export function DirectAssistantChatPage() {
+  const navigate = useNavigate();
+  const user = useAuthStore((state) => state.user);
+  const selectedConversationId = useRouterState({
+    select: (state) =>
+      parseAssistantSearch(state.location.search as Record<string, unknown>).c,
+  });
+  const drafting = useRouterState({
+    select: (state) =>
+      parseAssistantSearch(state.location.search as Record<string, unknown>)
+        .draft === true,
+  });
+  const selectedId = drafting ? undefined : selectedConversationId;
+  const composerRef = useRef<HTMLDivElement>(null);
+  const [composerHeight, setComposerHeight] = useState(0);
+  const [composerFocusRequest, setComposerFocusRequest] = useState(0);
+
+  const adoptConversation = useCallback(
+    (conversationId: string) => {
+      void navigate({
+        to: "/assistant" as never,
+        search: { c: conversationId } as never,
+        replace: true,
+      });
+    },
+    [navigate],
+  );
+  const chat = useDirectAssistantChat({
+    selectedConversationId: selectedId,
+    onConversationAdopted: adoptConversation,
+  });
+
+  useLayoutEffect(() => {
+    const element = composerRef.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver((entries) => {
+      setComposerHeight(entries[0]?.contentRect.height ?? 0);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!chat.isMissing) return;
+    void navigate({
+      to: "/assistant" as never,
+      search: { draft: true } as never,
+      replace: true,
+    });
+  }, [chat.isMissing, navigate]);
+
+  function selectConversation(conversationId: string) {
+    setComposerFocusRequest((value) => value + 1);
+    void navigate({
+      to: "/assistant" as never,
+      search: { c: conversationId } as never,
+    });
+  }
+
+  function createNewChat() {
+    setComposerFocusRequest((value) => value + 1);
+    void navigate({
+      to: "/assistant" as never,
+      search: { draft: true } as never,
+    });
+  }
+
+  async function deleteConversation(conversationId: string) {
+    if (
+      directAssistantTransport.getHistorySnapshot(conversationId)?.activeTurn
+        ?.status === "running"
+    ) {
+      return;
+    }
+    try {
+      await chat.deleteConversation(conversationId);
+      if (selectedId === conversationId) createNewChat();
+    } catch (error) {
+      toast.error("Could not delete the chat", {
+        description:
+          error instanceof Error
+            ? error.message
+            : "The direct chat store did not respond. Try again.",
+      });
+      throw error;
+    }
+  }
+
+  async function send(content: string) {
+    markChatActivity();
+    try {
+      await chat.send(content);
+    } catch (error) {
+      toast.error("The message was not delivered", {
+        description:
+          error instanceof Error
+            ? error.message
+            : "The direct model did not respond. Try again.",
+      });
+      throw error;
+    }
+  }
+
+  const draftKey = chat.session.conversationId
+    ? `conv:${chat.session.conversationId}`
+    : "screen:direct:assistant";
+  const sidebar = (
+    <AssistantSidebar
+      conversations={chat.conversations}
+      activeConversationId={chat.session.conversationId}
+      onNewChat={createNewChat}
+      onSelect={selectConversation}
+      onDelete={deleteConversation}
+    />
+  );
+
+  return (
+    <AssistantShell
+      title={chat.session.title}
+      sidebar={sidebar}
+      headerActions={
+        <AssistantWireLogAction
+          activeConversationId={chat.session.conversationId ?? null}
+        />
+      }
+    >
+      <div className="relative flex h-full min-h-0 flex-col bg-background">
+        <DirectModeBanner />
+        <ChatMessageList
+          session={chat.session}
+          bottomInset={composerHeight}
+          emptyDescription={DIRECT_MODE_COPY}
+        />
+        <div ref={composerRef} className="absolute inset-x-0 bottom-0 z-10">
+          <ChatComposer
+            active={chat.isStreaming}
+            sending={chat.isStreaming}
+            ownerUserId={user?.id ?? null}
+            draftKey={draftKey}
+            focusRequest={composerFocusRequest}
+            controls={
+              <DirectChatControls
+                conversationId={chat.session.conversationId}
+                disabled={chat.isStreaming}
+              />
+            }
             onSend={send}
             onStop={chat.stop}
           />

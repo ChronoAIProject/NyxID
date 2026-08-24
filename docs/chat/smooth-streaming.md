@@ -2,6 +2,12 @@
 
 Last verified against the phase-2 fix commit (2026-08-07).
 
+The presentation seam now receives the canonical accumulated content string
+from `RuntimeEventAccumulator` through `ChatMessage` and `TextBlock`. Smooth
+reveal remains strictly above that string: it never parses SSE, reduces actor
+facts, owns terminal state, or changes persisted/history content. Direct chat
+adapts its accumulated text to the same `ChatMessage`/`TextBlock` surface.
+
 This document is the single specification for how streamed assistant text is
 revealed and rendered. Section 2 describes the baseline shipped in PR #1390;
 sections 4–5 describe the implemented boundary-safety and adaptive-spread

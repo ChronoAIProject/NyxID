@@ -34,7 +34,7 @@ import type {
   ChatSessionState,
   ConversationMeta,
 } from "@/lib/assistant/chat-types";
-import { isLegacyConversationId } from "@/lib/assistant/aevatar-transport";
+import { isLegacyConversationId } from "@/lib/assistant/conversation-ids";
 import { useAssistantChatControls } from "@/hooks/use-assistant-chat-controls";
 
 export const ACTIVE_STATE_REFRESH_DELAYS_MS = [250, 500, 1_000, 2_000] as const;

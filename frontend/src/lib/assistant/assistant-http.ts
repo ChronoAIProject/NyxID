@@ -15,6 +15,7 @@ const DEBUG_ID_HEADER = "X-NyxID-Debug-Upstream-Id";
 const DEBUG_LOG_HEADER = "X-NyxID-Debug-Upstream-Log";
 const MAX_CAPTURE_BYTES = 4 * 1024 * 1024;
 const DEAD_SESSION_CODES = new Set([1001, 2000, 2001, 2002]);
+const responseWireLogExchangeIds = new WeakMap<Response, string>();
 
 type AssistantMethod = "GET" | "POST" | "DELETE";
 
@@ -42,7 +43,10 @@ declare global {
 function isMockMode(): boolean {
   if (import.meta.env.MODE === "test") return true;
   if (!import.meta.env.DEV || typeof window === "undefined") return false;
-  return new URLSearchParams(window.location.search).get("mock") === "1";
+  return (
+    globalThis.__nyxidAssistantHttpMock !== undefined ||
+    new URLSearchParams(window.location.search).get("mock") === "1"
+  );
 }
 
 function conversationIdFromEndpoint(endpoint: string): string | null {
@@ -90,6 +94,7 @@ async function captureResponse(
     ? captureAssistantWireLogId(wireLogId, meta)
     : captureAssistantWireLogHeader(response.headers.get(DEBUG_LOG_HEADER), meta);
   if (!exchangeId) return;
+  responseWireLogExchangeIds.set(response, exchangeId);
 
   const clone = response.clone();
   if (!clone.body) {
@@ -126,6 +131,17 @@ async function captureResponse(
   } finally {
     reader.releaseLock();
   }
+}
+
+export function assignAssistantResponseConversation(
+  response: Response,
+  conversationId: string,
+): void {
+  const exchangeId = responseWireLogExchangeIds.get(response);
+  if (!exchangeId) return;
+  useAssistantWireLogStore
+    .getState()
+    .assignConversation(exchangeId, conversationId);
 }
 
 function fallbackError(status: number): ApiErrorResponse {

@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { assistantWireLogRecordSchema } from "@/schemas/assistant-wire-log";
 import type { AssistantWireLogRecord } from "@/schemas/assistant-wire-log";
 import { ApiError } from "@/lib/api-client";
-import { assistantApi } from "@/lib/assistant/aevatar-transport";
+import { assistantJson } from "@/lib/assistant/assistant-http";
 
 export type AssistantWireLogResult =
   | {
@@ -15,7 +15,7 @@ async function fetchAssistantWireLog(
   wireLogId: string,
 ): Promise<AssistantWireLogResult> {
   try {
-    const response = await assistantApi.get<unknown>(
+    const response = await assistantJson<unknown>(
       `/assistant/wire-logs/${encodeURIComponent(wireLogId)}`,
     );
     return {

@@ -10,6 +10,7 @@ import {
   sendChatCommand,
   type ChatCommand,
 } from "@/lib/assistant/chat-api";
+import { assignAssistantResponseConversation } from "@/lib/assistant/assistant-http";
 import {
   buildAssistantMessagePatch,
   createChatMessage,
@@ -191,6 +192,7 @@ export async function runChatStream({
         }
         authoritativeConversationId = conversationId;
         authoritativeTurnId = turnId;
+        assignAssistantResponseConversation(response, conversationId);
         if (actorState.actorId && actorState.actorId !== conversationId) {
           throw new Error("Actor state does not match the chat conversation.");
         }

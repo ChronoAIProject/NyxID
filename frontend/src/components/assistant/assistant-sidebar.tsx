@@ -35,7 +35,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useWorkspaceCounts } from "@/hooks/use-assistant";
+import { useAssistantWorkspaceCounts } from "@/hooks/use-assistant-workspace";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
@@ -211,7 +211,7 @@ export function AssistantSidebar({
   readonly onDelete: (conversationId: string) => void | Promise<void>;
 }) {
   const user = useAuthStore((state) => state.user);
-  const counts = useWorkspaceCounts();
+  const counts = useAssistantWorkspaceCounts();
   const pluginsActive = activeView === "plugins";
   const approvalsActive = activeView === "approvals";
   const [deleteTarget, setDeleteTarget] = useState<Conversation | undefined>();
