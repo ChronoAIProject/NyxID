@@ -826,6 +826,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expiry_sweep_processes_more_than_one_legacy_batch() {
+        let Some(db) = connect_test_database("credit_grant_expiry_budget_loop").await else {
+            return;
+        };
+        super::super::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
+            super::super::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
+        ));
+        let now = Utc::now();
+        let grant_count = EXPIRY_SWEEP_BATCH as usize + 1;
+        let grants: Vec<CreditGrant> = (0..grant_count)
+            .map(|index| CreditGrant {
+                id: format!("grant-expiry-budget-{index:04}"),
+                batch_id: "batch-expiry-budget".to_string(),
+                schedule_origin: None,
+                recipient_user_id: format!("owner-expiry-budget-{index:04}"),
+                target_kind: BillingTargetKind::SelectedUsers,
+                amount_credits: 1,
+                amount_micros: CREDIT_MICROS,
+                remaining_micros: CREDIT_MICROS,
+                reserved_micros: 0,
+                scope: BillingServiceScope {
+                    all_services: true,
+                    service_ids: Vec::new(),
+                    service_slugs: Vec::new(),
+                },
+                expires_at: Some(now),
+                reason: None,
+                granted_by: "admin-1".to_string(),
+                status: CreditGrantStatus::Active,
+                issued_ledgered_at: Some(now),
+                terminal_ledgered_at: None,
+                terminal_amount_micros: 0,
+                active_settlement: None,
+                created_at: now - chrono::Duration::days(1),
+                updated_at: now,
+                consumed_at: None,
+                expired_at: None,
+                revoked_at: None,
+            })
+            .collect();
+        db.collection::<CreditGrant>(CREDIT_GRANTS)
+            .insert_many(grants)
+            .await
+            .expect("insert due grants across expiry batches");
+
+        assert_eq!(
+            expire_due_grants(&db, now)
+                .await
+                .expect("expire all due grants in one tick"),
+            grant_count as u64
+        );
+        assert_eq!(
+            db.collection::<CreditGrant>(CREDIT_GRANTS)
+                .count_documents(doc! { "status": "expired" })
+                .await
+                .expect("count expired grants"),
+            grant_count as u64
+        );
+    }
+
+    #[tokio::test]
     async fn reconcile_recovers_missing_issue_and_terminal_ledger_entries() {
         let Some(db) = connect_test_database("credit_grant_ledger_recovery").await else {
             return;

@@ -384,6 +384,73 @@ async fn recipient_budget_exhaustion_resumes_next_tick_without_loss() {
 }
 
 #[tokio::test]
+async fn frozen_period_policy_and_signup_snapshot_survive_mid_walk_edit() {
+    let Some(db) = connect_test_database("credit_schedule_frozen_snapshot").await else {
+        return;
+    };
+    init_ledger_key();
+    let owner_ids = seed_owners(&db, 205).await;
+    let schedule = create_schedule(&db).await;
+    let now = Utc.with_ymd_and_hms(2026, 8, 25, 12, 0, 0).unwrap();
+
+    schedules::disburse_due(&db, now, 75)
+        .await
+        .expect("open and partially disburse period");
+    let window = schedules::schedule_period(schedule.recurrence, now);
+    let period = db
+        .collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
+        .find_one(doc! { "_id": schedules::period_id(&schedule.id, window.start) })
+        .await
+        .expect("find claimed period")
+        .expect("claimed period exists");
+
+    let mut late_owner = test_user("zz-late-owner", UserType::Person);
+    late_owner.created_at = period.created_at + Duration::milliseconds(1);
+    late_owner.updated_at = late_owner.created_at;
+    db.collection::<User>(USERS)
+        .insert_one(late_owner)
+        .await
+        .expect("insert owner after period snapshot");
+    schedules::update_schedule(
+        &db,
+        &schedule.id,
+        schedules::UpdateScheduleInput {
+            amount_credits: Some(99),
+            expiry: Some(CreditExpiryPolicy::Never),
+            reason: Some(Some("Edited policy".to_string())),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("edit schedule during period walk");
+
+    schedules::disburse_due(&db, now, schedules::MAX_RECIPIENTS_PER_TICK)
+        .await
+        .expect("finish frozen period");
+    let grants: Vec<CreditGrant> = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .find(doc! { "schedule_origin.schedule_id": &schedule.id })
+        .await
+        .expect("find scheduled grants")
+        .try_collect()
+        .await
+        .expect("collect scheduled grants");
+
+    assert_eq!(grants.len(), owner_ids.len());
+    assert!(
+        grants
+            .iter()
+            .all(|grant| grant.recipient_user_id != "zz-late-owner")
+    );
+    assert!(grants.iter().all(|grant| {
+        grant.amount_credits == 25
+            && grant.amount_micros == 25_000_000
+            && grant.expires_at == Some(window.end)
+            && grant.reason.as_deref() == Some("Monthly platform credits")
+    }));
+}
+
+#[tokio::test]
 async fn pause_finishes_open_period_but_does_not_open_the_next_period() {
     let Some(db) = connect_test_database("credit_schedule_pause_semantics").await else {
         return;
