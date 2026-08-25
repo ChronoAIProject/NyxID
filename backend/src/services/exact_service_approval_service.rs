@@ -1914,6 +1914,8 @@ mod tests {
             operation_digest: &binding.operation_digest,
             operation_generation: binding.operation_generation,
         }
+    }
+
     #[tokio::test]
     async fn exact_auto_connected_global_default_is_not_required() {
         let Some(db) = crate::test_utils::connect_test_database("exact_auto_global_default").await
