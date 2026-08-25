@@ -21,6 +21,7 @@ pub const MAX_SELECTED_USERS: usize = 500;
 pub const MAX_SCOPED_SERVICES: usize = 100;
 pub const MAX_GRANT_REASON_LEN: usize = 2_000;
 const EXPIRY_SWEEP_BATCH: i64 = 500;
+const MAX_EXPIRATIONS_PER_TICK: usize = 10_000;
 const LEDGER_RECOVERY_BATCH: i64 = 500;
 pub const INLINE_ISSUANCE_LEDGER_LIMIT: usize = 50;
 
@@ -83,6 +84,7 @@ pub async fn issue_grants(
         .map(|recipient_user_id| CreditGrant {
             id: Uuid::new_v4().to_string(),
             batch_id: batch_id.clone(),
+            schedule_origin: None,
             recipient_user_id,
             target_kind: input.target_kind,
             amount_credits: input.amount_credits,
@@ -138,12 +140,17 @@ pub async fn issue_grants(
 pub async fn list_grants(
     db: &mongodb::Database,
     recipient_user_id: Option<&str>,
+    schedule_id: Option<&str>,
     limit: i64,
     skip: u64,
 ) -> AppResult<(Vec<CreditGrant>, u64)> {
-    let filter = recipient_user_id
-        .map(|user_id| doc! { "recipient_user_id": user_id })
-        .unwrap_or_default();
+    let mut filter = doc! {};
+    if let Some(user_id) = recipient_user_id {
+        filter.insert("recipient_user_id", user_id);
+    }
+    if let Some(schedule_id) = schedule_id {
+        filter.insert("schedule_origin.schedule_id", schedule_id);
+    }
     let collection = db.collection::<CreditGrant>(CREDIT_GRANTS);
     let total = collection.count_documents(filter.clone()).await?;
     let rows = collection
@@ -239,64 +246,76 @@ pub async fn revoke_grant(db: &mongodb::Database, grant_id: &str) -> AppResult<C
 }
 
 pub async fn expire_due_grants(db: &mongodb::Database, now: DateTime<Utc>) -> AppResult<u64> {
-    let due: Vec<CreditGrant> = db
-        .collection::<CreditGrant>(CREDIT_GRANTS)
-        .find(doc! {
-            "status": "active",
-            "reserved_micros": 0_i64,
-            "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
-            "$or": [
-                { "active_settlement": Bson::Null },
-                { "active_settlement": { "$exists": false } },
-            ],
-        })
-        .sort(doc! { "expires_at": 1 })
-        .limit(EXPIRY_SWEEP_BATCH)
-        .await?
-        .try_collect()
-        .await?;
     let mut expired = 0;
-    for grant in due {
-        let result = db
+    let mut examined = 0;
+    while examined < MAX_EXPIRATIONS_PER_TICK {
+        let batch_limit = EXPIRY_SWEEP_BATCH.min((MAX_EXPIRATIONS_PER_TICK - examined) as i64);
+        let due: Vec<CreditGrant> = db
             .collection::<CreditGrant>(CREDIT_GRANTS)
-            .update_one(
-                doc! {
-                    "_id": &grant.id,
-                    "status": "active",
-                    "reserved_micros": 0_i64,
-                    "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
-                    "$or": [
-                        { "active_settlement": Bson::Null },
-                        { "active_settlement": { "$exists": false } },
-                    ],
-                },
-                vec![doc! { "$set": {
-                    "status": "expired",
-                    "terminal_amount_micros": "$remaining_micros",
-                    "remaining_micros": 0_i64,
-                    "reserved_micros": 0_i64,
-                    "expired_at": bson::DateTime::from_chrono(now),
-                    "updated_at": bson::DateTime::from_chrono(now),
-                } }],
-            )
+            .find(doc! {
+                "status": "active",
+                "reserved_micros": 0_i64,
+                "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
+                "$or": [
+                    { "active_settlement": Bson::Null },
+                    { "active_settlement": { "$exists": false } },
+                ],
+            })
+            .sort(doc! { "expires_at": 1, "_id": 1 })
+            .limit(batch_limit)
+            .await?
+            .try_collect()
             .await?;
-        if result.modified_count == 0 {
-            continue;
+        if due.is_empty() {
+            break;
         }
-        expired += 1;
-        if super::ledger::record_grant_event(
-            db,
-            BillingLedgerEventType::GrantExpired,
-            &grant.recipient_user_id,
-            &grant.id,
-            grant.remaining_micros.max(0),
-            None,
-            format!("grant-expired:{}", grant.id),
-        )
-        .await
-            && let Err(error) = mark_terminal_ledgered(db, &grant.id, now).await
-        {
-            tracing::warn!(grant_id = %grant.id, %error, "grant expiry ledger marker will retry");
+        examined += due.len();
+        let short_batch = due.len() < batch_limit as usize;
+        for grant in due {
+            let result = db
+                .collection::<CreditGrant>(CREDIT_GRANTS)
+                .update_one(
+                    doc! {
+                        "_id": &grant.id,
+                        "status": "active",
+                        "reserved_micros": 0_i64,
+                        "expires_at": { "$lte": bson::DateTime::from_chrono(now) },
+                        "$or": [
+                            { "active_settlement": Bson::Null },
+                            { "active_settlement": { "$exists": false } },
+                        ],
+                    },
+                    vec![doc! { "$set": {
+                        "status": "expired",
+                        "terminal_amount_micros": "$remaining_micros",
+                        "remaining_micros": 0_i64,
+                        "reserved_micros": 0_i64,
+                        "expired_at": bson::DateTime::from_chrono(now),
+                        "updated_at": bson::DateTime::from_chrono(now),
+                    } }],
+                )
+                .await?;
+            if result.modified_count == 0 {
+                continue;
+            }
+            expired += 1;
+            if super::ledger::record_grant_event(
+                db,
+                BillingLedgerEventType::GrantExpired,
+                &grant.recipient_user_id,
+                &grant.id,
+                grant.remaining_micros.max(0),
+                None,
+                format!("grant-expired:{}", grant.id),
+            )
+            .await
+                && let Err(error) = mark_terminal_ledgered(db, &grant.id, now).await
+            {
+                tracing::warn!(grant_id = %grant.id, %error, "grant expiry ledger marker will retry");
+            }
+        }
+        if short_batch {
+            break;
         }
     }
     Ok(expired)
@@ -381,7 +400,7 @@ pub async fn recover_unledgered_events(
     Ok(recovered)
 }
 
-async fn mark_issued_ledgered(
+pub(super) async fn mark_issued_ledgered(
     db: &mongodb::Database,
     grant_id: &str,
     now: DateTime<Utc>,
@@ -465,7 +484,7 @@ fn validate_issue_input(input: &IssueCreditGrantInput) -> AppResult<()> {
     Ok(())
 }
 
-async fn resolve_recipients(
+pub(super) async fn resolve_recipients(
     db: &mongodb::Database,
     target_kind: BillingTargetKind,
     selected: &[String],
@@ -504,7 +523,7 @@ async fn resolve_recipients(
     Ok(users.into_iter().map(|user| user.id).collect())
 }
 
-async fn resolve_service_scope(
+pub(super) async fn resolve_service_scope(
     db: &mongodb::Database,
     all_services: bool,
     references: &[String],
@@ -749,6 +768,7 @@ mod tests {
         let due = CreditGrant {
             id: "grant-due".to_string(),
             batch_id: "batch-1".to_string(),
+            schedule_origin: None,
             recipient_user_id: "owner-1".to_string(),
             target_kind: BillingTargetKind::SelectedUsers,
             amount_credits: 2,
@@ -806,6 +826,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expiry_sweep_processes_more_than_one_legacy_batch() {
+        let Some(db) = connect_test_database("credit_grant_expiry_budget_loop").await else {
+            return;
+        };
+        super::super::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
+            super::super::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
+        ));
+        let now = Utc::now();
+        let grant_count = EXPIRY_SWEEP_BATCH as usize + 1;
+        let grants: Vec<CreditGrant> = (0..grant_count)
+            .map(|index| CreditGrant {
+                id: format!("grant-expiry-budget-{index:04}"),
+                batch_id: "batch-expiry-budget".to_string(),
+                schedule_origin: None,
+                recipient_user_id: format!("owner-expiry-budget-{index:04}"),
+                target_kind: BillingTargetKind::SelectedUsers,
+                amount_credits: 1,
+                amount_micros: CREDIT_MICROS,
+                remaining_micros: CREDIT_MICROS,
+                reserved_micros: 0,
+                scope: BillingServiceScope {
+                    all_services: true,
+                    service_ids: Vec::new(),
+                    service_slugs: Vec::new(),
+                },
+                expires_at: Some(now),
+                reason: None,
+                granted_by: "admin-1".to_string(),
+                status: CreditGrantStatus::Active,
+                issued_ledgered_at: Some(now),
+                terminal_ledgered_at: None,
+                terminal_amount_micros: 0,
+                active_settlement: None,
+                created_at: now - chrono::Duration::days(1),
+                updated_at: now,
+                consumed_at: None,
+                expired_at: None,
+                revoked_at: None,
+            })
+            .collect();
+        db.collection::<CreditGrant>(CREDIT_GRANTS)
+            .insert_many(grants)
+            .await
+            .expect("insert due grants across expiry batches");
+
+        assert_eq!(
+            expire_due_grants(&db, now)
+                .await
+                .expect("expire all due grants in one tick"),
+            grant_count as u64
+        );
+        assert_eq!(
+            db.collection::<CreditGrant>(CREDIT_GRANTS)
+                .count_documents(doc! { "status": "expired" })
+                .await
+                .expect("count expired grants"),
+            grant_count as u64
+        );
+    }
+
+    #[tokio::test]
     async fn reconcile_recovers_missing_issue_and_terminal_ledger_entries() {
         let Some(db) = connect_test_database("credit_grant_ledger_recovery").await else {
             return;
@@ -818,6 +899,7 @@ mod tests {
             .insert_one(CreditGrant {
                 id: "grant-ledger-recovery".to_string(),
                 batch_id: "batch-ledger-recovery".to_string(),
+                schedule_origin: None,
                 recipient_user_id: "owner-ledger-recovery".to_string(),
                 target_kind: BillingTargetKind::SelectedUsers,
                 amount_credits: 3,

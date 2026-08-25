@@ -1,4 +1,4 @@
-use chrono::{DateTime, Datelike, Duration, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use uuid::Uuid;
@@ -306,39 +306,16 @@ pub fn allowance_window(
             end: None,
         };
     }
-    let day = now.date_naive();
-    let day_start = Utc.from_utc_datetime(&day.and_hms_opt(0, 0, 0).expect("midnight is valid"));
-    match recurrence {
+    let recurrence = match recurrence {
         AllowanceRecurrence::OneTime => unreachable!(),
-        AllowanceRecurrence::Daily => AllowanceWindow {
-            start: day_start,
-            end: Some(day_start + Duration::days(1)),
-        },
-        AllowanceRecurrence::Weekly => {
-            let start = day_start - Duration::days(i64::from(day.weekday().num_days_from_monday()));
-            AllowanceWindow {
-                start,
-                end: Some(start + Duration::days(7)),
-            }
-        }
-        AllowanceRecurrence::Monthly => {
-            let start_date = day.with_day(1).expect("every month has a first day");
-            let (next_year, next_month) = if day.month() == 12 {
-                (day.year() + 1, 1)
-            } else {
-                (day.year(), day.month() + 1)
-            };
-            let next_date = chrono::NaiveDate::from_ymd_opt(next_year, next_month, 1)
-                .expect("next month is valid");
-            AllowanceWindow {
-                start: Utc.from_utc_datetime(
-                    &start_date.and_hms_opt(0, 0, 0).expect("midnight is valid"),
-                ),
-                end: Some(Utc.from_utc_datetime(
-                    &next_date.and_hms_opt(0, 0, 0).expect("midnight is valid"),
-                )),
-            }
-        }
+        AllowanceRecurrence::Daily => super::periods::RecurringUtcPeriod::Daily,
+        AllowanceRecurrence::Weekly => super::periods::RecurringUtcPeriod::Weekly,
+        AllowanceRecurrence::Monthly => super::periods::RecurringUtcPeriod::Monthly,
+    };
+    let window = super::periods::recurring_utc_window(recurrence, now);
+    AllowanceWindow {
+        start: window.start,
+        end: Some(window.end),
     }
 }
 
@@ -425,7 +402,7 @@ async fn resolve_service(db: &mongodb::Database, reference: &str) -> AppResult<D
 
 #[cfg(test)]
 mod tests {
-    use chrono::TimeZone;
+    use chrono::{Duration, TimeZone};
 
     use crate::models::billing_target::BillingTargetKind;
     use crate::models::user::{UserProfileConfig, UserType};

@@ -5,10 +5,13 @@ import { toast } from "sonner";
 import {
   useAdminAllowances,
   useAdminCreditGrants,
+  useAdminCreditSchedules,
   useCreateAllowance,
+  useCreateCreditSchedule,
   useIssueCreditGrant,
   useRevokeCreditGrant,
   useUpdateAllowance,
+  useUpdateCreditSchedule,
 } from "@/hooks/use-billing-credits";
 import { useServices } from "@/hooks/use-services";
 import { ApiError } from "@/lib/api-client";
@@ -16,9 +19,12 @@ import { billingMetricLabel } from "@/lib/billing-units";
 import {
   allowanceFormSchema,
   issueGrantFormSchema,
+  scheduleFormSchema,
   type AllowanceForm,
+  type CreditSchedule,
   type CreditGrant,
   type IssueGrantForm,
+  type ScheduleForm,
   type UsageAllowance,
 } from "@/schemas/billing-credits";
 import { useAuthStore } from "@/stores/auth-store";
@@ -29,6 +35,9 @@ import {
   GrantDialog,
 } from "@/components/admin-credits/credits-dialogs";
 import { CreditGrantsTable } from "@/components/admin-credits/credit-grants-table";
+import { GrantRevokeDescription } from "@/components/admin-credits/grant-revoke-description";
+import { ScheduleDialog } from "@/components/admin-credits/schedule-dialog";
+import { SchedulesTable } from "@/components/admin-credits/schedules-table";
 import { rolloutWarningMessage } from "@/components/admin-credits/credit-grant-visibility";
 import { PageHeader } from "@/components/shared/page-header";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -37,7 +46,6 @@ import { Button, ButtonIcon } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
-  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
@@ -72,6 +80,17 @@ const ALLOWANCE_DEFAULTS: AllowanceForm = {
   target_user_ids: [],
 };
 
+const SCHEDULE_DEFAULTS: ScheduleForm = {
+  amount_credits: 100,
+  recurrence: "monthly",
+  expiry: { kind: "end_of_period" },
+  target_kind: "all_users",
+  target_user_ids: [],
+  all_services: true,
+  service_refs: [],
+  reason: "",
+};
+
 const GRANTS_PER_PAGE = 50;
 
 export function AdminCreditsPage() {
@@ -80,15 +99,22 @@ export function AdminCreditsPage() {
   const [grantPage, setGrantPage] = useState(1);
   const grantsQuery = useAdminCreditGrants(grantPage, GRANTS_PER_PAGE);
   const allowancesQuery = useAdminAllowances();
+  const schedulesQuery = useAdminCreditSchedules();
   const servicesQuery = useServices();
   const issueGrant = useIssueCreditGrant();
   const revokeGrant = useRevokeCreditGrant();
   const createAllowance = useCreateAllowance();
   const updateAllowance = useUpdateAllowance();
+  const createSchedule = useCreateCreditSchedule();
+  const updateSchedule = useUpdateCreditSchedule();
   const [grantOpen, setGrantOpen] = useState(false);
   const [allowanceOpen, setAllowanceOpen] = useState(false);
+  const [scheduleOpen, setScheduleOpen] = useState(false);
   const [editingAllowance, setEditingAllowance] =
     useState<UsageAllowance | null>(null);
+  const [editingSchedule, setEditingSchedule] = useState<CreditSchedule | null>(
+    null,
+  );
   const [grantToRevoke, setGrantToRevoke] = useState<CreditGrant | null>(null);
 
   const grantForm = useAppForm<IssueGrantForm>({
@@ -98,6 +124,10 @@ export function AdminCreditsPage() {
   const allowanceForm = useAppForm<AllowanceForm>({
     resolver: zodResolver(allowanceFormSchema),
     defaultValues: ALLOWANCE_DEFAULTS,
+  });
+  const scheduleForm = useAppForm<ScheduleForm>({
+    resolver: zodResolver(scheduleFormSchema),
+    defaultValues: SCHEDULE_DEFAULTS,
   });
 
   function openGrantDialog() {
@@ -119,6 +149,25 @@ export function AdminCreditsPage() {
         : ALLOWANCE_DEFAULTS,
     );
     setAllowanceOpen(true);
+  }
+
+  function openScheduleDialog(schedule?: CreditSchedule) {
+    setEditingSchedule(schedule ?? null);
+    scheduleForm.reset(
+      schedule
+        ? {
+            amount_credits: schedule.amount_credits,
+            recurrence: schedule.recurrence,
+            expiry: schedule.expiry,
+            target_kind: schedule.target_kind,
+            target_user_ids: schedule.target_user_ids,
+            all_services: schedule.scope.all_services,
+            service_refs: schedule.scope.service_ids,
+            reason: schedule.reason ?? "",
+          }
+        : SCHEDULE_DEFAULTS,
+    );
+    setScheduleOpen(true);
   }
 
   async function submitGrant(value: IssueGrantForm) {
@@ -162,6 +211,39 @@ export function AdminCreditsPage() {
     }
   }
 
+  async function submitSchedule(value: ScheduleForm) {
+    try {
+      const targetUserIds =
+        value.target_kind === "all_users" ? [] : value.target_user_ids;
+      const serviceRefs = value.all_services ? [] : value.service_refs;
+      if (editingSchedule) {
+        await updateSchedule.mutateAsync({
+          id: editingSchedule.id,
+          body: {
+            amount_credits: value.amount_credits,
+            expiry: value.expiry,
+            target_kind: value.target_kind,
+            target_user_ids: targetUserIds,
+            all_services: value.all_services,
+            service_refs: serviceRefs,
+            reason: value.reason,
+          },
+        });
+        toast.success("Credit schedule updated");
+      } else {
+        await createSchedule.mutateAsync({
+          ...value,
+          target_user_ids: targetUserIds,
+          service_refs: serviceRefs,
+        });
+        toast.success("Credit schedule created");
+      }
+      setScheduleOpen(false);
+    } catch (error) {
+      toast.error(errorMessage(error, "Failed to save credit schedule"));
+    }
+  }
+
   async function handleRevoke() {
     if (!grantToRevoke) return;
     try {
@@ -187,19 +269,34 @@ export function AdminCreditsPage() {
     }
   }
 
+  async function toggleSchedule(schedule: CreditSchedule) {
+    try {
+      await updateSchedule.mutateAsync({
+        id: schedule.id,
+        body: { is_active: !schedule.is_active },
+      });
+      toast.success(
+        schedule.is_active ? "Schedule paused" : "Schedule resumed",
+      );
+    } catch (error) {
+      toast.error(errorMessage(error, "Failed to update credit schedule"));
+    }
+  }
+
   const services = servicesQuery.data ?? [];
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Credits"
-        description="Manage promotional credit grants and recurring free usage allowances."
+        description="Manage promotional credit grants, recurring credit schedules, and free usage allowances."
       />
 
       <Tabs defaultValue="grants">
         <TabsList>
           <TabsTrigger value="grants">Credit grants</TabsTrigger>
           <TabsTrigger value="allowances">Free allowances</TabsTrigger>
+          <TabsTrigger value="schedules">Schedules</TabsTrigger>
         </TabsList>
 
         <TabsContent value="grants" className="space-y-4">
@@ -364,6 +461,46 @@ export function AdminCreditsPage() {
             </div>
           )}
         </TabsContent>
+
+        <TabsContent value="schedules" className="space-y-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="text-[12px] text-muted-foreground">
+              Disburse wallet credits on recurring UTC periods. These are
+              credits, not metered service units.
+            </p>
+            {canWrite ? (
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => openScheduleDialog()}
+              >
+                <ButtonIcon variant="primary">
+                  <Plus className="h-3.5 w-3.5" />
+                </ButtonIcon>
+                Create schedule
+              </Button>
+            ) : null}
+          </div>
+          {schedulesQuery.isError ? (
+            <ErrorBanner
+              message={errorMessage(
+                schedulesQuery.error,
+                "Failed to load credit schedules",
+              )}
+              onRetry={() => void schedulesQuery.refetch()}
+            />
+          ) : schedulesQuery.isLoading ? (
+            <Skeleton className="h-52 w-full" />
+          ) : (
+            <SchedulesTable
+              schedules={schedulesQuery.data?.schedules ?? []}
+              canWrite={canWrite}
+              updatePending={updateSchedule.isPending}
+              onEdit={openScheduleDialog}
+              onToggle={(schedule) => void toggleSchedule(schedule)}
+            />
+          )}
+        </TabsContent>
       </Tabs>
 
       <GrantDialog
@@ -383,6 +520,15 @@ export function AdminCreditsPage() {
         editingAllowance={editingAllowance}
         onSubmit={submitAllowance}
       />
+      <ScheduleDialog
+        open={scheduleOpen}
+        onOpenChange={setScheduleOpen}
+        form={scheduleForm}
+        services={services}
+        pending={createSchedule.isPending || updateSchedule.isPending}
+        editingSchedule={editingSchedule}
+        onSubmit={submitSchedule}
+      />
       <Dialog
         open={grantToRevoke !== null}
         onOpenChange={(open) => {
@@ -392,17 +538,9 @@ export function AdminCreditsPage() {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Revoke credit grant</DialogTitle>
-            <DialogDescription>
-              Revoke the remaining{" "}
-              {grantToRevoke?.remaining_micros
-                ? formatCredits(grantToRevoke.remaining_micros)
-                : "credits"}{" "}
-              for{" "}
-              {grantToRevoke?.recipient_display_name ||
-                grantToRevoke?.recipient_email ||
-                "this recipient"}
-              ? This cannot be undone.
-            </DialogDescription>
+            {grantToRevoke ? (
+              <GrantRevokeDescription grant={grantToRevoke} />
+            ) : null}
           </DialogHeader>
           <DialogFooter>
             <Button
@@ -434,9 +572,6 @@ function serviceName(
   slug: string,
 ) {
   return services.find((service) => service.id === id)?.name ?? slug;
-}
-function formatCredits(micros: number) {
-  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(micros / 1_000_000)} credits`;
 }
 function formatNumber(value: number) {
   return new Intl.NumberFormat().format(value);

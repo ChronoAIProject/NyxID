@@ -42,6 +42,11 @@ pub struct ReconcileStats {
     pub service_price_syncs: u64,
     pub funding_releases_recovered: u64,
     pub grants_expired: u64,
+    pub schedule_grants_created: u64,
+    pub schedule_grants_already_disbursed: u64,
+    pub schedule_periods_completed: u64,
+    pub schedule_periods_abandoned: u64,
+    pub schedule_budget_exhausted: bool,
     pub grant_ledger_recoveries: u64,
     pub topups_expired: u64,
 }
@@ -68,6 +73,17 @@ impl BillingReconciler {
         stats.funding_releases_recovered +=
             super::funding::recover_terminal_releases(&self.db).await?;
         stats.grants_expired += super::grants::expire_due_grants(&self.db, Utc::now()).await?;
+        let schedule_stats = super::schedules::disburse_due(
+            &self.db,
+            Utc::now(),
+            super::schedules::MAX_RECIPIENTS_PER_TICK,
+        )
+        .await?;
+        stats.schedule_grants_created += schedule_stats.grants_created as u64;
+        stats.schedule_grants_already_disbursed += schedule_stats.already_disbursed as u64;
+        stats.schedule_periods_completed += schedule_stats.periods_completed as u64;
+        stats.schedule_periods_abandoned += schedule_stats.periods_abandoned as u64;
+        stats.schedule_budget_exhausted = schedule_stats.budget_exhausted;
         stats.grant_ledger_recoveries +=
             super::grants::recover_unledgered_events(&self.db, Utc::now()).await?;
         // Anchor the billing-ledger head into the audit chain whenever it

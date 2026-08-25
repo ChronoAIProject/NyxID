@@ -898,6 +898,15 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             patch(handlers::billing_credits::update_allowance),
         )
         .route(
+            "/credits/schedules",
+            get(handlers::billing_credit_schedules::list_schedules)
+                .post(handlers::billing_credit_schedules::create_schedule),
+        )
+        .route(
+            "/credits/schedules/{schedule_id}",
+            patch(handlers::billing_credit_schedules::update_schedule),
+        )
+        .route(
             "/chain-verification",
             get(handlers::admin::get_chain_verification),
         )

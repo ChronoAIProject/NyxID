@@ -1286,6 +1286,7 @@ mod tests {
             .insert_one(CreditGrant {
                 id: grant_id.to_string(),
                 batch_id: "batch-1".to_string(),
+                schedule_origin: None,
                 recipient_user_id: owner_id.to_string(),
                 target_kind: BillingTargetKind::SelectedUsers,
                 amount_credits: 2,

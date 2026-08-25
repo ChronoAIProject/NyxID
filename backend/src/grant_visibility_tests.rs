@@ -84,6 +84,7 @@ fn grant(recipient_user_id: &str, issued_ledgered_at: Option<DateTime<Utc>>) -> 
     CreditGrant {
         id: Uuid::new_v4().to_string(),
         batch_id: Uuid::new_v4().to_string(),
+        schedule_origin: None,
         recipient_user_id: recipient_user_id.to_string(),
         target_kind: BillingTargetKind::SelectedUsers,
         amount_credits: 5,
@@ -279,6 +280,7 @@ async fn admin_grant_responses_expose_rollout_and_pending_activation() {
         test_auth_user(&fixture.platform_admin_id),
         Query(GrantListQuery {
             recipient_user_id: Some(fixture.non_member_id),
+            schedule_id: None,
             page: Some(1),
             per_page: Some(50),
         }),
@@ -312,6 +314,7 @@ async fn admin_grant_responses_expose_rollout_and_pending_activation() {
         test_auth_user(&fixture.platform_admin_id),
         Query(GrantListQuery {
             recipient_user_id: Some("deleted-recipient".to_string()),
+            schedule_id: None,
             page: Some(1),
             per_page: Some(50),
         }),

@@ -5,13 +5,17 @@ import {
   adminCreditGrantListSchema,
   creditGrantListSchema,
   creditGrantSchema,
+  creditScheduleListSchema,
+  creditScheduleSchema,
   issueGrantFormSchema,
   issueGrantResponseSchema,
+  scheduleFormSchema,
   usageAllowanceListSchema,
   usageAllowanceSchema,
   userAllowanceListSchema,
   type AllowanceForm,
   type IssueGrantForm,
+  type ScheduleForm,
 } from "@/schemas/billing-credits";
 
 const ADMIN_CREDITS_KEY = ["admin", "credits"] as const;
@@ -65,6 +69,61 @@ export function useRevokeCreditGrant() {
       creditGrantSchema.parse(
         await api.delete<unknown>(
           `/admin/credits/grants/${encodeURIComponent(grantId)}`,
+        ),
+      ),
+    onSuccess: () =>
+      void queryClient.invalidateQueries({ queryKey: ADMIN_CREDITS_KEY }),
+  });
+}
+
+export function useAdminCreditSchedules() {
+  return useQuery({
+    queryKey: [...ADMIN_CREDITS_KEY, "schedules"],
+    queryFn: async () =>
+      creditScheduleListSchema.parse(
+        await api.get<unknown>("/admin/credits/schedules"),
+      ),
+  });
+}
+
+export function useCreateCreditSchedule() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (form: ScheduleForm) => {
+      const value = scheduleFormSchema.parse(form);
+      return creditScheduleSchema.parse(
+        await api.post<unknown>("/admin/credits/schedules", {
+          ...value,
+          target_user_ids:
+            value.target_kind === "all_users" ? [] : value.target_user_ids,
+          service_refs: value.all_services ? [] : value.service_refs,
+          reason: value.reason || null,
+        }),
+      );
+    },
+    onSuccess: () =>
+      void queryClient.invalidateQueries({ queryKey: ADMIN_CREDITS_KEY }),
+  });
+}
+
+export type UpdateCreditScheduleBody = Partial<
+  Omit<ScheduleForm, "recurrence">
+> & { readonly is_active?: boolean };
+
+export function useUpdateCreditSchedule() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      id,
+      body,
+    }: {
+      readonly id: string;
+      readonly body: UpdateCreditScheduleBody;
+    }) =>
+      creditScheduleSchema.parse(
+        await api.patch<unknown>(
+          `/admin/credits/schedules/${encodeURIComponent(id)}`,
+          body,
         ),
       ),
     onSuccess: () =>
