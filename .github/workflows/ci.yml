@@ -2,7 +2,8 @@ name: CI
 
 on:
   pull_request:
-    branches: [main, dev]
+    # Rollup PRs must be gated with the same CI coverage as main/dev PRs.
+    branches: [main, dev, 'rollup-*']
   push:
     # `main` is intentionally not listed here -- pushes to main are gated
     # through publish-images.yml, which calls this workflow via workflow_call.
