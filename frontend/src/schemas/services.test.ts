@@ -44,6 +44,45 @@ describe("constants", () => {
 });
 
 describe("createServiceSchema", () => {
+  it("accepts a write-only credential for an internal HTTP service", () => {
+    const result = createServiceSchema.safeParse({
+      name: "Platform X",
+      service_type: "http",
+      visibility: "public",
+      base_url: "https://api.x.com",
+      auth_type: "bearer",
+      credential: "vendor-secret",
+      service_category: "internal",
+    });
+
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.credential).toBe("vendor-secret");
+    }
+  });
+
+  it("rejects a master credential on a user-credential service", () => {
+    const result = createServiceSchema.safeParse({
+      name: "Platform X",
+      service_type: "http",
+      visibility: "public",
+      base_url: "https://api.x.com",
+      auth_type: "bearer",
+      credential: "vendor-secret",
+      service_category: "connection",
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toContainEqual(
+        expect.objectContaining({
+          path: ["service_category"],
+          message: "A master credential requires the Internal category",
+        }),
+      );
+    }
+  });
+
   const validData = {
     name: "My Service",
     service_type: "http" as const,

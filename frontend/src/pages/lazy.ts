@@ -231,6 +231,11 @@ export const AdminIntegrityPage = lazy(() =>
     default: m.AdminIntegrityPage,
   })),
 );
+export const AdminPlatformOpsPage = lazy(() =>
+  import("@/pages/admin-platform-ops").then((m) => ({
+    default: m.AdminPlatformOpsPage,
+  })),
+);
 export const AdminCreditsPage = lazy(() =>
   import("@/pages/admin-credits").then((m) => ({
     default: m.AdminCreditsPage,

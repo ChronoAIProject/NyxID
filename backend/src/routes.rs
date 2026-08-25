@@ -757,6 +757,14 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
 
     let admin_routes = Router::new()
         .route(
+            "/platform-ops",
+            get(handlers::admin_platform_ops::list_platform_operations),
+        )
+        .route(
+            "/platform-ops/{op}",
+            put(handlers::admin_platform_ops::update_platform_operation),
+        )
+        .route(
             "/feature-flags",
             get(handlers::admin_feature_flags::list_feature_flags),
         )
@@ -1525,6 +1533,16 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     )
     .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
 
+    let platform_operation_routes = Router::new()
+        .route("/x-search", post(handlers::platform_ops::x_search))
+        .route("/speak", post(handlers::platform_ops::speak))
+        .route("/call-and-say", post(handlers::platform_ops::call_and_say))
+        .layer(middleware::from_fn(reject_delegated_tokens))
+        .layer(middleware::from_fn(reject_service_account_tokens))
+        .layer(middleware::from_fn(reject_relay_tokens));
+
+    let api_v1_platform_operations = Router::new().nest("/platform-ops", platform_operation_routes);
+
     // Routes accessible by both users and service accounts (block delegated tokens)
     let api_v1_shared = Router::new()
         .nest("/connections", connection_routes)
@@ -1681,6 +1699,7 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let api_v1 = api_v1_public
         .merge(api_v1_delegated)
         .merge(api_v1_shared)
+        .merge(api_v1_platform_operations)
         .merge(api_v1_human_only);
 
     let well_known_routes = Router::new()

@@ -86,6 +86,7 @@ pub mod org_role_scope_service;
 pub mod org_service;
 pub mod org_slug;
 pub mod par_service;
+pub mod platform_operation_service;
 pub mod platform_settings_service;
 pub mod provider_service;
 pub mod provider_token_exchange_service;

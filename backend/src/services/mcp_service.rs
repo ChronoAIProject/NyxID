@@ -11,6 +11,7 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
     legacy_http_service_type_filter,
 };
+use crate::models::platform_operation::{PlatformOperation, PlatformOperationConfig};
 use crate::models::service_billing::{BillingMetric, PlatformUsage};
 use crate::models::service_endpoint::{
     COLLECTION_NAME as SERVICE_ENDPOINTS, EndpointRisk, OperationResponseContract, ServiceEndpoint,
@@ -1822,6 +1823,7 @@ fn build_generic_proxy_input_schema() -> serde_json::Value {
 pub fn generate_tool_definitions(
     services: &[McpToolService],
     activated_service_ids: Option<&HashSet<String>>,
+    platform_operations: &[PlatformOperation],
 ) -> Vec<McpToolDefinition> {
     let mut tools = Vec::new();
 
@@ -2141,6 +2143,102 @@ pub fn generate_tool_definitions(
             "required": ["conversation_id"]
         }),
     });
+
+    // -- First-party platform operations (present only while enabled) --
+    for operation in platform_operations {
+        if !operation.enabled {
+            continue;
+        }
+        let definition = match &operation.config {
+            PlatformOperationConfig::XSearch(config)
+                if operation.op
+                    == crate::models::platform_operation::PlatformOperationName::XSearch =>
+            {
+                McpToolDefinition {
+                    name: "nyx__x_search".to_string(),
+                    description: "Search recent posts on X through NyxID's constrained platform operation."
+                        .to_string(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 512,
+                                "description": "Search query"
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": config.max_results_cap,
+                                "description": "Maximum results to return"
+                            }
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false
+                    }),
+                }
+            }
+            PlatformOperationConfig::Speak(config)
+                if operation.op
+                    == crate::models::platform_operation::PlatformOperationName::Speak =>
+            {
+                McpToolDefinition {
+                    name: "nyx__speak".to_string(),
+                    description: "Synthesize MP3 speech through NyxID's constrained platform operation."
+                        .to_string(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": config.max_chars,
+                                "description": "Text to synthesize"
+                            },
+                            "voice_id": {
+                                "type": "string",
+                                "enum": config.allowed_voice_ids,
+                                "description": "Allowlisted ElevenLabs voice ID"
+                            }
+                        },
+                        "required": ["text", "voice_id"],
+                        "additionalProperties": false
+                    }),
+                }
+            }
+            PlatformOperationConfig::CallAndSay(config)
+                if operation.op
+                    == crate::models::platform_operation::PlatformOperationName::CallAndSay =>
+            {
+                McpToolDefinition {
+                    name: "nyx__call_and_say".to_string(),
+                    description: "Place a constrained voice call and speak a message using server-composed TwiML."
+                        .to_string(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "to": {
+                                "type": "string",
+                                "pattern": "^\\+[1-9][0-9]{0,14}$",
+                                "description": "Allowlisted E.164 destination"
+                            },
+                            "message": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": config.max_message_chars,
+                                "description": "Message to speak"
+                            }
+                        },
+                        "required": ["to", "message"],
+                        "additionalProperties": false
+                    }),
+                }
+            }
+            _ => continue,
+        };
+        tools.push(definition);
+    }
 
     // -- Per-service tools (filtered by activated set) --
     for service in services {
@@ -5580,7 +5678,7 @@ mod tests {
         )];
 
         let empty_set = HashSet::new();
-        let tools = generate_tool_definitions(&services, Some(&empty_set));
+        let tools = generate_tool_definitions(&services, Some(&empty_set), &[]);
 
         // Should only have the 14 meta-tools (6 core + 2 SSH + 6 oracle)
         assert_eq!(tools.len(), 14);
@@ -5606,7 +5704,7 @@ mod tests {
 
         let mut activated = HashSet::new();
         activated.insert("svc-1".to_string());
-        let tools = generate_tool_definitions(&services, Some(&activated));
+        let tools = generate_tool_definitions(&services, Some(&activated), &[]);
 
         // 14 meta-tools + 1 weather tool (news excluded)
         assert_eq!(tools.len(), 15);
@@ -5631,7 +5729,7 @@ mod tests {
             ),
         ];
 
-        let tools = generate_tool_definitions(&services, None);
+        let tools = generate_tool_definitions(&services, None, &[]);
 
         // 14 meta-tools + 2 service tools
         assert_eq!(tools.len(), 16);
@@ -5641,7 +5739,7 @@ mod tests {
 
     #[test]
     fn generate_tool_definitions_includes_oracle_meta_tools() {
-        let tools = generate_tool_definitions(&[], None);
+        let tools = generate_tool_definitions(&[], None, &[]);
 
         let required_for = |name: &str| -> Vec<String> {
             tools
@@ -5671,7 +5769,7 @@ mod tests {
 
     #[test]
     fn generate_tool_definitions_includes_connected_services_meta_tool() {
-        let tools = generate_tool_definitions(&[], None);
+        let tools = generate_tool_definitions(&[], None, &[]);
         let tool = tools
             .iter()
             .find(|tool| tool.name == "nyx__list_connected_services")
@@ -5679,6 +5777,53 @@ mod tests {
 
         assert_eq!(tool.input_schema["required"], serde_json::json!([]));
         assert!(tool.input_schema["properties"]["query"].is_object());
+    }
+
+    #[test]
+    fn generate_tool_definitions_publishes_only_enabled_platform_operation_rows() {
+        let enabled_operation = PlatformOperation {
+            id: "platform-speak".to_string(),
+            op: crate::models::platform_operation::PlatformOperationName::Speak,
+            enabled: true,
+            vendor_service_slug: "platform-elevenlabs".to_string(),
+            config: PlatformOperationConfig::Speak(
+                crate::models::platform_operation::SpeakConfig {
+                    allowed_voice_ids: vec!["voice-a".to_string(), "voice-b".to_string()],
+                    max_chars: 321,
+                    model_id: "eleven_multilingual_v2".to_string(),
+                },
+            ),
+            updated_at: chrono::Utc::now(),
+            updated_by: "admin-user".to_string(),
+        };
+        let disabled_operation = PlatformOperation {
+            id: "platform-x-search".to_string(),
+            op: crate::models::platform_operation::PlatformOperationName::XSearch,
+            enabled: false,
+            vendor_service_slug: "platform-x".to_string(),
+            config: PlatformOperationConfig::XSearch(
+                crate::models::platform_operation::XSearchConfig {
+                    max_results_cap: 10,
+                },
+            ),
+            updated_at: chrono::Utc::now(),
+            updated_by: "admin-user".to_string(),
+        };
+
+        let tools = generate_tool_definitions(&[], None, &[enabled_operation, disabled_operation]);
+        let speak = tools
+            .iter()
+            .find(|tool| tool.name == "nyx__speak")
+            .expect("enabled speak tool");
+
+        assert!(!tools.iter().any(|tool| tool.name == "nyx__x_search"));
+        assert!(!tools.iter().any(|tool| tool.name == "nyx__call_and_say"));
+        assert_eq!(speak.input_schema["properties"]["text"]["maxLength"], 321);
+        assert_eq!(
+            speak.input_schema["properties"]["voice_id"]["enum"],
+            serde_json::json!(["voice-a", "voice-b"])
+        );
+        assert_eq!(speak.input_schema["additionalProperties"], false);
     }
 
     #[test]

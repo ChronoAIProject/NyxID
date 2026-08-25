@@ -159,6 +159,7 @@ export const createServiceSchema = z
     auth_type: z.enum(AUTH_TYPES).optional(),
     /// JSON body key for `body` auth. Required when `auth_type === "body"`.
     auth_key_name: optionalString,
+    credential: optionalString,
     service_category: z.enum(SERVICE_CATEGORIES).optional(),
     host: optionalString,
     port: optionalString,
@@ -189,6 +190,14 @@ export const createServiceSchema = z
           code: z.ZodIssueCode.custom,
           path: ["auth_type"],
           message: "Auth type is required",
+        });
+      }
+
+      if (value.credential && value.service_category !== "internal") {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["service_category"],
+          message: "A master credential requires the Internal category",
         });
       }
 

@@ -387,6 +387,8 @@ export type CreateServicePayload =
       /// Required when auth_type is "body" (e.g. "app_secret" for Lark).
       /// Also accepted as an override for other auth types.
       readonly auth_key_name?: string;
+      /** Write-only master credential for an internal service row. */
+      readonly credential?: string;
       readonly service_category?: string;
       readonly anonymous_endpoints?: readonly AnonymousEndpointRule[];
     }

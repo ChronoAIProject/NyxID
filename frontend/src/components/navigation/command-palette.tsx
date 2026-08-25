@@ -25,8 +25,11 @@ import {
   Server,
   Plug,
   Webhook,
+  WandSparkles,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAuthStore } from "@/stores/auth-store";
+import { canAdminWrite } from "@/types/api";
 
 type CommandGroup = "navigation" | "admin" | "action";
 
@@ -36,6 +39,7 @@ export interface CommandItem {
   readonly group: CommandGroup;
   readonly to?: string;
   readonly search?: Record<string, string>;
+  readonly requiresAdminWrite?: boolean;
   /**
    * Optional in-place action. Takes precedence over `to` when set, so an
    * entry can open a modal or fire a side-effect instead of navigating.
@@ -62,6 +66,13 @@ export const ALL_ITEMS: readonly CommandItem[] = [
   { icon: Users, label: "Users", to: "/admin/users", group: "admin" },
   { icon: Ticket, label: "Invite Codes", to: "/admin/invite-codes", group: "admin" },
   { icon: ClipboardList, label: "Audit Log", to: "/admin/audit-log", group: "admin" },
+  {
+    icon: WandSparkles,
+    label: "Platform Operations",
+    to: "/admin/platform-ops",
+    group: "admin",
+    requiresAdminWrite: true,
+  },
   { icon: Bot, label: "Service Accounts", to: "/admin/service-accounts", group: "admin" },
   { icon: KeyRound, label: "OAuth Clients", to: "/admin/oauth-clients", group: "admin" },
   { icon: ShieldCheck, label: "Roles", to: "/admin/roles", group: "admin" },
@@ -93,6 +104,7 @@ export function CommandPalette({
   readonly onOpenChange: (open: boolean) => void;
 }) {
   const navigate = useNavigate();
+  const user = useAuthStore((state) => state.user);
   const [query, setQueryRaw] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
 
@@ -102,14 +114,17 @@ export function CommandPalette({
   }, []);
 
   const filtered = useMemo(() => {
-    if (!query.trim()) return ALL_ITEMS.slice(0, 8);
+    const visibleItems = ALL_ITEMS.filter(
+      (item) => !item.requiresAdminWrite || canAdminWrite(user),
+    );
+    if (!query.trim()) return visibleItems.slice(0, 8);
     const q = query.toLowerCase();
-    return ALL_ITEMS.filter(
+    return visibleItems.filter(
       (item) =>
         item.label.toLowerCase().includes(q) ||
         (item.to?.toLowerCase().includes(q) ?? false),
     );
-  }, [query]);
+  }, [query, user]);
 
   const handleSelect = useCallback(
     (item: CommandItem) => {

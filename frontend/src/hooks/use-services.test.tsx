@@ -171,20 +171,26 @@ describe("service CRUD mutations", () => {
     vi.clearAllMocks();
   });
 
-  it("useCreateService POSTs to /services with the payload", async () => {
+  it("useCreateService POSTs the write-only credential without altering it", async () => {
     mockPost.mockResolvedValue({ id: "svc-1" });
     const { result } = renderHook(() => useCreateService(), {
       wrapper: createWrapper(),
     });
     await result.current.mutateAsync({
       name: "Acme",
-      slug: "acme",
+      service_type: "http",
       base_url: "https://acme.test",
-    } as unknown as CreateServicePayload);
+      auth_type: "bearer",
+      service_category: "internal",
+      credential: "vendor-secret",
+    } satisfies CreateServicePayload);
     expect(mockPost).toHaveBeenCalledWith("/services", {
       name: "Acme",
-      slug: "acme",
+      service_type: "http",
       base_url: "https://acme.test",
+      auth_type: "bearer",
+      service_category: "internal",
+      credential: "vendor-secret",
     });
   });
 
