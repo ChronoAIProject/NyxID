@@ -7,9 +7,11 @@ import type { InputCardContentBlock } from "@/types/assistant";
 
 export function InputCard({
   block,
+  disabled = false,
   onResolve,
 }: {
   readonly block: InputCardContentBlock;
+  readonly disabled?: boolean;
   readonly onResolve: (answer: InputAnswer) => Promise<void> | void;
 }) {
   const [selectedOptionIds, setSelectedOptionIds] = useState<string[]>([]);
@@ -23,7 +25,7 @@ export function InputCard({
   }, [block.request_id]);
 
   async function submit(answer: InputAnswer, mode: "selection" | "text") {
-    if (block.status !== "pending" || pending !== null) return;
+    if (disabled || block.status !== "pending" || pending !== null) return;
     setPending(mode);
     try {
       await onResolve(answer);
@@ -102,7 +104,7 @@ export function InputCard({
               >
                 <input
                   checked={checked}
-                  disabled={busy}
+                  disabled={busy || disabled}
                   name={`assistant-input-${block.request_id}`}
                   onChange={(event) => {
                     setSelectedOptionIds((current) =>
@@ -135,7 +137,7 @@ export function InputCard({
             type="button"
             size="sm"
             className="mt-1 w-fit"
-            disabled={busy || selectedOptionIds.length === 0}
+            disabled={busy || disabled || selectedOptionIds.length === 0}
             onClick={() => void submit({ selectedOptionIds }, "selection")}
           >
             {pending === "selection" ? (
@@ -159,7 +161,7 @@ export function InputCard({
         >
           <Input
             aria-label="Answer"
-            disabled={busy}
+            disabled={busy || disabled}
             maxLength={32_768}
             onChange={(event) => setFreeText(event.target.value)}
             value={freeText}
@@ -167,7 +169,7 @@ export function InputCard({
           <Button
             type="submit"
             size="icon"
-            disabled={busy || !normalizedText}
+            disabled={busy || disabled || !normalizedText}
             title="Submit answer"
           >
             {pending === "text" ? (

@@ -35,7 +35,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useWorkspaceCounts } from "@/hooks/use-assistant";
+import { useAssistantWorkspaceCounts } from "@/hooks/use-assistant-workspace";
 import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
@@ -196,6 +196,7 @@ export function AssistantSidebar({
   activeConversationId,
   activeView = "chat",
   deletingId,
+  notice,
   onNewChat,
   onSelect,
   onDelete,
@@ -204,12 +205,13 @@ export function AssistantSidebar({
   readonly activeConversationId: string | undefined;
   readonly activeView?: "chat" | "plugins" | "approvals";
   readonly deletingId?: string;
+  readonly notice?: string;
   readonly onNewChat: () => void;
   readonly onSelect: (conversationId: string) => void;
   readonly onDelete: (conversationId: string) => void | Promise<void>;
 }) {
   const user = useAuthStore((state) => state.user);
-  const counts = useWorkspaceCounts();
+  const counts = useAssistantWorkspaceCounts();
   const pluginsActive = activeView === "plugins";
   const approvalsActive = activeView === "approvals";
   const [deleteTarget, setDeleteTarget] = useState<Conversation | undefined>();
@@ -312,6 +314,14 @@ export function AssistantSidebar({
       </div>
 
       <GroupLabel>Chats</GroupLabel>
+      {notice ? (
+        <p
+          role="status"
+          className="mx-2 mb-2 rounded-md border border-border bg-overlay px-2.5 py-2 text-[10px] leading-relaxed text-muted-foreground"
+        >
+          {notice}
+        </p>
+      ) : null}
       <nav className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         <div className="space-y-0.5">
           {conversations.map((conversation) => (

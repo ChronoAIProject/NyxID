@@ -27,7 +27,11 @@ test("opening the assistant lists history but leaves a bare route on New chat", 
   await expect(
     page.locator("header").getByText("New chat", { exact: true }),
   ).toBeVisible();
-  await expect(page.getByText("Start a new conversation")).toBeVisible();
+  await expect(
+    page.getByText(
+      "Ask NyxID to help with services, access, and account operations.",
+    ),
+  ).toBeVisible();
   await expect(
     page.getByText("Pull yesterday's failed Stripe payments", {
       exact: false,

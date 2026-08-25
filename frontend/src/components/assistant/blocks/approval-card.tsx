@@ -118,7 +118,7 @@ function DecidedCard({ block }: { readonly block: ApprovalCardContentBlock }) {
     <section className={`rounded-xl border p-4 ${style.container}`}>
       <div className="flex flex-wrap items-center gap-2 text-[12px] font-semibold text-foreground">
         <DecidedIcon decision={decision} />
-        {style.title}
+        <span>{style.title}</span>
         {block.decision_channel && (
           <Badge variant="secondary" className="ml-auto">
             via {block.decision_channel}
@@ -174,9 +174,11 @@ function SubmittedCard({
 
 export function ApprovalCard({
   block,
+  disabled = false,
   onDecide,
 }: {
   readonly block: ApprovalCardContentBlock;
+  readonly disabled?: boolean;
   readonly onDecide: (approved: boolean) => Promise<void> | void;
 }) {
   const [pendingAction, setPendingAction] = useState<"approve" | "deny" | null>(
@@ -195,6 +197,7 @@ export function ApprovalCard({
     if (
       block.decision !== null ||
       block.decision_submission != null ||
+      disabled ||
       pendingAction !== null ||
       clickedAt - lastClick.current < CLICK_THROTTLE_MS
     ) {
@@ -274,7 +277,7 @@ export function ApprovalCard({
       <div className="flex flex-wrap items-center gap-2 border-t border-border bg-muted px-4 py-3">
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || disabled}
           onClick={() => void decide(true)}
           className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-success/40 bg-success/15 px-3 text-[12px] font-medium text-success transition-colors hover:bg-success/20 disabled:cursor-not-allowed disabled:opacity-40 light:text-foreground"
         >
@@ -287,7 +290,7 @@ export function ApprovalCard({
         </button>
         <button
           type="button"
-          disabled={busy}
+          disabled={busy || disabled}
           onClick={() => void decide(false)}
           className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-destructive/40 bg-destructive/15 px-3 text-[12px] font-medium text-destructive transition-colors hover:bg-destructive/20 disabled:cursor-not-allowed disabled:opacity-40 light:text-foreground"
         >

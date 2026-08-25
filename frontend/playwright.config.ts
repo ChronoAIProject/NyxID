@@ -3,10 +3,10 @@ import { defineConfig, devices } from "@playwright/test";
 /**
  * E2E harness for the assistant chat flows (docs/chat/07-testing-and-gaps.md).
  *
- * Runs the REAL app in Vite dev mode against the scripted MockAssistantTransport
- * (`/assistant?mock` — see src/lib/assistant/transport.ts). No backend and no
- * auth are required: the mock beforeLoad seeds a mock user, and every flow is
- * deterministic (scripted 100 ms event cadence).
+ * Runs the real app in Vite dev mode against the assistant HTTP fixture boundary
+ * (`/assistant?mock=1` — see src/lib/assistant/assistant-http-fixtures.ts). No
+ * backend or auth is required: the fixture route seeds a mock user and serves
+ * deterministic history JSON, control responses, and chunked SSE streams.
  *
  * Dedicated strict port so parallel worktrees racing for :3000 can never serve
  * a different checkout to these tests (see reference_vite_worktree_collision).

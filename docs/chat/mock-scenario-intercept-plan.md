@@ -1,5 +1,8 @@
 # Mock Scenario Interception — Implementation Plan
 
+> Superseded by the HTTP fixture world (this PR). This plan is retained as a
+> historical implementation record; its transport interceptor has been removed.
+
 Status: IMPLEMENTED — WP1 through WP8 completed in order; code and test commits
 `4fe63f71..1a7f6f6b`. CodexSol round-2 findings were folded before execution
 (all 11 accepted; see `mock-scenario-intercept-plan.review.md`).

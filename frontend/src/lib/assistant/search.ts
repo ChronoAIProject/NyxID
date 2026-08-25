@@ -7,6 +7,7 @@
  * - `draft` is the pre-provision "New chat" state. The button paints an
  *   empty thread under `?draft` immediately, then swaps in `?c=<id>` once
  *   the actor lands (see AssistantPage.createNewChat).
+ * - `mock` preserves the dev-only HTTP fixture boundary across router writes.
  *
  * `draft` is accepted as a boolean and as the string "true": the router's
  * search parser hands back a real boolean for its own round-tripped links,
@@ -15,6 +16,7 @@
 export interface AssistantSearch {
   readonly c?: string;
   readonly draft?: boolean;
+  readonly mock?: 1;
 }
 
 export function parseAssistantSearch(
@@ -24,6 +26,9 @@ export function parseAssistantSearch(
     ...(typeof search.c === "string" ? { c: search.c } : {}),
     ...(search.draft === true || search.draft === "true"
       ? { draft: true }
+      : {}),
+    ...(search.mock === 1 || search.mock === "1"
+      ? { mock: 1 as const }
       : {}),
   };
 }

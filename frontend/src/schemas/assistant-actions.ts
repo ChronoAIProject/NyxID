@@ -613,7 +613,7 @@ function matchesSecretValue(value: string): boolean {
   return SECRET_VALUE.test(value);
 }
 
-function findSecretPath(
+export function findSecretPath(
   value: unknown,
   path: ReadonlyArray<string | number> = [],
 ): ReadonlyArray<string | number> | null {

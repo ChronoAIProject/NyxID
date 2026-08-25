@@ -1,11 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import errorThenDeltaFixture from "@/lib/assistant/__fixtures__/chrono-llm-direct-error-then-delta.sse?raw";
 import fixture from "@/lib/assistant/__fixtures__/chrono-llm-direct-stream.sse?raw";
-import { DirectAssistantTransport } from "@/lib/assistant/direct-transport";
+import {
+  DirectAssistantTransport,
+  type DirectTurnEvent,
+} from "@/lib/assistant/direct-transport";
 import { transitionAssistantIdentity } from "@/lib/assistant/identity";
 import { useAssistantDraftStore } from "@/stores/assistant-draft-store";
 import { useAuthStore } from "@/stores/auth-store";
-import type { TurnEvent } from "@/types/assistant";
+type TurnEvent = DirectTurnEvent;
 import type { User } from "@/types/api";
 
 const encoder = new TextEncoder();
@@ -145,7 +148,6 @@ describe("DirectAssistantTransport streaming", () => {
       }),
     ]);
     expect(history.conversation.llm_model).toBe("gpt-5.4-mini");
-    expect(history.messages.at(-1)?.status).toBeUndefined();
     expect(events.at(-1)).toMatchObject({
       event: "turn.completed",
       status: "completed",

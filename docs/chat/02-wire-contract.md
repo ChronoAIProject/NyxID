@@ -401,7 +401,9 @@ deadline for known durable identities, tombstones the identity during deletion,
 aborts or waits on active work as required, and invalidates list/detail caches
 after success. A failed known-ID delete restores the visible conversation.
 
-Implementation: `backend/src/handlers/assistant.rs:delete_conversation` and `frontend/src/lib/assistant/aevatar-transport.ts:deleteConversation`.
+Implementation: `backend/src/handlers/assistant.rs:delete_conversation`,
+`frontend/src/lib/assistant/chat-history-api.ts:chatHistoryApi.deleteConversation`,
+and `frontend/src/hooks/use-assistant-chat.ts:deleteConversation`.
 
 ## Typed state
 
@@ -448,15 +450,17 @@ The hydrated cards live in one stable synthetic current-state message. Each hydr
 
 Implementation: `backend/src/handlers/assistant.rs:get_state`.
 
-## Typed delivery replay
+## Typed delivery
 
-Typed `text` and `action.continue` streams have a maximum of two delivery attempts because `clientRequestId` is also the Aevatar `Idempotency-Key`. A replay is allowed for a network/header failure, an HTTP status in `408`, `425`, `429`, `500`, `502`, `503`, or `504`, or a stream outcome classified as retryable before an authoritative settlement.
+Typed `text` and `action.continue` commands carry `clientRequestId` as the
+Aevatar `Idempotency-Key`. The browser makes one command request and does not
+automatically replay a failed send. A pre-stream HTTP or network failure rejects
+the send; the start deadline and failures after authoritative identity adoption
+settle the visible turn as an error. A typed failure never invokes another
+engine or a legacy send path.
 
-The budget is one initial attempt plus one replay. Cancellation or a settled run
-prevents the replay. Nonretryable HTTP or protocol errors fail immediately. A
-typed failure never invokes a legacy send path.
-
-Implementation: `frontend/src/lib/assistant/aevatar-transport.ts:streamTurn` and `streamActionContinuation`.
+Implementation: `frontend/src/lib/assistant/chat-api.ts:sendChatCommand` and
+`frontend/src/lib/assistant/chat-stream-orchestrator.ts:runChatStream`.
 
 ## Error and body handling
 

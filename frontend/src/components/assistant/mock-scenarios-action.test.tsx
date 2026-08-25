@@ -2,8 +2,7 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { lazy } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { ScenarioEngine } from "@/lib/assistant/scenario-engine";
-import { compiledScenarios } from "@/lib/assistant/scenarios.config";
+import { matchAssistantHttpScenario } from "@/lib/assistant/assistant-http-scenarios";
 import { useAssistantMockScenariosStore } from "@/stores/assistant-mock-scenarios-store";
 import { MockScenariosAction } from "./mock-scenarios-action";
 
@@ -90,13 +89,11 @@ describe("MockScenariosAction", () => {
       useAssistantMockScenariosStore.getState().disabledScenarioIds;
     expect(disabledScenarioIds).toEqual(["connect-github"]);
 
-    const engine = new ScenarioEngine(compiledScenarios, {
-      isConnected: () => false,
-      connect: () => undefined,
-      disconnect: () => undefined,
-    });
     expect(
-      engine.match("connect to my github", disabledScenarioIds),
+      matchAssistantHttpScenario(
+        "connect to my github",
+        disabledScenarioIds,
+      ),
     ).toBeNull();
   });
 
@@ -131,7 +128,7 @@ describe("MockScenariosAction", () => {
     openPopover();
     expect(
       screen.getByText(
-        /Intercepts matching chat messages with scripted flows\. Session-only;/,
+        /Shapes matching assistant HTTP fixtures\. Session-only;/,
       ),
     ).toBeInTheDocument();
     expect(

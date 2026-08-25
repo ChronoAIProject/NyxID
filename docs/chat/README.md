@@ -1,7 +1,6 @@
 # Assistant Chat
 
-Last verified against Aevatar `0a86713671fcf551dc19ad86b1b6aa8ae6cb980b` and the
-production typed-chat probe (2026-08-11).
+Last verified against Aevatar console and SDK commit `e7ba2e6eb` (2026-08-25).
 
 This directory is the canonical specification for the browser assistant chat surface. It describes the contract implemented by NyxID's `/api/v1/assistant/**` routes, the React assistant client, and the upstream chat endpoints those routes call. The default surface uses Aevatar's durable typed actor. A default-off feature flag can instead select the implemented stateless Direct Chrono-LLM engine for internal testing.
 
@@ -18,8 +17,8 @@ The live Aevatar contract wins over prose. If the deployed or pinned upstream co
 7. [Frontend UI](05-frontend-ui.md) specifies rendering, composer, navigation, loading, error, and accessibility behavior.
 8. [Actions registry](06-actions-registry.md) specifies the public action manifest consumed by Aevatar composition.
 9. [Testing and gaps](07-testing-and-gaps.md) identifies executable coverage, fault-injection controls, and current operational gaps.
-10. [Mock scenario interception](mock-scenario-intercept-spec.md) specifies the implemented developer-only scripted-flow interceptor; its accepted adversarial findings are preserved in the [spec review](mock-scenario-intercept-spec.review.md).
-11. [Mock scenario implementation plan](mock-scenario-intercept-plan.md) records the ordered work packages and verification gates; its accepted planning findings are preserved in the [plan review](mock-scenario-intercept-plan.review.md).
+10. [Mock scenario interception](mock-scenario-intercept-spec.md) preserves the design record of the superseded scripted-flow interceptor; assistant mocks now live at the HTTP boundary.
+11. [Mock scenario implementation plan](mock-scenario-intercept-plan.md) preserves the superseded implementation record and its review findings.
 12. [Smooth text streaming](smooth-streaming.md) specifies the implemented text-reveal pipeline: the PR #1390 pacing controller, stable-prefix Markdown split and streaming caret, plus boundary-safe cuts and adaptive cadence spreading. It consolidates and supersedes the earlier exploratory plan and its adversarial review.
 
 ## Scope
@@ -28,8 +27,10 @@ The assistant chat surface is the authenticated browser experience at
 `/assistant`. A human session calls NyxID. With the default-off direct flag
 disabled, NyxID selects the platform-managed `aevatar` service and Aevatar owns
 typed actor execution and persistent conversation history. With the flag
-enabled for that user, the frontend selects the stateless Direct engine and
-NyxID calls the platform-managed `chrono-llm-public` service instead.
+enabled for that user, new drafts and `direct-*` IDs select the stateless Direct
+engine and NyxID calls the platform-managed `chrono-llm-public` service instead.
+Existing `nyxid-chat-*` and `chatc-*` routes remain on the canonical history
+reader even while the flag is enabled.
 Existing `chatc-*` rows are historical read/delete compatibility, never an
 alternate send, stream, recovery, or control path.
 
@@ -53,16 +54,22 @@ The normative implementation anchors are:
 - `backend/src/services/assistant_service.rs`: identifier validation, exact upstream paths, and typed command parsing/reconstruction.
 - `backend/src/handlers/assistant_actions.rs`: public v4 action manifest.
 - `backend/src/handlers/proxy.rs`: platform identity, delegation-token, and Authorization injection.
-- `frontend/src/lib/assistant/aevatar-transport.ts`: HTTP calls, typed stream interpretation, actor-state reconciliation, retry, and action-card state.
-- `frontend/src/lib/assistant/direct-transport.ts`: memory-only direct conversations and OpenAI-compatible SSE interpretation.
-- `frontend/src/lib/assistant/transport.ts`: prefix-based engine selection and delegation.
-- `frontend/src/lib/assistant/chat-stream-parser.ts`: SSE and AG-UI decoding.
-- `frontend/src/hooks/use-assistant.ts`: query ownership, active-turn state, optimistic messages, projection, and cancellation.
+- `frontend/src/lib/assistant/assistant-http.ts`: cookie-authenticated assistant HTTP, attributed 401 handling, HTTP fixture seam, and wire-log capture.
+- `frontend/src/lib/assistant/chat-api.ts`: typed command bodies and canonical SSE response access.
+- `frontend/src/lib/assistant/sse-frame-normalizer.ts`: incremental SSE framing and backend-frame normalization.
+- `frontend/src/lib/assistant/runtime-event-semantics.ts`: console-compatible runtime event accumulation plus NyxID media artifacts.
+- `frontend/src/lib/assistant/chat-actor-state.ts`: actor-fact decoding and versioned projection reduction.
+- `frontend/src/lib/assistant/chat-history-decoders.ts`: strict index and wrapped transcript decoding.
+- `frontend/src/lib/assistant/chat-stream-orchestrator.ts`: identity adoption, deadlines, watchdog, stream settlement, and state refresh.
+- `frontend/src/hooks/use-assistant-chat.ts`: per-conversation session ownership, switching, history restore, and controls.
+- `frontend/src/components/assistant/chat-message.tsx`: canonical message composition and tail following.
+- `frontend/src/lib/assistant/direct-transport.ts` and `frontend/src/hooks/use-assistant-direct.ts`: the memory-only Direct seam.
+- `frontend/src/lib/assistant/conversation-ids.ts`: legacy, typed, and Direct prefix routing.
 - `frontend/src/components/assistant/**`: visible behavior and accessibility semantics.
 - `frontend/e2e/**` and assistant unit tests: executable browser and transport contracts.
 
-Upstream claims in this set are verified against Aevatar commit
-`0a86713671fcf551dc19ad86b1b6aa8ae6cb980b`. The primary upstream anchors are
-`MainnetChatEndpoints.cs`, `NyxIdChatPublicEndpoints.cs`,
-`NyxIdChatConversationAguiFrameBuilder.cs`, `NyxIdChatServiceDefaults.cs`, the
-NyxID tool-provider options, and Mainnet host configuration.
+Upstream claims in this set are verified against Aevatar commit `e7ba2e6eb`.
+The primary anchors are the console's chat page/API, SSE normalizer, runtime
+event accumulator, actor-state reducer, history decoders, and the typed actor's
+`NyxIdChatSseWriter`, `NyxIdChatProjectionSession`, and
+`NyxIdChatCompletionAguiFrameBuilder`.
