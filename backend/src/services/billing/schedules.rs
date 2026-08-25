@@ -23,6 +23,8 @@ use crate::models::user::{COLLECTION_NAME as USERS, User};
 
 use super::grants::{CREDIT_MICROS, MAX_GRANT_CREDITS, MAX_GRANT_REASON_LEN, MAX_SELECTED_USERS};
 
+mod progress;
+
 pub const DISBURSEMENT_CHUNK: usize = 200;
 pub const MAX_RECIPIENTS_PER_TICK: usize = 5_000;
 pub const PERIOD_LEASE_SECS: i64 = 300;
@@ -116,6 +118,15 @@ pub async fn update_schedule(
         .find_one(doc! { "_id": schedule_id })
         .await?
         .ok_or_else(|| AppError::NotFound("Credit schedule not found".to_string()))?;
+    update_schedule_with_current(db, schedule_id, input, current).await
+}
+
+async fn update_schedule_with_current(
+    db: &mongodb::Database,
+    schedule_id: &str,
+    input: UpdateScheduleInput,
+    current: CreditSchedule,
+) -> AppResult<CreditSchedule> {
     let amount_credits = input.amount_credits.unwrap_or(current.amount_credits);
     let amount_micros = validate_amount(amount_credits)?;
     let expiry = input.expiry.unwrap_or_else(|| current.expiry.clone());
@@ -144,9 +155,18 @@ pub async fn update_schedule(
         None => current.reason.clone(),
     };
     let now = Utc::now();
-    db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
+    let updated_at = if now.timestamp_millis() <= current.updated_at.timestamp_millis() {
+        current.updated_at + Duration::milliseconds(1)
+    } else {
+        now
+    };
+    let result = db
+        .collection::<CreditSchedule>(CREDIT_SCHEDULES)
         .update_one(
-            doc! { "_id": schedule_id },
+            doc! {
+                "_id": schedule_id,
+                "updated_at": bson::DateTime::from_chrono(current.updated_at),
+            },
             doc! { "$set": {
                 "amount_credits": amount_credits,
                 "amount_micros": amount_micros,
@@ -156,10 +176,13 @@ pub async fn update_schedule(
                 "scope": encode(&scope, "schedule scope")?,
                 "reason": reason.as_ref().map_or(Bson::Null, |value| value.clone().into()),
                 "is_active": input.is_active.unwrap_or(current.is_active),
-                "updated_at": bson::DateTime::from_chrono(now),
+                "updated_at": bson::DateTime::from_chrono(updated_at),
             } },
         )
         .await?;
+    if result.matched_count == 0 {
+        return Err(AppError::Conflict("Credit schedule changed; retry".into()));
+    }
     db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
         .find_one(doc! { "_id": schedule_id })
         .await?
@@ -600,15 +623,8 @@ async fn complete_period(
     period: &CreditSchedulePeriod,
     now: DateTime<Utc>,
 ) -> AppResult<()> {
-    let disbursed_count = db
-        .collection::<CreditGrant>(CREDIT_GRANTS)
-        .count_documents(doc! {
-            "schedule_origin.schedule_id": schedule_id,
-            "schedule_origin.period_start": bson::DateTime::from_chrono(period.period_start),
-        })
-        .await?;
-    let disbursed_count = i64::try_from(disbursed_count)
-        .map_err(|_| AppError::Internal("credit schedule grant count overflowed".to_string()))?;
+    let disbursed_count =
+        progress::count_period_grants(db, schedule_id, period.period_start).await?;
     db.collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
         .update_one(
             doc! { "_id": &period.id, "status": "disbursing" },
@@ -664,12 +680,15 @@ async fn abandon_elapsed_periods(
         .try_collect()
         .await?;
     for period in periods {
+        let disbursed_count =
+            progress::count_period_grants(db, &period.schedule_id, period.period_start).await?;
         let result = db
             .collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
             .update_one(
                 doc! { "_id": &period.id, "status": "disbursing" },
                 doc! { "$set": {
                     "status": "complete",
+                    "disbursed_count": disbursed_count,
                     "lease_expires_at": Bson::Null,
                     "updated_at": bson::DateTime::from_chrono(now),
                     "completed_at": bson::DateTime::from_chrono(now),
@@ -773,3 +792,7 @@ fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+#[path = "schedules/update_tests.rs"]
+mod update_tests;

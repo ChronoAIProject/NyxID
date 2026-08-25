@@ -6,7 +6,9 @@ use mongodb::bson::{self, doc};
 
 use crate::models::billing_ledger::{BillingLedgerEntry, COLLECTION_NAME as BILLING_LEDGER};
 use crate::models::billing_target::BillingTargetKind;
-use crate::models::credit_grant::{COLLECTION_NAME as CREDIT_GRANTS, CreditGrant};
+use crate::models::credit_grant::{
+    COLLECTION_NAME as CREDIT_GRANTS, CreditGrant, CreditGrantScheduleOrigin, CreditGrantStatus,
+};
 use crate::models::credit_schedule::{
     COLLECTION_NAME as CREDIT_SCHEDULES, CreditExpiryPolicy, CreditSchedule, SchedulePeriod,
     ScheduleRecurrence,
@@ -289,7 +291,7 @@ async fn elapsed_incomplete_period_is_abandoned_without_dead_credit_backfill() {
         return;
     };
     init_ledger_key();
-    seed_owners(&db, 3).await;
+    let owner_id = seed_owners(&db, 3).await.remove(0);
     let schedule = create_schedule(&db).await;
     let now = Utc.with_ymd_and_hms(2026, 8, 25, 12, 0, 0).unwrap();
     let old_period = SchedulePeriod {
@@ -319,6 +321,37 @@ async fn elapsed_incomplete_period_is_abandoned_without_dead_credit_backfill() {
         })
         .await
         .expect("insert incomplete elapsed period");
+    db.collection::<CreditGrant>(CREDIT_GRANTS)
+        .insert_one(CreditGrant {
+            id: "crash-inserted-scheduled-grant".to_string(),
+            batch_id: old_id.clone(),
+            schedule_origin: Some(CreditGrantScheduleOrigin {
+                schedule_id: schedule.id.clone(),
+                period_start: old_period.start,
+            }),
+            recipient_user_id: owner_id,
+            target_kind: schedule.target_kind,
+            amount_credits: schedule.amount_credits,
+            amount_micros: schedule.amount_micros,
+            remaining_micros: schedule.amount_micros,
+            reserved_micros: 0,
+            scope: schedule.scope.clone(),
+            expires_at: Some(old_period.end),
+            reason: schedule.reason.clone(),
+            granted_by: schedule.created_by.clone(),
+            status: CreditGrantStatus::Active,
+            issued_ledgered_at: None,
+            terminal_ledgered_at: None,
+            terminal_amount_micros: 0,
+            active_settlement: None,
+            created_at: old_period.start,
+            updated_at: old_period.start,
+            consumed_at: None,
+            expired_at: None,
+            revoked_at: None,
+        })
+        .await
+        .expect("simulate grant insert before progress update");
 
     let stats = schedules::disburse_due(&db, now, schedules::MAX_RECIPIENTS_PER_TICK)
         .await
@@ -329,7 +362,7 @@ async fn elapsed_incomplete_period_is_abandoned_without_dead_credit_backfill() {
             .count_documents(doc! { "batch_id": &old_id })
             .await
             .expect("count dead-window grants"),
-        0
+        1
     );
     let old = db
         .collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
@@ -338,6 +371,7 @@ async fn elapsed_incomplete_period_is_abandoned_without_dead_credit_backfill() {
         .expect("find old period")
         .expect("old period exists");
     assert_eq!(old.status, SchedulePeriodStatus::Complete);
+    assert_eq!(old.disbursed_count, 1);
     assert_eq!(
         db.collection::<CreditSchedule>(CREDIT_SCHEDULES)
             .find_one(doc! { "_id": &schedule.id })
