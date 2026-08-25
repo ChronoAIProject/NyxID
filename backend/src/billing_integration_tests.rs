@@ -530,9 +530,11 @@ async fn billing_route_coverage_smoke() {
         .insert_one(NotificationChannel {
             id: Uuid::new_v4().to_string(),
             user_id: owner_id.clone(),
-            telegram_chat_id: None,
-            telegram_username: None,
-            telegram_enabled: false,
+            // Global approval protection is enforced only while a delivery
+            // channel is active; a linked Telegram chat keeps it enforced here.
+            telegram_chat_id: Some(4242),
+            telegram_username: Some("billing-smoke".to_string()),
+            telegram_enabled: true,
             telegram_link_code: None,
             telegram_link_code_expires_at: None,
             approval_timeout_secs: 300,
