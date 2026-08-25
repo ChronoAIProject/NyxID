@@ -12,6 +12,7 @@ import {
   clearLocalPushRegistrationState,
   deactivatePushOnLogout,
 } from "../../lib/notifications/pushNotifications";
+import { clearPendingApprovalRefreshSignal } from "../../lib/notifications/approvalRefreshSignal";
 import { getCurrentUserProfileRequest, refreshAccessTokenIfNeeded, setSessionInvalidationListener } from "../../lib/api/http";
 import { isEmailAllowed, ALLOWED_EMAILS } from "../../lib/env";
 import {
@@ -55,6 +56,9 @@ export function AuthSessionProvider({ children }: PropsWithChildren) {
       } else {
         await clearPendingPushSyncSignal();
       }
+      // A generic refresh hint may outlive a blurred Activity route. Never
+      // carry that previous user's pending work into the next auth session.
+      clearPendingApprovalRefreshSignal();
       // Clear telemetry identity before we wipe auth state so the
       // very next event carries a fresh anon distinct_id rather than
       // the ex-user's id. Safe no-op when telemetry is off.

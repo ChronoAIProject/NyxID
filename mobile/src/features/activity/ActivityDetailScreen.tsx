@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { capture } from "../../lib/telemetry";
-import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { AppState, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { NativeStackScreenProps } from "@react-navigation/native-stack";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useFocusEffect } from "@react-navigation/native";
+import { onlineManager, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ScreenContainer } from "../../components/ScreenContainer";
 
 import { FullScreenLoading } from "../../components/FullScreenLoading";
@@ -23,6 +24,12 @@ import type { ThemeColors } from "../../theme/mobileTheme";
 import { radius, spacing, typeScale } from "../../theme/designTokens";
 import { createFlowStyles } from "../../theme/flowStyles";
 import type { RootStackParamList } from "../../app/AppNavigator";
+import { useNetworkStatus } from "../../hooks/useNetworkStatus";
+import {
+  APPROVAL_BACKSTOP_POLL_INTERVAL_MS,
+  signalApprovalStateMayHaveChanged,
+  subscribeToApprovalRefreshSignals,
+} from "../../lib/notifications/approvalRefreshSignal";
 
 type Props = NativeStackScreenProps<RootStackParamList, "ActivityDetail">;
 
@@ -49,6 +56,8 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   const flowStyles = useMemo(() => createFlowStyles(colors), [colors]);
   const { challengeId } = route.params;
   const queryClient = useQueryClient();
+  const { isConnected } = useNetworkStatus();
+  const [isLiveRefreshEnabled, setIsLiveRefreshEnabled] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
 
   // Same gate as ActivityScreen: suppress the in-app toast for the approval
@@ -67,7 +76,123 @@ export function ActivityDetailScreen({ navigation, route }: Props) {
   const { data, isLoading, isError, error, refetch } = useQuery({
     queryKey: ["challenge", challengeId],
     queryFn: () => mobileApi.getChallengeById(challengeId),
+    refetchInterval: isLiveRefreshEnabled
+      ? APPROVAL_BACKSTOP_POLL_INTERVAL_MS
+      : false,
   });
+
+  const refreshInFlightRef = useRef<Promise<void> | null>(null);
+  const queuedSignalRefreshRef = useRef(false);
+  const acceptsSignalRefreshRef = useRef(false);
+
+  const returnQueuedSignalToBus = useCallback(() => {
+    if (!queuedSignalRefreshRef.current) return;
+    queuedSignalRefreshRef.current = false;
+    signalApprovalStateMayHaveChanged();
+  }, []);
+
+  const refreshDetailFromSignal = useCallback((): Promise<void> => {
+    if (
+      !acceptsSignalRefreshRef.current ||
+      !onlineManager.isOnline() ||
+      AppState.currentState !== "active"
+    ) {
+      // `deliver()` has already opened the throttle window, so this can retry
+      // at most once per second. Focus/AppState/connectivity teardown removes
+      // the last subscriber and cancels the timer while preserving the hint.
+      signalApprovalStateMayHaveChanged();
+      return Promise.resolve();
+    }
+
+    if (refreshInFlightRef.current) {
+      queuedSignalRefreshRef.current = true;
+      return refreshInFlightRef.current;
+    }
+
+    const refreshPromise = (async () => {
+      let shouldRunAgain = false;
+      try {
+        do {
+          queuedSignalRefreshRef.current = false;
+          await refetch({ cancelRefetch: false });
+          shouldRunAgain = queuedSignalRefreshRef.current;
+          if (
+            shouldRunAgain &&
+            (!acceptsSignalRefreshRef.current ||
+              !onlineManager.isOnline() ||
+              AppState.currentState !== "active")
+          ) {
+            returnQueuedSignalToBus();
+            shouldRunAgain = false;
+          }
+        } while (shouldRunAgain);
+      } finally {
+        returnQueuedSignalToBus();
+      }
+    })().finally(() => {
+      refreshInFlightRef.current = null;
+    });
+
+    refreshInFlightRef.current = refreshPromise;
+    return refreshPromise;
+  }, [refetch, returnQueuedSignalToBus]);
+
+  useFocusEffect(
+    useCallback(() => {
+      let unsubscribeSignal: (() => void) | null = null;
+
+      const stopSignalSubscription = () => {
+        setIsLiveRefreshEnabled(false);
+        acceptsSignalRefreshRef.current = false;
+        unsubscribeSignal?.();
+        unsubscribeSignal = null;
+        returnQueuedSignalToBus();
+      };
+
+      const syncSubscription = (appState: string) => {
+        const shouldSubscribe =
+          appState === "active" && isConnected && onlineManager.isOnline();
+        setIsLiveRefreshEnabled(shouldSubscribe);
+
+        if (shouldSubscribe && !unsubscribeSignal) {
+          acceptsSignalRefreshRef.current = true;
+          unsubscribeSignal = subscribeToApprovalRefreshSignals(() => {
+            void refreshDetailFromSignal();
+          });
+
+          const detailWasInvalidated = queryClient.getQueryState([
+            "challenge",
+            challengeId,
+          ])?.isInvalidated;
+          if (detailWasInvalidated) {
+            signalApprovalStateMayHaveChanged();
+          }
+          return;
+        }
+
+        if (!shouldSubscribe && unsubscribeSignal) {
+          stopSignalSubscription();
+        }
+      };
+
+      syncSubscription(AppState.currentState);
+      const appStateSubscription = AppState.addEventListener(
+        "change",
+        syncSubscription
+      );
+
+      return () => {
+        stopSignalSubscription();
+        appStateSubscription.remove();
+      };
+    }, [
+      challengeId,
+      isConnected,
+      queryClient,
+      refreshDetailFromSignal,
+      returnQueuedSignalToBus,
+    ])
+  );
 
   // view->tap latency for `ui.mobile_decision_made`; starts when the
   // approval data first resolves on this screen.
