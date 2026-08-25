@@ -1,5 +1,17 @@
 use std::{env, net::IpAddr};
 
+/// Canonicalize IPv4-mapped IPv6 addresses so trust and rate-limit decisions
+/// cannot split one endpoint across two address-family representations.
+pub fn normalize_ip_address(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(address)),
+        address => address,
+    }
+}
+
 /// A single trusted reverse-proxy address or CIDR range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TrustedProxyRange {
@@ -9,7 +21,9 @@ pub struct TrustedProxyRange {
 
 impl TrustedProxyRange {
     pub fn contains(&self, address: IpAddr) -> bool {
-        match (self.network, address) {
+        let network = normalize_ip_address(self.network);
+        let address = normalize_ip_address(address);
+        match (network, address) {
             (IpAddr::V4(network), IpAddr::V4(address)) => {
                 let mask = if self.prefix_len == 0 {
                     0
@@ -33,6 +47,7 @@ impl TrustedProxyRange {
 
 impl From<IpAddr> for TrustedProxyRange {
     fn from(address: IpAddr) -> Self {
+        let address = normalize_ip_address(address);
         Self {
             network: address,
             prefix_len: if address.is_ipv4() { 32 } else { 128 },
@@ -44,7 +59,7 @@ impl std::str::FromStr for TrustedProxyRange {
     type Err = String;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (address, prefix_len) = match value.split_once('/') {
+        let (address, explicit_prefix_len) = match value.split_once('/') {
             Some((address, prefix)) => {
                 if prefix.contains('/') {
                     return Err("multiple prefix separators".to_string());
@@ -55,12 +70,31 @@ impl std::str::FromStr for TrustedProxyRange {
                 let prefix_len = prefix
                     .parse::<u8>()
                     .map_err(|_| "prefix is not an unsigned integer".to_string())?;
-                (address, prefix_len)
+                (address, Some(prefix_len))
             }
             None => {
                 let address = value.parse::<IpAddr>().map_err(|error| error.to_string())?;
-                let prefix_len = if address.is_ipv4() { 32 } else { 128 };
-                (address, prefix_len)
+                (address, None)
+            }
+        };
+
+        let parsed_as_mapped_ipv6 =
+            matches!(address, IpAddr::V6(value) if value.to_ipv4_mapped().is_some());
+        let address = normalize_ip_address(address);
+        let prefix_len = match (parsed_as_mapped_ipv6, explicit_prefix_len) {
+            (true, Some(prefix_len)) if prefix_len >= 96 => prefix_len - 96,
+            (true, Some(prefix_len)) => {
+                return Err(format!(
+                    "IPv4-mapped IPv6 prefix {prefix_len} cannot be represented as IPv4"
+                ));
+            }
+            (_, Some(prefix_len)) => prefix_len,
+            (_, None) => {
+                if address.is_ipv4() {
+                    32
+                } else {
+                    128
+                }
             }
         };
 
@@ -1890,9 +1924,23 @@ mod tests {
     }
 
     #[test]
+    fn trusted_proxy_ipv4_ranges_match_ipv4_mapped_ipv6_addresses() {
+        let range: TrustedProxyRange = "10.0.0.0/8".parse().unwrap();
+        assert!(range.contains("::ffff:10.2.10.22".parse().unwrap()));
+
+        let mapped_range: TrustedProxyRange = "::ffff:10.0.0.0/104".parse().unwrap();
+        assert_eq!(mapped_range, range);
+        assert!(mapped_range.contains("10.255.255.255".parse().unwrap()));
+        assert!(!mapped_range.contains("11.0.0.0".parse().unwrap()));
+
+        let mapped_host: TrustedProxyRange = "::ffff:10.2.10.22".parse().unwrap();
+        assert_eq!(mapped_host, "10.2.10.22/32".parse().unwrap());
+    }
+
+    #[test]
     fn trusted_proxy_cidr_parser_drops_malformed_prefixes() {
         let parsed = parse_trusted_proxy_ips(Some(
-            "10.0.0.0/33,10.0.0.0/not-a-prefix,10.0.0.0/-1,::/129,10.0.0.0/8/4,10.0.0.0/8"
+            "10.0.0.0/33,10.0.0.0/not-a-prefix,10.0.0.0/-1,::/129,::ffff:10.0.0.0/95,10.0.0.0/8/4,10.0.0.0/8"
                 .to_string(),
         ));
         assert_eq!(parsed, vec!["10.0.0.0/8".parse().unwrap()]);

@@ -9,6 +9,9 @@ export const AUTH_DEVICE_ERROR_MESSAGES: Record<number, string> = {
   11207: "That code is no longer valid. Run `nyxid login --device` again.",
 };
 
+const AUTH_DEVICE_CONNECTION_ERROR_MESSAGE =
+  "Couldn't reach NyxID. Check your connection and try again.";
+
 export const userCodeSchema = z
   .string()
   .transform((value) => value.replace(/[-\s]/g, "").toUpperCase())
@@ -149,13 +152,7 @@ export function friendlyAuthDeviceErrorMessage(error: unknown): string {
     return AUTH_DEVICE_ERROR_MESSAGES[errorCode] ?? "Device login failed.";
   }
 
-  if (parsedEnvelope.success) {
-    return parsedEnvelope.data.message;
-  }
-
-  return typeof maybeApiError.message === "string"
-    ? maybeApiError.message
-    : "Device login failed.";
+  return AUTH_DEVICE_CONNECTION_ERROR_MESSAGE;
 }
 
 export function friendlyAuthDeviceStatusMessage(

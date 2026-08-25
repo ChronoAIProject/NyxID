@@ -806,7 +806,10 @@ fn effective_client_ip_attribution(
     requester_ip: Option<&str>,
     stored_attribution: AuthDeviceClientIpAttribution,
 ) -> AuthDeviceClientIpAttribution {
-    match requester_ip.and_then(|value| value.parse::<IpAddr>().ok()) {
+    match requester_ip
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .map(crate::config::normalize_ip_address)
+    {
         Some(ip) if crate::mw::rate_limit::is_global_unicast(ip) => stored_attribution,
         _ => AuthDeviceClientIpAttribution::Unavailable,
     }
@@ -823,8 +826,8 @@ fn same_ip_as_viewer(
     {
         return None;
     }
-    let requester_ip = requester_ip?.parse::<IpAddr>().ok()?;
-    let viewer_ip = viewer_ip?.parse::<IpAddr>().ok()?;
+    let requester_ip = crate::config::normalize_ip_address(requester_ip?.parse::<IpAddr>().ok()?);
+    let viewer_ip = crate::config::normalize_ip_address(viewer_ip?.parse::<IpAddr>().ok()?);
     Some(requester_ip == viewer_ip)
 }
 
@@ -1165,6 +1168,15 @@ mod tests {
                 AuthDeviceClientIpAttribution::Verified,
             ),
             Some(false)
+        );
+        assert_eq!(
+            same_ip_as_viewer(
+                Some("::ffff:8.8.8.8"),
+                AuthDeviceClientIpAttribution::Verified,
+                Some("8.8.8.8"),
+                AuthDeviceClientIpAttribution::Verified,
+            ),
+            Some(true)
         );
         assert_eq!(
             same_ip_as_viewer(

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { ApiError } from "@/lib/api-client";
 import {
   approveBodySchema,
   denyBodySchema,
@@ -218,6 +219,26 @@ describe("friendlyAuthDeviceErrorMessage", () => {
         errorCode: 11207,
       }),
     ).toBe("That code is no longer valid. Run `nyxid login --device` again.");
+  });
+
+  it("does not expose transport error details", () => {
+    expect(
+      friendlyAuthDeviceErrorMessage(
+        new Error("Request failed with status 502"),
+      ),
+    ).toBe("Couldn't reach NyxID. Check your connection and try again.");
+  });
+
+  it("does not expose an unmapped API error message", () => {
+    expect(
+      friendlyAuthDeviceErrorMessage(
+        new ApiError(502, {
+          error: "upstream_failure",
+          error_code: 19999,
+          message: "Proxy returned an invalid upstream response",
+        }),
+      ),
+    ).toBe("Couldn't reach NyxID. Check your connection and try again.");
   });
 });
 

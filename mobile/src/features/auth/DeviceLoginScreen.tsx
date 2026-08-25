@@ -19,7 +19,7 @@ import { PrimaryButton } from "../../components/PrimaryButton";
 import { ScreenContainer } from "../../components/ScreenContainer";
 import { MagicKeyIllustration } from "../../components/icons/empty-state/MagicKeyIllustration";
 import { RoadBarrierIllustration } from "../../components/icons/empty-state/RoadBarrierIllustration";
-import { resolveErrorMessage } from "../../lib/api/errorMessages";
+import { resolveAuthDeviceErrorMessage } from "../../lib/api/errorMessages";
 import { mobileApi } from "../../lib/api/mobileApi";
 import type { AuthDevicePreview } from "../../lib/api/authDeviceApi";
 import { spacing } from "../../theme/designTokens";
@@ -282,7 +282,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
         setClockMs(Date.now());
         return true;
       } catch (error) {
-        setErrorMessage(resolveErrorMessage(error));
+        setErrorMessage(resolveAuthDeviceErrorMessage(error));
         return false;
       } finally {
         setIsPreviewing(false);
@@ -330,7 +330,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
         setTerminal("denied");
       }
     } catch (error) {
-      setErrorMessage(resolveErrorMessage(error));
+      setErrorMessage(resolveAuthDeviceErrorMessage(error));
     } finally {
       setDecisionPending(null);
     }

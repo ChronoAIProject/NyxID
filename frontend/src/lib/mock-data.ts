@@ -1671,17 +1671,28 @@ const MOCK_HANDLERS: MockHandler[] = [
   // Public config
   (p) => p === "/public/config" ? MOCK_PUBLIC_CONFIG : undefined,
 
-  // Auth device-code login (issue #971 T5 frozen contract)
-  (p) =>
-    p === "/auth/device/preview"
-      ? {
-          client_label: "wsl-calvin",
-          client_user_agent: "nyxid-cli/0.8.0",
-          initiated_at: "2026-06-18T11:32:14Z",
-          expires_at: "2026-06-18T11:42:14Z",
-          status: "pending",
-        }
-      : undefined,
+  // Auth device-code login
+  (p) => {
+    if (p !== "/auth/device/preview") return undefined;
+
+    const now = Date.now();
+    const secondsRemaining = 10 * 60;
+    return {
+      client_label: "workstation",
+      client_user_agent: "nyxid-cli/1.4.2 (macos; aarch64)",
+      client_ip: "8.8.8.8",
+      client_ip_attribution: "verified",
+      client_country: "US",
+      client_kind: "cli",
+      client_app: "NyxID CLI 1.4.2",
+      client_platform: "macOS (aarch64)",
+      same_ip_as_viewer: false,
+      seconds_remaining: secondsRemaining,
+      initiated_at: new Date(now - 32_000).toISOString(),
+      expires_at: new Date(now + secondsRemaining * 1000).toISOString(),
+      status: "pending",
+    };
+  },
   (p) => (p === "/auth/device/approve" ? { ok: true } : undefined),
 ];
 

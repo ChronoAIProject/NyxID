@@ -19,7 +19,7 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-use crate::config::TrustedProxyRange;
+use crate::config::{TrustedProxyRange, normalize_ip_address};
 use crate::errors::AppError;
 use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode};
 
@@ -669,7 +669,7 @@ pub fn resolve_client_ip(
     peer: Option<SocketAddr>,
     trusted_proxies: &[TrustedProxyRange],
 ) -> Option<ResolvedClientIp> {
-    let peer_ip = peer.map(|p| p.ip());
+    let peer_ip = peer.map(|peer| normalize_ip_address(peer.ip()));
 
     warn_if_proxy_attribution_is_collapsed(peer_ip, trusted_proxies);
 
@@ -707,7 +707,7 @@ pub fn resolve_client_ip_with_legacy_fallback(
     trusted_proxies: &[TrustedProxyRange],
 ) -> Option<ResolvedClientIp> {
     if trusted_proxies.is_empty() {
-        let peer_ip = peer.map(|address| address.ip());
+        let peer_ip = peer.map(|address| normalize_ip_address(address.ip()));
         warn_if_proxy_attribution_is_collapsed(peer_ip, trusted_proxies);
         let ip = leftmost_xff(headers)
             .or_else(|| header_ip(headers, "x-real-ip"))
@@ -722,10 +722,12 @@ pub fn resolve_client_ip_with_legacy_fallback(
 }
 
 pub fn is_trusted_proxy(ip: IpAddr, trusted_proxies: &[TrustedProxyRange]) -> bool {
+    let ip = normalize_ip_address(ip);
     trusted_proxies.iter().any(|range| range.contains(ip))
 }
 
 pub fn is_global_unicast(ip: IpAddr) -> bool {
+    let ip = normalize_ip_address(ip);
     match ip {
         IpAddr::V4(address) => {
             let [a, b, c, _] = address.octets();
@@ -754,6 +756,7 @@ pub fn is_global_unicast(ip: IpAddr) -> bool {
 }
 
 fn attributed_forwarded_ip(ip: IpAddr) -> ResolvedClientIp {
+    let ip = normalize_ip_address(ip);
     ResolvedClientIp {
         ip,
         attribution: if is_global_unicast(ip) {
@@ -779,6 +782,7 @@ fn header_ip(headers: &HeaderMap, name: &'static str) -> Option<IpAddr> {
         .map(str::trim)
         .filter(|value| !value.is_empty() && !value.contains(','))
         .and_then(|value| value.parse::<IpAddr>().ok())
+        .map(normalize_ip_address)
 }
 
 fn leftmost_xff(headers: &HeaderMap) -> Option<IpAddr> {
@@ -789,6 +793,7 @@ fn leftmost_xff(headers: &HeaderMap) -> Option<IpAddr> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .and_then(|value| value.parse::<IpAddr>().ok())
+        .map(normalize_ip_address)
 }
 
 fn rightmost_untrusted_xff(
@@ -800,7 +805,13 @@ fn rightmost_untrusted_xff(
         .and_then(|value| value.to_str().ok())?
         .split(',')
         .rev()
-        .filter_map(|value| value.trim().parse::<IpAddr>().ok())
+        .filter_map(|value| {
+            value
+                .trim()
+                .parse::<IpAddr>()
+                .ok()
+                .map(normalize_ip_address)
+        })
         .find(|ip| !is_trusted_proxy(*ip, trusted_proxies))
 }
 
@@ -1348,6 +1359,31 @@ mod tests {
     }
 
     #[test]
+    fn resolve_client_ip_trusts_an_ipv4_mapped_proxy_peer() {
+        let proxy_ip = "::ffff:10.2.10.22".parse::<IpAddr>().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "8.8.8.8".parse().unwrap());
+        let ranges = [trusted("10.0.0.0/8")];
+
+        let resolved = resolve_client_ip(&headers, Some(socket(proxy_ip)), &ranges).unwrap();
+        assert_eq!(resolved.ip, "8.8.8.8".parse::<IpAddr>().unwrap());
+        assert_eq!(resolved.attribution, ClientIpAttribution::Verified);
+    }
+
+    #[test]
+    fn resolve_client_ip_normalizes_a_public_ipv4_mapped_header() {
+        let proxy_ip = "10.2.10.22".parse::<IpAddr>().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "::ffff:8.8.8.8".parse().unwrap());
+        let ranges = [trusted("10.0.0.0/8")];
+
+        let resolved = resolve_client_ip(&headers, Some(socket(proxy_ip)), &ranges).unwrap();
+        assert_eq!(resolved.ip, "8.8.8.8".parse::<IpAddr>().unwrap());
+        assert_eq!(resolved.attribution, ClientIpAttribution::Verified);
+        assert!(is_global_unicast("::ffff:8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
     fn resolve_client_ip_honors_x_real_ip_fallback_when_trusted() {
         let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
         let client_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
@@ -1402,6 +1438,48 @@ mod tests {
             &[trusted("10.0.0.0/8")],
         );
         assert_eq!(resolved, Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+    }
+
+    #[test]
+    fn resolve_client_ip_skips_ipv4_mapped_trusted_xff_hops() {
+        let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "1.2.3.4, 8.8.8.8, ::ffff:10.0.0.5".parse().unwrap(),
+        );
+        let resolved = resolve_client_ip_for_rate_limit(
+            &headers,
+            Some(socket(proxy_ip)),
+            &[trusted("10.0.0.0/8")],
+        );
+        assert_eq!(resolved, Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+    }
+
+    #[test]
+    fn xff_cloudflare_fallback_requires_every_proxy_hop_to_be_trusted() {
+        let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 2, 10, 22));
+        let cloudflare_edge = "104.16.10.20".parse::<IpAddr>().unwrap();
+        let real_client = "8.8.8.8".parse::<IpAddr>().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "1.2.3.4, 8.8.8.8, 104.16.10.20".parse().unwrap(),
+        );
+
+        let incomplete =
+            resolve_client_ip(&headers, Some(socket(proxy_ip)), &[trusted("10.0.0.0/8")]).unwrap();
+        assert_eq!(incomplete.ip, cloudflare_edge);
+        assert_eq!(incomplete.attribution, ClientIpAttribution::Verified);
+
+        let complete = resolve_client_ip(
+            &headers,
+            Some(socket(proxy_ip)),
+            &[trusted("10.0.0.0/8"), trusted("104.16.0.0/13")],
+        )
+        .unwrap();
+        assert_eq!(complete.ip, real_client);
+        assert_eq!(complete.attribution, ClientIpAttribution::Verified);
     }
 
     #[test]

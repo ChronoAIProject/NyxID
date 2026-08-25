@@ -8,7 +8,7 @@ use axum::{
 use base64::Engine;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -845,7 +845,7 @@ fn ws_extract_ip(
         if let Some(forwarded) = headers
             .get("x-forwarded-for")
             .and_then(|value| value.to_str().ok())
-            .map(|value| value.split(',').next().unwrap_or("").trim().to_string())
+            .map(|value| normalize_legacy_ip_text(value.split(',').next().unwrap_or("")))
             .filter(|value| !value.is_empty())
         {
             return Some(forwarded);
@@ -853,16 +853,25 @@ fn ws_extract_ip(
         if let Some(real_ip) = headers
             .get("x-real-ip")
             .and_then(|value| value.to_str().ok())
-            .map(|value| value.trim().to_string())
+            .map(normalize_legacy_ip_text)
             .filter(|value| !value.is_empty())
         {
             return Some(real_ip);
         }
-        return peer.map(|address| address.ip().to_string());
+        return peer.map(|address| crate::config::normalize_ip_address(address.ip()).to_string());
     }
 
     crate::mw::rate_limit::resolve_client_ip_with_legacy_fallback(headers, peer, trusted_proxies)
         .map(|resolved| resolved.ip.to_string())
+}
+
+fn normalize_legacy_ip_text(value: &str) -> String {
+    let value = value.trim();
+    value
+        .parse::<IpAddr>()
+        .map(crate::config::normalize_ip_address)
+        .map(|address| address.to_string())
+        .unwrap_or_else(|_| value.to_string())
 }
 
 async fn handle_node_connection(
@@ -2972,6 +2981,22 @@ mod tests {
         assert_eq!(
             ws_extract_ip(&headers, Some(peer), &[]).as_deref(),
             Some("legacy-proxy-value")
+        );
+    }
+
+    #[test]
+    fn ws_extract_ip_normalizes_ipv4_mapped_legacy_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "::ffff:8.8.8.8".parse().unwrap());
+        assert_eq!(
+            ws_extract_ip(&headers, None, &[]).as_deref(),
+            Some("8.8.8.8")
+        );
+
+        let peer = SocketAddr::new("::ffff:10.2.10.22".parse().unwrap(), 443);
+        assert_eq!(
+            ws_extract_ip(&HeaderMap::new(), Some(peer), &[]).as_deref(),
+            Some("10.2.10.22")
         );
     }
 
