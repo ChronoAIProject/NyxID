@@ -15,20 +15,12 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
                     println!("{}", serde_json::to_string_pretty(&settings)?);
                 }
                 OutputFormat::Table => {
-                    let push = settings["push_enabled"]
-                        .as_bool()
-                        .map(|b| b.to_string())
-                        .unwrap_or_else(|| "-".to_string());
-                    let telegram = settings["telegram_enabled"]
-                        .as_bool()
-                        .map(|b| b.to_string())
-                        .unwrap_or_else(|| "-".to_string());
+                    let push = optional_bool_display(&settings, "push_enabled");
+                    let telegram = optional_bool_display(&settings, "telegram_enabled");
                     let telegram_connected =
                         settings["telegram_connected"].as_bool().unwrap_or(false);
-                    let approval = settings["approval_required"]
-                        .as_bool()
-                        .map(|b| b.to_string())
-                        .unwrap_or_else(|| "-".to_string());
+                    let approval = optional_bool_display(&settings, "approval_required");
+                    let approval_suspended = optional_bool_display(&settings, "approval_suspended");
 
                     eprintln!("Notification Settings");
                     eprintln!();
@@ -36,6 +28,7 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
                     eprintln!("Telegram Enabled:    {telegram}");
                     eprintln!("Telegram Connected:  {telegram_connected}");
                     eprintln!("Approval Required:   {approval}");
+                    eprintln!("Approval Suspended:  {approval_suspended}");
                 }
             }
             Ok(())
@@ -123,6 +116,13 @@ pub async fn run(command: NotificationCommands) -> Result<()> {
     }
 }
 
+fn optional_bool_display(value: &Value, key: &str) -> String {
+    value[key]
+        .as_bool()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,7 +137,8 @@ mod tests {
             .and(path("/api/v1/notifications/settings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "push_enabled": true, "telegram_enabled": false,
-                "telegram_connected": false, "approval_required": true
+                "telegram_connected": false, "approval_required": true,
+                "approval_suspended": true
             })))
             .expect(1)
             .mount(&server)
@@ -213,7 +214,8 @@ mod tests {
             .and(path("/api/v1/notifications/settings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "push_enabled": false, "telegram_enabled": true,
-                "telegram_connected": true, "approval_required": false
+                "telegram_connected": true, "approval_required": true,
+                "approval_suspended": false
             })))
             .mount(&server)
             .await;
@@ -226,6 +228,41 @@ mod tests {
         })
         .await
         .expect("settings table should succeed");
+    }
+
+    #[tokio::test]
+    async fn settings_table_output_supports_older_server_without_suspension_field() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/notifications/settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "push_enabled": true, "telegram_enabled": false,
+                "telegram_connected": false, "approval_required": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(NotificationCommands::Settings {
+            auth: crate::test_support::mock_auth_with_output(
+                server.uri(),
+                crate::cli::OutputFormat::Table,
+            ),
+        })
+        .await
+        .expect("older-server settings table should succeed");
+    }
+
+    #[test]
+    fn settings_table_formats_suspension_and_supports_older_servers() {
+        let current = serde_json::json!({ "approval_suspended": true });
+        let older = serde_json::json!({});
+
+        assert_eq!(
+            optional_bool_display(&current, "approval_suspended"),
+            "true"
+        );
+        assert_eq!(optional_bool_display(&older, "approval_suspended"), "-");
     }
 
     #[tokio::test]

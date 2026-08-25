@@ -3517,7 +3517,7 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Streaming:** If the client sends `Accept: text/event-stream` or the upstream responds with `Content-Type: text/event-stream`, NyxID forwards the SSE stream without buffering and strips `content-length`.
 
-**Transaction Approval:** If the resource owner has `approval_required` enabled and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing approval grant. If no grant exists, an approval request is created (with Telegram notification if configured) and the **HTTP connection is held open** until the user approves/rejects or the configured timeout expires. If approved, the request proceeds and the downstream response is returned. If rejected or timed out, a `403 Forbidden` is returned. Direct browser sessions (session cookie auth) bypass approval.
+**Transaction Approval:** If the resource owner has `approval_required` enabled, has at least one active notification channel, and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing approval grant. If no grant exists, an approval request is created (with Telegram notification if configured) and the **HTTP connection is held open** until the user approves/rejects or the configured timeout expires. If approved, the request proceeds and the downstream response is returned. If rejected or timed out, a `403 Forbidden` is returned. The implicit global default is suspended while the owner has no active notification channel and never applies to auto-connected (auto-provisioned, credential-free) services. Explicit per-service `ServiceApprovalConfig` rows apply regardless of channel availability or the auto-connected exemption. Direct browser sessions (session cookie auth) bypass approval.
 
 **Limits:** Request body is limited to 10 MB for proxy requests.
 
@@ -3693,7 +3693,7 @@ Three access modes are available:
 
 Streaming is supported for providers that expose SSE-compatible streaming APIs. When the request sets `"stream": true`, NyxID returns `text/event-stream` and forwards or translates provider SSE events on the fly.
 
-**Transaction Approval:** The same blocking approval flow applies to LLM gateway endpoints as to the proxy. If the resource owner has `approval_required` enabled and the request uses a non-session auth method (API key, delegated token, service account, or access token), the connection is held open until the user approves/rejects or the timeout expires. See the [Proxy](#proxy) section for details.
+**Transaction Approval:** The same blocking approval flow applies to LLM gateway endpoints as to the proxy. If the resource owner has `approval_required` enabled, has at least one active notification channel, and the request uses a non-session auth method (API key, delegated token, service account, or access token), the connection is held open until the user approves/rejects or the timeout expires. The implicit global default is suspended while the owner has no active notification channel and never applies to auto-connected (auto-provisioned, credential-free) services. Explicit per-service `ServiceApprovalConfig` rows apply regardless of channel availability or the auto-connected exemption. See the [Proxy](#proxy) section for details.
 
 #### GET /api/v1/llm/status
 
@@ -7136,11 +7136,16 @@ Authorization: Bearer <access_token>
   "telegram_connected": true,
   "telegram_username": "johndoe",
   "telegram_enabled": true,
+  "push_enabled": true,
+  "push_device_count": 1,
   "approval_required": true,
+  "approval_suspended": false,
   "approval_timeout_secs": 30,
   "grant_expiry_days": 30
 }
 ```
+
+The global `approval_required` preference is enforced only while at least one Telegram or push notification channel is active. `approval_suspended` is `true` when the stored preference remains on but no channel is currently available; enforcement resumes automatically when a channel becomes active again.
 
 **curl:**
 
@@ -7174,8 +7179,23 @@ All fields are optional. Only provided fields are updated.
 - `approval_timeout_secs`: 10..=300
 - `grant_expiry_days`: 1..=365
 - `telegram_enabled: true` requires a linked Telegram account
+- `approval_required: true` (turning it on from off) requires an active Telegram or push channel; an already-enabled preference may keep its value while channels are disabled (protection is suspended)
 
-**Response (200):** Same shape as GET response.
+**Response (200):**
+
+```json
+{
+  "telegram_connected": true,
+  "telegram_username": "johndoe",
+  "telegram_enabled": true,
+  "push_enabled": true,
+  "push_device_count": 1,
+  "approval_required": true,
+  "approval_suspended": false,
+  "approval_timeout_secs": 60,
+  "grant_expiry_days": 14
+}
+```
 
 **curl:**
 
@@ -7230,6 +7250,8 @@ Clears the linked Telegram account and disables Telegram notifications.
 }
 ```
 
+If approval protection remains enabled but no active channel remains, the message is `Telegram disconnected. Approval protection is suspended until a notification channel is available; it resumes automatically.`
+
 **curl:**
 
 ```bash
@@ -7251,7 +7273,7 @@ Authorization: Bearer <access_token>
 Content-Type: application/json
 ```
 
-Register or refresh a device token for push notifications. If a device with the same `token` already exists, its metadata is updated (token refresh). The first registered device automatically enables push notifications.
+Register or refresh a device token for push notifications. If a device with the same `token` already exists, its metadata is updated (token refresh). The first registered device automatically enables push notifications. Registration never changes the stored `approval_required` preference; if protection was suspended, it resumes from that existing preference when the push channel becomes active.
 
 **Request Body:**
 
@@ -7357,6 +7379,8 @@ Remove a registered push notification device. If no devices remain after removal
   "message": "Device removed"
 }
 ```
+
+If approval protection remains enabled but no active channel remains, the message is `Device removed. Approval protection is suspended until a notification channel is available; it resumes automatically.`
 
 **Errors:**
 - `1003 not_found` -- Device not found
@@ -7568,7 +7592,7 @@ Authorization: Bearer <access_token>
 
 **Auth:** Required (human-only -- rejects delegated tokens and service account tokens).
 
-Returns all per-service approval configurations for the current user. These override the global `approval_required` setting on a per-service basis.
+Returns all per-service approval configurations for the current user. These override the global `approval_required` setting on a per-service basis (only the global fallback is subject to channel suspension and the auto-connected exemption).
 
 **Response (200):**
 
@@ -7603,7 +7627,7 @@ Content-Type: application/json
 
 **Auth:** Required (human-only).
 
-Creates or updates a per-service approval override. When set, this value takes precedence over the global `notification_channels.approval_required` setting for the specified service.
+Creates or updates a per-service approval override. When set, this value takes precedence over the global `notification_channels.approval_required` setting for the specified service (only the global fallback is subject to channel suspension and the auto-connected exemption).
 
 **Request:**
 
@@ -7649,7 +7673,7 @@ Authorization: Bearer <access_token>
 
 **Auth:** Required (human-only).
 
-Removes the per-service approval override, reverting to the global `approval_required` setting for this service.
+Removes the per-service approval override, reverting to the global `approval_required` setting for this service (the global fallback is subject to channel suspension and the auto-connected exemption).
 
 **Response (200):**
 

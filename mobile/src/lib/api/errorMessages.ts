@@ -53,7 +53,7 @@ const BAD_REQUEST_OVERRIDES: Array<{ pattern: string; message: string }> = [
   {
     pattern: "at least one enabled notification channel",
     message:
-      "Either Push or Telegram must stay enabled to receive approval requests.",
+      "Connect and enable Push or Telegram before turning on approval protection.",
   },
 ];
 

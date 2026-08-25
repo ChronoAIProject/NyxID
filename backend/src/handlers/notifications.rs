@@ -21,6 +21,7 @@ pub struct NotificationSettingsResponse {
     pub telegram_username: Option<String>,
     pub telegram_enabled: bool,
     pub approval_required: bool,
+    pub approval_suspended: bool,
     pub approval_timeout_secs: u32,
     pub grant_expiry_days: u32,
     pub push_enabled: bool,
@@ -149,10 +150,7 @@ pub async fn update_settings(
         ));
     }
 
-    let resulting_approval_required = body.approval_required.unwrap_or(channel.approval_required);
-    if resulting_approval_required
-        && !has_enabled_notification_channel_after_update(&channel, &body)
-    {
+    if explicitly_enables_approval_without_active_channel(&channel, &body) {
         return Err(AppError::BadRequest(
             "Approval protection requires at least one enabled notification channel. Keep Telegram or push notifications enabled, or disable approval protection first.".to_string(),
         ));
@@ -197,6 +195,8 @@ pub async fn update_settings(
         Some(serde_json::json!({
             "telegram_enabled": updated.telegram_enabled,
             "approval_required": updated.approval_required,
+            "approval_suspended": updated.approval_required
+                && !notification_service::has_active_notification_channel(&updated),
             "approval_timeout_secs": updated.approval_timeout_secs,
             "grant_expiry_days": updated.grant_expiry_days,
             "push_enabled": updated.push_enabled,
@@ -282,11 +282,8 @@ pub async fn telegram_disconnect(
     let user_id = auth_user.user_id.to_string();
     let channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
 
-    // Auto-disable approval_required if no other notification channel remains
-    let no_push_channel = channel.push_devices.is_empty() || !channel.push_enabled;
-
     let now = bson::DateTime::from_chrono(Utc::now());
-    let mut set_doc = doc! {
+    let set_doc = doc! {
         "telegram_chat_id": bson::Bson::Null,
         "telegram_username": bson::Bson::Null,
         "telegram_enabled": false,
@@ -294,9 +291,6 @@ pub async fn telegram_disconnect(
         "telegram_link_code_expires_at": bson::Bson::Null,
         "updated_at": now,
     };
-    if no_push_channel {
-        set_doc.insert("approval_required", false);
-    }
 
     state
         .db
@@ -304,14 +298,16 @@ pub async fn telegram_disconnect(
         .update_one(doc! { "_id": &channel.id }, doc! { "$set": set_doc })
         .await?;
 
-    let approval_disabled = no_push_channel && channel.approval_required;
+    let updated_channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
+    let approval_suspended = updated_channel.approval_required
+        && !notification_service::has_active_notification_channel(&updated_channel);
 
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
         "telegram_disconnected",
-        if approval_disabled {
-            Some(serde_json::json!({ "approval_auto_disabled": true }))
+        if approval_suspended {
+            Some(serde_json::json!({ "approval_suspended": true }))
         } else {
             None
         },
@@ -335,8 +331,8 @@ pub async fn telegram_disconnect(
         );
     }
 
-    let message = if approval_disabled {
-        "Telegram disconnected. Approval protection has been disabled because no notification channels remain.".to_string()
+    let message = if approval_suspended {
+        "Telegram disconnected. Approval protection is suspended until a notification channel is available; it resumes automatically.".to_string()
     } else {
         "Telegram disconnected".to_string()
     };
@@ -355,6 +351,8 @@ fn to_settings_response(channel: &NotificationChannel) -> NotificationSettingsRe
         telegram_username: channel.telegram_username.clone(),
         telegram_enabled: channel.telegram_enabled,
         approval_required: channel.approval_required,
+        approval_suspended: channel.approval_required
+            && !notification_service::has_active_notification_channel(channel),
         approval_timeout_secs: channel.approval_timeout_secs,
         grant_expiry_days: channel.grant_expiry_days,
         push_enabled: channel.push_enabled,
@@ -372,6 +370,15 @@ fn has_enabled_notification_channel_after_update(
 
     (telegram_enabled && channel.telegram_chat_id.is_some())
         || (push_enabled && !channel.push_devices.is_empty())
+}
+
+fn explicitly_enables_approval_without_active_channel(
+    channel: &NotificationChannel,
+    body: &UpdateNotificationSettingsRequest,
+) -> bool {
+    !channel.approval_required
+        && body.approval_required == Some(true)
+        && !has_enabled_notification_channel_after_update(channel, body)
 }
 
 #[cfg(test)]
@@ -420,13 +427,13 @@ mod tests {
             push_enabled: Some(true),
         };
 
-        assert!(has_enabled_notification_channel_after_update(
+        assert!(!explicitly_enables_approval_without_active_channel(
             &channel, &body
         ));
     }
 
     #[test]
-    fn rejects_disabling_last_channel_while_approval_stays_enabled() {
+    fn allows_disabling_last_channel_while_approval_preference_stays_enabled() {
         let mut channel = make_channel();
         channel.push_enabled = true;
         channel.approval_required = true;
@@ -444,13 +451,17 @@ mod tests {
 
         let body = UpdateNotificationSettingsRequest {
             telegram_enabled: None,
-            approval_required: None,
+            // The web form submits all values, including an unchanged `true`.
+            approval_required: Some(true),
             approval_timeout_secs: None,
             grant_expiry_days: None,
             push_enabled: Some(false),
         };
 
         assert!(!has_enabled_notification_channel_after_update(
+            &channel, &body
+        ));
+        assert!(!explicitly_enables_approval_without_active_channel(
             &channel, &body
         ));
     }
@@ -484,6 +495,25 @@ mod tests {
         assert!(!has_enabled_notification_channel_after_update(
             &channel, &body
         ));
+        assert!(!explicitly_enables_approval_without_active_channel(
+            &channel, &body
+        ));
+    }
+
+    #[test]
+    fn rejects_explicit_approval_enable_without_active_channel() {
+        let channel = make_channel();
+        let body = UpdateNotificationSettingsRequest {
+            telegram_enabled: None,
+            approval_required: Some(true),
+            approval_timeout_secs: None,
+            grant_expiry_days: None,
+            push_enabled: None,
+        };
+
+        assert!(explicitly_enables_approval_without_active_channel(
+            &channel, &body
+        ));
     }
 
     // --- Pure function tests: to_settings_response ---
@@ -497,6 +527,7 @@ mod tests {
         assert!(resp.telegram_username.is_none());
         assert!(!resp.telegram_enabled);
         assert!(!resp.approval_required);
+        assert!(!resp.approval_suspended);
         assert_eq!(resp.approval_timeout_secs, 30);
         assert_eq!(resp.grant_expiry_days, 30);
         assert!(!resp.push_enabled);
@@ -551,6 +582,7 @@ mod tests {
         let resp = to_settings_response(&channel);
 
         assert!(resp.approval_required);
+        assert!(resp.approval_suspended);
         assert_eq!(resp.approval_timeout_secs, 120);
         assert_eq!(resp.grant_expiry_days, 7);
     }
@@ -713,6 +745,7 @@ mod tests {
             telegram_username: Some("alice".to_string()),
             telegram_enabled: true,
             approval_required: false,
+            approval_suspended: false,
             approval_timeout_secs: 60,
             grant_expiry_days: 14,
             push_enabled: true,
@@ -725,6 +758,7 @@ mod tests {
         assert_eq!(json["telegram_username"], "alice");
         assert_eq!(json["telegram_enabled"], true);
         assert_eq!(json["approval_required"], false);
+        assert_eq!(json["approval_suspended"], false);
         assert_eq!(json["approval_timeout_secs"], 60);
         assert_eq!(json["grant_expiry_days"], 14);
         assert_eq!(json["push_enabled"], true);
@@ -740,6 +774,7 @@ mod tests {
             telegram_username: None,
             telegram_enabled: false,
             approval_required: false,
+            approval_suspended: false,
             approval_timeout_secs: 30,
             grant_expiry_days: 30,
             push_enabled: false,

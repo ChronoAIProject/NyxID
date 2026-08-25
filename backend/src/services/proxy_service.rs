@@ -1283,12 +1283,18 @@ pub struct UserServiceResolution {
     /// Set when a slug resolved through a `ServicePool` before selecting
     /// the concrete `UserService` member.
     pub pool_selection: Option<service_pool_service::PoolSelection>,
+    /// True when the resolved UserService is a platform-managed,
+    /// credential-free auto-provisioned catalog service. Approval resolution
+    /// uses this only to suppress the implicit global default; explicit
+    /// per-service policies remain authoritative.
+    pub is_auto_connected: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalResolutionHint {
     pub service_id: String,
     pub service_owner_id: String,
+    pub is_auto_connected: bool,
 }
 
 /// Audit metadata for proxy calls that resolved through an org membership
@@ -2188,6 +2194,7 @@ async fn legacy_approval_hint(
         return Ok(Some(ApprovalResolutionHint {
             service_id: service_id.to_string(),
             service_owner_id: actor_user_id.to_string(),
+            is_auto_connected: false,
         }));
     }
 
@@ -2196,6 +2203,7 @@ async fn legacy_approval_hint(
         return Ok(Some(ApprovalResolutionHint {
             service_id: service.id,
             service_owner_id: actor_user_id.to_string(),
+            is_auto_connected: false,
         }));
     }
 
@@ -2209,6 +2217,7 @@ fn approval_hint_from_user_service(user_service: &UserService) -> ApprovalResolu
             .clone()
             .unwrap_or_else(|| user_service.id.clone()),
         service_owner_id: user_service.user_id.clone(),
+        is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
     }
 }
 
@@ -2447,6 +2456,7 @@ async fn finish_resolution(
             master_credential: false,
             org_routing,
             pool_selection,
+            is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
         });
     }
 
@@ -2509,6 +2519,7 @@ async fn finish_resolution(
             master_credential: true,
             org_routing,
             pool_selection,
+            is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
         });
     }
 
@@ -2601,6 +2612,7 @@ async fn finish_resolution(
             master_credential: false,
             org_routing,
             pool_selection,
+            is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
         });
     }
 
@@ -2662,6 +2674,7 @@ async fn finish_resolution(
         master_credential: false,
         org_routing,
         pool_selection,
+        is_auto_connected: user_service.source.as_deref() == Some(AUTO_PROVISION_SOURCE),
     })
 }
 

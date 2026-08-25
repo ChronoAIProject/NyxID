@@ -235,6 +235,7 @@ pub async fn create_request(
         Some(&caller.requester_type),
         &caller.requester_id,
         false,
+        approval_target.is_auto_connected,
     )
     .await?
     {
@@ -1206,6 +1207,7 @@ struct ApprovalTarget {
     service_name: String,
     service_slug: String,
     service_owner_user_id: String,
+    is_auto_connected: bool,
 }
 
 async fn approval_target(
@@ -1237,6 +1239,7 @@ async fn approval_target(
         service_name: service.service_name.clone(),
         service_slug: service.service_slug.clone(),
         service_owner_user_id: hint.service_owner_id,
+        is_auto_connected: hint.is_auto_connected,
     })
 }
 
@@ -1469,6 +1472,7 @@ async fn approval_policy_is_live(
             Some(&caller.requester_type),
             &caller.requester_id,
             false,
+            target.is_auto_connected,
         )
         .await?,
         approval_service::ApprovalOutcome::NeedsApproval(pending)
@@ -1723,6 +1727,82 @@ mod tests {
         }
     }
 
+    fn caller_for(user_id: &str) -> ExactServiceApprovalCaller {
+        let mut value = caller();
+        value.actor_user_id = user_id.to_string();
+        value.proxy_resolution_user_id = user_id.to_string();
+        value.approval_owner_user_id = user_id.to_string();
+        value
+    }
+
+    fn exact_test_service(
+        user_service_id: &str,
+        owner_id: &str,
+        catalog_service_id: &str,
+        slug: &str,
+    ) -> mcp_service::McpToolService {
+        mcp_service::McpToolService {
+            service_id: catalog_service_id.to_string(),
+            service_name: "Exact test service".to_string(),
+            service_slug: slug.to_string(),
+            description: None,
+            service_category: "user_service".to_string(),
+            endpoints: Vec::new(),
+            durable_endpoint_metadata: HashMap::new(),
+            source: mcp_service::McpToolSource::UserManaged {
+                user_service_id: user_service_id.to_string(),
+                catalog_service_id: Some(catalog_service_id.to_string()),
+                effective_owner_id: owner_id.to_string(),
+                node_id: None,
+                has_server_credential: true,
+            },
+            executable: true,
+            is_generic_proxy: false,
+            invalid_openapi_contract: false,
+            recommended_skills: Vec::new(),
+            proxy_operation_policy: None,
+        }
+    }
+
+    async fn insert_exact_test_service(
+        db: &Database,
+        owner_id: &str,
+        user_service_id: &str,
+        catalog_service_id: &str,
+        slug: &str,
+        source: Option<&str>,
+    ) {
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user_endpoint::UserEndpoint>(
+            crate::models::user_endpoint::COLLECTION_NAME,
+        )
+        .insert_one(crate::test_utils::test_user_endpoint(
+            &endpoint_id,
+            owner_id,
+            "Exact test service",
+            "https://exact.invalid",
+            None,
+            Some(catalog_service_id),
+        ))
+        .await
+        .unwrap();
+        let mut service = crate::test_utils::test_user_service(
+            user_service_id,
+            owner_id,
+            slug,
+            &endpoint_id,
+            Some(catalog_service_id),
+            None,
+        );
+        service.source = source.map(str::to_string);
+        db.collection::<crate::models::user_service::UserService>(
+            crate::models::user_service::COLLECTION_NAME,
+        )
+        .insert_one(service)
+        .await
+        .unwrap();
+    }
+
     fn create() -> ExactServiceApprovalCreate {
         ExactServiceApprovalCreate {
             user_service_id: "service-alpha".to_string(),
@@ -1834,6 +1914,149 @@ mod tests {
             operation_digest: &binding.operation_digest,
             operation_generation: binding.operation_generation,
         }
+    }
+
+    #[tokio::test]
+    async fn exact_auto_connected_global_default_is_not_required() {
+        let Some(db) = crate::test_utils::connect_test_database("exact_auto_global_default").await
+        else {
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = uuid::Uuid::new_v4().to_string();
+        let slug = "exact-auto-global";
+        insert_exact_test_service(
+            &db,
+            &actor_id,
+            &user_service_id,
+            &catalog_service_id,
+            slug,
+            Some(crate::models::user_service::AUTO_PROVISION_SOURCE),
+        )
+        .await;
+        let channel = crate::models::notification_channel::NotificationChannel {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: actor_id.clone(),
+            telegram_chat_id: Some(1234),
+            telegram_username: Some("exact-test".to_string()),
+            telegram_enabled: true,
+            telegram_link_code: None,
+            telegram_link_code_expires_at: None,
+            approval_timeout_secs: 30,
+            grant_expiry_days: 30,
+            approval_required: true,
+            push_enabled: false,
+            push_devices: Vec::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        db.collection::<crate::models::notification_channel::NotificationChannel>(
+            crate::models::notification_channel::COLLECTION_NAME,
+        )
+        .insert_one(channel)
+        .await
+        .unwrap();
+
+        let service = exact_test_service(&user_service_id, &actor_id, &catalog_service_id, slug);
+        let caller = caller_for(&actor_id);
+        let target = approval_target(
+            &crate::test_utils::test_app_state(db.clone()),
+            &caller,
+            &service,
+        )
+        .await
+        .unwrap();
+        let outcome = approval_service::evaluate_and_check(
+            &db,
+            &actor_id,
+            &target.service_owner_user_id,
+            &target.service_id,
+            &crate::services::operation_descriptor::build_mcp_descriptor("POST", "/items", None),
+            Some("delegated"),
+            "exact-client",
+            false,
+            target.is_auto_connected,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            approval_service::ApprovalOutcome::Allowed { required: false }
+        ));
+        assert_eq!(
+            db.collection::<ApprovalRequest>(REQUESTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_auto_connected_explicit_per_service_config_still_requires_approval() {
+        let Some(db) = crate::test_utils::connect_test_database("exact_auto_explicit_config").await
+        else {
+            return;
+        };
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let catalog_service_id = uuid::Uuid::new_v4().to_string();
+        let slug = "exact-auto-explicit";
+        insert_exact_test_service(
+            &db,
+            &actor_id,
+            &user_service_id,
+            &catalog_service_id,
+            slug,
+            Some(crate::models::user_service::AUTO_PROVISION_SOURCE),
+        )
+        .await;
+        let now = Utc::now();
+        db.collection::<crate::models::service_approval_config::ServiceApprovalConfig>(
+            crate::models::service_approval_config::COLLECTION_NAME,
+        )
+        .insert_one(
+            crate::models::service_approval_config::ServiceApprovalConfig {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: actor_id.clone(),
+                service_id: catalog_service_id.clone(),
+                service_name: "Exact test service".to_string(),
+                approval_required: true,
+                approval_mode: ApprovalMode::PerRequest,
+                rules: Vec::new(),
+                default_effect: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .unwrap();
+
+        let service = exact_test_service(&user_service_id, &actor_id, &catalog_service_id, slug);
+        let caller = caller_for(&actor_id);
+        let state = crate::test_utils::test_app_state(db.clone());
+        let target = approval_target(&state, &caller, &service).await.unwrap();
+        let outcome = approval_service::evaluate_and_check(
+            &db,
+            &actor_id,
+            &target.service_owner_user_id,
+            &target.service_id,
+            &crate::services::operation_descriptor::build_mcp_descriptor("POST", "/items", None),
+            Some("delegated"),
+            "exact-client",
+            false,
+            target.is_auto_connected,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            approval_service::ApprovalOutcome::NeedsApproval(pending)
+                if pending.resolution.mode == ApprovalMode::PerRequest
+        ));
     }
 
     fn approval_request(

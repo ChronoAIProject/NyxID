@@ -48,8 +48,9 @@ export function NotificationSetupCard() {
   const pushReady =
     settings?.push_enabled && (pushDevices?.devices.length ?? 0) > 0;
   const approvalEnabled = settings?.approval_required ?? false;
+  const approvalSuspended = settings?.approval_suspended ?? false;
   const hasChannel = telegramReady || pushReady;
-  const allDone = hasChannel && approvalEnabled;
+  const allDone = hasChannel && approvalEnabled && !approvalSuspended;
 
   const handleDismiss = useCallback(() => {
     localStorage.setItem(DISMISSED_KEY, "true");
@@ -162,6 +163,22 @@ export function NotificationSetupCard() {
             </div>
           )}
 
+          {approvalSuspended && (
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-4 py-3">
+              <div className="flex items-center gap-2">
+                <Shield className="h-4 w-4 text-amber-500" />
+                <span className="text-[13px] font-medium">
+                  Approval protection is suspended
+                </span>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Your approval preference remains on. Connect or re-enable
+                Telegram or push notifications and protection will resume
+                automatically.
+              </p>
+            </div>
+          )}
+
           {/* Channel rows -- always shown so users can add more channels */}
           <div className="flex flex-col gap-3">
             {/* Telegram */}
@@ -241,9 +258,9 @@ export function NotificationSetupCard() {
 
             {!hasChannel && (
               <p className="text-xs text-muted-foreground">
-                Connect Telegram or download the mobile app to enable approval
-                protection. Approval is enabled automatically when you set up a
-                channel.
+                Connect Telegram or download the mobile app to receive approval
+                requests. Then explicitly enable approval protection in this
+                card or Approval Settings.
               </p>
             )}
           </div>

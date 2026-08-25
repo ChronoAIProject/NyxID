@@ -77,6 +77,7 @@ export type NotificationSettings = {
   telegram_username: string | null;
   telegram_enabled: boolean;
   approval_required: boolean;
+  approval_suspended: boolean;
   approval_timeout_secs: number;
   grant_expiry_days: number;
   push_enabled: boolean;

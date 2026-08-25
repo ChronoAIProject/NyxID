@@ -106,19 +106,12 @@ pub async fn register_device(
         ensure_platform_matches(existing, &body.platform)?;
 
         let device_id = existing.device_id.clone();
-        let mut update_doc = doc! {
-            "push_devices.$.token": &body.token,
-            "push_devices.$.platform": &body.platform,
-            "push_devices.$.registered_at": bson_now,
-            "updated_at": bson_now,
-        };
-
-        if let Some(ref name) = body.device_name {
-            update_doc.insert("push_devices.$.device_name", name);
-        }
-        if let Some(ref app_id) = body.app_id {
-            update_doc.insert("push_devices.$.app_id", app_id);
-        }
+        let update_doc = device_metadata_update_doc(
+            bson_now,
+            Some((&body.token, &body.platform)),
+            body.device_name.as_deref(),
+            body.app_id.as_deref(),
+        );
 
         collection
             .update_one(
@@ -161,17 +154,12 @@ pub async fn register_device(
 
         // Update existing device metadata
         let device_id = existing.device_id.clone();
-        let mut update_doc = doc! {
-            "push_devices.$.registered_at": bson_now,
-            "updated_at": bson_now,
-        };
-
-        if let Some(ref name) = body.device_name {
-            update_doc.insert("push_devices.$.device_name", name);
-        }
-        if let Some(ref app_id) = body.app_id {
-            update_doc.insert("push_devices.$.app_id", app_id);
-        }
+        let update_doc = device_metadata_update_doc(
+            bson_now,
+            None,
+            body.device_name.as_deref(),
+            body.app_id.as_deref(),
+        );
 
         collection
             .update_one(
@@ -228,17 +216,7 @@ pub async fn register_device(
                 "push_devices.9": { "$exists": false },
                 "push_devices.token": { "$ne": &body.token },
             },
-            doc! {
-                "$push": {
-                    "push_devices": bson::to_bson(&device_token)
-                        .map_err(|e| AppError::Internal(format!("BSON serialize failed: {e}")))?
-                },
-                "$set": {
-                    "push_enabled": true,
-                    "approval_required": true,
-                    "updated_at": bson_now,
-                }
-            },
+            new_device_update_doc(&device_token, bson_now)?,
         )
         .await?;
 
@@ -254,16 +232,12 @@ pub async fn register_device(
             ensure_platform_matches(existing, &body.platform)?;
 
             // Token already exists (likely concurrent request) -- refresh metadata and return it.
-            let mut update_doc = doc! {
-                "push_devices.$.registered_at": bson_now,
-                "updated_at": bson_now,
-            };
-            if let Some(ref name) = body.device_name {
-                update_doc.insert("push_devices.$.device_name", name);
-            }
-            if let Some(ref app_id) = body.app_id {
-                update_doc.insert("push_devices.$.app_id", app_id);
-            }
+            let update_doc = device_metadata_update_doc(
+                bson_now,
+                None,
+                body.device_name.as_deref(),
+                body.app_id.as_deref(),
+            );
 
             collection
                 .update_one(
@@ -313,10 +287,11 @@ pub async fn register_device(
         state.db.clone(),
         &auth_user,
         "push_device_registered",
-        Some(serde_json::json!({
-            "device_id": device_id,
-            "platform": body.platform,
-        })),
+        Some(push_device_registered_audit_metadata(
+            &channel,
+            &device_id,
+            &body.platform,
+        )),
     );
 
     // Telemetry: notification.device_registered (new-device path).
@@ -410,12 +385,6 @@ pub async fn remove_device(
 
     // Disable push only if this update still has no remaining devices.
     // The conditional filter prevents racing with a concurrent device registration.
-    // Also auto-disable approval_required if Telegram is not connected either,
-    // to prevent the user from being locked out of their own services.
-    let should_auto_disable_approval =
-        should_auto_disable_approval_after_last_push_device_removed(&channel);
-    let set_on_empty = disable_push_update_doc(should_auto_disable_approval);
-
     collection
         .update_one(
             doc! {
@@ -423,11 +392,13 @@ pub async fn remove_device(
                 "push_enabled": true,
                 "push_devices.0": { "$exists": false },
             },
-            doc! { "$set": set_on_empty },
+            doc! { "$set": disable_push_update_doc() },
         )
         .await?;
 
-    let approval_auto_disabled = channel.push_devices.len() == 1 && should_auto_disable_approval;
+    let updated_channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
+    let approval_suspended = updated_channel.approval_required
+        && !notification_service::has_active_notification_channel(&updated_channel);
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -435,7 +406,7 @@ pub async fn remove_device(
         "push_device_removed",
         Some(serde_json::json!({
             "device_id": device_id,
-            "approval_auto_disabled": approval_auto_disabled,
+            "approval_suspended": approval_suspended,
         })),
     );
 
@@ -452,8 +423,8 @@ pub async fn remove_device(
         );
     }
 
-    let message = if approval_auto_disabled && channel.approval_required {
-        "Device removed. Approval protection has been disabled because no notification channels remain.".to_string()
+    let message = if approval_suspended {
+        "Device removed. Approval protection is suspended until a notification channel is available; it resumes automatically.".to_string()
     } else {
         "Device removed".to_string()
     };
@@ -504,16 +475,14 @@ pub async fn remove_current_device(
                 "push_enabled": true,
                 "push_devices.0": { "$exists": false },
             },
-            doc! {
-                "$set": disable_push_update_doc(
-                    should_auto_disable_approval_after_last_push_device_removed(&channel)
-                )
-            },
+            doc! { "$set": disable_push_update_doc() },
         )
         .await?;
 
-    let approval_auto_disabled = channel.push_devices.len() == 1
-        && should_auto_disable_approval_after_last_push_device_removed(&channel);
+    let updated_channel = notification_service::get_or_create_channel(&state.db, &user_id).await?;
+    let approval_suspended = token_was_present
+        && updated_channel.approval_required
+        && !notification_service::has_active_notification_channel(&updated_channel);
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -521,8 +490,8 @@ pub async fn remove_current_device(
         "push_device_removed_on_logout",
         Some(serde_json::json!({
             "platform": body.platform,
-            "token_removed": true,
-            "approval_auto_disabled": approval_auto_disabled,
+            "token_removed": token_was_present,
+            "approval_suspended": approval_suspended,
         })),
     );
 
@@ -540,8 +509,8 @@ pub async fn remove_current_device(
         );
     }
 
-    let message = if approval_auto_disabled {
-        "Current device removed. Approval protection has been disabled because no notification channels remain.".to_string()
+    let message = if approval_suspended {
+        "Current device removed. Approval protection is suspended until a notification channel is available; it resumes automatically.".to_string()
     } else {
         "Current device removed".to_string()
     };
@@ -555,12 +524,13 @@ async fn detach_token_from_other_users(
     token: &str,
     now: bson::DateTime,
 ) -> AppResult<()> {
+    let filter = doc! {
+        "user_id": { "$ne": user_id },
+        "push_devices.token": token,
+    };
     let removed = collection
         .update_many(
-            doc! {
-                "user_id": { "$ne": user_id },
-                "push_devices.token": token,
-            },
+            filter,
             doc! {
                 "$pull": {
                     "push_devices": { "token": token }
@@ -584,28 +554,6 @@ async fn detach_token_from_other_users(
                 doc! {
                     "$set": {
                         "push_enabled": false,
-                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
-                    }
-                },
-            )
-            .await?;
-
-        // Avoid leaving approvals enabled for users who no longer have any
-        // active notification channels after token detachment.
-        collection
-            .update_many(
-                doc! {
-                    "user_id": { "$ne": user_id },
-                    "approval_required": true,
-                    "push_devices.0": { "$exists": false },
-                    "$or": [
-                        { "telegram_enabled": { "$ne": true } },
-                        { "telegram_chat_id": bson::Bson::Null },
-                    ],
-                },
-                doc! {
-                    "$set": {
-                        "approval_required": false,
                         "updated_at": bson::DateTime::from_chrono(Utc::now()),
                     }
                 },
@@ -640,6 +588,55 @@ async fn remove_duplicate_token_entries(
         )
         .await?;
     Ok(())
+}
+
+fn device_metadata_update_doc(
+    now: bson::DateTime,
+    token_and_platform: Option<(&str, &str)>,
+    device_name: Option<&str>,
+    app_id: Option<&str>,
+) -> Document {
+    let mut update = doc! {
+        "push_devices.$.registered_at": now,
+        "updated_at": now,
+    };
+    if let Some((token, platform)) = token_and_platform {
+        update.insert("push_devices.$.token", token);
+        update.insert("push_devices.$.platform", platform);
+    }
+    if let Some(name) = device_name {
+        update.insert("push_devices.$.device_name", name);
+    }
+    if let Some(app_id) = app_id {
+        update.insert("push_devices.$.app_id", app_id);
+    }
+    update
+}
+
+fn new_device_update_doc(device_token: &DeviceToken, now: bson::DateTime) -> AppResult<Document> {
+    Ok(doc! {
+        "$push": {
+            "push_devices": bson::to_bson(device_token)
+                .map_err(|e| AppError::Internal(format!("BSON serialize failed: {e}")))?
+        },
+        "$set": {
+            "push_enabled": true,
+            "updated_at": now,
+        }
+    })
+}
+
+fn push_device_registered_audit_metadata(
+    channel: &NotificationChannel,
+    device_id: &str,
+    platform: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "device_id": device_id,
+        "platform": platform,
+        "approval_resumed": channel.approval_required
+            && !notification_service::has_active_notification_channel(channel),
+    })
 }
 
 // --- Validation ---
@@ -725,30 +722,17 @@ fn ensure_platform_matches(existing: &DeviceToken, requested_platform: &str) -> 
     Ok(())
 }
 
-fn telegram_channel_is_active(channel: &NotificationChannel) -> bool {
-    channel.telegram_enabled && channel.telegram_chat_id.is_some()
-}
-
-fn should_auto_disable_approval_after_last_push_device_removed(
-    channel: &NotificationChannel,
-) -> bool {
-    channel.approval_required && !telegram_channel_is_active(channel)
-}
-
-fn disable_push_update_doc(disable_approval: bool) -> Document {
-    let mut update = doc! {
+fn disable_push_update_doc() -> Document {
+    doc! {
         "push_enabled": false,
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
-    };
-    if disable_approval {
-        update.insert("approval_required", false);
     }
-    update
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::connect_test_database;
 
     #[test]
     fn validate_valid_fcm() {
@@ -959,7 +943,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_disables_approval_when_last_push_device_is_removed_without_telegram() {
+    fn approval_preference_is_preserved_when_last_push_device_is_removed() {
         let channel = NotificationChannel {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -977,13 +961,14 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        assert!(should_auto_disable_approval_after_last_push_device_removed(
+        assert!(channel.approval_required);
+        assert!(!notification_service::has_active_notification_channel(
             &channel
         ));
     }
 
     #[test]
-    fn keeps_approval_when_telegram_channel_is_active() {
+    fn active_telegram_channel_keeps_approval_enforced() {
         let channel = NotificationChannel {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
@@ -1001,6 +986,335 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        assert!(!should_auto_disable_approval_after_last_push_device_removed(&channel));
+        assert!(notification_service::has_active_notification_channel(
+            &channel
+        ));
+    }
+
+    #[test]
+    fn new_push_device_audit_reports_approval_resumption_without_token() {
+        let channel = NotificationChannel {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            telegram_chat_id: None,
+            telegram_username: None,
+            telegram_enabled: false,
+            telegram_link_code: None,
+            telegram_link_code_expires_at: None,
+            approval_timeout_secs: 30,
+            grant_expiry_days: 30,
+            approval_required: true,
+            push_enabled: false,
+            push_devices: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        let metadata = push_device_registered_audit_metadata(&channel, "device-id", "fcm");
+
+        assert_eq!(metadata["approval_resumed"], true);
+        assert_eq!(metadata["device_id"], "device-id");
+        assert_eq!(metadata["platform"], "fcm");
+        assert!(metadata.get("token").is_none());
+
+        let mut already_active = channel.clone();
+        already_active.telegram_enabled = true;
+        already_active.telegram_chat_id = Some(1234);
+        assert_eq!(
+            push_device_registered_audit_metadata(&already_active, "device-id", "fcm")["approval_resumed"],
+            false
+        );
+
+        let mut approval_off = channel;
+        approval_off.approval_required = false;
+        assert_eq!(
+            push_device_registered_audit_metadata(&approval_off, "device-id", "fcm")["approval_resumed"],
+            false
+        );
+    }
+
+    #[tokio::test]
+    async fn registration_paths_leave_approval_required_untouched() {
+        let Some(db) = connect_test_database("device_registration_approval_untouched").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+
+        let old_device = DeviceToken {
+            device_id: "old-device".to_string(),
+            platform: "fcm".to_string(),
+            token: "old-token".to_string(),
+            device_name: None,
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+        let new_device = DeviceToken {
+            device_id: "new-device".to_string(),
+            platform: "fcm".to_string(),
+            token: "new-token".to_string(),
+            device_name: Some("new device".to_string()),
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+
+        for approval_required in [false, true] {
+            let paths = [
+                (
+                    "rotation",
+                    device_metadata_update_doc(
+                        bson::DateTime::from_chrono(Utc::now()),
+                        Some(("new-token", "fcm")),
+                        None,
+                        None,
+                    ),
+                    true,
+                ),
+                (
+                    "refresh",
+                    device_metadata_update_doc(
+                        bson::DateTime::from_chrono(Utc::now()),
+                        None,
+                        Some("refreshed"),
+                        None,
+                    ),
+                    true,
+                ),
+                (
+                    "concurrent-registration-recovery",
+                    device_metadata_update_doc(
+                        bson::DateTime::from_chrono(Utc::now()),
+                        None,
+                        None,
+                        Some("app-id"),
+                    ),
+                    true,
+                ),
+                (
+                    "new-device",
+                    new_device_update_doc(&new_device, bson::DateTime::from_chrono(Utc::now()))
+                        .unwrap(),
+                    false,
+                ),
+            ];
+
+            for (path, update, has_existing_device) in paths {
+                let update = if has_existing_device {
+                    doc! { "$set": update }
+                } else {
+                    update
+                };
+                let channel_id = uuid::Uuid::new_v4().to_string();
+                let user_id = uuid::Uuid::new_v4().to_string();
+                db.collection::<NotificationChannel>(COLLECTION_NAME)
+                    .insert_one(NotificationChannel {
+                        id: channel_id.clone(),
+                        user_id,
+                        telegram_chat_id: None,
+                        telegram_username: None,
+                        telegram_enabled: false,
+                        telegram_link_code: None,
+                        telegram_link_code_expires_at: None,
+                        approval_timeout_secs: 30,
+                        grant_expiry_days: 30,
+                        approval_required,
+                        push_enabled: has_existing_device,
+                        push_devices: if has_existing_device {
+                            vec![old_device.clone()]
+                        } else {
+                            vec![]
+                        },
+                        created_at: Utc::now(),
+                        updated_at: Utc::now(),
+                    })
+                    .await
+                    .unwrap();
+
+                let filter = if has_existing_device {
+                    doc! { "_id": &channel_id, "push_devices.token": "old-token" }
+                } else {
+                    doc! { "_id": &channel_id }
+                };
+                db.collection::<NotificationChannel>(COLLECTION_NAME)
+                    .update_one(filter, update)
+                    .await
+                    .unwrap_or_else(|error| panic!("{path} update failed: {error}"));
+
+                let saved = db
+                    .collection::<NotificationChannel>(COLLECTION_NAME)
+                    .find_one(doc! { "_id": &channel_id })
+                    .await
+                    .unwrap()
+                    .expect("registration channel");
+                assert_eq!(
+                    saved.approval_required, approval_required,
+                    "{path} path changed approval_required"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn logout_login_round_trip_preserves_approval_and_resumes_enforcement() {
+        let Some(db) = connect_test_database("device_logout_login_approval").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let channel_id = uuid::Uuid::new_v4().to_string();
+        let old_device = DeviceToken {
+            device_id: "logout-device".to_string(),
+            platform: "fcm".to_string(),
+            token: "logout-token".to_string(),
+            device_name: None,
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+        let collection = db.collection::<NotificationChannel>(COLLECTION_NAME);
+        collection
+            .insert_one(NotificationChannel {
+                id: channel_id.clone(),
+                user_id: user_id.clone(),
+                telegram_chat_id: None,
+                telegram_username: None,
+                telegram_enabled: false,
+                telegram_link_code: None,
+                telegram_link_code_expires_at: None,
+                approval_timeout_secs: 30,
+                grant_expiry_days: 30,
+                approval_required: true,
+                push_enabled: true,
+                push_devices: vec![old_device],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        // This is the database work performed by remove_current_device on logout.
+        collection
+            .update_one(
+                doc! { "_id": &channel_id },
+                doc! {
+                    "$pull": { "push_devices": { "token": "logout-token" } },
+                    "$set": disable_push_update_doc(),
+                },
+            )
+            .await
+            .unwrap();
+        let after_logout = notification_service::get_or_create_channel(&db, &user_id)
+            .await
+            .unwrap();
+        assert!(after_logout.approval_required);
+        assert!(!notification_service::has_active_notification_channel(
+            &after_logout
+        ));
+        assert!(
+            !crate::services::approval_service::user_requires_approval(&db, &user_id)
+                .await
+                .unwrap()
+        );
+
+        let new_device = DeviceToken {
+            device_id: "login-device".to_string(),
+            platform: "fcm".to_string(),
+            token: "login-token".to_string(),
+            device_name: None,
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+        collection
+            .update_one(
+                doc! { "_id": &channel_id },
+                new_device_update_doc(&new_device, bson::DateTime::from_chrono(Utc::now()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let after_login = notification_service::get_or_create_channel(&db, &user_id)
+            .await
+            .unwrap();
+        assert!(after_login.approval_required);
+        assert!(notification_service::has_active_notification_channel(
+            &after_login
+        ));
+        assert!(
+            crate::services::approval_service::user_requires_approval(&db, &user_id)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn detaching_last_device_preserves_previous_owner_approval_preference() {
+        let Some(db) = connect_test_database("device_detach_preserves_approval").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let previous_user_id = uuid::Uuid::new_v4().to_string();
+        let registering_user_id = uuid::Uuid::new_v4().to_string();
+        let channel_id = uuid::Uuid::new_v4().to_string();
+        let device = DeviceToken {
+            device_id: "detached-device".to_string(),
+            platform: "fcm".to_string(),
+            token: "detached-token".to_string(),
+            device_name: None,
+            app_id: None,
+            registered_at: Utc::now(),
+            last_used_at: None,
+        };
+        let duplicate_device = DeviceToken {
+            device_id: "duplicate-device".to_string(),
+            ..device.clone()
+        };
+        db.collection::<NotificationChannel>(COLLECTION_NAME)
+            .insert_one(NotificationChannel {
+                id: channel_id.clone(),
+                user_id: previous_user_id.clone(),
+                telegram_chat_id: None,
+                telegram_username: None,
+                telegram_enabled: false,
+                telegram_link_code: None,
+                telegram_link_code_expires_at: None,
+                approval_timeout_secs: 30,
+                grant_expiry_days: 30,
+                approval_required: true,
+                push_enabled: true,
+                // `$pull` removes every matching token. Duplicate legacy rows
+                // must still count as losing the previous owner's last channel.
+                push_devices: vec![device, duplicate_device],
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+
+        let collection = db.collection::<NotificationChannel>(COLLECTION_NAME);
+        detach_token_from_other_users(
+            &collection,
+            &registering_user_id,
+            "detached-token",
+            bson::DateTime::from_chrono(Utc::now()),
+        )
+        .await
+        .unwrap();
+
+        let saved = collection
+            .find_one(doc! { "_id": &channel_id })
+            .await
+            .unwrap()
+            .expect("previous owner channel");
+        assert!(saved.approval_required);
+        assert!(!notification_service::has_active_notification_channel(
+            &saved
+        ));
+        assert!(
+            !crate::services::approval_service::user_requires_approval(&db, &previous_user_id)
+                .await
+                .unwrap()
+        );
     }
 }

@@ -288,6 +288,7 @@ pub async fn llm_proxy_request(
     // always None -- and then fall through to the legacy delegation path
     // with the "Provider ... connection required" error, even though the
     // user has a perfectly valid UserService linked by catalog_service_id.
+    let mut is_auto_connected_for_approval = false;
     let (target, resolved_via_user_service, master_credential, owner_for_approval) =
         match proxy_service::resolve_proxy_target_from_user_service(
             &state.db,
@@ -301,6 +302,7 @@ pub async fn llm_proxy_request(
         .await?
         {
             Some(resolution) => {
+                is_auto_connected_for_approval = resolution.is_auto_connected;
                 let effective_owner = resolution
                     .org_routing
                     .as_ref()
@@ -350,6 +352,7 @@ pub async fn llm_proxy_request(
             Some(&body_bytes)
         },
         owner_for_approval.as_deref(),
+        is_auto_connected_for_approval,
     )
     .await?;
 
@@ -649,6 +652,7 @@ pub async fn gateway_request(
     // resolutions the owner is the org's user_id, otherwise it falls
     // through to the actor.
     let mut effective_owner_for_approval: Option<String> = None;
+    let mut is_auto_connected_for_approval = false;
     // See `llm_proxy_request` for why we pass `None` as the slug here
     // instead of `provider_slug` -- the URL's provider slug does not
     // match UserService.slug, which is user-chosen at provision time.
@@ -665,6 +669,7 @@ pub async fn gateway_request(
         .await?
         {
             Some(resolution) => {
+                is_auto_connected_for_approval = resolution.is_auto_connected;
                 effective_owner_for_approval = Some(
                     resolution
                         .org_routing
@@ -767,6 +772,7 @@ pub async fn gateway_request(
             Some(&body_bytes)
         },
         effective_owner_for_approval.as_deref(),
+        is_auto_connected_for_approval,
     )
     .await?;
 
@@ -1611,6 +1617,7 @@ async fn preflight_llm_deny_before_resolution(
     .unwrap_or_else(|| proxy_service::ApprovalResolutionHint {
         service_id: service_id.to_string(),
         service_owner_id: approval_owner_user_id.clone(),
+        is_auto_connected: false,
     });
 
     let operation = operation_descriptor::build_llm_descriptor(method_str, path, body);
@@ -1620,6 +1627,7 @@ async fn preflight_llm_deny_before_resolution(
         &hint.service_owner_id,
         &hint.service_id,
         &operation,
+        hint.is_auto_connected,
     )
     .await?;
 
@@ -1642,6 +1650,7 @@ async fn check_llm_approval(
     method_str: &str,
     body: Option<&[u8]>,
     service_owner_user_id: Option<&str>,
+    is_auto_connected: bool,
 ) -> AppResult<()> {
     let approval_owner_user_id = auth_user.effective_approval_owner_user_id();
     let owner_for_resolution = service_owner_user_id.unwrap_or(&approval_owner_user_id);
@@ -1655,6 +1664,7 @@ async fn check_llm_approval(
         auth_user.approval_requester_type(),
         &auth_user.approval_requester_id(),
         auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
+        is_auto_connected,
     )
     .await?;
 

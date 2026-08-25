@@ -18,10 +18,12 @@ export function ApprovalSetupWizard({
   hasChannel,
   channelEnabled,
   approvalEnabled,
+  approvalSuspended,
 }: {
   readonly hasChannel: boolean;
   readonly channelEnabled: boolean;
   readonly approvalEnabled: boolean;
+  readonly approvalSuspended: boolean;
 }) {
   const steps: readonly SetupStep[] = [
     {
@@ -39,12 +41,28 @@ export function ApprovalSetupWizard({
     {
       label: "Turn on approval protection",
       description:
-        "Enable the global approval toggle. Programmatic proxy, LLM gateway, and SSH requests will require your approval.",
+        "Enable the global approval toggle. Requests will require your approval by default; auto-connected services remain available unless you add an explicit per-service policy.",
       done: approvalEnabled,
     },
   ];
 
-  const allDone = steps.every((s) => s.done);
+  const allDone = steps.every((s) => s.done) && !approvalSuspended;
+
+  if (approvalSuspended) {
+    return (
+      <div className="flex items-start gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+        <Info className="mt-0.5 h-5 w-5 shrink-0 text-amber-500" />
+        <div className="space-y-0.5">
+          <p className="text-[12px] font-medium">Approval protection is suspended</p>
+          <p className="text-xs text-muted-foreground">
+            Your approval preference is still on, but no enabled notification
+            channel is available. Connect or re-enable Telegram or push
+            notifications and protection will resume automatically.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   if (allDone) {
     return (
@@ -56,7 +74,9 @@ export function ApprovalSetupWizard({
           </p>
           <p className="text-xs text-muted-foreground">
             Programmatic proxy, LLM gateway, and SSH requests require your
-            approval. You can approve via Telegram, the mobile app, or the{" "}
+            approval by default. Auto-connected services remain available
+            unless you add an explicit per-service policy. You can approve via
+            Telegram, the mobile app, or the{" "}
             <Link
               to="/approvals/history"
               className="underline underline-offset-2 hover:text-foreground"

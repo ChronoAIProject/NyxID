@@ -104,8 +104,10 @@ pub struct ApprovalRule {
 /// services (set `approval_required = false`). Conversely, when global is false,
 /// they can require approval for specific high-risk services.
 ///
-/// If no config exists for a (user, service) pair, the global
-/// `notification_channels.approval_required` setting applies.
+/// If no config exists for a (user, service) pair, the active global
+/// `notification_channels.approval_required` setting applies. That global default
+/// is suspended without a notification channel and exempted for auto-connected
+/// services; this explicit configuration remains authoritative in both cases.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServiceApprovalConfig {
     /// UUID v4 string
