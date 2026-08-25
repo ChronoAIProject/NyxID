@@ -14,6 +14,8 @@ pub struct UserProviderCredentials {
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub client_secret_encrypted: Option<Vec<u8>>,
     pub label: Option<String>,
+    #[serde(default)]
+    pub state_version: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -38,6 +40,7 @@ mod tests {
             client_id_encrypted: Some(vec![1, 2, 3]),
             client_secret_encrypted: Some(vec![4, 5, 6]),
             label: Some("My Twitter App".to_string()),
+            state_version: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -58,6 +61,7 @@ mod tests {
             client_id_encrypted: None,
             client_secret_encrypted: None,
             label: None,
+            state_version: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -65,5 +69,19 @@ mod tests {
         let restored: UserProviderCredentials = bson::from_document(doc).expect("deserialize");
         assert_eq!(cred.id, restored.id);
         assert!(restored.client_id_encrypted.is_none());
+    }
+
+    #[test]
+    fn bson_backward_compat_missing_state_version() {
+        let doc = bson::doc! {
+            "_id": uuid::Uuid::new_v4().to_string(),
+            "user_id": uuid::Uuid::new_v4().to_string(),
+            "provider_config_id": uuid::Uuid::new_v4().to_string(),
+            "created_at": bson::DateTime::from_chrono(Utc::now()),
+            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+        };
+        let restored: UserProviderCredentials =
+            bson::from_document(doc).expect("deserialize legacy credentials");
+        assert_eq!(restored.state_version, 0);
     }
 }

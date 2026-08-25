@@ -18,12 +18,22 @@ export const chainVerifyStatusSchema = z.object({
   last_run_at: z.string().min(1),
 });
 
+export const startupDiagnosticSchema = z.object({
+  code: z.string().min(1),
+  summary: z.string().min(1),
+  detail: z.string().min(1),
+  remediation: z.string().min(1),
+  detected_at: z.string().min(1),
+});
+
 export const chainVerificationResponseSchema = z.object({
   chains: z.array(chainVerifyStatusSchema),
+  startup_diagnostics: z.array(startupDiagnosticSchema).default([]),
 });
 
 export type ChainVerifyOutcome = z.infer<typeof chainVerifyOutcomeSchema>;
 export type ChainVerifyStatus = z.infer<typeof chainVerifyStatusSchema>;
+export type StartupDiagnostic = z.infer<typeof startupDiagnosticSchema>;
 export type ChainVerificationResponse = z.infer<
   typeof chainVerificationResponseSchema
 >;

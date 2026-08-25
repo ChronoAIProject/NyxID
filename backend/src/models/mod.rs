@@ -73,6 +73,7 @@ pub mod service_pool;
 pub mod service_provider_requirement;
 pub mod session;
 pub mod ssh_auth_mode;
+pub mod startup_diagnostic;
 pub mod telemetry_erasure_job;
 pub mod trigger;
 pub mod trigger_delivery;

@@ -3529,7 +3529,7 @@ async fn execute_proxy_inner(
                 .await;
                 return Err(AppError::DurableOperationOutcomeUncertain);
             }
-            return Err(error);
+            return Err(error.into_app_error());
         }
         Err(_) => {
             emit_preheader_diagnostics(
@@ -9855,6 +9855,7 @@ mod proxy_resolution_integration_tests {
                 credential_label: None,
                 metadata: None,
                 is_active: false,
+                state_version: 1,
                 created_at: now,
                 updated_at: now,
             },

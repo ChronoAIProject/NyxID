@@ -76,6 +76,7 @@ pub struct DeviceOnboardAuthorizationEvidenceResponse {
     pub id: String,
     pub owner_user_id: String,
     pub used: bool,
+    pub state_version: i64,
     pub redeemed_node_id: Option<String>,
     pub created_at: String,
     pub expires_at: String,
@@ -293,6 +294,7 @@ pub async fn get_onboard_device_authorization(
         id: authority.id,
         owner_user_id: authority.owner_user_id,
         used: authority.used,
+        state_version: authority.state_version,
         redeemed_node_id: authority.redeemed_node_id,
         created_at: authority.created_at.to_rfc3339(),
         expires_at: authority.expires_at.to_rfc3339(),
@@ -784,7 +786,10 @@ mod tests {
         let (notification_done_tx, mut notification_done_rx) = oneshot::channel::<()>();
 
         let result = tokio::time::timeout(
-            Duration::from_millis(200),
+            // The assertion is about not awaiting notification dispatch. The
+            // handler still performs several MongoDB writes, which can exceed
+            // 200ms when the full database-backed suite runs concurrently.
+            Duration::from_secs(2),
             approve_device_code_with_notification_dispatcher(
                 state,
                 auth_user,

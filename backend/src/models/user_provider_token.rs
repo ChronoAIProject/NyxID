@@ -45,6 +45,8 @@ pub struct UserProviderToken {
     // --- Status ---
     /// "active" | "expired" | "revoked" | "refresh_failed"
     pub status: String,
+    #[serde(default)]
+    pub state_version: i64,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_refreshed_at: Option<DateTime<Utc>>,
     #[serde(default, with = "bson_datetime::optional")]
@@ -95,6 +97,7 @@ mod tests {
             expires_at: Some(Utc::now()),
             api_key_encrypted: None,
             status: "active".to_string(),
+            state_version: 1,
             last_refreshed_at: Some(Utc::now()),
             last_used_at: None,
             error_message: None,
@@ -129,6 +132,7 @@ mod tests {
             expires_at: None,
             api_key_encrypted: Some(vec![7, 8, 9]),
             status: "active".to_string(),
+            state_version: 1,
             last_refreshed_at: None,
             last_used_at: None,
             error_message: None,
@@ -164,5 +168,6 @@ mod tests {
         // Pre-migration rows have no `connection_id`; deserializer must
         // tolerate the missing field rather than rejecting the document.
         assert!(restored.connection_id.is_none());
+        assert_eq!(restored.state_version, 0);
     }
 }

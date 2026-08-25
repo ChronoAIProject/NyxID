@@ -26,6 +26,7 @@ use uuid::Uuid;
 use crate::errors::{AppError, AppResult};
 use crate::models::approval_request::{
     ApprovalRequest, COLLECTION_NAME as APPROVAL_REQUESTS, ExactServiceApprovalBinding,
+    ExactServiceExecutionAuthorityBinding,
 };
 use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOG};
 use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as BILLING_RATE_CACHE};
@@ -577,6 +578,34 @@ async fn billing_route_coverage_smoke() {
     );
     let catalog_digest =
         crate::services::mcp_service::operation_catalog_digest(&exact_catalog.services);
+    let execution_resolution =
+        crate::services::proxy_service::read_proxy_authority_snapshot_by_user_service_id(
+            &db,
+            &state.encryption_keys,
+            &owner_id,
+            &mcp.id,
+            Some(&mcp.slug),
+        )
+        .await
+        .expect("resolve exact redemption execution authority")
+        .expect("exact redemption user service exists");
+    let configured_fallback_node_ids =
+        crate::services::node_routing_service::list_configured_binding_node_ids(
+            &db,
+            &owner_id,
+            &execution_resolution.target.service.id,
+        )
+        .await
+        .expect("resolve exact redemption configured node authority");
+    let execution_authority_projection = crate::services::execution_authority::build_projection(
+        &execution_resolution,
+        None,
+        configured_fallback_node_ids,
+    );
+    let execution_authority_digest =
+        crate::services::execution_authority::digest(&execution_authority_projection);
+    let legacy_execution_authority_digest =
+        crate::services::execution_authority::legacy_digest(&execution_authority_projection);
     let request_id = Uuid::new_v4().to_string();
     let operation_id = "billing-exact-operation".to_string();
     let operation_generation = 1;
@@ -629,13 +658,20 @@ async fn billing_route_coverage_smoke() {
                 endpoint_id,
                 catalog_digest: catalog_digest.clone(),
                 exact_view_digest: None,
+                exact_view_digest_binding: None,
                 endpoint_contract_digest,
                 operation_digest: operation_digest.clone(),
                 operation_id: operation_id.clone(),
                 operation_generation,
+                producer_generation_bound: true,
                 effect_idempotency_key: effect_idempotency_key.clone(),
                 arguments: exact_arguments,
-                execution_authority_digest: None,
+                execution_authority_digest: Some(legacy_execution_authority_digest),
+                execution_authority_binding: Some(ExactServiceExecutionAuthorityBinding {
+                    projection_version: crate::services::execution_authority::CONTRACT_VERSION
+                        .to_string(),
+                    digest: execution_authority_digest,
+                }),
                 redemption: None,
             }),
             created_at: now,
@@ -2075,6 +2111,7 @@ async fn insert_llm_route_service(
             expires_at: None,
             api_key_encrypted: None,
             status: "active".to_string(),
+            state_version: 1,
             last_refreshed_at: None,
             last_used_at: None,
             error_message: None,

@@ -5,6 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     http::HeaderMap,
 };
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -12,6 +13,9 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::oauth_flow_kind::OAuthFlowKind;
 use crate::models::oauth_state::OAuthState;
+use crate::models::user_provider_token::{
+    COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
+};
 use crate::mw::auth::{AuthUser, OptionalAuthUser};
 use crate::services::url_validation::validate_base_url;
 use crate::services::{
@@ -1175,6 +1179,41 @@ pub async fn disconnect_provider(
     }))
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProviderTokenAuthorizationEvidenceResponse {
+    pub provider_id: String,
+    pub status: String,
+    pub state_version: i64,
+    pub updated_at: String,
+}
+
+/// GET /api/v1/providers/{provider_id}/authorization
+///
+/// Secret-free projection of the caller's legacy provider-token state.
+pub async fn get_provider_token_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(provider_id): Path<String>,
+) -> AppResult<Json<ProviderTokenAuthorizationEvidenceResponse>> {
+    let user_id = auth_user.user_id.to_string();
+    let token = state
+        .db
+        .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+        .find_one(doc! {
+            "user_id": &user_id,
+            "provider_config_id": &provider_id,
+        })
+        .sort(doc! { "updated_at": -1_i32 })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Provider token not found".to_string()))?;
+    Ok(Json(ProviderTokenAuthorizationEvidenceResponse {
+        provider_id: token.provider_config_id,
+        status: token.status,
+        state_version: token.state_version,
+        updated_at: token.updated_at.to_rfc3339(),
+    }))
+}
+
 /// POST /api/v1/providers/{provider_id}/refresh
 ///
 /// Audit primary `user_id` is the affected token owner (`effective_user_id`);
@@ -1639,6 +1678,7 @@ mod tests {
             expires_at: None,
             api_key_encrypted: None,
             status: "active".to_string(),
+            state_version: 1,
             last_refreshed_at: None,
             last_used_at: None,
             error_message: None,

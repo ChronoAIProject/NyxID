@@ -22,6 +22,8 @@ pub struct UserServiceConnection {
     pub credential_label: Option<String>,
     pub metadata: Option<serde_json::Value>,
     pub is_active: bool,
+    #[serde(default)]
+    pub state_version: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -48,6 +50,7 @@ mod tests {
             credential_label: Some("My Key".to_string()),
             metadata: Some(serde_json::json!({"env": "production"})),
             is_active: true,
+            state_version: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -55,5 +58,27 @@ mod tests {
         let restored: UserServiceConnection = bson::from_document(doc).expect("deserialize");
         assert_eq!(conn.id, restored.id);
         assert_eq!(conn.credential_type, restored.credential_type);
+        assert_eq!(restored.state_version, 1);
+    }
+
+    #[test]
+    fn bson_backward_compat_missing_state_version() {
+        let mut doc = bson::to_document(&UserServiceConnection {
+            id: uuid::Uuid::new_v4().to_string(),
+            user_id: uuid::Uuid::new_v4().to_string(),
+            service_id: uuid::Uuid::new_v4().to_string(),
+            credential_encrypted: None,
+            credential_type: None,
+            credential_label: None,
+            metadata: None,
+            is_active: true,
+            state_version: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        })
+        .expect("serialize");
+        doc.remove("state_version");
+        let restored: UserServiceConnection = bson::from_document(doc).expect("deserialize");
+        assert_eq!(restored.state_version, 0);
     }
 }

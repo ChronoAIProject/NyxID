@@ -51,8 +51,9 @@
 //! branch) is the defect this variant exists to make a compile error.
 
 use mongodb::bson::doc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use utoipa::ToSchema;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::assistant_action_receipt::{
@@ -61,6 +62,16 @@ use crate::models::assistant_action_receipt::{
 };
 
 const MAX_ACTION_REQUEST_ID_LEN: usize = 256;
+
+/// Whether a response included one-time material that cannot be re-issued on
+/// an exact replay.
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OneTimeMaterialAvailability {
+    #[default]
+    Delivered,
+    Unavailable,
+}
 
 /// Outcome of a receipt reservation attempt.
 #[derive(Debug)]
@@ -222,6 +233,84 @@ pub async fn reserve_or_replay(
     fingerprint: &str,
     resource_id: String,
 ) -> AppResult<ReceiptOutcome> {
+    reserve_or_replay_with_markers(
+        db,
+        user_id,
+        action,
+        action_request_id,
+        fingerprint,
+        resource_id,
+        None,
+        None,
+    )
+    .await
+}
+
+/// Reserve a receipt while recording optional secret-free monotonic markers
+/// captured by the caller immediately before the effect.
+#[allow(clippy::too_many_arguments)]
+pub async fn reserve_or_replay_with_markers(
+    db: &mongodb::Database,
+    user_id: &str,
+    action: &str,
+    action_request_id: &str,
+    fingerprint: &str,
+    resource_id: String,
+    resource_state_version: Option<i64>,
+    resource_access_revision: Option<i64>,
+) -> AppResult<ReceiptOutcome> {
+    reserve_or_replay_with_all_markers(
+        db,
+        user_id,
+        action,
+        action_request_id,
+        fingerprint,
+        resource_id,
+        resource_state_version,
+        resource_access_revision,
+        None,
+    )
+    .await
+}
+
+/// Reserve a receipt while recording a keyed fingerprint of secret material
+/// captured immediately before a rotation.
+#[allow(clippy::too_many_arguments)]
+pub async fn reserve_or_replay_with_secret_marker(
+    db: &mongodb::Database,
+    user_id: &str,
+    action: &str,
+    action_request_id: &str,
+    fingerprint: &str,
+    resource_id: String,
+    resource_material_fingerprint: Option<String>,
+) -> AppResult<ReceiptOutcome> {
+    reserve_or_replay_with_all_markers(
+        db,
+        user_id,
+        action,
+        action_request_id,
+        fingerprint,
+        resource_id,
+        None,
+        None,
+        resource_material_fingerprint,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reserve_or_replay_with_all_markers(
+    db: &mongodb::Database,
+    user_id: &str,
+    action: &str,
+    action_request_id: &str,
+    fingerprint: &str,
+    resource_id: String,
+    resource_state_version: Option<i64>,
+    resource_access_revision: Option<i64>,
+    resource_material_fingerprint: Option<String>,
+) -> AppResult<ReceiptOutcome> {
     if let Some(existing) = find_receipt(db, user_id, action, action_request_id).await? {
         return existing_outcome(existing, fingerprint);
     }
@@ -233,6 +322,9 @@ pub async fn reserve_or_replay(
         action_request_id: action_request_id.to_string(),
         request_fingerprint: fingerprint.to_string(),
         resource_id,
+        resource_state_version,
+        resource_access_revision,
+        resource_material_fingerprint,
         status: AssistantActionReceiptStatus::Pending,
         created_at: utc_now_at_bson_precision(),
         completed_at: None,
@@ -374,6 +466,9 @@ mod tests {
             action_request_id: "act-1".to_string(),
             request_fingerprint: "fingerprint-a".to_string(),
             resource_id: "key-1".to_string(),
+            resource_state_version: None,
+            resource_access_revision: None,
+            resource_material_fingerprint: None,
             status: AssistantActionReceiptStatus::Pending,
             created_at: utc_now_at_bson_precision(),
             completed_at: None,
@@ -395,6 +490,9 @@ mod tests {
             action_request_id: "act-1".to_string(),
             request_fingerprint: "fingerprint-a".to_string(),
             resource_id: "key-1".to_string(),
+            resource_state_version: None,
+            resource_access_revision: None,
+            resource_material_fingerprint: None,
             status: AssistantActionReceiptStatus::Pending,
             created_at: utc_now_at_bson_precision(),
             completed_at: None,
@@ -414,6 +512,9 @@ mod tests {
             action_request_id: "act-1".to_string(),
             request_fingerprint: "fingerprint-a".to_string(),
             resource_id: "key-1".to_string(),
+            resource_state_version: None,
+            resource_access_revision: None,
+            resource_material_fingerprint: None,
             status: AssistantActionReceiptStatus::Completed,
             created_at: utc_now_at_bson_precision(),
             completed_at: Some(utc_now_at_bson_precision()),

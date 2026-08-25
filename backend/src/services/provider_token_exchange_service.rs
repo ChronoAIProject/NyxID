@@ -33,10 +33,11 @@
 //!
 //! ## Cache key
 //!
-//! `{base_url}::{sha256(credential_json)}`. The credential hash makes keys
-//! opaque and provider-agnostic: two users with the same Lark app share a
-//! cache entry (the resulting token is identical anyway), and different
-//! credentials cannot collide across providers.
+//! `{base_url}::{execution_config_fingerprint}::{credential_json}`, hashed as
+//! one opaque cache key. The config fingerprint prevents a token fetched
+//! under one exchange contract from being reused after an execution-relevant
+//! config change. Two users with the same credential and the same contract
+//! still share a cache entry (the resulting token is identical anyway).
 //!
 //! ## Lifetime
 //!
@@ -53,6 +54,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{CredentialFieldSpec, TokenExchangeConfig};
+use crate::services::mcp_service;
 
 /// A single cached access token with its computed expiry time.
 #[derive(Clone, Debug)]
@@ -68,8 +70,8 @@ struct TokenSlot {
     fetch_lock: Mutex<()>,
 }
 
-/// Process-wide cache of exchanged tokens keyed by
-/// `{base_url}::sha256({credential_json})`.
+/// Process-wide cache of exchanged tokens keyed by the base URL, canonical
+/// execution-config fingerprint, and credential hash.
 ///
 /// Clone is cheap -- all state lives behind `Arc`/`DashMap`.
 #[derive(Default, Clone)]
@@ -150,14 +152,46 @@ impl TokenExchangeCache {
     }
 }
 
-/// Build the cache key for a given base URL and credential blob.
+/// Build the canonical fingerprint for the execution-relevant token-exchange
+/// contract.
+///
+/// Credential labels, placeholders, and secret-rendering hints are UI-only
+/// and deliberately excluded. Field names are sorted and deduplicated so UI
+/// ordering cannot change the execution identity.
+pub fn execution_config_fingerprint(config: &TokenExchangeConfig) -> String {
+    let mut credential_field_names = config
+        .credential_fields
+        .iter()
+        .map(|field| field.name.clone())
+        .collect::<Vec<_>>();
+    credential_field_names.sort_unstable();
+    credential_field_names.dedup();
+    mcp_service::canonical_sha256(serde_json::json!({
+        "contract_version": "nyxid-token-exchange-execution.v1",
+        "endpoint": config.endpoint,
+        "request_encoding": config.request_encoding,
+        "request_template": config.request_template,
+        "token_response_path": config.token_response_path,
+        "ttl_response_path": config.ttl_response_path,
+        "default_ttl_secs": config.default_ttl_secs,
+        "injection": config.injection,
+        "error_code_path": config.error_code_path,
+        "error_message_path": config.error_message_path,
+        "credential_field_names": credential_field_names,
+    }))
+}
+
+/// Build the cache key for a base URL, credential blob, and token-exchange
+/// execution contract.
 ///
 /// Credential hashing makes keys opaque -- the raw secret never appears in
-/// cache metadata. Hash is stable across restarts and across users, so two
-/// users holding the same credential transparently share one cache entry.
-pub fn cache_key(base_url: &str, credential_json: &str) -> String {
+/// cache metadata. Hash is stable across restarts and across users, so users
+/// holding the same credential under the same config share one cache entry.
+pub fn cache_key(base_url: &str, credential_json: &str, config: &TokenExchangeConfig) -> String {
     let mut hasher = Sha256::new();
     hasher.update(base_url.trim_end_matches('/').as_bytes());
+    hasher.update(b"::");
+    hasher.update(execution_config_fingerprint(config).as_bytes());
     hasher.update(b"::");
     hasher.update(credential_json.as_bytes());
     format!("{:x}", hasher.finalize())
@@ -398,7 +432,8 @@ pub async fn fetch_exchange_token(
 }
 
 /// Get a cached token or perform a fresh exchange, using the single-flight
-/// cache keyed by `(base_url, hash(credential_json))`.
+/// cache keyed by `(base_url, execution_config_fingerprint,
+/// hash(credential_json))`.
 pub async fn get_cached_exchange_token(
     cache: &TokenExchangeCache,
     http: &reqwest::Client,
@@ -407,7 +442,7 @@ pub async fn get_cached_exchange_token(
     config: &TokenExchangeConfig,
     credential: &serde_json::Map<String, serde_json::Value>,
 ) -> AppResult<String> {
-    let key = cache_key(base_url, credential_json);
+    let key = cache_key(base_url, credential_json, config);
     cache
         .get_or_fetch(&key, || async {
             fetch_exchange_token(http, base_url, config, credential).await
@@ -466,27 +501,88 @@ mod tests {
         ]
     }
 
+    fn exchange_config() -> TokenExchangeConfig {
+        TokenExchangeConfig {
+            endpoint: "{base_url}/token".to_string(),
+            request_encoding: "json".to_string(),
+            request_template: serde_json::json!({
+                "app_id": "$app_id",
+                "app_secret": "$app_secret",
+            }),
+            token_response_path: "token_a".to_string(),
+            ttl_response_path: Some("expires_in".to_string()),
+            default_ttl_secs: 3600,
+            injection: "bearer".to_string(),
+            error_code_path: None,
+            error_message_path: None,
+            credential_fields: lark_field_specs(),
+        }
+    }
+
     // ─── cache_key ────────────────────────────────────────────────────
 
     #[test]
     fn cache_key_differs_per_base_url() {
-        let a = cache_key("https://open.larksuite.com", r#"{"app_id":"x"}"#);
-        let b = cache_key("https://open.feishu.cn", r#"{"app_id":"x"}"#);
+        let config = exchange_config();
+        let a = cache_key("https://open.larksuite.com", r#"{"app_id":"x"}"#, &config);
+        let b = cache_key("https://open.feishu.cn", r#"{"app_id":"x"}"#, &config);
         assert_ne!(a, b);
     }
 
     #[test]
     fn cache_key_differs_per_credential() {
-        let a = cache_key("https://api.example.com", r#"{"id":"a"}"#);
-        let b = cache_key("https://api.example.com", r#"{"id":"b"}"#);
+        let config = exchange_config();
+        let a = cache_key("https://api.example.com", r#"{"id":"a"}"#, &config);
+        let b = cache_key("https://api.example.com", r#"{"id":"b"}"#, &config);
         assert_ne!(a, b);
     }
 
     #[test]
     fn cache_key_normalises_trailing_slash() {
+        let config = exchange_config();
         assert_eq!(
-            cache_key("https://api.example.com/", "cred"),
-            cache_key("https://api.example.com", "cred")
+            cache_key("https://api.example.com/", "cred", &config),
+            cache_key("https://api.example.com", "cred", &config)
+        );
+    }
+
+    #[test]
+    fn execution_config_fingerprint_ignores_ui_hints_and_field_order() {
+        let mut first = exchange_config();
+        first.credential_fields.push(CredentialFieldSpec {
+            name: "app_id".to_string(),
+            label: "Duplicate UI label".to_string(),
+            placeholder: Some("duplicate".to_string()),
+            secret: true,
+        });
+
+        let mut second = exchange_config();
+        second.credential_fields.reverse();
+        for field in &mut second.credential_fields {
+            field.label = format!("Changed {} label", field.name);
+            field.placeholder = Some(format!("changed-{}", field.name));
+            field.secret = !field.secret;
+        }
+
+        assert_eq!(
+            execution_config_fingerprint(&first),
+            execution_config_fingerprint(&second)
+        );
+    }
+
+    #[test]
+    fn execution_config_fingerprint_changes_with_execution_contract() {
+        let first = exchange_config();
+        let mut second = first.clone();
+        second.token_response_path = "token_b".to_string();
+
+        assert_ne!(
+            execution_config_fingerprint(&first),
+            execution_config_fingerprint(&second)
+        );
+        assert_ne!(
+            cache_key("https://api.example.com", "credential", &first),
+            cache_key("https://api.example.com", "credential", &second)
         );
     }
 
@@ -793,6 +889,94 @@ mod tests {
             .unwrap();
         assert_eq!(second, "recovered");
         assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn cached_exchange_is_scoped_to_the_execution_config() {
+        use axum::{Json, Router, extract::State, routing::post};
+        use tokio::net::TcpListener;
+
+        async fn exchange_handler(
+            State(fetch_count): State<Arc<AtomicUsize>>,
+        ) -> Json<serde_json::Value> {
+            fetch_count.fetch_add(1, Ordering::SeqCst);
+            Json(serde_json::json!({
+                "token_a": "token-from-config-a",
+                "token_b": "token-from-config-b",
+                "expires_in": 3600,
+            }))
+        }
+
+        let fetch_count = Arc::new(AtomicUsize::new(0));
+        let app = Router::new()
+            .route("/token", post(exchange_handler))
+            .with_state(fetch_count.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let base_url = format!("http://{addr}");
+        let credential_json = r#"{"app_id":"same","app_secret":"same"}"#;
+        let credential = parse_credential(credential_json, &lark_field_specs()).unwrap();
+        let config_a = exchange_config();
+        let mut config_b = config_a.clone();
+        config_b.token_response_path = "token_b".to_string();
+        let cache = TokenExchangeCache::new();
+        let http = reqwest::Client::new();
+
+        let first_a = get_cached_exchange_token(
+            &cache,
+            &http,
+            &base_url,
+            credential_json,
+            &config_a,
+            &credential,
+        )
+        .await
+        .unwrap();
+        let second_a = get_cached_exchange_token(
+            &cache,
+            &http,
+            &base_url,
+            credential_json,
+            &config_a,
+            &credential,
+        )
+        .await
+        .unwrap();
+        let first_b = get_cached_exchange_token(
+            &cache,
+            &http,
+            &base_url,
+            credential_json,
+            &config_b,
+            &credential,
+        )
+        .await
+        .unwrap();
+        let second_b = get_cached_exchange_token(
+            &cache,
+            &http,
+            &base_url,
+            credential_json,
+            &config_b,
+            &credential,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first_a, "token-from-config-a");
+        assert_eq!(second_a, first_a, "the same config must remain cached");
+        assert_eq!(first_b, "token-from-config-b");
+        assert_eq!(second_b, first_b, "the second config must remain cached");
+        assert_eq!(cache.entries.len(), 2, "config A and B need distinct slots");
+        assert_eq!(
+            fetch_count.load(Ordering::SeqCst),
+            2,
+            "each config must fetch once while repeated calls hit its cache"
+        );
+
+        server.abort();
     }
 
     // ─── apply_injection ──────────────────────────────────────────────

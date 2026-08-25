@@ -44,7 +44,7 @@ beforeEach(() => { mockGet.mockReset(); mockPost.mockReset(); });
 describe("AssistantNotificationsActionDialog", () => {
   it("runs notifications.update with browser-collected settings and exact read-back", async () => {
     mockGet.mockResolvedValueOnce(evidence()).mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
-    mockPost.mockResolvedValue({ resource: { bindingId: ID }, replayed: false });
+    mockPost.mockResolvedValue({ resource: { bindingId: ID }, replayed: false, oneTimeMaterial: "delivered" });
     renderDialog("update");
     await submit();
     expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/notifications/update", {

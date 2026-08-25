@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use mongodb::bson::doc;
+use mongodb::options::ReturnDocument;
 use uuid::Uuid;
 
 use crate::crypto::aes::EncryptionKeys;
@@ -170,11 +171,15 @@ pub async fn connect_user(
         if let Some(label) = credential_label {
             set_doc.insert("credential_label", label);
         }
+        set_doc.insert(
+            "state_version",
+            doc! { "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64] },
+        );
 
         db.collection::<UserServiceConnection>(CONNECTIONS)
             .update_one(
                 doc! { "user_id": user_id, "service_id": service_id, "is_active": false },
-                doc! { "$set": set_doc },
+                vec![doc! { "$set": set_doc }],
             )
             .await?;
 
@@ -196,6 +201,7 @@ pub async fn connect_user(
         credential_label: credential_label.map(|s| s.to_string()),
         metadata: None,
         is_active: true,
+        state_version: 1,
         created_at: now,
         updated_at: now,
     };
@@ -275,6 +281,10 @@ pub async fn update_credential(
     if let Some(label) = credential_label {
         set_doc.insert("credential_label", label);
     }
+    set_doc.insert(
+        "state_version",
+        doc! { "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64] },
+    );
 
     let result = db
         .collection::<UserServiceConnection>(CONNECTIONS)
@@ -284,7 +294,7 @@ pub async fn update_credential(
                 "service_id": service_id,
                 "is_active": true,
             },
-            doc! { "$set": set_doc },
+            vec![doc! { "$set": set_doc }],
         )
         .await?;
 
@@ -304,31 +314,75 @@ pub async fn disconnect_user(
     user_id: &str,
     service_id: &str,
 ) -> AppResult<()> {
-    let now = Utc::now();
+    disconnect_user_with_expected_state_version(db, user_id, service_id, None)
+        .await
+        .map(|_| ())
+}
 
-    let result = db
+/// Disconnect one active legacy connection, optionally fencing the mutation
+/// on the authorization evidence observed by the browser.
+pub async fn disconnect_user_with_expected_state_version(
+    db: &mongodb::Database,
+    user_id: &str,
+    service_id: &str,
+    expected_state_version: Option<i64>,
+) -> AppResult<UserServiceConnection> {
+    let now = Utc::now();
+    let mut filter = doc! {
+        "user_id": user_id,
+        "service_id": service_id,
+        "is_active": true,
+    };
+    if let Some(expected) = expected_state_version {
+        filter.insert(
+            "$expr",
+            doc! { "$eq": [{ "$ifNull": ["$state_version", 0_i64] }, expected] },
+        );
+    }
+
+    let updated = db
         .collection::<UserServiceConnection>(CONNECTIONS)
-        .update_one(
-            doc! {
-                "user_id": user_id,
-                "service_id": service_id,
-                "is_active": true,
-            },
-            doc! { "$set": {
+        .find_one_and_update(
+            filter,
+            vec![doc! { "$set": {
                 "is_active": false,
                 "credential_encrypted": mongodb::bson::Bson::Null,
                 "credential_type": mongodb::bson::Bson::Null,
                 "credential_label": mongodb::bson::Bson::Null,
                 "updated_at": mongodb::bson::DateTime::from_chrono(now),
-            }},
+                "state_version": {
+                    "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64]
+                },
+            }}],
         )
+        .return_document(ReturnDocument::After)
         .await?;
 
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound("Connection not found".to_string()));
+    if let Some(connection) = updated {
+        return Ok(connection);
     }
 
-    Ok(())
+    let current = db
+        .collection::<UserServiceConnection>(CONNECTIONS)
+        .find_one(doc! { "user_id": user_id, "service_id": service_id })
+        .await?;
+    match current {
+        None => Err(AppError::NotFound("Connection not found".to_string())),
+        Some(connection) if !connection.is_active => {
+            Err(AppError::NotFound("Connection not found".to_string()))
+        }
+        Some(connection)
+            if expected_state_version
+                .is_some_and(|expected| connection.state_version != expected) =>
+        {
+            Err(AppError::Conflict(
+                "the connection changed since this action was prepared".to_string(),
+            ))
+        }
+        Some(_) => Err(AppError::Internal(
+            "Connection disappeared during disconnect".to_string(),
+        )),
+    }
 }
 
 #[cfg(test)]

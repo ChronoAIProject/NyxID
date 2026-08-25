@@ -119,6 +119,9 @@ const ENDPOINT_UPDATE_DESCRIPTION: &str = "Ask the user's browser to update one 
 const ENDPOINT_DELETE_DESCRIPTION: &str = "Ask the user's browser to permanently delete one exact user endpoint. Use when the user wants to remove a custom endpoint definition. Deletion is destructive and confirmed in the browser every time; NyxID reports only the safe user-service reference for the affected service. Never ask the user for keys, tokens, or passwords in chat.";
 const EXTERNAL_KEY_ROTATE_DESCRIPTION: &str = "Ask the user's browser to replace the secret of one exact stored external credential. Use when the user has a replacement API key for a connected provider. The replacement is entered only inside NyxID's browser journey; NyxID reports only the safe key reference. Never request, expose, or repeat credential material in chat.";
 const EXTERNAL_KEY_DELETE_DESCRIPTION: &str = "Ask the user's browser to permanently delete one exact stored external credential. Use when the user wants a stored provider key removed from NyxID. Deletion is destructive, confirmed in the browser every time, and may cascade an approval-grant review inside the journey; NyxID reports only the safe key reference. Never request, expose, or repeat credential material in chat.";
+const CONNECTION_REVOKE_DESCRIPTION: &str = "Ask the user's browser to revoke one exact legacy service connection and securely clear its stored credential. Destructive: NyxID confirms every time and reports only the safe connection reference. Never request, expose, or repeat credential material in chat.";
+const PROVIDER_DISCONNECT_DESCRIPTION: &str = "Ask the user's browser to disconnect one exact legacy provider token and securely clear its stored token material. Destructive: NyxID confirms every time and reports only the safe provider reference. Never request, expose, or repeat token material in chat.";
+const PROVIDER_SET_APP_CREDENTIALS_DESCRIPTION: &str = "Ask the user's browser to set the user's own OAuth app credentials for one exact provider. The client ID and secret are entered only inside NyxID's browser journey; NyxID reports only the safe provider reference. Never request, expose, or repeat credential material in chat.";
 
 const NODE_REGISTER_TOKEN_DESCRIPTION: &str = "Ask the user's browser to mint a one-time NyxID node registration token. Use when the user needs to enrol a new on-premise credential node. NyxID displays the token once in the browser and reports only a safe node reference. Never request, expose, or repeat the token in chat.";
 const NODE_ROTATE_TOKEN_DESCRIPTION: &str = "Ask the user's browser to rotate one exact node's auth token. Use when a node credential must be replaced. NyxID displays replacement material once in the browser and reports only the node reference. Never request, expose, or repeat token material in chat.";
@@ -490,6 +493,51 @@ static MANIFEST_BODY: LazyLock<String> = LazyLock::new(|| {
                     }
                 }),
                 risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "connection.revoke",
+                description: CONNECTION_REVOKE_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["serviceId"],
+                    "properties": {
+                        "serviceId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "provider.disconnect",
+                description: PROVIDER_DISCONNECT_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["providerId"],
+                    "properties": {
+                        "providerId": { "type": "string" }
+                    }
+                }),
+                risk: "destructive",
+                tier: "v1",
+                remember_eligible: false,
+            },
+            AssistantActionDescriptor {
+                action: "provider.set_app_credentials",
+                description: PROVIDER_SET_APP_CREDENTIALS_DESCRIPTION,
+                params_schema: json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["providerId"],
+                    "properties": {
+                        "providerId": { "type": "string" }
+                    }
+                }),
+                risk: "grant",
                 tier: "v1",
                 remember_eligible: false,
             },
@@ -1263,6 +1311,8 @@ mod tests {
         "endpoint.delete",
         "external_key.rotate",
         "external_key.delete",
+        "connection.revoke",
+        "provider.disconnect",
     ];
 
     /// The composition the deployed v8 pin executes. Everything else in the
@@ -1647,6 +1697,45 @@ mod tests {
                     "description": super::EXTERNAL_KEY_DELETE_DESCRIPTION,
                     "params_schema": external_key_only_params_schema(),
                     "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "connection.revoke",
+                    "description": super::CONNECTION_REVOKE_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["serviceId"],
+                        "properties": { "serviceId": { "type": "string" } }
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "provider.disconnect",
+                    "description": super::PROVIDER_DISCONNECT_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["providerId"],
+                        "properties": { "providerId": { "type": "string" } }
+                    },
+                    "risk": "destructive",
+                    "tier": "v1",
+                    "remember_eligible": false
+                },
+                {
+                    "action": "provider.set_app_credentials",
+                    "description": super::PROVIDER_SET_APP_CREDENTIALS_DESCRIPTION,
+                    "params_schema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["providerId"],
+                        "properties": { "providerId": { "type": "string" } }
+                    },
+                    "risk": "grant",
                     "tier": "v1",
                     "remember_eligible": false
                 },
@@ -2598,7 +2687,7 @@ mod tests {
 
         assert_eq!(manifest["schema_version"], 4);
         assert_eq!(manifest["revision"], "nyxid-assistant-actions.v8");
-        assert_eq!(actions.len(), 54);
+        assert_eq!(actions.len(), 57);
         assert_eq!(actions[0]["action"], "service.connect");
         assert_eq!(actions[0]["risk"], "grant");
         assert_eq!(actions[0]["tier"], "v1");
@@ -2662,6 +2751,8 @@ mod tests {
             "service.delete",
             "endpoint.delete",
             "external_key.delete",
+            "connection.revoke",
+            "provider.disconnect",
             "node.delete",
             "node.transfer",
             "pending_credential.cancel",
@@ -2688,8 +2779,8 @@ mod tests {
             .collect();
         assert_eq!(
             wave2.len(),
-            50,
-            "expected 12 Wave-2 + 8 Wave-3 + 30 Wave-4 dormant descriptors"
+            53,
+            "expected 15 Wave-2 + 8 Wave-3 + 30 Wave-4 dormant descriptors"
         );
         for name in wave2 {
             let entry = actions
@@ -3100,8 +3191,8 @@ mod tests {
             .collect();
         assert_eq!(
             dormant.len(),
-            50,
-            "expected 12 Wave-2 + 8 Wave-3 + 30 Wave-4 dormant descriptors"
+            53,
+            "expected 15 Wave-2 + 8 Wave-3 + 30 Wave-4 dormant descriptors"
         );
 
         for (revision, action_names) in PINNED_ACTIONS_BY_REVISION {

@@ -5,6 +5,7 @@ use axum::{
 use futures::TryStreamExt;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::AppResult;
@@ -89,6 +90,14 @@ pub struct DisconnectResponse {
 #[derive(Debug, Serialize)]
 pub struct UpdateCredentialResponse {
     pub message: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ConnectionAuthorizationEvidenceResponse {
+    pub service_id: String,
+    pub is_active: bool,
+    pub state_version: i64,
+    pub updated_at: String,
 }
 
 // --- Handlers ---
@@ -261,6 +270,29 @@ pub async fn disconnect_service(
 
     Ok(Json(DisconnectResponse {
         message: "Disconnected from service".to_string(),
+    }))
+}
+
+/// GET /api/v1/connections/{service_id}/authorization
+///
+/// Secret-free projection used to fence assistant connection mutations.
+pub async fn get_connection_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(service_id): Path<String>,
+) -> AppResult<Json<ConnectionAuthorizationEvidenceResponse>> {
+    let user_id = auth_user.user_id.to_string();
+    let connection = state
+        .db
+        .collection::<UserServiceConnection>(CONNECTIONS)
+        .find_one(doc! { "user_id": &user_id, "service_id": &service_id })
+        .await?
+        .ok_or_else(|| crate::errors::AppError::NotFound("Connection not found".to_string()))?;
+    Ok(Json(ConnectionAuthorizationEvidenceResponse {
+        service_id: connection.service_id,
+        is_active: connection.is_active,
+        state_version: connection.state_version,
+        updated_at: connection.updated_at.to_rfc3339(),
     }))
 }
 
