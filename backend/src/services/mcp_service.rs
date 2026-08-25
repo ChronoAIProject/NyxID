@@ -11,6 +11,7 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
     legacy_http_service_type_filter,
 };
+use crate::models::platform_operation::{PlatformOperation, PlatformOperationConfig};
 use crate::models::service_billing::{BillingMetric, PlatformUsage};
 use crate::models::service_endpoint::{
     COLLECTION_NAME as SERVICE_ENDPOINTS, EndpointRisk, OperationResponseContract, ServiceEndpoint,
@@ -189,6 +190,24 @@ pub struct McpToolService {
 pub struct McpDurableEndpointMetadata {
     pub risk: Option<EndpointRisk>,
     pub supports_idempotency_key: bool,
+    /// Producer-owned operation revision. Zero means the operation came from a
+    /// dynamic instance spec and has no durable producer-generation referent.
+    pub operation_generation: i64,
+}
+
+/// Resolve the operation revision published by the owning producer. Missing or
+/// non-positive values are intentionally unavailable rather than inferred from
+/// caller input or endpoint shape. The endpoint contract remains authoritative
+/// for dynamic instance-spec operations.
+pub fn producer_operation_generation(
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+) -> Option<i64> {
+    service
+        .durable_endpoint_metadata
+        .get(&endpoint.endpoint_id)
+        .map(|metadata| metadata.operation_generation)
+        .filter(|generation| *generation > 0)
 }
 
 fn mcp_credential_class(
@@ -333,7 +352,16 @@ pub struct ExactOperationViewOperation {
     pub request_content_type: Option<String>,
     pub request_body_required: bool,
     pub response: OperationResponseContract,
+    /// Producer-owned approval classification. This is projected alongside
+    /// the executable contract so rolling old-server writes that do not bump
+    /// `operation_generation` still move the canonical exact-view digest.
+    pub risk: Option<EndpointRisk>,
+    /// Producer-owned idempotency capability used by durable write approval.
+    pub supports_idempotency_key: bool,
     pub endpoint_contract_digest: String,
+    /// Null for operations parsed from an instance-mounted spec because there
+    /// is no durable `ServiceEndpoint` row whose generation can be compared.
+    pub operation_generation: Option<i64>,
 }
 
 /// One service in the canonical delegated exact-operation view.
@@ -377,17 +405,26 @@ pub fn exact_operation_view(services: &[McpToolService]) -> ExactOperationView {
             let mut operations = service
                 .endpoints
                 .iter()
-                .map(|endpoint| ExactOperationViewOperation {
-                    endpoint_id: endpoint.endpoint_id.clone(),
-                    name: endpoint.name.clone(),
-                    method: endpoint.method.clone(),
-                    path: endpoint.path.clone(),
-                    parameters: endpoint.parameters.clone(),
-                    request_body_schema: endpoint.request_body_schema.clone(),
-                    request_content_type: endpoint.request_content_type.clone(),
-                    request_body_required: endpoint.request_body_required,
-                    response: endpoint.response.clone(),
-                    endpoint_contract_digest: endpoint_contract_digest(endpoint),
+                .filter_map(|endpoint| {
+                    let metadata = service
+                        .durable_endpoint_metadata
+                        .get(&endpoint.endpoint_id)?;
+                    Some(ExactOperationViewOperation {
+                        endpoint_id: endpoint.endpoint_id.clone(),
+                        name: endpoint.name.clone(),
+                        method: endpoint.method.clone(),
+                        path: endpoint.path.clone(),
+                        parameters: endpoint.parameters.clone(),
+                        request_body_schema: endpoint.request_body_schema.clone(),
+                        request_content_type: endpoint.request_content_type.clone(),
+                        request_body_required: endpoint.request_body_required,
+                        response: endpoint.response.clone(),
+                        risk: metadata.risk,
+                        supports_idempotency_key: metadata.supports_idempotency_key,
+                        endpoint_contract_digest: endpoint_contract_digest(endpoint),
+                        operation_generation: (metadata.operation_generation > 0)
+                            .then_some(metadata.operation_generation),
+                    })
                 })
                 .collect::<Vec<_>>();
             operations.sort_by(|left, right| left.endpoint_id.cmp(&right.endpoint_id));
@@ -415,6 +452,54 @@ pub fn exact_operation_view_digest(view: &ExactOperationView) -> String {
     canonical_sha256(serde_json::json!({
         "contract_version": "nyxid-delegated-operation-catalog.v2",
         "services": &view.services,
+    }))
+}
+
+/// Digest emitted before `risk`, `supports_idempotency_key`, and
+/// `operation_generation` were added to the v2 operation representation.
+///
+/// TODO(2026-09-01): remove this compatibility digest and publish/store
+/// `exact_operation_view_digest` after every pre-deploy replica has drained and
+/// the maximum 300-second exact-approval lifetime has elapsed. That bound comes
+/// from `NotificationChannel::approval_timeout_secs` and is enforced by the
+/// notification-settings handler.
+pub fn legacy_exact_operation_view_digest(view: &ExactOperationView) -> String {
+    let services = view
+        .services
+        .iter()
+        .map(|service| {
+            let operations = service
+                .operations
+                .iter()
+                .map(|operation| {
+                    serde_json::json!({
+                        "endpoint_id": operation.endpoint_id,
+                        "name": operation.name,
+                        "method": operation.method,
+                        "path": operation.path,
+                        "parameters": operation.parameters,
+                        "request_body_schema": operation.request_body_schema,
+                        "request_content_type": operation.request_content_type,
+                        "request_body_required": operation.request_body_required,
+                        "response": operation.response,
+                        "endpoint_contract_digest": operation.endpoint_contract_digest,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "user_service_id": service.user_service_id,
+                "catalog_service_id": service.catalog_service_id,
+                "service_slug": service.service_slug,
+                "service_name": service.service_name,
+                "description": service.description,
+                "node_id": service.node_id,
+                "operations": operations,
+            })
+        })
+        .collect::<Vec<_>>();
+    canonical_sha256(serde_json::json!({
+        "contract_version": "nyxid-delegated-operation-catalog.v2",
+        "services": services,
     }))
 }
 
@@ -1166,14 +1251,7 @@ async fn load_user_tools_inner(
                             );
                             (template_rows, false, false)
                         }
-                        None => (
-                            ParsedMcpEndpoints {
-                                endpoints: vec![build_generic_proxy_endpoint(endpoint_label)],
-                                durable_metadata: HashMap::new(),
-                            },
-                            true,
-                            true,
-                        ),
+                        None => (generic_proxy_endpoints(endpoint_label), true, true),
                     }
                 }
                 None => (template_rows, false, false),
@@ -1184,15 +1262,7 @@ async fn load_user_tools_inner(
             // operation as a tool.
             user_spec_endpoints(spec_url, &r.effective_owner_id, &us.id, endpoint_label).await
         } else {
-            let generic_ep = build_generic_proxy_endpoint(endpoint_label);
-            (
-                ParsedMcpEndpoints {
-                    endpoints: vec![generic_ep],
-                    durable_metadata: HashMap::new(),
-                },
-                true,
-                false,
-            )
+            (generic_proxy_endpoints(endpoint_label), true, false)
         };
 
         let recommended_skills = user_endpoint
@@ -1293,6 +1363,7 @@ fn service_endpoint_durable_metadata(
                 McpDurableEndpointMetadata {
                     risk: endpoint.risk,
                     supports_idempotency_key: endpoint.supports_idempotency_key,
+                    operation_generation: endpoint.operation_generation,
                 },
             )
         })
@@ -1302,6 +1373,25 @@ fn service_endpoint_durable_metadata(
 struct ParsedMcpEndpoints {
     endpoints: Vec<McpToolEndpoint>,
     durable_metadata: HashMap<String, McpDurableEndpointMetadata>,
+}
+
+fn generic_proxy_endpoints(service_label: &str) -> ParsedMcpEndpoints {
+    let endpoint = build_generic_proxy_endpoint(service_label);
+    let durable_metadata = HashMap::from([(
+        endpoint.endpoint_id.clone(),
+        McpDurableEndpointMetadata {
+            risk: None,
+            supports_idempotency_key: false,
+            // The generic proxy is a NyxID-owned protocol operation. Its
+            // generation is bumped only when those protocol semantics change;
+            // delegated discovery still excludes generic services entirely.
+            operation_generation: GENERIC_PROXY_OPERATION_GENERATION,
+        },
+    )]);
+    ParsedMcpEndpoints {
+        endpoints: vec![endpoint],
+        durable_metadata,
+    }
 }
 
 /// Fetch the user-supplied OpenAPI spec through the hardened cache (scoped
@@ -1325,6 +1415,10 @@ async fn fetch_and_parse_user_spec(
             McpDurableEndpointMetadata {
                 risk: parsed_endpoint.risk,
                 supports_idempotency_key: parsed_endpoint.supports_idempotency_key,
+                // Remote instance specs have no durable producer revision.
+                // Their endpoint-contract digest remains the exact approval
+                // fence, while the caller-visible generation is null.
+                operation_generation: 0,
             },
         );
         endpoints.push(McpToolEndpoint {
@@ -1393,14 +1487,7 @@ async fn user_spec_endpoints(
 ) -> (ParsedMcpEndpoints, bool, bool) {
     match try_user_spec_endpoints(spec_url, owner_id, user_service_id).await {
         Some(parsed) => (parsed, false, false),
-        None => (
-            ParsedMcpEndpoints {
-                endpoints: vec![build_generic_proxy_endpoint(endpoint_label)],
-                durable_metadata: HashMap::new(),
-            },
-            true,
-            true,
-        ),
+        None => (generic_proxy_endpoints(endpoint_label), true, true),
     }
 }
 
@@ -1768,6 +1855,7 @@ fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
 }
 
 pub(crate) const GENERIC_PROXY_ENDPOINT_ID: &str = "nyx_generic_proxy_v1";
+pub(crate) const GENERIC_PROXY_OPERATION_GENERATION: i64 = 1;
 
 fn opaque_operation_id(source_operation_id: Option<&str>, method: &str, path: &str) -> String {
     let canonical = match source_operation_id {
@@ -1822,6 +1910,7 @@ fn build_generic_proxy_input_schema() -> serde_json::Value {
 pub fn generate_tool_definitions(
     services: &[McpToolService],
     activated_service_ids: Option<&HashSet<String>>,
+    platform_operations: &[PlatformOperation],
 ) -> Vec<McpToolDefinition> {
     let mut tools = Vec::new();
 
@@ -2141,6 +2230,102 @@ pub fn generate_tool_definitions(
             "required": ["conversation_id"]
         }),
     });
+
+    // -- First-party platform operations (present only while enabled) --
+    for operation in platform_operations {
+        if !operation.enabled {
+            continue;
+        }
+        let definition = match &operation.config {
+            PlatformOperationConfig::XSearch(config)
+                if operation.op
+                    == crate::models::platform_operation::PlatformOperationName::XSearch =>
+            {
+                McpToolDefinition {
+                    name: "nyx__x_search".to_string(),
+                    description: "Search recent posts on X through NyxID's constrained platform operation."
+                        .to_string(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 512,
+                                "description": "Search query"
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": config.max_results_cap,
+                                "description": "Maximum results to return"
+                            }
+                        },
+                        "required": ["query"],
+                        "additionalProperties": false
+                    }),
+                }
+            }
+            PlatformOperationConfig::Speak(config)
+                if operation.op
+                    == crate::models::platform_operation::PlatformOperationName::Speak =>
+            {
+                McpToolDefinition {
+                    name: "nyx__speak".to_string(),
+                    description: "Synthesize MP3 speech through NyxID's constrained platform operation."
+                        .to_string(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "text": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": config.max_chars,
+                                "description": "Text to synthesize"
+                            },
+                            "voice_id": {
+                                "type": "string",
+                                "enum": config.allowed_voice_ids,
+                                "description": "Allowlisted ElevenLabs voice ID"
+                            }
+                        },
+                        "required": ["text", "voice_id"],
+                        "additionalProperties": false
+                    }),
+                }
+            }
+            PlatformOperationConfig::CallAndSay(config)
+                if operation.op
+                    == crate::models::platform_operation::PlatformOperationName::CallAndSay =>
+            {
+                McpToolDefinition {
+                    name: "nyx__call_and_say".to_string(),
+                    description: "Place a constrained voice call and speak a message using server-composed TwiML."
+                        .to_string(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "to": {
+                                "type": "string",
+                                "pattern": "^\\+[1-9][0-9]{0,14}$",
+                                "description": "Allowlisted E.164 destination"
+                            },
+                            "message": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": config.max_message_chars,
+                                "description": "Message to speak"
+                            }
+                        },
+                        "required": ["to", "message"],
+                        "additionalProperties": false
+                    }),
+                }
+            }
+            _ => continue,
+        };
+        tools.push(definition);
+    }
 
     // -- Per-service tools (filtered by activated set) --
     for service in services {
@@ -2900,6 +3085,7 @@ pub struct PreparedProxyCall {
     path: String,
     query: Option<String>,
     parameter_headers: Vec<(String, String)>,
+    server_owned_headers: Vec<(String, String)>,
     body: Option<bytes::Bytes>,
     is_generic_proxy_endpoint: bool,
 }
@@ -2951,9 +3137,86 @@ pub fn prepare_proxy_tool_call(
         path,
         query,
         parameter_headers,
+        server_owned_headers: Vec::new(),
         body,
         is_generic_proxy_endpoint,
     })
+}
+
+/// Prepare an exact-approved call with a server-owned provider idempotency
+/// header. The caller can never supply or override this header. When the
+/// producer contract declares `Idempotency-Key` as a required header, the
+/// server value participates in required-parameter validation; otherwise it is
+/// appended after the ordinary MCP arguments have been validated.
+pub fn prepare_exact_proxy_tool_call(
+    service: &McpToolService,
+    endpoint: &McpToolEndpoint,
+    args: &serde_json::Value,
+    effect_idempotency_key: Option<&str>,
+) -> AppResult<PreparedProxyCall> {
+    let Some(effect_idempotency_key) = effect_idempotency_key else {
+        return prepare_proxy_tool_call(service, endpoint, args);
+    };
+    reqwest::header::HeaderValue::from_str(effect_idempotency_key).map_err(|_| {
+        AppError::BadRequest("idempotency_key is not a valid HTTP header value".to_string())
+    })?;
+
+    let args_object = args
+        .as_object()
+        .ok_or_else(|| AppError::BadRequest("arguments must be a JSON object".to_string()))?;
+    if args_object
+        .keys()
+        .any(|name| normalize_header_name(name) == "idempotency-key")
+    {
+        return Err(AppError::BadRequest(
+            "Idempotency-Key is server-owned for exact approvals".to_string(),
+        ));
+    }
+
+    let declared_header_name = endpoint
+        .parameters
+        .as_ref()
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .find_map(|parameter| {
+            let name = parameter.get("name").and_then(serde_json::Value::as_str)?;
+            (parameter.get("in").and_then(serde_json::Value::as_str) == Some("header")
+                && normalize_header_name(name) == "idempotency-key")
+                .then(|| name.to_string())
+        });
+
+    let mut server_arguments = args.clone();
+    if let Some(header_name) = declared_header_name.as_ref() {
+        server_arguments
+            .as_object_mut()
+            .expect("validated arguments object")
+            .insert(
+                header_name.clone(),
+                serde_json::Value::String(effect_idempotency_key.to_string()),
+            );
+    }
+
+    let mut prepared = prepare_proxy_tool_call(service, endpoint, &server_arguments)?;
+    prepared
+        .parameter_headers
+        .retain(|(name, _)| normalize_header_name(name) != "idempotency-key");
+    prepared.server_owned_headers.push((
+        "Idempotency-Key".to_string(),
+        effect_idempotency_key.to_string(),
+    ));
+    Ok(prepared)
+}
+
+fn apply_server_owned_headers(
+    mut headers: Vec<(String, String)>,
+    server_owned_headers: &[(String, String)],
+) -> Vec<(String, String)> {
+    for (name, value) in server_owned_headers {
+        headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
+        headers.push((name.clone(), value.clone()));
+    }
+    headers
 }
 
 pub fn build_mcp_operation_descriptor(
@@ -3462,7 +3725,7 @@ pub async fn execute_tool(
         }
     };
 
-    execute_tool_resolved(
+    match execute_tool_resolved(
         http_client,
         db,
         encryption_keys,
@@ -3485,7 +3748,65 @@ pub async fn execute_tool(
         has_server_credential,
         billing_context_builder,
     )
-    .await
+    .await?
+    {
+        McpToolExecutionOutcome::Response(response) => Ok(response),
+        McpToolExecutionOutcome::ProviderOutcomeUnknown(error) => Err(error),
+        McpToolExecutionOutcome::ProviderUnreachable(error) => Err(error),
+    }
+}
+
+/// Outcome of an MCP provider dispatch. Exact approvals need to distinguish a
+/// normal failure from a transport failure after the provider may already have
+/// committed the effect; collapsing both into `AppError` would make fallback
+/// replay unsafe.
+pub enum McpToolExecutionOutcome {
+    Response((u16, String)),
+    ProviderOutcomeUnknown(AppError),
+    ProviderUnreachable(AppError),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NodeDispatchFailureDisposition {
+    TryFallback,
+    StopProviderOutcomeUnknown,
+}
+
+fn node_dispatch_failure_disposition(dispatched: bool) -> NodeDispatchFailureDisposition {
+    if dispatched {
+        NodeDispatchFailureDisposition::StopProviderOutcomeUnknown
+    } else {
+        NodeDispatchFailureDisposition::TryFallback
+    }
+}
+
+async fn collect_node_stream_response(
+    mut stream: tokio::sync::mpsc::Receiver<crate::services::node_ws_manager::StreamChunk>,
+) -> AppResult<(u16, Vec<u8>)> {
+    use crate::services::node_ws_manager::StreamChunk;
+
+    let mut status = 200u16;
+    let mut body = Vec::new();
+    while let Some(chunk) = stream.recv().await {
+        match chunk {
+            StreamChunk::Start {
+                status: stream_status,
+                ..
+            } => status = stream_status,
+            StreamChunk::Data(data) => body.extend_from_slice(&data),
+            StreamChunk::End => return Ok((status, body)),
+            StreamChunk::Error(error) => {
+                tracing::error!(%error, "Node stream failed after provider dispatch");
+                return Err(AppError::Internal(
+                    "Node stream failed after provider dispatch".to_string(),
+                ));
+            }
+        }
+    }
+
+    Err(AppError::Internal(
+        "Node stream closed before its terminal frame".to_string(),
+    ))
 }
 
 /// Execute an already-resolved proxy target. Exact-service redemption uses
@@ -3513,7 +3834,7 @@ pub async fn execute_tool_resolved(
     node_route: Option<node_routing_service::NodeRoute>,
     has_server_credential: bool,
     billing_context_builder: McpBillingRouteContextBuilder,
-) -> AppResult<(u16, String)> {
+) -> AppResult<McpToolExecutionOutcome> {
     use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
     use crate::models::user::{COLLECTION_NAME as USERS, User};
     use crate::services::node_ws_manager::{NodeProxyRequest, ProxyResponseType};
@@ -3524,6 +3845,7 @@ pub async fn execute_tool_resolved(
         path,
         query,
         parameter_headers,
+        server_owned_headers,
         body,
         is_generic_proxy_endpoint,
     } = prepared;
@@ -3708,6 +4030,7 @@ pub async fn execute_tool_resolved(
                 target.user_service_default_headers.as_slice(),
             ],
         );
+        all_headers = apply_server_owned_headers(all_headers, &server_owned_headers);
 
         // Strip any default whose name collides with what the node
         // agent will append locally as the service credential. Matches
@@ -3756,7 +4079,7 @@ pub async fn execute_tool_resolved(
 
             billing.mark_forwarded(&metered).await?;
             match node_ws_manager
-                .send_proxy_request(
+                .send_proxy_request_classified(
                     nid,
                     attempt,
                     signing_secret.as_ref().map(|s| s.as_slice()),
@@ -3774,26 +4097,15 @@ pub async fn execute_tool_resolved(
                         )
                         .await?;
                     let body_text = String::from_utf8_lossy(&resp.body).to_string();
-                    return Ok((resp.status, body_text));
+                    return Ok(McpToolExecutionOutcome::Response((resp.status, body_text)));
                 }
-                Ok(ProxyResponseType::Streaming(mut rx)) => {
-                    use crate::services::node_ws_manager::StreamChunk;
-                    let mut status = 200u16;
-                    let mut body_buf = Vec::new();
-                    while let Some(chunk) = rx.recv().await {
-                        match chunk {
-                            StreamChunk::Start { status: s, .. } => {
-                                status = s;
-                            }
-                            StreamChunk::Data(data) => {
-                                body_buf.extend_from_slice(&data);
-                            }
-                            StreamChunk::End => break,
-                            StreamChunk::Error(e) => {
-                                return Ok((502, format!("Node streaming error: {e}")));
-                            }
+                Ok(ProxyResponseType::Streaming(rx)) => {
+                    let (status, body_buf) = match collect_node_stream_response(rx).await {
+                        Ok(response) => response,
+                        Err(error) => {
+                            return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(error));
                         }
-                    }
+                    };
                     billing
                         .settle(
                             &metered,
@@ -3802,12 +4114,22 @@ pub async fn execute_tool_resolved(
                             None,
                         )
                         .await?;
-                    return Ok((status, String::from_utf8_lossy(&body_buf).to_string()));
+                    return Ok(McpToolExecutionOutcome::Response((
+                        status,
+                        String::from_utf8_lossy(&body_buf).to_string(),
+                    )));
                 }
-                Err(e) => {
-                    last_error = Some(e);
-                    continue;
-                }
+                Err(failure) => match node_dispatch_failure_disposition(failure.dispatched) {
+                    NodeDispatchFailureDisposition::StopProviderOutcomeUnknown => {
+                        return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
+                            failure.error,
+                        ));
+                    }
+                    NodeDispatchFailureDisposition::TryFallback => {
+                        last_error = Some(failure.error);
+                        continue;
+                    }
+                },
             }
         }
 
@@ -3825,7 +4147,7 @@ pub async fn execute_tool_resolved(
     // Direct proxy (no node, or node offline with server credential fallback)
     // -------------------------------------------------------------------
     billing.mark_forwarded(&metered).await?;
-    let response = proxy_service::forward_request(
+    let response = match proxy_service::forward_request_with_extra_outbound_headers(
         http_client,
         &target,
         method,
@@ -3838,15 +4160,54 @@ pub async fn execute_tool_resolved(
         None,
         token_exchange_cache,
         cloud_response_cache,
+        server_owned_headers,
         billing_egress_permit,
     )
-    .await?;
+    .await
+    {
+        Ok(response) => response,
+        Err(proxy_service::ForwardRequestError::Application(error)) => return Err(error),
+        Err(proxy_service::ForwardRequestError::Transport(error))
+            if direct_transport_failure_is_pre_dispatch(&error) =>
+        {
+            tracing::warn!(
+                connect = error.is_connect(),
+                builder = error.is_builder(),
+                request = error.is_request(),
+                "Provider was unreachable before direct dispatch"
+            );
+            return Ok(McpToolExecutionOutcome::ProviderUnreachable(
+                AppError::Internal("Proxy request failed".to_string()),
+            ));
+        }
+        Err(proxy_service::ForwardRequestError::Transport(error)) => {
+            tracing::error!(
+                timeout = error.is_timeout(),
+                body = error.is_body(),
+                decode = error.is_decode(),
+                "Direct provider outcome is unknown"
+            );
+            return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
+                AppError::Internal("Direct provider outcome is unknown".to_string()),
+            ));
+        }
+    };
 
     let status = response.status().as_u16();
-    let body_text = response.text().await.map_err(|e| {
-        tracing::error!("Failed to read downstream response: {e}");
-        AppError::Internal("Failed to read downstream response".to_string())
-    })?;
+    let body_text = match response.text().await {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::error!(
+                timeout = error.is_timeout(),
+                body = error.is_body(),
+                decode = error.is_decode(),
+                "Failed to read downstream response"
+            );
+            return Ok(McpToolExecutionOutcome::ProviderOutcomeUnknown(
+                AppError::Internal("Failed to read downstream response".to_string()),
+            ));
+        }
+    };
     billing
         .settle(
             &metered,
@@ -3856,7 +4217,11 @@ pub async fn execute_tool_resolved(
         )
         .await?;
 
-    Ok((status, body_text))
+    Ok(McpToolExecutionOutcome::Response((status, body_text)))
+}
+
+fn direct_transport_failure_is_pre_dispatch(error: &reqwest::Error) -> bool {
+    error.is_connect() || error.is_builder()
 }
 
 /// Build proxy arguments from a generic proxy tool call.
@@ -4253,6 +4618,19 @@ mod tests {
         slug: &str,
         endpoints: Vec<McpToolEndpoint>,
     ) -> McpToolService {
+        let durable_endpoint_metadata = endpoints
+            .iter()
+            .map(|endpoint| {
+                (
+                    endpoint.endpoint_id.clone(),
+                    McpDurableEndpointMetadata {
+                        risk: None,
+                        supports_idempotency_key: false,
+                        operation_generation: 1,
+                    },
+                )
+            })
+            .collect();
         McpToolService {
             service_id: id.to_string(),
             service_name: name.to_string(),
@@ -4261,7 +4639,7 @@ mod tests {
             service_category: "connection".to_string(),
             recommended_skills: Vec::new(),
             endpoints,
-            durable_endpoint_metadata: HashMap::new(),
+            durable_endpoint_metadata,
             source: McpToolSource::Platform {
                 downstream_service_id: id.to_string(),
             },
@@ -4433,6 +4811,44 @@ mod tests {
             exact_operation_view_digest(&exact_operation_view(&original)),
             exact_operation_view_digest(&exact_operation_view(&changed)),
             "caller-visible service and operation changes must move the digest"
+        );
+    }
+
+    #[test]
+    fn legacy_policy_write_moves_exact_view_without_generation_bump() {
+        let original = user_managed(
+            make_service(
+                "svc-typed",
+                "Typed",
+                "typed",
+                vec![make_endpoint("write", "d")],
+            ),
+            "us-typed",
+        );
+        let endpoint_id = original.endpoints[0].endpoint_id.clone();
+        let original_digest = exact_operation_view_digest(&exact_operation_view(&[original]));
+
+        let mut changed = user_managed(
+            make_service(
+                "svc-typed",
+                "Typed",
+                "typed",
+                vec![make_endpoint("write", "d")],
+            ),
+            "us-typed",
+        );
+        let metadata = changed
+            .durable_endpoint_metadata
+            .get_mut(&endpoint_id)
+            .expect("producer metadata");
+        metadata.risk = Some(EndpointRisk::Write);
+        metadata.supports_idempotency_key = true;
+        assert_eq!(metadata.operation_generation, 1);
+
+        assert_ne!(
+            original_digest,
+            exact_operation_view_digest(&exact_operation_view(&[changed])),
+            "old-writer policy changes must move the canonical fence even when generation is stale"
         );
     }
 
@@ -4962,6 +5378,7 @@ mod tests {
                 credential_label: None,
                 metadata: None,
                 is_active: true,
+                state_version: 1,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })
@@ -4985,6 +5402,7 @@ mod tests {
                 risk: None,
                 supports_idempotency_key: false,
                 is_active: true,
+                operation_generation: 1,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })
@@ -5084,6 +5502,7 @@ mod tests {
                 risk: None,
                 supports_idempotency_key: false,
                 is_active: true,
+                operation_generation: 1,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })
@@ -5231,6 +5650,9 @@ mod tests {
         assert_eq!(service.endpoints[0].name, "im_message_create");
         assert_eq!(service.endpoints[0].method, "POST");
         assert_eq!(service.endpoints[0].path, "/open-apis/im/v1/messages");
+        let view = exact_operation_view(&catalog_result.services);
+        let operation = &view.services[0].operations[0];
+        assert_eq!(operation.operation_generation, None);
     }
 
     #[tokio::test]
@@ -5274,6 +5696,7 @@ mod tests {
                 risk: None,
                 supports_idempotency_key: false,
                 is_active: true,
+                operation_generation: 1,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })
@@ -5388,6 +5811,7 @@ mod tests {
                 risk: None,
                 supports_idempotency_key: false,
                 is_active: true,
+                operation_generation: 1,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })
@@ -5486,6 +5910,7 @@ mod tests {
                 credential_label: None,
                 metadata: None,
                 is_active: false,
+                state_version: 1,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })
@@ -5568,6 +5993,65 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn discover_services_excludes_auto_provisioned_user_service() {
+        let Some(db) = connect_test_database("mcp_discover_auto_user_service").await else {
+            eprintln!("skipping MCP auto-provision discovery test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+
+        let mut catalog = dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "auto-provisioned-catalog".to_string();
+        catalog.requires_user_credential = false;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .expect("insert auto catalog service");
+
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &user_id,
+                "Auto service",
+                "https://auto.example.com",
+                None,
+                Some(&catalog_id),
+            ))
+            .await
+            .expect("insert auto endpoint");
+        let mut user_service = test_user_service(
+            &user_service_id,
+            &user_id,
+            "auto-service",
+            &endpoint_id,
+            Some(&catalog_id),
+            None,
+        );
+        user_service.source = Some(crate::models::user_service::AUTO_PROVISION_SOURCE.to_string());
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .expect("insert auto user service");
+
+        let discovered = discover_services(&db, &user_id, None, Some("connection"))
+            .await
+            .expect("discover services");
+        let discovered_ids: Vec<&str> = discovered["services"]
+            .as_array()
+            .expect("services array")
+            .iter()
+            .filter_map(|service| service["service_id"].as_str())
+            .collect();
+        assert!(!discovered_ids.contains(&catalog_id.as_str()));
+        assert!(!discovered_ids.contains(&user_service_id.as_str()));
+    }
+
     // -- generate_tool_definitions tests --
 
     #[test]
@@ -5580,7 +6064,7 @@ mod tests {
         )];
 
         let empty_set = HashSet::new();
-        let tools = generate_tool_definitions(&services, Some(&empty_set));
+        let tools = generate_tool_definitions(&services, Some(&empty_set), &[]);
 
         // Should only have the 14 meta-tools (6 core + 2 SSH + 6 oracle)
         assert_eq!(tools.len(), 14);
@@ -5606,7 +6090,7 @@ mod tests {
 
         let mut activated = HashSet::new();
         activated.insert("svc-1".to_string());
-        let tools = generate_tool_definitions(&services, Some(&activated));
+        let tools = generate_tool_definitions(&services, Some(&activated), &[]);
 
         // 14 meta-tools + 1 weather tool (news excluded)
         assert_eq!(tools.len(), 15);
@@ -5631,7 +6115,7 @@ mod tests {
             ),
         ];
 
-        let tools = generate_tool_definitions(&services, None);
+        let tools = generate_tool_definitions(&services, None, &[]);
 
         // 14 meta-tools + 2 service tools
         assert_eq!(tools.len(), 16);
@@ -5641,7 +6125,7 @@ mod tests {
 
     #[test]
     fn generate_tool_definitions_includes_oracle_meta_tools() {
-        let tools = generate_tool_definitions(&[], None);
+        let tools = generate_tool_definitions(&[], None, &[]);
 
         let required_for = |name: &str| -> Vec<String> {
             tools
@@ -5671,7 +6155,7 @@ mod tests {
 
     #[test]
     fn generate_tool_definitions_includes_connected_services_meta_tool() {
-        let tools = generate_tool_definitions(&[], None);
+        let tools = generate_tool_definitions(&[], None, &[]);
         let tool = tools
             .iter()
             .find(|tool| tool.name == "nyx__list_connected_services")
@@ -5679,6 +6163,53 @@ mod tests {
 
         assert_eq!(tool.input_schema["required"], serde_json::json!([]));
         assert!(tool.input_schema["properties"]["query"].is_object());
+    }
+
+    #[test]
+    fn generate_tool_definitions_publishes_only_enabled_platform_operation_rows() {
+        let enabled_operation = PlatformOperation {
+            id: "platform-speak".to_string(),
+            op: crate::models::platform_operation::PlatformOperationName::Speak,
+            enabled: true,
+            vendor_service_slug: "platform-elevenlabs".to_string(),
+            config: PlatformOperationConfig::Speak(
+                crate::models::platform_operation::SpeakConfig {
+                    allowed_voice_ids: vec!["voice-a".to_string(), "voice-b".to_string()],
+                    max_chars: 321,
+                    model_id: "eleven_multilingual_v2".to_string(),
+                },
+            ),
+            updated_at: chrono::Utc::now(),
+            updated_by: "admin-user".to_string(),
+        };
+        let disabled_operation = PlatformOperation {
+            id: "platform-x-search".to_string(),
+            op: crate::models::platform_operation::PlatformOperationName::XSearch,
+            enabled: false,
+            vendor_service_slug: "platform-x".to_string(),
+            config: PlatformOperationConfig::XSearch(
+                crate::models::platform_operation::XSearchConfig {
+                    max_results_cap: 10,
+                },
+            ),
+            updated_at: chrono::Utc::now(),
+            updated_by: "admin-user".to_string(),
+        };
+
+        let tools = generate_tool_definitions(&[], None, &[enabled_operation, disabled_operation]);
+        let speak = tools
+            .iter()
+            .find(|tool| tool.name == "nyx__speak")
+            .expect("enabled speak tool");
+
+        assert!(!tools.iter().any(|tool| tool.name == "nyx__x_search"));
+        assert!(!tools.iter().any(|tool| tool.name == "nyx__call_and_say"));
+        assert_eq!(speak.input_schema["properties"]["text"]["maxLength"], 321);
+        assert_eq!(
+            speak.input_schema["properties"]["voice_id"]["enum"],
+            serde_json::json!(["voice-a", "voice-b"])
+        );
+        assert_eq!(speak.input_schema["additionalProperties"], false);
     }
 
     #[test]
@@ -7600,6 +8131,7 @@ mod tests {
                 membership_id: "membership".to_string(),
             }),
             pool_selection: None,
+            is_auto_connected: false,
         }
     }
 
@@ -7714,6 +8246,124 @@ mod tests {
         assert_eq!(billing_ctx.billing_owner_id, "owner");
         assert_eq!(billing_ctx.actor_user_id, "service-account");
         assert_ne!(billing_ctx.billing_owner_id, billing_ctx.actor_user_id);
+    }
+
+    #[test]
+    fn exact_preparation_owns_and_satisfies_required_idempotency_header() {
+        let mut service = make_service(
+            "svc-write",
+            "Write",
+            "write",
+            vec![make_endpoint("create", "create")],
+        );
+        service.endpoints[0].parameters = Some(serde_json::json!([{
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string" }
+        }]));
+
+        let prepared = prepare_exact_proxy_tool_call(
+            &service,
+            &service.endpoints[0],
+            &serde_json::json!({}),
+            Some("effect-key"),
+        )
+        .expect("server key satisfies the required producer header");
+        assert!(prepared.parameter_headers.is_empty());
+        assert_eq!(
+            prepared.server_owned_headers,
+            vec![("Idempotency-Key".to_string(), "effect-key".to_string())]
+        );
+        assert!(matches!(
+            prepare_exact_proxy_tool_call(
+                &service,
+                &service.endpoints[0],
+                &serde_json::json!({"idempotency-key": "caller-key"}),
+                Some("effect-key"),
+            ),
+            Err(AppError::BadRequest(message))
+                if message == "Idempotency-Key is server-owned for exact approvals"
+        ));
+    }
+
+    #[test]
+    fn ordinary_preparation_is_unchanged_and_server_headers_win_defaults() {
+        let service = make_service(
+            "svc-read",
+            "Read",
+            "read",
+            vec![make_endpoint("list", "list")],
+        );
+        let prepared =
+            prepare_proxy_tool_call(&service, &service.endpoints[0], &serde_json::json!({}))
+                .expect("ordinary preparation");
+        assert!(prepared.server_owned_headers.is_empty());
+
+        assert_eq!(
+            apply_server_owned_headers(
+                vec![("idempotency-key".to_string(), "default".to_string())],
+                &[("Idempotency-Key".to_string(), "effect-key".to_string())],
+            ),
+            vec![("Idempotency-Key".to_string(), "effect-key".to_string())]
+        );
+    }
+
+    #[test]
+    fn only_pre_dispatch_node_failures_may_select_a_fallback() {
+        assert_eq!(
+            node_dispatch_failure_disposition(false),
+            NodeDispatchFailureDisposition::TryFallback
+        );
+        assert_eq!(
+            node_dispatch_failure_disposition(true),
+            NodeDispatchFailureDisposition::StopProviderOutcomeUnknown
+        );
+    }
+
+    #[tokio::test]
+    async fn node_stream_requires_an_explicit_terminal_frame() {
+        use crate::services::node_ws_manager::StreamChunk;
+
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tx.send(StreamChunk::Start {
+            status: 201,
+            headers: Vec::new(),
+        })
+        .await
+        .unwrap();
+        tx.send(StreamChunk::Data(b"created".to_vec()))
+            .await
+            .unwrap();
+        tx.send(StreamChunk::End).await.unwrap();
+        drop(tx);
+
+        let response = collect_node_stream_response(rx)
+            .await
+            .expect("explicitly terminated stream");
+        assert_eq!(response, (201, b"created".to_vec()));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        tx.send(StreamChunk::Error("transport lost".to_string()))
+            .await
+            .unwrap();
+        drop(tx);
+        assert!(matches!(
+            collect_node_stream_response(rx).await,
+            Err(AppError::Internal(message))
+                if message == "Node stream failed after provider dispatch"
+        ));
+
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        tx.send(StreamChunk::Data(b"partial".to_vec()))
+            .await
+            .unwrap();
+        drop(tx);
+        assert!(matches!(
+            collect_node_stream_response(rx).await,
+            Err(AppError::Internal(message))
+                if message == "Node stream closed before its terminal frame"
+        ));
     }
 
     mod public_tools {

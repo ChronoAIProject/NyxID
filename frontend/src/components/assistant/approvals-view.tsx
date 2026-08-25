@@ -15,7 +15,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useDecideApproval } from "@/hooks/use-approvals";
-import { useAssistantApprovals } from "@/hooks/use-assistant";
+import { useAssistantApprovals } from "@/hooks/use-assistant-workspace";
 import { ApiError } from "@/lib/api-client";
 import { formatDate } from "@/lib/utils";
 import type { AssistantApprovalEntry } from "@/lib/assistant/approvals";

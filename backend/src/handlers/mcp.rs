@@ -322,11 +322,12 @@ mod tests {
                     .map(move |endpoint| format!("{}__{}", service.service_slug, endpoint.name))
             })
             .collect();
-        let mcp_operations: Vec<String> = mcp_service::generate_tool_definitions(&services, None)
-            .into_iter()
-            .filter(|tool| !tool.name.starts_with("nyx__"))
-            .map(|tool| tool.name)
-            .collect();
+        let mcp_operations: Vec<String> =
+            mcp_service::generate_tool_definitions(&services, None, &[])
+                .into_iter()
+                .filter(|tool| !tool.name.starts_with("nyx__"))
+                .map(|tool| tool.name)
+                .collect();
 
         assert_eq!(rest_operations, mcp_operations);
     }

@@ -37,6 +37,7 @@ import type { KeyInfo } from "@/types/keys";
 
 interface ActionCardProps {
   readonly block: ActionCardContentBlock;
+  readonly disabled?: boolean;
   readonly onProgress: (blockId: string, inProgress: boolean) => void;
   readonly onBlock: (blockId: string, note: string) => Promise<void> | void;
   readonly onResolve: (report: ActionReport) => Promise<void> | void;
@@ -450,6 +451,7 @@ function StatusNotice({ block }: { readonly block: ActionCardContentBlock }) {
 
 export function ActionCard({
   block,
+  disabled = false,
   onProgress,
   onBlock,
   onResolve,
@@ -657,13 +659,14 @@ export function ActionCard({
   const awaitingAuthorization = pendingAuth !== null && !dialogOpen;
   const blocked = block.status === "blocked";
   const conflicted = block.status === "conflicted";
-  const primaryDisabled = busy || blocked || conflicted;
+  const primaryDisabled = disabled || busy || blocked || conflicted;
   // Decline stays live through `in_progress`. Abandoning a connection the user
   // started is always their call, and it is the manual floor under every
   // automatic settlement: with it disabled, a busy card that lost its watch
   // had no reachable control at all. `report` supersedes any watch still
-  // running, and the transport de-duplicates a report already queued.
-  const secondaryDisabled = conflicted;
+  // running, and resolvingRef prevents duplicate local submission while that
+  // report is in flight.
+  const secondaryDisabled = disabled || conflicted;
   const params = block.params;
 
   function setOpen(next: boolean) {
@@ -716,11 +719,9 @@ export function ActionCard({
         ),
       )
       .catch(() => {
-        // The transport retains failed/rejected reports for retry, and the
-        // page has already toasted the delivery failure. Unlock dismissal AND
-        // roll the card out of any busy projection: a completed-connection
-        // report that dies must not strand the card at "Connecting" with its
-        // controls disabled — back to actionable is what makes retry possible.
+        // A rejected pre-stream report remains unresolved in actor state, and
+        // the page has already toasted the delivery failure. Unlock dismissal
+        // and roll the card out of any busy projection so the user can retry.
         resolvingRef.current = false;
         onProgress(block.block_id, false);
       });
@@ -947,10 +948,10 @@ export function ActionCard({
             const binding = dialogBindingFor(params.variant);
             return (
               <binding.Dialog
+                {...binding.toProps(params)}
                 open={dialogOpen}
                 onOpenChange={setOpen}
                 actionRequestId={block.action_request_id}
-                params={binding.toProps(params)}
                 onComplete={(id) =>
                   report("completed", descriptor.resource(id))
                 }

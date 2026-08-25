@@ -4,6 +4,7 @@ import {
   composerInput,
   conversationRow,
   openAssistant,
+  openLatestToolActivity,
   SCRIPTED_REPLY_START,
   SCRIPTED_TOOL_RESULT,
   SEEDED,
@@ -58,6 +59,7 @@ test("switching away mid-stream leaks nothing; switching back lands in the finis
   await expect(
     thread(page).getByText("Check the payment retries as well."),
   ).toBeVisible();
+  await openLatestToolActivity(page);
   await expect(
     thread(page).getByText(SCRIPTED_TOOL_RESULT, { exact: false }),
   ).toBeVisible({ timeout: 10_000 });
@@ -141,10 +143,12 @@ test("a queued canonical swap cannot override a newer conversation choice", asyn
   page,
 }) => {
   const message = "Keep this draft running in the background.";
-  await openAssistant(page, { faults: { aliasOnFirstSend: true } });
+  await openAssistant(page, {
+    faults: { aliasOnFirstSend: true, firstEventSilenceMs: 800 },
+  });
 
   await sendMessage(page, message);
-  await expect(page).toHaveURL(/c=local-pending-/, { timeout: 2_000 });
+  expect(new URL(page.url()).searchParams.has("c")).toBe(false);
   await expect(stopButton(page)).toBeVisible({ timeout: 1_000 });
 
   await conversationRow(page, SEEDED.github.title).click();

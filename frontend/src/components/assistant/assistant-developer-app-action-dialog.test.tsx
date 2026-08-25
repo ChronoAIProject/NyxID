@@ -1,12 +1,24 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AssistantDeveloperAppActionDialog, type AssistantDeveloperAppAction } from "./assistant-developer-app-action-dialog";
+import {
+  AssistantDeveloperAppActionDialog,
+  type AssistantDeveloperAppAction,
+} from "./assistant-developer-app-action-dialog";
 
-const { mockGet, mockPost } = vi.hoisted(() => ({ mockGet: vi.fn(), mockPost: vi.fn() }));
+const { mockGet, mockPost } = vi.hoisted(() => ({
+  mockGet: vi.fn(),
+  mockPost: vi.fn(),
+}));
 vi.mock("@/lib/api-client", () => ({
   api: { get: mockGet, post: mockPost },
-  ApiError: class ApiError extends Error { readonly status: number; constructor(status: number) { super(`HTTP ${String(status)}`); this.status = status; } },
+  ApiError: class ApiError extends Error {
+    readonly status: number;
+    constructor(status: number) {
+      super(`HTTP ${String(status)}`);
+      this.status = status;
+    }
+  },
 }));
 
 const ID = "00000000-0000-4000-8000-000000000061";
@@ -22,50 +34,143 @@ function evidence(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderDialog(action: AssistantDeveloperAppAction, params: Record<string, unknown>) {
-  render(<AssistantDeveloperAppActionDialog open onOpenChange={vi.fn()} actionRequestId={`request-${action}`} action={action} params={params} onComplete={vi.fn()} />);
+function renderDialog(
+  action: AssistantDeveloperAppAction,
+  params: Record<string, unknown>,
+) {
+  render(
+    <AssistantDeveloperAppActionDialog
+      open
+      onOpenChange={vi.fn()}
+      actionRequestId={`request-${action}`}
+      action={action}
+      params={params}
+      onComplete={vi.fn()}
+    />,
+  );
 }
 
 async function submit(destructive = false) {
   if (destructive) await userEvent.click(screen.getByRole("checkbox"));
-  const button = screen.getByRole("button", { name: destructive ? "Delete app" : "Continue" });
+  const button = screen.getByRole("button", {
+    name: destructive ? "Delete app" : "Continue",
+  });
   fireEvent.click(button);
   fireEvent.click(button);
   await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
 }
 
-beforeEach(() => { mockGet.mockReset(); mockPost.mockReset(); });
+beforeEach(() => {
+  mockGet.mockReset();
+  mockPost.mockReset();
+});
 
 describe("AssistantDeveloperAppActionDialog", () => {
   it("runs developer_app.create and displays its one-time secret", async () => {
-    mockPost.mockResolvedValue({ resource: { clientId: ID }, replayed: false, clientSecret: "client-secret-once" });
+    mockPost.mockResolvedValue({
+      resource: { clientId: ID },
+      replayed: false,
+      clientSecret: "client-secret-once",
+      oneTimeMaterial: "delivered",
+    });
     mockGet.mockResolvedValue(evidence());
-    renderDialog("create", { name: "My app", redirectUris: ["https://app.example/callback"] });
+    renderDialog("create", {
+      name: "My app",
+      redirectUris: ["https://app.example/callback"],
+    });
     await submit();
-    expect(mockGet).toHaveBeenCalledWith(`/developer/oauth-clients/${ID}/authorization`);
-    expect(await screen.findByDisplayValue("client-secret-once")).toBeInTheDocument();
+    expect(mockGet).toHaveBeenCalledWith(
+      `/developer/oauth-clients/${ID}/authorization`,
+    );
+    expect(
+      await screen.findByDisplayValue("client-secret-once"),
+    ).toBeInTheDocument();
   });
 
   it("runs developer_app.update and proves a newer projection", async () => {
-    mockGet.mockResolvedValueOnce(evidence()).mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
     mockPost.mockResolvedValue({ resource: { clientId: ID }, replayed: false });
-    renderDialog("update", { clientId: ID, name: "Renamed", redirectUris: ["https://app.example/callback"] });
+    renderDialog("update", {
+      clientId: ID,
+      name: "Renamed",
+      redirectUris: ["https://app.example/callback"],
+    });
     await submit();
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/developer-app/update", expect.objectContaining({ clientId: ID, name: "Renamed" }));
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/developer-app/update",
+      expect.objectContaining({ clientId: ID, name: "Renamed" }),
+    );
+  });
+
+  it("does not clear redirect URIs when an update textarea is empty", async () => {
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
+    mockPost.mockResolvedValue({ resource: { clientId: ID }, replayed: false });
+    renderDialog("update", { clientId: ID, name: "Renamed" });
+
+    await submit();
+
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/developer-app/update",
+      {
+        actionRequestId: "request-update",
+        clientId: ID,
+        name: "Renamed",
+        redirectUris: undefined,
+      },
+    );
+  });
+
+  it("does not forward model-supplied application fields that the dialog does not show", async () => {
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
+    mockPost.mockResolvedValue({ resource: { clientId: ID }, replayed: false });
+    renderDialog("update", {
+      clientId: ID,
+      name: "Renamed",
+      redirectUris: ["https://app.example/callback"],
+      brokerCapabilityEnabled: true,
+    });
+    await submit();
+    const requestBody = mockPost.mock.calls[0]?.[1];
+    expect(requestBody).toEqual({
+      actionRequestId: "request-update",
+      clientId: ID,
+      name: "Renamed",
+      redirectUris: ["https://app.example/callback"],
+    });
+    expect(requestBody).not.toHaveProperty("brokerCapabilityEnabled");
   });
 
   it("runs developer_app.delete and proves the soft-deactivated terminal state", async () => {
-    mockGet.mockResolvedValueOnce(evidence()).mockResolvedValueOnce(evidence({ is_active: false, updated_at: "2026-01-01T00:00:01Z" }));
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce(
+        evidence({ is_active: false, updated_at: "2026-01-01T00:00:01Z" }),
+      );
     mockPost.mockResolvedValue({ resource: { clientId: ID }, replayed: false });
     renderDialog("delete", { clientId: ID });
     await submit(true);
     expect(mockGet).toHaveBeenCalledTimes(2);
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/developer-app/delete", expect.objectContaining({ confirmed: true }));
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/developer-app/delete",
+      expect.objectContaining({ confirmed: true }),
+    );
   });
 
   it("runs developer_app.rotate_secret and keeps the secret in the browser response", async () => {
-    mockGet.mockResolvedValueOnce(evidence()).mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
-    mockPost.mockResolvedValue({ resource: { clientId: ID }, replayed: false, clientSecret: "rotated-client-secret" });
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
+    mockPost.mockResolvedValue({
+      resource: { clientId: ID },
+      replayed: false,
+      clientSecret: "rotated-client-secret",
+    });
     renderDialog("rotate_secret", { clientId: ID });
     await submit();
     // Falsifier: remove the `expectedUpdatedAt` payload assignment in the
@@ -74,6 +179,26 @@ describe("AssistantDeveloperAppActionDialog", () => {
       "/assistant/actions/org/developer-app/rotate-secret",
       expect.objectContaining({ expectedUpdatedAt: "2026-01-01T00:00:00Z" }),
     );
-    expect(await screen.findByDisplayValue("rotated-client-secret")).toBeInTheDocument();
+    expect(
+      await screen.findByDisplayValue("rotated-client-secret"),
+    ).toBeInTheDocument();
+  });
+
+  it("warns when a replayed rotate cannot return the one-time secret", async () => {
+    mockGet.mockResolvedValue(evidence());
+    mockPost.mockResolvedValue({
+      resource: { clientId: ID },
+      replayed: true,
+      oneTimeMaterial: "unavailable",
+    });
+    renderDialog("rotate_secret", { clientId: ID });
+
+    await submit();
+
+    expect(
+      await screen.findByText(/one-time secret was unavailable/i),
+    ).toHaveTextContent(/rotate the secret again/i);
+    expect(screen.getByRole("button", { name: "Acknowledge" })).toBeEnabled();
+    expect(screen.queryByLabelText("One-time client secret")).toBeNull();
   });
 });

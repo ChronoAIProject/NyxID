@@ -9,7 +9,7 @@ use axum::{
     extract::State,
     routing::{get, post},
 };
-use mongodb::bson::{Document, doc};
+use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -24,7 +24,8 @@ use crate::models::node::COLLECTION_NAME as NODES;
 use crate::models::node_pending_credential::InjectionMethod;
 use crate::mw::auth::AuthUser;
 use crate::services::assistant_action_receipts::{
-    self, ReceiptOutcome, fingerprint_canonical, in_progress_conflict, normalize_action_request_id,
+    self, OneTimeMaterialAvailability, ReceiptOutcome, fingerprint_canonical, in_progress_conflict,
+    normalize_action_request_id,
 };
 use crate::services::device_code_service::{DeviceOnboardInput, onboard_with_id};
 use crate::services::{audit_service, node_pending_credential_service, node_service, org_service};
@@ -154,6 +155,8 @@ pub struct AssistantDeviceResource {
 pub struct AssistantNodeEffectResponse {
     pub resource: AssistantNodeResource,
     pub replayed: bool,
+    #[serde(default)]
+    pub one_time_material: OneTimeMaterialAvailability,
     pub requested_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub registration_token: Option<String>,
@@ -178,6 +181,8 @@ pub struct AssistantPendingCredentialEffectResponse {
 pub struct AssistantDeviceEffectResponse {
     pub resource: AssistantDeviceResource,
     pub replayed: bool,
+    #[serde(default)]
+    pub one_time_material: OneTimeMaterialAvailability,
     pub requested_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qr_payload: Option<String>,
@@ -308,40 +313,6 @@ fn validate_expected_state_version(expected_state_version: i64) -> AppResult<i64
     Ok(expected_state_version)
 }
 
-/// Compare-and-set the authority projection's version after a receipt is
-/// reserved. The node model intentionally remains backward-compatible with
-/// rows that predate the projection; those rows are treated as version one,
-/// matching the public authorization endpoint, and get the explicit version
-/// field as part of this no-op write. A stale confirmation therefore cannot
-/// pass the database write predicate into the mutation service.
-async fn ensure_expected_node_state_version(
-    state: &AppState,
-    node_id: &str,
-    expected_state_version: i64,
-) -> AppResult<()> {
-    let result = state
-        .db
-        .collection::<Document>(NODES)
-        .update_one(
-            doc! {
-                "_id": node_id,
-                "is_active": true,
-                "$or": [
-                    { "state_version": expected_state_version },
-                    { "state_version": { "$exists": false } },
-                ],
-            },
-            doc! { "$set": { "state_version": expected_state_version } },
-        )
-        .await?;
-    if result.matched_count != 1 {
-        return Err(AppError::Conflict(
-            "the node changed since this action was prepared".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 async fn release_pending_receipt(state: &AppState, receipt: &AssistantActionReceipt) {
     if let Err(error) = state
         .db
@@ -366,12 +337,23 @@ fn node_response(receipt: &AssistantActionReceipt, replayed: bool) -> AssistantN
             node_id: receipt.resource_id.clone(),
         },
         replayed,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         requested_at: receipt.created_at.to_rfc3339(),
         registration_token: None,
         auth_token: None,
         signing_secret: None,
         expires_at: None,
     }
+}
+
+fn node_replay_response(receipt: &AssistantActionReceipt) -> AssistantNodeEffectResponse {
+    node_response(receipt, true)
+}
+
+fn node_material_replay_response(receipt: &AssistantActionReceipt) -> AssistantNodeEffectResponse {
+    let mut response = node_response(receipt, true);
+    response.one_time_material = OneTimeMaterialAvailability::Unavailable;
+    response
 }
 
 fn pending_response(
@@ -396,10 +378,17 @@ fn device_response(
             device_id: receipt.resource_id.clone(),
         },
         replayed,
+        one_time_material: OneTimeMaterialAvailability::Delivered,
         requested_at: receipt.created_at.to_rfc3339(),
         qr_payload: None,
         expires_at: None,
     }
+}
+
+fn device_replay_response(receipt: &AssistantActionReceipt) -> AssistantDeviceEffectResponse {
+    let mut response = device_response(receipt, true);
+    response.one_time_material = OneTimeMaterialAvailability::Unavailable;
+    response
 }
 
 async fn replay_in_progress_registration(
@@ -411,7 +400,7 @@ async fn replay_in_progress_registration(
         .await
         .map_err(|_| in_progress_conflict())?;
     assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-    Ok(Json(node_response(&receipt, true)))
+    Ok(Json(node_material_replay_response(&receipt)))
 }
 
 async fn replay_in_progress_pending(
@@ -430,22 +419,6 @@ async fn replay_in_progress_pending(
     .map_err(|_| in_progress_conflict())?;
     assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
     Ok(Json(pending_response(&receipt, true)))
-}
-
-async fn replay_in_progress_device(
-    state: &AppState,
-    actor_user_id: &str,
-    receipt: AssistantActionReceipt,
-) -> AppResult<Json<AssistantDeviceEffectResponse>> {
-    crate::services::device_code_service::get_onboard_authorization_state(
-        &state.db,
-        actor_user_id,
-        &receipt.resource_id,
-    )
-    .await
-    .map_err(|_| in_progress_conflict())?;
-    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-    Ok(Json(device_response(&receipt, true)))
 }
 
 pub async fn register_node_token(
@@ -474,7 +447,7 @@ pub async fn register_node_token(
     )
     .await?;
     match outcome {
-        ReceiptOutcome::Replay(receipt) => Ok(Json(node_response(&receipt, true))),
+        ReceiptOutcome::Replay(receipt) => Ok(Json(node_material_replay_response(&receipt))),
         ReceiptOutcome::InProgress(receipt) => {
             replay_in_progress_registration(&state, &actor, receipt).await
         }
@@ -524,59 +497,73 @@ pub async fn rotate_node_token(
     let actor = auth_user.user_id.to_string();
     let action_request_id = normalize_action_request_id(body.action_request_id)?;
     let node_id = normalize_action_request_id(body.node_id)?;
+    let authority = node_service::get_node_authorization_state(&state.db, &actor, &node_id).await?;
     node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await?;
     let fingerprint = fingerprint_canonical(&NodeIdentityFingerprint {
         action: NODE_ROTATE_TOKEN_ACTION,
         node_id: &node_id,
     })?;
-    match assistant_action_receipts::reserve_or_replay(
+    let receipt = match assistant_action_receipts::reserve_or_replay_with_markers(
         &state.db,
         &actor,
         NODE_ROTATE_TOKEN_ACTION,
         &action_request_id,
         &fingerprint,
         node_id.clone(),
+        Some(authority.state_version),
+        Some(authority.access_revision),
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) => Ok(Json(node_response(&receipt, true))),
-        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
-        ReceiptOutcome::Reserved(receipt) => {
-            let (raw_token, signing_secret) = node_service::rotate_auth_token(
-                &state.db,
-                &state.encryption_keys,
-                &actor,
-                &node_id,
-            )
-            .await?;
-            assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            if state.node_ws_manager.is_connected(&node_id) {
-                state
-                    .node_ws_manager
-                    .disconnect_connection(&node_id, 4002, "node credentials rotated")
-                    .await;
-                if let Err(error) = node_service::set_node_status(
-                    &state.db,
-                    &node_id,
-                    crate::models::node::NodeStatus::Offline,
-                )
+        ReceiptOutcome::Replay(receipt) => {
+            return Ok(Json(node_material_replay_response(&receipt)));
+        }
+        ReceiptOutcome::InProgress(receipt) => {
+            let current = node_service::get_node_authorization_state(&state.db, &actor, &node_id)
                 .await
-                {
-                    tracing::warn!(node_id = %node_id, error = %error, "failed to persist rotated node disconnect status");
-                }
+                .map_err(|_| in_progress_conflict())?;
+            // access_revision advances only when node credential material is
+            // replaced, so unrelated metadata writes cannot prove rotation.
+            let committed = receipt
+                .resource_access_revision
+                .is_some_and(|revision| current.access_revision > revision);
+            if committed {
+                assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+                return Ok(Json(node_material_replay_response(&receipt)));
             }
-            audit_service::log_for_user(
-                state.db.clone(),
-                &auth_user,
-                "assistant_node_token_rotated",
-                Some(serde_json::json!({ "node_id": &node_id })),
-            );
-            let mut response = node_response(&receipt, false);
-            response.auth_token = Some(raw_token);
-            response.signing_secret = Some(signing_secret);
-            Ok(Json(response))
+            receipt
+        }
+        ReceiptOutcome::Reserved(receipt) => receipt,
+    };
+    let (raw_token, signing_secret) =
+        node_service::rotate_auth_token(&state.db, &state.encryption_keys, &actor, &node_id)
+            .await?;
+    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+    if state.node_ws_manager.is_connected(&node_id) {
+        state
+            .node_ws_manager
+            .disconnect_connection(&node_id, 4002, "node credentials rotated")
+            .await;
+        if let Err(error) = node_service::set_node_status(
+            &state.db,
+            &node_id,
+            crate::models::node::NodeStatus::Offline,
+        )
+        .await
+        {
+            tracing::warn!(node_id = %node_id, error = %error, "failed to persist rotated node disconnect status");
         }
     }
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "assistant_node_token_rotated",
+        Some(serde_json::json!({ "node_id": &node_id })),
+    );
+    let mut response = node_response(&receipt, false);
+    response.auth_token = Some(raw_token);
+    response.signing_secret = Some(signing_secret);
+    Ok(Json(response))
 }
 
 pub async fn delete_node(
@@ -601,7 +588,7 @@ pub async fn delete_node(
         node_id: &node_id,
         expected_state_version,
     })?;
-    match assistant_action_receipts::reserve_or_replay(
+    let receipt = match assistant_action_receipts::reserve_or_replay(
         &state.db,
         &actor,
         NODE_DELETE_ACTION,
@@ -611,43 +598,61 @@ pub async fn delete_node(
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) => Ok(Json(node_response(&receipt, true))),
-        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
-        ReceiptOutcome::Reserved(receipt) => {
-            if let Err(error) =
-                node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await
+        ReceiptOutcome::Replay(receipt) => return Ok(Json(node_replay_response(&receipt))),
+        ReceiptOutcome::InProgress(receipt) => {
+            // The receipt is actor-scoped, so this existence probe does not
+            // widen authorization or reveal another actor's node.
+            let current = state
+                .db
+                .collection::<mongodb::bson::Document>(NODES)
+                .find_one(doc! { "_id": &node_id })
+                .await
+                .map_err(AppError::from)?;
+            if current
+                .as_ref()
+                .and_then(|node| node.get_bool("is_active").ok())
+                == Some(false)
             {
-                release_pending_receipt(&state, &receipt).await;
-                return Err(error);
+                assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+                return Ok(Json(node_replay_response(&receipt)));
             }
-            if let Err(error) =
-                ensure_expected_node_state_version(&state, &node_id, expected_state_version).await
-            {
-                release_pending_receipt(&state, &receipt).await;
-                return Err(error);
-            }
-            if let Err(error) = node_service::delete_node(&state.db, &actor, &node_id).await {
-                if !matches!(error, AppError::DatabaseError(_)) {
-                    release_pending_receipt(&state, &receipt).await;
-                }
-                return Err(error);
-            }
-            assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            if state.node_ws_manager.is_connected(&node_id) {
-                state
-                    .node_ws_manager
-                    .disconnect_connection(&node_id, 4006, "node deleted")
-                    .await;
-            }
-            audit_service::log_for_user(
-                state.db.clone(),
-                &auth_user,
-                "assistant_node_deleted",
-                Some(serde_json::json!({ "node_id": &node_id })),
-            );
-            Ok(Json(node_response(&receipt, false)))
+            receipt
         }
+        ReceiptOutcome::Reserved(receipt) => receipt,
+    };
+    if let Err(error) =
+        node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await
+    {
+        release_pending_receipt(&state, &receipt).await;
+        return Err(error);
     }
+    if let Err(error) = node_service::delete_node_with_expected_state_version(
+        &state.db,
+        &actor,
+        &node_id,
+        Some(expected_state_version),
+    )
+    .await
+    {
+        if !matches!(error, AppError::DatabaseError(_)) {
+            release_pending_receipt(&state, &receipt).await;
+        }
+        return Err(error);
+    }
+    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+    if state.node_ws_manager.is_connected(&node_id) {
+        state
+            .node_ws_manager
+            .disconnect_connection(&node_id, 4006, "node deleted")
+            .await;
+    }
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "assistant_node_deleted",
+        Some(serde_json::json!({ "node_id": &node_id })),
+    );
+    Ok(Json(node_response(&receipt, false)))
 }
 
 pub async fn transfer_node(
@@ -671,7 +676,7 @@ pub async fn transfer_node(
         new_owner_user_id: &new_owner_user_id,
         expected_state_version,
     })?;
-    match assistant_action_receipts::reserve_or_replay(
+    let receipt = match assistant_action_receipts::reserve_or_replay(
         &state.db,
         &actor,
         NODE_TRANSFER_ACTION,
@@ -681,61 +686,71 @@ pub async fn transfer_node(
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) => Ok(Json(node_response(&receipt, true))),
-        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
-        ReceiptOutcome::Reserved(receipt) => {
-            // Both sides of the transfer are authorised here, inside the
-            // reservation, so a replayed retry never re-runs them.
-            match node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await {
-                Ok(current) if current.user_id == new_owner_user_id => {
-                    release_pending_receipt(&state, &receipt).await;
-                    return Err(AppError::BadRequest(
-                        "node already belongs to that owner".to_string(),
-                    ));
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    release_pending_receipt(&state, &receipt).await;
-                    return Err(error);
-                }
-            }
-            if let Err(error) =
-                ensure_expected_node_state_version(&state, &node_id, expected_state_version).await
+        ReceiptOutcome::Replay(receipt) => return Ok(Json(node_replay_response(&receipt))),
+        ReceiptOutcome::InProgress(receipt) => {
+            let current = state
+                .db
+                .collection::<mongodb::bson::Document>(NODES)
+                .find_one(doc! { "_id": &node_id })
+                .await
+                .map_err(AppError::from)?;
+            if current
+                .as_ref()
+                .and_then(|node| node.get_str("user_id").ok())
+                == Some(new_owner_user_id.as_str())
             {
-                release_pending_receipt(&state, &receipt).await;
-                return Err(error);
+                assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+                return Ok(Json(node_replay_response(&receipt)));
             }
-            if let Err(error) = ensure_owner_writable(&state, &actor, &new_owner_user_id).await {
-                release_pending_receipt(&state, &receipt).await;
-                return Err(error);
-            }
-            let transfer = node_service::transfer_node_owner(
-                &state.db,
-                &actor,
-                &node_id,
-                &new_owner_user_id,
-                state.config.node_max_per_user,
-            )
-            .await;
-            if let Err(error) = transfer {
-                if !matches!(error, AppError::DatabaseError(_)) {
-                    release_pending_receipt(&state, &receipt).await;
-                }
-                return Err(error);
-            }
-            assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            audit_service::log_for_user(
-                state.db.clone(),
-                &auth_user,
-                "assistant_node_transferred",
-                Some(serde_json::json!({
-                    "node_id": &node_id,
-                    "new_owner_user_id": &new_owner_user_id,
-                })),
-            );
-            Ok(Json(node_response(&receipt, false)))
+            receipt
+        }
+        ReceiptOutcome::Reserved(receipt) => receipt,
+    };
+    // Both sides of the transfer are authorised here, inside the reservation,
+    // so a replayed retry never re-runs them.
+    match node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await {
+        Ok(current) if current.user_id == new_owner_user_id => {
+            release_pending_receipt(&state, &receipt).await;
+            return Err(AppError::BadRequest(
+                "node already belongs to that owner".to_string(),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => {
+            release_pending_receipt(&state, &receipt).await;
+            return Err(error);
         }
     }
+    if let Err(error) = ensure_owner_writable(&state, &actor, &new_owner_user_id).await {
+        release_pending_receipt(&state, &receipt).await;
+        return Err(error);
+    }
+    let transfer = node_service::transfer_node_owner_with_expected_state_version(
+        &state.db,
+        &actor,
+        &node_id,
+        &new_owner_user_id,
+        state.config.node_max_per_user,
+        Some(expected_state_version),
+    )
+    .await;
+    if let Err(error) = transfer {
+        if !matches!(error, AppError::DatabaseError(_)) {
+            release_pending_receipt(&state, &receipt).await;
+        }
+        return Err(error);
+    }
+    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "assistant_node_transferred",
+        Some(serde_json::json!({
+            "node_id": &node_id,
+            "new_owner_user_id": &new_owner_user_id,
+        })),
+    );
+    Ok(Json(node_response(&receipt, false)))
 }
 
 async fn create_pending_credential_effect(
@@ -882,7 +897,7 @@ pub async fn cancel_pending_credential(
         node_id: &node_id,
         pending_credential_id: &pending_credential_id,
     })?;
-    match assistant_action_receipts::reserve_or_replay(
+    let receipt = match assistant_action_receipts::reserve_or_replay(
         &state.db,
         &actor,
         PENDING_CREDENTIAL_CANCEL_ACTION,
@@ -892,35 +907,49 @@ pub async fn cancel_pending_credential(
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) => Ok(Json(pending_response(&receipt, true))),
-        ReceiptOutcome::InProgress(_) => Err(in_progress_conflict()),
-        ReceiptOutcome::Reserved(receipt) => {
-            let cancelled = node_pending_credential_service::cancel_pending_credential(
-                &state.db,
-                &actor,
-                &node_id,
-                &pending_credential_id,
-            )
-            .await;
-            if let Err(error) = cancelled {
-                if !matches!(error, AppError::DatabaseError(_)) {
-                    release_pending_receipt(&state, &receipt).await;
-                }
-                return Err(error);
+        ReceiptOutcome::Replay(receipt) => return Ok(Json(pending_response(&receipt, true))),
+        ReceiptOutcome::InProgress(receipt) => {
+            let current =
+                node_pending_credential_service::get_pending_credential_authorization_state(
+                    &state.db,
+                    &actor,
+                    &node_id,
+                    &pending_credential_id,
+                )
+                .await
+                .map_err(|_| in_progress_conflict())?;
+            if !current.is_active && current.declined_at.is_some() {
+                assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+                return Ok(Json(pending_response(&receipt, true)));
             }
-            assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            audit_service::log_for_user(
-                state.db.clone(),
-                &auth_user,
-                "assistant_pending_credential_cancelled",
-                Some(serde_json::json!({
-                    "node_id": &node_id,
-                    "pending_credential_id": &pending_credential_id,
-                })),
-            );
-            Ok(Json(pending_response(&receipt, false)))
+            receipt
         }
+        ReceiptOutcome::Reserved(receipt) => receipt,
+    };
+    let cancelled = node_pending_credential_service::cancel_pending_credential(
+        &state.db,
+        &actor,
+        &node_id,
+        &pending_credential_id,
+    )
+    .await;
+    if let Err(error) = cancelled {
+        if !matches!(error, AppError::DatabaseError(_)) {
+            release_pending_receipt(&state, &receipt).await;
+        }
+        return Err(error);
     }
+    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "assistant_pending_credential_cancelled",
+        Some(serde_json::json!({
+            "node_id": &node_id,
+            "pending_credential_id": &pending_credential_id,
+        })),
+    );
+    Ok(Json(pending_response(&receipt, false)))
 }
 
 pub async fn onboard_device(
@@ -941,7 +970,7 @@ pub async fn onboard_device(
         target_owner_user_id: &owner_user_id,
         default_service_ids: &default_service_ids,
     })?;
-    match assistant_action_receipts::reserve_or_replay(
+    let receipt = match assistant_action_receipts::reserve_or_replay(
         &state.db,
         &actor,
         DEVICE_ONBOARD_ACTION,
@@ -951,48 +980,65 @@ pub async fn onboard_device(
     )
     .await?
     {
-        ReceiptOutcome::Replay(receipt) => Ok(Json(device_response(&receipt, true))),
+        ReceiptOutcome::Replay(receipt) => return Ok(Json(device_replay_response(&receipt))),
         ReceiptOutcome::InProgress(receipt) => {
-            replay_in_progress_device(&state, &actor, receipt).await
-        }
-        ReceiptOutcome::Reserved(receipt) => {
-            let created = onboard_with_id(
+            match crate::services::device_code_service::get_onboard_authorization_state(
                 &state.db,
                 &actor,
                 &receipt.resource_id,
-                DeviceOnboardInput {
-                    org_id: (owner_user_id != actor).then_some(owner_user_id.clone()),
-                    label,
-                    default_services: Some(default_service_ids),
-                    base_url: state.config.base_url.clone(),
-                },
             )
-            .await;
-            let onboarded = match created {
-                Ok(onboarded) => onboarded,
-                Err(error) => {
-                    if !matches!(error, AppError::DatabaseError(_)) {
-                        release_pending_receipt(&state, &receipt).await;
-                    }
-                    return Err(error);
+            .await
+            {
+                // Existence proves that the bootstrap create committed. It
+                // remains `used: false` until the device redeems it, so that
+                // flag cannot distinguish an interrupted create from a live
+                // unredeemed bootstrap.
+                Ok(_) => {
+                    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+                    return Ok(Json(device_replay_response(&receipt)));
                 }
-            };
-            assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            audit_service::log_for_user(
-                state.db.clone(),
-                &auth_user,
-                "assistant_device_onboard_created",
-                Some(serde_json::json!({
-                    "device_id": &receipt.resource_id,
-                    "owner_user_id": &owner_user_id,
-                })),
-            );
-            let mut response = device_response(&receipt, false);
-            response.qr_payload = Some(onboarded.qr_payload);
-            response.expires_at = Some(onboarded.expires_at.to_rfc3339());
-            Ok(Json(response))
+                Err(AppError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+            receipt
         }
-    }
+        ReceiptOutcome::Reserved(receipt) => receipt,
+    };
+    let created = onboard_with_id(
+        &state.db,
+        &actor,
+        &receipt.resource_id,
+        DeviceOnboardInput {
+            org_id: (owner_user_id != actor).then_some(owner_user_id.clone()),
+            label,
+            default_services: Some(default_service_ids),
+            base_url: state.config.base_url.clone(),
+        },
+    )
+    .await;
+    let onboarded = match created {
+        Ok(onboarded) => onboarded,
+        Err(error) => {
+            if !matches!(error, AppError::DatabaseError(_)) {
+                release_pending_receipt(&state, &receipt).await;
+            }
+            return Err(error);
+        }
+    };
+    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "assistant_device_onboard_created",
+        Some(serde_json::json!({
+            "device_id": &receipt.resource_id,
+            "owner_user_id": &owner_user_id,
+        })),
+    );
+    let mut response = device_response(&receipt, false);
+    response.qr_payload = Some(onboarded.qr_payload);
+    response.expires_at = Some(onboarded.expires_at.to_rfc3339());
+    Ok(Json(response))
 }
 
 #[cfg(test)]
@@ -1078,6 +1124,28 @@ mod tests {
             .insert_one(test_user(user_id, UserType::Person))
             .await
             .expect("insert person");
+    }
+
+    async fn reopen_receipt(
+        db: &mongodb::Database,
+        actor_id: &str,
+        action: &str,
+        request_id: &str,
+    ) {
+        db.collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+            .update_one(
+                doc! {
+                    "user_id": actor_id,
+                    "action": action,
+                    "action_request_id": request_id,
+                },
+                doc! {
+                    "$set": { "status": "pending" },
+                    "$unset": { "completed_at": "" },
+                },
+            )
+            .await
+            .expect("reopen assistant receipt");
     }
 
     /// Audit finding F4. `ensure_node_writable_by_actor` filters
@@ -1185,6 +1253,10 @@ mod tests {
             "retry of a committed delete must replay, not deny it: {retry}"
         );
         assert_eq!(retry["replayed"], true);
+        assert_eq!(
+            retry["oneTimeMaterial"], "delivered",
+            "delete replays do not lose one-time material"
+        );
     }
 
     #[tokio::test]
@@ -1309,6 +1381,298 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn node_rotate_token_interrupted_commit_replays_without_second_rotation() {
+        let Some(db) = connect_test_database("assistant_node_rotate_interrupted").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        insert_person(&db, &actor_id).await;
+        let node = test_node(&actor_id, "interrupted-rotate-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let body = json!({"actionRequestId": "rotate-interrupted", "nodeId": node_id});
+
+        let (status, first) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/rotate-token",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let first_revision = db
+            .collection::<mongodb::bson::Document>(NODES)
+            .find_one(doc! {"_id": &node_id})
+            .await
+            .expect("load rotated node")
+            .expect("rotated node")
+            .get_i64("access_revision")
+            .expect("access revision");
+        reopen_receipt(
+            &db,
+            &actor_id,
+            NODE_ROTATE_TOKEN_ACTION,
+            "rotate-interrupted",
+        )
+        .await;
+
+        let (status, retry) = request(
+            state,
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/rotate-token",
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["replayed"], true);
+        assert_eq!(retry["oneTimeMaterial"], "unavailable");
+        let retry_revision = db
+            .collection::<mongodb::bson::Document>(NODES)
+            .find_one(doc! {"_id": &node_id})
+            .await
+            .expect("reload node")
+            .expect("node")
+            .get_i64("access_revision")
+            .expect("access revision");
+        assert_eq!(
+            retry_revision, first_revision,
+            "retry must not rotate twice"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_delete_interrupted_commit_replays_without_second_mutation() {
+        let Some(db) = connect_test_database("assistant_node_delete_interrupted").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        insert_person(&db, &actor_id).await;
+        let node = test_node(&actor_id, "interrupted-delete-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let body = json!({"actionRequestId": "delete-interrupted", "nodeId": node_id, "expectedStateVersion": 1});
+        let (status, first) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/delete",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        reopen_receipt(&db, &actor_id, NODE_DELETE_ACTION, "delete-interrupted").await;
+        let (status, retry) = request(
+            state,
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/delete",
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["replayed"], true);
+        let stored = db
+            .collection::<Node>(NODES)
+            .find_one(doc! {"_id": &node_id})
+            .await
+            .expect("load node")
+            .expect("node");
+        assert!(
+            !stored.is_active,
+            "retry must not resurrect or re-delete the node"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_transfer_interrupted_commit_replays_without_second_mutation() {
+        let Some(db) = connect_test_database("assistant_node_transfer_interrupted").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        let destination_id = Uuid::new_v4().to_string();
+        insert_person(&db, &actor_id).await;
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&destination_id, UserType::Org))
+            .await
+            .expect("insert destination");
+        db.collection(ORG_MEMBERSHIPS)
+            .insert_one(test_membership(
+                &destination_id,
+                &actor_id,
+                OrgRole::Admin,
+                None,
+            ))
+            .await
+            .expect("insert membership");
+        let node = test_node(&actor_id, "interrupted-transfer-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let body = json!({"actionRequestId": "transfer-interrupted", "nodeId": node_id, "newOwnerUserId": destination_id, "expectedStateVersion": 1});
+        let (status, first) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/transfer",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        reopen_receipt(&db, &actor_id, NODE_TRANSFER_ACTION, "transfer-interrupted").await;
+        let (status, retry) = request(
+            state,
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/transfer",
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["replayed"], true);
+        let stored = db
+            .collection::<Node>(NODES)
+            .find_one(doc! {"_id": &node_id})
+            .await
+            .expect("load node")
+            .expect("node");
+        assert_eq!(stored.user_id, destination_id);
+    }
+
+    #[tokio::test]
+    async fn pending_credential_cancel_interrupted_commit_replays_without_second_mutation() {
+        let Some(db) = connect_test_database("assistant_node_cancel_interrupted").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        insert_person(&db, &actor_id).await;
+        let node = test_node(&actor_id, "interrupted-cancel-node");
+        let node_id = node.id.clone();
+        db.collection::<Node>(NODES)
+            .insert_one(&node)
+            .await
+            .expect("insert node");
+        let pending_id = Uuid::new_v4().to_string();
+        node_pending_credential_service::create_pending_credential_with_id(
+            &db,
+            &actor_id,
+            &node_id,
+            &pending_id,
+            CreatePendingCredentialInput {
+                service_slug: "github".to_string(),
+                injection_method: InjectionMethod::Header,
+                field_name: "Authorization".to_string(),
+                target_url: None,
+                label: Some("cancel".to_string()),
+                ttl_secs: 900,
+                remote_crypto: false,
+            },
+        )
+        .await
+        .expect("create pending credential");
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let body = json!({"actionRequestId": "cancel-interrupted", "nodeId": node_id, "pendingCredentialId": pending_id});
+        let (status, first) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/pending-credential-cancel",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        reopen_receipt(
+            &db,
+            &actor_id,
+            PENDING_CREDENTIAL_CANCEL_ACTION,
+            "cancel-interrupted",
+        )
+        .await;
+        let (status, retry) = request(
+            state,
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/pending-credential-cancel",
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["replayed"], true);
+        let stored = db
+            .collection::<mongodb::bson::Document>(
+                crate::models::node_pending_credential::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": &pending_id})
+            .await
+            .expect("load pending")
+            .expect("pending");
+        assert_eq!(stored.get_bool("is_active"), Ok(false));
+        assert!(stored.get("declined_at").is_some());
+    }
+
+    #[tokio::test]
+    async fn device_onboard_interrupted_commit_replays_unredeemed_bootstrap() {
+        let Some(db) = connect_test_database("assistant_device_onboard_interrupted").await else {
+            return;
+        };
+        let actor_id = Uuid::new_v4().to_string();
+        insert_person(&db, &actor_id).await;
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor_id);
+        let body = json!({"actionRequestId": "device-interrupted", "label": "camera"});
+        let (status, first) = request(
+            state.clone(),
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/device-onboard",
+            body.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{first}");
+        let bootstrap_id = first["resource"]["deviceId"]
+            .as_str()
+            .expect("bootstrap id")
+            .to_string();
+        reopen_receipt(&db, &actor_id, DEVICE_ONBOARD_ACTION, "device-interrupted").await;
+        let (status, retry) = request(
+            state,
+            &token,
+            Method::POST,
+            "/api/v1/assistant/actions/nodes/device-onboard",
+            body,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{retry}");
+        assert_eq!(retry["replayed"], true);
+        assert_eq!(retry["oneTimeMaterial"], "unavailable");
+        assert_eq!(
+            db.collection::<mongodb::bson::Document>(
+                crate::models::device_onboard_credential::COLLECTION_NAME
+            )
+            .count_documents(doc! {"_id": &bootstrap_id})
+            .await
+            .expect("count bootstraps"),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn replay_handlers_never_serialize_one_time_material() {
         // Falsifier: attaching one-time material in any handler's Replay arm
         // makes the second production-router response contain one of these
@@ -1353,11 +1717,19 @@ mod tests {
                 first.get(one_time_property).is_some(),
                 "first {uri}: {first}"
             );
+            assert_eq!(
+                first["oneTimeMaterial"], "delivered",
+                "first {uri}: {first}"
+            );
 
             let (retry_status, retry) =
                 request(state.clone(), &token, Method::POST, uri, body).await;
             assert_eq!(retry_status, StatusCode::OK, "retry {uri}: {retry}");
             assert_eq!(retry["replayed"], true, "retry {uri}: {retry}");
+            assert_eq!(
+                retry["oneTimeMaterial"], "unavailable",
+                "retry {uri}: {retry}"
+            );
             for forbidden in [
                 "registrationToken",
                 "authToken",
@@ -1432,6 +1804,10 @@ mod tests {
         .await;
         assert_eq!(retry_status, StatusCode::OK, "{retry}");
         assert_eq!(retry["replayed"], true);
+        assert_eq!(
+            retry["oneTimeMaterial"], "delivered",
+            "transfer replays do not lose one-time material"
+        );
         let stored = db
             .collection::<Node>(NODES)
             .find_one(doc! { "_id": &node_id })

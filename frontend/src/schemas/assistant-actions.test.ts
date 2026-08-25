@@ -20,6 +20,231 @@ const BASE_REQUEST = {
   action: "service.connect",
 } as const;
 
+const WAVE_3_4_ACTIONS = [
+  {
+    action: "node.register_token",
+    params: { name: "Edge node", targetOrgId: "org-1" },
+    variant: "node_register_token",
+  },
+  {
+    action: "node.rotate_token",
+    params: { nodeId: "node-1" },
+    variant: "node_rotate_token",
+  },
+  {
+    action: "node.delete",
+    params: { nodeId: "node-1" },
+    variant: "node_delete",
+  },
+  {
+    action: "node.transfer",
+    params: { nodeId: "node-1", newOwnerUserId: "user-2" },
+    variant: "node_transfer",
+  },
+  {
+    action: "node.inject_credential",
+    params: {
+      nodeId: "node-1",
+      serviceSlug: "github",
+      injectionMethod: "header",
+      fieldName: "Authorization",
+      targetUrl: "https://api.github.test",
+      label: "GitHub",
+    },
+    variant: "node_inject_credential",
+  },
+  {
+    action: "pending_credential.push",
+    params: {
+      nodeId: "node-1",
+      serviceSlug: "github",
+      injectionMethod: "query-param",
+      fieldName: "token",
+    },
+    variant: "pending_credential_push",
+  },
+  {
+    action: "pending_credential.cancel",
+    params: { nodeId: "node-1", pendingCredentialId: "pending-1" },
+    variant: "pending_credential_cancel",
+  },
+  {
+    action: "device.onboard",
+    params: {
+      label: "Kitchen",
+      targetOrgId: "org-1",
+      defaultServiceIds: ["service-1"],
+    },
+    variant: "device_onboard",
+  },
+  {
+    action: "org.create",
+    params: {
+      displayName: "Platform",
+      contactEmail: "platform@example.test",
+      avatarUrl: "https://example.test/avatar.png",
+    },
+    variant: "org_create",
+  },
+  {
+    action: "org.update",
+    params: {
+      orgId: "org-1",
+      displayName: "Platform Ops",
+      slug: "platform-ops",
+    },
+    variant: "org_update",
+  },
+  { action: "org.delete", params: { orgId: "org-1" }, variant: "org_delete" },
+  {
+    action: "org.member_add",
+    params: {
+      orgId: "org-1",
+      userId: "user-1",
+      role: "member",
+      allowedServiceIds: ["service-1"],
+    },
+    variant: "org_member_add",
+  },
+  {
+    action: "org.member_remove",
+    params: { orgId: "org-1", memberId: "member-1" },
+    variant: "org_member_remove",
+  },
+  {
+    action: "org.member_update_role",
+    params: { orgId: "org-1", memberId: "member-1", role: "admin" },
+    variant: "org_member_update_role",
+  },
+  {
+    action: "org.invite",
+    params: {
+      orgId: "org-1",
+      role: "viewer",
+      allowedServiceIds: ["service-1"],
+    },
+    variant: "org_invite",
+  },
+  {
+    action: "org.set_primary",
+    params: { orgId: "org-1" },
+    variant: "org_set_primary",
+  },
+  {
+    action: "account.profile_update",
+    params: { displayName: "Ada", avatarUrl: "https://example.test/ada.png" },
+    variant: "account_profile_update",
+  },
+  {
+    action: "account.revoke_consent",
+    params: { clientId: "client-1" },
+    variant: "account_revoke_consent",
+  },
+  { action: "account.delete", params: {}, variant: "account_delete" },
+  { action: "account.mfa_setup", params: {}, variant: "account_mfa_setup" },
+  {
+    action: "approval.configure",
+    params: { serviceId: "service-1" },
+    variant: "approval_configure",
+  },
+  {
+    action: "approval.enable",
+    params: { serviceId: "service-1" },
+    variant: "approval_enable",
+  },
+  {
+    action: "approval.disable",
+    params: { serviceId: "service-1" },
+    variant: "approval_disable",
+  },
+  {
+    action: "approval.revoke_grant",
+    params: { grantId: "grant-1" },
+    variant: "approval_revoke_grant",
+  },
+  {
+    action: "notifications.update",
+    params: {},
+    variant: "notifications_update",
+  },
+  {
+    action: "notifications.telegram_link",
+    params: {},
+    variant: "notifications_telegram_link",
+  },
+  {
+    action: "notifications.telegram_disconnect",
+    params: {},
+    variant: "notifications_telegram_disconnect",
+  },
+  {
+    action: "service_account.create",
+    params: {
+      name: "Deploy agent",
+      description: "Production deploys",
+      targetOrgId: "org-1",
+    },
+    variant: "service_account_create",
+  },
+  {
+    action: "service_account.update",
+    params: { serviceAccountId: "service-account-1", name: "Deploy agent v2" },
+    variant: "service_account_update",
+  },
+  {
+    action: "service_account.delete",
+    params: { serviceAccountId: "service-account-1" },
+    variant: "service_account_delete",
+  },
+  {
+    action: "service_account.rotate_secret",
+    params: { serviceAccountId: "service-account-1" },
+    variant: "service_account_rotate_secret",
+  },
+  {
+    action: "service_account.revoke_tokens",
+    params: { serviceAccountId: "service-account-1" },
+    variant: "service_account_revoke_tokens",
+  },
+  {
+    action: "developer_app.create",
+    params: {
+      name: "Console",
+      redirectUris: ["https://console.example.test/callback"],
+    },
+    variant: "developer_app_create",
+  },
+  {
+    action: "developer_app.update",
+    params: {
+      clientId: "client-1",
+      name: "Console v2",
+      redirectUris: ["https://console.example.test/oauth/callback"],
+    },
+    variant: "developer_app_update",
+  },
+  {
+    action: "developer_app.delete",
+    params: { clientId: "client-1" },
+    variant: "developer_app_delete",
+  },
+  {
+    action: "developer_app.rotate_secret",
+    params: { clientId: "client-1" },
+    variant: "developer_app_rotate_secret",
+  },
+  {
+    action: "external_key.add_gcp_service_account",
+    params: { label: "GCP production", targetOrgId: "org-1" },
+    variant: "external_key_add_gcp_service_account",
+  },
+  {
+    action: "openclaw.connect",
+    params: { gatewayUrl: "https://openclaw.example.test" },
+    variant: "openclaw_connect",
+  },
+] as const;
+
 describe("assistant action request schema", () => {
   it("fills protobuf-omitted catalog defaults", () => {
     const request = assistantActionRequestSchema.parse({
@@ -221,7 +446,7 @@ describe("assistant action request schema", () => {
     }
   });
 
-  it("accepts all twelve Wave-2 param shapes while their journeys stay unsupported", () => {
+  it("accepts all twelve Wave-2 param shapes and resolves their journeys", () => {
     const wave2 = [
       ["key.update", { keyId: "key-1", name: "renamed" }],
       ["key.delete", { keyId: "key-1" }],
@@ -242,12 +467,18 @@ describe("assistant action request schema", () => {
         { userServiceId: "service-alpha", name: "Renamed API" },
       ],
       ["service.delete", { userServiceId: "service-alpha" }],
-      ["service.route", { userServiceId: "service-alpha", viaNodeId: "node-1" }],
+      [
+        "service.route",
+        { userServiceId: "service-alpha", viaNodeId: "node-1" },
+      ],
       ["service.rotate_credential", { userServiceId: "service-alpha" }],
       ["endpoint.update", { endpointId: "endpoint-1", label: "Renamed" }],
       ["endpoint.delete", { endpointId: "endpoint-1" }],
       ["external_key.rotate", { externalKeyId: "external-1" }],
       ["external_key.delete", { externalKeyId: "external-1" }],
+      ["connection.revoke", { serviceId: "legacy-service-1" }],
+      ["provider.disconnect", { providerId: "provider-1" }],
+      ["provider.set_app_credentials", { providerId: "provider-1" }],
     ] as const;
 
     for (const [index, [action, params]] of wave2.entries()) {
@@ -270,40 +501,24 @@ describe("assistant action request schema", () => {
     }
   });
 
-  it("keeps Wave-3 and Wave-4 journeys unsupported until they are wired", () => {
-    // The guard the Wave-2 case above used to provide. Wiring a verb makes a
-    // dormant backend effect reachable the instant a revision pins it, so a
-    // verb must not gain a journey before its family is review-closed.
-    //
-    // Falsifier: add a registry row for any name below and this fails.
-    const deferred = [
-      ["node.delete", { nodeId: "node-1" }],
-      ["node.transfer", { nodeId: "node-1", newOwnerUserId: "user-2" }],
-      ["device.onboard", { label: "Kitchen" }],
-      ["org.delete", { orgId: "org-1" }],
-      ["account.delete", {}],
-      ["service_account.rotate_secret", { serviceAccountId: "sa-1" }],
-    ] as const;
-
-    for (const [index, [action, params]] of deferred.entries()) {
-      // Built directly rather than via `assistantActionRequestSchema.parse`:
-      // these verbs have no param schema precisely because they are unwired,
-      // so parsing would fail before resolution — which is the thing under
-      // test here.
-      const request = {
+  it.each(WAVE_3_4_ACTIONS)(
+    "parses and resolves $action as $variant",
+    ({ action, params, variant }) => {
+      const request = assistantActionRequestSchema.parse({
         ...BASE_REQUEST,
-        actionRequestId: `deferred-${String(index)}`,
+        actionRequestId: `active-${variant}`,
         action,
         params,
-      } as unknown as Parameters<typeof resolveAssistantAction>[0];
-      expect(resolveAssistantAction(request)).toMatchObject({
-        supported: false,
-        journey: null,
       });
-    }
-  });
+      expect(resolveAssistantAction(request)).toMatchObject({
+        supported: true,
+        journey: variant,
+        params: { variant },
+      });
+    },
+  );
 
-  it("rejects id-less, widened, and secret-carrying Wave-2 params", () => {
+  it("rejects or leaves unsupported id-less, widened, and secret-carrying Wave-2 params", () => {
     const invalid = [
       ["key.update", { name: "renamed" }],
       ["key.extend_scope", { keyId: "key-1", addServiceIds: [] }],
@@ -325,7 +540,10 @@ describe("assistant action request schema", () => {
       ],
       [
         "service.rotate_credential",
-        { userServiceId: "service-alpha", credentialValue: "nyxid_ag_secret99" },
+        {
+          userServiceId: "service-alpha",
+          credentialValue: "nyxid_ag_secret99",
+        },
       ],
       ["endpoint.update", { label: "Renamed" }],
       [
@@ -335,14 +553,15 @@ describe("assistant action request schema", () => {
     ] as const;
 
     for (const [index, [action, params]] of invalid.entries()) {
-      expect(
-        assistantActionRequestSchema.safeParse({
-          ...BASE_REQUEST,
-          actionRequestId: `wave2-invalid-${String(index)}`,
-          action,
-          params,
-        }).success,
-      ).toBe(false);
+      const parsed = assistantActionRequestSchema.safeParse({
+        ...BASE_REQUEST,
+        actionRequestId: `wave2-invalid-${String(index)}`,
+        action,
+        params,
+      });
+      if (parsed.success) {
+        expect(resolveAssistantAction(parsed.data).supported).toBe(false);
+      }
     }
   });
 

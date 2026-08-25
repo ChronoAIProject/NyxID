@@ -1068,6 +1068,9 @@ pub(crate) async fn authorize_ssh_access_for_operation(
         auth_user.approval_requester_type(),
         &auth_user.approval_requester_id(),
         auth_user.auth_method == AuthMethod::Session,
+        // SSH services are not auto-provisioned today, so there is no
+        // auto-connected source to exempt from the global fallback here.
+        false,
     )
     .await?;
 

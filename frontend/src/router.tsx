@@ -14,7 +14,7 @@ import { AuthLayout } from "@/components/layout/auth-layout";
 import { DashboardLayout } from "@/components/layout/dashboard-layout";
 import { BillingRouteGuard } from "@/components/billing-route-guard";
 import { useAuthStore } from "@/stores/auth-store";
-import { hasAdminRead } from "@/types/api";
+import { canAdminWrite, hasAdminRead } from "@/types/api";
 import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
@@ -68,6 +68,7 @@ import {
   AdminAuditLogPage,
   AdminFeatureFlagsPage,
   AdminIntegrityPage,
+  AdminPlatformOpsPage,
   AdminCreditsPage,
   AdminInviteCodesPage,
   CliAuthPage,
@@ -849,6 +850,18 @@ const adminIntegrityRoute = createRoute({
   component: AdminIntegrityPage,
 });
 
+const adminPlatformOpsRoute = createRoute({
+  path: "platform-ops",
+  getParentRoute: () => adminLayout,
+  beforeLoad: () => {
+    const { user, isLoading } = useAuthStore.getState();
+    if (!isLoading && !canAdminWrite(user)) {
+      throw redirect({ to: "/dashboard" });
+    }
+  },
+  component: AdminPlatformOpsPage,
+});
+
 const adminCreditsRoute = createRoute({
   path: "credits",
   getParentRoute: () => adminLayout,
@@ -952,6 +965,7 @@ const routeTree = rootRoute.addChildren([
       adminNodesRoute,
       adminAuditLogRoute,
       adminIntegrityRoute,
+      adminPlatformOpsRoute,
       adminCreditsRoute,
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,

@@ -90,6 +90,7 @@ interface ChatComposerProps {
   readonly allowActiveInput?: boolean;
   readonly sending: boolean;
   readonly disabled?: boolean;
+  readonly stopDisabled?: boolean;
   readonly ownerUserId: string | null;
   readonly draftKey: string | null;
   /**
@@ -120,6 +121,7 @@ function DraftedChatComposer({
   allowActiveInput = false,
   sending,
   disabled = false,
+  stopDisabled = false,
   ownerUserId,
   draftKey,
   focusRequest = 0,
@@ -595,6 +597,7 @@ function DraftedChatComposer({
                 variant="outline"
                 size="icon"
                 onClick={() => void onStop()}
+                disabled={stopDisabled}
                 aria-label="Stop assistant turn"
               >
                 <Square className="fill-current" />

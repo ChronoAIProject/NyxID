@@ -4,6 +4,7 @@ import {
   composerInput,
   emptyTurnError,
   openAssistant,
+  openLatestToolActivity,
   SCRIPTED_REPLY_START,
   SCRIPTED_TOOL_RESULT,
   sendMessage,
@@ -44,6 +45,7 @@ test("a sent message echoes immediately and the reply streams to completion", as
   await expect(
     page.getByText(SCRIPTED_REPLY_START, { exact: false }),
   ).toBeVisible({ timeout: 5_000 });
+  await openLatestToolActivity(page);
   await expect(
     page.getByText(SCRIPTED_TOOL_RESULT, { exact: false }),
   ).toBeVisible({ timeout: 5_000 });
@@ -79,7 +81,7 @@ test("thinking dots hold the floor before the first content, then are replaced b
   // Pre-content: dots present and announced to assistive tech.
   await expect(streamingDots(page).first()).toBeVisible({ timeout: 5_000 });
   await expect(
-    page.getByRole("status", { name: /Assistant is (thinking|answering)/ }),
+    page.getByRole("status", { name: "Assistant is thinking" }),
   ).toBeVisible();
 
   // Streamed text takes over without an error. The dots may remain visually

@@ -31,9 +31,13 @@ forwarding and resource-family switching are in
 `backend/src/handlers/assistant.rs`; Direct forwarding is in
 `backend/src/handlers/assistant_direct.rs`. Their request grammars live in
 `backend/src/services/assistant_service.rs` and
-`backend/src/services/assistant_direct.rs`. Browser orchestration is in the two
-engine transports, `frontend/src/lib/assistant/transport.ts`, and
-`frontend/src/hooks/use-assistant.ts`.
+`backend/src/services/assistant_direct.rs`. Browser engine routing is in
+`frontend/src/pages/assistant.tsx:AssistantPage`; typed actor orchestration is in
+`frontend/src/hooks/use-assistant-chat.ts:useAssistantChat` and
+`frontend/src/lib/assistant/chat-stream-orchestrator.ts:runChatStream`; the
+memory-only Direct seam is in
+`frontend/src/hooks/use-assistant-direct.ts:useDirectAssistantChat` and
+`frontend/src/lib/assistant/direct-transport.ts:DirectAssistantTransport`.
 
 ## Authentication boundary
 

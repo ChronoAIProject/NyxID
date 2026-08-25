@@ -283,6 +283,7 @@ pub struct PendingCredentialAuthorizationEvidenceResponse {
     pub owner_user_id: String,
     pub remote_state: Option<String>,
     pub is_active: bool,
+    pub state_version: i64,
     pub created_at: String,
     pub expires_at: String,
     pub consumed_at: Option<String>,
@@ -1611,6 +1612,7 @@ pub async fn get_pending_credential_authorization(
             .map(remote_state_name)
             .map(str::to_string),
         is_active: authority.is_active,
+        state_version: authority.state_version,
         created_at: authority.created_at.to_rfc3339(),
         expires_at: authority.expires_at.to_rfc3339(),
         consumed_at: authority.consumed_at.map(|value| value.to_rfc3339()),

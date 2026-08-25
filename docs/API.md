@@ -3517,7 +3517,7 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Streaming:** If the client sends `Accept: text/event-stream` or the upstream responds with `Content-Type: text/event-stream`, NyxID forwards the SSE stream without buffering and strips `content-length`.
 
-**Transaction Approval:** If the resource owner has `approval_required` enabled and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing approval grant. If no grant exists, an approval request is created (with Telegram notification if configured) and the **HTTP connection is held open** until the user approves/rejects or the configured timeout expires. If approved, the request proceeds and the downstream response is returned. If rejected or timed out, a `403 Forbidden` is returned. Direct browser sessions (session cookie auth) bypass approval.
+**Transaction Approval:** If the resource owner has `approval_required` enabled, has at least one active notification channel, and the request uses a non-session auth method (API key, delegated token, service account, or access token), the proxy checks for an existing approval grant. If no grant exists, an approval request is created (with Telegram notification if configured) and the **HTTP connection is held open** until the user approves/rejects or the configured timeout expires. If approved, the request proceeds and the downstream response is returned. If rejected or timed out, a `403 Forbidden` is returned. The implicit global default is suspended while the owner has no active notification channel and never applies to auto-connected (auto-provisioned, credential-free) services. Explicit per-service `ServiceApprovalConfig` rows apply regardless of channel availability or the auto-connected exemption. Direct browser sessions (session cookie auth) bypass approval.
 
 **Limits:** Request body is limited to 10 MB for proxy requests.
 
@@ -3693,7 +3693,7 @@ Three access modes are available:
 
 Streaming is supported for providers that expose SSE-compatible streaming APIs. When the request sets `"stream": true`, NyxID returns `text/event-stream` and forwards or translates provider SSE events on the fly.
 
-**Transaction Approval:** The same blocking approval flow applies to LLM gateway endpoints as to the proxy. If the resource owner has `approval_required` enabled and the request uses a non-session auth method (API key, delegated token, service account, or access token), the connection is held open until the user approves/rejects or the timeout expires. See the [Proxy](#proxy) section for details.
+**Transaction Approval:** The same blocking approval flow applies to LLM gateway endpoints as to the proxy. If the resource owner has `approval_required` enabled, has at least one active notification channel, and the request uses a non-session auth method (API key, delegated token, service account, or access token), the connection is held open until the user approves/rejects or the timeout expires. The implicit global default is suspended while the owner has no active notification channel and never applies to auto-connected (auto-provisioned, credential-free) services. Explicit per-service `ServiceApprovalConfig` rows apply regardless of channel availability or the auto-connected exemption. See the [Proxy](#proxy) section for details.
 
 #### GET /api/v1/llm/status
 
@@ -4387,7 +4387,10 @@ other effect authority. The existing approval endpoints intentionally return
             "content_types": ["application/json"],
             "binary_artifact": false
           },
-          "endpoint_contract_digest": "sha256:..."
+          "risk": "read",
+          "supports_idempotency_key": false,
+          "endpoint_contract_digest": "sha256:...",
+          "operation_generation": 7
         }
       ]
     }
@@ -4397,19 +4400,43 @@ other effect authority. The existing approval endpoints intentionally return
 }
 ```
 
-`exact_view_digest` is the representation validator for the exact
-caller-visible `services` array. It is SHA-256 over canonical compact JSON
-containing `contract_version: "nyxid-delegated-operation-catalog.v2"` and the
-returned `services`; services are sorted by `user_service_id`, operations by
-`endpoint_id`, and object keys recursively in lexicographic order. The dynamic
-timestamps, totals, and `catalog_digest` are excluded. Delegated discovery and
-exact approval create, observe, and redeem use this same projection.
+`exact_view_digest` is the representation validator for the caller-visible
+`services` array. Digests use SHA-256 over canonical compact JSON containing
+`contract_version: "nyxid-delegated-operation-catalog.v2"` and the returned
+`services`; services are sorted by `user_service_id`, operations by
+`endpoint_id`, and object keys recursively in lexicographic order. Dynamic
+timestamps, totals, and `catalog_digest` are excluded.
+
+The producer-owned `operation_generation`, `risk`, and
+`supports_idempotency_key` fields are additive to v2. During the bounded mixed-
+replica compatibility window, discovery emits the v2 digest of the same
+projection with those three fields omitted. Clients should echo that response
+value for compatibility with every replica. A client may instead recompute the
+full additive digest by retaining all three fields in the canonical projection;
+new replicas accept either value at create and redeem, and during live
+revalidation. New rows retain the pre-additive value in the legacy
+`exact_view_digest` slot so an old replica can revalidate them, and persist the
+full projection in a server-owned `exact_view_digest_binding` slot that new
+replicas also enforce. This catches additive policy changes written by an old
+replica even though that writer cannot bump `operation_generation`. This lets
+existing clients and old and new NyxID replicas coexist during an ordinary
+rolling deploy.
 
 Each service also carries the producer-owned `catalog_service_id` used to
 resolve its catalog provider. This field is included in `exact_view_digest` and
 is nullable: a custom user service with typed operations has no catalog
 provider, so its value is `null` and `user_service_id` is its canonical
 identity.
+
+`operation_generation` is the positive, producer-owned revision of a durable
+`ServiceEndpoint`. It starts at 1, increments when the endpoint contract or
+active state changes, remains stable across no-op reconciliation, and is paired
+with the opaque `endpoint_id` so delete/recreate cannot form an ABA identity.
+Startup backfill assigns 1 only to legacy rows where the generation field is
+missing. Operations parsed from an instance-mounted `openapi_spec_url` have no
+durable producer row; they remain discoverable with `operation_generation:
+null`, persist `producer_generation_bound: false`, and use
+`endpoint_contract_digest` as their shape fence.
 
 `catalog_digest` remains the pre-existing broad approval fence. For wire
 compatibility with #1424 (commit `d1a042c2`), it is exactly
@@ -4444,6 +4471,16 @@ A mismatched in-view digest returns the existing
 `exact_service_exact_view_digest_drift` conflict, and an empty supplied value is
 rejected as a bad request.
 
+Create never requires or rejects `operation_generation`. NyxID resolves and
+persists the live producer generation for a durable endpoint regardless of
+caller input; a supplied mismatch is debug telemetry only. Freshness at create
+is already established by `catalog_digest`, `exact_view_digest`, and
+`endpoint_contract_digest`. The stored producer value is used to detect drift
+between create and redeem. Instance-spec operations persist generation `0` with
+`producer_generation_bound: false`, so observe and redeem skip only the
+generation comparison while retaining every digest fence. Clients redeem with
+the value returned by create/status.
+
 At redeem the fence follows the same split. For **delegated** callers an
 omitted `exact_view_digest` is rejected with `400 exact_view_digest_required`
 before the request is loaded or claimed; a supplied empty or mismatched digest
@@ -4451,35 +4488,106 @@ returns `exact_service_redemption_conflict`. For **nondelegated** callers
 omission remains accepted, and the server still re-resolves the catalog and
 revalidates the digest persisted in the approval binding.
 
-Redeem and observe also revalidate a producer-owned **execution-authority
-digest** persisted on the approval binding at create. It binds the resolved
+Redeem and observe also revalidate a producer-owned **execution-authority v2
+binding** persisted as `{ projection_version, digest }` at create. It binds the resolved
 destination URL, auth method, credential identity plus `credential_epoch`,
-identity-injection config, default headers, proxy operation policy, and the
-configured node-binding set. A mismatch returns HTTP 200 with
-`state: "drifted"` and `failure_code: "execution_authority_drift"` and does
-not dispatch downstream. Catalog/shape drift still uses `catalog_drift`.
-Rows created before this field existed (`execution_authority_digest: null`)
-skip the new gate until they expire.
+identity-injection config, default headers, proxy operation policy, configured
+node-binding set, `service_category`, `requires_user_credential`, and a nested
+digest of the execution-relevant `token_exchange_config`. A mismatch returns
+HTTP 200 with `state: "drifted"` and
+`failure_code: "execution_authority_drift"` and does not dispatch downstream.
+Catalog, shape, or producer-generation drift uses `catalog_drift`.
+New rows also store the real v1 projection digest in the legacy
+`execution_authority_digest` slot. Old replicas validate that slot exactly as
+before, while new replicas validate the v2 binding. For main-era rows with no
+versioned binding and a v1 digest, new replicas recompute and compare the live
+v1 projection. A versioned v1 binding is handled the same way. Rows with neither
+field predate authority digests and skip this one gate within their approval
+expiry. `execution_authority_version_unsupported` is reserved for genuinely
+unknown future projection versions.
+
+Observe and redeem use one ordered live evaluator: catalog and exact-generation
+checks, then approval-policy revalidation, then a read-only execution-authority
+snapshot. Observe does not claim the request, materialize credentials, or write
+a redemption, so content-addressed A-to-B-to-A configuration can recover from
+`drifted` back to `approved`. Redeem checks only persisted state before its
+atomic claim, runs the same evaluator after the claim, and durably records any
+terminal drift/revocation/failure. Only after all read-only gates pass may it
+materialize or refresh credentials; the materialized execution authority is
+digested and compared once more before the provider effect. The claim predicate
+atomically requires `status=approved`, no prior redemption, and
+`expires_at > admitted_at`. If a concurrent deny/expiry/redemption wins, redeem
+reloads and returns that persisted state; it reads a replay receipt only when a
+redemption actually exists.
+
+Buffered exact execution has a 10-minute deadline. Because a timed-out request
+may already have committed at the provider, timeout is terminal
+`failed/provider_outcome_unknown` and is never automatically replayed. The same
+terminal is atomically recovered on a later redeem retry when an `executing`
+claim is older than 15 minutes, covering a process crash or failed MongoDB
+receipt write while preserving at-most-once dispatch.
 
 | Redeem / observe outcome | `state` | `failure_code` | Downstream effect |
 |---|---|---|---|
 | Catalog / exact-view / operation identity changed | `drifted` | `catalog_drift` | None |
 | Destination, credential identity/epoch, injection, headers, policy, or configured node set changed | `drifted` | `execution_authority_drift` | None |
+| Unknown future authority projection | `drifted` | `execution_authority_version_unsupported` | None |
 | Selector gone / out of scope | `revoked` | `selector_revoked` | None |
+| Direct DNS/connect/TLS handshake or request-build failure | `failed` | `provider_unreachable` | None; terminal request may be recreated only with a new effect key |
+| In-flight request failure, effect timeout, response-body/decode/stream failure, or stale `executing` recovery | `failed` | `provider_outcome_unknown` | Never replayed; reconcile provider state |
 | Background OAuth token refresh (epoch unchanged) | `redeemed` | omitted | Exactly one |
-| URL changed away and back (ABA) | `redeemed` | omitted | Exactly one |
+| URL changed away and back before redeem (ABA) | `redeemed` | omitted | Exactly one |
 
-The current implementation keeps `operation_generation` as caller bookkeeping
-for wire compatibility. Its producer-freshness rationale (live
-`endpoint_contract_digest` plus the execution-authority digest) is the
-implementation's proposed interpretation, not a ratified contract decision.
-It remains open.
+Legacy and instance-spec approval rows without
+`producer_generation_bound: true` skip only the producer-generation
+comparison. Main-era v1 authority digests remain executable authority for the
+v1 field set, while new rows carry both the real v1 digest and the stronger v2
+binding. This makes mixed v1/v2 create, observe, redeem, and rollback safe.
+Create keeps the existing
+`nyxid-exact-approval-request.v1` identity but derives its generation from the
+producer. A semantic pre-upgrade row for the same requester, operation and
+idempotency key is detected across pending and terminal states and returns
+`exact_service_request_conflict`, preventing a second approval/effect identity.
+The atomic fence is the partial unique MongoDB index
+`exact_service_semantic_effect_unique` over `(requester_type, requester_id,
+exact_service.actor_user_id, exact_service.endpoint_id,
+exact_service.effect_idempotency_key)`; producer generation is deliberately not
+part of this effect identity. This closes the interval between the semantic
+precheck and insert when old and new pods overlap. A losing new pod returns the
+typed conflict. A pre-upgrade pod may surface its older database-error response,
+but it still cannot create a duplicate effect.
 
-Existing stored rows with no exact-view digest remain compatible for
-nondelegated callers and continue to use the other live fences. A delegated
-row created before this requirement still carries the server-resolved digest,
-which the status endpoint returns, so a client that previously omitted the
-value can read it back and supply it at redeem.
+Before first installing or repairing this index, startup runs a bounded
+duplicate preflight. If duplicates already exist, or a duplicate write races
+the index build, startup logs the remediation, leaves the unique index absent,
+persists an active `exact_service_semantic_effect_index` startup diagnostic,
+and continues boot. The admin Integrity page surfaces the diagnostic. The
+service-level semantic pre-insert check and legacy-replay rejection remain the
+guard until an operator resolves the data and restarts. Pause exact-approval
+creates and use the following aggregation to enumerate every conflicting group:
+
+```javascript
+db.approval_requests.aggregate([
+  { $match: { "exact_service.effect_idempotency_key": { $type: "string" } } },
+  { $group: {
+      _id: {
+        requester_type: "$requester_type",
+        requester_id: "$requester_id",
+        actor_user_id: "$exact_service.actor_user_id",
+        endpoint_id: "$exact_service.endpoint_id",
+        effect_idempotency_key: "$exact_service.effect_idempotency_key"
+      },
+      sample_request_id: { $first: "$_id" },
+      count: { $sum: 1 }
+  } },
+  { $match: { count: { $gt: 1 } } }
+])
+```
+
+Inspect approval decisions, redemption receipts, and downstream-effect evidence
+for each group. Reconcile it to one authoritative request only through an audited
+operator migration, then restart to build the unique index. Never bulk-delete the
+duplicates: a terminal row may be the only durable receipt for an executed effect.
 
 Delegated callers may create, observe, or redeem an exact-service approval only
 for a service and operation present in the exact projection returned by
@@ -7028,11 +7136,16 @@ Authorization: Bearer <access_token>
   "telegram_connected": true,
   "telegram_username": "johndoe",
   "telegram_enabled": true,
+  "push_enabled": true,
+  "push_device_count": 1,
   "approval_required": true,
+  "approval_suspended": false,
   "approval_timeout_secs": 30,
   "grant_expiry_days": 30
 }
 ```
+
+The global `approval_required` preference is enforced only while at least one Telegram or push notification channel is active. `approval_suspended` is `true` when the stored preference remains on but no channel is currently available; enforcement resumes automatically when a channel becomes active again.
 
 **curl:**
 
@@ -7066,8 +7179,23 @@ All fields are optional. Only provided fields are updated.
 - `approval_timeout_secs`: 10..=300
 - `grant_expiry_days`: 1..=365
 - `telegram_enabled: true` requires a linked Telegram account
+- `approval_required: true` (turning it on from off) requires an active Telegram or push channel; an already-enabled preference may keep its value while channels are disabled (protection is suspended)
 
-**Response (200):** Same shape as GET response.
+**Response (200):**
+
+```json
+{
+  "telegram_connected": true,
+  "telegram_username": "johndoe",
+  "telegram_enabled": true,
+  "push_enabled": true,
+  "push_device_count": 1,
+  "approval_required": true,
+  "approval_suspended": false,
+  "approval_timeout_secs": 60,
+  "grant_expiry_days": 14
+}
+```
 
 **curl:**
 
@@ -7122,6 +7250,8 @@ Clears the linked Telegram account and disables Telegram notifications.
 }
 ```
 
+If approval protection remains enabled but no active channel remains, the message is `Telegram disconnected. Approval protection is suspended until a notification channel is available; it resumes automatically.`
+
 **curl:**
 
 ```bash
@@ -7143,7 +7273,7 @@ Authorization: Bearer <access_token>
 Content-Type: application/json
 ```
 
-Register or refresh a device token for push notifications. If a device with the same `token` already exists, its metadata is updated (token refresh). The first registered device automatically enables push notifications.
+Register or refresh a device token for push notifications. If a device with the same `token` already exists, its metadata is updated (token refresh). The first registered device automatically enables push notifications. Registration never changes the stored `approval_required` preference; if protection was suspended, it resumes from that existing preference when the push channel becomes active.
 
 **Request Body:**
 
@@ -7249,6 +7379,8 @@ Remove a registered push notification device. If no devices remain after removal
   "message": "Device removed"
 }
 ```
+
+If approval protection remains enabled but no active channel remains, the message is `Device removed. Approval protection is suspended until a notification channel is available; it resumes automatically.`
 
 **Errors:**
 - `1003 not_found` -- Device not found
@@ -7460,7 +7592,7 @@ Authorization: Bearer <access_token>
 
 **Auth:** Required (human-only -- rejects delegated tokens and service account tokens).
 
-Returns all per-service approval configurations for the current user. These override the global `approval_required` setting on a per-service basis.
+Returns all per-service approval configurations for the current user. These override the global `approval_required` setting on a per-service basis (only the global fallback is subject to channel suspension and the auto-connected exemption).
 
 **Response (200):**
 
@@ -7495,7 +7627,7 @@ Content-Type: application/json
 
 **Auth:** Required (human-only).
 
-Creates or updates a per-service approval override. When set, this value takes precedence over the global `notification_channels.approval_required` setting for the specified service.
+Creates or updates a per-service approval override. When set, this value takes precedence over the global `notification_channels.approval_required` setting for the specified service (only the global fallback is subject to channel suspension and the auto-connected exemption).
 
 **Request:**
 
@@ -7541,7 +7673,7 @@ Authorization: Bearer <access_token>
 
 **Auth:** Required (human-only).
 
-Removes the per-service approval override, reverting to the global `approval_required` setting for this service.
+Removes the per-service approval override, reverting to the global `approval_required` setting for this service (the global fallback is subject to channel suspension and the auto-connected exemption).
 
 **Response (200):**
 

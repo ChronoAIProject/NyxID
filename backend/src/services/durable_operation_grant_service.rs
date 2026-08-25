@@ -203,6 +203,7 @@ async fn load_active_published_endpoint(
         risk: metadata.risk,
         supports_idempotency_key: metadata.supports_idempotency_key,
         is_active: true,
+        operation_generation: metadata.operation_generation,
         created_at: now,
         updated_at: now,
     }))
@@ -1546,6 +1547,7 @@ mod tests {
             risk: Some(EndpointRisk::Write),
             supports_idempotency_key: false,
             is_active: true,
+            operation_generation: 1,
             created_at: now,
             updated_at: now,
         }

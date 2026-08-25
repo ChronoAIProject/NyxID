@@ -321,6 +321,7 @@ fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool 
         "/api/v1/channel-relay",
         "/api/v1/delegation",
         "/api/v1/llm",
+        "/api/v1/platform-ops",
         "/api/v1/proxy",
         "/api/v1/ssh",
         "/api/v1/approvals/exact-service",
@@ -413,6 +414,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "channel-bots"
                 | "channel-conversations"
                 | "connect-links"
+                | "platform-ops"
         )
     ) {
         return true;
@@ -1538,6 +1540,7 @@ mod tests {
             "/api/v1/oracle/pools",
             "/api/v1/channel-bots",
             "/api/v1/channel-conversations/conversation-id",
+            "/api/v1/platform-ops/x-search",
             "/api/v1/nodes/ws",
             "/api/v1/nodes/node-id/credentials",
             "/api/v1/nodes/node-id/credentials/pending",
@@ -2396,6 +2399,7 @@ mod tests {
                 expires_at: None,
                 api_key_encrypted: None,
                 status: "active".to_string(),
+                state_version: 1,
                 last_refreshed_at: None,
                 last_used_at: None,
                 error_message: None,
@@ -2415,6 +2419,7 @@ mod tests {
                 client_id_encrypted: Some(vec![13, 14, 15]),
                 client_secret_encrypted: Some(vec![16, 17, 18]),
                 label: Some("BYO OAuth app".to_string()),
+                state_version: 1,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })
@@ -2482,6 +2487,7 @@ mod tests {
                 credential_label: Some("Connection secret fixture".to_string()),
                 metadata: None,
                 is_active: true,
+                state_version: 1,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
             })
@@ -3041,6 +3047,7 @@ mod tests {
             (Method::POST, "/api/v1/llm/gateway/v1/chat/completions"),
             (Method::POST, "/api/v1/channel-relay/reply"),
             (Method::POST, "/api/v1/channel-events/conversation-1"),
+            (Method::POST, "/api/v1/platform-ops/x-search"),
             (Method::POST, "/api/v1/ssh/service-1/exec"),
             (Method::POST, "/oauth/token"),
         ];

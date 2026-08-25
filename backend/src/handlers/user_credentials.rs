@@ -3,6 +3,7 @@ use axum::{
     extract::{Path, State},
 };
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -43,6 +44,14 @@ pub struct DeleteCredentialsResponse {
     pub message: String,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct UserCredentialsAuthorizationEvidenceResponse {
+    pub provider_id: String,
+    pub has_credentials: bool,
+    pub state_version: i64,
+    pub updated_at: Option<String>,
+}
+
 // --- Handlers ---
 
 /// GET /api/v1/providers/{provider_id}/credentials
@@ -76,6 +85,34 @@ pub async fn get_my_credentials(
             updated_at: None,
         })),
     }
+}
+
+/// GET /api/v1/providers/{provider_id}/credentials/authorization
+///
+/// Secret-free projection used before and after assistant credential writes.
+pub async fn get_my_credentials_authorization(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(provider_id): Path<String>,
+) -> AppResult<Json<UserCredentialsAuthorizationEvidenceResponse>> {
+    let user_id = auth_user.user_id.to_string();
+    let metadata =
+        user_credentials_service::get_user_credentials_metadata(&state.db, &user_id, &provider_id)
+            .await?;
+    Ok(Json(match metadata {
+        Some(metadata) => UserCredentialsAuthorizationEvidenceResponse {
+            provider_id: metadata.provider_config_id,
+            has_credentials: true,
+            state_version: metadata.state_version,
+            updated_at: Some(metadata.updated_at.to_rfc3339()),
+        },
+        None => UserCredentialsAuthorizationEvidenceResponse {
+            provider_id,
+            has_credentials: false,
+            state_version: 0,
+            updated_at: None,
+        },
+    }))
 }
 
 /// PUT /api/v1/providers/{provider_id}/credentials

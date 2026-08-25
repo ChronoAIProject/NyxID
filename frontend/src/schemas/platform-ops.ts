@@ -1,0 +1,192 @@
+import { z } from "zod";
+
+export const PLATFORM_OPERATION_QUERY_KEY = [
+  "admin",
+  "platform-ops",
+] as const;
+
+const vendorServiceSlugSchema = z
+  .string()
+  .min(1, "Vendor service slug is required")
+  .max(128, "Vendor service slug must be at most 128 characters")
+  .regex(
+    /^[a-z0-9-]+$/,
+    "Use only lowercase letters, digits, and hyphens",
+  );
+
+const safeIdentifierSchema = (label: string) =>
+  z
+    .string()
+    .min(1, `${label} is required`)
+    .max(128, `${label} must be at most 128 characters`)
+    .regex(
+      /^[A-Za-z0-9._-]+$/,
+      `${label} may only use letters, digits, periods, hyphens, and underscores`,
+    );
+
+const e164Schema = z
+  .string()
+  .regex(/^\+[1-9][0-9]{0,14}$/, "Must be a valid E.164 number or prefix");
+
+const uniqueStrings = <T extends z.ZodType<string>>(item: T, max: number) =>
+  z
+    .array(item)
+    .max(max, `At most ${String(max)} values are allowed`)
+    .refine(
+      (values) => new Set(values).size === values.length,
+      "Duplicate values are not allowed",
+    );
+
+const operationMetadataSchema = {
+  enabled: z.boolean(),
+  vendor_service_slug: vendorServiceSlugSchema,
+  updated_at: z.string().nullable(),
+  updated_by: z.string().nullable(),
+};
+
+export const xSearchConfigSchema = z
+  .object({
+    type: z.literal("x_search"),
+    max_results_cap: z
+      .number()
+      .int("Maximum results must be an integer")
+      .min(1, "Maximum results must be at least 1")
+      .max(25, "Maximum results cannot exceed 25"),
+  })
+  .strict();
+
+export const speakConfigResponseSchema = z
+  .object({
+    type: z.literal("speak"),
+    allowed_voice_ids: uniqueStrings(safeIdentifierSchema("Voice ID"), 100),
+    max_chars: z
+      .number()
+      .int("Maximum characters must be an integer")
+      .min(1, "Maximum characters must be at least 1")
+      .max(5_000, "Maximum characters cannot exceed 5000"),
+    model_id: safeIdentifierSchema("Model ID"),
+  })
+  .strict();
+
+export const speakConfigSchema = speakConfigResponseSchema.extend({
+  allowed_voice_ids: uniqueStrings(
+    safeIdentifierSchema("Voice ID"),
+    100,
+  ).min(1, "Add at least one allowed voice ID"),
+});
+
+export const callAndSayConfigResponseSchema = z
+  .object({
+    type: z.literal("call_and_say"),
+    allowed_destination_prefixes: uniqueStrings(e164Schema, 100),
+    max_message_chars: z
+      .number()
+      .int("Maximum message characters must be an integer")
+      .min(1, "Maximum message characters must be at least 1")
+      .max(1_000, "Maximum message characters cannot exceed 1000"),
+    voice: safeIdentifierSchema("Voice"),
+    max_calls_per_user_per_day: z
+      .number()
+      .int("Daily call limit must be an integer")
+      .min(1, "Daily call limit must be at least 1")
+      .max(4_294_967_295, "Daily call limit is too large"),
+    account_sid: z.union([
+      z.literal(""),
+      z
+        .string()
+        .regex(
+          /^AC[0-9A-Fa-f]{32}$/,
+          "Must be a Twilio Account SID beginning with AC",
+        ),
+    ]),
+    call_from: z.union([z.literal(""), e164Schema]),
+  })
+  .strict();
+
+export const callAndSayConfigSchema = callAndSayConfigResponseSchema.extend({
+  account_sid: z
+    .string()
+    .regex(
+      /^AC[0-9A-Fa-f]{32}$/,
+      "Must be a Twilio Account SID beginning with AC",
+    ),
+  call_from: e164Schema,
+});
+
+export const xSearchOperationSchema = z
+  .object({
+    op: z.literal("x_search"),
+    ...operationMetadataSchema,
+    config: xSearchConfigSchema,
+  })
+  .strict();
+
+export const speakOperationSchema = z
+  .object({
+    op: z.literal("speak"),
+    ...operationMetadataSchema,
+    config: speakConfigResponseSchema,
+  })
+  .strict();
+
+export const callAndSayOperationSchema = z
+  .object({
+    op: z.literal("call_and_say"),
+    ...operationMetadataSchema,
+    config: callAndSayConfigResponseSchema,
+  })
+  .strict();
+
+export const platformOperationSchema = z.discriminatedUnion("op", [
+  xSearchOperationSchema,
+  speakOperationSchema,
+  callAndSayOperationSchema,
+]);
+
+export const platformOperationListSchema = z
+  .object({
+    operations: z.array(platformOperationSchema),
+  })
+  .strict();
+
+const updateMetadataSchema = {
+  enabled: z.boolean(),
+  vendor_service_slug: vendorServiceSlugSchema,
+};
+
+export const xSearchUpdateSchema = z
+  .object({
+    ...updateMetadataSchema,
+    config: xSearchConfigSchema,
+  })
+  .strict();
+
+export const speakUpdateSchema = z
+  .object({
+    ...updateMetadataSchema,
+    config: speakConfigSchema,
+  })
+  .strict();
+
+export const callAndSayUpdateSchema = z
+  .object({
+    ...updateMetadataSchema,
+    config: callAndSayConfigSchema,
+  })
+  .strict();
+
+export type PlatformOperation = z.infer<typeof platformOperationSchema>;
+export type PlatformOperationList = z.infer<
+  typeof platformOperationListSchema
+>;
+export type XSearchOperation = z.infer<typeof xSearchOperationSchema>;
+export type SpeakOperation = z.infer<typeof speakOperationSchema>;
+export type CallAndSayOperation = z.infer<typeof callAndSayOperationSchema>;
+export type XSearchUpdate = z.infer<typeof xSearchUpdateSchema>;
+export type SpeakUpdate = z.infer<typeof speakUpdateSchema>;
+export type CallAndSayUpdate = z.infer<typeof callAndSayUpdateSchema>;
+
+export type UpdatePlatformOperationVariables =
+  | { readonly op: "x_search"; readonly data: XSearchUpdate }
+  | { readonly op: "speak"; readonly data: SpeakUpdate }
+  | { readonly op: "call_and_say"; readonly data: CallAndSayUpdate };

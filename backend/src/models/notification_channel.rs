@@ -71,8 +71,9 @@ pub struct NotificationChannel {
     #[serde(default = "default_grant_expiry_days")]
     pub grant_expiry_days: u32,
 
-    /// Whether approval is required for proxy/LLM requests using this user's
-    /// credentials. When false, all requests are auto-approved (legacy behavior).
+    /// The user's global approval-protection preference. Enforcement is suspended
+    /// while no active notification channel is available and resumes when one returns.
+    /// Explicit per-service approval configuration is evaluated independently.
     #[serde(default)]
     pub approval_required: bool,
 

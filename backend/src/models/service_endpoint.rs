@@ -14,6 +14,13 @@ fn default_request_body_required() -> bool {
     true
 }
 
+fn default_operation_generation() -> i64 {
+    // Generation predates rolling writers. A missing field means the trusted
+    // producer row was created by that legacy writer; its first revision is 1.
+    // Explicit zero/negative values remain invalid and fail closed.
+    1
+}
+
 /// Normalized success-response metadata for an operation.
 ///
 /// `binary_artifact` is intentionally tri-state. `None` means the source
@@ -57,6 +64,11 @@ pub struct ServiceEndpoint {
     #[serde(default)]
     pub supports_idempotency_key: bool,
     pub is_active: bool,
+    /// Producer-owned revision of this operation contract. A field omitted by
+    /// a rolling legacy writer is revision 1; explicit non-positive values are
+    /// invalid. The startup backfill persists the same canonical default.
+    #[serde(default = "default_operation_generation")]
+    pub operation_generation: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -97,6 +109,7 @@ mod tests {
             risk: Some(EndpointRisk::Read),
             supports_idempotency_key: false,
             is_active: true,
+            operation_generation: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -129,12 +142,14 @@ mod tests {
         doc.remove("response");
         doc.remove("risk");
         doc.remove("supports_idempotency_key");
+        doc.remove("operation_generation");
 
         let restored: ServiceEndpoint = bson::from_document(doc).expect("deserialize legacy row");
         assert!(restored.response.content_types.is_empty());
         assert_eq!(restored.response.binary_artifact, None);
         assert_eq!(restored.risk, None);
         assert!(!restored.supports_idempotency_key);
+        assert_eq!(restored.operation_generation, 1);
     }
 
     #[test]

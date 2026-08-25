@@ -11,7 +11,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { scenarios } from "@/lib/assistant/scenarios.config";
+import { assistantHttpScenarios } from "@/lib/assistant/assistant-http-scenarios";
 import { formatRelativeTime } from "@/lib/utils";
 import { useAssistantMockScenariosStore } from "@/stores/assistant-mock-scenarios-store";
 
@@ -106,8 +106,8 @@ export function MockScenariosAction() {
             />
           </div>
           <p className="text-[11px] leading-4 text-muted-foreground">
-            Intercepts matching chat messages with scripted flows. Session-only;
-            other messages reach the assistant normally.
+            Shapes matching assistant HTTP fixtures. Session-only; other
+            messages use the default fixture stream.
           </p>
           <div className="flex gap-2 text-[11px] leading-4 text-warning">
             <TriangleAlert className="mt-0.5 h-3 w-3 shrink-0" />
@@ -129,7 +129,7 @@ export function MockScenariosAction() {
             Scenarios
           </h3>
           <div className="divide-y divide-border/50">
-            {scenarios.map((entry) => {
+            {assistantHttpScenarios.map((entry) => {
               const scenarioEnabled = !disabledScenarioIds.includes(entry.id);
               const matched =
                 lastActivity?.matched === true &&
@@ -238,11 +238,11 @@ export function MockScenariosAction() {
           <p>
             Edit flows in{" "}
             <code className="font-mono">
-              src/lib/assistant/scenarios.config.ts
+              src/lib/assistant/assistant-http-scenarios.ts
             </code>
             .
           </p>
-          <p>Mock turns are session-only and disappear on reload.</p>
+          <p>Fixture conversations are session-only and disappear on reload.</p>
           <p>Settings use last-write-wins across tabs.</p>
         </footer>
       </PopoverContent>

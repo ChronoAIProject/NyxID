@@ -260,6 +260,18 @@ fn build_telegram_identity_update_doc(
         "error_message": bson::Bson::Null,
         "metadata": metadata_bson,
         "updated_at": bson::DateTime::from_chrono(now),
+        "state_version": {
+            "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64]
+        },
+    })
+}
+
+fn next_provider_token_state_version(existing: Option<&UserProviderToken>) -> AppResult<i64> {
+    existing.map_or(Ok(1), |token| {
+        token
+            .state_version
+            .checked_add(1)
+            .ok_or_else(|| AppError::Internal("Provider token state version overflow".to_string()))
     })
 }
 
@@ -373,6 +385,7 @@ pub async fn store_api_key(
             "user_id": user_id,
             "provider_config_id": provider_id,
         })
+        .sort(doc! { "updated_at": -1_i32 })
         .await?;
 
     let now = Utc::now();
@@ -398,8 +411,15 @@ pub async fn store_api_key(
                 set_doc.insert("gateway_url", bson::Bson::Null);
             }
         }
+        set_doc.insert(
+            "state_version",
+            doc! { "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64] },
+        );
         db.collection::<UserProviderToken>(COLLECTION_NAME)
-            .update_one(doc! { "_id": &existing_token.id }, doc! { "$set": set_doc })
+            .update_one(
+                doc! { "_id": &existing_token.id },
+                vec![doc! { "$set": set_doc }],
+            )
             .await?;
 
         let updated = db
@@ -424,6 +444,7 @@ pub async fn store_api_key(
         expires_at: None,
         api_key_encrypted: Some(encrypted),
         status: "active".to_string(),
+        state_version: 1,
         last_refreshed_at: None,
         last_used_at: None,
         error_message: None,
@@ -508,14 +529,15 @@ async fn store_telegram_identity(
     provider_id: &str,
     data: &crate::crypto::telegram::TelegramLoginData,
 ) -> AppResult<UserProviderToken> {
-    // Check if user already has a token for this provider
+    // Reuse revoked rows too so reconnects retain a monotone authorization
+    // lineage instead of returning to version 1.
     let existing = db
         .collection::<UserProviderToken>(COLLECTION_NAME)
         .find_one(doc! {
             "user_id": user_id,
             "provider_config_id": provider_id,
-            "status": { "$ne": "revoked" },
         })
+        .sort(doc! { "updated_at": -1_i32 })
         .await?;
 
     let now = Utc::now();
@@ -527,7 +549,10 @@ async fn store_telegram_identity(
         let set_doc = build_telegram_identity_update_doc(&metadata, now)?;
 
         db.collection::<UserProviderToken>(COLLECTION_NAME)
-            .update_one(doc! { "_id": &existing_token.id }, doc! { "$set": set_doc })
+            .update_one(
+                doc! { "_id": &existing_token.id },
+                vec![doc! { "$set": set_doc }],
+            )
             .await?;
 
         let updated = db
@@ -552,6 +577,7 @@ async fn store_telegram_identity(
         expires_at: None,
         api_key_encrypted: None,
         status: "active".to_string(),
+        state_version: 1,
         last_refreshed_at: None,
         last_used_at: None,
         error_message: None,
@@ -1513,6 +1539,18 @@ async fn store_device_code_tokens(
         .delete_one(doc! { "_id": state })
         .await?;
 
+    // Preserve the authorization lineage across reconnect replacement so an
+    // older assistant evidence snapshot cannot target the new token.
+    let existing_token = db
+        .collection::<UserProviderToken>(COLLECTION_NAME)
+        .find_one(doc! {
+            "user_id": user_id,
+            "provider_config_id": provider_id,
+        })
+        .sort(doc! { "updated_at": -1_i32 })
+        .await?;
+    let state_version = next_provider_token_state_version(existing_token.as_ref())?;
+
     // Upsert: remove existing token for this user+provider, insert new
     db.collection::<UserProviderToken>(COLLECTION_NAME)
         .delete_many(doc! {
@@ -1534,6 +1572,7 @@ async fn store_device_code_tokens(
         expires_at: token_expires_at,
         api_key_encrypted: None,
         status: "active".to_string(),
+        state_version,
         last_refreshed_at: None,
         last_used_at: None,
         error_message: None,
@@ -1900,7 +1939,9 @@ pub async fn handle_oauth_callback(
             "user_id": user_id,
             "provider_config_id": provider_id,
         })
+        .sort(doc! { "updated_at": -1_i32 })
         .await?;
+    let state_version = next_provider_token_state_version(existing_token.as_ref())?;
 
     let preserved_refresh_enc = refresh_enc.or_else(|| {
         existing_token
@@ -1931,6 +1972,7 @@ pub async fn handle_oauth_callback(
         expires_at: token_expires_at,
         api_key_encrypted: None,
         status: "active".to_string(),
+        state_version,
         last_refreshed_at: None,
         last_used_at: None,
         error_message: None,
@@ -2712,25 +2754,70 @@ pub async fn claim_provider_token_by_id(
     user_id: &str,
     token_id: &str,
 ) -> AppResult<Option<UserProviderToken>> {
+    claim_provider_token_by_id_with_expected_state_version(db, user_id, token_id, None).await
+}
+
+/// Atomically claim a provider token while optionally fencing the write on
+/// authorization evidence read by the browser.
+pub async fn claim_provider_token_by_id_with_expected_state_version(
+    db: &mongodb::Database,
+    user_id: &str,
+    token_id: &str,
+    expected_state_version: Option<i64>,
+) -> AppResult<Option<UserProviderToken>> {
     let now = Utc::now();
-    Ok(db
-        .collection::<UserProviderToken>(COLLECTION_NAME)
+    let collection = db.collection::<UserProviderToken>(COLLECTION_NAME);
+    if let Some(expected) = expected_state_version {
+        let current = collection
+            .find_one(doc! { "_id": token_id, "user_id": user_id })
+            .await?;
+        if current.is_some_and(|token| token.state_version != expected) {
+            return Err(AppError::Conflict(
+                "the provider token changed since this action was prepared".to_string(),
+            ));
+        }
+    }
+    let mut filter = doc! {
+        "_id": token_id,
+        "user_id": user_id,
+        "status": { "$ne": "revoked" },
+    };
+    if let Some(expected) = expected_state_version {
+        filter.insert(
+            "$expr",
+            doc! { "$eq": [{ "$ifNull": ["$state_version", 0_i64] }, expected] },
+        );
+    }
+    let claimed = collection
         .find_one_and_update(
-            doc! {
-                "_id": token_id,
-                "user_id": user_id,
-                "status": { "$ne": "revoked" },
-            },
-            doc! { "$set": {
+            filter,
+            vec![doc! { "$set": {
                 "status": "revoked",
                 "api_key_encrypted": bson::Bson::Null,
                 "access_token_encrypted": bson::Bson::Null,
                 "refresh_token_encrypted": bson::Bson::Null,
                 "updated_at": bson::DateTime::from_chrono(now),
-            }},
+                "state_version": {
+                    "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64]
+                },
+            }}],
         )
         .return_document(ReturnDocument::Before)
-        .await?)
+        .await?;
+    if claimed.is_none() && expected_state_version.is_some() {
+        let current = collection
+            .find_one(doc! { "_id": token_id, "user_id": user_id })
+            .await?;
+        if current.is_some_and(|token| {
+            token.status != "revoked"
+                && expected_state_version.is_some_and(|expected| token.state_version != expected)
+        }) {
+            return Err(AppError::Conflict(
+                "the provider token changed since this action was prepared".to_string(),
+            ));
+        }
+    }
+    Ok(claimed)
 }
 
 fn build_user_token_summary(
@@ -2894,6 +2981,7 @@ mod tests {
             expires_at: None,
             api_key_encrypted: None,
             status: "active".to_string(),
+            state_version: 1,
             last_refreshed_at: None,
             last_used_at: None,
             error_message: None,
@@ -3593,6 +3681,7 @@ mod tests {
                 client_id_encrypted: Some(byo_cid),
                 client_secret_encrypted: Some(byo_sec),
                 label: None,
+                state_version: 1,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             },
@@ -3706,6 +3795,7 @@ mod tests {
                 client_id_encrypted: Some(byo_cid),
                 client_secret_encrypted: Some(byo_sec),
                 label: None,
+                state_version: 1,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             },
@@ -4383,6 +4473,7 @@ mod tests {
             expires_at: None,
             api_key_encrypted: Some(encrypted),
             status: status.to_string(),
+            state_version: 1,
             last_refreshed_at: None,
             last_used_at: None,
             error_message: None,
@@ -4418,6 +4509,7 @@ mod tests {
             expires_at,
             api_key_encrypted: None,
             status: status.to_string(),
+            state_version: 1,
             last_refreshed_at: None,
             last_used_at: None,
             error_message: None,
@@ -4597,6 +4689,7 @@ mod tests {
             expires_at: None,
             api_key_encrypted: None,
             status: "active".to_string(),
+            state_version: 1,
             last_refreshed_at: None,
             last_used_at: None,
             error_message: None,
@@ -5067,6 +5160,7 @@ mod tests {
         .unwrap();
         assert_eq!(first.id, second.id);
         assert_eq!(second.label.as_deref(), Some("Updated"));
+        assert_eq!(second.state_version, first.state_version + 1);
     }
 
     /// Insert a UserApiKey with arbitrary `expires_at`, `connection_id`,

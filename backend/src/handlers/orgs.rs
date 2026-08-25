@@ -607,6 +607,17 @@ pub async fn create_org(
     auth_user: AuthUser,
     Json(body): Json<CreateOrgRequest>,
 ) -> AppResult<(StatusCode, Json<OrgResponse>)> {
+    create_org_with_id(State(state), auth_user, Json(body), None).await
+}
+
+/// Internal create path used by assistant receipts so the underlying org
+/// user is created with the receipt's reserved identity.
+pub(crate) async fn create_org_with_id(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<CreateOrgRequest>,
+    reserved_id: Option<&str>,
+) -> AppResult<(StatusCode, Json<OrgResponse>)> {
     body.validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
@@ -621,13 +632,27 @@ pub async fn create_org(
         .ok_or_else(|| AppError::Unauthorized("actor user not found".to_string()))?;
     crate::services::auth_service::ensure_person_user(&actor_user)?;
 
-    let org = org_service::create_org_user(
-        &state.db,
-        &body.display_name,
-        body.contact_email.as_deref(),
-        body.avatar_url.as_deref(),
-    )
-    .await?;
+    let org = match reserved_id {
+        Some(id) => {
+            org_service::create_org_user_with_id(
+                &state.db,
+                id,
+                &body.display_name,
+                body.contact_email.as_deref(),
+                body.avatar_url.as_deref(),
+            )
+            .await?
+        }
+        None => {
+            org_service::create_org_user(
+                &state.db,
+                &body.display_name,
+                body.contact_email.as_deref(),
+                body.avatar_url.as_deref(),
+            )
+            .await?
+        }
+    };
 
     // Add the creator as Admin. If this fails (network blip, race, etc.)
     // roll back the org user insert so we never leave behind an org with

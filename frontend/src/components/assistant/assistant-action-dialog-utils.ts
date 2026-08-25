@@ -7,6 +7,7 @@ const FORBIDDEN_READ_BACK_FIELDS = new Set([
   "accesstoken",
   "apikey",
   "authorization",
+  "clientsecret",
   "cookie",
   "cookies",
   "credential",

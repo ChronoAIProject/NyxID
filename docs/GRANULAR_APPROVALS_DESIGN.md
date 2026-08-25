@@ -264,6 +264,17 @@ endpoint.
 - `ApprovalRequest`: add `http_method: Option<String>`, `resource: Option<String>`,
   `verb: Option<String>` so the prompt UI and audit log can show structured operation
   identity (today only the free-text `operation_summary` carries it).
+- Exact-service effect admission is atomic across rolling versions. The partial unique
+  `exact_service_semantic_effect_unique` index binds requester type/id, actor user,
+  operation id, and effect idempotency key, intentionally excluding caller or producer
+  generation. Startup first checks for historical duplicate groups. If duplicates are
+  present, or a duplicate write races the unique-index build, startup logs and persists
+  an Integrity-page remediation diagnostic, skips index creation, and continues; it
+  never silently deletes requests or falls back to a non-unique index. The pre-insert
+  semantic lookup and legacy replay guard remain active until operators reconcile each
+  group against decision/redemption/provider evidence and restart. Once the correctly
+  shaped index exists, later startups verify its metadata and skip the full duplicate
+  scan.
 
 ## API & CLI surface
 
@@ -306,21 +317,31 @@ the resolved execution inputs:
 - the effective proxy operation policy
 - the *configured* node binding set (primary plus fallbacks)
 
-The projection serializes under `nyxid-exact-execution-authority.v1` and is
-hashed with `canonical_sha256`, so key order cannot change the digest. Header
-values participate in the hash but are never persisted in plaintext.
+The projection serializes under `nyxid-exact-execution-authority.v2` and is
+hashed with `canonical_sha256`, so key order cannot change the digest. The
+approval persists `{ projection_version, digest }`; the hash is never
+interpreted without that version. Header values participate in the hash but
+are never persisted in plaintext.
+
+Version 2 also binds `service_category`, `requires_user_credential`, and an
+inner digest of the execution-relevant `token_exchange_config` (endpoint,
+encoding/template, response paths, TTL/injection/error mapping, and canonical
+credential-field names). The literal configuration remains server-side; only
+its canonical digest enters the outer projection.
 
 The projection is built from the resolved `ProxyTarget`, which is the same
 struct the execution path consults, rather than from independently re-read
 rows. Re-reading would reintroduce exactly the producer/consumer split the
 digest exists to close.
 
-Create stores the digest on the approval binding. Redeem resolves the proxy
-target once, digests *that* resolution, compares, then executes the same
-resolution object. Because the outbound request is built from the bytes just
-digested, there is no check-then-re-resolve window to race. Drift returns HTTP
-200 with `state: "drifted"` and `failure_code: "execution_authority_drift"`,
-and dispatches no provider call.
+Create stores the digest on the approval binding. Observe and redeem first use
+a read-only authority snapshot that neither materializes credentials nor runs
+provider refresh/mint side effects. After the shared live gates pass, redeem
+materializes the proxy target, digests that resolution again, compares it, and
+executes the same resolution object. Because the outbound request is built
+from the bytes just digested, there is no check-then-re-resolve window to race.
+Drift returns HTTP 200 with `state: "drifted"` and
+`failure_code: "execution_authority_drift"`, and dispatches no provider call.
 
 The digest binds the **configured** node set, not the dispatchable one. A node
 dropping its WebSocket between approval and redemption is a connectivity event,
@@ -352,32 +373,69 @@ is an aggregation expression; in a classic update document MongoDB stores the
 literal expression sub-document instead of evaluating it, which both skips the
 bump and makes the row fail to deserialize.
 
-Approvals created before the digest existed store `execution_authority_digest:
-null` and skip the gate. That window is bounded by approval expiry.
+The authority rollout is rolling-safe. New approvals store the real v1 digest
+in the legacy slot and the explicit v2 `{ projection_version, digest }` binding.
+A v1 replica therefore validates exactly the projection it understands, while
+a v2 replica validates the stronger projection. When a v2 replica reads a
+main-era row with only the unversioned v1 digest, it recomputes and compares the
+live v1 projection. A versioned v1 binding uses the same comparison. Rows that
+predate authority digests skip this one gate, bounded by approval expiry and all
+other fences; only genuinely unknown future projection versions return
+`execution_authority_version_unsupported`.
 
-### Known limitations
+The additive exact-view fields retain the v2 catalog contract. During the
+bounded mixed-replica window, discovery and the legacy `exact_view_digest` row
+slot carry the pre-additive digest, while new rows also persist the full digest
+in `exact_view_digest_binding`. Old replicas validate the legacy slot; new
+replicas validate both. Main-era rows without the second slot accept either the
+live full or pre-additive digest, allowing pending approvals to roll forward.
 
-- `token_exchange_config` and the `service_category` / `requires_user_credential`
-  pair are consulted at execution but are not in the projection. Both are
-  catalog fields, administrator-owned rather than owner-mutable, so they sit
-  outside the owner-retargeting threat this digest addresses — but coverage is
-  not total.
-- The digest binds HTTP execution inputs. `ws_frame_injections` is not
-  projected; it is unreachable from the exact-approval execution path.
+Producer generation follows the same compatibility rule. New approvals bind
+the live positive generation of a durable `ServiceEndpoint`. Main-era and
+instance-spec rows with `producer_generation_bound: false` skip only the
+generation comparison; catalog, exact-view, endpoint-contract, operation, and
+execution-authority fences remain active. Instance-spec endpoints have no
+durable producer row, so their delegated view publishes
+`operation_generation: null` and their endpoint-contract digest is the shape
+fence.
 
-### Two gates, not one
+`ws_frame_injections` is not projected because it is unreachable from the HTTP
+exact-approval execution path.
 
-Drift is checked in two places and both are load-bearing:
+### Shared live evaluator
 
-- `execution_authority_mismatch` covers the **observe** path, so a status poll
-  reports `drifted` before any redemption is attempted.
-- `redeem_request` re-checks inline, after claiming the redemption and against
-  the resolution it is about to execute.
+Observe and redeem do not maintain independent catalog, generation, policy, or
+execution-authority gate implementations. Both call one ordered evaluator:
 
-The helper's name suggests it is the single gate. It is not. Removing the
-inline check in `redeem_request` because "the helper already covers it" would
-silently reopen the retargeting hole: the helper runs before the claim and
-never sees the resolution that actually executes.
+1. resolve the live catalog and compare catalog, exact-view, operation-shape,
+   and producer-generation fences;
+2. revalidate that the live approval policy still requires this exact
+   per-request approval; and
+3. compare a read-only execution-authority snapshot.
+
+Observe returns that evaluation without claiming or writing the request. Its
+`drifted`/`revoked` result is therefore transient: content-addressed A-to-B-to-A
+configuration can return to `approved`. Redeem intentionally checks only
+persisted request state before claim, claims atomically, then runs the same live
+evaluator and persists terminal drift, revocation, or failure. Only a matched
+result reaches credential materialization, whose separately recomputed digest
+must still match before the provider call. This keeps the gates single-sourced
+while preserving the different persistence semantics of observation and
+effect admission.
+
+### Provider outcome recovery
+
+The provider effect and the MongoDB terminal receipt cannot be committed in one
+transaction. Redemption therefore claims `executing` before dispatch and never
+replays that claim. Buffered exact execution has a 10-minute hard deadline; a
+deadline leaves provider success ambiguous and is itself persisted as
+`provider_outcome_unknown`. If the process crashes, or the terminal Mongo write
+fails, a later redeem retry leaves a fresh claim alone but atomically converts
+an `executing` claim older than 15 minutes to terminal `failed` with
+`failure_code: "provider_outcome_unknown"`. The original `admitted_at` remains
+on the row for audit. No automatic retry follows because the provider may have
+committed a non-idempotent effect; provider-specific read-back or human
+reconciliation must resolve the ambiguity outside this approval identity.
 
 ## Security notes
 

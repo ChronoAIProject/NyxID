@@ -555,6 +555,10 @@ struct PreResolved {
     /// lookups so the failover list reflects the org's bindings, not
     /// just the calling member's personal bindings.
     effective_owner_id: String,
+    /// Whether the resolved UserService is platform-managed and
+    /// auto-connected. This suppresses only the implicit global approval
+    /// fallback; explicit per-service policies remain in force.
+    is_auto_connected: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1021,6 +1025,7 @@ async fn proxy_request_inner(
                         .as_ref()
                         .map(|r| r.org_user_id.clone())
                         .unwrap_or_else(|| user_id_str.clone()),
+                    is_auto_connected: resolved.is_auto_connected,
                 }),
                 TargetMode::CallerAddressed,
                 Vec::new(),
@@ -1082,6 +1087,7 @@ async fn proxy_request_inner(
                     .as_ref()
                     .map(|r| r.org_user_id.clone())
                     .unwrap_or_else(|| user_id_str.clone()),
+                is_auto_connected: resolved.is_auto_connected,
             }),
             TargetMode::CallerAddressed,
             Vec::new(),
@@ -1250,6 +1256,7 @@ async fn proxy_request_by_slug_inner(
                         .as_ref()
                         .map(|r| r.org_user_id.clone())
                         .unwrap_or_else(|| user_id_str.clone()),
+                    is_auto_connected: resolved.is_auto_connected,
                 }),
                 TargetMode::CallerAddressed,
                 Vec::new(),
@@ -1311,6 +1318,7 @@ async fn proxy_request_by_slug_inner(
                     .as_ref()
                     .map(|r| r.org_user_id.clone())
                     .unwrap_or_else(|| user_id_str.clone()),
+                is_auto_connected: resolved.is_auto_connected,
             }),
             TargetMode::CallerAddressed,
             Vec::new(),
@@ -1708,12 +1716,14 @@ async fn preflight_proxy_deny_before_resolution(
         Some(proxy_service::ApprovalResolutionHint {
             service_id: service_id.to_string(),
             service_owner_id: approval_owner_user_id.clone(),
+            is_auto_connected: false,
         })
     } else if let Some(slug) = slug {
         let service = proxy_service::resolve_service_by_slug(&state.db, slug).await?;
         Some(proxy_service::ApprovalResolutionHint {
             service_id: service.id,
             service_owner_id: approval_owner_user_id.clone(),
+            is_auto_connected: false,
         })
     } else {
         None
@@ -1730,6 +1740,7 @@ async fn preflight_proxy_deny_before_resolution(
         &hint.service_owner_id,
         &hint.service_id,
         &operation,
+        hint.is_auto_connected,
     )
     .await?;
 
@@ -1804,6 +1815,7 @@ async fn execute_proxy_inner(
     // Captured outside the resolution match so the downstream approval
     // block can apply the org-aware cascade.
     let mut effective_owner_for_approval: Option<String> = None;
+    let mut is_auto_connected_for_approval = false;
 
     // Resolve target and node routing.
     //
@@ -1822,6 +1834,7 @@ async fn execute_proxy_inner(
         catalog_service_slug,
     ) = if let Some(mut pre) = pre_resolved {
         effective_owner_for_approval = Some(pre.effective_owner_id.clone());
+        is_auto_connected_for_approval = pre.is_auto_connected;
         // New UserService path: target already resolved.
         // Use the resolved service's effective owner (the org's user_id
         // for org-routed calls, the actor for personal) when looking up
@@ -2216,6 +2229,7 @@ async fn execute_proxy_inner(
         auth_user.approval_requester_type(),
         &auth_user.approval_requester_id(),
         auth_user.auth_method == crate::mw::auth::AuthMethod::Session,
+        is_auto_connected_for_approval,
     )
     .await?;
 
@@ -3529,7 +3543,7 @@ async fn execute_proxy_inner(
                 .await;
                 return Err(AppError::DurableOperationOutcomeUncertain);
             }
-            return Err(error);
+            return Err(error.into_app_error());
         }
         Err(_) => {
             emit_preheader_diagnostics(
@@ -9855,6 +9869,7 @@ mod proxy_resolution_integration_tests {
                 credential_label: None,
                 metadata: None,
                 is_active: false,
+                state_version: 1,
                 created_at: now,
                 updated_at: now,
             },

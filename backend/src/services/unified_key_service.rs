@@ -171,8 +171,25 @@ fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
     false
 }
 
+fn is_duplicate_reserved_service_id_error(error: &mongodb::error::Error) -> bool {
+    if let mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(we)) =
+        error.kind.as_ref()
+    {
+        // MongoDB reports the unique `_id` index as `index: _id_` in the
+        // duplicate-key message. This is distinct from the user-scoped
+        // `(user_id, slug)` index, whose collision should keep using the
+        // slug retry path.
+        return we.code == 11000 && we.message.contains("index: _id_");
+    }
+    false
+}
+
+fn is_duplicate_reserved_service_id_app_error(error: &AppError) -> bool {
+    matches!(error, AppError::DatabaseError(db_error) if is_duplicate_reserved_service_id_error(db_error))
+}
+
 fn is_duplicate_slug_app_error(error: &AppError) -> bool {
-    matches!(error, AppError::DatabaseError(db_error) if is_duplicate_key_error(db_error))
+    matches!(error, AppError::DatabaseError(db_error) if is_duplicate_key_error(db_error) && !is_duplicate_reserved_service_id_error(db_error))
         || matches!(
             error,
             AppError::Conflict(message)
@@ -657,6 +674,105 @@ pub async fn create_key(
     oauth_client_credentials: OauthClientCredentialsInput<'_>,
     hosted_mode: bool,
 ) -> AppResult<CreateKeyResult> {
+    create_key_inner(
+        db,
+        encryption_keys,
+        user_id,
+        actor_user_id,
+        service_slug,
+        endpoint_url,
+        credential,
+        label,
+        slug_override,
+        auth_method,
+        auth_key_name,
+        node_id,
+        ssh_params,
+        identity,
+        openapi_spec_url,
+        ws_frame_injections,
+        admin_only,
+        oauth_client_credentials,
+        hosted_mode,
+        None,
+    )
+    .await
+}
+
+/// Create a key while forcing the `UserService` identity to a previously
+/// reserved assistant-action receipt id. The endpoint and credential rows
+/// retain their normal generated identities.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_key_with_service_id(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    actor_user_id: &str,
+    service_slug: Option<&str>,
+    endpoint_url: Option<&str>,
+    credential: &str,
+    label: &str,
+    slug_override: Option<&str>,
+    auth_method: Option<&str>,
+    auth_key_name: Option<&str>,
+    node_id: Option<&str>,
+    ssh_params: Option<SshCreateParams<'_>>,
+    identity: Option<user_service_service::IdentityConfig>,
+    openapi_spec_url: OpenApiSpecUrlInput<'_>,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: bool,
+    oauth_client_credentials: OauthClientCredentialsInput<'_>,
+    hosted_mode: bool,
+    service_id: &str,
+) -> AppResult<CreateKeyResult> {
+    create_key_inner(
+        db,
+        encryption_keys,
+        user_id,
+        actor_user_id,
+        service_slug,
+        endpoint_url,
+        credential,
+        label,
+        slug_override,
+        auth_method,
+        auth_key_name,
+        node_id,
+        ssh_params,
+        identity,
+        openapi_spec_url,
+        ws_frame_injections,
+        admin_only,
+        oauth_client_credentials,
+        hosted_mode,
+        Some(service_id),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_key_inner(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    actor_user_id: &str,
+    service_slug: Option<&str>,
+    endpoint_url: Option<&str>,
+    credential: &str,
+    label: &str,
+    slug_override: Option<&str>,
+    auth_method: Option<&str>,
+    auth_key_name: Option<&str>,
+    node_id: Option<&str>,
+    ssh_params: Option<SshCreateParams<'_>>,
+    identity: Option<user_service_service::IdentityConfig>,
+    openapi_spec_url: OpenApiSpecUrlInput<'_>,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: bool,
+    oauth_client_credentials: OauthClientCredentialsInput<'_>,
+    hosted_mode: bool,
+    reserved_service_id: Option<&str>,
+) -> AppResult<CreateKeyResult> {
     let node_id = node_id.filter(|nid| !nid.is_empty());
     if let Some(rules) = ws_frame_injections {
         ws_frame_injector::validate_rules(rules)?;
@@ -1002,7 +1118,7 @@ pub async fn create_key(
         let mut attempts_left = USER_SERVICE_SLUG_INSERT_RETRIES;
         let service = loop {
             let resolved_slug = resolve_unique_slug(db, user_id, &base_slug, strategy).await?;
-            match user_service_service::create_user_service(
+            match user_service_service::create_user_service_with_id(
                 db,
                 user_id,
                 actor_user_id,
@@ -1022,10 +1138,16 @@ pub async fn create_key(
                 &catalog_identity,
                 ws_frame_injections,
                 admin_only,
+                reserved_service_id,
             )
             .await
             {
                 Ok(service) => break service,
+                Err(error) if is_duplicate_reserved_service_id_app_error(&error) => {
+                    return Err(AppError::Conflict(
+                        "reserved service identity already exists".to_string(),
+                    ));
+                }
                 Err(error) if is_duplicate_slug_app_error(&error) => {
                     if attempts_left == 0 || strategy == SlugCollisionStrategy::PreserveExact {
                         return Err(exact_slug_conflict(&resolved_slug));
@@ -1221,7 +1343,7 @@ pub async fn create_key(
         let mut attempts_left = USER_SERVICE_SLUG_INSERT_RETRIES;
         let service = loop {
             let resolved_slug = resolve_unique_slug(db, user_id, &base_slug, strategy).await?;
-            match user_service_service::create_user_service(
+            match user_service_service::create_user_service_with_id(
                 db,
                 user_id,
                 actor_user_id,
@@ -1241,10 +1363,16 @@ pub async fn create_key(
                 &user_service_service::IdentityConfig::none(),
                 ws_frame_injections,
                 admin_only,
+                reserved_service_id,
             )
             .await
             {
                 Ok(service) => break service,
+                Err(error) if is_duplicate_reserved_service_id_app_error(&error) => {
+                    return Err(AppError::Conflict(
+                        "reserved service identity already exists".to_string(),
+                    ));
+                }
                 Err(error) if is_duplicate_slug_app_error(&error) => {
                     if attempts_left == 0 || strategy == SlugCollisionStrategy::PreserveExact {
                         return Err(exact_slug_conflict(&resolved_slug));
@@ -1381,7 +1509,7 @@ pub async fn create_key(
         let mut attempts_left = USER_SERVICE_SLUG_INSERT_RETRIES;
         let service = loop {
             let resolved_slug = resolve_unique_slug(db, user_id, &base_slug, strategy).await?;
-            match user_service_service::create_user_service(
+            match user_service_service::create_user_service_with_id(
                 db,
                 user_id,
                 actor_user_id,
@@ -1401,10 +1529,16 @@ pub async fn create_key(
                 &custom_identity,
                 ws_frame_injections,
                 admin_only,
+                reserved_service_id,
             )
             .await
             {
                 Ok(service) => break service,
+                Err(error) if is_duplicate_reserved_service_id_app_error(&error) => {
+                    return Err(AppError::Conflict(
+                        "reserved service identity already exists".to_string(),
+                    ));
+                }
                 Err(error) if is_duplicate_slug_app_error(&error) => {
                     if attempts_left == 0 || strategy == SlugCollisionStrategy::PreserveExact {
                         return Err(exact_slug_conflict(&resolved_slug));
@@ -2798,6 +2932,7 @@ pub enum DisconnectTarget<'a> {
     UserService(&'a str),
     UserApiKey(&'a str),
     Provider(&'a str),
+    ProviderWithExpectedStateVersion(&'a str, i64),
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2851,6 +2986,7 @@ struct DisconnectPlan {
     provider_token: Option<UserProviderToken>,
     initiating_key_id: Option<String>,
     initiating_provider_token_id: Option<String>,
+    expected_provider_token_state_version: Option<i64>,
 }
 
 /// Shared local-teardown and remote-revocation orchestration for every OAuth
@@ -2935,7 +3071,14 @@ pub async fn disconnect_credentials_with_expected_siblings(
     }
 
     let mut claimed_provider_token = if let Some(token) = plan.provider_token.take() {
-        match user_token_service::claim_provider_token_by_id(db, owner_id, &token.id).await? {
+        match user_token_service::claim_provider_token_by_id_with_expected_state_version(
+            db,
+            owner_id,
+            &token.id,
+            plan.expected_provider_token_state_version,
+        )
+        .await?
+        {
             Some(claimed) => Some(claimed),
             None if plan.initiating_provider_token_id.as_deref() == Some(token.id.as_str()) => {
                 return Err(AppError::NotFound(
@@ -3079,7 +3222,13 @@ async fn build_disconnect_plan(
     options: &DisconnectOptions,
     expected_siblings: Option<&[(String, String, String)]>,
 ) -> AppResult<DisconnectPlan> {
-    let (primary_service, initiating_key, initiating_token, provider_id) = match target {
+    let (
+        primary_service,
+        initiating_key,
+        initiating_token,
+        provider_id,
+        expected_provider_token_state_version,
+    ) = match target {
         DisconnectTarget::UserService(service_id) => {
             let service = user_service_service::get_user_service(db, owner_id, service_id).await?;
             let key = match service.api_key_id.as_deref() {
@@ -3087,12 +3236,12 @@ async fn build_disconnect_plan(
                 None => None,
             };
             let provider_id = key.as_ref().and_then(|key| key.provider_config_id.clone());
-            (Some(service), key, None, provider_id)
+            (Some(service), key, None, provider_id, None)
         }
         DisconnectTarget::UserApiKey(key_id) => {
             let key = user_api_key_service::get_api_key(db, owner_id, key_id).await?;
             let provider_id = key.provider_config_id.clone();
-            (None, Some(key), None, provider_id)
+            (None, Some(key), None, provider_id, None)
         }
         DisconnectTarget::Provider(provider_id) => {
             let token = db
@@ -3106,7 +3255,32 @@ async fn build_disconnect_plan(
                 .ok_or_else(|| {
                     AppError::NotFound("No active token found for this provider".to_string())
                 })?;
-            (None, None, Some(token), Some(provider_id.to_string()))
+            (None, None, Some(token), Some(provider_id.to_string()), None)
+        }
+        DisconnectTarget::ProviderWithExpectedStateVersion(provider_id, expected) => {
+            let token = db
+                .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+                .find_one(doc! {
+                    "user_id": owner_id,
+                    "provider_config_id": provider_id,
+                    "status": { "$ne": "revoked" },
+                })
+                .await?
+                .ok_or_else(|| {
+                    AppError::NotFound("No active token found for this provider".to_string())
+                })?;
+            if token.state_version != expected {
+                return Err(AppError::Conflict(
+                    "the provider token changed since this action was prepared".to_string(),
+                ));
+            }
+            (
+                None,
+                None,
+                Some(token),
+                Some(provider_id.to_string()),
+                Some(expected),
+            )
         }
     };
     let provider = match provider_id.as_deref() {
@@ -3136,6 +3310,7 @@ async fn build_disconnect_plan(
             provider_token: initiating_token.clone(),
             initiating_key_id: initiating_key.map(|key| key.id),
             initiating_provider_token_id: initiating_token.map(|token| token.id),
+            expected_provider_token_state_version,
         });
     }
 
@@ -3306,6 +3481,7 @@ async fn build_disconnect_plan(
             .flatten(),
         initiating_key_id: initiating_key.map(|key| key.id),
         initiating_provider_token_id: initiating_token.map(|token| token.id),
+        expected_provider_token_state_version,
     })
 }
 
@@ -3975,10 +4151,11 @@ mod tests {
         build_key_view, classify_update_credential_action, create_key, derive_effective_auth,
         direct_credential_type_for_service, direct_credential_type_from_auth_method,
         ensure_user_api_key_for_update, exact_slug_conflict, generate_slug_from_label, get_key,
-        identity_config_from_downstream_service, is_duplicate_slug_app_error, list_keys,
-        oauth_connection_status, random_slug_suffix, reconcile_provider_key_for_service_routing,
-        resolve_openapi_spec_url, resolve_unique_slug, revoke_key_if_pending,
-        slug_candidate_with_suffix, validate_token_exchange_catalog_credential,
+        identity_config_from_downstream_service, is_duplicate_reserved_service_id_app_error,
+        is_duplicate_slug_app_error, list_keys, oauth_connection_status, random_slug_suffix,
+        reconcile_provider_key_for_service_routing, resolve_openapi_spec_url, resolve_unique_slug,
+        revoke_key_if_pending, slug_candidate_with_suffix,
+        validate_token_exchange_catalog_credential,
     };
     use crate::errors::{AppError, AppResult};
     use crate::models::downstream_service::{
@@ -4174,6 +4351,7 @@ mod tests {
                 expires_at: None,
                 api_key_encrypted: None,
                 status: "active".to_string(),
+                state_version: 1,
                 last_refreshed_at: None,
                 last_used_at: None,
                 error_message: None,
@@ -6804,6 +6982,7 @@ mod tests {
                 expires_at: None,
                 api_key_encrypted: None,
                 status: "active".to_string(),
+                state_version: 1,
                 last_refreshed_at: None,
                 last_used_at: None,
                 error_message: None,
@@ -6882,6 +7061,7 @@ mod tests {
                 expires_at: None,
                 api_key_encrypted: Some(vec![9, 9, 9]),
                 status: "active".to_string(),
+                state_version: 1,
                 last_refreshed_at: None,
                 last_used_at: None,
                 error_message: None,
@@ -7738,6 +7918,35 @@ mod tests {
         assert!(!is_duplicate_slug_app_error(&AppError::Internal(
             "x".into()
         )));
+    }
+
+    #[test]
+    fn duplicate_key_classifier_distinguishes_reserved_id_from_slug() {
+        fn duplicate_error(message: &str) -> AppError {
+            let write_error: mongodb::error::WriteError = bson::from_document(doc! {
+                "code": 11000,
+                "codeName": "DuplicateKey",
+                "errmsg": message,
+            })
+            .expect("deserialize duplicate-key fixture");
+            AppError::DatabaseError(mongodb::error::Error::from(
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )),
+            ))
+        }
+
+        let reserved_id = duplicate_error(
+            "E11000 duplicate key error collection: db.user_services index: _id_ dup key: { _id: \"reserved\" }",
+        );
+        assert!(is_duplicate_reserved_service_id_app_error(&reserved_id));
+        assert!(!is_duplicate_slug_app_error(&reserved_id));
+
+        let slug = duplicate_error(
+            "E11000 duplicate key error collection: db.user_services index: user_id_1_slug_1 dup key: { user_id: \"user\", slug: \"service\" }",
+        );
+        assert!(!is_duplicate_reserved_service_id_app_error(&slug));
+        assert!(is_duplicate_slug_app_error(&slug));
     }
 
     // ── generate_slug_from_label additional edge cases ──────────────

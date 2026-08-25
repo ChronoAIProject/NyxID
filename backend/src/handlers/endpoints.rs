@@ -281,7 +281,8 @@ pub async fn update_endpoint(
         is_active: body.is_active,
     };
 
-    service_endpoint_service::update_endpoint(&state.db, &endpoint_id, updates).await?;
+    service_endpoint_service::update_endpoint(&state.db, &service_id, &endpoint_id, updates)
+        .await?;
 
     tracing::info!(
         endpoint_id = %endpoint_id,
@@ -305,7 +306,7 @@ pub async fn delete_endpoint(
     require_http_service(&service)?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
 
-    service_endpoint_service::delete_endpoint(&state.db, &endpoint_id).await?;
+    service_endpoint_service::delete_endpoint(&state.db, &service_id, &endpoint_id).await?;
 
     tracing::info!(
         endpoint_id = %endpoint_id,
@@ -386,9 +387,13 @@ pub async fn discover_endpoints(
 mod tests {
     use chrono::Utc;
 
-    use super::{endpoint_to_response, validate_request_content_type, validate_response_contract};
+    use super::*;
     use crate::errors::AppError;
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, test_helpers::dummy_service,
+    };
     use crate::models::service_endpoint::ServiceEndpoint;
+    use crate::test_utils::{connect_test_database, test_app_state, test_auth_user};
 
     #[test]
     fn validate_request_content_type_accepts_valid_values() {
@@ -440,11 +445,92 @@ mod tests {
             risk: None,
             supports_idempotency_key: false,
             is_active: true,
+            operation_generation: 1,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
 
         let response = endpoint_to_response(endpoint);
         assert!(!response.request_body_required);
+    }
+
+    #[tokio::test]
+    async fn route_service_id_cannot_mutate_or_delete_another_services_endpoint() {
+        let Some(db) = connect_test_database("endpoint_handler_owner_scope").await else {
+            return;
+        };
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let mut route_service = dummy_service();
+        route_service.id = uuid::Uuid::new_v4().to_string();
+        route_service.created_by = owner_id.clone();
+        db.collection::<crate::models::downstream_service::DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&route_service)
+            .await
+            .unwrap();
+
+        let other_service_id = uuid::Uuid::new_v4().to_string();
+        let endpoint = service_endpoint_service::create_endpoint(
+            &db,
+            &other_service_id,
+            EndpointInput {
+                name: "other_endpoint".to_string(),
+                description: None,
+                method: "GET".to_string(),
+                path: "/original".to_string(),
+                parameters: None,
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: false,
+                response_description: None,
+                response: OperationResponseContract::default(),
+                risk: None,
+                supports_idempotency_key: false,
+            },
+        )
+        .await
+        .unwrap();
+        let state = test_app_state(db.clone());
+
+        let update_error = update_endpoint(
+            State(state.clone()),
+            test_auth_user(&owner_id),
+            Path((route_service.id.clone(), endpoint.id.clone())),
+            Json(UpdateEndpointRequest {
+                name: None,
+                description: None,
+                method: None,
+                path: Some("/unauthorized".to_string()),
+                parameters: None,
+                request_body_schema: None,
+                request_content_type: None,
+                request_body_required: None,
+                response_description: None,
+                response: None,
+                risk: None,
+                supports_idempotency_key: None,
+                is_active: None,
+            }),
+        )
+        .await
+        .expect_err("route service ownership must not authorize another endpoint");
+        assert!(matches!(update_error, AppError::NotFound(_)));
+
+        let delete_error = delete_endpoint(
+            State(state),
+            test_auth_user(&owner_id),
+            Path((route_service.id, endpoint.id.clone())),
+        )
+        .await
+        .expect_err("route service ownership must not authorize deleting another endpoint");
+        assert!(matches!(delete_error, AppError::NotFound(_)));
+
+        let persisted = db
+            .collection::<ServiceEndpoint>(crate::models::service_endpoint::COLLECTION_NAME)
+            .find_one(mongodb::bson::doc! { "_id": &endpoint.id })
+            .await
+            .unwrap()
+            .expect("other service endpoint remains intact");
+        assert_eq!(persisted.path, "/original");
+        assert_eq!(persisted.operation_generation, 1);
     }
 }

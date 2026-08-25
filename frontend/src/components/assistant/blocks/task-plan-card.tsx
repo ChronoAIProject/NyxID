@@ -15,11 +15,19 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type {
-  TaskExternalEffect,
-  TaskPlanContentBlock,
-  TaskStep,
-  TaskStepStatus,
-} from "@/types/assistant";
+  ChatActorStep,
+  ChatExternalEffect,
+  ChatTaskPlan,
+  ChatTaskStepStatus,
+} from "@/lib/assistant/chat-task-plan";
+
+interface TaskPlanCardBlock {
+  readonly type: "task_plan";
+  readonly block_id: string;
+  readonly state_version: number;
+  readonly progress_sequence: number;
+  readonly plan: ChatTaskPlan;
+}
 
 type TaskControl =
   | "stop"
@@ -28,7 +36,7 @@ type TaskControl =
   | `retry:${string}`
   | `skip:${string}`;
 
-const STATUS_STYLE: Record<TaskStepStatus, string> = {
+const STATUS_STYLE: Record<ChatTaskStepStatus, string> = {
   planned: "text-text-tertiary",
   waiting: "text-warning",
   running: "text-nyx-secondary-400",
@@ -43,7 +51,7 @@ function words(value: string): string {
   return value.replaceAll("_", " ");
 }
 
-function StepIcon({ status }: { readonly status: TaskStepStatus }) {
+function StepIcon({ status }: { readonly status: ChatTaskStepStatus }) {
   const className = `h-3.5 w-3.5 shrink-0 ${STATUS_STYLE[status]}`;
   switch (status) {
     case "running":
@@ -66,7 +74,7 @@ function StepIcon({ status }: { readonly status: TaskStepStatus }) {
   }
 }
 
-function effectStyle(effect: TaskExternalEffect): string {
+function effectStyle(effect: ChatExternalEffect): string {
   switch (effect) {
     case "confirmed":
       return "border-success/25 bg-success/[0.07] text-success";
@@ -80,7 +88,7 @@ function effectStyle(effect: TaskExternalEffect): string {
   }
 }
 
-function StepDetails({ step }: { readonly step: TaskStep }) {
+function StepDetails({ step }: { readonly step: ChatActorStep }) {
   const sourceDetail =
     step.source.kind === "tool" && step.source.serviceSlug
       ? `${step.source.label} / ${step.source.serviceSlug}`
@@ -180,12 +188,14 @@ function StepDetails({ step }: { readonly step: TaskStep }) {
 
 export function TaskPlanCard({
   block,
+  disabled = false,
   onStop,
   onRetry,
   onSkip,
   onResolve,
 }: {
-  readonly block: TaskPlanContentBlock;
+  readonly block: TaskPlanCardBlock;
+  readonly disabled?: boolean;
   readonly onStop: () => Promise<void>;
   readonly onRetry: (stepId: string) => Promise<void>;
   readonly onSkip: (stepId: string) => Promise<void>;
@@ -198,7 +208,7 @@ export function TaskPlanCard({
     plan.gate?.mode === "confirm" && plan.gate.status === "pending";
 
   async function run(control: TaskControl, action: () => Promise<void>) {
-    if (pending) return;
+    if (disabled || pending) return;
     setPending(control);
     try {
       await action();
@@ -244,7 +254,7 @@ export function TaskPlanCard({
             type="button"
             size="sm"
             variant="primary"
-            disabled={pending !== null}
+            disabled={disabled || pending !== null}
             onClick={() =>
               void run("plan:confirm", () => onResolve(true))
             }
@@ -260,7 +270,7 @@ export function TaskPlanCard({
             type="button"
             size="sm"
             variant="destructive"
-            disabled={pending !== null}
+            disabled={disabled || pending !== null}
             onClick={() => void run("plan:reject", () => onResolve(false))}
           >
             {pending === "plan:reject" ? (
@@ -293,7 +303,7 @@ export function TaskPlanCard({
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={pending !== null}
+                      disabled={disabled || pending !== null}
                       aria-label={`Retry ${step.description}`}
                       onClick={() =>
                         void run(`retry:${step.stepId}`, () =>
@@ -314,7 +324,7 @@ export function TaskPlanCard({
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={pending !== null}
+                      disabled={disabled || pending !== null}
                       aria-label={`Skip ${step.description}`}
                       onClick={() =>
                         void run(`skip:${step.stepId}`, () =>
@@ -342,7 +352,7 @@ export function TaskPlanCard({
             type="button"
             size="sm"
             variant="outline"
-            disabled={pending !== null}
+            disabled={disabled || pending !== null}
             onClick={() => void run("stop", onStop)}
           >
             {pending === "stop" ? (

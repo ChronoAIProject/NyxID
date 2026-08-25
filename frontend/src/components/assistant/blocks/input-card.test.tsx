@@ -54,4 +54,19 @@ describe("InputCard", () => {
       expect(onResolve).toHaveBeenCalledWith({ freeText: "Singapore north" }),
     );
   });
+
+  it("disables every answer control behind the state-version fence", () => {
+    render(
+      <InputCard
+        block={inputCard()}
+        disabled
+        onResolve={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByLabelText("Singapore")).toBeDisabled();
+    expect(screen.getByLabelText("Frankfurt")).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Answer" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled();
+  });
 });

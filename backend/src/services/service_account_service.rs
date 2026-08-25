@@ -48,6 +48,32 @@ pub async fn create_service_account(
     rate_limit_override: Option<u64>,
     created_by: &str,
 ) -> AppResult<(ServiceAccount, String)> {
+    let id = Uuid::new_v4().to_string();
+    create_service_account_with_id(
+        db,
+        &id,
+        name,
+        description,
+        allowed_scopes,
+        role_ids,
+        rate_limit_override,
+        created_by,
+    )
+    .await
+}
+
+/// Create a service account with a caller-reserved UUID.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_service_account_with_id(
+    db: &Database,
+    id: &str,
+    name: &str,
+    description: Option<&str>,
+    allowed_scopes: &str,
+    role_ids: &[String],
+    rate_limit_override: Option<u64>,
+    created_by: &str,
+) -> AppResult<(ServiceAccount, String)> {
     if name.is_empty() || name.len() > 100 {
         return Err(AppError::ValidationError(
             "Service account name must be between 1 and 100 characters".to_string(),
@@ -91,7 +117,6 @@ pub async fn create_service_account(
         }
     }
 
-    let id = Uuid::new_v4().to_string();
     let client_id = generate_client_id();
     let raw_secret = generate_client_secret();
     let secret_hash = hash_token(&raw_secret);
@@ -99,7 +124,7 @@ pub async fn create_service_account(
     let now = Utc::now();
 
     let sa = ServiceAccount {
-        id,
+        id: id.to_string(),
         name: name.to_string(),
         description: description.map(String::from),
         client_id,

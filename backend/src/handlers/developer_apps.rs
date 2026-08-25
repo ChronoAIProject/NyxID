@@ -302,6 +302,17 @@ pub async fn create_my_oauth_client(
     tele: TelemetryContext,
     Json(body): Json<CreateDeveloperOAuthClientRequest>,
 ) -> AppResult<Json<DeveloperOAuthClientResponse>> {
+    create_my_oauth_client_with_id(State(state), auth_user, tele, Json(body), None).await
+}
+
+/// Internal assistant-action create path with a receipt-reserved client id.
+pub(crate) async fn create_my_oauth_client_with_id(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    Json(body): Json<CreateDeveloperOAuthClientRequest>,
+    reserved_id: Option<&str>,
+) -> AppResult<Json<DeveloperOAuthClientResponse>> {
     if body.name.trim().is_empty() {
         return Err(AppError::ValidationError(
             "Client name is required".to_string(),
@@ -361,21 +372,43 @@ pub async fn create_my_oauth_client(
         None => Vec::new(),
     };
 
-    let (client, raw_secret) = oauth_client_service::create_client(
-        &state.db,
-        &body.name,
-        &validated_uris,
-        client_type,
-        &user_id,
-        delegation_scopes,
-        &allowed_scopes,
-        crate::models::oauth_client::ScopeProvenance::Explicit,
-        body.broker_capability_enabled.unwrap_or(false),
-        revocation_webhook_url,
-        revocation_webhook_secret_encrypted,
-        &default_service_catalog_slugs,
-    )
-    .await?;
+    let (client, raw_secret) = match reserved_id {
+        Some(id) => {
+            oauth_client_service::create_client_with_id(
+                &state.db,
+                id,
+                &body.name,
+                &validated_uris,
+                client_type,
+                &user_id,
+                delegation_scopes,
+                &allowed_scopes,
+                crate::models::oauth_client::ScopeProvenance::Explicit,
+                body.broker_capability_enabled.unwrap_or(false),
+                revocation_webhook_url,
+                revocation_webhook_secret_encrypted,
+                &default_service_catalog_slugs,
+            )
+            .await?
+        }
+        None => {
+            oauth_client_service::create_client(
+                &state.db,
+                &body.name,
+                &validated_uris,
+                client_type,
+                &user_id,
+                delegation_scopes,
+                &allowed_scopes,
+                crate::models::oauth_client::ScopeProvenance::Explicit,
+                body.broker_capability_enabled.unwrap_or(false),
+                revocation_webhook_url,
+                revocation_webhook_secret_encrypted,
+                &default_service_catalog_slugs,
+            )
+            .await?
+        }
+    };
 
     emit_event(
         state.telemetry.as_deref(),

@@ -508,6 +508,7 @@ const MOCK_NOTIFICATION_SETTINGS = {
   push_enabled: true,
   push_device_count: 1,
   approval_required: true,
+  approval_suspended: false,
   approval_timeout_secs: 300,
   grant_expiry_days: 30,
 };

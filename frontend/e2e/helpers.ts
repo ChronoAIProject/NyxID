@@ -1,5 +1,5 @@
 import { expect, type Page } from "@playwright/test";
-import type { AssistantMockFaults } from "../src/lib/assistant/transport";
+import type { AssistantHttpFixtureFaults } from "../src/lib/assistant/assistant-http-fixtures";
 
 /**
  * Shared driver for the assistant chat flow specs.
@@ -26,14 +26,14 @@ export const SCRIPTED_TOOL_RESULT = "Posted to #payments-oncall";
 
 export async function openAssistant(
   page: Page,
-  options: { conversation?: string; faults?: AssistantMockFaults } = {},
+  options: { conversation?: string; faults?: AssistantHttpFixtureFaults } = {},
 ): Promise<void> {
   if (options.faults) {
     const faults = options.faults;
-    await page.addInitScript((value: AssistantMockFaults) => {
+    await page.addInitScript((value: AssistantHttpFixtureFaults) => {
       (
-        window as { __assistantMockFaults?: AssistantMockFaults }
-      ).__assistantMockFaults = value;
+        window as { __nyxidAssistantHttpFaults?: AssistantHttpFixtureFaults }
+      ).__nyxidAssistantHttpFaults = value;
     }, faults);
   }
   const search = new URLSearchParams({ mock: "1" });
@@ -42,7 +42,10 @@ export async function openAssistant(
   await expect
     .poll(
       async () =>
-        (await page.getByRole("button", { name: "New chat" }).isVisible()) ||
+        (await page
+          .getByRole("button", { name: "New chat", exact: true })
+          .first()
+          .isVisible()) ||
         (await page.getByRole("button", { name: "Open chats" }).isVisible()),
       { timeout: 20_000 },
     )
@@ -118,9 +121,11 @@ export async function observeTurnContinuity(
         const visibleText =
           document.querySelector("main")?.innerText ?? document.body.innerText;
         if (visibleText.includes(message)) probe.sawMessage = true;
-        const emptyStateVisible = visibleText.includes(
-          "Start a new conversation",
-        );
+        const emptyStateVisible =
+          visibleText.includes("Start a new conversation") ||
+          visibleText.includes(
+            "Ask NyxID to help with services, access, and account operations.",
+          );
         if (probe.sawMessage && emptyStateVisible) {
           probe.bouncedToEmptyState = true;
         }
@@ -200,6 +205,18 @@ export function stopButton(page: Page) {
 
 export function sendButton(page: Page) {
   return page.getByRole("button", { name: "Send message" });
+}
+
+export async function openLatestToolActivity(page: Page): Promise<void> {
+  await thread(page)
+    .getByRole("button", { name: /\d+ actions?/ })
+    .last()
+    .click();
+  await thread(page)
+    .locator("summary")
+    .filter({ hasText: "lark.postMessage" })
+    .last()
+    .click();
 }
 
 /**

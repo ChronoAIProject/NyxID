@@ -1322,6 +1322,40 @@ pub struct ChainVerifyStatusItem {
 #[derive(Debug, Serialize)]
 pub struct ChainVerificationResponse {
     pub chains: Vec<ChainVerifyStatusItem>,
+    pub startup_diagnostics: Vec<StartupDiagnosticItem>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StartupDiagnosticItem {
+    pub code: String,
+    pub summary: String,
+    pub detail: String,
+    pub remediation: String,
+    pub detected_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn active_startup_diagnostics(
+    db: &mongodb::Database,
+) -> AppResult<Vec<StartupDiagnosticItem>> {
+    use futures::TryStreamExt;
+
+    let diagnostics: Vec<crate::models::startup_diagnostic::StartupDiagnostic> = db
+        .collection(crate::models::startup_diagnostic::COLLECTION_NAME)
+        .find(mongodb::bson::doc! { "active": true })
+        .sort(mongodb::bson::doc! { "detected_at": -1, "_id": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(diagnostics
+        .into_iter()
+        .map(|diagnostic| StartupDiagnosticItem {
+            code: diagnostic.code,
+            summary: diagnostic.summary,
+            detail: diagnostic.detail,
+            remediation: diagnostic.remediation,
+            detected_at: diagnostic.detected_at,
+        })
+        .collect())
 }
 
 fn chain_status_item(
@@ -1365,7 +1399,10 @@ pub async fn get_chain_verification(
             items.push(chain_status_item(status));
         }
     }
-    Ok(Json(ChainVerificationResponse { chains: items }))
+    Ok(Json(ChainVerificationResponse {
+        chains: items,
+        startup_diagnostics: active_startup_diagnostics(&state.db).await?,
+    }))
 }
 
 /// POST /api/v1/admin/chain-verification/run
@@ -1389,6 +1426,7 @@ pub async fn run_chain_verification(
             chain_status_item(report.audit),
             chain_status_item(report.billing_ledger),
         ],
+        startup_diagnostics: active_startup_diagnostics(&state.db).await?,
     }))
 }
 

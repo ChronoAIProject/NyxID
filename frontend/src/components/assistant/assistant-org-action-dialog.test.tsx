@@ -2,9 +2,15 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
-import { AssistantOrgActionDialog, type AssistantOrgAction } from "./assistant-org-action-dialog";
+import {
+  AssistantOrgActionDialog,
+  type AssistantOrgAction,
+} from "./assistant-org-action-dialog";
 
-const { mockGet, mockPost } = vi.hoisted(() => ({ mockGet: vi.fn(), mockPost: vi.fn() }));
+const { mockGet, mockPost } = vi.hoisted(() => ({
+  mockGet: vi.fn(),
+  mockPost: vi.fn(),
+}));
 vi.mock("@/lib/api-client", () => {
   class MockApiError extends Error {
     readonly status: number;
@@ -48,47 +54,91 @@ function memberEvidence(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderDialog(action: AssistantOrgAction, params: Record<string, unknown>) {
+function renderDialog(
+  action: AssistantOrgAction,
+  params: Record<string, unknown>,
+) {
   const onComplete = vi.fn();
-  render(<AssistantOrgActionDialog open onOpenChange={vi.fn()} actionRequestId={`request-${action}`} action={action} params={params} onComplete={onComplete} />);
+  render(
+    <AssistantOrgActionDialog
+      open
+      onOpenChange={vi.fn()}
+      actionRequestId={`request-${action}`}
+      action={action}
+      params={params}
+      onComplete={onComplete}
+    />,
+  );
   return onComplete;
 }
 
 async function clickSubmit(destructive = false) {
   if (destructive) await userEvent.click(screen.getByRole("checkbox"));
-  const button = screen.getByRole("button", { name: destructive ? "Confirm change" : "Continue" });
+  const button = screen.getByRole("button", {
+    name: destructive ? "Confirm change" : "Continue",
+  });
   fireEvent.click(button);
   fireEvent.click(button);
   await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
 }
 
-beforeEach(() => { mockGet.mockReset(); mockPost.mockReset(); });
+beforeEach(() => {
+  mockGet.mockReset();
+  mockPost.mockReset();
+});
 
 describe("AssistantOrgActionDialog", () => {
   it("runs org.create and verifies the canonical projection", async () => {
-    mockPost.mockResolvedValue({ resource: { orgId: ORG_ID }, replayed: false });
+    mockPost.mockResolvedValue({
+      resource: { orgId: ORG_ID },
+      replayed: false,
+      oneTimeMaterial: "delivered",
+    });
     mockGet.mockResolvedValue(orgEvidence());
     renderDialog("create", { displayName: "Acme" });
     await clickSubmit();
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/org/create", expect.objectContaining({ displayName: "Acme" }));
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/org/create",
+      expect.objectContaining({ displayName: "Acme" }),
+    );
     expect(mockGet).toHaveBeenCalledWith(`/orgs/${ORG_ID}/authorization`);
   });
 
   it("runs org.update only after a live pre-read and observes a newer state", async () => {
-    mockGet.mockResolvedValueOnce(orgEvidence()).mockResolvedValueOnce(orgEvidence({ updated_at: "2026-01-01T00:00:01Z" }));
-    mockPost.mockResolvedValue({ resource: { orgId: ORG_ID }, replayed: false });
+    mockGet
+      .mockResolvedValueOnce(orgEvidence())
+      .mockResolvedValueOnce(
+        orgEvidence({ updated_at: "2026-01-01T00:00:01Z" }),
+      );
+    mockPost.mockResolvedValue({
+      resource: { orgId: ORG_ID },
+      replayed: false,
+    });
     renderDialog("update", { orgId: ORG_ID, displayName: "Renamed" });
     await clickSubmit();
     expect(mockGet).toHaveBeenCalledTimes(2);
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/org/update", expect.objectContaining({ orgId: ORG_ID, displayName: "Renamed" }));
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/org/update",
+      expect.objectContaining({ orgId: ORG_ID, displayName: "Renamed" }),
+    );
   });
 
   it("runs org.delete only after a 200 pre-read, then accepts the causal 404", async () => {
-    mockGet.mockResolvedValueOnce(orgEvidence()).mockRejectedValueOnce(new ApiError(404, { message: "not found" } as never));
-    mockPost.mockResolvedValue({ resource: { orgId: ORG_ID }, replayed: false });
+    mockGet
+      .mockResolvedValueOnce(orgEvidence())
+      .mockRejectedValueOnce(
+        new ApiError(404, { message: "not found" } as never),
+      );
+    mockPost.mockResolvedValue({
+      resource: { orgId: ORG_ID },
+      replayed: false,
+    });
     const onComplete = renderDialog("delete", { orgId: ORG_ID });
     await clickSubmit(true);
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/org/delete", expect.objectContaining({ confirmed: true }));
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/org/delete",
+      expect.objectContaining({ confirmed: true }),
+    );
     expect(mockGet).toHaveBeenNthCalledWith(1, `/orgs/${ORG_ID}/authorization`);
     expect(mockGet).toHaveBeenNthCalledWith(2, `/orgs/${ORG_ID}/authorization`);
     await userEvent.click(await screen.findByRole("button", { name: "Done" }));
@@ -96,20 +146,64 @@ describe("AssistantOrgActionDialog", () => {
   });
 
   it("blocks org.delete when the canonical pre-read route is missing", async () => {
-    mockGet.mockRejectedValue(new ApiError(404, { message: "not found" } as never));
+    mockGet.mockRejectedValue(
+      new ApiError(404, { message: "not found" } as never),
+    );
     renderDialog("delete", { orgId: ORG_ID });
     await userEvent.click(screen.getByRole("checkbox"));
-    await userEvent.click(screen.getByRole("button", { name: "Confirm change" }));
+    await userEvent.click(
+      screen.getByRole("button", { name: "Confirm change" }),
+    );
     expect(await screen.findByRole("alert")).toBeInTheDocument();
     expect(mockPost).not.toHaveBeenCalled();
   });
 
   it("runs org.member_add and proves the member count increased", async () => {
-    mockGet.mockResolvedValueOnce(orgEvidence()).mockResolvedValueOnce(orgEvidence({ member_count: 2 }));
-    mockPost.mockResolvedValue({ resource: { orgId: ORG_ID }, replayed: false });
-    renderDialog("member_add", { orgId: ORG_ID, userId: USER_ID, role: "member" });
+    mockGet
+      .mockResolvedValueOnce(orgEvidence())
+      .mockResolvedValueOnce(orgEvidence({ member_count: 2 }));
+    mockPost.mockResolvedValue({
+      resource: { orgId: ORG_ID },
+      replayed: false,
+    });
+    renderDialog("member_add", {
+      orgId: ORG_ID,
+      userId: USER_ID,
+      role: "member",
+    });
     await clickSubmit();
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/org/member-add", expect.objectContaining({ userId: USER_ID, role: "member" }));
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/org/member-add",
+      expect.objectContaining({ userId: USER_ID, role: "member" }),
+    );
+  });
+
+  it("shows and forwards org.member_add allowedServiceIds while dropping unsupported isAdmin", async () => {
+    mockGet
+      .mockResolvedValueOnce(orgEvidence())
+      .mockResolvedValueOnce(orgEvidence({ member_count: 2 }));
+    mockPost.mockResolvedValue({
+      resource: { orgId: ORG_ID },
+      replayed: false,
+    });
+    renderDialog("member_add", {
+      orgId: ORG_ID,
+      userId: USER_ID,
+      role: "member",
+      allowedServiceIds: ["service-alpha", "service-beta"],
+      isAdmin: true,
+    });
+    expect(screen.getByText("service-alpha, service-beta")).toBeInTheDocument();
+    await clickSubmit();
+    const requestBody = mockPost.mock.calls[0]?.[1];
+    expect(requestBody).toEqual({
+      actionRequestId: "request-member_add",
+      orgId: ORG_ID,
+      userId: USER_ID,
+      role: "member",
+      allowedServiceIds: ["service-alpha", "service-beta"],
+    });
+    expect(requestBody).not.toHaveProperty("isAdmin");
   });
 
   it("runs org.member_remove and proves a terminal revoked membership", async () => {
@@ -117,12 +211,22 @@ describe("AssistantOrgActionDialog", () => {
       .mockResolvedValueOnce(orgEvidence({ member_count: 2 }))
       .mockResolvedValueOnce(memberEvidence())
       .mockResolvedValueOnce(orgEvidence({ member_count: 1 }))
-      .mockResolvedValueOnce(memberEvidence({ revoked_at: "2026-01-01T00:00:01Z" }));
-    mockPost.mockResolvedValue({ resource: { orgId: ORG_ID }, replayed: false });
+      .mockResolvedValueOnce(
+        memberEvidence({ revoked_at: "2026-01-01T00:00:01Z" }),
+      );
+    mockPost.mockResolvedValue({
+      resource: { orgId: ORG_ID },
+      replayed: false,
+    });
     renderDialog("member_remove", { orgId: ORG_ID, memberId: MEMBER_ID });
     await clickSubmit(true);
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/org/member-remove", expect.objectContaining({ confirmed: true }));
-    expect(mockGet).toHaveBeenLastCalledWith(`/orgs/${ORG_ID}/members/${MEMBER_ID}/authorization`);
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/org/member-remove",
+      expect.objectContaining({ confirmed: true }),
+    );
+    expect(mockGet).toHaveBeenLastCalledWith(
+      `/orgs/${ORG_ID}/members/${MEMBER_ID}/authorization`,
+    );
   });
 
   it("runs org.member_update_role and proves the exact new role", async () => {
@@ -131,25 +235,59 @@ describe("AssistantOrgActionDialog", () => {
       .mockResolvedValueOnce(memberEvidence())
       .mockResolvedValueOnce(orgEvidence())
       .mockResolvedValueOnce(memberEvidence({ role: "admin" }));
-    mockPost.mockResolvedValue({ resource: { orgId: ORG_ID }, replayed: false });
-    renderDialog("member_update_role", { orgId: ORG_ID, memberId: MEMBER_ID, role: "admin" });
+    mockPost.mockResolvedValue({
+      resource: { orgId: ORG_ID },
+      replayed: false,
+    });
+    renderDialog("member_update_role", {
+      orgId: ORG_ID,
+      memberId: MEMBER_ID,
+      role: "admin",
+    });
     await clickSubmit();
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/org/member-update-role", expect.objectContaining({ role: "admin", expectedRole: "viewer" }));
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/org/member-update-role",
+      expect.objectContaining({ role: "admin", expectedRole: "viewer" }),
+    );
   });
 
-  it("runs org.invite and proves the active invite count increased", async () => {
-    mockGet.mockResolvedValueOnce(orgEvidence()).mockResolvedValueOnce(orgEvidence({ active_invite_count: 1 }));
-    mockPost.mockResolvedValue({ resource: { orgId: ORG_ID }, replayed: false });
-    renderDialog("invite", { orgId: ORG_ID, role: "viewer" });
+  it("shows and forwards org.invite allowedServiceIds", async () => {
+    mockGet
+      .mockResolvedValueOnce(orgEvidence())
+      .mockResolvedValueOnce(orgEvidence({ active_invite_count: 1 }));
+    mockPost.mockResolvedValue({
+      resource: { orgId: ORG_ID },
+      replayed: false,
+    });
+    renderDialog("invite", {
+      orgId: ORG_ID,
+      role: "viewer",
+      allowedServiceIds: ["service-invite"],
+    });
+    expect(screen.getByText("service-invite")).toBeInTheDocument();
     await clickSubmit();
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/org/invite", expect.objectContaining({ ttlHours: 24 }));
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/org/invite",
+      expect.objectContaining({
+        allowedServiceIds: ["service-invite"],
+        ttlHours: 24,
+      }),
+    );
   });
 
   it("runs org.set_primary and proves the primary flag", async () => {
-    mockGet.mockResolvedValueOnce(orgEvidence()).mockResolvedValueOnce(orgEvidence({ is_primary: true }));
-    mockPost.mockResolvedValue({ resource: { orgId: ORG_ID }, replayed: false });
+    mockGet
+      .mockResolvedValueOnce(orgEvidence())
+      .mockResolvedValueOnce(orgEvidence({ is_primary: true }));
+    mockPost.mockResolvedValue({
+      resource: { orgId: ORG_ID },
+      replayed: false,
+    });
     renderDialog("set_primary", { orgId: ORG_ID });
     await clickSubmit();
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/org/set-primary", expect.objectContaining({ orgId: ORG_ID }));
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/org/set-primary",
+      expect.objectContaining({ orgId: ORG_ID }),
+    );
   });
 });

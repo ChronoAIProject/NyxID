@@ -268,6 +268,13 @@ One browser HTTP exchange creates one panel entry only after a valid backend
 wire-log ID or inline echo is received. Client captures can attach to that
 backend-created exchange; they can never create an entry independently.
 
+All assistant requests now pass through
+`frontend/src/lib/assistant/assistant-http.ts`. When both gates are active it
+adds the debug header, records the backend ID/inline envelope, and reads a
+`Response.clone()` into `WireBodyCapture`. The original response remains owned
+by `chat-api.ts` and the canonical SSE normalizer. Capture cannot reorder,
+delay, or consume live frames.
+
 An exchange records:
 
 - a client-derived label and transport kind
@@ -277,26 +284,16 @@ An exchange records:
 - the server wire-log ID, or a bounded inline fallback envelope
 - an optional session-only delivered capture
 
-Capture terminal outcomes are `complete`, `cancelled`, `network_error`,
-`worker_error`, or `protocol_cancel`. Truncation is independent of the terminal
-outcome: a stream may complete normally after exceeding the capture limit.
+New HTTP captures settle as `complete` or `network_error`. The schema retains
+the older `cancelled`, `worker_error`, and `protocol_cancel` values only for
+already-materialized diagnostic entries. Truncation is independent from the
+outcome. `WireBodyCapture` counts all received bytes, decodes UTF-8 with
+replacement for malformed sequences, and retains at most 4 MiB. Reaching the
+cap cancels only the cloned reader.
 
-The worker and inline fallback use the same independent tee. The tee does not
-change the bytes passed to the live AG-UI parser, frame ordering, or frame
-callback behavior. With capture disabled, cancellation still settles locally
-without a worker acknowledgement, HTTP error text still uses the original
-character-bounded `Response.text()` path, and a successful response without a
-body still reports `stream_closed` to live chat. With capture enabled, request
-retirement waits for the diagnostic wire flush acknowledgement so retained
-data is not lost; the live cancellation and bodyless-response results remain
-the same. Wire callbacks are isolated from frame callbacks.
-
-The per-response limits are:
-
-- 512 KiB retained decoded SSE line data
-- 64 KiB retained non-SSE or error response data
-- 32 KiB maximum serialized worker wire message, using line fragments when a
-  single logical line exceeds the message limit
+`POST /assistant/chat` is initially unattributed because its authoritative ID
+is inside `RUN_STARTED`. The orchestrator assigns the captured exchange to the
+adopted conversation as soon as that frame passes identity validation.
 
 The Zustand persistence schema is version 3 under the existing
 `nyxid.assistant.wirelog.v1` local-storage key. Pre-v3 entries are discarded.
@@ -326,22 +323,15 @@ The **Responses** switch at the top of the panel hides or shows every
 response-derived surface, including Aevatar status badges, backend-observed
 response metadata, delivered response bodies, raw SSE, and the Rendered view.
 
-Raw SSE renders as individual decoded line items. The DOM is windowed in
-200-line increments so a capture containing many short or blank lines does not
-mount every retained line at once.
+Raw SSE is derived from the retained body and windowed in 200-line increments.
 
-Rendered replay uses the production SSE parser, turn-event reducer, and text
-Markdown renderer. It derives actor or workflow ordering rules from the
-exchange and carries capture outcome and truncation into EOF handling. The
-replay projector is diagnostic-only; parity tests compare its event sequence
-and final reduced messages against the real transport for actor and workflow
-fixtures.
-
-Only text uses the production chat renderer. Run ledgers, connection cards,
-action cards, approval cards, and media are inert placeholders. Each
-placeholder shows the original source frame JSON from the replay sidecar and
-is explicitly marked "Not replayed." No live controls, queries, navigation, or
-assistant-store writes are mounted by replay.
+Rendered replay passes the captured body through the same
+`SsePayloadDecoder`, `normalizeBackendSseFrame`, runtime accumulator, and actor
+reducer as live chat. It carries capture outcome and truncation into partial
+replay handling. Text, reasoning, step/tool activity, errors, and media use the
+production message renderer. Actor facts are shown separately as diagnostic
+JSON. They never mount task, input, approval, connection, action, navigation,
+query, or store side effects; connect cards are disabled in replay.
 
 Raw captures, fetched request echoes, and placeholder JSON may contain
 sensitive upstream payloads verbatim. They bypass the chat renderer's
@@ -368,7 +358,7 @@ unredacted request payloads is unacceptable.
   the feature and browser capture gates are enabled.
 - A final `AppError` has no assistant debug echo because no final handler
   `Response` passes through the attachment path.
-- Production interactive cards are not replayed. Read-only card variants are
-  a possible follow-up.
+- Production interactive actor cards are not replayed. Actor facts remain
+  diagnostic JSON.
 - Literal upstream response octets are not captured or persisted server-side.
   The delivered browser entity is the privacy-preserving diagnostic boundary.

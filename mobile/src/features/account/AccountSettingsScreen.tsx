@@ -299,9 +299,9 @@ export function AccountSettingsScreen({ navigation }: Props) {
       );
       return;
     }
-    const willDisableApproval = isLastChannel("push") && notifSettings?.approval_required;
-    const message = willDisableApproval
-      ? "This is your only notification channel. Disabling it will also turn off approval protection."
+    const willSuspendApproval = isLastChannel("push") && notifSettings?.approval_required;
+    const message = willSuspendApproval
+      ? "This is your only notification channel. Approval protection will be suspended until a channel is available, then resume automatically."
       : "You will no longer receive push notifications for approval requests.";
 
     Alert.alert("Disable Push Notifications", message, [
@@ -316,7 +316,6 @@ export function AccountSettingsScreen({ navigation }: Props) {
           notifMutation.mutate(
             {
               push_enabled: false,
-              ...(willDisableApproval && { approval_required: false }),
             },
             emitPreferenceToggledOnSuccess("push_enabled", false),
           );
@@ -333,10 +332,10 @@ export function AccountSettingsScreen({ navigation }: Props) {
       );
       return;
     }
-    const willDisableApproval = isLastChannel("telegram") && notifSettings?.approval_required;
+    const willSuspendApproval = isLastChannel("telegram") && notifSettings?.approval_required;
     const willDisconnect = true; // disabling always disconnects
-    const message = willDisableApproval
-      ? "This is your only notification channel. Disabling it will disconnect Telegram and turn off approval protection."
+    const message = willSuspendApproval
+      ? "This is your only notification channel. Disabling it will disconnect Telegram and suspend approval protection until a channel is available."
       : "This will disconnect your Telegram account and stop all Telegram notifications.";
 
     Alert.alert("Disable Telegram", message, [
@@ -345,8 +344,7 @@ export function AccountSettingsScreen({ navigation }: Props) {
         text: "Disable",
         style: "destructive",
         onPress: async () => {
-          // Disable notifications + approval in one call, then
-          // disconnect. Only emit after BOTH land -- the earlier design
+          // Disable notifications in one call, then disconnect. Only emit after BOTH land -- the earlier design
           // emitted before the settings update, which overcounted
           // completed toggles on offline/error.
           //
@@ -360,7 +358,6 @@ export function AccountSettingsScreen({ navigation }: Props) {
           try {
             await mobileApi.updateNotificationSettings({
               telegram_enabled: false,
-              ...(willDisableApproval && { approval_required: false }),
             });
             settingsOk = true;
           } catch {
@@ -586,7 +583,9 @@ export function AccountSettingsScreen({ navigation }: Props) {
               </View>
               {notifSettings && (
                 <Text style={styles.channelHint}>
-                  Either Push or Telegram must stay enabled to receive approval requests.
+                  {notifSettings.approval_suspended
+                    ? "Approval protection is suspended until a notification channel is available; it resumes automatically."
+                    : "Push or Telegram delivers requests when approval protection is on."}
                 </Text>
               )}
             </>
