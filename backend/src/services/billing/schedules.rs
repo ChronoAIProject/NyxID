@@ -266,7 +266,7 @@ pub async fn disburse_due(
             let chunk_limit = DISBURSEMENT_CHUNK.min(remaining_budget);
             let recipients = next_recipients(db, &period, chunk_limit).await?;
             if recipients.is_empty() {
-                complete_period(db, &schedule.id, &period.id, now).await?;
+                complete_period(db, &schedule.id, &period, now).await?;
                 stats.periods_completed += 1;
                 break;
             }
@@ -597,14 +597,24 @@ async fn advance_cursor(
 async fn complete_period(
     db: &mongodb::Database,
     schedule_id: &str,
-    period_id: &str,
+    period: &CreditSchedulePeriod,
     now: DateTime<Utc>,
 ) -> AppResult<()> {
+    let disbursed_count = db
+        .collection::<CreditGrant>(CREDIT_GRANTS)
+        .count_documents(doc! {
+            "schedule_origin.schedule_id": schedule_id,
+            "schedule_origin.period_start": bson::DateTime::from_chrono(period.period_start),
+        })
+        .await?;
+    let disbursed_count = i64::try_from(disbursed_count)
+        .map_err(|_| AppError::Internal("credit schedule grant count overflowed".to_string()))?;
     db.collection::<CreditSchedulePeriod>(CREDIT_SCHEDULE_PERIODS)
         .update_one(
-            doc! { "_id": period_id, "status": "disbursing" },
+            doc! { "_id": &period.id, "status": "disbursing" },
             doc! { "$set": {
                 "status": "complete",
+                "disbursed_count": disbursed_count,
                 "lease_expires_at": Bson::Null,
                 "updated_at": bson::DateTime::from_chrono(now),
                 "completed_at": bson::DateTime::from_chrono(now),

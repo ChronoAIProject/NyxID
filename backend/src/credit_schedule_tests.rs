@@ -93,6 +93,7 @@ async fn disburse_due_is_idempotent_across_replicas_and_crashes() {
             doc! { "_id": &period_id },
             doc! { "$set": {
                 "cursor_user_id": bson::Bson::Null,
+                "disbursed_count": 0_i64,
                 "lease_expires_at": bson::Bson::Null,
             } },
         )
