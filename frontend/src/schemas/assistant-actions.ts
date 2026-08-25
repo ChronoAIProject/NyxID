@@ -242,6 +242,190 @@ export const externalKeyDeleteActionParamsSchema = z
   })
   .strict();
 
+// ---- Wave 3 and Wave 4 browser-journey params. These schemas mirror the
+// published assistant manifest. Effect-only values (confirmation flags,
+// optimistic-concurrency versions, and browser-entered secrets) are excluded:
+// dialogs derive or collect those values after the user opens the journey.
+const optionalActionIdentitySchema = requiredActionIdentitySchema.optional();
+const optionalActionTextSchema = z.string().max(4_096).optional();
+const actionIdentityListSchema = z.array(requiredActionIdentitySchema).max(64);
+const orgRoleActionParamsSchema = z.enum(["admin", "member", "viewer"]);
+
+export const nodeRegisterTokenActionParamsSchema = z
+  .object({
+    name: z.string().trim().min(1).max(64),
+    targetOrgId: optionalActionIdentitySchema,
+  })
+  .strict();
+
+export const nodeRotateTokenActionParamsSchema = z
+  .object({ nodeId: requiredActionIdentitySchema })
+  .strict();
+
+export const nodeDeleteActionParamsSchema = z
+  .object({ nodeId: requiredActionIdentitySchema })
+  .strict();
+
+export const nodeTransferActionParamsSchema = z
+  .object({
+    nodeId: requiredActionIdentitySchema,
+    newOwnerUserId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const nodeCredentialActionParamsSchema = z
+  .object({
+    nodeId: requiredActionIdentitySchema,
+    serviceSlug: z.string().trim().min(1).max(64),
+    injectionMethod: z.enum(["header", "query-param", "path-prefix"]),
+    fieldName: z.string().trim().min(1).max(128),
+    targetUrl: optionalActionTextSchema,
+    label: optionalActionTextSchema,
+  })
+  .strict();
+
+export const pendingCredentialCancelActionParamsSchema = z
+  .object({
+    nodeId: requiredActionIdentitySchema,
+    pendingCredentialId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const deviceOnboardActionParamsSchema = z
+  .object({
+    label: z.string().trim().min(1).max(128),
+    targetOrgId: optionalActionIdentitySchema,
+    defaultServiceIds: actionIdentityListSchema.optional(),
+  })
+  .strict();
+
+export const orgCreateActionParamsSchema = z
+  .object({
+    displayName: z.string().trim().min(1).max(200),
+    contactEmail: optionalActionTextSchema,
+    avatarUrl: optionalActionTextSchema,
+  })
+  .strict();
+
+export const orgUpdateActionParamsSchema = z
+  .object({
+    orgId: requiredActionIdentitySchema,
+    displayName: optionalActionTextSchema,
+    slug: optionalActionTextSchema,
+    contactEmail: optionalActionTextSchema,
+    avatarUrl: optionalActionTextSchema,
+  })
+  .strict();
+
+export const orgIdentityActionParamsSchema = z
+  .object({ orgId: requiredActionIdentitySchema })
+  .strict();
+
+export const orgMemberAddActionParamsSchema = z
+  .object({
+    orgId: requiredActionIdentitySchema,
+    userId: requiredActionIdentitySchema,
+    role: orgRoleActionParamsSchema,
+    allowedServiceIds: actionIdentityListSchema.optional(),
+  })
+  .strict();
+
+export const orgMemberIdentityActionParamsSchema = z
+  .object({
+    orgId: requiredActionIdentitySchema,
+    memberId: requiredActionIdentitySchema,
+  })
+  .strict();
+
+export const orgMemberUpdateRoleActionParamsSchema = z
+  .object({
+    orgId: requiredActionIdentitySchema,
+    memberId: requiredActionIdentitySchema,
+    role: orgRoleActionParamsSchema,
+  })
+  .strict();
+
+export const orgInviteActionParamsSchema = z
+  .object({
+    orgId: requiredActionIdentitySchema,
+    role: orgRoleActionParamsSchema,
+    allowedServiceIds: actionIdentityListSchema.optional(),
+  })
+  .strict();
+
+export const accountProfileUpdateActionParamsSchema = z
+  .object({
+    displayName: optionalActionTextSchema,
+    avatarUrl: optionalActionTextSchema,
+  })
+  .strict()
+  .refine(
+    (value) => value.displayName !== undefined || value.avatarUrl !== undefined,
+    "At least one profile field is required",
+  );
+
+export const accountRevokeConsentActionParamsSchema = z
+  .object({ clientId: requiredActionIdentitySchema })
+  .strict();
+
+export const approvalServiceActionParamsSchema = z
+  .object({ serviceId: requiredActionIdentitySchema })
+  .strict();
+
+export const approvalRevokeGrantActionParamsSchema = z
+  .object({ grantId: requiredActionIdentitySchema })
+  .strict();
+
+export const serviceAccountCreateActionParamsSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    description: optionalActionTextSchema,
+    targetOrgId: optionalActionIdentitySchema,
+  })
+  .strict();
+
+export const serviceAccountUpdateActionParamsSchema = z
+  .object({
+    serviceAccountId: requiredActionIdentitySchema,
+    name: optionalActionTextSchema,
+    description: optionalActionTextSchema,
+  })
+  .strict();
+
+export const serviceAccountIdentityActionParamsSchema = z
+  .object({ serviceAccountId: requiredActionIdentitySchema })
+  .strict();
+
+export const developerAppCreateActionParamsSchema = z
+  .object({
+    name: z.string().trim().min(1).max(200),
+    redirectUris: z.array(z.string().max(4_096)).min(1).max(64),
+  })
+  .strict();
+
+export const developerAppUpdateActionParamsSchema = z
+  .object({
+    clientId: requiredActionIdentitySchema,
+    name: optionalActionTextSchema,
+    redirectUris: z.array(z.string().max(4_096)).max(64).optional(),
+  })
+  .strict();
+
+export const developerAppIdentityActionParamsSchema = z
+  .object({ clientId: requiredActionIdentitySchema })
+  .strict();
+
+export const externalKeyAddGcpActionParamsSchema = z
+  .object({
+    label: optionalActionTextSchema,
+    targetOrgId: optionalActionIdentitySchema,
+  })
+  .strict();
+
+export const openClawConnectActionParamsSchema = z
+  .object({ gatewayUrl: z.string().trim().min(1).max(4_096) })
+  .strict();
+
 const emptyActionParamsSchema = z.object({}).strict();
 
 export const assistantActionParamsSchema = z
@@ -262,6 +446,32 @@ export const assistantActionParamsSchema = z
     endpointDeleteActionParamsSchema,
     externalKeyRotateActionParamsSchema,
     externalKeyDeleteActionParamsSchema,
+    nodeRegisterTokenActionParamsSchema,
+    nodeRotateTokenActionParamsSchema,
+    nodeDeleteActionParamsSchema,
+    nodeTransferActionParamsSchema,
+    nodeCredentialActionParamsSchema,
+    pendingCredentialCancelActionParamsSchema,
+    deviceOnboardActionParamsSchema,
+    orgCreateActionParamsSchema,
+    orgUpdateActionParamsSchema,
+    orgIdentityActionParamsSchema,
+    orgMemberAddActionParamsSchema,
+    orgMemberIdentityActionParamsSchema,
+    orgMemberUpdateRoleActionParamsSchema,
+    orgInviteActionParamsSchema,
+    accountProfileUpdateActionParamsSchema,
+    accountRevokeConsentActionParamsSchema,
+    approvalServiceActionParamsSchema,
+    approvalRevokeGrantActionParamsSchema,
+    serviceAccountCreateActionParamsSchema,
+    serviceAccountUpdateActionParamsSchema,
+    serviceAccountIdentityActionParamsSchema,
+    developerAppCreateActionParamsSchema,
+    developerAppUpdateActionParamsSchema,
+    developerAppIdentityActionParamsSchema,
+    externalKeyAddGcpActionParamsSchema,
+    openClawConnectActionParamsSchema,
     emptyActionParamsSchema,
   ])
   .optional()
@@ -435,6 +645,160 @@ export type ActionCardParams =
       readonly variant: "external_key_delete";
       readonly external_key_id: string;
     }
+  | {
+      readonly variant: "node_register_token";
+      readonly name: string;
+      readonly target_org_id?: string;
+    }
+  | { readonly variant: "node_rotate_token"; readonly node_id: string }
+  | { readonly variant: "node_delete"; readonly node_id: string }
+  | {
+      readonly variant: "node_transfer";
+      readonly node_id: string;
+      readonly new_owner_user_id: string;
+    }
+  | {
+      readonly variant: "node_inject_credential";
+      readonly node_id: string;
+      readonly service_slug: string;
+      readonly injection_method: "header" | "query-param" | "path-prefix";
+      readonly field_name: string;
+      readonly target_url?: string;
+      readonly label?: string;
+    }
+  | {
+      readonly variant: "pending_credential_push";
+      readonly node_id: string;
+      readonly service_slug: string;
+      readonly injection_method: "header" | "query-param" | "path-prefix";
+      readonly field_name: string;
+      readonly target_url?: string;
+      readonly label?: string;
+    }
+  | {
+      readonly variant: "pending_credential_cancel";
+      readonly node_id: string;
+      readonly pending_credential_id: string;
+    }
+  | {
+      readonly variant: "device_onboard";
+      readonly label: string;
+      readonly target_org_id?: string;
+      readonly default_service_ids?: readonly string[];
+    }
+  | {
+      readonly variant: "org_create";
+      readonly display_name: string;
+      readonly contact_email?: string;
+      readonly avatar_url?: string;
+    }
+  | {
+      readonly variant: "org_update";
+      readonly org_id: string;
+      readonly display_name?: string;
+      readonly slug?: string;
+      readonly contact_email?: string;
+      readonly avatar_url?: string;
+    }
+  | { readonly variant: "org_delete"; readonly org_id: string }
+  | {
+      readonly variant: "org_member_add";
+      readonly org_id: string;
+      readonly user_id: string;
+      readonly role: "admin" | "member" | "viewer";
+      readonly allowed_service_ids?: readonly string[];
+    }
+  | {
+      readonly variant: "org_member_remove";
+      readonly org_id: string;
+      readonly member_id: string;
+    }
+  | {
+      readonly variant: "org_member_update_role";
+      readonly org_id: string;
+      readonly member_id: string;
+      readonly role: "admin" | "member" | "viewer";
+    }
+  | {
+      readonly variant: "org_invite";
+      readonly org_id: string;
+      readonly role: "admin" | "member" | "viewer";
+      readonly allowed_service_ids?: readonly string[];
+    }
+  | { readonly variant: "org_set_primary"; readonly org_id: string }
+  | {
+      readonly variant: "account_profile_update";
+      readonly display_name?: string;
+      readonly avatar_url?: string;
+    }
+  | {
+      readonly variant: "account_revoke_consent";
+      readonly client_id: string;
+    }
+  | { readonly variant: "account_delete" }
+  | { readonly variant: "account_mfa_setup" }
+  | {
+      readonly variant: "approval_configure";
+      readonly service_id: string;
+    }
+  | { readonly variant: "approval_enable"; readonly service_id: string }
+  | { readonly variant: "approval_disable"; readonly service_id: string }
+  | {
+      readonly variant: "approval_revoke_grant";
+      readonly grant_id: string;
+    }
+  | { readonly variant: "notifications_update" }
+  | { readonly variant: "notifications_telegram_link" }
+  | { readonly variant: "notifications_telegram_disconnect" }
+  | {
+      readonly variant: "service_account_create";
+      readonly name: string;
+      readonly description?: string;
+      readonly target_org_id?: string;
+    }
+  | {
+      readonly variant: "service_account_update";
+      readonly service_account_id: string;
+      readonly name?: string;
+      readonly description?: string;
+    }
+  | {
+      readonly variant: "service_account_delete";
+      readonly service_account_id: string;
+    }
+  | {
+      readonly variant: "service_account_rotate_secret";
+      readonly service_account_id: string;
+    }
+  | {
+      readonly variant: "service_account_revoke_tokens";
+      readonly service_account_id: string;
+    }
+  | {
+      readonly variant: "developer_app_create";
+      readonly name: string;
+      readonly redirect_uris: readonly string[];
+    }
+  | {
+      readonly variant: "developer_app_update";
+      readonly client_id: string;
+      readonly name?: string;
+      readonly redirect_uris?: readonly string[];
+    }
+  | { readonly variant: "developer_app_delete"; readonly client_id: string }
+  | {
+      readonly variant: "developer_app_rotate_secret";
+      readonly client_id: string;
+    }
+  | {
+      readonly variant: "external_key_add_gcp_service_account";
+      readonly label?: string;
+      readonly target_org_id?: string;
+    }
+  | {
+      readonly variant: "openclaw_connect";
+      readonly gateway_url: string;
+    }
   | { readonly variant: "unknown" };
 
 export const actionDispositionSchema = z.enum([
@@ -607,7 +971,8 @@ export type ActionReport = z.infer<typeof actionReportSchema>;
 export type ActionContinueBody = z.infer<typeof actionContinueBodySchema>;
 export type ActionWakeBody = z.infer<typeof actionWakeBodySchema>;
 export type ActionReportActionLookup =
-  ReadonlyMap<string, string> | Readonly<Record<string, string | undefined>>;
+  | ReadonlyMap<string, string>
+  | Readonly<Record<string, string | undefined>>;
 function matchesSecretValue(value: string): boolean {
   SECRET_VALUE.lastIndex = 0;
   return SECRET_VALUE.test(value);
@@ -731,13 +1096,16 @@ function copyResource(resource: ActionResource): ActionResource {
   if ("account" in resource) {
     return { account: { userId: resource.account.userId } };
   }
-  if ("grant" in resource) return { grant: { grantId: resource.grant.grantId } };
+  if ("grant" in resource)
+    return { grant: { grantId: resource.grant.grantId } };
   if ("approvalConfig" in resource) {
     return { approvalConfig: { serviceId: resource.approvalConfig.serviceId } };
   }
   if ("notificationBinding" in resource) {
     return {
-      notificationBinding: { bindingId: resource.notificationBinding.bindingId },
+      notificationBinding: {
+        bindingId: resource.notificationBinding.bindingId,
+      },
     };
   }
   if ("serviceAccount" in resource) {

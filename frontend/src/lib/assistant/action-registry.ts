@@ -1,8 +1,17 @@
 import {
   ACTION_SCHEMA_VERSION,
   ACTION_SERVICE_SLUG_PATTERN,
+  accountProfileUpdateActionParamsSchema,
+  accountRevokeConsentActionParamsSchema,
+  approvalRevokeGrantActionParamsSchema,
+  approvalServiceActionParamsSchema,
+  developerAppCreateActionParamsSchema,
+  developerAppIdentityActionParamsSchema,
+  developerAppUpdateActionParamsSchema,
+  deviceOnboardActionParamsSchema,
   endpointDeleteActionParamsSchema,
   endpointUpdateActionParamsSchema,
+  externalKeyAddGcpActionParamsSchema,
   externalKeyDeleteActionParamsSchema,
   externalKeyRotateActionParamsSchema,
   keyBindCredentialActionParamsSchema,
@@ -11,7 +20,24 @@ import {
   keyExtendScopeActionParamsSchema,
   keyRotateActionParamsSchema,
   keyUpdateActionParamsSchema,
+  nodeCredentialActionParamsSchema,
+  nodeDeleteActionParamsSchema,
+  nodeRegisterTokenActionParamsSchema,
+  nodeRotateTokenActionParamsSchema,
+  nodeTransferActionParamsSchema,
+  openClawConnectActionParamsSchema,
+  orgCreateActionParamsSchema,
+  orgIdentityActionParamsSchema,
+  orgInviteActionParamsSchema,
+  orgMemberAddActionParamsSchema,
+  orgMemberIdentityActionParamsSchema,
+  orgMemberUpdateRoleActionParamsSchema,
+  orgUpdateActionParamsSchema,
+  pendingCredentialCancelActionParamsSchema,
   serviceConnectActionParamsSchema,
+  serviceAccountCreateActionParamsSchema,
+  serviceAccountIdentityActionParamsSchema,
+  serviceAccountUpdateActionParamsSchema,
   serviceDeleteActionParamsSchema,
   serviceReauthorizeActionParamsSchema,
   serviceRotateCredentialActionParamsSchema,
@@ -333,6 +359,369 @@ function normalizeExternalKeyDelete(raw: unknown): ActionCardParams | null {
     variant: "external_key_delete",
     external_key_id: parsed.data.externalKeyId,
   };
+}
+
+function normalizeNodeRegisterToken(raw: unknown): ActionCardParams | null {
+  const parsed = nodeRegisterTokenActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "node_register_token",
+    name: parsed.data.name,
+    target_org_id: parsed.data.targetOrgId,
+  };
+}
+
+function normalizeNodeRotateToken(raw: unknown): ActionCardParams | null {
+  const parsed = nodeRotateTokenActionParamsSchema.safeParse(raw);
+  return parsed.success
+    ? { variant: "node_rotate_token", node_id: parsed.data.nodeId }
+    : null;
+}
+
+function normalizeNodeDelete(raw: unknown): ActionCardParams | null {
+  const parsed = nodeDeleteActionParamsSchema.safeParse(raw);
+  return parsed.success
+    ? { variant: "node_delete", node_id: parsed.data.nodeId }
+    : null;
+}
+
+function normalizeNodeTransfer(raw: unknown): ActionCardParams | null {
+  const parsed = nodeTransferActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "node_transfer",
+    node_id: parsed.data.nodeId,
+    new_owner_user_id: parsed.data.newOwnerUserId,
+  };
+}
+
+function normalizedCredentialParams(
+  raw: unknown,
+  variant: "node_inject_credential" | "pending_credential_push",
+): ActionCardParams | null {
+  const parsed = nodeCredentialActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant,
+    node_id: parsed.data.nodeId,
+    service_slug: parsed.data.serviceSlug,
+    injection_method: parsed.data.injectionMethod,
+    field_name: parsed.data.fieldName,
+    target_url: parsed.data.targetUrl,
+    label: parsed.data.label,
+  };
+}
+
+function normalizeNodeInjectCredential(raw: unknown): ActionCardParams | null {
+  return normalizedCredentialParams(raw, "node_inject_credential");
+}
+
+function normalizePendingCredentialPush(raw: unknown): ActionCardParams | null {
+  return normalizedCredentialParams(raw, "pending_credential_push");
+}
+
+function normalizePendingCredentialCancel(
+  raw: unknown,
+): ActionCardParams | null {
+  const parsed = pendingCredentialCancelActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "pending_credential_cancel",
+    node_id: parsed.data.nodeId,
+    pending_credential_id: parsed.data.pendingCredentialId,
+  };
+}
+
+function normalizeDeviceOnboard(raw: unknown): ActionCardParams | null {
+  const parsed = deviceOnboardActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "device_onboard",
+    label: parsed.data.label,
+    target_org_id: parsed.data.targetOrgId,
+    default_service_ids: parsed.data.defaultServiceIds,
+  };
+}
+
+function normalizeOrgCreate(raw: unknown): ActionCardParams | null {
+  const parsed = orgCreateActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "org_create",
+    display_name: parsed.data.displayName,
+    contact_email: parsed.data.contactEmail,
+    avatar_url: parsed.data.avatarUrl,
+  };
+}
+
+function normalizeOrgUpdate(raw: unknown): ActionCardParams | null {
+  const parsed = orgUpdateActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "org_update",
+    org_id: parsed.data.orgId,
+    display_name: parsed.data.displayName,
+    slug: parsed.data.slug,
+    contact_email: parsed.data.contactEmail,
+    avatar_url: parsed.data.avatarUrl,
+  };
+}
+
+function normalizedOrgIdentity(
+  raw: unknown,
+  variant: "org_delete" | "org_set_primary",
+): ActionCardParams | null {
+  const parsed = orgIdentityActionParamsSchema.safeParse(raw);
+  return parsed.success ? { variant, org_id: parsed.data.orgId } : null;
+}
+
+function normalizeOrgDelete(raw: unknown): ActionCardParams | null {
+  return normalizedOrgIdentity(raw, "org_delete");
+}
+
+function normalizeOrgMemberAdd(raw: unknown): ActionCardParams | null {
+  const parsed = orgMemberAddActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "org_member_add",
+    org_id: parsed.data.orgId,
+    user_id: parsed.data.userId,
+    role: parsed.data.role,
+    allowed_service_ids: parsed.data.allowedServiceIds,
+  };
+}
+
+function normalizedOrgMemberIdentity(
+  raw: unknown,
+  variant: "org_member_remove",
+): ActionCardParams | null {
+  const parsed = orgMemberIdentityActionParamsSchema.safeParse(raw);
+  return parsed.success
+    ? {
+        variant,
+        org_id: parsed.data.orgId,
+        member_id: parsed.data.memberId,
+      }
+    : null;
+}
+
+function normalizeOrgMemberRemove(raw: unknown): ActionCardParams | null {
+  return normalizedOrgMemberIdentity(raw, "org_member_remove");
+}
+
+function normalizeOrgMemberUpdateRole(raw: unknown): ActionCardParams | null {
+  const parsed = orgMemberUpdateRoleActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "org_member_update_role",
+    org_id: parsed.data.orgId,
+    member_id: parsed.data.memberId,
+    role: parsed.data.role,
+  };
+}
+
+function normalizeOrgInvite(raw: unknown): ActionCardParams | null {
+  const parsed = orgInviteActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "org_invite",
+    org_id: parsed.data.orgId,
+    role: parsed.data.role,
+    allowed_service_ids: parsed.data.allowedServiceIds,
+  };
+}
+
+function normalizeOrgSetPrimary(raw: unknown): ActionCardParams | null {
+  return normalizedOrgIdentity(raw, "org_set_primary");
+}
+
+function normalizeAccountProfileUpdate(raw: unknown): ActionCardParams | null {
+  const parsed = accountProfileUpdateActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "account_profile_update",
+    display_name: parsed.data.displayName,
+    avatar_url: parsed.data.avatarUrl,
+  };
+}
+
+function normalizeAccountRevokeConsent(raw: unknown): ActionCardParams | null {
+  const parsed = accountRevokeConsentActionParamsSchema.safeParse(raw);
+  return parsed.success
+    ? { variant: "account_revoke_consent", client_id: parsed.data.clientId }
+    : null;
+}
+
+function normalizeEmptyVariant(
+  raw: unknown,
+  variant:
+    | "account_delete"
+    | "account_mfa_setup"
+    | "notifications_update"
+    | "notifications_telegram_link"
+    | "notifications_telegram_disconnect",
+): ActionCardParams | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  return Object.keys(raw).length === 0 ? { variant } : null;
+}
+
+function normalizeAccountDelete(raw: unknown): ActionCardParams | null {
+  return normalizeEmptyVariant(raw, "account_delete");
+}
+
+function normalizeAccountMfaSetup(raw: unknown): ActionCardParams | null {
+  return normalizeEmptyVariant(raw, "account_mfa_setup");
+}
+
+function normalizedApprovalService(
+  raw: unknown,
+  variant: "approval_configure" | "approval_enable" | "approval_disable",
+): ActionCardParams | null {
+  const parsed = approvalServiceActionParamsSchema.safeParse(raw);
+  return parsed.success ? { variant, service_id: parsed.data.serviceId } : null;
+}
+
+function normalizeApprovalConfigure(raw: unknown): ActionCardParams | null {
+  return normalizedApprovalService(raw, "approval_configure");
+}
+
+function normalizeApprovalEnable(raw: unknown): ActionCardParams | null {
+  return normalizedApprovalService(raw, "approval_enable");
+}
+
+function normalizeApprovalDisable(raw: unknown): ActionCardParams | null {
+  return normalizedApprovalService(raw, "approval_disable");
+}
+
+function normalizeApprovalRevokeGrant(raw: unknown): ActionCardParams | null {
+  const parsed = approvalRevokeGrantActionParamsSchema.safeParse(raw);
+  return parsed.success
+    ? { variant: "approval_revoke_grant", grant_id: parsed.data.grantId }
+    : null;
+}
+
+function normalizeNotificationsUpdate(raw: unknown): ActionCardParams | null {
+  return normalizeEmptyVariant(raw, "notifications_update");
+}
+
+function normalizeNotificationsTelegramLink(
+  raw: unknown,
+): ActionCardParams | null {
+  return normalizeEmptyVariant(raw, "notifications_telegram_link");
+}
+
+function normalizeNotificationsTelegramDisconnect(
+  raw: unknown,
+): ActionCardParams | null {
+  return normalizeEmptyVariant(raw, "notifications_telegram_disconnect");
+}
+
+function normalizeServiceAccountCreate(raw: unknown): ActionCardParams | null {
+  const parsed = serviceAccountCreateActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "service_account_create",
+    name: parsed.data.name,
+    description: parsed.data.description,
+    target_org_id: parsed.data.targetOrgId,
+  };
+}
+
+function normalizeServiceAccountUpdate(raw: unknown): ActionCardParams | null {
+  const parsed = serviceAccountUpdateActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "service_account_update",
+    service_account_id: parsed.data.serviceAccountId,
+    name: parsed.data.name,
+    description: parsed.data.description,
+  };
+}
+
+function normalizedServiceAccountIdentity(
+  raw: unknown,
+  variant:
+    | "service_account_delete"
+    | "service_account_rotate_secret"
+    | "service_account_revoke_tokens",
+): ActionCardParams | null {
+  const parsed = serviceAccountIdentityActionParamsSchema.safeParse(raw);
+  return parsed.success
+    ? { variant, service_account_id: parsed.data.serviceAccountId }
+    : null;
+}
+
+function normalizeServiceAccountDelete(raw: unknown): ActionCardParams | null {
+  return normalizedServiceAccountIdentity(raw, "service_account_delete");
+}
+
+function normalizeServiceAccountRotateSecret(
+  raw: unknown,
+): ActionCardParams | null {
+  return normalizedServiceAccountIdentity(raw, "service_account_rotate_secret");
+}
+
+function normalizeServiceAccountRevokeTokens(
+  raw: unknown,
+): ActionCardParams | null {
+  return normalizedServiceAccountIdentity(raw, "service_account_revoke_tokens");
+}
+
+function normalizeDeveloperAppCreate(raw: unknown): ActionCardParams | null {
+  const parsed = developerAppCreateActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "developer_app_create",
+    name: parsed.data.name,
+    redirect_uris: parsed.data.redirectUris,
+  };
+}
+
+function normalizeDeveloperAppUpdate(raw: unknown): ActionCardParams | null {
+  const parsed = developerAppUpdateActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  return {
+    variant: "developer_app_update",
+    client_id: parsed.data.clientId,
+    name: parsed.data.name,
+    redirect_uris: parsed.data.redirectUris,
+  };
+}
+
+function normalizedDeveloperAppIdentity(
+  raw: unknown,
+  variant: "developer_app_delete" | "developer_app_rotate_secret",
+): ActionCardParams | null {
+  const parsed = developerAppIdentityActionParamsSchema.safeParse(raw);
+  return parsed.success ? { variant, client_id: parsed.data.clientId } : null;
+}
+
+function normalizeDeveloperAppDelete(raw: unknown): ActionCardParams | null {
+  return normalizedDeveloperAppIdentity(raw, "developer_app_delete");
+}
+
+function normalizeDeveloperAppRotateSecret(
+  raw: unknown,
+): ActionCardParams | null {
+  return normalizedDeveloperAppIdentity(raw, "developer_app_rotate_secret");
+}
+
+function normalizeExternalKeyAddGcp(raw: unknown): ActionCardParams | null {
+  const parsed = externalKeyAddGcpActionParamsSchema.safeParse(raw);
+  return parsed.success
+    ? {
+        variant: "external_key_add_gcp_service_account",
+        label: parsed.data.label,
+        target_org_id: parsed.data.targetOrgId,
+      }
+    : null;
+}
+
+function normalizeOpenClawConnect(raw: unknown): ActionCardParams | null {
+  const parsed = openClawConnectActionParamsSchema.safeParse(raw);
+  return parsed.success
+    ? { variant: "openclaw_connect", gateway_url: parsed.data.gatewayUrl }
+    : null;
 }
 
 function completedId(completion: unknown): string {
@@ -847,6 +1236,584 @@ const externalKeyDeleteDescriptor: ActionDescriptor = {
     params.variant === "external_key_delete" ? "external_key_delete" : null,
 };
 
+type DialogResourceKind =
+  | "userService"
+  | "node"
+  | "pendingCredential"
+  | "device"
+  | "org"
+  | "account"
+  | "approvalConfig"
+  | "grant"
+  | "notificationBinding"
+  | "serviceAccount"
+  | "developerApp"
+  | "externalKey";
+
+interface DialogSummaryField {
+  readonly label: string;
+  readonly key: string;
+  readonly mono?: boolean;
+}
+
+interface DialogDescriptorConfig {
+  readonly variant: Exclude<ActionCardParams["variant"], "unknown">;
+  readonly title: string;
+  readonly body: string;
+  readonly cta: string;
+  readonly icon: ActionIcon;
+  readonly normalize: (raw: unknown) => ActionCardParams | null;
+  readonly resourceKind: DialogResourceKind;
+  readonly fields?: readonly DialogSummaryField[];
+  readonly assurance?: string;
+}
+
+function dialogResource(
+  kind: DialogResourceKind,
+  completion: unknown,
+): ActionResource {
+  const id = completedId(completion);
+  switch (kind) {
+    case "userService":
+      return { userService: { userServiceId: id } };
+    case "node":
+      return { node: { nodeId: id } };
+    case "pendingCredential":
+      return { pendingCredential: { pendingCredentialId: id } };
+    case "device":
+      return { device: { deviceId: id } };
+    case "org":
+      return { org: { orgId: id } };
+    case "account":
+      return { account: { userId: id } };
+    case "approvalConfig":
+      return { approvalConfig: { serviceId: id } };
+    case "grant":
+      return { grant: { grantId: id } };
+    case "notificationBinding":
+      return { notificationBinding: { bindingId: id } };
+    case "serviceAccount":
+      return { serviceAccount: { serviceAccountId: id } };
+    case "developerApp":
+      return { developerApp: { clientId: id } };
+    case "externalKey":
+      return { externalKey: { externalKeyId: id } };
+  }
+}
+
+function dialogSummary(
+  params: ActionCardParams,
+  config: DialogDescriptorConfig,
+): readonly SummaryRow[] {
+  if (params.variant !== config.variant) return [];
+  const values = params as unknown as Readonly<Record<string, unknown>>;
+  return (config.fields ?? []).flatMap((field) => {
+    const value = values[field.key];
+    if (typeof value === "string" && value) {
+      return [{ label: field.label, value, mono: field.mono }];
+    }
+    if (Array.isArray(value)) {
+      return value
+        .filter(
+          (entry): entry is string =>
+            typeof entry === "string" && Boolean(entry),
+        )
+        .map((entry) => ({
+          label: field.label,
+          value: entry,
+          mono: field.mono,
+        }));
+    }
+    return [];
+  });
+}
+
+function createDialogDescriptor(
+  config: DialogDescriptorConfig,
+): ActionDescriptor {
+  return {
+    title: () => config.title,
+    body: () => config.body,
+    cta: () => config.cta,
+    risk: "credential_access",
+    normalize: config.normalize,
+    summary: (params) => dialogSummary(params, config),
+    icon: config.icon,
+    busyLabel: "Working",
+    assurance:
+      config.assurance ??
+      "NyxID performs and verifies this exact change in your signed-in browser. The assistant receives only the safe resource reference.",
+    resource: (completion) => dialogResource(config.resourceKind, completion),
+    wiring: "dialog",
+    journey: (params) =>
+      params.variant === config.variant ? config.variant : null,
+  };
+}
+
+const nodeRegisterTokenDescriptor = createDialogDescriptor({
+  variant: "node_register_token",
+  title: "Create node registration token",
+  body: "NyxID will create one registration token and show it only in this browser dialog.",
+  cta: "Create registration token",
+  icon: "node",
+  normalize: normalizeNodeRegisterToken,
+  resourceKind: "node",
+  fields: [
+    { label: "Node name", key: "name" },
+    { label: "Organization", key: "target_org_id", mono: true },
+  ],
+});
+
+const nodeRotateTokenDescriptor = createDialogDescriptor({
+  variant: "node_rotate_token",
+  title: "Rotate node credentials",
+  body: "NyxID will invalidate this node's current credentials and show the replacements once.",
+  cta: "Rotate node token",
+  icon: "node",
+  normalize: normalizeNodeRotateToken,
+  resourceKind: "node",
+  fields: [{ label: "Node", key: "node_id", mono: true }],
+});
+
+const nodeDeleteDescriptor = createDialogDescriptor({
+  variant: "node_delete",
+  title: "Delete credential node",
+  body: "NyxID will deactivate this node and its bindings after explicit destructive confirmation.",
+  cta: "Delete node",
+  icon: "node",
+  normalize: normalizeNodeDelete,
+  resourceKind: "node",
+  fields: [{ label: "Node", key: "node_id", mono: true }],
+});
+
+const nodeTransferDescriptor = createDialogDescriptor({
+  variant: "node_transfer",
+  title: "Transfer credential node",
+  body: "NyxID will move this node and its authority to a different owner after explicit confirmation.",
+  cta: "Transfer node",
+  icon: "node",
+  normalize: normalizeNodeTransfer,
+  resourceKind: "node",
+  fields: [
+    { label: "Node", key: "node_id", mono: true },
+    { label: "New owner", key: "new_owner_user_id", mono: true },
+  ],
+});
+
+const nodeInjectCredentialDescriptor = createDialogDescriptor({
+  variant: "node_inject_credential",
+  title: "Inject node credential",
+  body: "NyxID will queue this credential-injection shape for an online node without exposing a credential to chat.",
+  cta: "Inject credential",
+  icon: "node",
+  normalize: normalizeNodeInjectCredential,
+  resourceKind: "pendingCredential",
+  fields: [
+    { label: "Node", key: "node_id", mono: true },
+    { label: "Service", key: "service_slug", mono: true },
+    { label: "Injection", key: "injection_method" },
+    { label: "Field", key: "field_name", mono: true },
+  ],
+});
+
+const pendingCredentialPushDescriptor = createDialogDescriptor({
+  variant: "pending_credential_push",
+  title: "Queue pending credential",
+  body: "NyxID will create a pending remote-credential request for this node and verify its safe status projection.",
+  cta: "Push credential",
+  icon: "node",
+  normalize: normalizePendingCredentialPush,
+  resourceKind: "pendingCredential",
+  fields: [
+    { label: "Node", key: "node_id", mono: true },
+    { label: "Service", key: "service_slug", mono: true },
+    { label: "Injection", key: "injection_method" },
+    { label: "Field", key: "field_name", mono: true },
+  ],
+});
+
+const pendingCredentialCancelDescriptor = createDialogDescriptor({
+  variant: "pending_credential_cancel",
+  title: "Cancel pending credential",
+  body: "NyxID will deactivate this pending credential request after explicit destructive confirmation.",
+  cta: "Cancel credential",
+  icon: "node",
+  normalize: normalizePendingCredentialCancel,
+  resourceKind: "pendingCredential",
+  fields: [
+    { label: "Node", key: "node_id", mono: true },
+    { label: "Pending credential", key: "pending_credential_id", mono: true },
+  ],
+});
+
+const deviceOnboardDescriptor = createDialogDescriptor({
+  variant: "device_onboard",
+  title: "Onboard headless device",
+  body: "NyxID will create a one-time provisioning package and show its QR payload only here.",
+  cta: "Onboard device",
+  icon: "node",
+  normalize: normalizeDeviceOnboard,
+  resourceKind: "device",
+  fields: [
+    { label: "Device", key: "label" },
+    { label: "Organization", key: "target_org_id", mono: true },
+    { label: "Default service", key: "default_service_ids", mono: true },
+  ],
+});
+
+const orgCreateDescriptor = createDialogDescriptor({
+  variant: "org_create",
+  title: "Create organization",
+  body: "NyxID will create an organization with the profile values reviewed in the dialog.",
+  cta: "Create organization",
+  icon: "org",
+  normalize: normalizeOrgCreate,
+  resourceKind: "org",
+  fields: [{ label: "Name", key: "display_name" }],
+});
+
+const orgUpdateDescriptor = createDialogDescriptor({
+  variant: "org_update",
+  title: "Update organization",
+  body: "NyxID will apply only the organization profile values reviewed in the dialog.",
+  cta: "Update organization",
+  icon: "org",
+  normalize: normalizeOrgUpdate,
+  resourceKind: "org",
+  fields: [
+    { label: "Organization", key: "org_id", mono: true },
+    { label: "Name", key: "display_name" },
+  ],
+});
+
+const orgDeleteDescriptor = createDialogDescriptor({
+  variant: "org_delete",
+  title: "Delete organization",
+  body: "NyxID will permanently delete this organization after explicit confirmation.",
+  cta: "Delete organization",
+  icon: "org",
+  normalize: normalizeOrgDelete,
+  resourceKind: "org",
+  fields: [{ label: "Organization", key: "org_id", mono: true }],
+});
+
+const orgMemberAddDescriptor = createDialogDescriptor({
+  variant: "org_member_add",
+  title: "Add organization member",
+  body: "NyxID will add this user with the role reviewed in the dialog.",
+  cta: "Add member",
+  icon: "org",
+  normalize: normalizeOrgMemberAdd,
+  resourceKind: "org",
+  fields: [
+    { label: "Organization", key: "org_id", mono: true },
+    { label: "User", key: "user_id", mono: true },
+    { label: "Role", key: "role" },
+  ],
+});
+
+const orgMemberRemoveDescriptor = createDialogDescriptor({
+  variant: "org_member_remove",
+  title: "Remove organization member",
+  body: "NyxID will revoke this membership after explicit confirmation.",
+  cta: "Remove member",
+  icon: "org",
+  normalize: normalizeOrgMemberRemove,
+  resourceKind: "org",
+  fields: [
+    { label: "Organization", key: "org_id", mono: true },
+    { label: "Member", key: "member_id", mono: true },
+  ],
+});
+
+const orgMemberUpdateRoleDescriptor = createDialogDescriptor({
+  variant: "org_member_update_role",
+  title: "Change organization role",
+  body: "NyxID will change this member to the role reviewed in the dialog.",
+  cta: "Change member role",
+  icon: "org",
+  normalize: normalizeOrgMemberUpdateRole,
+  resourceKind: "org",
+  fields: [
+    { label: "Member", key: "member_id", mono: true },
+    { label: "Role", key: "role" },
+  ],
+});
+
+const orgInviteDescriptor = createDialogDescriptor({
+  variant: "org_invite",
+  title: "Create organization invite",
+  body: "NyxID will create an invite with the role and lifetime reviewed in the dialog.",
+  cta: "Create invite",
+  icon: "org",
+  normalize: normalizeOrgInvite,
+  resourceKind: "org",
+  fields: [
+    { label: "Organization", key: "org_id", mono: true },
+    { label: "Role", key: "role" },
+  ],
+});
+
+const orgSetPrimaryDescriptor = createDialogDescriptor({
+  variant: "org_set_primary",
+  title: "Set primary organization",
+  body: "NyxID will make this organization the account's primary organization.",
+  cta: "Set primary",
+  icon: "org",
+  normalize: normalizeOrgSetPrimary,
+  resourceKind: "org",
+  fields: [{ label: "Organization", key: "org_id", mono: true }],
+});
+
+const accountProfileUpdateDescriptor = createDialogDescriptor({
+  variant: "account_profile_update",
+  title: "Update account profile",
+  body: "NyxID will apply the profile values shown for review.",
+  cta: "Update profile",
+  icon: "shield",
+  normalize: normalizeAccountProfileUpdate,
+  resourceKind: "account",
+  fields: [
+    { label: "Display name", key: "display_name" },
+    { label: "Avatar URL", key: "avatar_url", mono: true },
+  ],
+});
+
+const accountRevokeConsentDescriptor = createDialogDescriptor({
+  variant: "account_revoke_consent",
+  title: "Revoke application consent",
+  body: "NyxID will revoke this application's consent after explicit confirmation.",
+  cta: "Revoke consent",
+  icon: "shield",
+  normalize: normalizeAccountRevokeConsent,
+  resourceKind: "account",
+  fields: [{ label: "Client", key: "client_id", mono: true }],
+});
+
+const accountDeleteDescriptor = createDialogDescriptor({
+  variant: "account_delete",
+  title: "Delete account",
+  body: "NyxID will require your account email before permanently deleting the account.",
+  cta: "Delete account",
+  icon: "shield",
+  normalize: normalizeAccountDelete,
+  resourceKind: "account",
+});
+
+const accountMfaSetupDescriptor = createDialogDescriptor({
+  variant: "account_mfa_setup",
+  title: "Set up multi-factor authentication",
+  body: "NyxID will keep setup and recovery material inside the browser journey.",
+  cta: "Set up MFA",
+  icon: "shield",
+  normalize: normalizeAccountMfaSetup,
+  resourceKind: "account",
+});
+
+const approvalConfigureDescriptor = createDialogDescriptor({
+  variant: "approval_configure",
+  title: "Configure service approvals",
+  body: "NyxID will apply the approval policy reviewed in the dialog.",
+  cta: "Configure approvals",
+  icon: "shield",
+  normalize: normalizeApprovalConfigure,
+  resourceKind: "approvalConfig",
+  fields: [{ label: "Service", key: "service_id", mono: true }],
+});
+
+const approvalEnableDescriptor = createDialogDescriptor({
+  variant: "approval_enable",
+  title: "Enable service approvals",
+  body: "NyxID will require approval for this service.",
+  cta: "Enable approvals",
+  icon: "shield",
+  normalize: normalizeApprovalEnable,
+  resourceKind: "approvalConfig",
+  fields: [{ label: "Service", key: "service_id", mono: true }],
+});
+
+const approvalDisableDescriptor = createDialogDescriptor({
+  variant: "approval_disable",
+  title: "Disable service approvals",
+  body: "NyxID will weaken this service's safety control only after explicit confirmation.",
+  cta: "Disable approvals",
+  icon: "shield",
+  normalize: normalizeApprovalDisable,
+  resourceKind: "approvalConfig",
+  fields: [{ label: "Service", key: "service_id", mono: true }],
+});
+
+const approvalRevokeGrantDescriptor = createDialogDescriptor({
+  variant: "approval_revoke_grant",
+  title: "Revoke approval grant",
+  body: "NyxID will revoke this active grant after explicit confirmation.",
+  cta: "Revoke grant",
+  icon: "shield",
+  normalize: normalizeApprovalRevokeGrant,
+  resourceKind: "grant",
+  fields: [{ label: "Grant", key: "grant_id", mono: true }],
+});
+
+const notificationsUpdateDescriptor = createDialogDescriptor({
+  variant: "notifications_update",
+  title: "Update notification settings",
+  body: "NyxID will load the current settings and let you edit them in the dialog.",
+  cta: "Update notifications",
+  icon: "bell",
+  normalize: normalizeNotificationsUpdate,
+  resourceKind: "notificationBinding",
+});
+
+const notificationsTelegramLinkDescriptor = createDialogDescriptor({
+  variant: "notifications_telegram_link",
+  title: "Link Telegram notifications",
+  body: "NyxID will create a one-time Telegram linking code and show it only here.",
+  cta: "Link Telegram",
+  icon: "bell",
+  normalize: normalizeNotificationsTelegramLink,
+  resourceKind: "notificationBinding",
+});
+
+const notificationsTelegramDisconnectDescriptor = createDialogDescriptor({
+  variant: "notifications_telegram_disconnect",
+  title: "Disconnect Telegram notifications",
+  body: "NyxID will disconnect Telegram after explicit confirmation.",
+  cta: "Disconnect Telegram",
+  icon: "bell",
+  normalize: normalizeNotificationsTelegramDisconnect,
+  resourceKind: "notificationBinding",
+});
+
+const serviceAccountCreateDescriptor = createDialogDescriptor({
+  variant: "service_account_create",
+  title: "Create service account",
+  body: "NyxID will create the service account and show its client secret once.",
+  cta: "Create service account",
+  icon: "key",
+  normalize: normalizeServiceAccountCreate,
+  resourceKind: "serviceAccount",
+  fields: [
+    { label: "Name", key: "name" },
+    { label: "Organization", key: "target_org_id", mono: true },
+  ],
+});
+
+const serviceAccountUpdateDescriptor = createDialogDescriptor({
+  variant: "service_account_update",
+  title: "Update service account",
+  body: "NyxID will update only the service-account metadata reviewed in the dialog.",
+  cta: "Update service account",
+  icon: "key",
+  normalize: normalizeServiceAccountUpdate,
+  resourceKind: "serviceAccount",
+  fields: [{ label: "Service account", key: "service_account_id", mono: true }],
+});
+
+const serviceAccountDeleteDescriptor = createDialogDescriptor({
+  variant: "service_account_delete",
+  title: "Delete service account",
+  body: "NyxID will deactivate this service account after explicit confirmation.",
+  cta: "Delete service account",
+  icon: "key",
+  normalize: normalizeServiceAccountDelete,
+  resourceKind: "serviceAccount",
+  fields: [{ label: "Service account", key: "service_account_id", mono: true }],
+});
+
+const serviceAccountRotateSecretDescriptor = createDialogDescriptor({
+  variant: "service_account_rotate_secret",
+  title: "Rotate service-account secret",
+  body: "NyxID will rotate this service account's secret and show it once.",
+  cta: "Rotate service-account secret",
+  icon: "key",
+  normalize: normalizeServiceAccountRotateSecret,
+  resourceKind: "serviceAccount",
+  fields: [{ label: "Service account", key: "service_account_id", mono: true }],
+});
+
+const serviceAccountRevokeTokensDescriptor = createDialogDescriptor({
+  variant: "service_account_revoke_tokens",
+  title: "Revoke service-account tokens",
+  body: "NyxID will invalidate this service account's active tokens after explicit confirmation.",
+  cta: "Revoke service-account tokens",
+  icon: "key",
+  normalize: normalizeServiceAccountRevokeTokens,
+  resourceKind: "serviceAccount",
+  fields: [{ label: "Service account", key: "service_account_id", mono: true }],
+});
+
+const developerAppCreateDescriptor = createDialogDescriptor({
+  variant: "developer_app_create",
+  title: "Create developer application",
+  body: "NyxID will create the OAuth client and show its client secret once.",
+  cta: "Create developer app",
+  icon: "app",
+  normalize: normalizeDeveloperAppCreate,
+  resourceKind: "developerApp",
+  fields: [
+    { label: "Name", key: "name" },
+    { label: "Redirect URI", key: "redirect_uris", mono: true },
+  ],
+});
+
+const developerAppUpdateDescriptor = createDialogDescriptor({
+  variant: "developer_app_update",
+  title: "Update developer application",
+  body: "NyxID will update only the OAuth client values reviewed in the dialog.",
+  cta: "Update developer app",
+  icon: "app",
+  normalize: normalizeDeveloperAppUpdate,
+  resourceKind: "developerApp",
+  fields: [{ label: "Client", key: "client_id", mono: true }],
+});
+
+const developerAppDeleteDescriptor = createDialogDescriptor({
+  variant: "developer_app_delete",
+  title: "Delete developer application",
+  body: "NyxID will deactivate this OAuth client after explicit confirmation.",
+  cta: "Delete developer app",
+  icon: "app",
+  normalize: normalizeDeveloperAppDelete,
+  resourceKind: "developerApp",
+  fields: [{ label: "Client", key: "client_id", mono: true }],
+});
+
+const developerAppRotateSecretDescriptor = createDialogDescriptor({
+  variant: "developer_app_rotate_secret",
+  title: "Rotate developer-app secret",
+  body: "NyxID will rotate this OAuth client secret and show it once.",
+  cta: "Rotate developer-app secret",
+  icon: "app",
+  normalize: normalizeDeveloperAppRotateSecret,
+  resourceKind: "developerApp",
+  fields: [{ label: "Client", key: "client_id", mono: true }],
+});
+
+const externalKeyAddGcpDescriptor = createDialogDescriptor({
+  variant: "external_key_add_gcp_service_account",
+  title: "Add GCP service account",
+  body: "Paste the GCP service-account JSON only inside the NyxID dialog.",
+  cta: "Add GCP service account",
+  icon: "key",
+  normalize: normalizeExternalKeyAddGcp,
+  resourceKind: "externalKey",
+  fields: [
+    { label: "Label", key: "label" },
+    { label: "Organization", key: "target_org_id", mono: true },
+  ],
+});
+
+const openClawConnectDescriptor = createDialogDescriptor({
+  variant: "openclaw_connect",
+  title: "Connect OpenClaw",
+  body: "NyxID will collect the OpenClaw bearer credential only inside the browser dialog.",
+  cta: "Connect OpenClaw",
+  icon: "service",
+  normalize: normalizeOpenClawConnect,
+  resourceKind: "userService",
+  fields: [{ label: "Gateway", key: "gateway_url", mono: true }],
+});
+
 const unsupportedDescriptor: ActionDescriptor = {
   title: () => "Unsupported action request",
   body: () =>
@@ -882,44 +1849,45 @@ export const ACTION_REGISTRY: Readonly<Record<string, ActionDescriptor>> = {
   "endpoint.delete": endpointDeleteDescriptor,
   "external_key.rotate": externalKeyRotateDescriptor,
   "external_key.delete": externalKeyDeleteDescriptor,
-  "node.register_token": unsupportedDescriptor,
-  "node.rotate_token": unsupportedDescriptor,
-  "node.delete": unsupportedDescriptor,
-  "node.transfer": unsupportedDescriptor,
-  "node.inject_credential": unsupportedDescriptor,
-  "pending_credential.push": unsupportedDescriptor,
-  "pending_credential.cancel": unsupportedDescriptor,
-  "device.onboard": unsupportedDescriptor,
-  "org.create": unsupportedDescriptor,
-  "org.update": unsupportedDescriptor,
-  "org.delete": unsupportedDescriptor,
-  "org.member_add": unsupportedDescriptor,
-  "org.member_remove": unsupportedDescriptor,
-  "org.member_update_role": unsupportedDescriptor,
-  "org.invite": unsupportedDescriptor,
-  "org.set_primary": unsupportedDescriptor,
-  "account.profile_update": unsupportedDescriptor,
-  "account.revoke_consent": unsupportedDescriptor,
-  "account.delete": unsupportedDescriptor,
-  "account.mfa_setup": unsupportedDescriptor,
-  "approval.configure": unsupportedDescriptor,
-  "approval.enable": unsupportedDescriptor,
-  "approval.disable": unsupportedDescriptor,
-  "approval.revoke_grant": unsupportedDescriptor,
-  "notifications.update": unsupportedDescriptor,
-  "notifications.telegram_link": unsupportedDescriptor,
-  "notifications.telegram_disconnect": unsupportedDescriptor,
-  "service_account.create": unsupportedDescriptor,
-  "service_account.update": unsupportedDescriptor,
-  "service_account.delete": unsupportedDescriptor,
-  "service_account.rotate_secret": unsupportedDescriptor,
-  "service_account.revoke_tokens": unsupportedDescriptor,
-  "developer_app.create": unsupportedDescriptor,
-  "developer_app.update": unsupportedDescriptor,
-  "developer_app.delete": unsupportedDescriptor,
-  "developer_app.rotate_secret": unsupportedDescriptor,
-  "external_key.add_gcp_service_account": unsupportedDescriptor,
-  "openclaw.connect": unsupportedDescriptor,
+  "node.register_token": nodeRegisterTokenDescriptor,
+  "node.rotate_token": nodeRotateTokenDescriptor,
+  "node.delete": nodeDeleteDescriptor,
+  "node.transfer": nodeTransferDescriptor,
+  "node.inject_credential": nodeInjectCredentialDescriptor,
+  "pending_credential.push": pendingCredentialPushDescriptor,
+  "pending_credential.cancel": pendingCredentialCancelDescriptor,
+  "device.onboard": deviceOnboardDescriptor,
+  "org.create": orgCreateDescriptor,
+  "org.update": orgUpdateDescriptor,
+  "org.delete": orgDeleteDescriptor,
+  "org.member_add": orgMemberAddDescriptor,
+  "org.member_remove": orgMemberRemoveDescriptor,
+  "org.member_update_role": orgMemberUpdateRoleDescriptor,
+  "org.invite": orgInviteDescriptor,
+  "org.set_primary": orgSetPrimaryDescriptor,
+  "account.profile_update": accountProfileUpdateDescriptor,
+  "account.revoke_consent": accountRevokeConsentDescriptor,
+  "account.delete": accountDeleteDescriptor,
+  "account.mfa_setup": accountMfaSetupDescriptor,
+  "approval.configure": approvalConfigureDescriptor,
+  "approval.enable": approvalEnableDescriptor,
+  "approval.disable": approvalDisableDescriptor,
+  "approval.revoke_grant": approvalRevokeGrantDescriptor,
+  "notifications.update": notificationsUpdateDescriptor,
+  "notifications.telegram_link": notificationsTelegramLinkDescriptor,
+  "notifications.telegram_disconnect":
+    notificationsTelegramDisconnectDescriptor,
+  "service_account.create": serviceAccountCreateDescriptor,
+  "service_account.update": serviceAccountUpdateDescriptor,
+  "service_account.delete": serviceAccountDeleteDescriptor,
+  "service_account.rotate_secret": serviceAccountRotateSecretDescriptor,
+  "service_account.revoke_tokens": serviceAccountRevokeTokensDescriptor,
+  "developer_app.create": developerAppCreateDescriptor,
+  "developer_app.update": developerAppUpdateDescriptor,
+  "developer_app.delete": developerAppDeleteDescriptor,
+  "developer_app.rotate_secret": developerAppRotateSecretDescriptor,
+  "external_key.add_gcp_service_account": externalKeyAddGcpDescriptor,
+  "openclaw.connect": openClawConnectDescriptor,
 };
 
 export interface ResolvedAction {

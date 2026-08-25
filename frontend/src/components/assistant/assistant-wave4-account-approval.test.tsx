@@ -88,7 +88,7 @@ describe("Wave 4 account journeys", () => {
   });
 
   it("keeps MFA material in the browser and reports only the account id", async () => {
-    mockPost.mockResolvedValueOnce({ resource: { userId: IDS.user }, stage: "start", factorId: IDS.factor, setupValue: "JBSWY3DPEHPK3PXP", qrCodeUrl: "otpauth://totp/NyxID:test", recoveryValues: null, replayed: false }).mockResolvedValueOnce({ resource: { userId: IDS.user }, stage: "confirm", factorId: IDS.factor, recoveryValues: ["recovery-1"], replayed: false });
+    mockPost.mockResolvedValueOnce({ resource: { userId: IDS.user }, stage: "start", factorId: IDS.factor, setupValue: "JBSWY3DPEHPK3PXP", qrCodeUrl: "otpauth://totp/NyxID:test", recoveryValues: null, replayed: false, oneTimeMaterial: "delivered" }).mockResolvedValueOnce({ resource: { userId: IDS.user }, stage: "confirm", factorId: IDS.factor, recoveryValues: ["recovery-1"], replayed: false, oneTimeMaterial: "delivered" });
     mockGet.mockResolvedValue({ id: IDS.user, mfa_enabled: true });
     const onComplete = vi.fn();
     renderDialog(<AssistantAccountMfaSetupDialog open onOpenChange={vi.fn()} actionRequestId="mfa-1" onComplete={onComplete} />);

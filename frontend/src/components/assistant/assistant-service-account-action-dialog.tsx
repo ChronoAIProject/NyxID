@@ -14,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
+import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
 import {
   assertSecretFreeReadBack,
   assertNoSensitiveActionParams,
@@ -33,13 +34,15 @@ export const serviceAccountActions = [
   "rotate_secret",
   "revoke_tokens",
 ] as const;
-export type AssistantServiceAccountAction = (typeof serviceAccountActions)[number];
+export type AssistantServiceAccountAction =
+  (typeof serviceAccountActions)[number];
 
 const responseSchema = z
   .object({
     resource: z.object({ serviceAccountId: z.string().min(1) }).strict(),
     replayed: z.boolean(),
     clientSecret: z.string().min(1).optional(),
+    oneTimeMaterial: assistantOneTimeMaterialSchema,
   })
   .strict();
 
@@ -78,15 +81,24 @@ export function AssistantServiceAccountActionDialog({
   readonly onComplete: (serviceAccountId: string) => void;
 }) {
   const [name, setName] = useState(textParam(params, "name"));
-  const [description, setDescription] = useState(textParam(params, "description"));
-  const [allowedScopes, setAllowedScopes] = useState(textParam(params, "allowedScopes") || "proxy");
+  const [description, setDescription] = useState(
+    textParam(params, "description"),
+  );
+  const [allowedScopes, setAllowedScopes] = useState(
+    textParam(params, "allowedScopes") || "proxy",
+  );
   const [confirmed, setConfirmed] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{ id: string; secret?: string } | null>(null);
+  const [result, setResult] = useState<{
+    id: string;
+    secret?: string;
+    unavailable: boolean;
+  } | null>(null);
   const pendingRef = useRef(false);
   const destructive = action === "delete" || action === "revoke_tokens";
   const serviceAccountId = textParam(params, "serviceAccountId");
+  const targetOrgId = textParam(params, "targetOrgId");
 
   function close() {
     pendingRef.current = false;
@@ -111,7 +123,10 @@ export function AssistantServiceAccountActionDialog({
       setError("Confirm this destructive change to continue.");
       return;
     }
-    if ((action === "create" || action === "update") && SECRET_VALUE_PATTERN.test(`${name} ${description}`)) {
+    if (
+      (action === "create" || action === "update") &&
+      SECRET_VALUE_PATTERN.test(`${name} ${description}`)
+    ) {
       setError("Names and descriptions cannot contain secret-shaped values.");
       return;
     }
@@ -128,18 +143,39 @@ export function AssistantServiceAccountActionDialog({
     setError(null);
     try {
       assertNoSensitiveActionParams(params);
-      const before = action === "create" ? null : await readEvidence(serviceAccountId);
+      const before =
+        action === "create" ? null : await readEvidence(serviceAccountId);
       if (before && before.id !== serviceAccountId) {
         throw new Error("NyxID returned a different service-account identity.");
       }
-      const payload: Record<string, unknown> = { ...params, actionRequestId };
-      if (destructive) payload.confirmed = confirmed;
-      if (action === "create" || action === "update") {
-        payload.name = name.trim() || undefined;
-        payload.description = description.trim() || undefined;
-      }
-      if (action === "create") payload.allowedScopes = allowedScopes.trim();
-      if (action === "rotate_secret") payload.expectedUpdatedAt = before?.updated_at;
+      const payload: Record<string, unknown> = (() => {
+        switch (action) {
+          case "create":
+            return {
+              actionRequestId,
+              name: name.trim(),
+              description: description.trim() || undefined,
+              allowedScopes: allowedScopes.trim(),
+              targetOrgId: targetOrgId || undefined,
+            };
+          case "update":
+            return {
+              actionRequestId,
+              serviceAccountId,
+              name: name.trim() || undefined,
+              description: description.trim() || undefined,
+            };
+          case "delete":
+          case "revoke_tokens":
+            return { actionRequestId, serviceAccountId, confirmed };
+          case "rotate_secret":
+            return {
+              actionRequestId,
+              serviceAccountId,
+              expectedUpdatedAt: before?.updated_at,
+            };
+        }
+      })();
       const raw = await api.post<unknown>(
         `/assistant/actions/org/service-account/${action.replaceAll("_", "-")}`,
         payload,
@@ -147,22 +183,43 @@ export function AssistantServiceAccountActionDialog({
       const response = responseSchema.parse(raw);
       const id = response.resource.serviceAccountId;
       const after = await readEvidence(id);
-      if (after.id !== id) throw new Error("NyxID returned a different service-account identity.");
-      if (action === "create" && (!after.is_active || response.replayed === false && !response.clientSecret)) {
-        throw new Error("NyxID did not return the active account and its one-time secret.");
+      if (after.id !== id)
+        throw new Error("NyxID returned a different service-account identity.");
+      if (action === "create" && !after.is_active) {
+        throw new Error("NyxID did not return the active service account.");
       }
-      if (action === "rotate_secret" && response.replayed === false && !response.clientSecret) {
-        throw new Error("NyxID did not return the rotated secret to the browser.");
+      const expectsSecret = action === "create" || action === "rotate_secret";
+      const unavailable =
+        expectsSecret &&
+        !response.clientSecret &&
+        (response.replayed || response.oneTimeMaterial === "unavailable");
+      if (expectsSecret && !response.clientSecret && !unavailable) {
+        throw new Error(
+          "NyxID did not return the one-time secret to the browser.",
+        );
       }
       if (action === "delete" && after.is_active) {
         throw new Error("NyxID still reports this service account as active.");
       }
-      if (before && !response.replayed && !isNewerTimestamp(before.updated_at, after.updated_at)) {
+      if (
+        before &&
+        !response.replayed &&
+        !isNewerTimestamp(before.updated_at, after.updated_at)
+      ) {
         throw new Error("NyxID did not show a newer service-account state.");
       }
-      setResult({ id, ...(response.clientSecret ? { secret: response.clientSecret } : {}) });
+      setResult({
+        id,
+        unavailable,
+        ...(response.clientSecret ? { secret: response.clientSecret } : {}),
+      });
     } catch (caught) {
-      setError(errorMessage(caught, "NyxID could not complete this service-account action."));
+      setError(
+        errorMessage(
+          caught,
+          "NyxID could not complete this service-account action.",
+        ),
+      );
     } finally {
       pendingRef.current = false;
       setPending(false);
@@ -179,23 +236,132 @@ export function AssistantServiceAccountActionDialog({
     <Dialog open={open} onOpenChange={(next) => !next && close()}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle className="flex items-center gap-2"><KeyRound className="size-4" />{title}</DialogTitle>
-          <DialogDescription>{result?.secret ? "Save this secret now. It will not be shown again." : result ? "The canonical service-account projection confirms the change." : destructive ? "This change revokes access and must be confirmed every time." : "NyxID keeps the service-account secret out of chat."}</DialogDescription>
+          <DialogTitle className="flex items-center gap-2">
+            <KeyRound className="size-4" />
+            {title}
+          </DialogTitle>
+          <DialogDescription>
+            {result?.secret
+              ? "Save this secret now. It will not be shown again."
+              : result?.unavailable
+                ? "The one-time secret was unavailable and was not captured by this browser. Rotate the secret again to receive a new value."
+                : result
+                  ? "The canonical service-account projection confirms the change."
+                  : destructive
+                    ? "This change revokes access and must be confirmed every time."
+                    : "NyxID keeps the service-account secret out of chat."}
+          </DialogDescription>
         </DialogHeader>
         {result ? (
           <div className="space-y-3 border-y border-border py-4">
-            {result.secret ? <div className="space-y-2"><Label htmlFor="one-time-secret">One-time secret</Label><Input id="one-time-secret" readOnly value={result.secret} className="font-mono" /></div> : null}
-            <p className="font-mono text-xs text-muted-foreground">{result.id}</p>
+            {result.secret ? (
+              <div className="space-y-2">
+                <Label htmlFor="one-time-secret">One-time secret</Label>
+                <Input
+                  id="one-time-secret"
+                  readOnly
+                  value={result.secret}
+                  className="font-mono"
+                />
+              </div>
+            ) : null}
+            <p className="font-mono text-xs text-muted-foreground">
+              {result.id}
+            </p>
           </div>
         ) : (
           <div className="space-y-4 border-y border-border py-4">
-            {(action === "create" || action === "update") ? <><div className="space-y-2"><Label htmlFor="sa-name">Name</Label><Input id="sa-name" value={name} onChange={(event) => setName(event.target.value)} /></div><div className="space-y-2"><Label htmlFor="sa-description">Description</Label><Input id="sa-description" value={description} onChange={(event) => setDescription(event.target.value)} /></div></> : <p className="font-mono text-xs text-muted-foreground">{serviceAccountId}</p>}
-            {action === "create" ? <div className="space-y-2"><Label htmlFor="sa-scopes">Allowed scopes</Label><Input id="sa-scopes" value={allowedScopes} onChange={(event) => setAllowedScopes(event.target.value)} /></div> : null}
-            {destructive ? <label className="flex items-start gap-2 text-xs"><Checkbox checked={confirmed} onCheckedChange={(value) => setConfirmed(value === true)} /><span className="flex items-center gap-1"><ShieldAlert className="size-3" />I understand this change revokes access.</span></label> : null}
+            {action === "create" || action === "update" ? (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="sa-name">Name</Label>
+                  <Input
+                    id="sa-name"
+                    value={name}
+                    onChange={(event) => setName(event.target.value)}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="sa-description">Description</Label>
+                  <Input
+                    id="sa-description"
+                    value={description}
+                    onChange={(event) => setDescription(event.target.value)}
+                  />
+                </div>
+              </>
+            ) : (
+              <p className="font-mono text-xs text-muted-foreground">
+                {serviceAccountId}
+              </p>
+            )}
+            {action === "create" ? (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="sa-scopes">Allowed scopes</Label>
+                  <Input
+                    id="sa-scopes"
+                    value={allowedScopes}
+                    onChange={(event) => setAllowedScopes(event.target.value)}
+                  />
+                </div>
+                {targetOrgId ? (
+                  <div className="space-y-1.5">
+                    <p className="text-xs font-medium">Target organization</p>
+                    <p className="break-all font-mono text-xs text-muted-foreground">
+                      {targetOrgId}
+                    </p>
+                  </div>
+                ) : null}
+              </>
+            ) : null}
+            {destructive ? (
+              <label className="flex items-start gap-2 text-xs">
+                <Checkbox
+                  checked={confirmed}
+                  onCheckedChange={(value) => setConfirmed(value === true)}
+                />
+                <span className="flex items-center gap-1">
+                  <ShieldAlert className="size-3" />I understand this change
+                  revokes access.
+                </span>
+              </label>
+            ) : null}
           </div>
         )}
-        {error ? <p role="alert" className="text-xs text-destructive">{error}</p> : null}
-        <DialogFooter>{result ? <Button type="button" onClick={() => { onComplete(result.id); close(); }}>Done</Button> : <><Button type="button" variant="outline" onClick={close}>Cancel</Button><Button type="button" variant={destructive ? "destructive" : "primary"} isLoading={pending} disabled={pending || (destructive && !confirmed)} onClick={() => void submit()}>{destructive ? "Confirm change" : "Continue"}</Button></>}</DialogFooter>
+        {error ? (
+          <p role="alert" className="text-xs text-destructive">
+            {error}
+          </p>
+        ) : null}
+        <DialogFooter>
+          {result ? (
+            <Button
+              type="button"
+              onClick={() => {
+                onComplete(result.id);
+                close();
+              }}
+            >
+              {result.unavailable ? "Acknowledge" : "Done"}
+            </Button>
+          ) : (
+            <>
+              <Button type="button" variant="outline" onClick={close}>
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant={destructive ? "destructive" : "primary"}
+                isLoading={pending}
+                disabled={pending || (destructive && !confirmed)}
+                onClick={() => void submit()}
+              >
+                {destructive ? "Confirm change" : "Continue"}
+              </Button>
+            </>
+          )}
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );

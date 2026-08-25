@@ -1,12 +1,24 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { AssistantServiceAccountActionDialog, type AssistantServiceAccountAction } from "./assistant-service-account-action-dialog";
+import {
+  AssistantServiceAccountActionDialog,
+  type AssistantServiceAccountAction,
+} from "./assistant-service-account-action-dialog";
 
-const { mockGet, mockPost } = vi.hoisted(() => ({ mockGet: vi.fn(), mockPost: vi.fn() }));
+const { mockGet, mockPost } = vi.hoisted(() => ({
+  mockGet: vi.fn(),
+  mockPost: vi.fn(),
+}));
 vi.mock("@/lib/api-client", () => ({
   api: { get: mockGet, post: mockPost },
-  ApiError: class ApiError extends Error { readonly status: number; constructor(status: number) { super(`HTTP ${String(status)}`); this.status = status; } },
+  ApiError: class ApiError extends Error {
+    readonly status: number;
+    constructor(status: number) {
+      super(`HTTP ${String(status)}`);
+      this.status = status;
+    }
+  },
 }));
 
 const ID = "00000000-0000-4000-8000-000000000051";
@@ -25,50 +37,125 @@ function evidence(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function renderDialog(action: AssistantServiceAccountAction, params: Record<string, unknown>) {
-  render(<AssistantServiceAccountActionDialog open onOpenChange={vi.fn()} actionRequestId={`request-${action}`} action={action} params={params} onComplete={vi.fn()} />);
+function renderDialog(
+  action: AssistantServiceAccountAction,
+  params: Record<string, unknown>,
+) {
+  render(
+    <AssistantServiceAccountActionDialog
+      open
+      onOpenChange={vi.fn()}
+      actionRequestId={`request-${action}`}
+      action={action}
+      params={params}
+      onComplete={vi.fn()}
+    />,
+  );
 }
 
 async function submit(destructive = false) {
   if (destructive) await userEvent.click(screen.getByRole("checkbox"));
-  const button = screen.getByRole("button", { name: destructive ? "Confirm change" : "Continue" });
+  const button = screen.getByRole("button", {
+    name: destructive ? "Confirm change" : "Continue",
+  });
   fireEvent.click(button);
   fireEvent.click(button);
   await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
 }
 
-beforeEach(() => { mockGet.mockReset(); mockPost.mockReset(); });
+beforeEach(() => {
+  mockGet.mockReset();
+  mockPost.mockReset();
+});
 
 describe("AssistantServiceAccountActionDialog", () => {
   it("runs service_account.create and displays the one-time secret after evidence", async () => {
-    mockPost.mockResolvedValue({ resource: { serviceAccountId: ID }, replayed: false, clientSecret: "sa-secret-once" });
+    mockPost.mockResolvedValue({
+      resource: { serviceAccountId: ID },
+      replayed: false,
+      clientSecret: "sa-secret-once",
+      oneTimeMaterial: "delivered",
+    });
     mockGet.mockResolvedValue(evidence());
     renderDialog("create", { name: "Deploy bot" });
     await submit();
-    expect(mockGet).toHaveBeenCalledWith(`/admin/service-accounts/${ID}/authorization`);
-    expect(await screen.findByDisplayValue("sa-secret-once")).toBeInTheDocument();
+    expect(mockGet).toHaveBeenCalledWith(
+      `/admin/service-accounts/${ID}/authorization`,
+    );
+    expect(
+      await screen.findByDisplayValue("sa-secret-once"),
+    ).toBeInTheDocument();
+  });
+
+  it("shows and forwards targetOrgId while dropping unsupported isAdmin", async () => {
+    mockPost.mockResolvedValue({
+      resource: { serviceAccountId: ID },
+      replayed: false,
+      clientSecret: "sa-secret-once",
+    });
+    mockGet.mockResolvedValue(evidence());
+    renderDialog("create", {
+      name: "Deploy bot",
+      targetOrgId: "org-production",
+      isAdmin: true,
+    });
+    expect(screen.getByText("org-production")).toBeInTheDocument();
+    await submit();
+    const requestBody = mockPost.mock.calls[0]?.[1];
+    expect(requestBody).toEqual({
+      actionRequestId: "request-create",
+      name: "Deploy bot",
+      description: undefined,
+      allowedScopes: "proxy",
+      targetOrgId: "org-production",
+    });
+    expect(requestBody).not.toHaveProperty("isAdmin");
   });
 
   it("runs service_account.update and proves a newer projection", async () => {
-    mockGet.mockResolvedValueOnce(evidence()).mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
-    mockPost.mockResolvedValue({ resource: { serviceAccountId: ID }, replayed: false });
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
+    mockPost.mockResolvedValue({
+      resource: { serviceAccountId: ID },
+      replayed: false,
+    });
     renderDialog("update", { serviceAccountId: ID, name: "Renamed" });
     await submit();
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/service-account/update", expect.objectContaining({ name: "Renamed" }));
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/service-account/update",
+      expect.objectContaining({ name: "Renamed" }),
+    );
   });
 
   it("runs service_account.delete and proves the soft-deactivated terminal state", async () => {
-    mockGet.mockResolvedValueOnce(evidence()).mockResolvedValueOnce(evidence({ is_active: false, updated_at: "2026-01-01T00:00:01Z" }));
-    mockPost.mockResolvedValue({ resource: { serviceAccountId: ID }, replayed: false });
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce(
+        evidence({ is_active: false, updated_at: "2026-01-01T00:00:01Z" }),
+      );
+    mockPost.mockResolvedValue({
+      resource: { serviceAccountId: ID },
+      replayed: false,
+    });
     renderDialog("delete", { serviceAccountId: ID });
     await submit(true);
     expect(mockGet).toHaveBeenCalledTimes(2);
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/service-account/delete", expect.objectContaining({ confirmed: true }));
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/service-account/delete",
+      expect.objectContaining({ confirmed: true }),
+    );
   });
 
   it("runs service_account.rotate_secret and returns material only in the committing response", async () => {
-    mockGet.mockResolvedValueOnce(evidence()).mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
-    mockPost.mockResolvedValue({ resource: { serviceAccountId: ID }, replayed: false, clientSecret: "rotated-once" });
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
+    mockPost.mockResolvedValue({
+      resource: { serviceAccountId: ID },
+      replayed: false,
+      clientSecret: "rotated-once",
+    });
     renderDialog("rotate_secret", { serviceAccountId: ID });
     await submit();
     // Falsifier: remove the `expectedUpdatedAt` payload assignment in the
@@ -80,18 +167,48 @@ describe("AssistantServiceAccountActionDialog", () => {
     expect(await screen.findByDisplayValue("rotated-once")).toBeInTheDocument();
   });
 
+  it("warns when a replayed create cannot return the one-time secret", async () => {
+    mockPost.mockResolvedValue({
+      resource: { serviceAccountId: ID },
+      replayed: true,
+    });
+    mockGet.mockResolvedValue(evidence());
+    renderDialog("create", { name: "Deploy bot" });
+
+    await submit();
+
+    expect(
+      await screen.findByText(/one-time secret was unavailable/i),
+    ).toHaveTextContent(/rotate the secret again/i);
+    expect(screen.getByRole("button", { name: "Acknowledge" })).toBeEnabled();
+    expect(screen.queryByLabelText("One-time secret")).toBeNull();
+  });
+
   it("runs service_account.revoke_tokens and proves the revocation timestamp advance", async () => {
-    mockGet.mockResolvedValueOnce(evidence()).mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
-    mockPost.mockResolvedValue({ resource: { serviceAccountId: ID }, replayed: false });
+    mockGet
+      .mockResolvedValueOnce(evidence())
+      .mockResolvedValueOnce(evidence({ updated_at: "2026-01-01T00:00:01Z" }));
+    mockPost.mockResolvedValue({
+      resource: { serviceAccountId: ID },
+      replayed: false,
+    });
     renderDialog("revoke_tokens", { serviceAccountId: ID });
     await submit(true);
-    expect(mockPost).toHaveBeenCalledWith("/assistant/actions/org/service-account/revoke-tokens", expect.objectContaining({ confirmed: true }));
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/org/service-account/revoke-tokens",
+      expect.objectContaining({ confirmed: true }),
+    );
   });
 
   it("rejects secret-bearing assistant params before any mutation", async () => {
-    renderDialog("update", { serviceAccountId: ID, credential: "Bearer abcdefghijklmnop" });
+    renderDialog("update", {
+      serviceAccountId: ID,
+      credential: "Bearer abcdefghijklmnop",
+    });
     await userEvent.click(screen.getByRole("button", { name: "Continue" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(/entered in the NyxID browser dialog/i);
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /entered in the NyxID browser dialog/i,
+    );
     expect(mockGet).not.toHaveBeenCalled();
     expect(mockPost).not.toHaveBeenCalled();
   });

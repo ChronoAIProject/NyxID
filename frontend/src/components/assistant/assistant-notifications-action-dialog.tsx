@@ -14,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/lib/api-client";
+import { assistantOneTimeMaterialSchema } from "@/schemas/assistant-action-effects";
 import {
   assertSecretFreeReadBack,
   assertNoSensitiveActionParams,
@@ -51,6 +52,7 @@ const responseSchema = z
     linkCode: z.string().min(1).optional(),
     botUsername: z.string().min(1).optional(),
     expiresInSecs: z.number().int().positive().optional(),
+    oneTimeMaterial: assistantOneTimeMaterialSchema,
   })
   .strict();
 

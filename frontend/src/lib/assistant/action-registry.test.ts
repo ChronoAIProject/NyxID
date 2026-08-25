@@ -3,23 +3,9 @@ import { ACTION_DIALOGS } from "@/components/assistant/blocks/action-dialogs";
 import manifestActions from "@/lib/assistant/__fixtures__/assistant-actions-manifest.json";
 import { ACTION_REGISTRY } from "@/lib/assistant/action-registry";
 
-const ACTIVE_WIRING = {
+const NON_DIALOG_WIRING = {
   "service.connect": "legacy_connect",
   "service.reauthorize": "legacy_reauthorize",
-  "key.create": "dialog",
-  "key.rotate": "dialog",
-  "key.update": "dialog",
-  "key.delete": "dialog",
-  "key.extend_scope": "dialog",
-  "key.bind_credential": "dialog",
-  "service.update": "dialog",
-  "service.delete": "dialog",
-  "service.route": "dialog",
-  "service.rotate_credential": "dialog",
-  "endpoint.update": "dialog",
-  "endpoint.delete": "dialog",
-  "external_key.rotate": "dialog",
-  "external_key.delete": "dialog",
 } as const;
 
 describe("assistant action registry", () => {
@@ -38,7 +24,7 @@ describe("assistant action registry", () => {
       if (!descriptor) continue;
 
       const expectedWiring =
-        ACTIVE_WIRING[action as keyof typeof ACTIVE_WIRING] ?? "deferred";
+        NON_DIALOG_WIRING[action as keyof typeof NON_DIALOG_WIRING] ?? "dialog";
       expect(
         descriptor.wiring,
         `${action} must not change wiring without an explicit review update`,
