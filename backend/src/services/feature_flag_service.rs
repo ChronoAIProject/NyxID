@@ -116,12 +116,24 @@ const DIRECT_CHAT_ENGINE_FLAG: FeatureFlagDef = FeatureFlagDef {
     default_enabled: false,
 };
 
+/// Operator gate for the first-party platform-services operation surface.
+/// Disabled by default; per-operation `enabled` rows remain a separate,
+/// narrower layer below this caller-facing feature gate.
+pub const PLATFORM_SERVICES_FLAG_KEY: &str = "experimental:platform-services";
+
+const PLATFORM_SERVICES_FLAG: FeatureFlagDef = FeatureFlagDef {
+    key: PLATFORM_SERVICES_FLAG_KEY,
+    description: "Exposes constrained first-party platform service operations.",
+    default_enabled: false,
+};
+
 #[cfg(not(test))]
 pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     AI_ASSISTANT_FLAG,
     BILLING_FLAG,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
+    PLATFORM_SERVICES_FLAG,
 ];
 
 /// Test builds carry a placeholder flag so the resolution / override pipeline
@@ -132,6 +144,7 @@ pub const FEATURE_FLAGS: &[FeatureFlagDef] = &[
     BILLING_FLAG_TEST,
     AEVATAR_CHAT_WIRE_LOG_FLAG,
     DIRECT_CHAT_ENGINE_FLAG,
+    PLATFORM_SERVICES_FLAG,
     FeatureFlagDef {
         key: "example_ui",
         description: "Test-only placeholder flag.",
@@ -1278,6 +1291,7 @@ mod tests {
                 "experimental:billing",
                 "experimental:aevatar-chat-wire-log",
                 "experimental:direct-chat-engine",
+                "experimental:platform-services",
             ]
         );
         assert_eq!(
@@ -1289,6 +1303,12 @@ mod tests {
                 .expect("wire-log flag is registered")
                 .default_enabled,
             "the wire-log diagnostic must default to off"
+        );
+        assert!(
+            !find_flag(PLATFORM_SERVICES_FLAG_KEY)
+                .expect("platform-services flag is registered")
+                .default_enabled,
+            "the platform-services surface must default to off"
         );
     }
 
