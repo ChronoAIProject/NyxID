@@ -2,10 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  compareDeviceLoginTimezones,
   formatDeviceLoginRelativeTime,
   resolveDeviceLoginDeadlineMs,
   secondsUntilDeviceLoginDeadline,
 } from "./deviceLoginPreview";
+
+test("compares a requester timezone with the approving phone without inventing absence", () => {
+  assert.equal(
+    compareDeviceLoginTimezones("Europe/Moscow", "Asia/Singapore"),
+    "different",
+  );
+  assert.equal(
+    compareDeviceLoginTimezones("Asia/Singapore", "Asia/Singapore"),
+    "same",
+  );
+  assert.equal(compareDeviceLoginTimezones(null, "Asia/Singapore"), "unavailable");
+  assert.equal(compareDeviceLoginTimezones("Europe/Moscow", undefined), "unavailable");
+});
 
 test("uses backend remaining seconds as the countdown anchor", () => {
   const now = Date.parse("2026-08-20T10:00:00Z");

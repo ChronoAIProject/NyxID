@@ -22,6 +22,12 @@ test("normalizes additive fields missing from an older backend", () => {
       client_platform: preview.client_platform,
       same_ip_as_viewer: preview.same_ip_as_viewer,
       seconds_remaining: preview.seconds_remaining,
+      initiating_origin: preview.initiating_origin,
+      initiating_origin_status: preview.initiating_origin_status,
+      network_relation: preview.network_relation,
+      client_timezone: preview.client_timezone,
+      client_ip_timezone: preview.client_ip_timezone,
+      client_timezone_matches_ip: preview.client_timezone_matches_ip,
     },
     {
       client_ip: null,
@@ -32,6 +38,12 @@ test("normalizes additive fields missing from an older backend", () => {
       client_platform: null,
       same_ip_as_viewer: null,
       seconds_remaining: null,
+      initiating_origin: null,
+      initiating_origin_status: "absent",
+      network_relation: null,
+      client_timezone: null,
+      client_ip_timezone: null,
+      client_timezone_matches_ip: null,
     },
   );
 });
@@ -48,6 +60,22 @@ test("accepts verbose requester attribution", () => {
     client_platform: "macOS (aarch64)",
     same_ip_as_viewer: false,
     seconds_remaining: 583,
+    initiating_origin: "https://nyxid.dev",
+    initiating_origin_status: "matched",
+    network_relation: "same_network",
+    client_city: "Singapore",
+    client_region: "Singapore",
+    client_continent: "AS",
+    client_ip_timezone: "Asia/Singapore",
+    client_timezone: "Europe/Moscow",
+    client_timezone_matches_ip: false,
+    client_locale: "en-SG",
+    client_form_factor: "desktop",
+    client_screen_width: 1512,
+    client_screen_height: 982,
+    client_device_pixel_ratio: 2,
+    client_hardware_concurrency: 12,
+    client_device_memory: 16,
     initiated_at: "2026-08-20T10:00:00Z",
     expires_at: "2026-08-20T10:10:00Z",
     status: "pending",
@@ -60,6 +88,11 @@ test("accepts verbose requester attribution", () => {
   assert.equal(preview.client_platform, "macOS (aarch64)");
   assert.equal(preview.same_ip_as_viewer, false);
   assert.equal(preview.seconds_remaining, 583);
+  assert.equal(preview.initiating_origin_status, "matched");
+  assert.equal(preview.network_relation, "same_network");
+  assert.equal(preview.client_city, "Singapore");
+  assert.equal(preview.client_timezone_matches_ip, false);
+  assert.equal(preview.client_form_factor, "desktop");
 });
 
 test("bounds and strips controls from requester display strings", () => {

@@ -63,10 +63,27 @@ function makePreview(
     client_ip: "203.0.113.10",
     client_ip_attribution: "verified",
     client_country: "SG",
+    client_city: "Singapore",
+    client_region: "Singapore",
+    client_continent: "AS",
+    client_ip_timezone: "Asia/Singapore",
+    initiating_origin: "https://nyxid.dev",
+    initiating_origin_status: "matched",
     client_kind: "cli",
     client_app: "NyxID CLI 1.4.2",
     client_platform: "macOS (aarch64)",
+    client_model: null,
+    client_form_factor: null,
+    client_timezone: null,
+    client_timezone_matches_ip: null,
+    client_locale: null,
+    client_screen_width: null,
+    client_screen_height: null,
+    client_device_pixel_ratio: null,
+    client_hardware_concurrency: null,
+    client_device_memory: null,
     same_ip_as_viewer: true,
+    network_relation: "same_ip",
     seconds_remaining: 600,
     initiated_at: "2099-08-20T10:00:00Z",
     expires_at: "2099-08-20T10:10:00Z",
@@ -83,6 +100,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe("LoginDevicePage", () => {
@@ -110,7 +128,9 @@ describe("LoginDevicePage", () => {
     expect(
       screen.getByText("Reported by the requesting device (unverified)"),
     ).toBeInTheDocument();
-    expect(screen.getByText("203.0.113.10 (SG)")).toBeInTheDocument();
+    expect(screen.getByText("Started from nyxid.dev")).toBeInTheDocument();
+    expect(screen.getByText("203.0.113.10")).toBeInTheDocument();
+    expect(screen.getByText("Singapore, Singapore (SG)")).toBeInTheDocument();
     expect(screen.getByText("Same IP as this device")).toBeInTheDocument();
     expect(screen.getByText("NyxID CLI 1.4.2")).toBeInTheDocument();
     expect(screen.getByText("macOS (aarch64)")).toBeInTheDocument();
@@ -121,12 +141,104 @@ describe("LoginDevicePage", () => {
     expect(rawDetails).toHaveAttribute("open");
   });
 
-  it("uses warning styling when the preview caller is on a different IP", () => {
-    previewState.data = makePreview({ same_ip_as_viewer: false });
+  it("presents different networks as useful context rather than an alarm", () => {
+    previewState.data = makePreview({
+      same_ip_as_viewer: false,
+      network_relation: "different_network",
+    });
     render(<LoginDevicePage />);
 
-    const signal = screen.getByText("Different IP from this device");
-    expect(signal).toHaveClass("text-warning");
+    const signal = screen.getByText(
+      "Different network from this device - common when a phone uses cellular data",
+    );
+    expect(signal).not.toHaveClass("text-warning");
+  });
+
+  it("shows rich browser recognition details and both timezone mismatch signals", () => {
+    vi.spyOn(Intl.DateTimeFormat.prototype, "resolvedOptions").mockReturnValue({
+      ...new Intl.DateTimeFormat().resolvedOptions(),
+      timeZone: "Asia/Singapore",
+    });
+    previewState.data = makePreview({
+      client_kind: "browser",
+      client_label: "Chrome 131.0.6778.85 on macOS 15.2",
+      client_app: "Chrome 131.0.6778.85",
+      client_platform: "macOS 15.2 (arm64)",
+      client_form_factor: "desktop",
+      client_timezone: "Europe/Moscow",
+      client_timezone_matches_ip: false,
+      client_locale: "en-SG",
+      client_screen_width: 1512,
+      client_screen_height: 982,
+      client_device_pixel_ratio: 2,
+      client_hardware_concurrency: 12,
+      client_device_memory: 16,
+      network_relation: "same_network",
+      same_ip_as_viewer: false,
+    });
+    render(<LoginDevicePage />);
+
+    expect(screen.getByText("Same network as this device")).toBeInTheDocument();
+    expect(
+      screen.getByText("Reported timezone does not match the verified IP timezone"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Europe/Moscow")).toBeInTheDocument();
+    expect(
+      screen.getByText("Differs from this device (Asia/Singapore)"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1512 x 982 CSS px at 2x")).toBeInTheDocument();
+    expect(screen.getByText("12 logical processors")).toBeInTheDocument();
+    expect(screen.getByText("16 GB reported memory")).toBeInTheDocument();
+  });
+
+  it("shows a prominent warning for a mismatched initiating origin", () => {
+    previewState.data = makePreview({
+      initiating_origin: "https://login-copy.example",
+      initiating_origin_status: "mismatched",
+    });
+    render(<LoginDevicePage />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "This sign-in was started from login-copy.example, not the official NyxID site",
+    );
+  });
+
+  it.each([
+    ["malformed", "The initiating Origin header was malformed"],
+    ["non_http", "This sign-in reported a non-HTTP(S) initiating origin"],
+  ] as const)("distinguishes an %s initiating origin", (status, message) => {
+    previewState.data = makePreview({
+      initiating_origin: status === "non_http" ? "file:///tmp/login.html" : "not a url",
+      initiating_origin_status: status,
+    });
+    render(<LoginDevicePage />);
+
+    expect(screen.getByRole("alert")).toHaveTextContent(message);
+  });
+
+  it("keeps a CLI-shaped request neutral when browser context and origin are absent", () => {
+    previewState.data = makePreview({
+      initiating_origin: null,
+      initiating_origin_status: "absent",
+      client_city: null,
+      client_region: null,
+      client_continent: null,
+      client_ip_timezone: null,
+      client_timezone: null,
+      client_timezone_matches_ip: null,
+      client_locale: null,
+      client_form_factor: null,
+      client_screen_width: null,
+      client_screen_height: null,
+      client_device_pixel_ratio: null,
+      client_hardware_concurrency: null,
+      client_device_memory: null,
+    });
+    render(<LoginDevicePage />);
+
+    expect(screen.queryByText(/not the official NyxID site/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/origin.*malformed/i)).not.toBeInTheDocument();
+    expect(screen.getByText("NyxID CLI 1.4.2")).toBeInTheDocument();
   });
 
   it("never presents an unavailable infrastructure IP as evidence", () => {
@@ -135,6 +247,7 @@ describe("LoginDevicePage", () => {
       client_ip_attribution: "unavailable",
       client_country: null,
       same_ip_as_viewer: true,
+      network_relation: null,
     });
     render(<LoginDevicePage />);
 
@@ -151,6 +264,7 @@ describe("LoginDevicePage", () => {
       client_ip_attribution: "unverified",
       client_country: null,
       same_ip_as_viewer: null,
+      network_relation: null,
     });
     render(<LoginDevicePage />);
 

@@ -69,6 +69,12 @@ describe("previewResponseSchema", () => {
       client_platform: null,
       same_ip_as_viewer: null,
       seconds_remaining: null,
+      initiating_origin: null,
+      initiating_origin_status: "absent",
+      network_relation: null,
+      client_timezone: null,
+      client_ip_timezone: null,
+      client_timezone_matches_ip: null,
     });
   });
 
@@ -85,6 +91,22 @@ describe("previewResponseSchema", () => {
         client_platform: "macOS (aarch64)",
         same_ip_as_viewer: false,
         seconds_remaining: 583,
+        initiating_origin: "https://nyxid.dev",
+        initiating_origin_status: "matched",
+        network_relation: "same_network",
+        client_city: "Singapore",
+        client_region: "Singapore",
+        client_continent: "AS",
+        client_ip_timezone: "Asia/Singapore",
+        client_timezone: "Europe/Moscow",
+        client_timezone_matches_ip: false,
+        client_locale: "en-SG",
+        client_form_factor: "desktop",
+        client_screen_width: 1512,
+        client_screen_height: 982,
+        client_device_pixel_ratio: 2,
+        client_hardware_concurrency: 12,
+        client_device_memory: 16,
         initiated_at: "2026-08-20T10:00:00Z",
         expires_at: "2026-08-20T10:10:00Z",
         status: "pending",
@@ -97,6 +119,11 @@ describe("previewResponseSchema", () => {
       client_platform: "macOS (aarch64)",
       same_ip_as_viewer: false,
       seconds_remaining: 583,
+      initiating_origin_status: "matched",
+      network_relation: "same_network",
+      client_city: "Singapore",
+      client_timezone_matches_ip: false,
+      client_form_factor: "desktop",
     });
   });
 
@@ -120,12 +147,32 @@ describe("browser device-code schemas", () => {
   it("accepts a request response and normalizes the request body", () => {
     expect(
       requestBodySchema.parse({
-        client_label: "NyxID web (MacIntel)",
+        client_label: "Chrome 131 on macOS 15.2",
         client_user_agent: "Mozilla/5.0",
+        client_app: "Chrome 131",
+        client_platform: "macOS 15.2 (arm64)",
+        client_form_factor: "desktop",
+        client_timezone: "Asia/Singapore",
+        client_locale: "en-SG",
+        client_screen_width: 1512,
+        client_screen_height: 982,
+        client_device_pixel_ratio: 2,
+        client_hardware_concurrency: 12,
+        client_device_memory: 16,
       }),
     ).toEqual({
-      client_label: "NyxID web (MacIntel)",
+      client_label: "Chrome 131 on macOS 15.2",
       client_user_agent: "Mozilla/5.0",
+      client_app: "Chrome 131",
+      client_platform: "macOS 15.2 (arm64)",
+      client_form_factor: "desktop",
+      client_timezone: "Asia/Singapore",
+      client_locale: "en-SG",
+      client_screen_width: 1512,
+      client_screen_height: 982,
+      client_device_pixel_ratio: 2,
+      client_hardware_concurrency: 12,
+      client_device_memory: 16,
     });
     expect(
       requestResponseSchema.parse({

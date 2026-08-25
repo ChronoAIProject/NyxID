@@ -20,7 +20,7 @@ describe("mock catalog", () => {
 });
 
 describe("auth device preview mock", () => {
-  it("returns a live, fully attributed CLI request", () => {
+  it("returns a live, richly attributed browser request", () => {
     vi.useFakeTimers();
     const now = new Date("2026-08-25T12:00:00Z");
     vi.setSystemTime(now);
@@ -36,6 +36,13 @@ describe("auth device preview mock", () => {
       readonly client_app: string;
       readonly client_platform: string;
       readonly client_user_agent: string;
+      readonly client_city: string;
+      readonly client_ip_timezone: string;
+      readonly initiating_origin_status: string;
+      readonly client_timezone: string;
+      readonly client_timezone_matches_ip: boolean;
+      readonly client_form_factor: string;
+      readonly network_relation: string;
       readonly same_ip_as_viewer: boolean;
       readonly initiated_at: string;
       readonly expires_at: string;
@@ -44,14 +51,20 @@ describe("auth device preview mock", () => {
     };
 
     expect(response).toMatchObject({
-      client_ip: "8.8.8.8",
+      client_ip: "103.6.151.42",
       client_ip_attribution: "verified",
-      client_country: "US",
-      client_kind: "cli",
-      client_app: "NyxID CLI 1.4.2",
-      client_platform: "macOS (aarch64)",
-      client_user_agent: "nyxid-cli/1.4.2 (macos; aarch64)",
+      client_country: "SG",
+      client_city: "Singapore",
+      client_ip_timezone: "Asia/Singapore",
+      initiating_origin_status: "matched",
+      client_kind: "browser",
+      client_app: "Chrome 151.0.7922.174",
+      client_platform: "macOS 26.5.2 (arm64)",
+      client_timezone: "Europe/Moscow",
+      client_timezone_matches_ip: false,
+      client_form_factor: "desktop",
       same_ip_as_viewer: false,
+      network_relation: "same_network",
       seconds_remaining: 600,
       status: "pending",
     });

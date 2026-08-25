@@ -6,7 +6,11 @@ import {
   ChevronDown,
   CircleX,
   Clock3,
+  Cpu,
   Globe2,
+  Languages,
+  MapPin,
+  Monitor,
   MonitorSmartphone,
   ShieldCheck,
   ShieldX,
@@ -320,10 +324,10 @@ function WarningBanner() {
         <AlertTriangle className="h-4 w-4 text-warning" />
       </div>
       <p className="text-[12px] leading-relaxed text-warning">
-        Only approve a code you generated yourself. NyxID can verify only the
-        network and timing details explicitly labelled below. Device names,
-        applications, platforms, and user agents are unverified and can be
-        forged. If someone sent you this code, reject it.
+        Only approve a request you started yourself. Check the initiating site,
+        location, and timing below before deciding. Device names, browser
+        details, timezone, and hardware are self-reported and can be forged. If
+        someone else showed or sent you this code, reject it.
       </p>
     </div>
   );
@@ -339,6 +343,20 @@ function PreviewPanel({
   const expired = remainingSeconds === 0;
   const verifiedIp = preview.client_ip_attribution === "verified";
   const unverifiedIp = preview.client_ip_attribution === "unverified";
+  const networkRelation =
+    preview.network_relation ??
+    (preview.same_ip_as_viewer === true
+      ? "same_ip"
+      : preview.same_ip_as_viewer === false
+        ? "different_ip"
+        : null);
+  const localTimezone = browserTimezone();
+  const reportedTimezoneDiffers =
+    preview.client_timezone !== null &&
+    localTimezone !== null &&
+    preview.client_timezone.toLowerCase() !== localTimezone.toLowerCase();
+  const location = formatVerifiedLocation(preview);
+  const screenDescription = formatScreenDescription(preview);
   const appDescription =
     preview.client_app ??
     (preview.client_kind === "unknown"
@@ -368,11 +386,12 @@ function PreviewPanel({
           Verified by NyxID
         </div>
         <div className="divide-y divide-border/30 rounded-md border border-border/50 bg-overlay/30">
+          <InitiatingOriginSignal preview={preview} />
           {verifiedIp && preview.client_ip ? (
             <PreviewRow
               icon={<Globe2 />}
               label="Requester IP"
-              value={`${preview.client_ip}${preview.client_country ? ` (${preview.client_country})` : ""}`}
+              value={preview.client_ip}
               mono
             />
           ) : (
@@ -382,18 +401,42 @@ function PreviewPanel({
                 : "No requester IP was verified by NyxID."}
             </div>
           )}
-          {verifiedIp && preview.same_ip_as_viewer !== null ? (
+          {verifiedIp && location ? (
+            <PreviewRow
+              icon={<MapPin />}
+              label="Requester location"
+              value={location}
+            />
+          ) : null}
+          {verifiedIp && networkRelation ? (
             <div
               className={
-                preview.same_ip_as_viewer
+                networkRelation === "same_ip" || networkRelation === "same_network"
                   ? "flex items-center gap-2 px-3 py-2.5 text-[12px] font-medium text-success"
-                  : "flex items-center gap-2 px-3 py-2.5 text-[12px] font-medium text-warning"
+                  : "flex items-center gap-2 px-3 py-2.5 text-[12px] font-medium text-muted-foreground"
               }
             >
-              {preview.same_ip_as_viewer ? <ShieldCheck /> : <AlertTriangle />}
-              {preview.same_ip_as_viewer
+              {networkRelation === "same_ip" ? <ShieldCheck /> : <Globe2 />}
+              {networkRelation === "same_ip"
                 ? "Same IP as this device"
-                : "Different IP from this device"}
+                : networkRelation === "same_network"
+                  ? "Same network as this device"
+                  : networkRelation === "different_network"
+                    ? "Different network from this device - common when a phone uses cellular data"
+                    : "Different IP from this device - common when devices use separate connections"}
+            </div>
+          ) : null}
+          {verifiedIp && preview.client_ip_timezone ? (
+            <PreviewRow
+              icon={<Globe2 />}
+              label="IP timezone"
+              value={preview.client_ip_timezone}
+            />
+          ) : null}
+          {preview.client_timezone_matches_ip === false ? (
+            <div className="flex items-center gap-2 px-3 py-2.5 text-[12px] font-semibold text-warning">
+              <AlertTriangle className="size-3.5 shrink-0" />
+              Reported timezone does not match the verified IP timezone
             </div>
           ) : null}
           <PreviewRow
@@ -447,6 +490,57 @@ function PreviewPanel({
             label="Platform"
             value={preview.client_platform ?? "Not identified"}
           />
+          {preview.client_model ? (
+            <PreviewRow label="Device model" value={preview.client_model} />
+          ) : null}
+          {preview.client_form_factor ? (
+            <PreviewRow
+              label="Form factor"
+              value={capitalize(preview.client_form_factor)}
+            />
+          ) : null}
+          {preview.client_timezone ? (
+            <>
+              <PreviewRow
+                icon={<Globe2 />}
+                label="Timezone"
+                value={preview.client_timezone}
+              />
+              {reportedTimezoneDiffers ? (
+                <div className="flex items-center gap-2 px-3 py-2.5 text-[12px] font-medium text-warning">
+                  <AlertTriangle className="size-3.5 shrink-0" />
+                  Differs from this device ({localTimezone})
+                </div>
+              ) : null}
+            </>
+          ) : null}
+          {preview.client_locale ? (
+            <PreviewRow
+              icon={<Languages />}
+              label="Locale"
+              value={preview.client_locale}
+            />
+          ) : null}
+          {screenDescription ? (
+            <PreviewRow
+              icon={<Monitor />}
+              label="Screen"
+              value={screenDescription}
+            />
+          ) : null}
+          {preview.client_hardware_concurrency !== null ? (
+            <PreviewRow
+              icon={<Cpu />}
+              label="Processor"
+              value={`${preview.client_hardware_concurrency} logical processors`}
+            />
+          ) : null}
+          {preview.client_device_memory !== null ? (
+            <PreviewRow
+              label="Memory"
+              value={`${preview.client_device_memory} GB reported memory`}
+            />
+          ) : null}
           <details className="group px-3 py-2.5">
             <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-[12px] text-muted-foreground">
               Raw user agent
@@ -460,6 +554,79 @@ function PreviewPanel({
       </div>
     </section>
   );
+}
+
+function InitiatingOriginSignal({
+  preview,
+}: {
+  readonly preview: PreviewAuthDeviceResponse;
+}) {
+  if (preview.initiating_origin_status === "absent") return null;
+  const host = originHost(preview.initiating_origin);
+  if (preview.initiating_origin_status === "matched") {
+    return (
+      <div className="flex items-center gap-2 px-3 py-2.5 text-[12px] font-semibold text-success">
+        <ShieldCheck className="size-3.5 shrink-0" />
+        Started from {host ?? "the configured NyxID site"}
+      </div>
+    );
+  }
+
+  const message =
+    preview.initiating_origin_status === "mismatched"
+      ? `This sign-in was started from ${host ?? "another site"}, not the official NyxID site. Reject it unless you intentionally used that site.`
+      : preview.initiating_origin_status === "non_http"
+        ? "This sign-in reported a non-HTTP(S) initiating origin. Reject it unless you generated the request yourself."
+        : "The initiating Origin header was malformed. Reject this request unless you generated it yourself.";
+  return (
+    <div
+      role="alert"
+      className="flex items-start gap-2 bg-destructive/10 px-3 py-3 text-[12px] font-semibold leading-relaxed text-destructive"
+    >
+      <ShieldX className="mt-0.5 size-4 shrink-0" />
+      {message}
+    </div>
+  );
+}
+
+function originHost(origin: string | null): string | null {
+  if (!origin) return null;
+  try {
+    return new URL(origin).host || null;
+  } catch {
+    return null;
+  }
+}
+
+function browserTimezone(): string | null {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch {
+    return null;
+  }
+}
+
+function formatVerifiedLocation(preview: PreviewAuthDeviceResponse): string | null {
+  const locality = [preview.client_city, preview.client_region]
+    .filter((value): value is string => Boolean(value))
+    .join(", ");
+  if (locality && preview.client_country) return `${locality} (${preview.client_country})`;
+  return locality || preview.client_country;
+}
+
+function formatScreenDescription(preview: PreviewAuthDeviceResponse): string | null {
+  if (preview.client_screen_width === null || preview.client_screen_height === null) {
+    return null;
+  }
+  const ratio =
+    preview.client_device_pixel_ratio === null
+      ? ""
+      : ` at ${preview.client_device_pixel_ratio}x`;
+  return `${preview.client_screen_width} x ${preview.client_screen_height} CSS px${ratio}`;
+}
+
+function capitalize(value: string): string {
+  return `${value[0]?.toUpperCase() ?? ""}${value.slice(1)}`;
 }
 
 function PreviewRow({

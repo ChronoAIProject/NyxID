@@ -199,6 +199,16 @@ Before enabling trusted proxy attribution in production:
 4. Confirm the origin cannot be reached around Cloudflare. If direct-to-origin traffic is possible, ensure it cannot reach an allowlisted ingress peer.
 5. After enabling, initiate a device login while sending a forged `CF-Connecting-IP`, then confirm `/auth/device/preview` does not echo the forged address. Repeat with forged `X-Forwarded-For`, `X-Real-IP`, and `CF-IPCountry` values before treating requester attribution as verified.
 
+For richer requester recognition, enable Cloudflare's **Add visitor location headers**
+managed transform in the Cloudflare dashboard. NyxID reads `CF-IPCity`, `CF-Region`,
+`CF-IPContinent`, and `CF-Timezone` only when the origin peer matches
+`TRUSTED_PROXY_IPS`, under the same trust gate as `CF-IPCountry`. It intentionally
+does not retain Cloudflare latitude, longitude, postal-code, or metro-code headers;
+city and region are sufficient for a sign-in recognition check without storing more
+precise location data. If the transform is disabled or a particular header is absent,
+the approval screen degrades cleanly to country-only attribution. The ingress header
+overwrite/strip checklist above still applies to every enabled location header.
+
 ## CLI Remote Pairing (Optional)
 
 The `nyxid` CLI's wizard-style commands (e.g. `nyxid service add`, `nyxid api-key create`, `nyxid node register-token`) can hand off to a browser on another device via a short pairing code. Codes are 8 Crockford characters (~2^40 space) and live for 15 minutes; the backend keys the stored hash with an HMAC so a MongoDB snapshot alone cannot brute-force them offline.

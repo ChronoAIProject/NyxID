@@ -32,3 +32,13 @@ export function formatDeviceLoginRelativeTime(
   const days = Math.floor(hours / 24);
   return `${days} day${days === 1 ? "" : "s"} ago`;
 }
+
+export function compareDeviceLoginTimezones(
+  requesterTimezone: string | null | undefined,
+  approvingDeviceTimezone: string | null | undefined,
+): "same" | "different" | "unavailable" {
+  if (!requesterTimezone || !approvingDeviceTimezone) return "unavailable";
+  return requesterTimezone.toLowerCase() === approvingDeviceTimezone.toLowerCase()
+    ? "same"
+    : "different";
+}

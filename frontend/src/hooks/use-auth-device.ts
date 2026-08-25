@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
+import { collectBrowserDeviceContext } from "@/lib/browser-device-context";
 import { useAuthStore } from "@/stores/auth-store";
 import {
   AUTH_DEVICE_ERROR_MESSAGES,
@@ -114,22 +115,6 @@ function getTerminalPhase(errorCode: number | null): WebAuthDevicePhase | null {
   }
 }
 
-function browserClientLabel(): string {
-  const browserNavigator =
-    typeof navigator !== "undefined"
-      ? (navigator as Navigator & {
-          readonly userAgentData?: { readonly platform?: string };
-        })
-      : null;
-  const platform =
-    browserNavigator?.userAgentData?.platform
-      ? browserNavigator.userAgentData.platform
-      : browserNavigator
-        ? browserNavigator.platform
-        : "browser";
-  return `NyxID web (${platform || "browser"})`;
-}
-
 /**
  * Owns the browser-facing device-code request and polling lifecycle. The
  * device code remains in this hook's memory and is never persisted or logged.
@@ -153,6 +138,7 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
   const lastActionAtRef = useRef(0);
   const stoppedRef = useRef(true);
   const consecutiveFailuresRef = useRef(0);
+  const requestGenerationRef = useRef(0);
 
   const clearPollTimer = useCallback(() => {
     if (pollTimerRef.current !== null) {
@@ -246,6 +232,7 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
     const now = Date.now();
     if (now - lastActionAtRef.current < ACTION_THROTTLE_MS) return;
     lastActionAtRef.current = now;
+    const requestGeneration = ++requestGenerationRef.current;
     stopPolling();
     requestRef.current = null;
     expiresAtRef.current = null;
@@ -257,14 +244,18 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
     setCurrentPhase("requesting");
 
     try {
-      const body = requestBodySchema.parse({
-        client_label: browserClientLabel(),
-        client_user_agent:
-          typeof navigator !== "undefined" ? navigator.userAgent : "browser",
-      });
+      const browserContext = await collectBrowserDeviceContext();
+      if (
+        requestGenerationRef.current !== requestGeneration ||
+        phaseRef.current !== "requesting"
+      ) {
+        return;
+      }
+      const body = requestBodySchema.parse(browserContext);
       const response = requestResponseSchema.parse(
         await api.post<unknown>("/auth/device/request", body),
       );
+      if (requestGenerationRef.current !== requestGeneration) return;
       requestRef.current = response;
       setRequest(response);
       intervalRef.current = response.interval;
@@ -274,6 +265,7 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
       setCurrentPhase("pending");
       schedulePollRef.current(response.interval);
     } catch (requestError) {
+      if (requestGenerationRef.current !== requestGeneration) return;
       stopPolling();
       setCurrentPhase("error");
       setError({
@@ -304,9 +296,16 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
     return () => clearInterval(timer);
   }, [phase, setCurrentPhase, stopPolling]);
 
-  useEffect(() => () => stopPolling(), [stopPolling]);
+  useEffect(
+    () => () => {
+      requestGenerationRef.current += 1;
+      stopPolling();
+    },
+    [stopPolling],
+  );
 
   const close = useCallback(() => {
+    requestGenerationRef.current += 1;
     stopPolling();
     requestRef.current = null;
     expiresAtRef.current = null;
