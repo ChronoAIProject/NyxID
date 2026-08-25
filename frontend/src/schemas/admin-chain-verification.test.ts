@@ -27,6 +27,24 @@ describe("admin chain verification schemas", () => {
     expect(parsed.anchor_seq).toBe(41);
   });
 
+  it("parses an active startup diagnostic", () => {
+    const parsed = chainVerificationResponseSchema.parse({
+      chains: [baseStatus],
+      startup_diagnostics: [
+        {
+          code: "exact_service_semantic_effect_index",
+          summary: "Semantic uniqueness is not enforced.",
+          detail: "Two duplicate groups were detected.",
+          remediation: "Reconcile duplicate groups and restart.",
+          detected_at: "2026-08-25T10:00:00Z",
+        },
+      ],
+    });
+    expect(parsed.startup_diagnostics[0]?.code).toBe(
+      "exact_service_semantic_effect_index",
+    );
+  });
+
   it("parses a broken status with break details", () => {
     const parsed = chainVerifyStatusSchema.parse({
       ...baseStatus,
@@ -44,8 +62,16 @@ describe("admin chain verification schemas", () => {
   });
 
   it("tolerates chains the sweep has not covered yet", () => {
-    const parsed = chainVerificationResponseSchema.parse({ chains: [] });
+    const parsed = chainVerificationResponseSchema.parse({
+      chains: [],
+      startup_diagnostics: [],
+    });
     expect(parsed.chains).toHaveLength(0);
+  });
+
+  it("defaults diagnostics for responses served by an older replica", () => {
+    const parsed = chainVerificationResponseSchema.parse({ chains: [] });
+    expect(parsed.startup_diagnostics).toEqual([]);
   });
 
   it("rejects unknown outcomes and chains", () => {

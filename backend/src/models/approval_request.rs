@@ -36,6 +36,16 @@ pub struct ExactServiceApprovalRedemption {
     pub failure_code: Option<String>,
 }
 
+/// Versioned producer projection bound to an exact-service approval.
+///
+/// The version is stored beside the digest so a redeemer never guesses which
+/// projection produced an otherwise opaque hash during a rolling deployment.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExactServiceExecutionAuthorityBinding {
+    pub projection_version: String,
+    pub digest: String,
+}
+
 /// Server-authoritative binding for a connected-service approval.
 ///
 /// This is deliberately absent on generic tool approvals. Redemption requires
@@ -51,17 +61,32 @@ pub struct ExactServiceApprovalBinding {
     pub catalog_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exact_view_digest: Option<String>,
+    /// Current additive v2 projection digest. During the bounded rolling
+    /// window, `exact_view_digest` retains the pre-additive v2 value for old
+    /// replicas while current replicas enforce this slot as well.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exact_view_digest_binding: Option<String>,
     pub endpoint_contract_digest: String,
     pub operation_digest: String,
     pub operation_id: String,
     pub operation_generation: i64,
+    /// True only when NyxID resolved and persisted the generation from a live
+    /// producer referent. Dynamic instance-spec operations and legacy
+    /// caller-owned generations have no producer generation to compare.
+    #[serde(default)]
+    pub producer_generation_bound: bool,
     pub effect_idempotency_key: String,
     pub arguments: serde_json::Value,
-    /// Producer-owned digest of the resolved execution inputs at create.
-    /// `None` on legacy rows created before this field existed; redeem
-    /// skips the execution-authority gate for those rows.
+    /// Legacy v1 execution-authority slot. New rows retain a real v1 digest so
+    /// v1 and v2 replicas can safely validate their respective projections
+    /// during a rolling deployment.
     #[serde(default)]
     pub execution_authority_digest: Option<String>,
+    /// Explicitly versioned execution-authority binding. Its absence selects
+    /// the legacy v1 digest when present; rows predating authority digests skip
+    /// this gate and remain bounded by approval expiry and the other fences.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_authority_binding: Option<ExactServiceExecutionAuthorityBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redemption: Option<ExactServiceApprovalRedemption>,
 }
@@ -302,19 +327,24 @@ mod tests {
             endpoint_id: "endpoint".to_string(),
             catalog_digest: "sha256:catalog".to_string(),
             exact_view_digest: Some("sha256:exact-view".to_string()),
+            exact_view_digest_binding: Some("sha256:additive-exact-view".to_string()),
             endpoint_contract_digest: "sha256:endpoint".to_string(),
             operation_digest: "sha256:operation".to_string(),
             operation_id: "operation".to_string(),
             operation_generation: 1,
+            producer_generation_bound: true,
             effect_idempotency_key: "effect".to_string(),
             arguments: serde_json::json!({}),
             execution_authority_digest: None,
+            execution_authority_binding: None,
             redemption: None,
         };
         let mut doc = bson::to_document(&binding).expect("serialize exact binding");
         doc.remove("exact_view_digest");
+        doc.remove("exact_view_digest_binding");
         binding = bson::from_document(doc).expect("deserialize legacy exact binding");
         assert!(binding.exact_view_digest.is_none());
+        assert!(binding.exact_view_digest_binding.is_none());
     }
 
     #[test]
@@ -326,19 +356,59 @@ mod tests {
             endpoint_id: "endpoint".to_string(),
             catalog_digest: "sha256:catalog".to_string(),
             exact_view_digest: None,
+            exact_view_digest_binding: None,
             endpoint_contract_digest: "sha256:endpoint".to_string(),
             operation_digest: "sha256:operation".to_string(),
             operation_id: "operation".to_string(),
             operation_generation: 1,
+            producer_generation_bound: true,
             effect_idempotency_key: "effect".to_string(),
             arguments: serde_json::json!({}),
             execution_authority_digest: Some("sha256:exec".to_string()),
+            execution_authority_binding: Some(ExactServiceExecutionAuthorityBinding {
+                projection_version: "nyxid-exact-execution-authority.v2".to_string(),
+                digest: "sha256:exec-v2".to_string(),
+            }),
             redemption: None,
         };
         let mut doc = bson::to_document(&binding).expect("serialize exact binding");
         doc.remove("execution_authority_digest");
         binding = bson::from_document(doc).expect("deserialize legacy execution-authority binding");
         assert!(binding.execution_authority_digest.is_none());
+    }
+
+    #[test]
+    fn missing_versioned_execution_authority_remains_deserializable_but_unbound() {
+        let mut binding = ExactServiceApprovalBinding {
+            request_key: "request-key".to_string(),
+            actor_user_id: "actor".to_string(),
+            user_service_id: "service".to_string(),
+            endpoint_id: "endpoint".to_string(),
+            catalog_digest: "sha256:catalog".to_string(),
+            exact_view_digest: None,
+            exact_view_digest_binding: None,
+            endpoint_contract_digest: "sha256:endpoint".to_string(),
+            operation_digest: "sha256:operation".to_string(),
+            operation_id: "operation".to_string(),
+            operation_generation: 1,
+            producer_generation_bound: true,
+            effect_idempotency_key: "effect".to_string(),
+            arguments: serde_json::json!({}),
+            execution_authority_digest: Some("sha256:legacy-v1".to_string()),
+            execution_authority_binding: Some(ExactServiceExecutionAuthorityBinding {
+                projection_version: "nyxid-exact-execution-authority.v2".to_string(),
+                digest: "sha256:current-v2".to_string(),
+            }),
+            redemption: None,
+        };
+        let mut doc = bson::to_document(&binding).expect("serialize exact binding");
+        doc.remove("execution_authority_binding");
+        binding = bson::from_document(doc).expect("deserialize legacy v1 authority binding");
+        assert!(binding.execution_authority_binding.is_none());
+        assert_eq!(
+            binding.execution_authority_digest.as_deref(),
+            Some("sha256:legacy-v1")
+        );
     }
 
     #[test]

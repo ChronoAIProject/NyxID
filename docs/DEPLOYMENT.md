@@ -10,6 +10,7 @@ This guide covers deploying NyxID in development, staging, and production enviro
 - [Local Development](#local-development)
 - [Building for Production](#building-for-production)
 - [Docker Deployment](#docker-deployment)
+- [Delegated Catalog v2 and Exact Authority v2 Rollout](#delegated-catalog-v2-and-exact-authority-v2-rollout)
 - [Environment Configuration](#environment-configuration)
 - [Database Setup](#database-setup)
 - [RSA Key Management](#rsa-key-management)
@@ -321,6 +322,47 @@ If using cert-manager for automatic TLS certificates:
 1. Install cert-manager and create a `ClusterIssuer`
 2. Uncomment the `cert-manager.io/cluster-issuer` annotation in `k8s/ingress.yaml`
 3. cert-manager will automatically provision and renew certificates
+
+---
+
+## Delegated Catalog v2 and Exact Authority v2 Rollout
+
+This change is safe under an ordinary rolling backend deployment. No traffic
+pause, approval drain, or coordinated Aevatar release is required:
+
+- The delegated discovery contract remains
+  `nyxid-delegated-operation-catalog.v2`. The new `risk`,
+  `supports_idempotency_key`, and nullable `operation_generation` fields are
+  additive. During the bounded compatibility window, discovery publishes the
+  pre-additive v2 digest and new replicas accept both that digest and the full
+  additive projection. Existing clients and replicas therefore continue to
+  create and revalidate the same fence while new clients can consume the added
+  metadata. New approval rows keep that pre-additive digest in the legacy
+  `exact_view_digest` slot and also persist the full projection in the
+  server-owned `exact_view_digest_binding` slot. Old replicas validate the
+  former; new replicas enforce both, so an old writer changing additive policy
+  fields without a generation bump is still detected.
+- New approvals store both execution-authority projections: the real v1 digest
+  in `execution_authority_digest` and the versioned v2 binding in
+  `execution_authority_binding`. An old replica validates the v1 slot exactly
+  as before; a new replica validates v2. Existing main-era rows with only a v1
+  digest are compared against the live v1 projection, and older rows with no
+  digest retain their expiry-bounded behavior.
+- Producer generation is resolved by the server. Durable endpoint rows bind
+  their positive generation; instance-mounted specification operations have no
+  durable generation and keep the endpoint-contract digest as their shape
+  fence.
+
+Deploy backend replicas with the normal rolling strategy and verify `/health`
+reports the intended release commit as each replica becomes ready. A rollback
+is also safe: old code can validate the real v1 slot written by new replicas.
+
+Startup checks the exact-approval semantic-effect unique index. Duplicate
+legacy data or a duplicate write racing the index build no longer blocks
+process startup: NyxID logs the audited remediation, leaves the index absent,
+and activates a diagnostic on the admin Integrity page. The service-level
+semantic replay checks remain active until an operator reconciles the duplicate
+groups and restarts to install the unique index.
 
 ---
 

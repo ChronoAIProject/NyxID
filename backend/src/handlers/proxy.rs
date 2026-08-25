@@ -3529,7 +3529,7 @@ async fn execute_proxy_inner(
                 .await;
                 return Err(AppError::DurableOperationOutcomeUncertain);
             }
-            return Err(error);
+            return Err(error.into_app_error());
         }
         Err(_) => {
             emit_preheader_diagnostics(
