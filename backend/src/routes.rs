@@ -1052,6 +1052,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             get(handlers::node_admin::list_my_bound_services),
         )
         .route("/{node_id}", get(handlers::node_admin::get_node))
+        .route(
+            "/{node_id}/authorization",
+            get(handlers::node_admin::get_node_authorization),
+        )
         .route("/{node_id}", delete(handlers::node_admin::delete_node))
         .route(
             "/{node_id}/rotate-token",
@@ -1097,6 +1101,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
             "/{node_id}/credentials/pending/{pending_id}",
             get(handlers::node_admin::get_pending_credential_pubkey)
                 .delete(handlers::node_admin::cancel_pending_credential),
+        )
+        .route(
+            "/{node_id}/credentials/pending/{pending_id}/authorization",
+            get(handlers::node_admin::get_pending_credential_authorization),
         )
         .route(
             "/{node_id}/credentials/pending/{pending_id}/remote-crypto",
@@ -1671,6 +1679,10 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route(
             "/devices/onboard/{bootstrap_id}",
             delete(handlers::devices::revoke_onboard_device),
+        )
+        .route(
+            "/devices/onboard/{bootstrap_id}/authorization",
+            get(handlers::devices::get_onboard_device_authorization),
         )
         .nest("/users", user_routes)
         .nest("/api-keys", api_key_routes)

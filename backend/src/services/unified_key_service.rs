@@ -171,8 +171,25 @@ fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
     false
 }
 
+fn is_duplicate_reserved_service_id_error(error: &mongodb::error::Error) -> bool {
+    if let mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(we)) =
+        error.kind.as_ref()
+    {
+        // MongoDB reports the unique `_id` index as `index: _id_` in the
+        // duplicate-key message. This is distinct from the user-scoped
+        // `(user_id, slug)` index, whose collision should keep using the
+        // slug retry path.
+        return we.code == 11000 && we.message.contains("index: _id_");
+    }
+    false
+}
+
+fn is_duplicate_reserved_service_id_app_error(error: &AppError) -> bool {
+    matches!(error, AppError::DatabaseError(db_error) if is_duplicate_reserved_service_id_error(db_error))
+}
+
 fn is_duplicate_slug_app_error(error: &AppError) -> bool {
-    matches!(error, AppError::DatabaseError(db_error) if is_duplicate_key_error(db_error))
+    matches!(error, AppError::DatabaseError(db_error) if is_duplicate_key_error(db_error) && !is_duplicate_reserved_service_id_error(db_error))
         || matches!(
             error,
             AppError::Conflict(message)
@@ -657,6 +674,105 @@ pub async fn create_key(
     oauth_client_credentials: OauthClientCredentialsInput<'_>,
     hosted_mode: bool,
 ) -> AppResult<CreateKeyResult> {
+    create_key_inner(
+        db,
+        encryption_keys,
+        user_id,
+        actor_user_id,
+        service_slug,
+        endpoint_url,
+        credential,
+        label,
+        slug_override,
+        auth_method,
+        auth_key_name,
+        node_id,
+        ssh_params,
+        identity,
+        openapi_spec_url,
+        ws_frame_injections,
+        admin_only,
+        oauth_client_credentials,
+        hosted_mode,
+        None,
+    )
+    .await
+}
+
+/// Create a key while forcing the `UserService` identity to a previously
+/// reserved assistant-action receipt id. The endpoint and credential rows
+/// retain their normal generated identities.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_key_with_service_id(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    actor_user_id: &str,
+    service_slug: Option<&str>,
+    endpoint_url: Option<&str>,
+    credential: &str,
+    label: &str,
+    slug_override: Option<&str>,
+    auth_method: Option<&str>,
+    auth_key_name: Option<&str>,
+    node_id: Option<&str>,
+    ssh_params: Option<SshCreateParams<'_>>,
+    identity: Option<user_service_service::IdentityConfig>,
+    openapi_spec_url: OpenApiSpecUrlInput<'_>,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: bool,
+    oauth_client_credentials: OauthClientCredentialsInput<'_>,
+    hosted_mode: bool,
+    service_id: &str,
+) -> AppResult<CreateKeyResult> {
+    create_key_inner(
+        db,
+        encryption_keys,
+        user_id,
+        actor_user_id,
+        service_slug,
+        endpoint_url,
+        credential,
+        label,
+        slug_override,
+        auth_method,
+        auth_key_name,
+        node_id,
+        ssh_params,
+        identity,
+        openapi_spec_url,
+        ws_frame_injections,
+        admin_only,
+        oauth_client_credentials,
+        hosted_mode,
+        Some(service_id),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_key_inner(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    actor_user_id: &str,
+    service_slug: Option<&str>,
+    endpoint_url: Option<&str>,
+    credential: &str,
+    label: &str,
+    slug_override: Option<&str>,
+    auth_method: Option<&str>,
+    auth_key_name: Option<&str>,
+    node_id: Option<&str>,
+    ssh_params: Option<SshCreateParams<'_>>,
+    identity: Option<user_service_service::IdentityConfig>,
+    openapi_spec_url: OpenApiSpecUrlInput<'_>,
+    ws_frame_injections: Option<&[WsFrameInjection]>,
+    admin_only: bool,
+    oauth_client_credentials: OauthClientCredentialsInput<'_>,
+    hosted_mode: bool,
+    reserved_service_id: Option<&str>,
+) -> AppResult<CreateKeyResult> {
     let node_id = node_id.filter(|nid| !nid.is_empty());
     if let Some(rules) = ws_frame_injections {
         ws_frame_injector::validate_rules(rules)?;
@@ -1002,7 +1118,7 @@ pub async fn create_key(
         let mut attempts_left = USER_SERVICE_SLUG_INSERT_RETRIES;
         let service = loop {
             let resolved_slug = resolve_unique_slug(db, user_id, &base_slug, strategy).await?;
-            match user_service_service::create_user_service(
+            match user_service_service::create_user_service_with_id(
                 db,
                 user_id,
                 actor_user_id,
@@ -1022,10 +1138,16 @@ pub async fn create_key(
                 &catalog_identity,
                 ws_frame_injections,
                 admin_only,
+                reserved_service_id,
             )
             .await
             {
                 Ok(service) => break service,
+                Err(error) if is_duplicate_reserved_service_id_app_error(&error) => {
+                    return Err(AppError::Conflict(
+                        "reserved service identity already exists".to_string(),
+                    ));
+                }
                 Err(error) if is_duplicate_slug_app_error(&error) => {
                     if attempts_left == 0 || strategy == SlugCollisionStrategy::PreserveExact {
                         return Err(exact_slug_conflict(&resolved_slug));
@@ -1221,7 +1343,7 @@ pub async fn create_key(
         let mut attempts_left = USER_SERVICE_SLUG_INSERT_RETRIES;
         let service = loop {
             let resolved_slug = resolve_unique_slug(db, user_id, &base_slug, strategy).await?;
-            match user_service_service::create_user_service(
+            match user_service_service::create_user_service_with_id(
                 db,
                 user_id,
                 actor_user_id,
@@ -1241,10 +1363,16 @@ pub async fn create_key(
                 &user_service_service::IdentityConfig::none(),
                 ws_frame_injections,
                 admin_only,
+                reserved_service_id,
             )
             .await
             {
                 Ok(service) => break service,
+                Err(error) if is_duplicate_reserved_service_id_app_error(&error) => {
+                    return Err(AppError::Conflict(
+                        "reserved service identity already exists".to_string(),
+                    ));
+                }
                 Err(error) if is_duplicate_slug_app_error(&error) => {
                     if attempts_left == 0 || strategy == SlugCollisionStrategy::PreserveExact {
                         return Err(exact_slug_conflict(&resolved_slug));
@@ -1381,7 +1509,7 @@ pub async fn create_key(
         let mut attempts_left = USER_SERVICE_SLUG_INSERT_RETRIES;
         let service = loop {
             let resolved_slug = resolve_unique_slug(db, user_id, &base_slug, strategy).await?;
-            match user_service_service::create_user_service(
+            match user_service_service::create_user_service_with_id(
                 db,
                 user_id,
                 actor_user_id,
@@ -1401,10 +1529,16 @@ pub async fn create_key(
                 &custom_identity,
                 ws_frame_injections,
                 admin_only,
+                reserved_service_id,
             )
             .await
             {
                 Ok(service) => break service,
+                Err(error) if is_duplicate_reserved_service_id_app_error(&error) => {
+                    return Err(AppError::Conflict(
+                        "reserved service identity already exists".to_string(),
+                    ));
+                }
                 Err(error) if is_duplicate_slug_app_error(&error) => {
                     if attempts_left == 0 || strategy == SlugCollisionStrategy::PreserveExact {
                         return Err(exact_slug_conflict(&resolved_slug));
@@ -4017,10 +4151,11 @@ mod tests {
         build_key_view, classify_update_credential_action, create_key, derive_effective_auth,
         direct_credential_type_for_service, direct_credential_type_from_auth_method,
         ensure_user_api_key_for_update, exact_slug_conflict, generate_slug_from_label, get_key,
-        identity_config_from_downstream_service, is_duplicate_slug_app_error, list_keys,
-        oauth_connection_status, random_slug_suffix, reconcile_provider_key_for_service_routing,
-        resolve_openapi_spec_url, resolve_unique_slug, revoke_key_if_pending,
-        slug_candidate_with_suffix, validate_token_exchange_catalog_credential,
+        identity_config_from_downstream_service, is_duplicate_reserved_service_id_app_error,
+        is_duplicate_slug_app_error, list_keys, oauth_connection_status, random_slug_suffix,
+        reconcile_provider_key_for_service_routing, resolve_openapi_spec_url, resolve_unique_slug,
+        revoke_key_if_pending, slug_candidate_with_suffix,
+        validate_token_exchange_catalog_credential,
     };
     use crate::errors::{AppError, AppResult};
     use crate::models::downstream_service::{
@@ -7783,6 +7918,35 @@ mod tests {
         assert!(!is_duplicate_slug_app_error(&AppError::Internal(
             "x".into()
         )));
+    }
+
+    #[test]
+    fn duplicate_key_classifier_distinguishes_reserved_id_from_slug() {
+        fn duplicate_error(message: &str) -> AppError {
+            let write_error: mongodb::error::WriteError = bson::from_document(doc! {
+                "code": 11000,
+                "codeName": "DuplicateKey",
+                "errmsg": message,
+            })
+            .expect("deserialize duplicate-key fixture");
+            AppError::DatabaseError(mongodb::error::Error::from(
+                mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(
+                    write_error,
+                )),
+            ))
+        }
+
+        let reserved_id = duplicate_error(
+            "E11000 duplicate key error collection: db.user_services index: _id_ dup key: { _id: \"reserved\" }",
+        );
+        assert!(is_duplicate_reserved_service_id_app_error(&reserved_id));
+        assert!(!is_duplicate_slug_app_error(&reserved_id));
+
+        let slug = duplicate_error(
+            "E11000 duplicate key error collection: db.user_services index: user_id_1_slug_1 dup key: { user_id: \"user\", slug: \"service\" }",
+        );
+        assert!(!is_duplicate_reserved_service_id_app_error(&slug));
+        assert!(is_duplicate_slug_app_error(&slug));
     }
 
     // ── generate_slug_from_label additional edge cases ──────────────

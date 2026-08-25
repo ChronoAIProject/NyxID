@@ -273,6 +273,16 @@ pub async fn create_gcp_service_account_key(
     auth_user: AuthUser,
     Json(body): Json<CreateGcpServiceAccountRequest>,
 ) -> AppResult<(StatusCode, Json<ExternalApiKeyResponse>)> {
+    create_gcp_service_account_key_with_id(State(state), auth_user, Json(body), None).await
+}
+
+/// Internal assistant-action create path with a receipt-reserved API-key id.
+pub(crate) async fn create_gcp_service_account_key_with_id(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<CreateGcpServiceAccountRequest>,
+    reserved_id: Option<&str>,
+) -> AppResult<(StatusCode, Json<ExternalApiKeyResponse>)> {
     let actor = auth_user.user_id.to_string();
 
     // Validate JSON shape and derive a default label up front.
@@ -331,28 +341,43 @@ pub async fn create_gcp_service_account_key(
         .filter(|l| !l.is_empty())
         .unwrap_or_else(|| client_email.to_string());
 
-    let key = user_api_key_service::create_api_key(
-        &state.db,
-        &state.encryption_keys,
-        &owner_id,
-        user_api_key_service::CreateApiKeyParams {
-            label: &label,
-            credential_type: "gcp_service_account",
-            credential: &body.key_json,
-            access_token: Some(&minted.access_token),
-            refresh_token: None,
-            token_scopes: Some(scope),
-            expires_at: Some(expires_at),
-            provider_config_id: None,
-            connection_id: None,
-            oauth_client_id: None,
-            oauth_client_secret: None,
-            status: "active",
-            source: Some("user_created"),
-            source_id: None,
-        },
-    )
-    .await?;
+    let params = user_api_key_service::CreateApiKeyParams {
+        label: &label,
+        credential_type: "gcp_service_account",
+        credential: &body.key_json,
+        access_token: Some(&minted.access_token),
+        refresh_token: None,
+        token_scopes: Some(scope),
+        expires_at: Some(expires_at),
+        provider_config_id: None,
+        connection_id: None,
+        oauth_client_id: None,
+        oauth_client_secret: None,
+        status: "active",
+        source: Some("user_created"),
+        source_id: None,
+    };
+    let key = match reserved_id {
+        Some(id) => {
+            user_api_key_service::create_api_key_with_id(
+                &state.db,
+                &state.encryption_keys,
+                &owner_id,
+                id,
+                params,
+            )
+            .await?
+        }
+        None => {
+            user_api_key_service::create_api_key(
+                &state.db,
+                &state.encryption_keys,
+                &owner_id,
+                params,
+            )
+            .await?
+        }
+    };
 
     // Optional: re-point existing services (e.g. google-bigquery,
     // google-cloud-billing) at this credential.

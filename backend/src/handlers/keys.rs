@@ -864,6 +864,18 @@ pub async fn create_key(
     tele: TelemetryContext,
     Json(body): Json<CreateKeyRequest>,
 ) -> AppResult<Json<KeyResponse>> {
+    create_key_with_service_id(State(state), auth_user, tele, Json(body), None).await
+}
+
+/// Internal assistant-action create path with a receipt-reserved
+/// `UserService` identity.
+pub(crate) async fn create_key_with_service_id(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    tele: TelemetryContext,
+    Json(body): Json<CreateKeyRequest>,
+    reserved_service_id: Option<&str>,
+) -> AppResult<Json<KeyResponse>> {
     let actor = auth_user.user_id.to_string();
 
     // Resolve the effective owner of the new key. If `target_org_id` is set,
@@ -1001,28 +1013,57 @@ pub async fn create_key(
         unified_key_service::OauthClientCredentialsInput::None
     };
 
-    let result = unified_key_service::create_key(
-        &state.db,
-        &state.encryption_keys,
-        &user_id_str,
-        &actor,
-        body.service_slug.as_deref(),
-        body.endpoint_url.as_deref(),
-        credential,
-        &body.label,
-        body.slug.as_deref(),
-        body.auth_method.as_deref(),
-        body.auth_key_name.as_deref(),
-        body.node_id.as_deref(),
-        ssh_params,
-        identity,
-        openapi_input,
-        body.ws_frame_injections.as_deref(),
-        body.admin_only.unwrap_or(false),
-        oauth_client_credentials,
-        state.config.is_production(),
-    )
-    .await?;
+    let result = match reserved_service_id {
+        Some(service_id) => {
+            unified_key_service::create_key_with_service_id(
+                &state.db,
+                &state.encryption_keys,
+                &user_id_str,
+                &actor,
+                body.service_slug.as_deref(),
+                body.endpoint_url.as_deref(),
+                credential,
+                &body.label,
+                body.slug.as_deref(),
+                body.auth_method.as_deref(),
+                body.auth_key_name.as_deref(),
+                body.node_id.as_deref(),
+                ssh_params,
+                identity,
+                openapi_input,
+                body.ws_frame_injections.as_deref(),
+                body.admin_only.unwrap_or(false),
+                oauth_client_credentials,
+                state.config.is_production(),
+                service_id,
+            )
+            .await?
+        }
+        None => {
+            unified_key_service::create_key(
+                &state.db,
+                &state.encryption_keys,
+                &user_id_str,
+                &actor,
+                body.service_slug.as_deref(),
+                body.endpoint_url.as_deref(),
+                credential,
+                &body.label,
+                body.slug.as_deref(),
+                body.auth_method.as_deref(),
+                body.auth_key_name.as_deref(),
+                body.node_id.as_deref(),
+                ssh_params,
+                identity,
+                openapi_input,
+                body.ws_frame_injections.as_deref(),
+                body.admin_only.unwrap_or(false),
+                oauth_client_credentials,
+                state.config.is_production(),
+            )
+            .await?
+        }
+    };
 
     // Fire-and-forget: push credential to node if routed AND we have a credential to push
     let has_pushable_credential = result.api_key.as_ref().is_some_and(|api_key| {

@@ -375,6 +375,41 @@ pub async fn create_client(
     default_service_catalog_slugs: &[String],
 ) -> AppResult<(OauthClient, Option<String>)> {
     let client_id = Uuid::new_v4().to_string();
+    create_client_with_id(
+        db,
+        &client_id,
+        name,
+        redirect_uris,
+        client_type,
+        created_by,
+        delegation_scopes,
+        allowed_scopes,
+        scope_provenance,
+        broker_capability_enabled,
+        revocation_webhook_url,
+        revocation_webhook_secret_encrypted,
+        default_service_catalog_slugs,
+    )
+    .await
+}
+
+/// Create an OAuth client with a caller-reserved UUID.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_client_with_id(
+    db: &mongodb::Database,
+    client_id: &str,
+    name: &str,
+    redirect_uris: &[String],
+    client_type: &str,
+    created_by: &str,
+    delegation_scopes: &str,
+    allowed_scopes: &str,
+    scope_provenance: crate::models::oauth_client::ScopeProvenance,
+    broker_capability_enabled: bool,
+    revocation_webhook_url: Option<&str>,
+    revocation_webhook_secret_encrypted: Option<Vec<u8>>,
+    default_service_catalog_slugs: &[String],
+) -> AppResult<(OauthClient, Option<String>)> {
     let now = Utc::now();
 
     let (secret_hash, raw_secret) = if client_type == "confidential" {
@@ -386,7 +421,7 @@ pub async fn create_client(
     };
 
     let client = OauthClient {
-        id: client_id,
+        id: client_id.to_string(),
         client_name: name.to_string(),
         client_secret_hash: secret_hash,
         redirect_uris: redirect_uris.to_vec(),

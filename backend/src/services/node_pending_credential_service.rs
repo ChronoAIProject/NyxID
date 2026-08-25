@@ -55,6 +55,9 @@ pub struct PendingCredentialAuthorizationState {
     pub owner_user_id: String,
     pub remote_state: Option<RemoteCryptoState>,
     pub is_active: bool,
+    /// Monotonic evidence version for dialog preconditions. Fan-out rows use
+    /// their durable revision; single-node rows retain the legacy version one.
+    pub state_version: i64,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub consumed_at: Option<DateTime<Utc>>,
@@ -542,6 +545,7 @@ pub async fn get_pending_credential_authorization_state(
         owner_user_id: pending.owner_user_id,
         remote_state: pending.remote_state,
         is_active: pending.is_active,
+        state_version: pending.fan_out_revision.max(1),
         created_at: pending.created_at,
         expires_at: pending.expires_at,
         consumed_at: pending.consumed_at,
