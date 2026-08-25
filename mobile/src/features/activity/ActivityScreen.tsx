@@ -3,6 +3,7 @@ import { capture } from "../../lib/telemetry";
 import {
   ActivityIndicator,
   Alert,
+  AppState,
   Dimensions,
   FlatList,
   Modal,
@@ -17,7 +18,10 @@ import {
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
+  cancelAnimation,
+  Easing,
   withTiming,
+  withRepeat,
   runOnJS,
 } from "react-native-reanimated";
 import {
@@ -25,9 +29,9 @@ import {
   Gesture,
   GestureDetector,
 } from "react-native-gesture-handler";
-import { useNavigation, useRoute, type RouteProp } from "@react-navigation/native";
+import { useFocusEffect, useNavigation, useRoute, type RouteProp } from "@react-navigation/native";
 import type { NativeStackNavigationProp } from "@react-navigation/native-stack";
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { onlineManager, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ScreenContainer } from "../../components/ScreenContainer";
 
 import { ToastOverlay, type ToastState } from "../../components/ToastOverlay";
@@ -52,8 +56,12 @@ import { radius, spacing, typeScale } from "../../theme/designTokens";
 import type { RootStackParamList } from "../../app/AppNavigator";
 import type { ActivitySegment } from "./activityTypes";
 import type { ApprovalMode, ChallengeDetail, ApprovalItem } from "../../lib/api/types";
-import { usePushPollingActive } from "../../lib/notifications/pushPollingSignal";
-import { ScanQrCode } from "lucide-react-native";
+import {
+  APPROVAL_BACKSTOP_POLL_INTERVAL_MS,
+  signalApprovalStateMayHaveChanged,
+  subscribeToApprovalRefreshSignals,
+} from "../../lib/notifications/approvalRefreshSignal";
+import { RefreshCw, ScanQrCode } from "lucide-react-native";
 
 type Nav = NativeStackNavigationProp<RootStackParamList>;
 
@@ -147,7 +155,9 @@ function ChallengeDetailSheet({
         }
       });
     }
-  }, [challenge, translateY]); // eslint-disable-line react-hooks/exhaustive-deps
+    // Query refreshes may replace the challenge object without changing which
+    // sheet is open. Only an id/open-state change should replay sheet motion.
+  }, [challenge?.id, translateY]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleClose = useCallback(() => {
     if (isDismissing.current) return;
@@ -288,11 +298,18 @@ export function ActivityScreen() {
   const route = useRoute<RouteProp<RootStackParamList, "Activity">>();
   const queryClient = useQueryClient();
   const { isConnected, recheckConnection } = useNetworkStatus();
-  const isPolling = usePushPollingActive();
+  const [isLiveRefreshEnabled, setIsLiveRefreshEnabled] = useState(false);
   const [activeSegment, setActiveSegment] = useState<ActivitySegment>("pending");
+  const activeSegmentRef = useRef(activeSegment);
+  activeSegmentRef.current = activeSegment;
+  const [isPullRefreshing, setIsPullRefreshing] = useState(false);
+  const [isRefreshRunning, setIsRefreshRunning] = useState(false);
+  const [isUserRefreshRunning, setIsUserRefreshRunning] = useState(false);
   const [toast, setToast] = useState<ToastState | null>(null);
   const [mutatingIds, setMutatingIds] = useState<Set<string>>(new Set());
   const [detailChallenge, setDetailChallenge] = useState<ChallengeDetail | null>(null);
+  const detailChallengeIdRef = useRef(detailChallenge?.id ?? null);
+  detailChallengeIdRef.current = detailChallenge?.id ?? null;
 
   // Tell the push layer which approval is on screen, so a push for THIS
   // challenge does not raise an in-app toast over the sheet the user is
@@ -395,7 +412,9 @@ export function ActivityScreen() {
     queryFn: ({ pageParam }) => mobileApi.getChallenges(pageParam, PAGE_SIZE),
     initialPageParam: 1,
     getNextPageParam,
-    refetchInterval: isPolling ? 30_000 : false,
+    refetchInterval: isLiveRefreshEnabled
+      ? APPROVAL_BACKSTOP_POLL_INTERVAL_MS
+      : false,
   });
 
   const approvalsQuery = useInfiniteQuery({
@@ -403,7 +422,9 @@ export function ActivityScreen() {
     queryFn: ({ pageParam }) => mobileApi.getApprovals(pageParam, PAGE_SIZE),
     initialPageParam: 1,
     getNextPageParam,
-    refetchInterval: isPolling ? 30_000 : false,
+    refetchInterval: isLiveRefreshEnabled
+      ? APPROVAL_BACKSTOP_POLL_INTERVAL_MS
+      : false,
   });
 
   const settingsQuery = useQuery({
@@ -416,8 +437,39 @@ export function ActivityScreen() {
     queryFn: ({ pageParam }) => mobileApi.getHistory(pageParam, PAGE_SIZE),
     initialPageParam: 1,
     getNextPageParam,
-    refetchInterval: isPolling ? 30_000 : false,
+    refetchInterval: isLiveRefreshEnabled
+      ? APPROVAL_BACKSTOP_POLL_INTERVAL_MS
+      : false,
   });
+
+  const detailChallengeId = detailChallenge?.id ?? "";
+  const detailChallengeQuery = useQuery({
+    queryKey: ["challenge", detailChallengeId],
+    queryFn: () => mobileApi.getChallengeById(detailChallengeId),
+    enabled: detailChallengeId.length > 0,
+    // The tapped row keeps opening instant even before this detail key exists.
+    initialData: detailChallenge ?? undefined,
+    refetchInterval:
+      isLiveRefreshEnabled && detailChallengeId.length > 0
+        ? APPROVAL_BACKSTOP_POLL_INTERVAL_MS
+        : false,
+  });
+
+  // The selected row remains the sheet's open/closed authority. Query data can
+  // update that selection in place, but a late response after local close can
+  // only populate cache and therefore cannot reopen the sheet.
+  const sheetChallenge =
+    detailChallenge && detailChallengeQuery.data?.id === detailChallenge.id
+      ? detailChallengeQuery.data
+      : detailChallenge;
+
+  useEffect(() => {
+    if (sheetChallenge && sheetChallenge.status !== "PENDING") {
+      // A remote decision/expiry removes the actions immediately and makes a
+      // later close ordinary review, not an abandoned approval decision.
+      detailDecidableRef.current = false;
+    }
+  }, [sheetChallenge?.id, sheetChallenge?.status]);
 
   const pendingItems = pendingQuery.data?.pages.flatMap((p) => p.items) ?? [];
   const activeItems = approvalsQuery.data?.pages.flatMap((p) => p.items) ?? [];
@@ -579,25 +631,225 @@ export function ActivityScreen() {
     ]);
   }, [revokeMutation]);
 
-  const handleRefresh = useCallback(() => {
-    if (activeSegment === "pending") void pendingQuery.refetch();
-    if (activeSegment === "active") void approvalsQuery.refetch();
-    if (activeSegment === "history") void historyQuery.refetch();
-  }, [activeSegment, pendingQuery, approvalsQuery, historyQuery]);
+  const refreshInFlightRef = useRef<Promise<void> | null>(null);
+  const queuedSignalRefreshRef = useRef(false);
+  const acceptsSignalRefreshRef = useRef(false);
+
+  const returnQueuedSignalToBus = useCallback(() => {
+    if (!queuedSignalRefreshRef.current) return;
+    queuedSignalRefreshRef.current = false;
+    // The throttle already consumed this signal when it called us. If focus,
+    // app activity, or connectivity disappears before the follow-up can run,
+    // put the work back so the next eligible approval screen catches up.
+    signalApprovalStateMayHaveChanged();
+  }, []);
+
+  const refreshVisibleSegmentAndCounts = useCallback(async (refreshAllSegments = false) => {
+    // Pending and Active appear in the header and segment badges regardless
+    // of the visible list. Refreshing both keeps those counts coherent after
+    // a decision moves an item between states; History only costs a request
+    // when it is the list the user is actually looking at. Push signals pass
+    // `refreshAllSegments` because decisions and expiries also change History,
+    // which otherwise stays mounted-but-stale when the user changes segments.
+    const refetches: Promise<unknown>[] = [
+      pendingQuery.refetch({ cancelRefetch: false }),
+      approvalsQuery.refetch({ cancelRefetch: false }),
+    ];
+    if (refreshAllSegments || activeSegmentRef.current === "history") {
+      refetches.push(historyQuery.refetch({ cancelRefetch: false }));
+    }
+    if (detailChallengeIdRef.current) {
+      // TanStack owns detail errors and request deduplication. The selected row
+      // remains available as last-known sheet content if this refetch fails.
+      refetches.push(detailChallengeQuery.refetch({ cancelRefetch: false }));
+    }
+    await Promise.all(refetches);
+  }, [
+    pendingQuery.refetch,
+    approvalsQuery.refetch,
+    historyQuery.refetch,
+    detailChallengeQuery.refetch,
+  ]);
+
+  const handleRefresh = useCallback(
+    (source: "user" | "signal" = "user"): Promise<void> => {
+      if (
+        !onlineManager.isOnline() ||
+        AppState.currentState !== "active"
+      ) {
+        if (source === "signal") {
+          // `deliver()` has already opened the throttle window, so this can
+          // retry at most once per second. The AppState/NetInfo-driven focus
+          // cleanup unsubscribes and cancels that timer when the condition
+          // persists; re-signaling keeps the hint pending for the next focus.
+          signalApprovalStateMayHaveChanged();
+        }
+        return Promise.resolve();
+      }
+
+      if (refreshInFlightRef.current) {
+        // A manual double-tap simply joins the existing request. Signals are
+        // different: queue exactly one follow-up so a state change that lands
+        // during a slow request is not lost when that older response wins.
+        if (source === "signal") {
+          queuedSignalRefreshRef.current = true;
+        }
+        return refreshInFlightRef.current;
+      }
+
+      setIsRefreshRunning(true);
+      const refreshPromise = (async () => {
+        let shouldRefreshAllSegments = source === "signal";
+        let shouldRunAgain = false;
+
+        try {
+          do {
+            queuedSignalRefreshRef.current = false;
+            await refreshVisibleSegmentAndCounts(shouldRefreshAllSegments);
+            shouldRunAgain = queuedSignalRefreshRef.current;
+
+            if (
+              shouldRunAgain &&
+              (!acceptsSignalRefreshRef.current ||
+                !onlineManager.isOnline() ||
+                AppState.currentState !== "active")
+            ) {
+              returnQueuedSignalToBus();
+              shouldRunAgain = false;
+            }
+
+            // A second pass can only have been requested by a signal that
+            // arrived during the first pass, so it must include History too.
+            shouldRefreshAllSegments = shouldRunAgain;
+          } while (shouldRunAgain);
+        } finally {
+          // Also preserve a follow-up if the underlying refetch rejects.
+          returnQueuedSignalToBus();
+        }
+      })().finally(() => {
+        refreshInFlightRef.current = null;
+        setIsRefreshRunning(false);
+      });
+
+      refreshInFlightRef.current = refreshPromise;
+      return refreshPromise;
+    },
+    [refreshVisibleSegmentAndCounts, returnQueuedSignalToBus]
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      let unsubscribeSignal: (() => void) | null = null;
+
+      const stopSignalSubscription = () => {
+        setIsLiveRefreshEnabled(false);
+        acceptsSignalRefreshRef.current = false;
+        unsubscribeSignal?.();
+        unsubscribeSignal = null;
+        returnQueuedSignalToBus();
+      };
+
+      const syncSubscription = (appState: string) => {
+        const shouldSubscribe =
+          appState === "active" && isConnected && onlineManager.isOnline();
+        setIsLiveRefreshEnabled(shouldSubscribe);
+
+        if (shouldSubscribe && !unsubscribeSignal) {
+          acceptsSignalRefreshRef.current = true;
+          unsubscribeSignal = subscribeToApprovalRefreshSignals(() => {
+            void handleRefresh("signal");
+          });
+
+          // A detail route may have consumed the live signal while this list
+          // was blurred. The push invalidation remains on the cache, so use it
+          // as the durable indication that this focus needs to catch up.
+          const hasInvalidatedApprovalData = [
+            ["challenges", "pending"],
+            ["approvals"],
+            ["challenges", "history"],
+          ].some((queryKey) => queryClient.getQueryState(queryKey)?.isInvalidated);
+          if (hasInvalidatedApprovalData) {
+            signalApprovalStateMayHaveChanged();
+          }
+          return;
+        }
+
+        if (!shouldSubscribe && unsubscribeSignal) {
+          stopSignalSubscription();
+        }
+      };
+
+      syncSubscription(AppState.currentState);
+      const appStateSubscription = AppState.addEventListener(
+        "change",
+        syncSubscription
+      );
+
+      return () => {
+        stopSignalSubscription();
+        appStateSubscription.remove();
+      };
+    }, [handleRefresh, isConnected, queryClient, returnQueuedSignalToBus])
+  );
+
+  const handleHeaderRefresh = useCallback(async () => {
+    // A tap during signal-driven work joins that request without disabling the
+    // control. Only a user-started request owns the disabled state.
+    const startedUserRefresh = refreshInFlightRef.current === null;
+    if (startedUserRefresh) {
+      setIsUserRefreshRunning(true);
+    }
+    try {
+      await handleRefresh("user");
+    } finally {
+      if (startedUserRefresh) {
+        setIsUserRefreshRunning(false);
+      }
+    }
+  }, [handleRefresh]);
+
+  const handlePullRefresh = useCallback(async () => {
+    setIsPullRefreshing(true);
+    try {
+      await handleRefresh("user");
+    } finally {
+      setIsPullRefreshing(false);
+    }
+  }, [handleRefresh]);
 
   const handleOfflineRetry = useCallback(async () => {
     const online = await recheckConnection();
     if (online) {
-      handleRefresh();
+      await handleRefresh("user");
     } else {
       setToast({ message: "Still offline — will retry when connected", kind: "error" });
     }
   }, [recheckConnection, handleRefresh]);
 
-  const isRefreshing =
-    (activeSegment === "pending" && pendingQuery.isRefetching && !pendingQuery.isFetchingNextPage) ||
-    (activeSegment === "active" && approvalsQuery.isRefetching && !approvalsQuery.isFetchingNextPage) ||
-    (activeSegment === "history" && historyQuery.isRefetching && !historyQuery.isFetchingNextPage);
+  // Passive backstop polls deliberately stay invisible. Only refreshes started
+  // by the user or approval signal own the header/pull refresh feedback.
+  const isRefreshing = isRefreshRunning || isPullRefreshing;
+
+  const refreshRotation = useSharedValue(0);
+  useEffect(() => {
+    cancelAnimation(refreshRotation);
+    if (isRefreshing) {
+      refreshRotation.value = 0;
+      refreshRotation.value = withRepeat(
+        withTiming(360, { duration: 750, easing: Easing.linear }),
+        -1,
+        false
+      );
+    } else {
+      refreshRotation.value = 0;
+    }
+
+    return () => cancelAnimation(refreshRotation);
+  }, [isRefreshing, refreshRotation]);
+
+  const refreshIconAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ rotate: `${refreshRotation.value}deg` }],
+  }));
 
   // --- Loading states ---
   const isInitialLoading =
@@ -623,6 +875,7 @@ export function ActivityScreen() {
   ];
 
   const segmentIndex = activeSegment === "pending" ? 0 : activeSegment === "active" ? 1 : 2;
+  const isManualRefreshDisabled = !isConnected || isUserRefreshRunning || isPullRefreshing;
 
   return (
     <ScreenContainer>
@@ -633,14 +886,41 @@ export function ActivityScreen() {
             {pendingCount} pending · {activeCount} active grant{activeCount !== 1 ? "s" : ""}
           </Text>
         </View>
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Scan login QR code"
-          onPress={() => navigation.navigate("DeviceLogin", { start_scanner: true })}
-          style={({ pressed }) => [styles.scanLoginButton, pressed && styles.scanLoginButtonPressed]}
-        >
-          <ScanQrCode size={21} color={colors.primary} />
-        </Pressable>
+        <View style={styles.headerActions}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Refresh activity"
+            accessibilityState={{ disabled: isManualRefreshDisabled, busy: isRefreshing }}
+            disabled={isManualRefreshDisabled}
+            hitSlop={8}
+            onPress={() => {
+              void handleHeaderRefresh();
+            }}
+            style={({ pressed }) => [
+              styles.scanLoginButton,
+              pressed && styles.scanLoginButtonPressed,
+            ]}
+          >
+            <Animated.View style={refreshIconAnimatedStyle}>
+              <RefreshCw
+                size={21}
+                color={!isConnected ? colors.textTertiary : colors.primary}
+              />
+            </Animated.View>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Scan login QR code"
+            hitSlop={8}
+            onPress={() => navigation.navigate("DeviceLogin", { start_scanner: true })}
+            style={({ pressed }) => [
+              styles.scanLoginButton,
+              pressed && styles.scanLoginButtonPressed,
+            ]}
+          >
+            <ScanQrCode size={21} color={colors.primary} />
+          </Pressable>
+        </View>
       </View>
 
       <View style={styles.segmentWrap}>
@@ -699,7 +979,7 @@ export function ActivityScreen() {
             onEndReachedThreshold={0.5}
             ListFooterComponent={pendingQuery.isFetchingNextPage ? <ActivityIndicator style={styles.loadingFooter} color={colors.primary} /> : null}
             refreshControl={
-              <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} tintColor={colors.primary} />
+              <RefreshControl refreshing={isPullRefreshing} onRefresh={handlePullRefresh} tintColor={colors.primary} />
             }
           />
         )
@@ -729,7 +1009,7 @@ export function ActivityScreen() {
             onEndReachedThreshold={0.5}
             ListFooterComponent={approvalsQuery.isFetchingNextPage ? <ActivityIndicator style={styles.loadingFooter} color={colors.primary} /> : null}
             refreshControl={
-              <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} tintColor={colors.primary} />
+              <RefreshControl refreshing={isPullRefreshing} onRefresh={handlePullRefresh} tintColor={colors.primary} />
             }
           />
         )
@@ -761,19 +1041,23 @@ export function ActivityScreen() {
             onEndReachedThreshold={0.5}
             ListFooterComponent={historyQuery.isFetchingNextPage ? <ActivityIndicator style={styles.loadingFooter} color={colors.primary} /> : null}
             refreshControl={
-              <RefreshControl refreshing={isRefreshing} onRefresh={handleRefresh} tintColor={colors.primary} />
+              <RefreshControl refreshing={isPullRefreshing} onRefresh={handlePullRefresh} tintColor={colors.primary} />
             }
           />
         )
       )}
 
       <ChallengeDetailSheet
-        challenge={detailChallenge}
+        challenge={sheetChallenge}
         grantDurationLabel={grantDurationLabel}
         onClose={closeApprovalDetail}
-        onApprove={(id) => decideMutation.mutate({ id, decision: "APPROVE", approvalMode: detailChallenge!.approval_mode })}
-        onDeny={(id) => decideMutation.mutate({ id, decision: "DENY", approvalMode: detailChallenge!.approval_mode })}
-        isMutating={mutatingIds.has(detailChallenge?.id ?? "")}
+        onApprove={sheetChallenge
+          ? (id) => decideMutation.mutate({ id, decision: "APPROVE", approvalMode: sheetChallenge.approval_mode })
+          : undefined}
+        onDeny={sheetChallenge
+          ? (id) => decideMutation.mutate({ id, decision: "DENY", approvalMode: sheetChallenge.approval_mode })
+          : undefined}
+        isMutating={mutatingIds.has(sheetChallenge?.id ?? "")}
       />
       <ToastOverlay toast={toast} bottom={64} />
     </ScreenContainer>
@@ -793,6 +1077,10 @@ const createStyles = (c: ThemeColors) => StyleSheet.create({
   headerCopy: {
     flex: 1,
     gap: spacing.xxs,
+  },
+  headerActions: {
+    flexDirection: "row",
+    gap: spacing.sm,
   },
   // DESIGN.md §PageHeader: mobile page title is text-[22px] font-bold leading-none
   // tracking-tight with -0.03em letter-spacing. Mobile downshift is intentional.

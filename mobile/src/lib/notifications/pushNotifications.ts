@@ -3,6 +3,7 @@ import * as SecureStore from "expo-secure-store";
 import * as TaskManager from "expo-task-manager";
 import { AppState, Platform } from "react-native";
 import { mobileApi } from "../api/mobileApi";
+import { signalApprovalStateMayHaveChanged } from "./approvalRefreshSignal";
 
 type PushActivateResult = {
   permission: "granted" | "denied";
@@ -34,7 +35,7 @@ export type PushSyncSignal = {
   source: PushSyncSource;
 };
 
-type PushSyncHandler = (signal: PushSyncSignal) => void;
+type PushSyncHandler = (signal: PushSyncSignal | null) => void;
 
 let pushSyncHandler: PushSyncHandler | null = null;
 
@@ -350,11 +351,21 @@ async function persistPendingPushSyncSignal(signal: PushSyncSignal): Promise<voi
 }
 
 async function emitOrPersistPushSyncSignal(signal: PushSyncSignal): Promise<void> {
-  if (pushSyncHandler) {
+  if (pushSyncHandler && AppState.currentState === "active") {
     pushSyncHandler(signal);
     return;
   }
   await persistPendingPushSyncSignal(signal);
+}
+
+function emitGenericApprovalRefreshHint(): void {
+  if (pushSyncHandler && AppState.currentState === "active") {
+    // `null` means the notification could not be attributed to one challenge;
+    // App still invalidates both list families before notifying the focused UI.
+    pushSyncHandler(null);
+    return;
+  }
+  signalApprovalStateMayHaveChanged();
 }
 
 function parsePushSyncSignalFromTaskPayload(
@@ -419,7 +430,11 @@ function ensureBackgroundTaskDefined() {
 
       const signal = parsePushSyncSignalFromTaskPayload(data);
       if (!signal) return;
-      await persistPendingPushSyncSignal(signal);
+      // Expo's notification task is the iOS delivery path for data-only
+      // content-available pushes even while the app is foregrounded. Deliver
+      // into the mounted runtime when possible; persist only for background or
+      // headless execution so resume/mount consumes it durably.
+      await emitOrPersistPushSyncSignal(signal);
     }
   );
 }
@@ -518,10 +533,28 @@ export async function initializeNotificationRuntime(): Promise<() => void> {
 
         if (signal) {
           void emitOrPersistPushSyncSignal(signal);
+        } else {
+          const type =
+            content.data && typeof content.data === "object"
+              ? asNonEmptyString((content.data as { type?: unknown }).type)
+              : null;
+          const hasVisibleCopy =
+            asNonEmptyString(content.title) !== null ||
+            asNonEmptyString(content.body) !== null;
+
+          // Approval decision/expiry pushes are normally parsed above, but a
+          // rolling backend or provider transform can strip an id or introduce
+          // a new approval_* type. Any unattributed visible toast is also a
+          // conservative refresh hint: it is better to make one throttled list
+          // request than show a toast beside approval state we cannot prove is
+          // current. Known non-approval silent pushes remain silent here.
+          if (hasVisibleCopy || type?.startsWith("approval_")) {
+            emitGenericApprovalRefreshHint();
+          }
         }
 
-        // Runs for non-approval pushes too -- those have no sync signal but
-        // still deserve the in-app toast that replaced their OS one.
+        // Runs for non-approval pushes too -- those may have no parsed sync
+        // signal but still deserve the in-app toast that replaced their OS one.
         presentForegroundNotification(content, signal);
       }
     );

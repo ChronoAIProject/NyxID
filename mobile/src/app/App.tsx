@@ -45,7 +45,7 @@ import {
   setPushSyncHandler,
 } from "../lib/notifications/pushNotifications";
 import { ToastOverlay, type ToastState } from "../components/ToastOverlay";
-import { startPushPolling } from "../lib/notifications/pushPollingSignal";
+import { signalApprovalStateMayHaveChanged } from "../lib/notifications/approvalRefreshSignal";
 import { AuthSessionProvider } from "../features/auth/AuthSessionContext";
 import { MobileConsentProvider } from "../lib/consent";
 import { capture } from "../lib/telemetry";
@@ -65,11 +65,31 @@ onlineManager.setEventListener((setOnline) => {
 
 const queryClient = new QueryClient();
 
-function refreshQueryCacheFromPushSignal(signal: PushSyncSignal) {
-  void queryClient.invalidateQueries({ queryKey: ["challenges"] });
-  void queryClient.invalidateQueries({ queryKey: ["approvals"] });
-  void queryClient.invalidateQueries({ queryKey: ["challenge", signal.challengeId] });
-  startPushPolling();
+function refreshQueryCacheFromPushSignal(signal: PushSyncSignal | null) {
+  // Notification callbacks can run while the app is inactive. Mark cached
+  // approval data stale here, but leave network work to the focused Activity
+  // subscriber (foreground) or the existing active-query resume sweep.
+  void queryClient.invalidateQueries({
+    queryKey: ["challenges"],
+    refetchType: "none",
+  });
+  void queryClient.invalidateQueries({
+    queryKey: ["approvals"],
+    refetchType: "none",
+  });
+  if (signal) {
+    void queryClient.invalidateQueries({
+      queryKey: ["challenge", signal.challengeId],
+      // The detail query owns this key and historically refreshed live. Keep
+      // that behavior in the foreground, while the focused signal subscriber
+      // handles background/offline catch-up without starting network work.
+      refetchType:
+        AppState.currentState === "active" && onlineManager.isOnline()
+          ? "active"
+          : "none",
+    });
+  }
+  signalApprovalStateMayHaveChanged();
 }
 
 function getActiveRouteName(
@@ -286,7 +306,7 @@ export default function App() {
   }, [openChallengeFromNotification]);
 
   useEffect(() => {
-    const onPushSyncSignal = (signal: PushSyncSignal) => {
+    const onPushSyncSignal = (signal: PushSyncSignal | null) => {
       refreshQueryCacheFromPushSignal(signal);
     };
 
