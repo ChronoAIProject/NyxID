@@ -17,13 +17,28 @@ use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::platform_operation_service::{
     CallAndSayRequest, SpeakRequest, XSearchRequest,
 };
-use crate::services::{audit_service, platform_operation_service};
+use crate::services::{audit_service, feature_flag_service, platform_operation_service};
+
+async fn require_platform_ops_enabled(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
+    let enabled =
+        feature_flag_service::resolve_personal_features(&state.db, &auth_user.user_id.to_string())
+            .await?
+            .into_iter()
+            .any(|key| key == feature_flag_service::PLATFORM_SERVICES_FLAG_KEY);
+    if !enabled {
+        return Err(AppError::NotFound(
+            "Platform operation route not found.".to_string(),
+        ));
+    }
+    Ok(())
+}
 
 pub async fn x_search(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Json(request): Json<XSearchRequest>,
 ) -> AppResult<Response> {
+    require_platform_ops_enabled(&state, &auth_user).await?;
     ensure_platform_operation_caller(&state, &auth_user).await?;
     enforce_agent_rate_limit(&state, &auth_user)?;
 
@@ -57,6 +72,7 @@ pub async fn speak(
     auth_user: AuthUser,
     Json(request): Json<SpeakRequest>,
 ) -> AppResult<Response> {
+    require_platform_ops_enabled(&state, &auth_user).await?;
     ensure_platform_operation_caller(&state, &auth_user).await?;
     enforce_agent_rate_limit(&state, &auth_user)?;
 
@@ -101,6 +117,7 @@ pub async fn call_and_say(
     auth_user: AuthUser,
     Json(request): Json<CallAndSayRequest>,
 ) -> AppResult<Response> {
+    require_platform_ops_enabled(&state, &auth_user).await?;
     ensure_platform_operation_caller(&state, &auth_user).await?;
     enforce_agent_rate_limit(&state, &auth_user)?;
 
@@ -305,6 +322,18 @@ mod tests {
             .expect("create platform operation usage index");
     }
 
+    async fn enable_platform_services_for_tests(db: &mongodb::Database) {
+        crate::services::feature_flag_service::set_platform_override(
+            db,
+            crate::services::feature_flag_service::PLATFORM_SERVICES_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+            true,
+            USER_ID,
+        )
+        .await
+        .expect("enable platform-services flag for test");
+    }
+
     async fn spawn_twilio(status: StatusCode) -> (String, tokio::task::JoinHandle<()>) {
         let app = Router::new().route(
             "/2010-04-01/Accounts/{account_sid}/Calls.json",
@@ -328,12 +357,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn platform_services_flag_off_returns_not_found_for_all_http_operations() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_ops_flag_default_off").await
+        else {
+            eprintln!("skipping platform operation handler test: no local MongoDB available");
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db);
+        let auth_user = crate::test_utils::test_auth_user(USER_ID);
+
+        let x_search_result = x_search(
+            State(state.clone()),
+            auth_user.clone(),
+            Json(XSearchRequest {
+                query: "nyxid".to_string(),
+                max_results: None,
+            }),
+        )
+        .await;
+        assert!(matches!(x_search_result, Err(AppError::NotFound(_))));
+
+        let speak_result = speak(
+            State(state.clone()),
+            auth_user.clone(),
+            Json(SpeakRequest {
+                text: "Hello".to_string(),
+                voice_id: "voice".to_string(),
+            }),
+        )
+        .await;
+        assert!(matches!(speak_result, Err(AppError::NotFound(_))));
+
+        let call_result = call_and_say(
+            State(state),
+            auth_user,
+            Json(CallAndSayRequest {
+                to: "+6512345678".to_string(),
+                message: "Hello".to_string(),
+            }),
+        )
+        .await;
+        assert!(matches!(call_result, Err(AppError::NotFound(_))));
+    }
+
+    #[tokio::test]
     async fn disabled_operation_returns_not_found() {
         let Some(db) = crate::test_utils::connect_test_database("platform_ops_disabled").await
         else {
             eprintln!("skipping platform operation handler test: no local MongoDB available");
             return;
         };
+        enable_platform_services_for_tests(&db).await;
         db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
             .insert_one(operation(
                 PlatformOperationName::XSearch,
@@ -364,6 +439,7 @@ mod tests {
             eprintln!("skipping platform operation handler test: no local MongoDB available");
             return;
         };
+        enable_platform_services_for_tests(&db).await;
         db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
             .insert_one(operation(
                 PlatformOperationName::XSearch,
@@ -395,6 +471,7 @@ mod tests {
             eprintln!("skipping platform operation handler test: no local MongoDB available");
             return;
         };
+        enable_platform_services_for_tests(&db).await;
         ensure_usage_index(&db).await;
         let state = crate::test_utils::test_app_state(db.clone());
         let (base_url, server) = spawn_twilio(StatusCode::CREATED).await;
@@ -440,6 +517,7 @@ mod tests {
             eprintln!("skipping platform operation handler test: no local MongoDB available");
             return;
         };
+        enable_platform_services_for_tests(&db).await;
         ensure_usage_index(&db).await;
         let state = crate::test_utils::test_app_state(db.clone());
         let (base_url, server) = spawn_twilio(StatusCode::INTERNAL_SERVER_ERROR).await;
