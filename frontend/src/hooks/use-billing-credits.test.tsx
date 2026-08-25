@@ -5,17 +5,21 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   useActiveCreditGrants,
   useAdminCreditGrants,
+  useAdminCreditSchedules,
+  useCreateCreditSchedule,
   useCurrentAllowances,
   useIssueCreditGrant,
+  useUpdateCreditSchedule,
 } from "./use-billing-credits";
 
-const { mockGet, mockPost } = vi.hoisted(() => ({
+const { mockGet, mockPost, mockPatch } = vi.hoisted(() => ({
   mockGet: vi.fn(),
   mockPost: vi.fn(),
+  mockPatch: vi.fn(),
 }));
 
 vi.mock("@/lib/api-client", () => ({
-  api: { get: mockGet, post: mockPost },
+  api: { get: mockGet, post: mockPost, patch: mockPatch },
 }));
 
 function wrapperFactory() {
@@ -123,6 +127,70 @@ describe("billing credit hooks", () => {
     expect(mockGet).toHaveBeenCalledWith("/billing/grants?owner_id=org%2Fone");
     expect(mockGet).toHaveBeenCalledWith(
       "/billing/allowances?owner_id=org%2Fone",
+    );
+  });
+
+  it("loads and normalizes recurring credit schedule requests", async () => {
+    mockGet.mockResolvedValueOnce({ schedules: [] });
+    const list = renderHook(() => useAdminCreditSchedules(), {
+      wrapper: wrapperFactory(),
+    });
+    await waitFor(() => expect(list.result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledWith("/admin/credits/schedules");
+
+    const schedule = {
+      id: "schedule-1",
+      amount_credits: 50,
+      amount_micros: 50_000_000,
+      recurrence: "monthly",
+      expiry: { kind: "end_of_period" },
+      target_kind: "all_users",
+      target_user_ids: [],
+      scope: { all_services: true, service_ids: [], service_slugs: [] },
+      is_active: true,
+      created_by: "admin-1",
+      created_at: "2026-08-01T00:00:00Z",
+      updated_at: "2026-08-01T00:00:00Z",
+      skipped_periods: 0,
+    };
+    mockPost.mockResolvedValueOnce(schedule);
+    const create = renderHook(() => useCreateCreditSchedule(), {
+      wrapper: wrapperFactory(),
+    });
+    create.result.current.mutate({
+      amount_credits: 50,
+      recurrence: "monthly",
+      expiry: { kind: "end_of_period" },
+      target_kind: "all_users",
+      target_user_ids: [],
+      all_services: true,
+      service_refs: [],
+      reason: "",
+    });
+    await waitFor(() => expect(create.result.current.isSuccess).toBe(true));
+    expect(mockPost).toHaveBeenCalledWith("/admin/credits/schedules", {
+      amount_credits: 50,
+      recurrence: "monthly",
+      expiry: { kind: "end_of_period" },
+      target_kind: "all_users",
+      target_user_ids: [],
+      all_services: true,
+      service_refs: [],
+      reason: null,
+    });
+
+    mockPatch.mockResolvedValueOnce({ ...schedule, is_active: false });
+    const update = renderHook(() => useUpdateCreditSchedule(), {
+      wrapper: wrapperFactory(),
+    });
+    update.result.current.mutate({
+      id: "schedule/1",
+      body: { is_active: false },
+    });
+    await waitFor(() => expect(update.result.current.isSuccess).toBe(true));
+    expect(mockPatch).toHaveBeenCalledWith(
+      "/admin/credits/schedules/schedule%2F1",
+      { is_active: false },
     );
   });
 });
