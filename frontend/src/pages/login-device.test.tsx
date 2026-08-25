@@ -128,7 +128,6 @@ describe("LoginDevicePage", () => {
     expect(
       screen.getByText("Reported by the requesting device (unverified)"),
     ).toBeInTheDocument();
-    expect(screen.getByText("Started from nyxid.dev")).toBeInTheDocument();
     expect(screen.getByText("203.0.113.10")).toBeInTheDocument();
     expect(screen.getByText("Singapore, Singapore (SG)")).toBeInTheDocument();
     expect(screen.getByText("Same IP as this device")).toBeInTheDocument();
@@ -139,6 +138,19 @@ describe("LoginDevicePage", () => {
     expect(rawDetails).not.toHaveAttribute("open");
     await user.click(screen.getByText("Raw user agent"));
     expect(rawDetails).toHaveAttribute("open");
+  });
+
+  it("never presents a matched Origin header as verified assurance", () => {
+    previewState.data = makePreview({
+      initiating_origin: "https://nyxid.dev",
+      initiating_origin_status: "matched",
+    });
+    render(<LoginDevicePage />);
+
+    expect(screen.queryByText(/Started from nyxid\.dev/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/configured NyxID site/i),
+    ).not.toBeInTheDocument();
   });
 
   it("presents different networks as useful context rather than an alarm", () => {

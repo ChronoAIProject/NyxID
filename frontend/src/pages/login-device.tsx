@@ -386,7 +386,14 @@ function PreviewPanel({
           Verified by NyxID
         </div>
         <div className="divide-y divide-border/30 rounded-md border border-border/50 bg-overlay/30">
-          <InitiatingOriginSignal preview={preview} />
+          {/*
+            A signal whose "good" state can be produced by an attacker choosing
+            what to send must never render as a positive assurance. Origin is a
+            forgeable header on this public endpoint, and even a first-party proof
+            would not stop an attacker from copying a genuine QR, so only negative
+            origin states are informative.
+          */}
+          <InitiatingOriginWarning preview={preview} />
           {verifiedIp && preview.client_ip ? (
             <PreviewRow
               icon={<Globe2 />}
@@ -556,22 +563,18 @@ function PreviewPanel({
   );
 }
 
-function InitiatingOriginSignal({
+function InitiatingOriginWarning({
   preview,
 }: {
   readonly preview: PreviewAuthDeviceResponse;
 }) {
-  if (preview.initiating_origin_status === "absent") return null;
-  const host = originHost(preview.initiating_origin);
-  if (preview.initiating_origin_status === "matched") {
-    return (
-      <div className="flex items-center gap-2 px-3 py-2.5 text-[12px] font-semibold text-success">
-        <ShieldCheck className="size-3.5 shrink-0" />
-        Started from {host ?? "the configured NyxID site"}
-      </div>
-    );
+  if (
+    preview.initiating_origin_status === "absent" ||
+    preview.initiating_origin_status === "matched"
+  ) {
+    return null;
   }
-
+  const host = originHost(preview.initiating_origin);
   const message =
     preview.initiating_origin_status === "mismatched"
       ? `This sign-in was started from ${host ?? "another site"}, not the official NyxID site. Reject it unless you intentionally used that site.`

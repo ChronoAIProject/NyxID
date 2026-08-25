@@ -3,10 +3,31 @@ import test from "node:test";
 
 import {
   compareDeviceLoginTimezones,
+  formatDeviceLoginOriginWarning,
   formatDeviceLoginRelativeTime,
   resolveDeviceLoginDeadlineMs,
   secondsUntilDeviceLoginDeadline,
 } from "./deviceLoginPreview";
+
+test("renders only negative initiating-origin states as security signals", () => {
+  assert.equal(
+    formatDeviceLoginOriginWarning("matched", "https://nyxid.dev"),
+    null,
+  );
+  assert.equal(formatDeviceLoginOriginWarning("absent", null), null);
+  assert.match(
+    formatDeviceLoginOriginWarning("mismatched", "https://login-copy.example") ?? "",
+    /started from login-copy\.example, not the official NyxID site/,
+  );
+  assert.match(
+    formatDeviceLoginOriginWarning("non_http", "file:\/\/\/tmp\/login.html") ?? "",
+    /non-HTTP\(S\) initiating origin/,
+  );
+  assert.match(
+    formatDeviceLoginOriginWarning("malformed", "not a url") ?? "",
+    /Origin header was malformed/,
+  );
+});
 
 test("compares a requester timezone with the approving phone without inventing absence", () => {
   assert.equal(

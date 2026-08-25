@@ -38,6 +38,7 @@ describe("auth device preview mock", () => {
       readonly client_user_agent: string;
       readonly client_city: string;
       readonly client_ip_timezone: string;
+      readonly initiating_origin: string;
       readonly initiating_origin_status: string;
       readonly client_timezone: string;
       readonly client_timezone_matches_ip: boolean;
@@ -56,7 +57,8 @@ describe("auth device preview mock", () => {
       client_country: "SG",
       client_city: "Singapore",
       client_ip_timezone: "Asia/Singapore",
-      initiating_origin_status: "matched",
+      initiating_origin: "https://login-copy.example",
+      initiating_origin_status: "mismatched",
       client_kind: "browser",
       client_app: "Chrome 151.0.7922.174",
       client_platform: "macOS 26.5.2 (arm64)",

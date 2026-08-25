@@ -42,3 +42,27 @@ export function compareDeviceLoginTimezones(
     ? "same"
     : "different";
 }
+
+export function formatDeviceLoginOriginWarning(
+  status: "absent" | "matched" | "mismatched" | "malformed" | "non_http",
+  origin: string | null | undefined,
+): string | null {
+  if (status === "absent" || status === "matched") return null;
+  const host = deviceLoginOriginHost(origin);
+  if (status === "mismatched") {
+    return `This sign-in was started from ${host ?? "another site"}, not the official NyxID site. Reject it unless you intentionally used that site.`;
+  }
+  if (status === "non_http") {
+    return "This sign-in reported a non-HTTP(S) initiating origin. Reject it unless you generated the request yourself.";
+  }
+  return "The initiating Origin header was malformed. Reject this request unless you generated it yourself.";
+}
+
+function deviceLoginOriginHost(origin: string | null | undefined): string | null {
+  if (!origin) return null;
+  try {
+    return new URL(origin).host || null;
+  } catch {
+    return null;
+  }
+}
