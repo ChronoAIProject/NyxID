@@ -1,11 +1,4 @@
-export function formatWebAuthDeviceRemaining(seconds: number): string {
-  const safeSeconds = Math.max(0, seconds);
-  const minutes = Math.floor(safeSeconds / 60);
-  const remainder = safeSeconds % 60;
-  return `${minutes}:${String(remainder).padStart(2, "0")}`;
-}
-
-export function resolveAuthDeviceDeadlineMs(
+export function resolveDeviceLoginDeadlineMs(
   expiresAt: string,
   secondsRemaining: number | null,
   nowMs = Date.now(),
@@ -17,14 +10,14 @@ export function resolveAuthDeviceDeadlineMs(
   return Number.isFinite(parsed) ? parsed : nowMs;
 }
 
-export function secondsUntilAuthDeviceDeadline(
+export function secondsUntilDeviceLoginDeadline(
   deadlineMs: number,
   nowMs = Date.now(),
 ): number {
   return Math.max(0, Math.ceil((deadlineMs - nowMs) / 1000));
 }
 
-export function formatAuthDeviceRelativeTime(
+export function formatDeviceLoginRelativeTime(
   value: string,
   nowMs = Date.now(),
 ): string {

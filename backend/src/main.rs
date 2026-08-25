@@ -353,6 +353,11 @@ async fn main() {
     // Load configuration
     let mut config = AppConfig::from_env();
     config.validate_ssh_runtime_config();
+    if config.trusted_proxy_ips.is_empty() {
+        tracing::warn!(
+            "TRUSTED_PROXY_IPS is empty; forwarded client IPs and Cloudflare country headers cannot be verified. Requester attribution will be unavailable when the observed peer is an internal proxy, and strict public per-IP limits may collapse to that proxy address."
+        );
+    }
 
     // Connect to database
     let db = db::create_connection(&config)
@@ -1225,6 +1230,7 @@ async fn main() {
         db: Some(state.db.clone()),
         trusted_proxies: Arc::new(state.config.trusted_proxy_ips.clone()),
     };
+    let trusted_proxy_ranges = Arc::new(state.config.trusted_proxy_ips.clone());
 
     // Global response-header policy (security headers + the SSE
     // anti-buffering mark) wraps the FULLY MERGED router, so every route
@@ -1257,6 +1263,7 @@ async fn main() {
     .layer(axum_mw::from_fn(mw::telemetry::telemetry_mw))
     .layer(Extension(per_ip_rate_limiter))
     .layer(Extension(global_rate_limiter))
+    .layer(Extension(trusted_proxy_ranges))
     .layer(TraceLayer::new_for_http());
 
     // Bind and serve

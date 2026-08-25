@@ -3,9 +3,14 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import {
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   CircleX,
+  Clock3,
+  Globe2,
+  MonitorSmartphone,
   ShieldCheck,
   ShieldX,
+  Timer,
 } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -22,8 +27,15 @@ import {
   formatAuthDeviceUserCodeInput,
   friendlyAuthDeviceErrorMessage,
   friendlyAuthDeviceStatusMessage,
+  type PreviewAuthDeviceResponse,
   userCodeSchema,
 } from "@/schemas/auth-device";
+import {
+  formatAuthDeviceRelativeTime,
+  formatWebAuthDeviceRemaining,
+  resolveAuthDeviceDeadlineMs,
+  secondsUntilAuthDeviceDeadline,
+} from "@/lib/auth-device-time";
 import { useAuthStore } from "@/stores/auth-store";
 
 const VALID_CODE_LENGTH = 9;
@@ -35,12 +47,21 @@ export function LoginDevicePage() {
   const [userCode, setUserCode] = useState("");
   const [decision, setDecision] = useState<"approved" | "denied" | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [clockMs, setClockMs] = useState(() => Date.now());
   const lastClickAtRef = useRef(0);
   const normalizedCode = useMemo(() => {
     const parsed = userCodeSchema.safeParse(userCode);
     return parsed.success ? parsed.data : null;
   }, [userCode]);
   const preview = usePreviewAuthDevice();
+  const [previewDeadline, setPreviewDeadline] = useState<number | null>(() =>
+    preview.data
+      ? resolveAuthDeviceDeadlineMs(
+          preview.data.expires_at,
+          preview.data.seconds_remaining,
+        )
+      : null,
+  );
   const approve = useApproveAuthDevice();
   const deny = useDenyAuthDevice();
   const isDecisionPending = approve.isPending || deny.isPending;
@@ -52,11 +73,26 @@ export function LoginDevicePage() {
     : preview.data
       ? "review"
       : "enter-code";
+  const previewRemaining =
+    previewDeadline === null
+      ? null
+      : secondsUntilAuthDeviceDeadline(previewDeadline, clockMs);
+  const locallyExpired = previewRemaining === 0;
 
   useEffect(() => {
     if (isLoading || isAuthenticated) return;
     void navigate({ to: "/login", search: { return_to: "/login/device" } });
   }, [isAuthenticated, isLoading, navigate]);
+
+  useEffect(() => {
+    if (previewDeadline === null) return;
+    const interval = window.setInterval(() => {
+      const now = Date.now();
+      setClockMs(now);
+      if (now >= previewDeadline) window.clearInterval(interval);
+    }, 1000);
+    return () => window.clearInterval(interval);
+  }, [previewDeadline]);
 
   function withinCooldown(): boolean {
     const now = Date.now();
@@ -70,13 +106,23 @@ export function LoginDevicePage() {
     approve.reset();
     deny.reset();
     setSubmitError(null);
+    setPreviewDeadline(null);
   }
 
   async function handleContinue() {
     if (!normalizedCode || preview.isPending || withinCooldown()) return;
     setSubmitError(null);
     try {
-      await preview.mutateAsync(normalizedCode);
+      const result = await preview.mutateAsync(normalizedCode);
+      const now = Date.now();
+      setClockMs(now);
+      setPreviewDeadline(
+        resolveAuthDeviceDeadlineMs(
+          result.expires_at,
+          result.seconds_remaining,
+          now,
+        ),
+      );
     } catch (error) {
       setSubmitError(friendlyAuthDeviceErrorMessage(error));
     }
@@ -187,12 +233,8 @@ export function LoginDevicePage() {
 
             {step === "review" && preview.data ? (
               <PreviewPanel
-                clientLabel={preview.data.client_label}
-                clientUserAgent={preview.data.client_user_agent}
-                clientIp={preview.data.client_ip}
-                initiatedAt={preview.data.initiated_at}
-                expiresAt={preview.data.expires_at}
-                status={preview.data.status}
+                preview={preview.data}
+                remainingSeconds={previewRemaining}
               />
             ) : null}
             {previewStatusMessage ? (
@@ -221,7 +263,9 @@ export function LoginDevicePage() {
                   </ButtonIcon>
                   Continue
                 </Button>
-              ) : step === "review" && preview.data?.status === "pending" ? (
+              ) : step === "review" &&
+                preview.data?.status === "pending" &&
+                !locallyExpired ? (
                 <>
                   <Button
                     type="button"
@@ -276,88 +320,176 @@ function WarningBanner() {
         <AlertTriangle className="h-4 w-4 text-warning" />
       </div>
       <p className="text-[12px] leading-relaxed text-warning">
-        Only enter a code you generated yourself. If someone sent you this code,
-        cancel and start a fresh login from your own terminal.
+        Only approve a code you generated yourself. NyxID can verify only the
+        network and timing details explicitly labelled below. Device names,
+        applications, platforms, and user agents are unverified and can be
+        forged. If someone sent you this code, reject it.
       </p>
     </div>
   );
 }
 
 function PreviewPanel({
-  clientLabel,
-  clientUserAgent,
-  clientIp,
-  initiatedAt,
-  expiresAt,
-  status,
+  preview,
+  remainingSeconds,
 }: {
-  readonly clientLabel: string | null;
-  readonly clientUserAgent: string | null;
-  readonly clientIp: string | null;
-  readonly initiatedAt: string | null;
-  readonly expiresAt: string | null;
-  readonly status: string;
+  readonly preview: PreviewAuthDeviceResponse;
+  readonly remainingSeconds: number | null;
 }) {
+  const expired = remainingSeconds === 0;
+  const verifiedIp = preview.client_ip_attribution === "verified";
+  const unverifiedIp = preview.client_ip_attribution === "unverified";
+  const appDescription =
+    preview.client_app ??
+    (preview.client_kind === "unknown"
+      ? "Not identified"
+      : `${preview.client_kind[0]?.toUpperCase()}${preview.client_kind.slice(1)} client`);
+
   return (
-    <div className="rounded-xl border border-border/50 bg-white/[0.02]">
-      <div className="border-b border-border/50 px-4 py-2.5">
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-[13px] font-semibold text-foreground">
-            Request details
-          </p>
-          <span className="rounded-md border border-warning/30 bg-warning/10 px-2 py-0.5 text-[10px] font-medium capitalize text-warning">
-            {status}
-          </span>
+    <section className="space-y-5 border-t border-border/50 pt-4" aria-label="Request details">
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-[13px] font-semibold text-foreground">
+          Request details
+        </p>
+        <span
+          className={
+            expired
+              ? "rounded-md border border-destructive/30 bg-destructive/10 px-2 py-0.5 text-[10px] font-medium text-destructive"
+              : "rounded-md border border-warning/30 bg-warning/10 px-2 py-0.5 text-[10px] font-medium capitalize text-warning"
+          }
+        >
+          {expired ? "Request expired" : preview.status}
+        </span>
+      </div>
+
+      <div>
+        <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase text-success">
+          <ShieldCheck className="size-3.5" />
+          Verified by NyxID
+        </div>
+        <div className="divide-y divide-border/30 rounded-md border border-border/50 bg-overlay/30">
+          {verifiedIp && preview.client_ip ? (
+            <PreviewRow
+              icon={<Globe2 />}
+              label="Requester IP"
+              value={`${preview.client_ip}${preview.client_country ? ` (${preview.client_country})` : ""}`}
+              mono
+            />
+          ) : (
+            <div className="px-3 py-2.5 text-[12px] leading-relaxed text-muted-foreground">
+              {preview.client_ip_attribution === "unavailable"
+                ? "Requester IP is not available on this deployment."
+                : "No requester IP was verified by NyxID."}
+            </div>
+          )}
+          {verifiedIp && preview.same_ip_as_viewer !== null ? (
+            <div
+              className={
+                preview.same_ip_as_viewer
+                  ? "flex items-center gap-2 px-3 py-2.5 text-[12px] font-medium text-success"
+                  : "flex items-center gap-2 px-3 py-2.5 text-[12px] font-medium text-warning"
+              }
+            >
+              {preview.same_ip_as_viewer ? <ShieldCheck /> : <AlertTriangle />}
+              {preview.same_ip_as_viewer
+                ? "Same IP as this device"
+                : "Different IP from this device"}
+            </div>
+          ) : null}
+          <PreviewRow
+            icon={<Clock3 />}
+            label="Requested"
+            value={
+              <>
+                <span className="block">
+                  {formatAuthDeviceRelativeTime(preview.initiated_at)}
+                </span>
+                <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                  {formatAbsoluteDateTime(preview.initiated_at)}
+                </span>
+              </>
+            }
+          />
+          <PreviewRow
+            icon={<Timer />}
+            label="Expiry"
+            value={
+              expired
+                ? "Expired"
+                : `Expires in ${formatWebAuthDeviceRemaining(remainingSeconds ?? 0)}`
+            }
+            valueClassName={expired ? "text-destructive" : "text-warning"}
+          />
         </div>
       </div>
-      <div className="divide-y divide-border/30">
-        <div className="px-4 py-3 text-[12px] leading-relaxed text-warning">
-          Requested from{" "}
-          <span className="font-mono text-foreground">
-            {clientIp ?? "an unknown IP"}
-          </span>{" "}
-          at{" "}
-          <span className="font-medium text-foreground">
-            {initiatedAt ? formatRequestedAt(initiatedAt) : "an unknown time"}
-          </span>
-          . Reject this request if you do not recognize it.
+
+      <div>
+        <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase text-warning">
+          <MonitorSmartphone className="size-3.5" />
+          Reported by the requesting device (unverified)
         </div>
-        <PreviewRow label="Client" value={clientLabel ?? "Unknown device"} />
-        <PreviewRow
-          label="User agent"
-          value={clientUserAgent ?? "Not provided"}
-          mono
-        />
-        <PreviewRow
-          label="Expires"
-          value={expiresAt ? formatAbsoluteTime(expiresAt) : "Unknown"}
-        />
+        <div className="divide-y divide-border/30 rounded-md border border-warning/20 bg-warning/[0.03]">
+          {unverifiedIp && preview.client_ip ? (
+            <PreviewRow
+              icon={<Globe2 />}
+              label="Reported IP (unverified)"
+              value={preview.client_ip}
+              mono
+              valueClassName="text-warning"
+            />
+          ) : null}
+          <PreviewRow
+            label="Device label"
+            value={preview.client_label ?? "Not provided"}
+          />
+          <PreviewRow label="Client" value={appDescription} />
+          <PreviewRow
+            label="Platform"
+            value={preview.client_platform ?? "Not identified"}
+          />
+          <details className="group px-3 py-2.5">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-[12px] text-muted-foreground">
+              Raw user agent
+              <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+            </summary>
+            <p className="mt-2 break-all rounded bg-background/60 p-2 font-mono text-[11px] leading-relaxed text-foreground">
+              {preview.client_user_agent ?? "Not provided"}
+            </p>
+          </details>
+        </div>
       </div>
-    </div>
+    </section>
   );
 }
 
 function PreviewRow({
+  icon,
   label,
   value,
   mono = false,
+  valueClassName = "",
 }: {
+  readonly icon?: React.ReactNode;
   readonly label: string;
-  readonly value: string;
+  readonly value: React.ReactNode;
   readonly mono?: boolean;
+  readonly valueClassName?: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
-      <span className="shrink-0 text-muted-foreground">{label}</span>
-      <span
-        className={
+    <div className="flex items-start justify-between gap-4 px-3 py-2.5 text-[12px]">
+      <span className="flex shrink-0 items-center gap-2 text-muted-foreground">
+        {icon ? <span className="[&_svg]:size-3.5">{icon}</span> : null}
+        {label}
+      </span>
+      <div
+        className={`${
           mono
-            ? "min-w-0 break-words text-right font-mono text-[11px] text-foreground"
+            ? "min-w-0 break-all text-right font-mono text-[11px] text-foreground"
             : "min-w-0 break-words text-right font-medium text-foreground"
-        }
+        } ${valueClassName}`}
       >
         {value}
-      </span>
+      </div>
     </div>
   );
 }
@@ -416,20 +548,11 @@ function TerminalPanel({
   );
 }
 
-function formatRequestedAt(value: string): string {
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) return "an unknown time";
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(timestamp);
-}
-
-function formatAbsoluteTime(value: string): string {
+function formatAbsoluteDateTime(value: string): string {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return "Unknown";
   return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
+    dateStyle: "medium",
+    timeStyle: "medium",
   }).format(timestamp);
 }

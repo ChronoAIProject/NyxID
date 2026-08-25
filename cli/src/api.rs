@@ -6,6 +6,35 @@ use serde::{Deserialize, Serialize};
 /// User-Agent string sent on all CLI HTTP requests.
 pub const CLI_USER_AGENT: &str = concat!("nyxid-cli/", env!("CARGO_PKG_VERSION"));
 
+pub fn device_login_user_agent() -> String {
+    format!(
+        "{} ({}; {})",
+        CLI_USER_AGENT,
+        std::env::consts::OS,
+        std::env::consts::ARCH
+    )
+}
+
+#[cfg(test)]
+mod device_login_user_agent_tests {
+    use super::{CLI_USER_AGENT, device_login_user_agent};
+
+    #[test]
+    fn device_login_user_agent_adds_os_and_arch_without_changing_the_base_ua() {
+        let expected = format!(
+            "{} ({}; {})",
+            CLI_USER_AGENT,
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        );
+        assert_eq!(device_login_user_agent(), expected);
+        assert_eq!(
+            CLI_USER_AGENT,
+            concat!("nyxid-cli/", env!("CARGO_PKG_VERSION"))
+        );
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AuthDeviceRequestBody {
     pub client_label: Option<String>,

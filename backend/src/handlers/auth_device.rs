@@ -13,7 +13,9 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::apply_browser_session_cookies;
+use crate::models::auth_device_code::AuthDeviceClientIpAttribution;
 use crate::mw::auth::AuthUser;
+use crate::mw::rate_limit::{ClientIpAttribution, ResolvedClientIp};
 use crate::services::auth_device_service::{
     self, ApproveInput, DenyInput, InitiateInput, PollClaim, PreviewOutput,
 };
@@ -78,6 +80,13 @@ pub struct AuthDevicePreviewResponse {
     pub client_label: Option<String>,
     pub client_user_agent: Option<String>,
     pub client_ip: Option<String>,
+    pub client_ip_attribution: String,
+    pub client_country: Option<String>,
+    pub client_kind: String,
+    pub client_app: Option<String>,
+    pub client_platform: Option<String>,
+    pub same_ip_as_viewer: Option<bool>,
+    pub seconds_remaining: i64,
     pub initiated_at: String,
     pub expires_at: String,
     pub status: String,
@@ -100,7 +109,8 @@ pub async fn request_auth_device(
     headers: HeaderMap,
     Json(body): Json<AuthDeviceRequestBody>,
 ) -> AppResult<Json<AuthDeviceRequestResponse>> {
-    let client_ip = resolve_client_ip(&headers, addr, &state)?;
+    let resolved_client = resolve_client_context(&headers, addr, &state)?;
+    let client_ip = resolved_client.ip;
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
 
@@ -116,6 +126,8 @@ pub async fn request_auth_device(
             client_label: body.client_label,
             client_user_agent: body.client_user_agent,
             client_ip: Some(client_ip.to_string()),
+            client_ip_attribution: auth_device_attribution(resolved_client.attribution),
+            client_country: trusted_client_country(&headers, addr, &state.config.trusted_proxy_ips),
         },
     )
     .await?;
@@ -510,7 +522,8 @@ pub async fn preview_auth_device(
     headers: HeaderMap,
     Json(body): Json<AuthDevicePreviewBody>,
 ) -> AppResult<Json<AuthDevicePreviewResponse>> {
-    let client_ip = resolve_client_ip(&headers, addr, &state)?;
+    let resolved_client = resolve_client_context(&headers, addr, &state)?;
+    let client_ip = resolved_client.ip;
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
 
@@ -519,10 +532,13 @@ pub async fn preview_auth_device(
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
 
+    let viewer_ip = client_ip.to_string();
     let preview = auth_device_service::preview(
         &state.db,
         state.auth_device_hmac_key.as_slice(),
         &body.user_code,
+        Some(&viewer_ip),
+        auth_device_attribution(resolved_client.attribution),
     )
     .await?;
 
@@ -536,13 +552,39 @@ pub async fn preview_auth_device(
 }
 
 fn resolve_client_ip(headers: &HeaderMap, addr: SocketAddr, state: &AppState) -> AppResult<IpAddr> {
-    crate::mw::rate_limit::resolve_client_ip_for_rate_limit(
-        headers,
-        Some(addr),
-        &state.config.trusted_proxy_ips,
-    )
-    .or_else(|| Some(addr.ip()))
-    .ok_or_else(|| AppError::Internal("unable to resolve client IP".to_string()))
+    resolve_client_context(headers, addr, state).map(|resolved| resolved.ip)
+}
+
+fn resolve_client_context(
+    headers: &HeaderMap,
+    addr: SocketAddr,
+    state: &AppState,
+) -> AppResult<ResolvedClientIp> {
+    crate::mw::rate_limit::resolve_client_ip(headers, Some(addr), &state.config.trusted_proxy_ips)
+        .ok_or_else(|| AppError::Internal("unable to resolve client IP".to_string()))
+}
+
+fn auth_device_attribution(value: ClientIpAttribution) -> AuthDeviceClientIpAttribution {
+    match value {
+        ClientIpAttribution::Verified => AuthDeviceClientIpAttribution::Verified,
+        ClientIpAttribution::Unverified => AuthDeviceClientIpAttribution::Unverified,
+        ClientIpAttribution::Unavailable => AuthDeviceClientIpAttribution::Unavailable,
+    }
+}
+
+fn trusted_client_country(
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    trusted_proxies: &[crate::config::TrustedProxyRange],
+) -> Option<String> {
+    if !crate::mw::rate_limit::is_trusted_proxy(peer.ip(), trusted_proxies) {
+        return None;
+    }
+    let value = headers
+        .get("cf-ipcountry")
+        .and_then(|header| header.to_str().ok())
+        .map(String::from);
+    auth_device_service::normalize_client_country(value)
 }
 
 fn client_ip_hash(state: &AppState, ip: IpAddr) -> String {
@@ -589,6 +631,13 @@ fn preview_response(preview: PreviewOutput) -> AuthDevicePreviewResponse {
         client_label: preview.client_label,
         client_user_agent: preview.client_user_agent,
         client_ip: preview.client_ip,
+        client_ip_attribution: preview.client_ip_attribution,
+        client_country: preview.client_country,
+        client_kind: preview.client_kind,
+        client_app: preview.client_app,
+        client_platform: preview.client_platform,
+        same_ip_as_viewer: preview.same_ip_as_viewer,
+        seconds_remaining: preview.seconds_remaining,
         initiated_at: preview
             .initiated_at
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -774,6 +823,61 @@ mod tests {
     fn assert_error(json: &Value, error: &str, code: u64) {
         assert_eq!(json["error"], error);
         assert_eq!(json["error_code"], code);
+    }
+
+    #[test]
+    fn cloudflare_country_is_accepted_only_from_a_trusted_peer() {
+        let proxy = "10.0.0.8:443".parse::<SocketAddr>().expect("proxy");
+        let direct = "203.0.113.20:443"
+            .parse::<SocketAddr>()
+            .expect("direct peer");
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-ipcountry", "sg".parse().expect("country header"));
+        let trusted = ["10.0.0.0/8".parse().expect("trusted CIDR")];
+
+        assert_eq!(
+            trusted_client_country(&headers, proxy, &trusted).as_deref(),
+            Some("SG")
+        );
+        assert_eq!(trusted_client_country(&headers, direct, &trusted), None);
+
+        for placeholder in ["XX", "T1", "USA", "1A"] {
+            headers.insert(
+                "cf-ipcountry",
+                placeholder.parse().expect("placeholder header"),
+            );
+            assert_eq!(trusted_client_country(&headers, proxy, &trusted), None);
+        }
+    }
+
+    #[test]
+    fn preview_response_maps_verbose_fields_additively() {
+        let now = chrono::Utc::now();
+        let response = preview_response(PreviewOutput {
+            client_label: Some("workstation".to_string()),
+            client_user_agent: Some("nyxid-cli/1.4.2 (macos; aarch64)".to_string()),
+            client_ip: Some("8.8.8.8".to_string()),
+            client_ip_attribution: "verified".to_string(),
+            client_country: Some("SG".to_string()),
+            client_kind: "cli".to_string(),
+            client_app: Some("NyxID CLI 1.4.2".to_string()),
+            client_platform: Some("macOS (aarch64)".to_string()),
+            same_ip_as_viewer: Some(false),
+            seconds_remaining: 583,
+            initiated_at: now,
+            expires_at: now + chrono::Duration::seconds(583),
+            status: crate::models::auth_device_code::AuthDeviceCodeStatus::Pending,
+        });
+
+        assert_eq!(response.client_ip.as_deref(), Some("8.8.8.8"));
+        assert_eq!(response.client_ip_attribution, "verified");
+        assert_eq!(response.client_country.as_deref(), Some("SG"));
+        assert_eq!(response.client_kind, "cli");
+        assert_eq!(response.client_app.as_deref(), Some("NyxID CLI 1.4.2"));
+        assert_eq!(response.client_platform.as_deref(), Some("macOS (aarch64)"));
+        assert_eq!(response.same_ip_as_viewer, Some(false));
+        assert_eq!(response.seconds_remaining, 583);
+        assert_eq!(response.status, "pending");
     }
 
     async fn request_and_approve(state: &AppState, server: &TestServer, user_id: &str) -> Value {
@@ -1310,6 +1414,8 @@ mod tests {
                 client_label: Some("kitchen-rpi".to_string()),
                 client_user_agent: Some("nyxid-cli/0.7.1".to_string()),
                 client_ip: Some("127.0.0.1".to_string()),
+                client_ip_attribution: AuthDeviceClientIpAttribution::Unavailable,
+                client_country: None,
             },
         )
         .await
@@ -1353,6 +1459,8 @@ mod tests {
                 client_label: None,
                 client_user_agent: None,
                 client_ip: Some("127.0.0.1".to_string()),
+                client_ip_attribution: AuthDeviceClientIpAttribution::Unavailable,
+                client_country: None,
             },
         )
         .await
@@ -1459,6 +1567,8 @@ mod tests {
                 client_label: None,
                 client_user_agent: None,
                 client_ip: Some("127.0.0.1".to_string()),
+                client_ip_attribution: AuthDeviceClientIpAttribution::Unavailable,
+                client_country: None,
             },
         )
         .await

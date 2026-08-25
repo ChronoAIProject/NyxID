@@ -7,6 +7,25 @@ use crate::redaction::RedactedLen;
 
 pub const COLLECTION_NAME: &str = "auth_device_codes";
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthDeviceClientIpAttribution {
+    Verified,
+    #[default]
+    Unverified,
+    Unavailable,
+}
+
+impl AuthDeviceClientIpAttribution {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::Unverified => "unverified",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AuthDeviceCodeStatus {
@@ -30,6 +49,10 @@ pub struct AuthDeviceCode {
     pub client_user_agent: Option<String>,
     #[serde(default)]
     pub client_ip: Option<String>,
+    #[serde(default)]
+    pub client_ip_attribution: AuthDeviceClientIpAttribution,
+    #[serde(default)]
+    pub client_country: Option<String>,
     pub client_ip_hmac: Option<String>,
     #[serde(default, with = "bson_datetime::optional")]
     pub last_polled_at: Option<DateTime<Utc>>,
@@ -85,6 +108,7 @@ impl fmt::Debug for AuthDeviceCode {
                 "client_ip",
                 &self.client_ip.as_ref().map(|ip| RedactedLen(ip.len())),
             )
+            .field("client_ip_attribution", &self.client_ip_attribution)
             .field(
                 "client_ip_hmac",
                 &self
@@ -146,6 +170,8 @@ mod tests {
             client_label: Some("wsl-calvin".to_string()),
             client_user_agent: Some("nyxid-cli/0.8.0".to_string()),
             client_ip: Some("203.0.113.10".to_string()),
+            client_ip_attribution: AuthDeviceClientIpAttribution::Verified,
+            client_country: Some("SG".to_string()),
             client_ip_hmac: Some("11112222".repeat(8)),
             last_polled_at: Some(now + chrono::Duration::seconds(5)),
             approved_user_id: Some(uuid::Uuid::new_v4().to_string()),
@@ -189,6 +215,8 @@ mod tests {
         assert_eq!(row.client_label, restored.client_label);
         assert_eq!(row.client_user_agent, restored.client_user_agent);
         assert_eq!(row.client_ip, restored.client_ip);
+        assert_eq!(row.client_ip_attribution, restored.client_ip_attribution);
+        assert_eq!(row.client_country, restored.client_country);
         assert_eq!(row.client_ip_hmac, restored.client_ip_hmac);
         assert_eq!(row.approved_user_id, restored.approved_user_id);
         assert_eq!(row.approved_session_id, restored.approved_session_id);
@@ -239,6 +267,7 @@ mod tests {
             row.user_code_hmac.as_str(),
             row.client_ip_hmac.as_deref().unwrap(),
             row.client_ip.as_deref().unwrap(),
+            row.client_country.as_deref().unwrap(),
             row.approver_ip_hmac.as_deref().unwrap(),
             "abcdef",
             "123456",
@@ -264,5 +293,28 @@ mod tests {
 
         assert!(restored.client_ip.is_none());
         assert!(restored.denied_by_user_id.is_none());
+    }
+
+    #[test]
+    fn legacy_row_without_client_country_deserializes_to_none() {
+        let mut doc = bson::to_document(&make_auth_device_code()).expect("serialize");
+        doc.remove("client_country");
+
+        let restored: AuthDeviceCode = bson::from_document(doc).expect("deserialize legacy row");
+
+        assert!(restored.client_country.is_none());
+    }
+
+    #[test]
+    fn legacy_row_without_client_ip_attribution_is_unverified() {
+        let mut doc = bson::to_document(&make_auth_device_code()).expect("serialize");
+        doc.remove("client_ip_attribution");
+
+        let restored: AuthDeviceCode = bson::from_document(doc).expect("deserialize legacy row");
+
+        assert_eq!(
+            restored.client_ip_attribution,
+            AuthDeviceClientIpAttribution::Unverified
+        );
     }
 }

@@ -50,7 +50,7 @@ describe("denyBodySchema", () => {
 });
 
 describe("previewResponseSchema", () => {
-  it("normalizes a missing client_ip from an older backend to null", () => {
+  it("normalizes additive fields missing from an older backend", () => {
     expect(
       previewResponseSchema.parse({
         client_label: "workstation",
@@ -58,8 +58,60 @@ describe("previewResponseSchema", () => {
         initiated_at: "2026-08-20T10:00:00Z",
         expires_at: "2026-08-20T10:10:00Z",
         status: "pending",
-      }).client_ip,
-    ).toBeNull();
+      }),
+    ).toMatchObject({
+      client_ip: null,
+      client_ip_attribution: "unavailable",
+      client_country: null,
+      client_kind: "unknown",
+      client_app: null,
+      client_platform: null,
+      same_ip_as_viewer: null,
+      seconds_remaining: null,
+    });
+  });
+
+  it("accepts the verbose requester attribution fields", () => {
+    expect(
+      previewResponseSchema.parse({
+        client_label: "workstation",
+        client_user_agent: "nyxid-cli/1.4.2 (macos; aarch64)",
+        client_ip: "203.0.113.10",
+        client_ip_attribution: "verified",
+        client_country: "SG",
+        client_kind: "cli",
+        client_app: "NyxID CLI 1.4.2",
+        client_platform: "macOS (aarch64)",
+        same_ip_as_viewer: false,
+        seconds_remaining: 583,
+        initiated_at: "2026-08-20T10:00:00Z",
+        expires_at: "2026-08-20T10:10:00Z",
+        status: "pending",
+      }),
+    ).toMatchObject({
+      client_country: "SG",
+      client_ip_attribution: "verified",
+      client_kind: "cli",
+      client_app: "NyxID CLI 1.4.2",
+      client_platform: "macOS (aarch64)",
+      same_ip_as_viewer: false,
+      seconds_remaining: 583,
+    });
+  });
+
+  it("bounds and strips control characters from requester display fields", () => {
+    const parsed = previewResponseSchema.parse({
+      client_label: `host\u0000${"x".repeat(100)}`,
+      client_user_agent: `agent\n${"y".repeat(300)}`,
+      initiated_at: "2026-08-20T10:00:00Z",
+      expires_at: "2026-08-20T10:10:00Z",
+      status: "pending",
+    });
+
+    expect(parsed.client_label).toHaveLength(64);
+    expect(parsed.client_user_agent).toHaveLength(256);
+    expect(parsed.client_label).not.toContain("\u0000");
+    expect(parsed.client_user_agent).not.toContain("\n");
   });
 });
 

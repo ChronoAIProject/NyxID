@@ -65,6 +65,15 @@ describe("LoginPage", () => {
     });
   });
 
+  it("does not treat a device user_code query as login-page state", () => {
+    window.history.pushState({}, "", "/login?user_code=ABCD-EFGH");
+
+    render(<LoginPage />);
+
+    const flow = screen.getByTestId("auth-flow");
+    expect(JSON.parse(flow.dataset.props ?? "{}")).toEqual({ initialPanel: 0 });
+  });
+
   it("renders MfaVerifyForm (not AuthFlow) when mfaRequired is true, passing returnTo", () => {
     storeState.mfaRequired = true;
     window.history.pushState({}, "", "/login?return_to=%2Fdashboard");

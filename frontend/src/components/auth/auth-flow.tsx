@@ -1,6 +1,7 @@
 import { useState, useRef } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate, Link } from "@tanstack/react-router";
+import { ChevronRight } from "lucide-react";
 import {
   loginSchema,
   type LoginFormData,
@@ -24,7 +25,10 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
 import { usePublicConfig } from "@/hooks/use-public-config";
-import { WebDeviceLogin } from "@/components/auth/web-device-login";
+import {
+  LOGIN_PROVIDER_ROW_CLASS,
+  WebDeviceLogin,
+} from "@/components/auth/web-device-login";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -142,6 +146,7 @@ export function AuthFlow({
     initialPanel === 2 && !emailAuthEnabled ? 1 : initialPanel,
   );
   const [inviteError, setInviteError] = useState(false);
+  const [deviceLoginOpen, setDeviceLoginOpen] = useState(false);
   const [fadeOpacity, setFadeOpacity] = useState(1);
   const fadingRef = useRef(false);
   const navigate = useNavigate();
@@ -185,7 +190,6 @@ export function AuthFlow({
   const enabledProviders = publicConfig
     ? REGISTER_PROVIDERS.filter((p) => publicConfig.social_providers.includes(p.id))
     : [...REGISTER_PROVIDERS];
-  const hasSocialProviders = enabledProviders.length > 0;
 
   // -- Slide helpers --
   const FADE_MS = 200;
@@ -332,10 +336,9 @@ export function AuthFlow({
             </div>
           )}
 
-          {/* Social providers first */}
-          {hasSocialProviders && (
-            <div className="flex flex-col gap-2.5">
-              {enabledProviders.map((provider) => (
+          <div className={deviceLoginOpen ? undefined : "flex flex-col gap-2.5"}>
+            {!deviceLoginOpen &&
+              enabledProviders.map((provider) => (
                 <button
                   key={provider.id}
                   type="button"
@@ -346,22 +349,24 @@ export function AuthFlow({
                     const url = `${window.location.origin}/api/v1/auth/social/${encodeURIComponent(provider.id)}${qs ? `?${qs}` : ""}`;
                     void openExternal(url);
                   }}
-                  className="flex h-[46px] w-full cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors duration-300 hover:border-border/80 hover:bg-overlay active:scale-[0.99]"
+                  className={LOGIN_PROVIDER_ROW_CLASS}
                 >
                   <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-overlay-strong">
                     {provider.icon}
                   </span>
                   {provider.label}
-                  <span className="ml-auto text-[12px] text-muted-foreground">
-                    &rsaquo;
-                  </span>
+                  <ChevronRight className="ml-auto size-4 text-muted-foreground" />
                 </button>
               ))}
-            </div>
-          )}
+            <WebDeviceLogin
+              returnTo={returnTo}
+              isOpen={deviceLoginOpen}
+              onOpenChange={setDeviceLoginOpen}
+            />
+          </div>
 
           {/* Divider */}
-          {hasSocialProviders && emailAuthEnabled && (
+          {!deviceLoginOpen && emailAuthEnabled && (
             <div className="my-6 flex items-center gap-4">
               <div className="h-px flex-1 bg-border" />
               <span className="text-xs text-text-tertiary">or</span>
@@ -369,7 +374,7 @@ export function AuthFlow({
             </div>
           )}
 
-          {emailAuthEnabled && (
+          {!deviceLoginOpen && emailAuthEnabled && (
             <Form {...loginForm}>
               <form
                 onSubmit={loginForm.handleSubmit(onLoginSubmit)}
@@ -446,20 +451,18 @@ export function AuthFlow({
               </form>
             </Form>
           )}
-
-          <WebDeviceLogin returnTo={returnTo} />
-
-          {/* Footer */}
-          <div className="mt-8 text-center text-[13px] text-muted-foreground">
-            Don&apos;t have an account?{" "}
-            <button
-              type="button"
-              onClick={() => slideToPanel(1)}
-              className="cursor-pointer font-medium text-foreground underline underline-offset-2 hover:text-nyx-secondary-400"
-            >
-              Sign up
-            </button>
-          </div>
+          {!deviceLoginOpen && (
+            <div className="mt-8 text-center text-[13px] text-muted-foreground">
+              Don&apos;t have an account?{" "}
+              <button
+                type="button"
+                onClick={() => slideToPanel(1)}
+                className="cursor-pointer font-medium text-foreground underline underline-offset-2 hover:text-nyx-secondary-400"
+              >
+                Sign up
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         /* ================================================================
