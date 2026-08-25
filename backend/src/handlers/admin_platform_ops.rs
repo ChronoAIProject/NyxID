@@ -72,6 +72,8 @@ pub async fn list_platform_operations(
     State(state): State<AppState>,
     auth_user: AuthUser,
 ) -> AppResult<Json<AdminPlatformOperationListResponse>> {
+    // Deliberately ungated: administrators can stage per-operation configuration
+    // while the caller-facing platform-services feature flag remains disabled.
     require_admin(&state, &auth_user).await?;
     let configured = platform_operation_service::list_configured_operations(&state.db).await?;
     let operations = platform_operation_service::PLATFORM_OPERATION_NAMES
@@ -92,6 +94,8 @@ pub async fn update_platform_operation(
     Path(op): Path<String>,
     Json(body): Json<UpdatePlatformOperationRequest>,
 ) -> AppResult<Json<AdminPlatformOperationResponse>> {
+    // Deliberately ungated: administrators can stage per-operation configuration
+    // while the caller-facing platform-services feature flag remains disabled.
     require_admin(&state, &auth_user).await?;
     let op = platform_operation_service::parse_operation_name(&op)?;
     let operation = platform_operation_service::upsert_operation(

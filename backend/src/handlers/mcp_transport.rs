@@ -23,9 +23,10 @@ use crate::services::platform_operation_service::{
     CallAndSayRequest, SpeakRequest, XSearchRequest,
 };
 use crate::services::{
-    approval_service, audit_service, connect_link_service, mcp_service, notification_service,
-    operation_descriptor, oracle_pool_service, oracle_session_service, oracle_task_service,
-    platform_operation_service, proxy_service, ssh_service, user_service_service,
+    approval_service, audit_service, connect_link_service, feature_flag_service, mcp_service,
+    notification_service, operation_descriptor, oracle_pool_service, oracle_session_service,
+    oracle_task_service, platform_operation_service, proxy_service, ssh_service,
+    user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -662,6 +663,25 @@ fn platform_operations_allowed(auth: &McpAuthContext) -> bool {
     ) || (auth.auth_method == AuthMethod::ApiKey && auth.is_agent_api_key)
 }
 
+/// Resolve the caller-facing feature gate for platform operations. Resolution
+/// failures fail closed so a rollout cannot accidentally publish or execute a
+/// surface while its flag state is unavailable.
+async fn platform_services_flag_enabled(state: &AppState, auth: &McpAuthContext) -> bool {
+    match feature_flag_service::resolve_personal_features(&state.db, &auth.user_id).await {
+        Ok(features) => features
+            .iter()
+            .any(|key| key == feature_flag_service::PLATFORM_SERVICES_FLAG_KEY),
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                user_id = %auth.user_id,
+                "Failed to resolve platform-services feature flag for MCP"
+            );
+            false
+        }
+    }
+}
+
 fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
     if auth.allow_all_services {
         mcp_service::ServiceScope::Unrestricted
@@ -1196,20 +1216,21 @@ async fn handle_tools_list(
     };
 
     let services = catalog.services;
-    let platform_operations = if platform_operations_allowed(auth) {
-        match platform_operation_service::list_enabled_operations(&state.db).await {
-            Ok(operations) => operations,
-            Err(error) => {
-                tracing::error!(
-                    error = %error,
-                    "Failed to load enabled platform operations for MCP discovery"
-                );
-                Vec::new()
+    let platform_operations =
+        if platform_operations_allowed(auth) && platform_services_flag_enabled(state, auth).await {
+            match platform_operation_service::list_enabled_operations(&state.db).await {
+                Ok(operations) => operations,
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        "Failed to load enabled platform operations for MCP discovery"
+                    );
+                    Vec::new()
+                }
             }
-        }
-    } else {
-        Vec::new()
-    };
+        } else {
+            Vec::new()
+        };
 
     // Session-backed clients get meta-tools + activated service tools only.
     // Stateless (API-key) clients with no session get the full tool list up front.
@@ -1762,7 +1783,7 @@ async fn handle_platform_x_search(
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Response {
-    if !platform_operations_allowed(auth) {
+    if !platform_operations_allowed(auth) || !platform_services_flag_enabled(state, auth).await {
         return tool_result(request_id, "Platform operation is not available", true);
     }
     let request = match parse_platform_operation_arguments::<XSearchRequest>(arguments) {
@@ -1803,7 +1824,7 @@ async fn handle_platform_speak(
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Response {
-    if !platform_operations_allowed(auth) {
+    if !platform_operations_allowed(auth) || !platform_services_flag_enabled(state, auth).await {
         return tool_result(request_id, "Platform operation is not available", true);
     }
     let request = match parse_platform_operation_arguments::<SpeakRequest>(arguments) {
@@ -1848,7 +1869,7 @@ async fn handle_platform_call_and_say(
     arguments: &serde_json::Value,
     request_id: Option<serde_json::Value>,
 ) -> Response {
-    if !platform_operations_allowed(auth) {
+    if !platform_operations_allowed(auth) || !platform_services_flag_enabled(state, auth).await {
         return tool_result(request_id, "Platform operation is not available", true);
     }
     let request = match parse_platform_operation_arguments::<CallAndSayRequest>(arguments) {
@@ -3311,6 +3332,10 @@ mod tests {
     use crate::models::org_membership::{
         COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
     };
+    use crate::models::platform_operation::{
+        COLLECTION_NAME as PLATFORM_OPERATIONS, PlatformOperation, PlatformOperationConfig,
+        PlatformOperationName, XSearchConfig,
+    };
     use crate::models::service_approval_config::{
         ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
     };
@@ -3423,6 +3448,167 @@ mod tests {
                 method,
             )));
         }
+    }
+
+    async fn enable_platform_services_for_mcp_tests(db: &mongodb::Database) {
+        crate::services::feature_flag_service::set_platform_override(
+            db,
+            crate::services::feature_flag_service::PLATFORM_SERVICES_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+            true,
+            "mcp-test-actor",
+        )
+        .await
+        .expect("enable platform-services flag for MCP test");
+    }
+
+    fn enabled_x_search_operation() -> PlatformOperation {
+        PlatformOperation {
+            id: uuid::Uuid::new_v4().to_string(),
+            op: PlatformOperationName::XSearch,
+            enabled: true,
+            vendor_service_slug: "platform-x".to_string(),
+            config: PlatformOperationConfig::XSearch(XSearchConfig {
+                max_results_cap: 10,
+            }),
+            updated_at: chrono::Utc::now(),
+            updated_by: "mcp-test-actor".to_string(),
+        }
+    }
+
+    fn tools_list_request() -> JsonRpcRequest {
+        JsonRpcRequest {
+            jsonrpc: JSONRPC_VERSION.to_string(),
+            id: Some(serde_json::json!(1)),
+            method: "tools/list".to_string(),
+            params: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_list_hides_platform_operations_when_flag_is_off() {
+        let Some(db) = connect_test_database("mcp_platform_ops_flag_off").await else {
+            eprintln!("skipping MCP platform operation flag test: no local MongoDB available");
+            return;
+        };
+        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+            .insert_one(enabled_x_search_operation())
+            .await
+            .expect("insert enabled platform operation");
+        let state = test_app_state(db);
+        let auth = McpAuthContext::user("user-1".to_string(), AuthMethod::Session);
+        let response = handle_tools_list(&state, &auth, None, &tools_list_request()).await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read MCP tools/list response");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("decode MCP tools/list response");
+        let tools = payload["result"]["tools"]
+            .as_array()
+            .expect("tools/list result contains tools");
+        assert!(!tools.iter().any(|tool| tool["name"] == "nyx__x_search"));
+        assert!(!tools.iter().any(|tool| tool["name"] == "nyx__speak"));
+        assert!(!tools.iter().any(|tool| tool["name"] == "nyx__call_and_say"));
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_list_publishes_platform_operations_when_flag_is_on() {
+        let Some(db) = connect_test_database("mcp_platform_ops_flag_on").await else {
+            eprintln!("skipping MCP platform operation flag test: no local MongoDB available");
+            return;
+        };
+        enable_platform_services_for_mcp_tests(&db).await;
+        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+            .insert_one(enabled_x_search_operation())
+            .await
+            .expect("insert enabled platform operation");
+        let state = test_app_state(db);
+        let auth = McpAuthContext::user("user-1".to_string(), AuthMethod::Session);
+        let response = handle_tools_list(&state, &auth, None, &tools_list_request()).await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read MCP tools/list response");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("decode MCP tools/list response");
+        let tools = payload["result"]["tools"]
+            .as_array()
+            .expect("tools/list result contains tools");
+        assert!(tools.iter().any(|tool| tool["name"] == "nyx__x_search"));
+    }
+
+    #[tokio::test]
+    async fn mcp_platform_operations_reject_guessed_names_when_flag_is_off() {
+        let Some(db) = connect_test_database("mcp_platform_ops_dispatch_off").await else {
+            eprintln!("skipping MCP platform operation flag test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db);
+        let auth = McpAuthContext::user("user-1".to_string(), AuthMethod::Session);
+
+        let responses = [
+            handle_platform_x_search(
+                &state,
+                &auth,
+                &serde_json::json!({}),
+                Some(serde_json::json!(1)),
+            )
+            .await,
+            handle_platform_speak(
+                &state,
+                &auth,
+                &serde_json::json!({}),
+                Some(serde_json::json!(2)),
+            )
+            .await,
+            handle_platform_call_and_say(
+                &state,
+                &auth,
+                &serde_json::json!({}),
+                Some(serde_json::json!(3)),
+            )
+            .await,
+        ];
+        for response in responses {
+            let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+                .await
+                .expect("read MCP tool response");
+            let payload: serde_json::Value =
+                serde_json::from_slice(&body).expect("decode MCP tool response");
+            assert_eq!(payload["result"]["isError"], true);
+            assert_eq!(
+                payload["result"]["content"][0]["text"],
+                "Platform operation is not available"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_platform_dispatch_preserves_argument_validation_when_flag_is_on() {
+        let Some(db) = connect_test_database("mcp_platform_ops_dispatch_on").await else {
+            eprintln!("skipping MCP platform operation flag test: no local MongoDB available");
+            return;
+        };
+        enable_platform_services_for_mcp_tests(&db).await;
+        let state = test_app_state(db);
+        let auth = McpAuthContext::user("user-1".to_string(), AuthMethod::Session);
+        let response = handle_platform_x_search(
+            &state,
+            &auth,
+            &serde_json::json!({}),
+            Some(serde_json::json!(1)),
+        )
+        .await;
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("read MCP tool response");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("decode MCP tool response");
+        assert_eq!(payload["result"]["isError"], true);
+        assert!(
+            payload["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with("Invalid platform operation arguments:"))
+        );
     }
 
     #[tokio::test]
