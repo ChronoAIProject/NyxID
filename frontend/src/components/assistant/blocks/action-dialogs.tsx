@@ -7,6 +7,7 @@ import { AssistantApprovalConfigureDialog } from "@/components/assistant/assista
 import { AssistantApprovalDisableDialog } from "@/components/assistant/assistant-approval-disable-dialog";
 import { AssistantApprovalEnableDialog } from "@/components/assistant/assistant-approval-enable-dialog";
 import { AssistantApprovalRevokeGrantDialog } from "@/components/assistant/assistant-approval-revoke-grant-dialog";
+import { AssistantConnectionRevokeDialog } from "@/components/assistant/assistant-connection-revoke-dialog";
 import { AssistantDeveloperAppActionDialog } from "@/components/assistant/assistant-developer-app-action-dialog";
 import { AssistantDeviceOnboardDialog } from "@/components/assistant/assistant-device-onboard-dialog";
 import { AssistantEndpointDeleteDialog } from "@/components/assistant/assistant-endpoint-delete-dialog";
@@ -29,6 +30,8 @@ import { AssistantOrgActionDialog } from "@/components/assistant/assistant-org-a
 import { AssistantOrgIntegrationActionDialog } from "@/components/assistant/assistant-org-integration-action-dialog";
 import { AssistantPendingCredentialCancelDialog } from "@/components/assistant/assistant-pending-credential-cancel-dialog";
 import { AssistantPendingCredentialPushDialog } from "@/components/assistant/assistant-pending-credential-push-dialog";
+import { AssistantProviderDisconnectDialog } from "@/components/assistant/assistant-provider-disconnect-dialog";
+import { AssistantProviderSetAppCredentialsDialog } from "@/components/assistant/assistant-provider-set-app-credentials-dialog";
 import { AssistantServiceAccountActionDialog } from "@/components/assistant/assistant-service-account-action-dialog";
 import { AssistantServiceDeleteDialog } from "@/components/assistant/assistant-service-delete-dialog";
 import { AssistantServiceRotateCredentialDialog } from "@/components/assistant/assistant-service-rotate-credential-dialog";
@@ -177,6 +180,21 @@ export const ACTION_DIALOGS: {
     toProps: (params) => ({
       params: { externalKeyId: params.external_key_id },
     }),
+  },
+  connection_revoke: {
+    Dialog:
+      AssistantConnectionRevokeDialog as ComponentType<AssistantDialogProps>,
+    toProps: (params) => ({ params: { serviceId: params.service_id } }),
+  },
+  provider_disconnect: {
+    Dialog:
+      AssistantProviderDisconnectDialog as ComponentType<AssistantDialogProps>,
+    toProps: (params) => ({ params: { providerId: params.provider_id } }),
+  },
+  provider_set_app_credentials: {
+    Dialog:
+      AssistantProviderSetAppCredentialsDialog as ComponentType<AssistantDialogProps>,
+    toProps: (params) => ({ params: { providerId: params.provider_id } }),
   },
   node_register_token: {
     Dialog:

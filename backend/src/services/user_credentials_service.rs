@@ -22,6 +22,33 @@ pub async fn upsert_user_credentials(
     client_secret: Option<&str>,
     label: Option<&str>,
 ) -> AppResult<UserProviderCredentials> {
+    upsert_user_credentials_with_expected_state_version(
+        db,
+        encryption_keys,
+        user_id,
+        provider_config_id,
+        client_id,
+        client_secret,
+        label,
+        None,
+    )
+    .await
+}
+
+/// Upsert per-user OAuth app credentials with an optional state-version
+/// precondition. The browser assistant uses the precondition to fence the
+/// secret-bearing write against evidence read before the dialog opened.
+#[allow(clippy::too_many_arguments)]
+pub async fn upsert_user_credentials_with_expected_state_version(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    provider_config_id: &str,
+    client_id: &str,
+    client_secret: Option<&str>,
+    label: Option<&str>,
+    expected_state_version: Option<i64>,
+) -> AppResult<UserProviderCredentials> {
     let collection = db.collection::<UserProviderCredentials>(COLLECTION_NAME);
     let now = Utc::now();
 
@@ -36,6 +63,9 @@ pub async fn upsert_user_credentials(
         .await?;
 
     if let Some(existing) = existing {
+        if expected_state_version.is_some_and(|expected| existing.state_version != expected) {
+            return Err(stale_credentials_conflict());
+        }
         let mut set_doc = doc! {
             "client_id_encrypted": bson::Binary {
                 subtype: bson::spec::BinarySubtype::Generic,
@@ -60,20 +90,30 @@ pub async fn upsert_user_credentials(
         if let Some(l) = label {
             set_doc.insert("label", l);
         }
+        set_doc.insert(
+            "state_version",
+            doc! { "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64] },
+        );
 
         use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
 
+        let mut filter = doc! { "_id": &existing.id };
+        if let Some(expected) = expected_state_version {
+            filter.insert(
+                "$expr",
+                doc! { "$eq": [{ "$ifNull": ["$state_version", 0_i64] }, expected] },
+            );
+        }
+
         let updated = collection
-            .find_one_and_update(doc! { "_id": &existing.id }, doc! { "$set": set_doc })
+            .find_one_and_update(filter, vec![doc! { "$set": set_doc }])
             .with_options(
                 FindOneAndUpdateOptions::builder()
                     .return_document(ReturnDocument::After)
                     .build(),
             )
             .await?
-            .ok_or_else(|| {
-                AppError::Internal("Credential disappeared during update".to_string())
-            })?;
+            .ok_or_else(stale_credentials_conflict)?;
 
         tracing::info!(
             user_id = %user_id,
@@ -83,6 +123,9 @@ pub async fn upsert_user_credentials(
 
         Ok(updated)
     } else {
+        if expected_state_version.is_some_and(|expected| expected != 0) {
+            return Err(stale_credentials_conflict());
+        }
         let cred = UserProviderCredentials {
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
@@ -90,6 +133,7 @@ pub async fn upsert_user_credentials(
             client_id_encrypted: Some(client_id_enc),
             client_secret_encrypted: client_secret_enc,
             label: label.map(String::from),
+            state_version: 1,
             created_at: now,
             updated_at: now,
         };
@@ -104,6 +148,12 @@ pub async fn upsert_user_credentials(
 
         Ok(cred)
     }
+}
+
+fn stale_credentials_conflict() -> AppError {
+    AppError::Conflict(
+        "the provider credentials changed since this action was prepared".to_string(),
+    )
 }
 
 /// Get raw user credentials (for internal use, e.g. resolving OAuth creds).
@@ -124,6 +174,7 @@ pub struct UserCredentialsMetadata {
     pub label: Option<String>,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
+    pub state_version: i64,
 }
 
 /// Get credentials metadata without secrets (for API response).
@@ -138,6 +189,7 @@ pub async fn get_user_credentials_metadata(
         label: c.label,
         created_at: c.created_at,
         updated_at: c.updated_at,
+        state_version: c.state_version,
     }))
 }
 

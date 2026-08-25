@@ -117,6 +117,23 @@ vi.mock("@/components/assistant/assistant-external-key-delete-dialog", () => ({
   AssistantExternalKeyDeleteDialog: captureDialog("external_key_delete"),
 }));
 
+vi.mock("@/components/assistant/assistant-connection-revoke-dialog", () => ({
+  AssistantConnectionRevokeDialog: captureDialog("connection_revoke"),
+}));
+
+vi.mock("@/components/assistant/assistant-provider-disconnect-dialog", () => ({
+  AssistantProviderDisconnectDialog: captureDialog("provider_disconnect"),
+}));
+
+vi.mock(
+  "@/components/assistant/assistant-provider-set-app-credentials-dialog",
+  () => ({
+    AssistantProviderSetAppCredentialsDialog: captureDialog(
+      "provider_set_app_credentials",
+    ),
+  }),
+);
+
 vi.mock("@/components/assistant/assistant-node-register-token-dialog", () => ({
   AssistantNodeRegisterTokenDialog: captureDialog("node_register_token"),
 }));
@@ -632,6 +649,78 @@ describe("Wave-2 action card wiring", () => {
         externalKey: { externalKeyId: "external-key-deleted" },
       },
     });
+  });
+
+  it("wires connection.revoke through its typed dialog and connection report", async () => {
+    await runJourney({
+      action: "connection.revoke",
+      rawParams: { serviceId: "legacy-service-1" },
+      variant: "connection_revoke",
+      normalizedParams: {
+        variant: "connection_revoke",
+        service_id: "legacy-service-1",
+      },
+      cta: "Revoke connection",
+      dialogParams: { serviceId: "legacy-service-1" },
+      completion: "legacy-service-1",
+      resource: { connection: { serviceId: "legacy-service-1" } },
+    });
+  });
+
+  it("wires provider.disconnect through its typed dialog and provider-token report", async () => {
+    await runJourney({
+      action: "provider.disconnect",
+      rawParams: { providerId: "provider-disconnect-1" },
+      variant: "provider_disconnect",
+      normalizedParams: {
+        variant: "provider_disconnect",
+        provider_id: "provider-disconnect-1",
+      },
+      cta: "Disconnect provider",
+      dialogParams: { providerId: "provider-disconnect-1" },
+      completion: "provider-disconnect-1",
+      resource: {
+        providerToken: { providerId: "provider-disconnect-1" },
+      },
+    });
+  });
+
+  it("wires provider.set_app_credentials through its typed dialog and credentials report", async () => {
+    await runJourney({
+      action: "provider.set_app_credentials",
+      rawParams: { providerId: "provider-credentials-1" },
+      variant: "provider_set_app_credentials",
+      normalizedParams: {
+        variant: "provider_set_app_credentials",
+        provider_id: "provider-credentials-1",
+      },
+      cta: "Save credentials",
+      dialogParams: { providerId: "provider-credentials-1" },
+      completion: "provider-credentials-1",
+      resource: {
+        providerCredentials: { providerId: "provider-credentials-1" },
+      },
+    });
+  });
+
+  it("rejects model-supplied credential fields before dialog binding", () => {
+    const parsed = assistantActionRequestSchema.safeParse({
+      schemaVersion: ACTION_SCHEMA_VERSION,
+      actorId: "conversation-1",
+      originTurnId: "turn-origin-1",
+      taskId: "task-1",
+      stepId: "step-1",
+      actionRequestId: "act-provider-secret-injection",
+      action: "provider.set_app_credentials",
+      params: {
+        providerId: "provider-credentials-1",
+        clientSecret: "model-supplied-secret",
+        confirmed: true,
+      },
+    });
+
+    expect(parsed.success).toBe(false);
+    expect(dialogCalls.has("provider_set_app_credentials")).toBe(false);
   });
 });
 

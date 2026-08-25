@@ -242,6 +242,18 @@ export const externalKeyDeleteActionParamsSchema = z
   })
   .strict();
 
+export const connectionRevokeActionParamsSchema = z
+  .object({ serviceId: requiredActionIdentitySchema })
+  .strict();
+
+export const providerDisconnectActionParamsSchema = z
+  .object({ providerId: requiredActionIdentitySchema })
+  .strict();
+
+export const providerSetAppCredentialsActionParamsSchema = z
+  .object({ providerId: requiredActionIdentitySchema })
+  .strict();
+
 // ---- Wave 3 and Wave 4 browser-journey params. These schemas mirror the
 // published assistant manifest. Effect-only values (confirmation flags,
 // optimistic-concurrency versions, and browser-entered secrets) are excluded:
@@ -446,6 +458,9 @@ export const assistantActionParamsSchema = z
     endpointDeleteActionParamsSchema,
     externalKeyRotateActionParamsSchema,
     externalKeyDeleteActionParamsSchema,
+    connectionRevokeActionParamsSchema,
+    providerDisconnectActionParamsSchema,
+    providerSetAppCredentialsActionParamsSchema,
     nodeRegisterTokenActionParamsSchema,
     nodeRotateTokenActionParamsSchema,
     nodeDeleteActionParamsSchema,
@@ -644,6 +659,12 @@ export type ActionCardParams =
   | {
       readonly variant: "external_key_delete";
       readonly external_key_id: string;
+    }
+  | { readonly variant: "connection_revoke"; readonly service_id: string }
+  | { readonly variant: "provider_disconnect"; readonly provider_id: string }
+  | {
+      readonly variant: "provider_set_app_credentials";
+      readonly provider_id: string;
     }
   | {
       readonly variant: "node_register_token";
@@ -893,6 +914,25 @@ const externalKeyResourceSchema = z
       .strict(),
   })
   .strict();
+const connectionResourceSchema = z
+  .object({
+    connection: z.object({ serviceId: actionControlIdentitySchema }).strict(),
+  })
+  .strict();
+const providerTokenResourceSchema = z
+  .object({
+    providerToken: z
+      .object({ providerId: actionControlIdentitySchema })
+      .strict(),
+  })
+  .strict();
+const providerCredentialsResourceSchema = z
+  .object({
+    providerCredentials: z
+      .object({ providerId: actionControlIdentitySchema })
+      .strict(),
+  })
+  .strict();
 const deviceResourceSchema = z
   .object({
     device: z.object({ deviceId: actionControlIdentitySchema }).strict(),
@@ -904,6 +944,9 @@ export const actionResourceSchema = z.union([
   keyResourceSchema,
   endpointResourceSchema,
   externalKeyResourceSchema,
+  connectionResourceSchema,
+  providerTokenResourceSchema,
+  providerCredentialsResourceSchema,
   nodeResourceSchema,
   pendingCredentialResourceSchema,
   orgResourceSchema,
@@ -1050,6 +1093,27 @@ function assertReportMatchesAction(
       `${action} completed reports must include resource.externalKey.externalKeyId`,
     );
   }
+  if (action === "connection.revoke" && !("connection" in report.resource)) {
+    throw new Error(
+      "connection.revoke completed reports must include resource.connection.serviceId",
+    );
+  }
+  if (
+    action === "provider.disconnect" &&
+    !("providerToken" in report.resource)
+  ) {
+    throw new Error(
+      "provider.disconnect completed reports must include resource.providerToken.providerId",
+    );
+  }
+  if (
+    action === "provider.set_app_credentials" &&
+    !("providerCredentials" in report.resource)
+  ) {
+    throw new Error(
+      "provider.set_app_credentials completed reports must include resource.providerCredentials.providerId",
+    );
+  }
   if (
     action === "key.bind_credential" &&
     (!("key" in report.resource) || !report.resource.key.userServiceId)
@@ -1082,6 +1146,21 @@ function copyResource(resource: ActionResource): ActionResource {
   if ("externalKey" in resource) {
     return {
       externalKey: { externalKeyId: resource.externalKey.externalKeyId },
+    };
+  }
+  if ("connection" in resource) {
+    return { connection: { serviceId: resource.connection.serviceId } };
+  }
+  if ("providerToken" in resource) {
+    return {
+      providerToken: { providerId: resource.providerToken.providerId },
+    };
+  }
+  if ("providerCredentials" in resource) {
+    return {
+      providerCredentials: {
+        providerId: resource.providerCredentials.providerId,
+      },
     };
   }
   if ("node" in resource) return { node: { nodeId: resource.node.nodeId } };

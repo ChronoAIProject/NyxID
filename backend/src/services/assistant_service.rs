@@ -490,6 +490,9 @@ pub enum ActionResource {
     Key { key_id: String },
     Endpoint { endpoint_id: String },
     ExternalKey { external_key_id: String },
+    Connection { service_id: String },
+    ProviderToken { provider_id: String },
+    ProviderCredentials { provider_id: String },
     Node { node_id: String },
     PendingCredential { pending_credential_id: String },
     Org { org_id: String },
@@ -516,6 +519,15 @@ impl ActionResource {
             }),
             Self::ExternalKey { external_key_id } => serde_json::json!({
                 "externalKey": { "externalKeyId": external_key_id }
+            }),
+            Self::Connection { service_id } => serde_json::json!({
+                "connection": { "serviceId": service_id }
+            }),
+            Self::ProviderToken { provider_id } => serde_json::json!({
+                "providerToken": { "providerId": provider_id }
+            }),
+            Self::ProviderCredentials { provider_id } => serde_json::json!({
+                "providerCredentials": { "providerId": provider_id }
             }),
             Self::Node { node_id } => serde_json::json!({
                 "node": { "nodeId": node_id }
@@ -833,6 +845,15 @@ fn parse_action_resource(value: Option<serde_json::Value>) -> AppResult<Option<A
         },
         "externalKey" => ActionResource::ExternalKey {
             external_key_id: parse_identity(payload, "externalKeyId", "externalKeyId")?,
+        },
+        "connection" => ActionResource::Connection {
+            service_id: parse_identity(payload, "serviceId", "serviceId")?,
+        },
+        "providerToken" => ActionResource::ProviderToken {
+            provider_id: parse_identity(payload, "providerId", "providerId")?,
+        },
+        "providerCredentials" => ActionResource::ProviderCredentials {
+            provider_id: parse_identity(payload, "providerId", "providerId")?,
         },
         "node" => ActionResource::Node {
             node_id: parse_identity(payload, "nodeId", "nodeId")?,
@@ -2202,6 +2223,9 @@ mod tests {
         for (index, resource) in [
             json!({ "userService": { "userServiceId": "service-1" } }),
             json!({ "key": { "keyId": "key-1" } }),
+            json!({ "connection": { "serviceId": "service-1" } }),
+            json!({ "providerToken": { "providerId": "provider-1" } }),
+            json!({ "providerCredentials": { "providerId": "provider-1" } }),
             json!({ "node": { "nodeId": "node-1" } }),
             json!({ "serviceAccount": { "serviceAccountId": "sa-1" } }),
             json!({ "developerApp": { "clientId": "app-1" } }),

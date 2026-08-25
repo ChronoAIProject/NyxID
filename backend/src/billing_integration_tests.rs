@@ -2075,6 +2075,7 @@ async fn insert_llm_route_service(
             expires_at: None,
             api_key_encrypted: None,
             status: "active".to_string(),
+            state_version: 1,
             last_refreshed_at: None,
             last_used_at: None,
             error_message: None,
