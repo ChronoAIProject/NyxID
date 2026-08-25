@@ -171,32 +171,28 @@ export function ScheduleDialog({
                   )}
                 />
                 {expiry.kind === "after_days" ? (
-                  <FormItem className="max-w-52">
-                    <FormLabel htmlFor="schedule-expiry-days">
-                      Days until expiry
-                    </FormLabel>
-                    <Input
-                      id="schedule-expiry-days"
-                      type="number"
-                      min={1}
-                      max={3_650}
-                      value={expiry.days}
-                      onChange={(event) =>
-                        form.setValue(
-                          "expiry",
-                          {
-                            kind: "after_days",
-                            days: event.target.valueAsNumber,
-                          },
-                          {
-                            shouldDirty: true,
-                            shouldTouch: true,
-                            shouldValidate: true,
-                          },
-                        )
-                      }
-                    />
-                  </FormItem>
+                  <FormField
+                    control={form.control}
+                    name="expiry.days"
+                    render={({ field }) => (
+                      <FormItem className="max-w-52">
+                        <FormLabel>Days until expiry</FormLabel>
+                        <FormControl>
+                          <Input
+                            type="number"
+                            min={1}
+                            max={3_650}
+                            {...field}
+                            value={Number.isNaN(field.value) ? "" : field.value}
+                            onChange={(event) =>
+                              field.onChange(event.target.valueAsNumber)
+                            }
+                          />
+                        </FormControl>
+                        <FormMessage />
+                      </FormItem>
+                    )}
+                  />
                 ) : null}
 
                 <TargetFields form={form} targetKind={targetKind} />

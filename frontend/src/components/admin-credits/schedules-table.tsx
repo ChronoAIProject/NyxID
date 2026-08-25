@@ -67,7 +67,15 @@ export function SchedulesTable({
                 </div>
                 <RolloutSummary schedule={schedule} />
               </TableCell>
-              <TableCell>{periodLabel(schedule)}</TableCell>
+              <TableCell>
+                <div>{periodLabel(schedule)}</div>
+                {schedule.skipped_periods > 0 ? (
+                  <Badge variant="warning" className="mt-1">
+                    {formatNumber(schedule.skipped_periods)} skipped period
+                    {schedule.skipped_periods === 1 ? "" : "s"}
+                  </Badge>
+                ) : null}
+              </TableCell>
               <TableCell>
                 <Badge variant={schedule.is_active ? "success" : "secondary"}>
                   {schedule.is_active ? "Active" : "Paused"}

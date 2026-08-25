@@ -118,11 +118,20 @@ export const creditScheduleListSchema = z.object({
   schedules: z.array(creditScheduleSchema),
 });
 
+const scheduleFormExpiryPolicySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("end_of_period") }),
+  z.object({
+    kind: z.literal("after_days"),
+    days: z.union([z.number(), z.nan()]),
+  }),
+  z.object({ kind: z.literal("never") }),
+]);
+
 export const scheduleFormSchema = z
   .object({
     amount_credits: z.number().int().min(1).max(1_000_000),
     recurrence: scheduleRecurrenceSchema,
-    expiry: creditExpiryPolicySchema,
+    expiry: scheduleFormExpiryPolicySchema,
     target_kind: billingTargetKindSchema,
     target_user_ids: z.array(z.string()).max(500),
     all_services: z.boolean(),
@@ -130,6 +139,18 @@ export const scheduleFormSchema = z
     reason: z.string().trim().max(2_000),
   })
   .superRefine((value, ctx) => {
+    if (
+      value.expiry.kind === "after_days" &&
+      (!Number.isInteger(value.expiry.days) ||
+        value.expiry.days < 1 ||
+        value.expiry.days > 3_650)
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["expiry", "days"],
+        message: "Enter 1 to 3,650 days",
+      });
+    }
     if (
       value.target_kind === "selected_users" &&
       value.target_user_ids.length === 0

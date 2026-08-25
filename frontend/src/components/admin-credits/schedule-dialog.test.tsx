@@ -1,6 +1,10 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { zodResolver } from "@hookform/resolvers/zod";
 import { describe, expect, it, vi } from "vitest";
-import type { ScheduleForm } from "@/schemas/billing-credits";
+import {
+  scheduleFormSchema,
+  type ScheduleForm,
+} from "@/schemas/billing-credits";
 import type { DownstreamService } from "@/types/api";
 import { useAppForm } from "@/components/ui/form";
 import { ScheduleDialog } from "./schedule-dialog";
@@ -15,6 +19,7 @@ const service = {
 
 function Harness() {
   const form = useAppForm<ScheduleForm>({
+    resolver: zodResolver(scheduleFormSchema),
     defaultValues: {
       amount_credits: 50,
       recurrence: "monthly",
@@ -52,5 +57,19 @@ describe("ScheduleDialog", () => {
 
     fireEvent.click(screen.getByLabelText("After a fixed number of days"));
     expect(screen.getByLabelText("Days until expiry")).toBeInTheDocument();
+  });
+
+  it("shows a validation error when fixed expiry days are cleared", async () => {
+    render(<Harness />);
+
+    fireEvent.click(screen.getByLabelText("After a fixed number of days"));
+    fireEvent.change(screen.getByLabelText("Days until expiry"), {
+      target: { value: "" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create schedule" }));
+
+    expect(
+      await screen.findByText("Enter 1 to 3,650 days"),
+    ).toBeInTheDocument();
   });
 });

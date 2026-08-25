@@ -80,4 +80,18 @@ describe("SchedulesTable", () => {
 
     expect(screen.getByText(/Complete.*1,204.*expires/)).toBeInTheDocument();
   });
+
+  it("surfaces periods abandoned before completion", () => {
+    render(
+      <SchedulesTable
+        schedules={[schedule({ skipped_periods: 2 })]}
+        canWrite={false}
+        updatePending={false}
+        onEdit={vi.fn()}
+        onToggle={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("2 skipped periods")).toBeInTheDocument();
+  });
 });
