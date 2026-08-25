@@ -140,12 +140,17 @@ pub async fn issue_grants(
 pub async fn list_grants(
     db: &mongodb::Database,
     recipient_user_id: Option<&str>,
+    schedule_id: Option<&str>,
     limit: i64,
     skip: u64,
 ) -> AppResult<(Vec<CreditGrant>, u64)> {
-    let filter = recipient_user_id
-        .map(|user_id| doc! { "recipient_user_id": user_id })
-        .unwrap_or_default();
+    let mut filter = doc! {};
+    if let Some(user_id) = recipient_user_id {
+        filter.insert("recipient_user_id", user_id);
+    }
+    if let Some(schedule_id) = schedule_id {
+        filter.insert("schedule_origin.schedule_id", schedule_id);
+    }
     let collection = db.collection::<CreditGrant>(CREDIT_GRANTS);
     let total = collection.count_documents(filter.clone()).await?;
     let rows = collection

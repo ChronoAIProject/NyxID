@@ -65,6 +65,7 @@ pub enum CreditGrantActivationState {
 #[derive(Debug, Deserialize)]
 pub struct GrantListQuery {
     pub recipient_user_id: Option<String>,
+    pub schedule_id: Option<String>,
     pub page: Option<u32>,
     pub per_page: Option<u32>,
 }
@@ -79,6 +80,8 @@ pub struct BillingBenefitsQuery {
 pub struct CreditGrantResponse {
     pub id: String,
     pub batch_id: String,
+    pub schedule_id: Option<String>,
+    pub period_start: Option<DateTime<Utc>>,
     pub recipient_user_id: String,
     pub recipient_email: Option<String>,
     pub recipient_display_name: Option<String>,
@@ -250,6 +253,12 @@ pub async fn issue_grant(
     get,
     path = "/api/v1/admin/credits/grants",
     tag = "Admin Credits",
+    params(
+        ("recipient_user_id" = Option<String>, Query),
+        ("schedule_id" = Option<String>, Query),
+        ("page" = Option<u32>, Query),
+        ("per_page" = Option<u32>, Query)
+    ),
     responses((status = 200, body = CreditGrantListResponse)),
     security(("bearer_auth" = []))
 )]
@@ -264,6 +273,7 @@ pub async fn admin_list_grants(
     let (grants, total) = billing::grants::list_grants(
         &state.db,
         query.recipient_user_id.as_deref(),
+        query.schedule_id.as_deref(),
         i64::from(per_page),
         u64::from((page - 1).saturating_mul(per_page)),
     )
@@ -478,9 +488,19 @@ fn grant_response(
     recipient_billing_enabled: Option<bool>,
 ) -> CreditGrantResponse {
     let activation_state = activation_state(&grant);
+    let schedule_id = grant
+        .schedule_origin
+        .as_ref()
+        .map(|origin| origin.schedule_id.clone());
+    let period_start = grant
+        .schedule_origin
+        .as_ref()
+        .map(|origin| origin.period_start);
     CreditGrantResponse {
         id: grant.id,
         batch_id: grant.batch_id,
+        schedule_id,
+        period_start,
         recipient_user_id: grant.recipient_user_id,
         recipient_email: user.map(|value| value.email.clone()),
         recipient_display_name: user.and_then(|value| value.display_name.clone()),
@@ -637,6 +657,7 @@ mod tests {
             operator.clone(),
             Query(GrantListQuery {
                 recipient_user_id: None,
+                schedule_id: None,
                 page: None,
                 per_page: None,
             }),

@@ -24,6 +24,7 @@ pub mod assistant_readiness;
 pub mod auth;
 pub mod auth_device;
 pub mod billing;
+pub mod billing_credit_schedules;
 pub mod billing_credits;
 pub(crate) mod body_limit;
 pub mod broker_bindings;

@@ -280,6 +280,7 @@ async fn admin_grant_responses_expose_rollout_and_pending_activation() {
         test_auth_user(&fixture.platform_admin_id),
         Query(GrantListQuery {
             recipient_user_id: Some(fixture.non_member_id),
+            schedule_id: None,
             page: Some(1),
             per_page: Some(50),
         }),
@@ -313,6 +314,7 @@ async fn admin_grant_responses_expose_rollout_and_pending_activation() {
         test_auth_user(&fixture.platform_admin_id),
         Query(GrantListQuery {
             recipient_user_id: Some("deleted-recipient".to_string()),
+            schedule_id: None,
             page: Some(1),
             per_page: Some(50),
         }),
