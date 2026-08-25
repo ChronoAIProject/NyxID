@@ -36,6 +36,9 @@ mod billing_integration_tests;
 #[cfg(test)]
 mod grant_visibility_tests;
 
+#[cfg(test)]
+mod credit_schedule_tests;
+
 use std::sync::Arc;
 
 /// Install `aws_lc_rs` as the rustls process-wide crypto provider.

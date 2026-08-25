@@ -84,6 +84,7 @@ fn grant(recipient_user_id: &str, issued_ledgered_at: Option<DateTime<Utc>>) -> 
     CreditGrant {
         id: Uuid::new_v4().to_string(),
         batch_id: Uuid::new_v4().to_string(),
+        schedule_origin: None,
         recipient_user_id: recipient_user_id.to_string(),
         target_kind: BillingTargetKind::SelectedUsers,
         amount_credits: 5,

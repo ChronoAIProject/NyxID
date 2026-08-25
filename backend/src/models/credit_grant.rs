@@ -27,11 +27,20 @@ pub struct CreditGrantSettlementLock {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreditGrantScheduleOrigin {
+    pub schedule_id: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub period_start: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CreditGrant {
     #[serde(rename = "_id")]
     pub id: String,
     /// Groups the per-recipient rows created by one admin request.
     pub batch_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_origin: Option<CreditGrantScheduleOrigin>,
     pub recipient_user_id: String,
     pub target_kind: BillingTargetKind,
     pub amount_credits: i64,

@@ -15,6 +15,8 @@ use crate::models::billing_topup_session::COLLECTION_NAME as BILLING_TOPUP_SESSI
 use crate::models::catalog_delegation_grant::COLLECTION_NAME as CATALOG_DELEGATION_GRANTS;
 use crate::models::connect_link::{COLLECTION_NAME as CONNECT_LINKS, ConnectLink};
 use crate::models::credit_grant::COLLECTION_NAME as CREDIT_GRANTS;
+use crate::models::credit_schedule::COLLECTION_NAME as CREDIT_SCHEDULES;
+use crate::models::credit_schedule_period::COLLECTION_NAME as CREDIT_SCHEDULE_PERIODS;
 use crate::models::device_code::COLLECTION_NAME as DEVICE_CODES;
 use crate::models::device_onboard_credential::COLLECTION_NAME as DEVICE_ONBOARD_CREDENTIALS;
 use crate::models::downstream_service::{
@@ -2345,6 +2347,49 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                     "terminal_ledgered_at": 1,
                     "created_at": 1,
                 })
+                .build(),
+        )
+        .await?;
+    credit_grants
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "schedule_origin.schedule_id": 1,
+                    "schedule_origin.period_start": -1,
+                })
+                .options(
+                    IndexOptions::builder()
+                        .name("credit_grants_schedule_origin".to_string())
+                        .partial_filter_expression(doc! {
+                            "schedule_origin.schedule_id": { "$type": "string" },
+                            "schedule_origin.period_start": { "$type": "date" },
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
+    // ── credit_schedules / credit_schedule_periods ──
+    db.collection::<Document>(CREDIT_SCHEDULES)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "is_active": 1, "_id": 1 })
+                .build(),
+        )
+        .await?;
+    let credit_schedule_periods = db.collection::<Document>(CREDIT_SCHEDULE_PERIODS);
+    credit_schedule_periods
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "schedule_id": 1, "period_start": -1 })
+                .build(),
+        )
+        .await?;
+    credit_schedule_periods
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "status": 1, "lease_expires_at": 1 })
                 .build(),
         )
         .await?;
