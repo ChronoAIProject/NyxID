@@ -52,8 +52,15 @@ export type ServiceCategory = (typeof SERVICE_CATEGORIES)[number];
 
 const optionalString = z.string().optional().or(z.literal(""));
 
-// Mirrors the backend whitelist in handlers/services.rs validate_delegation_scope.
-const DELEGATION_TOKEN_SCOPES = ["llm:proxy", "proxy:*", "llm:status"];
+// Mirrors SERVICE_DELEGATION_SCOPES in backend/src/mw/auth.rs, the allowlist
+// enforced by both handlers/services.rs and services/user_service_service.rs.
+export const DELEGATION_TOKEN_SCOPES = [
+  "llm:proxy",
+  "proxy:*",
+  "llm:status",
+  "account:read",
+  "sandbox:execute",
+];
 const urlField = z.string().refine(isValidHttpUrl, "Must be a valid URL");
 
 export const sshServiceConfigSchema = z

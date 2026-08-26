@@ -230,6 +230,32 @@ describe("updateServiceSchema", () => {
     }
   });
 
+  it("accepts every delegation token scope the backend allows", () => {
+    // Backend source of truth: SERVICE_DELEGATION_SCOPES in backend/src/mw/auth.rs.
+    for (const delegation_token_scope of [
+      "llm:proxy",
+      "proxy:*",
+      "llm:status",
+      "account:read",
+      "sandbox:execute",
+      "proxy:* sandbox:execute",
+    ]) {
+      expect(
+        updateServiceSchema.safeParse({ ...validData, delegation_token_scope })
+          .success,
+      ).toBe(true);
+    }
+  });
+
+  it("rejects a delegation token scope the backend does not allow", () => {
+    expect(
+      updateServiceSchema.safeParse({
+        ...validData,
+        delegation_token_scope: "proxy:* sandbox:admin",
+      }).success,
+    ).toBe(false);
+  });
+
   it("accepts update with identity propagation fields", () => {
     const result = updateServiceSchema.safeParse({
       ...validData,
