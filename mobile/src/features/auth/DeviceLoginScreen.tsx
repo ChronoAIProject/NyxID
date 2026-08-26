@@ -35,8 +35,10 @@ import { DeviceCodeScanner } from "./DeviceCodeScanner";
 import { createDeviceLoginStyles } from "./deviceLoginStyles";
 import {
   compareDeviceLoginTimezones,
+  formatDeviceLoginOriginValue,
   formatDeviceLoginRelativeTime,
   resolveDeviceLoginDeadlineMs,
+  resolveDeviceLoginValueTones,
   secondsUntilDeviceLoginDeadline,
 } from "./deviceLoginPreview";
 import {
@@ -49,7 +51,6 @@ type Props = NativeStackScreenProps<RootStackParamList, "DeviceLogin">;
 type TerminalState = "approved" | "denied" | null;
 
 const ACTION_THROTTLE_MS = 750;
-const NEAR_EXPIRY_SECONDS = 60;
 const COMPLETION_MARK_SIZE = spacing.huge * 7;
 // Design-selected so completion marks stay clear without overpowering the title.
 const COMPLETION_MARK_OPACITY = 0.85;
@@ -103,26 +104,6 @@ function DetailRow({
   );
 }
 
-function initiatingOriginValue(preview: AuthDevicePreview): string | null {
-  if (
-    preview.initiating_origin_status === "absent" ||
-    preview.initiating_origin_status === "matched"
-  ) {
-    return null;
-  }
-  if (preview.initiating_origin_status === "mismatched") {
-    if (!preview.initiating_origin) return "Another site";
-    try {
-      return new URL(preview.initiating_origin).host || "Another site";
-    } catch {
-      return "Another site";
-    }
-  }
-  return preview.initiating_origin_status === "non_http"
-    ? "Non-HTTP origin"
-    : "Malformed origin";
-}
-
 function formatLocation(preview: AuthDevicePreview): string {
   if (preview.client_ip_attribution !== "verified") return "Not available";
   const locality = [preview.client_city, preview.client_region]
@@ -131,7 +112,7 @@ function formatLocation(preview: AuthDevicePreview): string {
   const place =
     locality && preview.client_country
       ? `${locality} (${preview.client_country})`
-      : locality || preview.client_country;
+      : locality || preview.client_country || preview.client_continent;
   if (place && preview.client_ip_timezone) {
     return `${place} · ${preview.client_ip_timezone}`;
   }
@@ -158,7 +139,10 @@ function formatNetwork(preview: AuthDevicePreview): string {
 }
 
 function formatScreen(preview: AuthDevicePreview): string {
-  if (preview.client_screen_width === null || preview.client_screen_height === null) {
+  if (
+    preview.client_screen_width === null ||
+    preview.client_screen_height === null
+  ) {
     return "Not reported";
   }
   const ratio =
@@ -179,9 +163,11 @@ function timezoneRow(
   preview: AuthDevicePreview,
   localTimezone: string | null,
 ): { value: string; anomalous: boolean } {
-  if (!preview.client_timezone) return { value: "Not reported", anomalous: false };
+  if (!preview.client_timezone)
+    return { value: "Not reported", anomalous: false };
   const differsFromPhone =
-    compareDeviceLoginTimezones(preview.client_timezone, localTimezone) === "different";
+    compareDeviceLoginTimezones(preview.client_timezone, localTimezone) ===
+    "different";
   const differences = [
     differsFromPhone ? "this phone" : null,
     preview.client_timezone_matches_ip === false ? "IP location" : null,
@@ -195,14 +181,17 @@ function timezoneRow(
   };
 }
 
-function requesterValue(preview: AuthDevicePreview, nowMs: number): string {
-  const requester =
-    preview.client_ip_attribution === "verified" && preview.client_ip
-      ? preview.client_ip
-      : preview.client_ip_attribution === "unverified" && preview.client_ip
-        ? `${preview.client_ip} (unverified)`
-        : "IP unavailable";
-  return `${requester} · ${formatDeviceLoginRelativeTime(preview.initiated_at, nowMs)} (${formatTimestamp(preview.initiated_at)})`;
+function requesterValue(preview: AuthDevicePreview): string {
+  if (preview.client_ip_attribution === "verified" && preview.client_ip) {
+    return preview.client_ip;
+  }
+  return preview.client_ip_attribution === "unverified"
+    ? "Not verified"
+    : "IP unavailable on this deployment";
+}
+
+function requestedAtValue(preview: AuthDevicePreview, nowMs: number): string {
+  return `${formatDeviceLoginRelativeTime(preview.initiated_at, nowMs)} · ${formatTimestamp(preview.initiated_at)}`;
 }
 
 function ManualCodeModal({
@@ -535,7 +524,12 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
   const isExpired = Boolean(preview) && secondsRemaining === 0;
   const isPending = isPreviewing || decisionPending !== null;
   const loginCode = formatAuthDeviceUserCode(confirmedCode ?? userCode);
-  const originValue = preview ? initiatingOriginValue(preview) : null;
+  const originValue = preview
+    ? formatDeviceLoginOriginValue(
+        preview.initiating_origin_status,
+        preview.initiating_origin,
+      )
+    : null;
   const reportedTimezone = preview
     ? timezoneRow(preview, localTimezone)
     : { value: "Not reported", anomalous: false };
@@ -547,14 +541,11 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
         unknown: "Not identified",
       }[preview.client_kind]
     : "Not identified";
-  const existingTintCount =
-    Number(originValue !== null) + Number(reportedTimezone.anomalous);
-  const expiryTone =
-    existingTintCount >= 2 || secondsRemaining > NEAR_EXPIRY_SECONDS
-      ? "default"
-      : isExpired
-        ? "danger"
-        : "warning";
+  const valueTones = resolveDeviceLoginValueTones(
+    originValue !== null,
+    reportedTimezone.anomalous,
+    secondsRemaining,
+  );
 
   if (terminal) {
     const approved = terminal === "approved";
@@ -685,13 +676,13 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   <DetailRow
                     label="Started from"
                     value={originValue}
-                    tone="danger"
+                    tone={valueTones.origin}
                     styles={styles}
                   />
                 ) : null}
                 <DetailRow
                   label="Requester"
-                  value={requesterValue(preview, clockMs)}
+                  value={requesterValue(preview)}
                   styles={styles}
                 />
                 <DetailRow
@@ -704,14 +695,20 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   value={formatNetwork(preview)}
                   styles={styles}
                 />
-                {preview.client_ip_attribution === "unverified" && preview.client_ip ? (
+                {preview.client_ip_attribution === "unverified" &&
+                preview.client_ip ? (
                   <DetailRow
                     label="Reported IP"
-                    value={preview.client_ip}
+                    value={`${preview.client_ip} · unverified`}
                     mono
                     styles={styles}
                   />
                 ) : null}
+                <DetailRow
+                  label="Requested"
+                  value={requestedAtValue(preview, clockMs)}
+                  styles={styles}
+                />
                 <DetailRow
                   label="Reported device"
                   value={formatDevice(preview)}
@@ -739,7 +736,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 <DetailRow
                   label="Timezone"
                   value={reportedTimezone.value}
-                  tone={reportedTimezone.anomalous ? "warning" : "default"}
+                  tone={valueTones.timezone}
                   styles={styles}
                 />
                 <DetailRow
@@ -773,9 +770,13 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 <Pressable
                   accessibilityRole="button"
                   accessibilityLabel={
-                    rawUserAgentExpanded ? "Hide raw user agent" : "Show raw user agent"
+                    rawUserAgentExpanded
+                      ? "Hide raw user agent"
+                      : "Show raw user agent"
                   }
-                  onPress={() => setRawUserAgentExpanded((expanded) => !expanded)}
+                  onPress={() =>
+                    setRawUserAgentExpanded((expanded) => !expanded)
+                  }
                   style={({ pressed }) => [
                     styles.rawUserAgentButton,
                     pressed && styles.pressed,
@@ -798,7 +799,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                   value={
                     isExpired ? "Expired" : formatRemaining(secondsRemaining)
                   }
-                  tone={expiryTone}
+                  tone={valueTones.expiry}
                   styles={styles}
                 />
               </View>

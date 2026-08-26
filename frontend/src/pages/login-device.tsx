@@ -1,20 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
-  AlertTriangle,
   CheckCircle2,
   ChevronDown,
   CircleX,
-  Clock3,
-  Cpu,
-  Globe2,
-  Languages,
-  MapPin,
-  Monitor,
-  MonitorSmartphone,
+  Info,
   ShieldCheck,
   ShieldX,
-  Timer,
 } from "lucide-react";
 import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { ErrorBanner } from "@/components/shared/error-banner";
@@ -40,6 +32,7 @@ import {
   resolveAuthDeviceDeadlineMs,
   secondsUntilAuthDeviceDeadline,
 } from "@/lib/auth-device-time";
+import { cn } from "@/lib/utils";
 import { useAuthStore } from "@/stores/auth-store";
 
 const VALID_CODE_LENGTH = 9;
@@ -174,14 +167,10 @@ export function LoginDevicePage() {
         </div>
         <div className="space-y-1">
           <h1 className="text-[22px] font-bold leading-tight tracking-tight text-foreground sm:text-[28px]">
-            Sign in to NyxID CLI on another device
+            Approve a device login
           </h1>
           <p className="mx-auto max-w-md text-[12px] text-muted-foreground">
-            Confirm the one-time code shown by{" "}
-            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">
-              nyxid login --device
-            </code>
-            .
+            Review the one-time code shown on the requesting device.
           </p>
         </div>
       </header>
@@ -233,13 +222,14 @@ export function LoginDevicePage() {
               />
             ) : null}
 
-            <WarningBanner />
-
             {step === "review" && preview.data ? (
-              <PreviewPanel
-                preview={preview.data}
-                remainingSeconds={previewRemaining}
-              />
+              <>
+                <PreviewPanel
+                  preview={preview.data}
+                  remainingSeconds={previewRemaining}
+                />
+                <ApprovalCaution />
+              </>
             ) : null}
             {previewStatusMessage ? (
               <ErrorBanner message={previewStatusMessage} />
@@ -317,17 +307,15 @@ function LoginDeviceShell({
   );
 }
 
-function WarningBanner() {
+function ApprovalCaution() {
   return (
-    <div className="flex gap-3 rounded-xl border border-warning/20 bg-warning/[0.04] px-4 py-3">
-      <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-warning/10">
-        <AlertTriangle className="h-4 w-4 text-warning" />
-      </div>
-      <p className="text-[12px] leading-relaxed text-warning">
-        Only approve a request you started yourself. Check the initiating site,
-        location, and timing below before deciding. Device names, browser
-        details, timezone, and hardware are self-reported and can be forged. If
-        someone else showed or sent you this code, reject it.
+    <div className="flex items-start gap-2 px-1 text-[12px] leading-relaxed text-muted-foreground">
+      <Info className="mt-0.5 size-4 shrink-0" />
+      <p>
+        Only approve if you started this sign-in.{" "}
+        <span className="font-medium text-destructive">
+          If anything looks unfamiliar, reject it.
+        </span>
       </p>
     </div>
   );
@@ -355,241 +343,180 @@ function PreviewPanel({
     preview.client_timezone !== null &&
     localTimezone !== null &&
     preview.client_timezone.toLowerCase() !== localTimezone.toLowerCase();
+  const timezoneDifferences = [
+    reportedTimezoneDiffers ? "this device" : null,
+    preview.client_timezone !== null &&
+    preview.client_timezone_matches_ip === false
+      ? "IP location"
+      : null,
+  ].filter((value): value is string => value !== null);
+  const timezoneValue = preview.client_timezone
+    ? timezoneDifferences.length > 0
+      ? `${preview.client_timezone} · differs from ${timezoneDifferences.join(" and ")}`
+      : preview.client_timezone
+    : "Not reported";
   const location = formatVerifiedLocation(preview);
   const screenDescription = formatScreenDescription(preview);
+  const originValue = initiatingOriginValue(preview);
   const appDescription =
     preview.client_app ??
     (preview.client_kind === "unknown"
       ? "Not identified"
       : `${preview.client_kind[0]?.toUpperCase()}${preview.client_kind.slice(1)} client`);
+  const deviceDescription =
+    preview.client_label && preview.client_model
+      ? `${preview.client_label} · ${preview.client_model}`
+      : (preview.client_label ?? preview.client_model ?? "Not provided");
+  // Upstream's caution sentence owns one accent. Keep at most one additional
+  // value tint, prioritizing the security signal over recognition details.
+  const originTone: DetailValueTone = originValue ? "danger" : "default";
+  const timezoneTone: DetailValueTone =
+    !originValue && timezoneDifferences.length > 0 ? "warning" : "default";
+  const expiryTone: DetailValueTone =
+    originValue || timezoneDifferences.length > 0
+      ? "default"
+      : expired
+        ? "danger"
+        : remainingSeconds !== null && remainingSeconds <= 60
+          ? "warning"
+          : "default";
 
   return (
-    <section className="space-y-5 border-t border-border/50 pt-4" aria-label="Request details">
-      <div className="flex items-center justify-between gap-3">
-        <p className="text-[13px] font-semibold text-foreground">
-          Request details
-        </p>
-        <span
-          className={
-            expired
-              ? "rounded-md border border-destructive/30 bg-destructive/10 px-2 py-0.5 text-[10px] font-medium text-destructive"
-              : "rounded-md border border-warning/30 bg-warning/10 px-2 py-0.5 text-[10px] font-medium capitalize text-warning"
+    <section
+      className="border-t border-border/50 pt-4"
+      aria-label="Request details"
+    >
+      <div className="divide-y divide-border/30 overflow-hidden rounded-xl border border-border/50 bg-overlay/30">
+        {/*
+          A signal whose "good" state can be produced by an attacker choosing
+          what to send must never render as a positive assurance. Origin is a
+          forgeable header on this public endpoint, and even a first-party proof
+          would not stop an attacker from copying a genuine QR, so only negative
+          origin states are informative.
+        */}
+        {originValue ? (
+          <ApprovalDetailRow
+            label="Started from"
+            value={originValue}
+            tone={originTone}
+          />
+        ) : null}
+        <ApprovalDetailRow label="Status" value={capitalize(preview.status)} />
+        <ApprovalDetailRow
+          label="Requester"
+          value={
+            verifiedIp && preview.client_ip
+              ? preview.client_ip
+              : unverifiedIp
+                ? "Not verified"
+                : "IP unavailable on this deployment"
           }
-        >
-          {expired ? "Request expired" : preview.status}
-        </span>
-      </div>
-
-      <div>
-        <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase text-success">
-          <ShieldCheck className="size-3.5" />
-          Verified by NyxID
-        </div>
-        <div className="divide-y divide-border/30 rounded-md border border-border/50 bg-overlay/30">
-          {/*
-            A signal whose "good" state can be produced by an attacker choosing
-            what to send must never render as a positive assurance. Origin is a
-            forgeable header on this public endpoint, and even a first-party proof
-            would not stop an attacker from copying a genuine QR, so only negative
-            origin states are informative.
-          */}
-          <InitiatingOriginWarning preview={preview} />
-          {verifiedIp && preview.client_ip ? (
-            <PreviewRow
-              icon={<Globe2 />}
-              label="Requester IP"
-              value={preview.client_ip}
-              mono
-            />
-          ) : (
-            <div className="px-3 py-2.5 text-[12px] leading-relaxed text-muted-foreground">
-              {preview.client_ip_attribution === "unavailable"
-                ? "Requester IP is not available on this deployment."
-                : "No requester IP was verified by NyxID."}
-            </div>
-          )}
-          {verifiedIp && location ? (
-            <PreviewRow
-              icon={<MapPin />}
-              label="Requester location"
-              value={location}
-            />
-          ) : null}
-          {verifiedIp && networkRelation ? (
-            <div
-              className={
-                networkRelation === "same_ip" || networkRelation === "same_network"
-                  ? "flex items-center gap-2 px-3 py-2.5 text-[12px] font-medium text-success"
-                  : "flex items-center gap-2 px-3 py-2.5 text-[12px] font-medium text-muted-foreground"
-              }
-            >
-              {networkRelation === "same_ip" ? <ShieldCheck /> : <Globe2 />}
-              {networkRelation === "same_ip"
-                ? "Same IP as this device"
-                : networkRelation === "same_network"
-                  ? "Same network as this device"
-                  : networkRelation === "different_network"
-                    ? "Different network from this device - common when a phone uses cellular data"
-                    : "Different IP from this device - common when devices use separate connections"}
-            </div>
-          ) : null}
-          {verifiedIp && preview.client_ip_timezone ? (
-            <PreviewRow
-              icon={<Globe2 />}
-              label="IP timezone"
-              value={preview.client_ip_timezone}
-            />
-          ) : null}
-          {preview.client_timezone_matches_ip === false ? (
-            <div className="flex items-center gap-2 px-3 py-2.5 text-[12px] font-semibold text-warning">
-              <AlertTriangle className="size-3.5 shrink-0" />
-              Reported timezone does not match the verified IP timezone
-            </div>
-          ) : null}
-          <PreviewRow
-            icon={<Clock3 />}
-            label="Requested"
-            value={
-              <>
-                <span className="block">
-                  {formatAuthDeviceRelativeTime(preview.initiated_at)}
-                </span>
-                <span className="mt-0.5 block text-[11px] text-muted-foreground">
-                  {formatAbsoluteDateTime(preview.initiated_at)}
-                </span>
-              </>
-            }
+          mono={verifiedIp && preview.client_ip !== null}
+        />
+        <ApprovalDetailRow
+          label="Location"
+          value={verifiedIp ? (location ?? "Not available") : "Not available"}
+        />
+        <ApprovalDetailRow
+          label="Network"
+          value={
+            verifiedIp
+              ? formatNetworkRelation(networkRelation)
+              : "Not available"
+          }
+        />
+        {unverifiedIp && preview.client_ip ? (
+          <ApprovalDetailRow
+            label="Reported IP"
+            value={`${preview.client_ip} · unverified`}
+            mono
           />
-          <PreviewRow
-            icon={<Timer />}
-            label="Expiry"
-            value={
-              expired
-                ? "Expired"
-                : `Expires in ${formatWebAuthDeviceRemaining(remainingSeconds ?? 0)}`
-            }
-            valueClassName={expired ? "text-destructive" : "text-warning"}
-          />
-        </div>
-      </div>
-
-      <div>
-        <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase text-warning">
-          <MonitorSmartphone className="size-3.5" />
-          Reported by the requesting device (unverified)
-        </div>
-        <div className="divide-y divide-border/30 rounded-md border border-warning/20 bg-warning/[0.03]">
-          {unverifiedIp && preview.client_ip ? (
-            <PreviewRow
-              icon={<Globe2 />}
-              label="Reported IP (unverified)"
-              value={preview.client_ip}
-              mono
-              valueClassName="text-warning"
-            />
-          ) : null}
-          <PreviewRow
-            label="Device label"
-            value={preview.client_label ?? "Not provided"}
-          />
-          <PreviewRow label="Client" value={appDescription} />
-          <PreviewRow
-            label="Platform"
-            value={preview.client_platform ?? "Not identified"}
-          />
-          {preview.client_model ? (
-            <PreviewRow label="Device model" value={preview.client_model} />
-          ) : null}
-          {preview.client_form_factor ? (
-            <PreviewRow
-              label="Form factor"
-              value={capitalize(preview.client_form_factor)}
-            />
-          ) : null}
-          {preview.client_timezone ? (
-            <>
-              <PreviewRow
-                icon={<Globe2 />}
-                label="Timezone"
-                value={preview.client_timezone}
-              />
-              {reportedTimezoneDiffers ? (
-                <div className="flex items-center gap-2 px-3 py-2.5 text-[12px] font-medium text-warning">
-                  <AlertTriangle className="size-3.5 shrink-0" />
-                  Differs from this device ({localTimezone})
-                </div>
-              ) : null}
-            </>
-          ) : null}
-          {preview.client_locale ? (
-            <PreviewRow
-              icon={<Languages />}
-              label="Locale"
-              value={preview.client_locale}
-            />
-          ) : null}
-          {screenDescription ? (
-            <PreviewRow
-              icon={<Monitor />}
-              label="Screen"
-              value={screenDescription}
-            />
-          ) : null}
-          {preview.client_hardware_concurrency !== null ? (
-            <PreviewRow
-              icon={<Cpu />}
-              label="Processor"
-              value={`${preview.client_hardware_concurrency} logical processors`}
-            />
-          ) : null}
-          {preview.client_device_memory !== null ? (
-            <PreviewRow
-              label="Memory"
-              value={`${preview.client_device_memory} GB reported memory`}
-            />
-          ) : null}
-          <details className="group px-3 py-2.5">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-[12px] text-muted-foreground">
-              Raw user agent
-              <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
-            </summary>
-            <p className="mt-2 break-all rounded bg-background/60 p-2 font-mono text-[11px] leading-relaxed text-foreground">
-              {preview.client_user_agent ?? "Not provided"}
-            </p>
-          </details>
-        </div>
+        ) : null}
+        <ApprovalDetailRow
+          label="Requested"
+          value={`${formatAuthDeviceRelativeTime(preview.initiated_at)} · ${formatAbsoluteDateTime(preview.initiated_at)}`}
+        />
+        <ApprovalDetailRow
+          label="Expires in"
+          value={
+            expired
+              ? "Expired"
+              : formatWebAuthDeviceRemaining(remainingSeconds ?? 0)
+          }
+          tone={expiryTone}
+        />
+        <ApprovalDetailRow label="Reported device" value={deviceDescription} />
+        <ApprovalDetailRow label="Reported client" value={appDescription} />
+        <ApprovalDetailRow
+          label="Platform"
+          value={preview.client_platform ?? "Not identified"}
+        />
+        <ApprovalDetailRow
+          label="Form factor"
+          value={
+            preview.client_form_factor
+              ? capitalize(preview.client_form_factor)
+              : "Not reported"
+          }
+        />
+        <ApprovalDetailRow
+          label="Timezone"
+          value={timezoneValue}
+          tone={timezoneTone}
+        />
+        <ApprovalDetailRow
+          label="Locale"
+          value={preview.client_locale ?? "Not reported"}
+        />
+        <ApprovalDetailRow
+          label="Screen"
+          value={screenDescription ?? "Not reported"}
+        />
+        <ApprovalDetailRow
+          label="Processor"
+          value={
+            preview.client_hardware_concurrency === null
+              ? "Not reported"
+              : `${preview.client_hardware_concurrency} logical processors`
+          }
+        />
+        <ApprovalDetailRow
+          label="Memory"
+          value={
+            preview.client_device_memory === null
+              ? "Not reported"
+              : `${preview.client_device_memory} GB`
+          }
+        />
+        <details className="group px-4 py-2.5">
+          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-[12px] text-muted-foreground">
+            Raw user agent
+            <ChevronDown className="size-3.5 transition-transform group-open:rotate-180" />
+          </summary>
+          <p className="mt-2 break-all font-mono text-[11px] leading-relaxed text-foreground">
+            {preview.client_user_agent ?? "Not provided"}
+          </p>
+        </details>
       </div>
     </section>
   );
 }
 
-function InitiatingOriginWarning({
-  preview,
-}: {
-  readonly preview: PreviewAuthDeviceResponse;
-}) {
+function initiatingOriginValue(
+  preview: PreviewAuthDeviceResponse,
+): string | null {
   if (
     preview.initiating_origin_status === "absent" ||
     preview.initiating_origin_status === "matched"
   ) {
     return null;
   }
-  const host = originHost(preview.initiating_origin);
-  const message =
-    preview.initiating_origin_status === "mismatched"
-      ? `This sign-in was started from ${host ?? "another site"}, not the official NyxID site. Reject it unless you intentionally used that site.`
-      : preview.initiating_origin_status === "non_http"
-        ? "This sign-in reported a non-HTTP(S) initiating origin. Reject it unless you generated the request yourself."
-        : "The initiating Origin header was malformed. Reject this request unless you generated it yourself.";
-  return (
-    <div
-      role="alert"
-      className="flex items-start gap-2 bg-destructive/10 px-3 py-3 text-[12px] font-semibold leading-relaxed text-destructive"
-    >
-      <ShieldX className="mt-0.5 size-4 shrink-0" />
-      {message}
-    </div>
-  );
+  if (preview.initiating_origin_status === "mismatched") {
+    return originHost(preview.initiating_origin) ?? "Another site";
+  }
+  return preview.initiating_origin_status === "non_http"
+    ? "Non-HTTP origin"
+    : "Malformed origin";
 }
 
 function originHost(origin: string | null): string | null {
@@ -609,16 +536,47 @@ function browserTimezone(): string | null {
   }
 }
 
-function formatVerifiedLocation(preview: PreviewAuthDeviceResponse): string | null {
+function formatVerifiedLocation(
+  preview: PreviewAuthDeviceResponse,
+): string | null {
   const locality = [preview.client_city, preview.client_region]
     .filter((value): value is string => Boolean(value))
     .join(", ");
-  if (locality && preview.client_country) return `${locality} (${preview.client_country})`;
-  return locality || preview.client_country;
+  const place =
+    locality && preview.client_country
+      ? `${locality} (${preview.client_country})`
+      : locality || preview.client_country || preview.client_continent;
+  if (place && preview.client_ip_timezone) {
+    return `${place} · ${preview.client_ip_timezone}`;
+  }
+  if (place) return place;
+  return preview.client_ip_timezone
+    ? `IP timezone: ${preview.client_ip_timezone}`
+    : null;
 }
 
-function formatScreenDescription(preview: PreviewAuthDeviceResponse): string | null {
-  if (preview.client_screen_width === null || preview.client_screen_height === null) {
+function formatNetworkRelation(
+  relation:
+    | "same_ip"
+    | "same_network"
+    | "different_network"
+    | "different_ip"
+    | null,
+): string {
+  if (relation === "same_ip") return "Same IP as this device";
+  if (relation === "same_network") return "Same network as this device";
+  if (relation === "different_network") return "Different network";
+  if (relation === "different_ip") return "Different IP";
+  return "Not available";
+}
+
+function formatScreenDescription(
+  preview: PreviewAuthDeviceResponse,
+): string | null {
+  if (
+    preview.client_screen_width === null ||
+    preview.client_screen_height === null
+  ) {
     return null;
   }
   const ratio =
@@ -632,34 +590,32 @@ function capitalize(value: string): string {
   return `${value[0]?.toUpperCase() ?? ""}${value.slice(1)}`;
 }
 
-function PreviewRow({
-  icon,
+type DetailValueTone = "default" | "warning" | "danger";
+
+function ApprovalDetailRow({
   label,
   value,
   mono = false,
-  valueClassName = "",
+  tone = "default",
 }: {
-  readonly icon?: React.ReactNode;
   readonly label: string;
-  readonly value: React.ReactNode;
+  readonly value: string;
   readonly mono?: boolean;
-  readonly valueClassName?: string;
+  readonly tone?: DetailValueTone;
 }) {
   return (
-    <div className="flex items-start justify-between gap-4 px-3 py-2.5 text-[12px]">
-      <span className="flex shrink-0 items-center gap-2 text-muted-foreground">
-        {icon ? <span className="[&_svg]:size-3.5">{icon}</span> : null}
-        {label}
-      </span>
-      <div
-        className={`${
-          mono
-            ? "min-w-0 break-all text-right font-mono text-[11px] text-foreground"
-            : "min-w-0 break-words text-right font-medium text-foreground"
-        } ${valueClassName}`}
+    <div className="flex items-start justify-between gap-4 px-4 py-2.5 text-[12px]">
+      <span className="shrink-0 text-muted-foreground">{label}</span>
+      <span
+        className={cn(
+          "min-w-0 break-words text-right text-foreground",
+          mono ? "font-mono text-[11px]" : "font-medium",
+          tone === "warning" && "text-warning",
+          tone === "danger" && "text-destructive",
+        )}
       >
         {value}
-      </div>
+      </span>
     </div>
   );
 }

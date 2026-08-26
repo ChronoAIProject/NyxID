@@ -119,20 +119,31 @@ describe("LoginDevicePage", () => {
     expect(previewMutate).toHaveBeenCalledWith("ABCDEFGH");
   });
 
-  it("separates NyxID-verified facts from unverified device claims", async () => {
+  it("presents requester facts and device claims as neutral detail rows", async () => {
     const user = userEvent.setup();
     previewState.data = makePreview();
     render(<LoginDevicePage />);
 
-    expect(screen.getByText("Verified by NyxID")).toBeInTheDocument();
+    expect(screen.queryByText("Verified by NyxID")).not.toBeInTheDocument();
     expect(
-      screen.getByText("Reported by the requesting device (unverified)"),
-    ).toBeInTheDocument();
+      screen.queryByText("Reported by the requesting device (unverified)"),
+    ).not.toBeInTheDocument();
     expect(screen.getByText("203.0.113.10")).toBeInTheDocument();
-    expect(screen.getByText("Singapore, Singapore (SG)")).toBeInTheDocument();
-    expect(screen.getByText("Same IP as this device")).toBeInTheDocument();
+    expect(
+      screen.getByText("Singapore, Singapore (SG) · Asia/Singapore"),
+    ).toBeInTheDocument();
+    const network = screen.getByText("Same IP as this device");
+    expect(network).not.toHaveClass("text-success");
+    expect(network).not.toHaveClass("text-warning");
     expect(screen.getByText("NyxID CLI 1.4.2")).toBeInTheDocument();
     expect(screen.getByText("macOS (aarch64)")).toBeInTheDocument();
+    const normalExpiry = screen.getByText("Expires in").nextElementSibling;
+    expect(normalExpiry).toBeInTheDocument();
+    expect(normalExpiry).not.toHaveClass("text-warning");
+    expect(normalExpiry).not.toHaveClass("text-destructive");
+    expect(
+      screen.getByText(/Only approve if you started this sign-in/),
+    ).toBeInTheDocument();
 
     const rawDetails = screen.getByText("Raw user agent").closest("details");
     expect(rawDetails).not.toHaveAttribute("open");
@@ -147,10 +158,13 @@ describe("LoginDevicePage", () => {
     });
     render(<LoginDevicePage />);
 
-    expect(screen.queryByText(/Started from nyxid\.dev/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Started from nyxid\.dev/i),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByText(/configured NyxID site/i),
     ).not.toBeInTheDocument();
+    expect(screen.queryByText("Started from")).not.toBeInTheDocument();
   });
 
   it("presents different networks as useful context rather than an alarm", () => {
@@ -160,10 +174,10 @@ describe("LoginDevicePage", () => {
     });
     render(<LoginDevicePage />);
 
-    const signal = screen.getByText(
-      "Different network from this device - common when a phone uses cellular data",
-    );
+    const signal = screen.getByText("Different network");
     expect(signal).not.toHaveClass("text-warning");
+    expect(signal).not.toHaveClass("text-destructive");
+    expect(signal).not.toHaveClass("text-success");
   });
 
   it("shows rich browser recognition details and both timezone mismatch signals", () => {
@@ -191,41 +205,58 @@ describe("LoginDevicePage", () => {
     render(<LoginDevicePage />);
 
     expect(screen.getByText("Same network as this device")).toBeInTheDocument();
-    expect(
-      screen.getByText("Reported timezone does not match the verified IP timezone"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Europe/Moscow")).toBeInTheDocument();
-    expect(
-      screen.getByText("Differs from this device (Asia/Singapore)"),
-    ).toBeInTheDocument();
+    const timezone = screen.getByText(
+      "Europe/Moscow · differs from this device and IP location",
+    );
+    expect(timezone).toHaveClass("text-warning");
     expect(screen.getByText("1512 x 982 CSS px at 2x")).toBeInTheDocument();
     expect(screen.getByText("12 logical processors")).toBeInTheDocument();
-    expect(screen.getByText("16 GB reported memory")).toBeInTheDocument();
+    expect(screen.getByText("16 GB")).toBeInTheDocument();
   });
 
-  it("shows a prominent warning for a mismatched initiating origin", () => {
+  it("prioritizes the origin anomaly when multiple signals differ", () => {
+    previewState.data = makePreview({
+      initiating_origin: "https://login-copy.example",
+      initiating_origin_status: "mismatched",
+      client_timezone: "Europe/Moscow",
+      client_timezone_matches_ip: false,
+    });
+    render(<LoginDevicePage />);
+
+    expect(screen.getByText("login-copy.example")).toHaveClass(
+      "text-destructive",
+    );
+    const timezone = screen.getByText(
+      "Europe/Moscow · differs from this device and IP location",
+    );
+    expect(timezone).not.toHaveClass("text-warning");
+    expect(timezone).not.toHaveClass("text-destructive");
+  });
+
+  it("tints only the mismatched initiating-origin value", () => {
     previewState.data = makePreview({
       initiating_origin: "https://login-copy.example",
       initiating_origin_status: "mismatched",
     });
     render(<LoginDevicePage />);
 
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "This sign-in was started from login-copy.example, not the official NyxID site",
-    );
+    const origin = screen.getByText("login-copy.example");
+    expect(origin).toHaveClass("text-destructive");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it.each([
-    ["malformed", "The initiating Origin header was malformed"],
-    ["non_http", "This sign-in reported a non-HTTP(S) initiating origin"],
+    ["malformed", "Malformed origin"],
+    ["non_http", "Non-HTTP origin"],
   ] as const)("distinguishes an %s initiating origin", (status, message) => {
     previewState.data = makePreview({
-      initiating_origin: status === "non_http" ? "file:///tmp/login.html" : "not a url",
+      initiating_origin:
+        status === "non_http" ? "file:///tmp/login.html" : "not a url",
       initiating_origin_status: status,
     });
     render(<LoginDevicePage />);
 
-    expect(screen.getByRole("alert")).toHaveTextContent(message);
+    expect(screen.getByText(message)).toHaveClass("text-destructive");
   });
 
   it("keeps a CLI-shaped request neutral when browser context and origin are absent", () => {
@@ -248,7 +279,9 @@ describe("LoginDevicePage", () => {
     });
     render(<LoginDevicePage />);
 
-    expect(screen.queryByText(/not the official NyxID site/i)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/not the official NyxID site/i),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText(/origin.*malformed/i)).not.toBeInTheDocument();
     expect(screen.getByText("NyxID CLI 1.4.2")).toBeInTheDocument();
   });
@@ -264,10 +297,12 @@ describe("LoginDevicePage", () => {
     render(<LoginDevicePage />);
 
     expect(
-      screen.getByText("Requester IP is not available on this deployment."),
+      screen.getByText("IP unavailable on this deployment"),
     ).toBeInTheDocument();
     expect(screen.queryByText("10.2.10.22")).not.toBeInTheDocument();
-    expect(screen.queryByText("Same IP as this device")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Same IP as this device"),
+    ).not.toBeInTheDocument();
   });
 
   it("places an unverified reported IP with the requesting device claims", () => {
@@ -280,9 +315,11 @@ describe("LoginDevicePage", () => {
     });
     render(<LoginDevicePage />);
 
-    expect(screen.getByText("No requester IP was verified by NyxID.")).toBeInTheDocument();
-    expect(screen.getByText("Reported IP (unverified)")).toBeInTheDocument();
-    expect(screen.getByText("8.8.8.8")).toBeInTheDocument();
+    expect(screen.getByText("Not verified")).toBeInTheDocument();
+    expect(screen.getByText("Reported IP")).toBeInTheDocument();
+    const reportedIp = screen.getByText("8.8.8.8 · unverified");
+    expect(reportedIp).not.toHaveClass("text-warning");
+    expect(reportedIp).not.toHaveClass("text-destructive");
   });
 
   it("ticks to an expired panel, clears the decision actions, and stops at zero", async () => {
@@ -295,16 +332,21 @@ describe("LoginDevicePage", () => {
     });
     render(<LoginDevicePage />);
 
-    expect(screen.getByText("32 seconds ago")).toBeInTheDocument();
-    expect(screen.getByText("Expires in 0:02")).toBeInTheDocument();
+    expect(screen.getByText(/^32 seconds ago · /)).toBeInTheDocument();
+    const nearExpiry = screen.getByText("0:02");
+    expect(nearExpiry).toHaveClass("text-warning");
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(2_000);
     });
 
-    expect(screen.getByText("Request expired")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
+    expect(screen.getByText("Expired")).toHaveClass("text-destructive");
+    expect(
+      screen.queryByRole("button", { name: "Approve" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reject" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText(/Expires in -/)).not.toBeInTheDocument();
   });
 
@@ -328,8 +370,12 @@ describe("LoginDevicePage", () => {
       render(<LoginDevicePage />);
 
       expect(screen.getByText(expectedMessage)).toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
-      expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Approve" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Reject" }),
+      ).not.toBeInTheDocument();
     },
   );
 });

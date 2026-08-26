@@ -38,27 +38,58 @@ export function compareDeviceLoginTimezones(
   approvingDeviceTimezone: string | null | undefined,
 ): "same" | "different" | "unavailable" {
   if (!requesterTimezone || !approvingDeviceTimezone) return "unavailable";
-  return requesterTimezone.toLowerCase() === approvingDeviceTimezone.toLowerCase()
+  return requesterTimezone.toLowerCase() ===
+    approvingDeviceTimezone.toLowerCase()
     ? "same"
     : "different";
 }
 
-export function formatDeviceLoginOriginWarning(
+export type DeviceLoginValueTone = "default" | "warning" | "danger";
+
+export function resolveDeviceLoginValueTones(
+  originAnomalous: boolean,
+  timezoneAnomalous: boolean,
+  secondsRemaining: number,
+): {
+  origin: DeviceLoginValueTone;
+  timezone: DeviceLoginValueTone;
+  expiry: DeviceLoginValueTone;
+} {
+  // The fixed caution sentence is already accented. Prioritize one additional
+  // state-driven value so the decision screen never becomes alarm-heavy.
+  const timezone =
+    !originAnomalous && timezoneAnomalous ? "warning" : "default";
+  const expiry =
+    originAnomalous || timezoneAnomalous || secondsRemaining > 60
+      ? "default"
+      : secondsRemaining === 0
+        ? "danger"
+        : "warning";
+  return {
+    origin: originAnomalous ? "danger" : "default",
+    timezone,
+    expiry,
+  };
+}
+
+export function formatDeviceLoginOriginValue(
   status: "absent" | "matched" | "mismatched" | "malformed" | "non_http",
   origin: string | null | undefined,
 ): string | null {
   if (status === "absent" || status === "matched") return null;
   const host = deviceLoginOriginHost(origin);
   if (status === "mismatched") {
-    return `This sign-in was started from ${host ?? "another site"}, not the official NyxID site. Reject it unless you intentionally used that site.`;
+    return host ?? "Another site";
   }
   if (status === "non_http") {
-    return "This sign-in reported a non-HTTP(S) initiating origin. Reject it unless you generated the request yourself.";
+    return "Non-HTTP origin";
   }
-  return "The initiating Origin header was malformed. Reject this request unless you generated it yourself.";
+  return "Malformed origin";
 }
 
-function deviceLoginOriginHost(origin: string | null | undefined): string | null {
+function deviceLoginOriginHost(
+  origin: string | null | undefined,
+): string | null {
   if (!origin) return null;
   try {
     return new URL(origin).host || null;
