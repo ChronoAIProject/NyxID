@@ -162,8 +162,10 @@ pub struct DelegationRefreshResponse {
     pub access_token: String,
     pub token_type: String,
     pub expires_in: i64,
-    /// Seconds remaining before this delegation session can no longer refresh.
-    pub session_expires_in: i64,
+    /// Seconds remaining before this service delegation can no longer refresh.
+    /// Omitted for OAuth-client delegation refreshes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_expires_in: Option<i64>,
     pub scope: String,
 }
 
@@ -179,7 +181,7 @@ pub struct DelegationRefreshResponse {
     security(("bearer_auth" = [])),
     responses(
         (status = 200, description = "Delegation token refreshed", body = DelegationRefreshResponse),
-        (status = 401, description = "Token, user, origin key, or delegation session is no longer active", body = crate::errors::ErrorResponse),
+        (status = 401, description = "Token, user, origin login session or key, or delegation session is no longer active", body = crate::errors::ErrorResponse),
         (status = 403, description = "Delegation route is revoked or the legacy service token cannot be refreshed", body = crate::errors::ErrorResponse)
     )
 )]
@@ -198,21 +200,39 @@ pub async fn refresh_delegation_token(
     let restrictions = crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(&auth_user);
 
     if auth_user.delegation_kind.as_deref() == Some("service") {
-        let result = token_exchange_service::refresh_service_delegation_token(
-            &state.db,
-            &state.config,
-            &state.jwt_keys,
-            token_exchange_service::ServiceDelegationRefreshContext {
-                user_id: &user_id_str,
-                acting_service_slug: acting_client_id,
-                user_service_id: auth_user.delegation_user_service_id.as_deref(),
-                session_exp: auth_user.delegation_session_exp,
-                origin_api_key_id: auth_user.delegation_origin_api_key_id.as_deref(),
-                scope: &auth_user.scope,
-                restrictions: &restrictions,
-            },
-        )
-        .await;
+        let limiter_result = auth_user
+            .delegation_user_service_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .map_or(Ok(()), |user_service_id| {
+                crate::mw::rate_limit::enforce_delegation_refresh_limit(
+                    crate::mw::rate_limit::delegation_refresh_rate_limiter(),
+                    &user_id_str,
+                    user_service_id,
+                )
+            });
+        let result = match limiter_result {
+            Ok(()) => {
+                token_exchange_service::refresh_service_delegation_token(
+                    &state.db,
+                    &state.config,
+                    &state.jwt_keys,
+                    token_exchange_service::ServiceDelegationRefreshContext {
+                        user_id: &user_id_str,
+                        acting_service_slug: acting_client_id,
+                        user_service_id: auth_user.delegation_user_service_id.as_deref(),
+                        session_exp: auth_user.delegation_session_exp,
+                        origin_api_key_id: auth_user.delegation_origin_api_key_id.as_deref(),
+                        origin_client_id: auth_user.delegation_origin_client_id.as_deref(),
+                        origin_session_id: auth_user.delegation_origin_session_id.as_deref(),
+                        scope: &auth_user.scope,
+                        restrictions: &restrictions,
+                    },
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
 
         let result = match result {
             Ok(result) => result,
@@ -226,6 +246,8 @@ pub async fn refresh_delegation_token(
                         "acting_service_slug": acting_client_id,
                         "user_service_id": auth_user.delegation_user_service_id.as_deref(),
                         "session_exp": auth_user.delegation_session_exp,
+                        "origin_client_id": auth_user.delegation_origin_client_id.as_deref(),
+                        "origin_session_id": auth_user.delegation_origin_session_id.as_deref(),
                         "scope": &auth_user.scope,
                         "reason": error.error_key(),
                     })),
@@ -252,6 +274,8 @@ pub async fn refresh_delegation_token(
                 "acting_service_slug": acting_client_id,
                 "user_service_id": &result.user_service_id,
                 "session_exp": result.session_exp,
+                "origin_client_id": auth_user.delegation_origin_client_id.as_deref(),
+                "origin_session_id": auth_user.delegation_origin_session_id.as_deref(),
                 "scope": &result.scope,
             })),
         );
@@ -260,7 +284,7 @@ pub async fn refresh_delegation_token(
             access_token: result.access_token,
             token_type: result.token_type,
             expires_in: result.expires_in,
-            session_expires_in: result.session_expires_in,
+            session_expires_in: Some(result.session_expires_in),
             scope: result.scope,
         }));
     }
@@ -302,7 +326,7 @@ pub async fn refresh_delegation_token(
         access_token: result.access_token,
         token_type: result.token_type,
         expires_in: result.expires_in,
-        session_expires_in: result.expires_in,
+        session_expires_in: None,
         scope: result.scope,
     }))
 }
@@ -1037,12 +1061,12 @@ mod tests {
     }
 
     #[test]
-    fn delegation_refresh_response_serializes_all_fields() {
+    fn service_delegation_refresh_response_serializes_five_fields() {
         let resp = DelegationRefreshResponse {
             access_token: "eyJhbGciOi...".to_string(),
             token_type: "Bearer".to_string(),
             expires_in: 300,
-            session_expires_in: 1800,
+            session_expires_in: Some(1800),
             scope: "llm:proxy".to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -1051,15 +1075,16 @@ mod tests {
         assert_eq!(json["expires_in"], 300);
         assert_eq!(json["session_expires_in"], 1800);
         assert_eq!(json["scope"], "llm:proxy");
+        assert_eq!(json.as_object().expect("refresh response object").len(), 5);
     }
 
     #[test]
-    fn delegation_refresh_response_field_names_match_oauth_convention() {
+    fn oauth_delegation_refresh_response_omits_service_session_field() {
         let resp = DelegationRefreshResponse {
             access_token: "token".to_string(),
             token_type: "Bearer".to_string(),
             expires_in: 900,
-            session_expires_in: 900,
+            session_expires_in: None,
             scope: "openid".to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -1068,9 +1093,9 @@ mod tests {
         assert!(obj.contains_key("access_token"));
         assert!(obj.contains_key("token_type"));
         assert!(obj.contains_key("expires_in"));
-        assert!(obj.contains_key("session_expires_in"));
         assert!(obj.contains_key("scope"));
-        assert_eq!(obj.len(), 5);
+        assert!(!obj.contains_key("session_expires_in"));
+        assert_eq!(obj.len(), 4);
     }
 
     #[test]
@@ -1081,10 +1106,28 @@ mod tests {
         assert!(operation["responses"].get("200").is_some());
         assert!(operation["responses"].get("401").is_some());
         assert!(operation["responses"].get("403").is_some());
+        let schema = &document["components"]["schemas"]["DelegationRefreshResponse"];
+        let session_schema = &schema["properties"]["session_expires_in"];
+        fn admits_null(schema: &serde_json::Value) -> bool {
+            schema.get("nullable").and_then(serde_json::Value::as_bool) == Some(true)
+                || schema.get("type").is_some_and(|kind| {
+                    kind == "null"
+                        || kind
+                            .as_array()
+                            .is_some_and(|kinds| kinds.iter().any(|kind| kind == "null"))
+                })
+                || schema
+                    .as_object()
+                    .is_some_and(|object| object.values().any(admits_null))
+                || schema
+                    .as_array()
+                    .is_some_and(|array| array.iter().any(admits_null))
+        }
+        assert!(admits_null(session_schema));
         assert!(
-            document["components"]["schemas"]["DelegationRefreshResponse"]["properties"]
-                .get("session_expires_in")
-                .is_some()
+            !schema["required"]
+                .as_array()
+                .is_some_and(|required| required.iter().any(|field| field == "session_expires_in"))
         );
     }
 
@@ -1117,15 +1160,21 @@ mod tests {
         )
         .expect("verify refreshed OAuth delegation");
         assert_eq!(oauth_claims.delegation_kind, None);
-        assert_eq!(
-            oauth_body["session_expires_in"],
-            jwt::DELEGATED_TOKEN_TTL_SECS
-        );
+        assert!(oauth_body.get("session_expires_in").is_none());
         tokio::time::timeout(std::time::Duration::from_secs(2), oauth_audit)
             .await
             .expect("OAuth refresh audit timeout")
             .expect("OAuth refresh audit sender dropped");
 
+        let mut legacy_service = crate::models::downstream_service::test_helpers::dummy_service();
+        legacy_service.id = Uuid::new_v4().to_string();
+        legacy_service.slug = "legacy-downstream-service".to_string();
+        fixture
+            .db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&legacy_service)
+            .await
+            .expect("insert legacy downstream identity");
         let legacy_token = jwt::generate_delegated_access_token(
             &fixture.state.jwt_keys,
             &fixture.state.config,
@@ -1162,6 +1211,8 @@ mod tests {
                 user_service_id: &fixture.user_service_id,
                 session_exp: now - 1,
                 origin_api_key_id: None,
+                origin_client_id: None,
+                origin_session_id: None,
             },
         )
         .expect("mint signed token with elapsed session cap");
@@ -1243,6 +1294,8 @@ mod tests {
                 user_service_id: &fixture.user_service_id,
                 session_exp,
                 origin_api_key_id: None,
+                origin_client_id: Some("oauth-lineage-client"),
+                origin_session_id: None,
             },
         )
         .expect("mint refreshable full-router service delegation");
@@ -1315,6 +1368,7 @@ mod tests {
         assert_eq!(event["acting_service_slug"], catalog.slug);
         assert_eq!(event["user_service_id"], fixture.user_service_id);
         assert_eq!(event["session_exp"], session_exp);
+        assert_eq!(event["origin_client_id"], "oauth-lineage-client");
         assert_eq!(event["scope"], "proxy");
 
         let proxy_path = format!("/api/v1/proxy/s/{}/items", user_service.slug);
@@ -1387,6 +1441,7 @@ mod tests {
             .expect("service refresh denial audit exists");
         let denied_event = denied.event_data.expect("service refresh denial metadata");
         assert_eq!(denied_event["actor_kind"], "service");
+        assert_eq!(denied_event["origin_client_id"], "oauth-lineage-client");
         assert_eq!(denied_event["reason"], "delegation_route_revoked");
         assert!(denied_event.get("access_token").is_none());
     }
@@ -1551,8 +1606,11 @@ mod tests {
             delegation_user_service_id: None,
             delegation_session_exp: None,
             delegation_origin_api_key_id: None,
+            delegation_origin_client_id: None,
+            delegation_origin_session_id: None,
             oauth_client_id: Some(TEST_RECEIVER.to_string()),
             token_jti: Some(uuid::Uuid::new_v4().to_string()),
+            token_exp: None,
             approval_owner_user_id: None,
             auth_method: method,
             allow_all_services: false,
@@ -2015,15 +2073,21 @@ mod tests {
             .expect("verify minted delegated token");
         AuthUser {
             user_id: Uuid::parse_str(&claims.sub).expect("delegated subject is a UUID"),
-            session_id: None,
+            session_id: claims
+                .sid
+                .as_deref()
+                .and_then(|sid| Uuid::parse_str(sid).ok()),
             scope: claims.scope,
             acting_client_id: claims.act.map(|actor| actor.sub),
             delegation_kind: claims.delegation_kind,
             delegation_user_service_id: claims.delegation_user_service_id,
             delegation_session_exp: claims.delegation_session_exp,
             delegation_origin_api_key_id: claims.delegation_origin_api_key_id,
+            delegation_origin_client_id: claims.delegation_origin_client_id,
+            delegation_origin_session_id: claims.delegation_origin_session_id,
             oauth_client_id: claims.client_id,
             token_jti: Some(claims.jti),
+            token_exp: Some(claims.exp),
             approval_owner_user_id: None,
             auth_method: AuthMethod::Delegated,
             allow_all_services: claims.allow_all_services.unwrap_or(true),

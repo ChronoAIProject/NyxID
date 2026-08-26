@@ -470,7 +470,9 @@ pub enum AppError {
     #[error("The delegation session has expired")]
     DelegationSessionExpired,
 
-    #[error("The delegation origin API key is inactive, expired, or no longer authorized")]
+    #[error(
+        "The delegation origin session or API key is inactive, expired, or no longer authorized"
+    )]
     DelegationOriginRevoked,
 
     #[error("The delegated service route is inactive or no longer authorized")]

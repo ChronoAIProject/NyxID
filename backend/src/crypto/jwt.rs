@@ -75,6 +75,12 @@ pub struct Claims {
     /// Agent API key that originated the proxied request, when present.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_origin_api_key_id: Option<String>,
+    /// OAuth client at the root of the service-delegation lineage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_origin_client_id: Option<String>,
+    /// Login session at the root of the service-delegation lineage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_origin_session_id: Option<String>,
     /// True if this token was issued to a service account.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sa: Option<bool>,
@@ -467,6 +473,8 @@ fn generate_access_token_for_client(
         delegation_user_service_id: None,
         delegation_session_exp: None,
         delegation_origin_api_key_id: None,
+        delegation_origin_client_id: None,
+        delegation_origin_session_id: None,
         sa: None,
         cnf,
         relay: None,
@@ -555,6 +563,8 @@ pub fn generate_assistant_forward_access_token(
         delegation_user_service_id: None,
         delegation_session_exp: None,
         delegation_origin_api_key_id: None,
+        delegation_origin_client_id: None,
+        delegation_origin_session_id: None,
         sa: None,
         cnf: None,
         relay: None,
@@ -628,6 +638,8 @@ pub fn generate_relay_access_token(
         delegation_user_service_id: None,
         delegation_session_exp: None,
         delegation_origin_api_key_id: None,
+        delegation_origin_client_id: None,
+        delegation_origin_session_id: None,
         sa: None,
         cnf: None,
         relay: Some(true),
@@ -744,6 +756,8 @@ pub fn generate_refresh_token(
         delegation_user_service_id: None,
         delegation_session_exp: None,
         delegation_origin_api_key_id: None,
+        delegation_origin_client_id: None,
+        delegation_origin_session_id: None,
         sa: None,
         cnf: None,
         relay: None,
@@ -802,6 +816,8 @@ pub fn reissue_refresh_token(
         delegation_user_service_id: None,
         delegation_session_exp: None,
         delegation_origin_api_key_id: None,
+        delegation_origin_client_id: None,
+        delegation_origin_session_id: None,
         sa: None,
         cnf: None,
         relay: None,
@@ -840,6 +856,8 @@ pub struct ServiceDelegationContext<'a> {
     pub user_service_id: &'a str,
     pub session_exp: i64,
     pub origin_api_key_id: Option<&'a str>,
+    pub origin_client_id: Option<&'a str>,
+    pub origin_session_id: Option<&'a str>,
 }
 
 /// Generate a proxy-injected service delegation token.
@@ -876,6 +894,8 @@ pub fn generate_service_delegation_token(
         delegation_user_service_id: Some(context.user_service_id.to_string()),
         delegation_session_exp: Some(context.session_exp),
         delegation_origin_api_key_id: context.origin_api_key_id.map(String::from),
+        delegation_origin_client_id: context.origin_client_id.map(String::from),
+        delegation_origin_session_id: context.origin_session_id.map(String::from),
         sa: None,
         cnf: None,
         relay: None,
@@ -967,6 +987,8 @@ pub fn generate_delegated_access_token_for_client(
         delegation_user_service_id: None,
         delegation_session_exp: None,
         delegation_origin_api_key_id: None,
+        delegation_origin_client_id: None,
+        delegation_origin_session_id: None,
         sa: None,
         cnf: None,
         relay: None,
@@ -1117,6 +1139,8 @@ pub fn generate_service_account_token(
         delegation_user_service_id: None,
         delegation_session_exp: None,
         delegation_origin_api_key_id: None,
+        delegation_origin_client_id: None,
+        delegation_origin_session_id: None,
         sa: Some(true),
         cnf: None,
         relay: None,
@@ -1365,6 +1389,8 @@ mod tests {
             jwt_assistant_forward_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
             delegation_session_max_secs: 3600,
+            delegation_refresh_rate_limit_per_second: 1,
+            delegation_refresh_rate_limit_burst: 10,
             release_integrity_manifest_url: None,
             credential_accept_dist_dir: "frontend/dist/credential-accept".to_string(),
             google_client_id: None,
@@ -1752,6 +1778,8 @@ mod tests {
             delegation_user_service_id: None,
             delegation_session_exp: None,
             delegation_origin_api_key_id: None,
+            delegation_origin_client_id: None,
+            delegation_origin_session_id: None,
             sa: None,
             cnf: None,
             relay: None,
@@ -1874,6 +1902,8 @@ mod tests {
             delegation_user_service_id: Some("service-123".to_string()),
             delegation_session_exp: Some(1_700_003_600),
             delegation_origin_api_key_id: Some("key-123".to_string()),
+            delegation_origin_client_id: Some("oauth-client-123".to_string()),
+            delegation_origin_session_id: Some("session-123".to_string()),
             sa: None,
             cnf: None,
             relay: None,
@@ -1907,6 +1937,14 @@ mod tests {
             claims.delegation_origin_api_key_id,
             restored.delegation_origin_api_key_id
         );
+        assert_eq!(
+            claims.delegation_origin_client_id,
+            restored.delegation_origin_client_id
+        );
+        assert_eq!(
+            claims.delegation_origin_session_id,
+            restored.delegation_origin_session_id
+        );
     }
 
     #[test]
@@ -1927,6 +1965,8 @@ mod tests {
         assert_eq!(claims.delegation_user_service_id, None);
         assert_eq!(claims.delegation_session_exp, None);
         assert_eq!(claims.delegation_origin_api_key_id, None);
+        assert_eq!(claims.delegation_origin_client_id, None);
+        assert_eq!(claims.delegation_origin_session_id, None);
     }
 
     #[test]
@@ -2029,8 +2069,11 @@ mod tests {
             delegation_user_service_id: None,
             delegation_session_exp: None,
             delegation_origin_api_key_id: None,
+            delegation_origin_client_id: None,
+            delegation_origin_session_id: None,
             oauth_client_id: None,
             token_jti: None,
+            token_exp: None,
             approval_owner_user_id: None,
             auth_method: crate::mw::auth::AuthMethod::Delegated,
             allow_all_services: false,

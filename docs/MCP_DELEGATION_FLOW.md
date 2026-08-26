@@ -219,6 +219,8 @@ Response:
 - The user must remain active.
 - An originating agent API key must still exist, belong to the user, remain
   active and unexpired, and still allow the exact `UserService`.
+- An originating login session, when recorded, must still exist, belong to the
+  user, remain unrevoked, and be unexpired. Logout therefore stops renewal.
 - The exact `UserService` must remain active, keep delegation injection enabled,
   retain every token scope, and remain accessible through the current personal
   or organization ACL.
@@ -227,24 +229,38 @@ Response:
 - A replacement copies all restrictions verbatim, receives a fresh `jti`, and
   expires at the earlier of five minutes or the unchanged session cap.
 - If a service token invokes another allowed proxy route, the injected child
-  token inherits the same absolute cap and origin-key lineage; proxy chaining
-  cannot start a new renewal window.
+  token inherits the same absolute cap and origin key, OAuth client, and login
+  session lineage; proxy chaining cannot start a new renewal window.
+- If an OAuth-client delegated token invokes a proxy route, the child service
+  session is capped at the parent bearer's `exp` and records that OAuth client
+  as its origin, so it cannot outlive the consent-checked parent credential.
 - The old token remains valid until its original expiry
 
-The renewal authority is revoked by user deactivation, origin-key deletion,
-deactivation, expiry, ownership change, or service-allowlist removal; route
-disablement; switching `inject_delegation_token` off; removing a delegated
-scope; losing organization access; actor/catalog drift; or catalog
-de-eligibility. The absolute cap is final even if none of those levers changes.
+The renewal authority is revoked by user deactivation; origin-session logout,
+deletion, or expiry; origin-key deletion, deactivation, expiry, ownership
+change, or service-allowlist removal; route disablement; switching
+`inject_delegation_token` off; removing a delegated scope; losing organization
+access; actor/catalog drift; or catalog de-eligibility. An OAuth-origin child
+also stops at the parent bearer's expiry. The absolute cap is final even if
+none of those levers changes.
 
 Legacy proxy tokens minted through a `DownstreamService`-only resolution have
-no exact `UserService` binding and are deliberately non-refreshable. Re-run the
-proxied request to receive a current token after the route is migrated.
+no exact `UserService` binding and are deliberately non-refreshable. The
+assistant/Aevatar bridge also deliberately mints a non-refreshable admission
+credential: Aevatar seals admission proofs and tolerates the short bearer
+expiring after admission. Re-run a normal proxied request to receive a current
+refreshable token after a legacy route is migrated.
 
 If either the bearer or absolute cap has expired, the service cannot refresh
-the token and must wait for a new proxied invocation. The refresh endpoint uses
-the server's existing global and per-IP request limits; there is no separate
-authenticated per-route limit.
+the token and must wait for a new proxied invocation. Service refreshes also
+use a token bucket keyed by `(user_id, user_service_id)`, defaulting to one
+refresh per second with burst 10; `DELEGATION_REFRESH_RATE_LIMIT_PER_SECOND=0`
+disables that dedicated limiter.
+
+Cookie-session mints record the current login session. A JWT caller's `sid` is
+adopted when present, but current first-party access-token issuance leaves
+`Claims.sid` unset; those access-token-origin mints therefore rely on the
+absolute cap and the other live revocation checks rather than logout.
 
 This renewable, bounded service credential is the intended replacement for
 forwarding a raw user bearer or placing a long-lived agent API key in sandboxed
@@ -342,9 +358,8 @@ Authorization: Bearer <delegation_token>
 The OAuth branch is intentionally unchanged: NyxID re-verifies the active
 acting/receiving clients, current delegation scopes, user consent, and any
 catalog authority before issuing a new five-minute token. It does not use the
-service-route absolute cap. The additive `session_expires_in` response value is
-the new token's current lifetime for OAuth refreshes, not a renewable-session
-deadline.
+service-route absolute cap. OAuth refresh responses omit `session_expires_in`;
+that field is present only when a service-delegation absolute cap exists.
 
 **If the user's original access token expires:** The downstream service must use its OIDC refresh token to obtain a new user access token, then perform a new token exchange.
 

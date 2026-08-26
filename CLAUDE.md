@@ -47,7 +47,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 11700 `RequestBodyTooLarge` (HTTP 413): a bounded proxy or forwarding ingress exceeded its configured byte limit
 - 11800 `PlatformManagedCatalogService` (HTTP 403): user-created rows of a public internal master-credential catalog service are refused; identity policy is catalog-owned
 - 11810 `DelegationSessionExpired` (HTTP 401): the absolute service-delegation session cap has elapsed
-- 11811 `DelegationOriginRevoked` (HTTP 401): the originating agent API key is no longer valid for the delegated route
+- 11811 `DelegationOriginRevoked` (HTTP 401): the originating login session or agent API key is no longer valid for the delegated route
 - 11812 `DelegationRouteRevoked` (HTTP 403): the delegated route, owner access, scope, actor, or catalog eligibility no longer validates
 - 11813 `DelegationRefreshUnsupported` (HTTP 403): a legacy service-actor token lacks refresh context and must be minted again
 
@@ -338,6 +338,8 @@ JWT_ASSISTANT_FORWARD_TTL_SECS=300  # Legacy tombstone for the retired assistant
                                     # Live assistant delegation uses the compile-time 300s
                                     # MCP_DELEGATION_TOKEN_TTL_SECS constant; this env has no effect.
 DELEGATION_SESSION_MAX_SECS=3600    # Absolute service-delegation refresh cap; clamped to 300..86400
+DELEGATION_REFRESH_RATE_LIMIT_PER_SECOND=1  # Sustained refreshes per user and UserService; 0 disables
+DELEGATION_REFRESH_RATE_LIMIT_BURST=10      # Refresh burst per user and UserService
 SA_TOKEN_TTL_SECS=3600              # Service account tokens
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10

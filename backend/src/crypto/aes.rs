@@ -963,6 +963,8 @@ mod tests {
             jwt_assistant_forward_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
             delegation_session_max_secs: 3600,
+            delegation_refresh_rate_limit_per_second: 1,
+            delegation_refresh_rate_limit_burst: 10,
             release_integrity_manifest_url: None,
             credential_accept_dist_dir: "frontend/dist/credential-accept".to_string(),
             google_client_id: None,

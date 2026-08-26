@@ -899,12 +899,6 @@ pub(crate) async fn create_key_with_service_id(
         actor.clone()
     };
 
-    unified_key_service::ensure_catalog_service_user_creatable(
-        &state.db,
-        body.service_slug.as_deref(),
-    )
-    .await?;
-
     let credential = body.credential.as_deref().unwrap_or("");
     if let Some(ref rules) = body.ws_frame_injections {
         crate::services::ws_frame_injector::validate_rules(rules)?;
