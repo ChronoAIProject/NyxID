@@ -45,6 +45,9 @@ const ERROR_MESSAGES: Record<number, string> = {
   11207: "Enter a valid eight-character login code.",
 };
 
+const AUTH_DEVICE_CONNECTION_ERROR_MESSAGE =
+  "Couldn't reach NyxID. Check your connection and try again.";
+
 /**
  * For generic error codes (e.g. 1000 = bad_request) where multiple distinct
  * errors share the same code, match on a keyword in the server message.
@@ -92,4 +95,13 @@ export function resolveErrorMessage(error: unknown): string {
   if (cleaned) return cleaned;
 
   return "Something went wrong. Please try again.";
+}
+
+export function resolveAuthDeviceErrorMessage(error: unknown): string {
+  if (isApiError(error) && error.errorCode >= 11200 && error.errorCode <= 11207) {
+    const mapped = ERROR_MESSAGES[error.errorCode];
+    if (mapped) return mapped;
+  }
+
+  return AUTH_DEVICE_CONNECTION_ERROR_MESSAGE;
 }

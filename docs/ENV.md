@@ -187,7 +187,27 @@ Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3).
 | `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND` | `0` | Sustained requests/second per user for each platform-credentialed service. Defaults to `0` (disabled): enabling a cap on a shared credential is a deliberate operator decision taken after observing real traffic, so it never arrives with a deploy. |
 | `PLATFORM_SERVICE_RATE_LIMIT_BURST` | `10` | Burst capacity per user for each platform-credentialed service. |
 | `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | When true, a platform-credentialed catalog row with no `proxy_operation_policy` is refused on actor-addressed paths (`/proxy/s/{slug}`, `/llm/*`). Ships **disabled** so deploying changes no existing behaviour; enable per environment once every such row either carries a policy or is confirmed to receive no actor-addressed traffic. Server-chosen surfaces (the assistant) are unaffected either way — they cannot name an operation, so a policy has no meaning there. |
-| `TRUSTED_PROXY_IPS` | *(empty)* | Comma-separated list of reverse-proxy IP addresses (IPv4 or IPv6) whose `X-Forwarded-For` / `X-Real-IP` headers may be trusted when keying per-IP rate limits (currently: the CLI-pairing claim limiter, 5/60s per client). Leave empty for direct-exposure deployments — the TCP peer is then used directly, and forwarded headers are ignored so they cannot be spoofed. Set to the IPs of your ingress/load balancer when deployed behind nginx, an ALB, Fly.io's proxy, etc., so each end-user gets their own bucket instead of sharing one with every other user that hits the proxy. **Only list proxies you have configured to overwrite client-supplied `X-Forwarded-For` / `X-Real-IP` headers** — otherwise the allowlist extends trust to the original client. Invalid entries are dropped with a warning. |
+| `TRUSTED_PROXY_IPS` | *(empty)* | Comma-separated reverse-proxy IPv4/IPv6 addresses or CIDR ranges. Bare addresses mean `/32` (IPv4) or `/128` (IPv6); IPv4-mapped IPv6 addresses are normalized to IPv4. **Only list proxies configured to overwrite client-supplied forwarded headers.** From an allowlisted peer, resolution prefers `CF-Connecting-IP`, then scans `X-Forwarded-For` right-to-left while skipping trusted proxy hops, then uses `X-Real-IP`, then the TCP peer. `CF-Connecting-IP` is the primary Cloudflare path because it does not depend on a complete proxy-hop list. The XFF fallback requires every hop to be listed, including Cloudflare's published IPv4 and IPv6 ranges when Cloudflare is in front; otherwise the rightmost unlisted Cloudflare edge becomes the apparent client and rate-limit key. From an untrusted peer, strict public/device-login paths ignore all forwarded headers. The global limiter and node WebSocket attribution retain their legacy XFF-first behavior only while this setting is empty, then switch to the trusted resolver when configured. Invalid entries are dropped with a warning. Until this is set behind an internal ingress, requester IP and country are unavailable and strict public per-IP buckets can collapse to the ingress peer. |
+
+Deploy the resolver code before changing `TRUSTED_PROXY_IPS`. The code-only deploy is backward compatible for the global limiter and node WebSocket path. Setting the variable is the activation step: Cloudflare client attribution becomes verified, auth-device request/poll/preview limits key by the actual client, and the global/WS paths stop accepting forwarded headers from peers outside the allowlist.
+
+Before enabling trusted proxy attribution in production:
+
+1. Verify the ingress overwrites or strips all client-supplied `CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP`, and `CF-IPCountry` headers.
+2. Prefer the narrow actual ingress CIDR over broad private ranges. The example `10.0.0.0/8,172.16.0.0/12,192.168.0.0/16` is a starting point only when the ingress network cannot yet be narrowed.
+3. Add every proxy hop needed by the XFF fallback. When Cloudflare is in front, include its current published IPv4 and IPv6 ranges as well as the private ingress range. Keep those ranges synchronized with Cloudflare. `CF-Connecting-IP` remains the preferred path because it is independent of this complete-hop requirement.
+4. Confirm the origin cannot be reached around Cloudflare. If direct-to-origin traffic is possible, ensure it cannot reach an allowlisted ingress peer.
+5. After enabling, initiate a device login while sending a forged `CF-Connecting-IP`, then confirm `/auth/device/preview` does not echo the forged address. Repeat with forged `X-Forwarded-For`, `X-Real-IP`, and `CF-IPCountry` values before treating requester attribution as verified.
+
+For richer requester recognition, enable Cloudflare's **Add visitor location headers**
+managed transform in the Cloudflare dashboard. NyxID reads `CF-IPCity`, `CF-Region`,
+`CF-IPContinent`, and `CF-Timezone` only when the origin peer matches
+`TRUSTED_PROXY_IPS`, under the same trust gate as `CF-IPCountry`. It intentionally
+does not retain Cloudflare latitude, longitude, postal-code, or metro-code headers;
+city and region are sufficient for a sign-in recognition check without storing more
+precise location data. If the transform is disabled or a particular header is absent,
+the approval screen degrades cleanly to country-only attribution. The ingress header
+overwrite/strip checklist above still applies to every enabled location header.
 
 ## CLI Remote Pairing (Optional)
 

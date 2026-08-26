@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+use std::net::IpAddr;
+
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use hmac::{Hmac, Mac};
@@ -16,7 +18,8 @@ use crate::config::AppConfig;
 use crate::crypto::{aes::EncryptionKeys, jwt::JwtKeys};
 use crate::errors::{AppError, AppResult};
 use crate::models::auth_device_code::{
-    AuthDeviceCode, AuthDeviceCodeStatus, COLLECTION_NAME as AUTH_DEVICE_CODES,
+    AuthDeviceClientIpAttribution, AuthDeviceCode, AuthDeviceCodeStatus,
+    AuthDeviceInitiatingOriginStatus, COLLECTION_NAME as AUTH_DEVICE_CODES,
 };
 use crate::services::{audit_service, token_service};
 
@@ -29,12 +32,41 @@ const AUTH_DEVICE_SLOW_DOWN_INCREMENT_SECS: i64 = 5;
 const AUTH_DEVICE_USER_CODE_LEN: usize = 8;
 const AUTH_DEVICE_USER_CODE_WRITE_RETRIES: usize = 5;
 const AUTH_DEVICE_USER_CODE_ALPHABET: &[u8] = b"123456789ABCDEFGHJKMNPQRSTVWXYZ";
+const CLIENT_UA_PARSE_MAX_LEN: usize = 512;
+const CLIENT_VERSION_MAX_LEN: usize = 32;
+const CLIENT_DISPLAY_MAX_LEN: usize = 96;
+const CLIENT_TIMEZONE_MAX_LEN: usize = 64;
+const CLIENT_LOCALE_MAX_LEN: usize = 35;
+const CLIENT_SCREEN_DIMENSION_MAX: u32 = 32_768;
+const CLIENT_HARDWARE_CONCURRENCY_MAX: u16 = 1_024;
+const CLIENT_DEVICE_PIXEL_RATIO_MAX: f64 = 16.0;
+const CLIENT_DEVICE_MEMORY_MAX: f64 = 1_024.0;
+pub(crate) const INITIATING_ORIGIN_MAX_LEN: usize = 256;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq)]
 pub struct InitiateInput {
     pub client_label: Option<String>,
     pub client_user_agent: Option<String>,
     pub client_ip: Option<String>,
+    pub client_ip_attribution: AuthDeviceClientIpAttribution,
+    pub client_country: Option<String>,
+    pub client_city: Option<String>,
+    pub client_region: Option<String>,
+    pub client_continent: Option<String>,
+    pub client_ip_timezone: Option<String>,
+    pub initiating_origin: Option<String>,
+    pub initiating_origin_status: AuthDeviceInitiatingOriginStatus,
+    pub client_app: Option<String>,
+    pub client_platform: Option<String>,
+    pub client_model: Option<String>,
+    pub client_form_factor: Option<String>,
+    pub client_timezone: Option<String>,
+    pub client_locale: Option<String>,
+    pub client_screen_width: Option<u32>,
+    pub client_screen_height: Option<u32>,
+    pub client_device_pixel_ratio: Option<f64>,
+    pub client_hardware_concurrency: Option<u16>,
+    pub client_device_memory: Option<f64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,11 +93,35 @@ pub enum PollClaim {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq)]
 pub struct PreviewOutput {
     pub client_label: Option<String>,
     pub client_user_agent: Option<String>,
     pub client_ip: Option<String>,
+    pub client_ip_attribution: String,
+    pub client_country: Option<String>,
+    pub client_city: Option<String>,
+    pub client_region: Option<String>,
+    pub client_continent: Option<String>,
+    pub client_ip_timezone: Option<String>,
+    pub initiating_origin: Option<String>,
+    pub initiating_origin_status: String,
+    pub client_kind: String,
+    pub client_app: Option<String>,
+    pub client_platform: Option<String>,
+    pub client_model: Option<String>,
+    pub client_form_factor: Option<String>,
+    pub client_timezone: Option<String>,
+    pub client_timezone_matches_ip: Option<bool>,
+    pub client_locale: Option<String>,
+    pub client_screen_width: Option<u32>,
+    pub client_screen_height: Option<u32>,
+    pub client_device_pixel_ratio: Option<f64>,
+    pub client_hardware_concurrency: Option<u16>,
+    pub client_device_memory: Option<f64>,
+    pub same_ip_as_viewer: Option<bool>,
+    pub network_relation: Option<String>,
+    pub seconds_remaining: i64,
     pub initiated_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
     pub status: AuthDeviceCodeStatus,
@@ -97,30 +153,48 @@ pub async fn initiate(
     hmac_key: &[u8],
     input: InitiateInput,
 ) -> AppResult<InitiateOutput> {
-    let client_label = sanitize_optional(input.client_label, 64);
-    let client_user_agent = sanitize_optional(input.client_user_agent, 256);
+    let input = InitiateInput {
+        client_label: sanitize_optional(input.client_label, 64),
+        client_user_agent: sanitize_optional(input.client_user_agent, 256),
+        client_ip: input.client_ip,
+        client_ip_attribution: input.client_ip_attribution,
+        client_country: normalize_client_country(input.client_country),
+        client_city: normalize_geo_label(input.client_city),
+        client_region: normalize_geo_label(input.client_region),
+        client_continent: normalize_client_continent(input.client_continent),
+        client_ip_timezone: normalize_client_timezone(input.client_ip_timezone),
+        initiating_origin: sanitize_optional(input.initiating_origin, INITIATING_ORIGIN_MAX_LEN),
+        initiating_origin_status: input.initiating_origin_status,
+        client_app: sanitize_optional(input.client_app, CLIENT_DISPLAY_MAX_LEN),
+        client_platform: sanitize_optional(input.client_platform, CLIENT_DISPLAY_MAX_LEN),
+        client_model: sanitize_optional(input.client_model, CLIENT_DISPLAY_MAX_LEN),
+        client_form_factor: normalize_client_form_factor(input.client_form_factor),
+        client_timezone: normalize_client_timezone(input.client_timezone),
+        client_locale: normalize_client_locale(input.client_locale),
+        client_screen_width: normalize_screen_dimension(input.client_screen_width),
+        client_screen_height: normalize_screen_dimension(input.client_screen_height),
+        client_device_pixel_ratio: normalize_device_pixel_ratio(input.client_device_pixel_ratio),
+        client_hardware_concurrency: normalize_hardware_concurrency(
+            input.client_hardware_concurrency,
+        ),
+        client_device_memory: normalize_device_memory(input.client_device_memory),
+    };
     tracing::Span::current().record(
         "client_label_len",
-        client_label.as_ref().map(|label| label.len()).unwrap_or(0),
+        input
+            .client_label
+            .as_ref()
+            .map(|label| label.len())
+            .unwrap_or(0),
     );
 
-    initiate_with_user_code_generator(
-        db,
-        hmac_key,
-        client_label,
-        client_user_agent,
-        input.client_ip,
-        generate_user_code,
-    )
-    .await
+    initiate_with_user_code_generator(db, hmac_key, input, generate_user_code).await
 }
 
 async fn initiate_with_user_code_generator<F>(
     db: &Database,
     hmac_key: &[u8],
-    client_label: Option<String>,
-    client_user_agent: Option<String>,
-    client_ip: Option<String>,
+    input: InitiateInput,
     mut user_code_generator: F,
 ) -> AppResult<InitiateOutput>
 where
@@ -139,10 +213,30 @@ where
             status: AuthDeviceCodeStatus::Pending,
             poll_interval_secs: AUTH_DEVICE_POLL_INTERVAL_SECS,
             slow_down_increments: 0,
-            client_label: client_label.clone(),
-            client_user_agent: client_user_agent.clone(),
-            client_ip: client_ip.clone(),
-            client_ip_hmac: client_ip
+            client_label: input.client_label.clone(),
+            client_user_agent: input.client_user_agent.clone(),
+            client_ip: input.client_ip.clone(),
+            client_ip_attribution: input.client_ip_attribution,
+            client_country: input.client_country.clone(),
+            client_city: input.client_city.clone(),
+            client_region: input.client_region.clone(),
+            client_continent: input.client_continent.clone(),
+            client_ip_timezone: input.client_ip_timezone.clone(),
+            initiating_origin: input.initiating_origin.clone(),
+            initiating_origin_status: input.initiating_origin_status,
+            client_app: input.client_app.clone(),
+            client_platform: input.client_platform.clone(),
+            client_model: input.client_model.clone(),
+            client_form_factor: input.client_form_factor.clone(),
+            client_timezone: input.client_timezone.clone(),
+            client_locale: input.client_locale.clone(),
+            client_screen_width: input.client_screen_width,
+            client_screen_height: input.client_screen_height,
+            client_device_pixel_ratio: input.client_device_pixel_ratio,
+            client_hardware_concurrency: input.client_hardware_concurrency,
+            client_device_memory: input.client_device_memory,
+            client_ip_hmac: input
+                .client_ip
                 .as_deref()
                 .map(|client_ip| hmac_hex(hmac_key, client_ip.as_bytes())),
             last_polled_at: None,
@@ -242,7 +336,13 @@ pub async fn poll_and_claim(
 }
 
 #[tracing::instrument(name = "auth_device.preview", skip_all, fields(row_id))]
-pub async fn preview(db: &Database, hmac_key: &[u8], user_code: &str) -> AppResult<PreviewOutput> {
+pub async fn preview(
+    db: &Database,
+    hmac_key: &[u8],
+    user_code: &str,
+    viewer_ip: Option<&str>,
+    viewer_ip_attribution: AuthDeviceClientIpAttribution,
+) -> AppResult<PreviewOutput> {
     let normalized = normalize_user_code(user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
     let row = collection(db)
@@ -251,11 +351,56 @@ pub async fn preview(db: &Database, hmac_key: &[u8], user_code: &str) -> AppResu
         .ok_or(AppError::AuthDeviceUserCodeInvalid)?;
 
     tracing::Span::current().record("row_id", row.id.as_str());
+    let parsed_client = parse_client_user_agent(row.client_user_agent.as_deref());
+    let client_ip_attribution =
+        effective_client_ip_attribution(row.client_ip.as_deref(), row.client_ip_attribution);
+    let network_relation = network_relation(
+        row.client_ip.as_deref(),
+        client_ip_attribution,
+        viewer_ip,
+        viewer_ip_attribution,
+    );
+    let same_ip_as_viewer = network_relation.map(|relation| relation == "same_ip");
+    let seconds_remaining = seconds_remaining_at(row.expires_at, Utc::now());
+    let verified_ip = client_ip_attribution == AuthDeviceClientIpAttribution::Verified;
+    let client_ip_timezone = verified_ip.then_some(row.client_ip_timezone).flatten();
+    let client_timezone_matches_ip = verified_ip
+        .then(|| {
+            timezones_match(
+                client_ip_timezone.as_deref(),
+                row.client_timezone.as_deref(),
+            )
+        })
+        .flatten();
 
     Ok(PreviewOutput {
         client_label: row.client_label,
         client_user_agent: row.client_user_agent,
         client_ip: row.client_ip,
+        client_ip_attribution: client_ip_attribution.as_str().to_string(),
+        client_country: verified_ip.then_some(row.client_country).flatten(),
+        client_city: verified_ip.then_some(row.client_city).flatten(),
+        client_region: verified_ip.then_some(row.client_region).flatten(),
+        client_continent: verified_ip.then_some(row.client_continent).flatten(),
+        client_ip_timezone,
+        initiating_origin: row.initiating_origin,
+        initiating_origin_status: row.initiating_origin_status.as_str().to_string(),
+        client_kind: parsed_client.kind.to_string(),
+        client_app: row.client_app.or(parsed_client.app),
+        client_platform: row.client_platform.or(parsed_client.platform),
+        client_model: row.client_model,
+        client_form_factor: row.client_form_factor,
+        client_timezone: row.client_timezone,
+        client_timezone_matches_ip,
+        client_locale: row.client_locale,
+        client_screen_width: row.client_screen_width,
+        client_screen_height: row.client_screen_height,
+        client_device_pixel_ratio: row.client_device_pixel_ratio,
+        client_hardware_concurrency: row.client_hardware_concurrency,
+        client_device_memory: row.client_device_memory,
+        same_ip_as_viewer,
+        network_relation: network_relation.map(str::to_string),
+        seconds_remaining,
         initiated_at: row.created_at,
         expires_at: row.expires_at,
         status: row.status,
@@ -553,10 +698,441 @@ fn sanitize_optional(value: Option<String>, max_len: usize) -> Option<String> {
         .filter(|ch| !ch.is_control())
         .take(max_len)
         .collect();
+    let sanitized = sanitized.trim().to_string();
     if sanitized.is_empty() {
         None
     } else {
         Some(sanitized)
+    }
+}
+
+pub(crate) fn normalize_client_country(value: Option<String>) -> Option<String> {
+    let normalized = value?.trim().to_ascii_uppercase();
+    if normalized.len() != 2
+        || !normalized.bytes().all(|byte| byte.is_ascii_alphabetic())
+        || normalized == "XX"
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TrustedClientLocation {
+    pub country: Option<String>,
+    pub city: Option<String>,
+    pub region: Option<String>,
+    pub continent: Option<String>,
+    pub timezone: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InitiatingOriginClassification {
+    pub origin: Option<String>,
+    pub status: AuthDeviceInitiatingOriginStatus,
+}
+
+pub(crate) fn classify_initiating_origin(
+    raw_origin: Option<&str>,
+    frontend_url: &str,
+) -> InitiatingOriginClassification {
+    let Some(raw_origin) = raw_origin else {
+        return InitiatingOriginClassification {
+            origin: None,
+            status: AuthDeviceInitiatingOriginStatus::Absent,
+        };
+    };
+
+    let trimmed = raw_origin.trim();
+    let stored = sanitize_optional(Some(trimmed.to_string()), INITIATING_ORIGIN_MAX_LEN);
+    if trimmed.is_empty()
+        || trimmed.chars().count() > INITIATING_ORIGIN_MAX_LEN
+        || trimmed.chars().any(char::is_control)
+    {
+        return InitiatingOriginClassification {
+            origin: stored,
+            status: AuthDeviceInitiatingOriginStatus::Malformed,
+        };
+    }
+
+    let Ok(parsed) = url::Url::parse(trimmed) else {
+        return InitiatingOriginClassification {
+            origin: stored,
+            status: AuthDeviceInitiatingOriginStatus::Malformed,
+        };
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return InitiatingOriginClassification {
+            origin: stored,
+            status: AuthDeviceInitiatingOriginStatus::NonHttp,
+        };
+    }
+    if parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return InitiatingOriginClassification {
+            origin: stored,
+            status: AuthDeviceInitiatingOriginStatus::Malformed,
+        };
+    }
+
+    let origin = parsed.origin().ascii_serialization();
+    let frontend_origin = url::Url::parse(frontend_url.trim())
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .map(|url| url.origin().ascii_serialization());
+    let status = if frontend_origin.as_deref() == Some(origin.as_str()) {
+        AuthDeviceInitiatingOriginStatus::Matched
+    } else {
+        AuthDeviceInitiatingOriginStatus::Mismatched
+    };
+
+    InitiatingOriginClassification {
+        origin: Some(origin),
+        status,
+    }
+}
+
+pub(crate) fn normalize_geo_label(value: Option<String>) -> Option<String> {
+    sanitize_optional(value, CLIENT_DISPLAY_MAX_LEN)
+}
+
+pub(crate) fn normalize_client_continent(value: Option<String>) -> Option<String> {
+    let normalized = value?.trim().to_ascii_uppercase();
+    if normalized.len() != 2
+        || !normalized.bytes().all(|byte| byte.is_ascii_alphabetic())
+        || normalized == "XX"
+    {
+        return None;
+    }
+    Some(normalized)
+}
+
+pub(crate) fn normalize_client_timezone(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > CLIENT_TIMEZONE_MAX_LEN
+        || trimmed.chars().any(char::is_control)
+        || !trimmed.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '/' | '_' | '-' | '+')
+        })
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+pub(crate) fn normalize_client_locale(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || trimmed.chars().count() > CLIENT_LOCALE_MAX_LEN
+        || trimmed.chars().any(char::is_control)
+        || !trimmed
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn normalize_client_form_factor(value: Option<String>) -> Option<String> {
+    match value?.trim().to_ascii_lowercase().as_str() {
+        "desktop" => Some("desktop".to_string()),
+        "mobile" => Some("mobile".to_string()),
+        "tablet" => Some("tablet".to_string()),
+        "unknown" => Some("unknown".to_string()),
+        _ => None,
+    }
+}
+
+fn normalize_screen_dimension(value: Option<u32>) -> Option<u32> {
+    value.filter(|value| (1..=CLIENT_SCREEN_DIMENSION_MAX).contains(value))
+}
+
+fn normalize_device_pixel_ratio(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| {
+        value.is_finite() && *value > 0.0 && *value <= CLIENT_DEVICE_PIXEL_RATIO_MAX
+    })
+}
+
+fn normalize_hardware_concurrency(value: Option<u16>) -> Option<u16> {
+    value.filter(|value| (1..=CLIENT_HARDWARE_CONCURRENCY_MAX).contains(value))
+}
+
+fn normalize_device_memory(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && *value > 0.0 && *value <= CLIENT_DEVICE_MEMORY_MAX)
+}
+
+fn timezones_match(
+    verified_timezone: Option<&str>,
+    reported_timezone: Option<&str>,
+) -> Option<bool> {
+    Some(verified_timezone?.eq_ignore_ascii_case(reported_timezone?))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedClientUserAgent {
+    kind: &'static str,
+    app: Option<String>,
+    platform: Option<String>,
+}
+
+fn parse_client_user_agent(value: Option<&str>) -> ParsedClientUserAgent {
+    let Some(user_agent) = bounded_clean_text(value.unwrap_or_default(), CLIENT_UA_PARSE_MAX_LEN)
+    else {
+        return unknown_client_user_agent();
+    };
+
+    if let Some(version) = native_client_version(&user_agent, "nyxid-cli/") {
+        return ParsedClientUserAgent {
+            kind: "cli",
+            app: bounded_display(format!("NyxID CLI {version}")),
+            platform: native_client_platform(&user_agent),
+        };
+    }
+
+    if let Some(version) = native_client_version(&user_agent, "nyxid-mobile/") {
+        return ParsedClientUserAgent {
+            kind: "mobile",
+            app: bounded_display(format!("NyxID Mobile {version}")),
+            platform: native_client_platform(&user_agent),
+        };
+    }
+
+    let browser = [
+        ("EdgiOS/", "Edge"),
+        ("EdgA/", "Edge"),
+        ("Edg/", "Edge"),
+        ("CriOS/", "Chrome"),
+        ("Chrome/", "Chrome"),
+        ("FxiOS/", "Firefox"),
+        ("Firefox/", "Firefox"),
+    ]
+    .into_iter()
+    .find_map(|(marker, name)| {
+        browser_major_version(&user_agent, marker).map(|version| (name, version))
+    })
+    .or_else(|| {
+        if user_agent.contains("Safari/") {
+            browser_major_version(&user_agent, "Version/").map(|version| ("Safari", version))
+        } else {
+            None
+        }
+    });
+
+    let Some((browser_name, version)) = browser else {
+        return unknown_client_user_agent();
+    };
+
+    ParsedClientUserAgent {
+        kind: "browser",
+        app: bounded_display(format!("{browser_name} {version}")),
+        platform: browser_platform(&user_agent),
+    }
+}
+
+fn unknown_client_user_agent() -> ParsedClientUserAgent {
+    ParsedClientUserAgent {
+        kind: "unknown",
+        app: None,
+        platform: None,
+    }
+}
+
+fn bounded_clean_text(value: &str, max_len: usize) -> Option<String> {
+    let cleaned = value
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(max_len)
+        .collect::<String>();
+    let cleaned = cleaned.trim();
+    (!cleaned.is_empty()).then(|| cleaned.to_string())
+}
+
+fn bounded_display(value: String) -> Option<String> {
+    bounded_clean_text(&value, CLIENT_DISPLAY_MAX_LEN)
+}
+
+fn native_client_version(user_agent: &str, prefix: &str) -> Option<String> {
+    let rest = user_agent.strip_prefix(prefix)?;
+    let version = rest
+        .chars()
+        .take_while(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | '+')
+        })
+        .take(CLIENT_VERSION_MAX_LEN)
+        .collect::<String>();
+    (!version.is_empty()).then_some(version)
+}
+
+fn browser_major_version(user_agent: &str, marker: &str) -> Option<String> {
+    let start = user_agent.find(marker)? + marker.len();
+    let version = user_agent[start..]
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .take(CLIENT_VERSION_MAX_LEN)
+        .collect::<String>();
+    (!version.is_empty()).then_some(version)
+}
+
+fn native_client_platform(user_agent: &str) -> Option<String> {
+    let start = user_agent.find('(')? + 1;
+    let end = user_agent[start..].find(')')? + start;
+    let mut segments = user_agent[start..end].split(';').map(str::trim);
+    let platform = canonical_platform(segments.next()?)?;
+    let architecture = segments.next().and_then(canonical_architecture);
+    platform_with_architecture(platform, architecture)
+}
+
+fn canonical_platform(value: &str) -> Option<&'static str> {
+    match value.to_ascii_lowercase().as_str() {
+        "macos" | "mac os" | "darwin" => Some("macOS"),
+        "windows" | "win32" => Some("Windows"),
+        "linux" => Some("Linux"),
+        "ios" | "iphone" | "ipad" => Some("iOS"),
+        "android" => Some("Android"),
+        _ => None,
+    }
+}
+
+fn canonical_architecture(value: &str) -> Option<&'static str> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "aarch64" => Some("aarch64"),
+        "arm64" => Some("arm64"),
+        "arm" | "armv7" | "armv7l" => Some("arm"),
+        "x86_64" | "x64" | "amd64" => Some("x86_64"),
+        "x86" | "i386" | "i686" => Some("x86"),
+        _ => None,
+    }
+}
+
+fn platform_with_architecture(
+    platform: &'static str,
+    architecture: Option<&'static str>,
+) -> Option<String> {
+    bounded_display(match architecture {
+        Some(architecture) => format!("{platform} ({architecture})"),
+        None => platform.to_string(),
+    })
+}
+
+fn browser_platform(user_agent: &str) -> Option<String> {
+    let lower = user_agent.to_ascii_lowercase();
+    if lower.contains("iphone") || lower.contains("ipad") || lower.contains("ipod") {
+        return platform_with_architecture("iOS", None);
+    }
+    if lower.contains("android") {
+        return platform_with_architecture("Android", reported_architecture(&lower));
+    }
+    if lower.contains("windows") {
+        return platform_with_architecture("Windows", reported_architecture(&lower));
+    }
+    if lower.contains("macintosh") || lower.contains("mac os x") {
+        let architecture = lower
+            .contains("intel mac")
+            .then_some("x86_64")
+            .or_else(|| reported_architecture(&lower));
+        return platform_with_architecture("macOS", architecture);
+    }
+    if lower.contains("linux") || lower.contains("x11") {
+        return platform_with_architecture("Linux", reported_architecture(&lower));
+    }
+    None
+}
+
+fn reported_architecture(lower_user_agent: &str) -> Option<&'static str> {
+    if lower_user_agent.contains("aarch64") {
+        Some("aarch64")
+    } else if lower_user_agent.contains("arm64") {
+        Some("arm64")
+    } else if lower_user_agent.contains("x86_64")
+        || lower_user_agent.contains("win64")
+        || lower_user_agent.contains("x64")
+        || lower_user_agent.contains("amd64")
+    {
+        Some("x86_64")
+    } else if lower_user_agent.contains("i686") || lower_user_agent.contains("i386") {
+        Some("x86")
+    } else {
+        None
+    }
+}
+
+fn effective_client_ip_attribution(
+    requester_ip: Option<&str>,
+    stored_attribution: AuthDeviceClientIpAttribution,
+) -> AuthDeviceClientIpAttribution {
+    match requester_ip
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .map(crate::config::normalize_ip_address)
+    {
+        Some(ip) if crate::mw::rate_limit::is_global_unicast(ip) => stored_attribution,
+        _ => AuthDeviceClientIpAttribution::Unavailable,
+    }
+}
+
+fn same_ip_as_viewer(
+    requester_ip: Option<&str>,
+    requester_attribution: AuthDeviceClientIpAttribution,
+    viewer_ip: Option<&str>,
+    viewer_attribution: AuthDeviceClientIpAttribution,
+) -> Option<bool> {
+    network_relation(
+        requester_ip,
+        requester_attribution,
+        viewer_ip,
+        viewer_attribution,
+    )
+    .map(|relation| relation == "same_ip")
+}
+
+fn network_relation(
+    requester_ip: Option<&str>,
+    requester_attribution: AuthDeviceClientIpAttribution,
+    viewer_ip: Option<&str>,
+    viewer_attribution: AuthDeviceClientIpAttribution,
+) -> Option<&'static str> {
+    if requester_attribution != AuthDeviceClientIpAttribution::Verified
+        || viewer_attribution != AuthDeviceClientIpAttribution::Verified
+    {
+        return None;
+    }
+    let requester_ip = crate::config::normalize_ip_address(requester_ip?.parse::<IpAddr>().ok()?);
+    let viewer_ip = crate::config::normalize_ip_address(viewer_ip?.parse::<IpAddr>().ok()?);
+    if requester_ip == viewer_ip {
+        return Some("same_ip");
+    }
+
+    let same_network = match (requester_ip, viewer_ip) {
+        (IpAddr::V4(requester), IpAddr::V4(viewer)) => {
+            requester.octets()[..3] == viewer.octets()[..3]
+        }
+        (IpAddr::V6(requester), IpAddr::V6(viewer)) => {
+            requester.segments()[..3] == viewer.segments()[..3]
+        }
+        _ => false,
+    };
+    Some(if same_network {
+        "same_network"
+    } else {
+        "different_network"
+    })
+}
+
+fn seconds_remaining_at(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
+    let remaining_millis = (expires_at - now).num_milliseconds();
+    if remaining_millis <= 0 {
+        0
+    } else {
+        remaining_millis.saturating_add(999) / 1_000
     }
 }
 
@@ -762,6 +1338,337 @@ mod tests {
     const TEST_HMAC_KEY: &[u8] = b"auth-device-test-hmac-key-32-bytes";
 
     #[test]
+    fn client_country_normalization_accepts_only_real_iso_codes() {
+        for (raw, expected) in [
+            (Some("sg"), Some("SG")),
+            (Some(" US "), Some("US")),
+            (Some("XX"), None),
+            (Some("T1"), None),
+            (Some("USA"), None),
+            (Some("1A"), None),
+            (Some("S\0"), None),
+            (Some(""), None),
+            (None, None),
+        ] {
+            assert_eq!(
+                normalize_client_country(raw.map(str::to_string)),
+                expected.map(str::to_string),
+                "raw country: {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn initiating_origin_classification_distinguishes_all_security_states() {
+        let frontend_url = "https://nyxid.dev/login";
+        let cases = [
+            (None, None, "absent"),
+            (
+                Some("https://nyxid.dev"),
+                Some("https://nyxid.dev"),
+                "matched",
+            ),
+            (
+                Some("https://login-copy.example"),
+                Some("https://login-copy.example"),
+                "mismatched",
+            ),
+            (Some("not a url"), Some("not a url"), "malformed"),
+            (
+                Some("file:///tmp/login.html"),
+                Some("file:///tmp/login.html"),
+                "non_http",
+            ),
+        ];
+
+        for (raw, expected_origin, expected_status) in cases {
+            let classified = classify_initiating_origin(raw, frontend_url);
+            assert_eq!(
+                classified.origin.as_deref(),
+                expected_origin,
+                "raw: {raw:?}"
+            );
+            assert_eq!(classified.status.as_str(), expected_status, "raw: {raw:?}");
+        }
+    }
+
+    #[test]
+    fn initiating_origin_is_normalized_bounded_and_rejects_non_origin_urls() {
+        let normalized =
+            classify_initiating_origin(Some(" HTTPS://NYXID.DEV:443/ "), "https://nyxid.dev");
+        assert_eq!(normalized.origin.as_deref(), Some("https://nyxid.dev"));
+        assert_eq!(normalized.status.as_str(), "matched");
+
+        for malformed in [
+            "https://nyxid.dev/login",
+            "https://nyxid.dev?source=copy",
+            "https://user@nyxid.dev",
+            "null",
+        ] {
+            assert_eq!(
+                classify_initiating_origin(Some(malformed), "https://nyxid.dev")
+                    .status
+                    .as_str(),
+                "malformed",
+                "origin: {malformed}"
+            );
+        }
+
+        let hostile = format!("https://{}example.com\0", "a".repeat(400));
+        let classified = classify_initiating_origin(Some(&hostile), "https://nyxid.dev");
+        assert_eq!(classified.status.as_str(), "malformed");
+        assert!(classified.origin.is_some_and(|value| {
+            value.chars().count() <= INITIATING_ORIGIN_MAX_LEN
+                && !value.chars().any(char::is_control)
+        }));
+    }
+
+    #[test]
+    fn requester_metadata_normalizers_bound_hostile_values() {
+        assert_eq!(
+            normalize_client_timezone(Some(" Asia/Singapore ".to_string())).as_deref(),
+            Some("Asia/Singapore")
+        );
+        assert_eq!(
+            normalize_client_locale(Some("en-SG".to_string())).as_deref(),
+            Some("en-SG")
+        );
+        assert_eq!(
+            normalize_client_form_factor(Some("desktop".to_string())).as_deref(),
+            Some("desktop")
+        );
+        assert!(normalize_client_timezone(Some("Europe/Moscow\0oops".to_string())).is_none());
+        assert!(normalize_client_timezone(Some("x".repeat(100))).is_none());
+        assert!(normalize_client_locale(Some("en SG".to_string())).is_none());
+        assert!(normalize_client_form_factor(Some("watch".to_string())).is_none());
+        assert_eq!(normalize_screen_dimension(Some(2560)), Some(2560));
+        assert_eq!(normalize_screen_dimension(Some(0)), None);
+        assert_eq!(normalize_screen_dimension(Some(100_000)), None);
+        assert_eq!(normalize_device_pixel_ratio(Some(2.0)), Some(2.0));
+        assert_eq!(normalize_device_pixel_ratio(Some(f64::NAN)), None);
+        assert_eq!(normalize_hardware_concurrency(Some(16)), Some(16));
+        assert_eq!(normalize_hardware_concurrency(Some(0)), None);
+        assert_eq!(normalize_device_memory(Some(8.0)), Some(8.0));
+        assert_eq!(normalize_device_memory(Some(f64::INFINITY)), None);
+    }
+
+    #[test]
+    fn verified_and_reported_timezones_are_compared_only_when_both_are_valid() {
+        assert_eq!(
+            timezones_match(Some("Asia/Singapore"), Some("Asia/Singapore")),
+            Some(true)
+        );
+        assert_eq!(
+            timezones_match(Some("Asia/Singapore"), Some("Europe/Moscow")),
+            Some(false)
+        );
+        assert_eq!(timezones_match(Some("Asia/Singapore"), None), None);
+        assert_eq!(timezones_match(None, Some("Asia/Singapore")), None);
+    }
+
+    #[test]
+    fn verified_network_relation_uses_ipv4_24_and_ipv6_48_prefixes() {
+        let verified = AuthDeviceClientIpAttribution::Verified;
+        let cases = [
+            ("8.8.8.8", "8.8.8.8", Some("same_ip")),
+            ("8.8.8.8", "8.8.8.200", Some("same_network")),
+            ("8.8.8.8", "8.8.9.8", Some("different_network")),
+            (
+                "2001:4860:4860::8888",
+                "2001:4860:4860::8888",
+                Some("same_ip"),
+            ),
+            (
+                "2001:4860:4860::8888",
+                "2001:4860:4860:ffff::1",
+                Some("same_network"),
+            ),
+            (
+                "2001:4860:4860::8888",
+                "2001:4860:4861::1",
+                Some("different_network"),
+            ),
+            ("::ffff:8.8.8.8", "8.8.8.42", Some("same_network")),
+        ];
+
+        for (requester, viewer, expected) in cases {
+            assert_eq!(
+                network_relation(Some(requester), verified, Some(viewer), verified,),
+                expected,
+                "requester={requester}, viewer={viewer}"
+            );
+        }
+
+        assert_eq!(
+            network_relation(
+                Some("8.8.8.8"),
+                verified,
+                Some("8.8.8.9"),
+                AuthDeviceClientIpAttribution::Unavailable,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn client_user_agent_parser_covers_supported_requesters() {
+        struct Case {
+            ua: &'static str,
+            kind: &'static str,
+            app: Option<&'static str>,
+            platform: Option<&'static str>,
+        }
+
+        let cases = [
+            Case {
+                ua: "nyxid-cli/1.4.2 (macos; aarch64)",
+                kind: "cli",
+                app: Some("NyxID CLI 1.4.2"),
+                platform: Some("macOS (aarch64)"),
+            },
+            Case {
+                ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                kind: "browser",
+                app: Some("Chrome 131"),
+                platform: Some("Windows (x86_64)"),
+            },
+            Case {
+                ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0",
+                kind: "browser",
+                app: Some("Edge 131"),
+                platform: Some("Windows (x86_64)"),
+            },
+            Case {
+                ua: "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:133.0) Gecko/20100101 Firefox/133.0",
+                kind: "browser",
+                app: Some("Firefox 133"),
+                platform: Some("Linux (x86_64)"),
+            },
+            Case {
+                ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
+                kind: "browser",
+                app: Some("Safari 18"),
+                platform: Some("macOS (x86_64)"),
+            },
+            Case {
+                ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1",
+                kind: "browser",
+                app: Some("Safari 18"),
+                platform: Some("iOS"),
+            },
+            Case {
+                ua: "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6778.81 Mobile Safari/537.36",
+                kind: "browser",
+                app: Some("Chrome 131"),
+                platform: Some("Android"),
+            },
+            Case {
+                ua: "nyxid-mobile/2.3.1 (ios; arm64)",
+                kind: "mobile",
+                app: Some("NyxID Mobile 2.3.1"),
+                platform: Some("iOS (arm64)"),
+            },
+        ];
+
+        for case in cases {
+            let parsed = parse_client_user_agent(Some(case.ua));
+            assert_eq!(parsed.kind, case.kind, "UA: {}", case.ua);
+            assert_eq!(parsed.app.as_deref(), case.app, "UA: {}", case.ua);
+            assert_eq!(parsed.platform.as_deref(), case.platform, "UA: {}", case.ua);
+        }
+    }
+
+    #[test]
+    fn client_user_agent_parser_bounds_and_rejects_hostile_or_junk_input() {
+        for ua in ["", "   ", "curl/8.10.1", "\0\n\r\t"] {
+            let parsed = parse_client_user_agent(Some(ua));
+            assert_eq!(parsed.kind, "unknown", "UA: {ua:?}");
+            assert!(parsed.app.is_none(), "UA: {ua:?}");
+            assert!(parsed.platform.is_none(), "UA: {ua:?}");
+        }
+
+        let hostile = format!("nyxid-cli/1.4.2\0\n (macos; {})", "aarch64".repeat(200));
+        let parsed = parse_client_user_agent(Some(&hostile));
+        assert!(parsed.app.as_ref().is_none_or(|value| {
+            value.len() <= CLIENT_DISPLAY_MAX_LEN && !value.chars().any(char::is_control)
+        }));
+        assert!(parsed.platform.as_ref().is_none_or(|value| {
+            value.len() <= CLIENT_DISPLAY_MAX_LEN && !value.chars().any(char::is_control)
+        }));
+    }
+
+    #[test]
+    fn preview_ip_comparison_and_remaining_time_are_pure_and_clamped() {
+        assert_eq!(
+            same_ip_as_viewer(
+                Some("8.8.8.8"),
+                AuthDeviceClientIpAttribution::Verified,
+                Some("8.8.8.8"),
+                AuthDeviceClientIpAttribution::Verified,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            same_ip_as_viewer(
+                Some("8.8.8.8"),
+                AuthDeviceClientIpAttribution::Verified,
+                Some("9.9.9.9"),
+                AuthDeviceClientIpAttribution::Verified,
+            ),
+            Some(false)
+        );
+        assert_eq!(
+            same_ip_as_viewer(
+                Some("::ffff:8.8.8.8"),
+                AuthDeviceClientIpAttribution::Verified,
+                Some("8.8.8.8"),
+                AuthDeviceClientIpAttribution::Verified,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            same_ip_as_viewer(
+                Some("8.8.8.8"),
+                AuthDeviceClientIpAttribution::Verified,
+                Some("8.8.8.8"),
+                AuthDeviceClientIpAttribution::Unverified,
+            ),
+            None
+        );
+        assert_eq!(
+            same_ip_as_viewer(
+                Some("10.2.10.22"),
+                AuthDeviceClientIpAttribution::Unavailable,
+                Some("10.2.10.22"),
+                AuthDeviceClientIpAttribution::Unavailable,
+            ),
+            None
+        );
+        assert_eq!(
+            effective_client_ip_attribution(
+                Some("10.2.10.22"),
+                AuthDeviceClientIpAttribution::Verified,
+            ),
+            AuthDeviceClientIpAttribution::Unavailable
+        );
+        assert_eq!(
+            effective_client_ip_attribution(
+                Some("8.8.8.8"),
+                AuthDeviceClientIpAttribution::Unverified,
+            ),
+            AuthDeviceClientIpAttribution::Unverified
+        );
+
+        let now = Utc::now();
+        assert_eq!(
+            seconds_remaining_at(now + Duration::milliseconds(1500), now),
+            2
+        );
+        assert_eq!(seconds_remaining_at(now, now), 0);
+        assert_eq!(seconds_remaining_at(now - Duration::seconds(5), now), 0);
+    }
+
+    #[test]
     fn normalize_user_code_accepts_roundtrip_vectors() {
         for (raw, expected) in [
             ("abcd1234", "ABCD1234"),
@@ -820,6 +1727,19 @@ mod tests {
                 client_label: Some("  label\u{0000}with-control  ".to_string()),
                 client_user_agent: Some(format!("  {}  ", "a".repeat(300))),
                 client_ip: Some("203.0.113.10".to_string()),
+                client_ip_attribution: AuthDeviceClientIpAttribution::Unverified,
+                client_country: None,
+                client_app: Some("Chrome 151.0.7922.174".to_string()),
+                client_platform: Some("macOS 26.5.2 (arm64)".to_string()),
+                client_form_factor: Some("desktop".to_string()),
+                client_timezone: Some("Asia/Singapore".to_string()),
+                client_locale: Some("en-US".to_string()),
+                client_screen_width: Some(1512),
+                client_screen_height: Some(982),
+                client_device_pixel_ratio: Some(2.0),
+                client_hardware_concurrency: Some(12),
+                client_device_memory: Some(16.0),
+                ..Default::default()
             },
         )
         .await
@@ -842,6 +1762,15 @@ mod tests {
         assert_eq!(row.client_label.as_deref(), Some("labelwith-control"));
         assert_eq!(row.client_user_agent.as_ref().unwrap().len(), 256);
         assert_eq!(row.client_ip.as_deref(), Some("203.0.113.10"));
+        assert_eq!(row.client_app.as_deref(), Some("Chrome 151.0.7922.174"));
+        assert_eq!(row.client_platform.as_deref(), Some("macOS 26.5.2 (arm64)"));
+        assert_eq!(row.client_form_factor.as_deref(), Some("desktop"));
+        assert_eq!(row.client_timezone.as_deref(), Some("Asia/Singapore"));
+        assert_eq!(row.client_locale.as_deref(), Some("en-US"));
+        assert_eq!(row.client_screen_width, Some(1512));
+        assert_eq!(row.client_device_pixel_ratio, Some(2.0));
+        assert_eq!(row.client_hardware_concurrency, Some(12));
+        assert_eq!(row.client_device_memory, Some(16.0));
         assert_eq!(
             row.client_ip_hmac.as_deref(),
             Some(hmac_hex(TEST_HMAC_KEY, b"203.0.113.10").as_str())
@@ -859,17 +1788,28 @@ mod tests {
         let output = initiate_with_user_code_generator(
             &db,
             TEST_HMAC_KEY,
-            Some("workstation".to_string()),
-            Some("nyxid-cli/0.8.0".to_string()),
-            Some("203.0.113.10".to_string()),
+            InitiateInput {
+                client_label: Some("workstation".to_string()),
+                client_user_agent: Some("nyxid-cli/0.8.0".to_string()),
+                client_ip: Some("203.0.113.10".to_string()),
+                client_ip_attribution: AuthDeviceClientIpAttribution::Unverified,
+                client_country: None,
+                ..Default::default()
+            },
             || "ABCD1234".to_string(),
         )
         .await
         .expect("initiate");
 
-        let preview = preview(&db, TEST_HMAC_KEY, &output.user_code)
-            .await
-            .expect("preview");
+        let preview = preview(
+            &db,
+            TEST_HMAC_KEY,
+            &output.user_code,
+            None,
+            AuthDeviceClientIpAttribution::Unavailable,
+        )
+        .await
+        .expect("preview");
 
         assert_eq!(preview.client_label.as_deref(), Some("workstation"));
         assert_eq!(
@@ -877,6 +1817,12 @@ mod tests {
             Some("nyxid-cli/0.8.0")
         );
         assert_eq!(preview.client_ip.as_deref(), Some("203.0.113.10"));
+        assert_eq!(preview.initiating_origin_status, "absent");
+        assert!(preview.initiating_origin.is_none());
+        assert!(preview.client_timezone.is_none());
+        assert!(preview.client_ip_timezone.is_none());
+        assert!(preview.client_timezone_matches_ip.is_none());
+        assert!(preview.network_relation.is_none());
         assert_eq!(preview.status, AuthDeviceCodeStatus::Pending);
     }
 
@@ -902,9 +1848,15 @@ mod tests {
             .await
             .expect("remove legacy field");
 
-        let output = preview(&db, TEST_HMAC_KEY, "ABCD-1234")
-            .await
-            .expect("preview legacy row");
+        let output = preview(
+            &db,
+            TEST_HMAC_KEY,
+            "ABCD-1234",
+            None,
+            AuthDeviceClientIpAttribution::Unavailable,
+        )
+        .await
+        .expect("preview legacy row");
 
         assert!(output.client_ip.is_none());
     }
@@ -1181,9 +2133,14 @@ mod tests {
         let output = initiate_with_user_code_generator(
             &db,
             TEST_HMAC_KEY,
-            Some("workstation".to_string()),
-            Some("nyxid-cli/0.8.0".to_string()),
-            None,
+            InitiateInput {
+                client_label: Some("workstation".to_string()),
+                client_user_agent: Some("nyxid-cli/0.8.0".to_string()),
+                client_ip: None,
+                client_ip_attribution: AuthDeviceClientIpAttribution::Unavailable,
+                client_country: None,
+                ..Default::default()
+            },
             || "ABCDEFGH".to_string(),
         )
         .await
@@ -1698,6 +2655,25 @@ mod tests {
             client_label: None,
             client_user_agent: None,
             client_ip: None,
+            client_ip_attribution: AuthDeviceClientIpAttribution::Unavailable,
+            client_country: None,
+            client_city: None,
+            client_region: None,
+            client_continent: None,
+            client_ip_timezone: None,
+            initiating_origin: None,
+            initiating_origin_status: AuthDeviceInitiatingOriginStatus::Absent,
+            client_app: None,
+            client_platform: None,
+            client_model: None,
+            client_form_factor: None,
+            client_timezone: None,
+            client_locale: None,
+            client_screen_width: None,
+            client_screen_height: None,
+            client_device_pixel_ratio: None,
+            client_hardware_concurrency: None,
+            client_device_memory: None,
             client_ip_hmac: None,
             last_polled_at: None,
             approved_user_id: has_approval.then(|| "approved-user-id".to_string()),
@@ -1743,11 +2719,7 @@ mod tests {
     }
 
     fn empty_input() -> InitiateInput {
-        InitiateInput {
-            client_label: None,
-            client_user_agent: None,
-            client_ip: None,
-        }
+        InitiateInput::default()
     }
 
     fn make_debug_row() -> AuthDeviceCode {
@@ -1762,6 +2734,25 @@ mod tests {
             client_label: Some("wsl-calvin".to_string()),
             client_user_agent: Some("nyxid-cli/0.8.0".to_string()),
             client_ip: Some("203.0.113.10".to_string()),
+            client_ip_attribution: AuthDeviceClientIpAttribution::Unverified,
+            client_country: None,
+            client_city: None,
+            client_region: None,
+            client_continent: None,
+            client_ip_timezone: None,
+            initiating_origin: None,
+            initiating_origin_status: AuthDeviceInitiatingOriginStatus::Absent,
+            client_app: None,
+            client_platform: None,
+            client_model: None,
+            client_form_factor: None,
+            client_timezone: None,
+            client_locale: None,
+            client_screen_width: None,
+            client_screen_height: None,
+            client_device_pixel_ratio: None,
+            client_hardware_concurrency: None,
+            client_device_memory: None,
             client_ip_hmac: Some("11112222".repeat(8)),
             last_polled_at: Some(now),
             approved_user_id: Some(Uuid::new_v4().to_string()),

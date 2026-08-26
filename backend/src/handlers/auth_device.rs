@@ -13,7 +13,9 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::apply_browser_session_cookies;
+use crate::models::auth_device_code::AuthDeviceClientIpAttribution;
 use crate::mw::auth::AuthUser;
+use crate::mw::rate_limit::{ClientIpAttribution, ResolvedClientIp};
 use crate::services::auth_device_service::{
     self, ApproveInput, DenyInput, InitiateInput, PollClaim, PreviewOutput,
 };
@@ -28,6 +30,28 @@ pub struct AuthDeviceRequestBody {
     pub client_label: Option<String>,
     #[serde(default)]
     pub client_user_agent: Option<String>,
+    #[serde(default)]
+    pub client_app: Option<String>,
+    #[serde(default)]
+    pub client_platform: Option<String>,
+    #[serde(default)]
+    pub client_model: Option<String>,
+    #[serde(default)]
+    pub client_form_factor: Option<String>,
+    #[serde(default)]
+    pub client_timezone: Option<String>,
+    #[serde(default)]
+    pub client_locale: Option<String>,
+    #[serde(default)]
+    pub client_screen_width: Option<u32>,
+    #[serde(default)]
+    pub client_screen_height: Option<u32>,
+    #[serde(default)]
+    pub client_device_pixel_ratio: Option<f64>,
+    #[serde(default)]
+    pub client_hardware_concurrency: Option<u16>,
+    #[serde(default)]
+    pub client_device_memory: Option<f64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -78,6 +102,30 @@ pub struct AuthDevicePreviewResponse {
     pub client_label: Option<String>,
     pub client_user_agent: Option<String>,
     pub client_ip: Option<String>,
+    pub client_ip_attribution: String,
+    pub client_country: Option<String>,
+    pub client_city: Option<String>,
+    pub client_region: Option<String>,
+    pub client_continent: Option<String>,
+    pub client_ip_timezone: Option<String>,
+    pub initiating_origin: Option<String>,
+    pub initiating_origin_status: String,
+    pub client_kind: String,
+    pub client_app: Option<String>,
+    pub client_platform: Option<String>,
+    pub client_model: Option<String>,
+    pub client_form_factor: Option<String>,
+    pub client_timezone: Option<String>,
+    pub client_timezone_matches_ip: Option<bool>,
+    pub client_locale: Option<String>,
+    pub client_screen_width: Option<u32>,
+    pub client_screen_height: Option<u32>,
+    pub client_device_pixel_ratio: Option<f64>,
+    pub client_hardware_concurrency: Option<u16>,
+    pub client_device_memory: Option<f64>,
+    pub same_ip_as_viewer: Option<bool>,
+    pub network_relation: Option<String>,
+    pub seconds_remaining: i64,
     pub initiated_at: String,
     pub expires_at: String,
     pub status: String,
@@ -100,7 +148,8 @@ pub async fn request_auth_device(
     headers: HeaderMap,
     Json(body): Json<AuthDeviceRequestBody>,
 ) -> AppResult<Json<AuthDeviceRequestResponse>> {
-    let client_ip = resolve_client_ip(&headers, addr, &state)?;
+    let resolved_client = resolve_client_context(&headers, addr, &state)?;
+    let client_ip = resolved_client.ip;
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
 
@@ -109,6 +158,12 @@ pub async fn request_auth_device(
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
 
+    let location = trusted_client_location(&headers, addr, &state.config.trusted_proxy_ips);
+    let origin = auth_device_service::classify_initiating_origin(
+        header_text(&headers, header::ORIGIN.as_str()).as_deref(),
+        &state.config.frontend_url,
+    );
+
     let initiated = auth_device_service::initiate(
         &state.db,
         state.auth_device_hmac_key.as_slice(),
@@ -116,6 +171,25 @@ pub async fn request_auth_device(
             client_label: body.client_label,
             client_user_agent: body.client_user_agent,
             client_ip: Some(client_ip.to_string()),
+            client_ip_attribution: auth_device_attribution(resolved_client.attribution),
+            client_country: location.country,
+            client_city: location.city,
+            client_region: location.region,
+            client_continent: location.continent,
+            client_ip_timezone: location.timezone,
+            initiating_origin: origin.origin,
+            initiating_origin_status: origin.status,
+            client_app: body.client_app,
+            client_platform: body.client_platform,
+            client_model: body.client_model,
+            client_form_factor: body.client_form_factor,
+            client_timezone: body.client_timezone,
+            client_locale: body.client_locale,
+            client_screen_width: body.client_screen_width,
+            client_screen_height: body.client_screen_height,
+            client_device_pixel_ratio: body.client_device_pixel_ratio,
+            client_hardware_concurrency: body.client_hardware_concurrency,
+            client_device_memory: body.client_device_memory,
         },
     )
     .await?;
@@ -510,7 +584,8 @@ pub async fn preview_auth_device(
     headers: HeaderMap,
     Json(body): Json<AuthDevicePreviewBody>,
 ) -> AppResult<Json<AuthDevicePreviewResponse>> {
-    let client_ip = resolve_client_ip(&headers, addr, &state)?;
+    let resolved_client = resolve_client_context(&headers, addr, &state)?;
+    let client_ip = resolved_client.ip;
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
 
@@ -519,10 +594,13 @@ pub async fn preview_auth_device(
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
 
+    let viewer_ip = client_ip.to_string();
     let preview = auth_device_service::preview(
         &state.db,
         state.auth_device_hmac_key.as_slice(),
         &body.user_code,
+        Some(&viewer_ip),
+        auth_device_attribution(resolved_client.attribution),
     )
     .await?;
 
@@ -536,13 +614,61 @@ pub async fn preview_auth_device(
 }
 
 fn resolve_client_ip(headers: &HeaderMap, addr: SocketAddr, state: &AppState) -> AppResult<IpAddr> {
-    crate::mw::rate_limit::resolve_client_ip_for_rate_limit(
-        headers,
-        Some(addr),
-        &state.config.trusted_proxy_ips,
-    )
-    .or_else(|| Some(addr.ip()))
-    .ok_or_else(|| AppError::Internal("unable to resolve client IP".to_string()))
+    resolve_client_context(headers, addr, state).map(|resolved| resolved.ip)
+}
+
+fn resolve_client_context(
+    headers: &HeaderMap,
+    addr: SocketAddr,
+    state: &AppState,
+) -> AppResult<ResolvedClientIp> {
+    crate::mw::rate_limit::resolve_client_ip(headers, Some(addr), &state.config.trusted_proxy_ips)
+        .ok_or_else(|| AppError::Internal("unable to resolve client IP".to_string()))
+}
+
+fn auth_device_attribution(value: ClientIpAttribution) -> AuthDeviceClientIpAttribution {
+    match value {
+        ClientIpAttribution::Verified => AuthDeviceClientIpAttribution::Verified,
+        ClientIpAttribution::Unverified => AuthDeviceClientIpAttribution::Unverified,
+        ClientIpAttribution::Unavailable => AuthDeviceClientIpAttribution::Unavailable,
+    }
+}
+
+fn trusted_client_location(
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    trusted_proxies: &[crate::config::TrustedProxyRange],
+) -> auth_device_service::TrustedClientLocation {
+    if !crate::mw::rate_limit::is_trusted_proxy(peer.ip(), trusted_proxies) {
+        return Default::default();
+    }
+
+    // Cloudflare also offers coordinates, postal codes, and metro codes. Those
+    // are intentionally not collected: city-level recognition is sufficient
+    // for this approval check and avoids retaining unnecessary precise location.
+    auth_device_service::TrustedClientLocation {
+        country: auth_device_service::normalize_client_country(header_text(
+            headers,
+            "cf-ipcountry",
+        )),
+        city: auth_device_service::normalize_geo_label(header_text(headers, "cf-ipcity")),
+        region: auth_device_service::normalize_geo_label(header_text(headers, "cf-region")),
+        continent: auth_device_service::normalize_client_continent(header_text(
+            headers,
+            "cf-ipcontinent",
+        )),
+        timezone: auth_device_service::normalize_client_timezone(header_text(
+            headers,
+            "cf-timezone",
+        )),
+    }
+}
+
+fn header_text(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|header| header.to_str().ok())
+        .map(String::from)
 }
 
 fn client_ip_hash(state: &AppState, ip: IpAddr) -> String {
@@ -589,6 +715,30 @@ fn preview_response(preview: PreviewOutput) -> AuthDevicePreviewResponse {
         client_label: preview.client_label,
         client_user_agent: preview.client_user_agent,
         client_ip: preview.client_ip,
+        client_ip_attribution: preview.client_ip_attribution,
+        client_country: preview.client_country,
+        client_city: preview.client_city,
+        client_region: preview.client_region,
+        client_continent: preview.client_continent,
+        client_ip_timezone: preview.client_ip_timezone,
+        initiating_origin: preview.initiating_origin,
+        initiating_origin_status: preview.initiating_origin_status,
+        client_kind: preview.client_kind,
+        client_app: preview.client_app,
+        client_platform: preview.client_platform,
+        client_model: preview.client_model,
+        client_form_factor: preview.client_form_factor,
+        client_timezone: preview.client_timezone,
+        client_timezone_matches_ip: preview.client_timezone_matches_ip,
+        client_locale: preview.client_locale,
+        client_screen_width: preview.client_screen_width,
+        client_screen_height: preview.client_screen_height,
+        client_device_pixel_ratio: preview.client_device_pixel_ratio,
+        client_hardware_concurrency: preview.client_hardware_concurrency,
+        client_device_memory: preview.client_device_memory,
+        same_ip_as_viewer: preview.same_ip_as_viewer,
+        network_relation: preview.network_relation,
+        seconds_remaining: preview.seconds_remaining,
         initiated_at: preview
             .initiated_at
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -776,6 +926,100 @@ mod tests {
         assert_eq!(json["error_code"], code);
     }
 
+    #[test]
+    fn cloudflare_location_is_accepted_only_from_a_trusted_peer() {
+        let proxy = "10.0.0.8:443".parse::<SocketAddr>().expect("proxy");
+        let direct = "203.0.113.20:443"
+            .parse::<SocketAddr>()
+            .expect("direct peer");
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-ipcountry", "sg".parse().expect("country header"));
+        headers.insert("cf-ipcity", "Singapore".parse().expect("city header"));
+        headers.insert("cf-region", "Singapore".parse().expect("region header"));
+        headers.insert("cf-ipcontinent", "as".parse().expect("continent header"));
+        headers.insert(
+            "cf-timezone",
+            "Asia/Singapore".parse().expect("timezone header"),
+        );
+        let trusted = ["10.0.0.0/8".parse().expect("trusted CIDR")];
+
+        let location = trusted_client_location(&headers, proxy, &trusted);
+        assert_eq!(location.country.as_deref(), Some("SG"));
+        assert_eq!(location.city.as_deref(), Some("Singapore"));
+        assert_eq!(location.region.as_deref(), Some("Singapore"));
+        assert_eq!(location.continent.as_deref(), Some("AS"));
+        assert_eq!(location.timezone.as_deref(), Some("Asia/Singapore"));
+        assert_eq!(
+            trusted_client_location(&headers, direct, &trusted),
+            Default::default()
+        );
+
+        for placeholder in ["XX", "T1", "USA", "1A"] {
+            headers.insert(
+                "cf-ipcountry",
+                placeholder.parse().expect("placeholder header"),
+            );
+            assert_eq!(
+                trusted_client_location(&headers, proxy, &trusted).country,
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn preview_response_maps_verbose_fields_additively() {
+        let now = chrono::Utc::now();
+        let response = preview_response(PreviewOutput {
+            client_label: Some("workstation".to_string()),
+            client_user_agent: Some("nyxid-cli/1.4.2 (macos; aarch64)".to_string()),
+            client_ip: Some("8.8.8.8".to_string()),
+            client_ip_attribution: "verified".to_string(),
+            client_country: Some("SG".to_string()),
+            client_city: Some("Singapore".to_string()),
+            client_region: Some("Singapore".to_string()),
+            client_continent: Some("AS".to_string()),
+            client_ip_timezone: Some("Asia/Singapore".to_string()),
+            initiating_origin: Some("https://nyxid.dev".to_string()),
+            initiating_origin_status: "matched".to_string(),
+            client_kind: "browser".to_string(),
+            client_app: Some("Chrome 131.0.6778.85".to_string()),
+            client_platform: Some("macOS 15.2 (arm64)".to_string()),
+            client_model: None,
+            client_form_factor: Some("desktop".to_string()),
+            client_timezone: Some("Europe/Moscow".to_string()),
+            client_timezone_matches_ip: Some(false),
+            client_locale: Some("en-SG".to_string()),
+            client_screen_width: Some(1512),
+            client_screen_height: Some(982),
+            client_device_pixel_ratio: Some(2.0),
+            client_hardware_concurrency: Some(12),
+            client_device_memory: Some(16.0),
+            same_ip_as_viewer: Some(false),
+            network_relation: Some("same_network".to_string()),
+            seconds_remaining: 583,
+            initiated_at: now,
+            expires_at: now + chrono::Duration::seconds(583),
+            status: crate::models::auth_device_code::AuthDeviceCodeStatus::Pending,
+        });
+
+        assert_eq!(response.client_ip.as_deref(), Some("8.8.8.8"));
+        assert_eq!(response.client_ip_attribution, "verified");
+        assert_eq!(response.client_country.as_deref(), Some("SG"));
+        assert_eq!(response.client_city.as_deref(), Some("Singapore"));
+        assert_eq!(response.initiating_origin_status, "matched");
+        assert_eq!(response.client_kind, "browser");
+        assert_eq!(response.client_app.as_deref(), Some("Chrome 131.0.6778.85"));
+        assert_eq!(
+            response.client_platform.as_deref(),
+            Some("macOS 15.2 (arm64)")
+        );
+        assert_eq!(response.client_timezone_matches_ip, Some(false));
+        assert_eq!(response.same_ip_as_viewer, Some(false));
+        assert_eq!(response.network_relation.as_deref(), Some("same_network"));
+        assert_eq!(response.seconds_remaining, 583);
+        assert_eq!(response.status, "pending");
+    }
+
     async fn request_and_approve(state: &AppState, server: &TestServer, user_id: &str) -> Value {
         let token = access_token(state, user_id);
         let (status, request_json) = post_json(
@@ -870,6 +1114,80 @@ mod tests {
         )
         .expect("valid refresh token");
         assert_eq!(refresh_claims.sub, access_claims.sub);
+    }
+
+    #[tokio::test]
+    async fn auth_device_browser_context_roundtrips_through_public_preview() {
+        let Some(db) = connect_test_database("auth_device_browser_context").await else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("ensure indexes");
+        let mut config = test_app_config();
+        config.frontend_url = "https://nyxid.dev".to_string();
+        config.trusted_proxy_ips = vec!["127.0.0.1/32".parse().expect("trusted loopback")];
+        let state = crate::test_utils::test_app_state_with_config(db, config);
+        let server = spawn_test_server(state.clone()).await;
+
+        let (status, initiated) = post_request(
+            &server,
+            "/api/v1/auth/device/request",
+            &[
+                ("origin", "https://nyxid.dev"),
+                ("cf-connecting-ip", "103.6.151.42"),
+                ("cf-ipcountry", "SG"),
+                ("cf-ipcity", "Singapore"),
+                ("cf-region", "Singapore"),
+                ("cf-ipcontinent", "AS"),
+                ("cf-timezone", "Asia/Singapore"),
+            ],
+            serde_json::json!({
+                "client_label": "Chrome 151 on macOS 26.5.2 (arm64)",
+                "client_user_agent": "Mozilla/5.0 Chrome/151.0.0.0 Safari/537.36",
+                "client_app": "Chrome 151.0.7922.174",
+                "client_platform": "macOS 26.5.2 (arm64)",
+                "client_form_factor": "desktop",
+                "client_timezone": "Europe/Moscow",
+                "client_locale": "en-US",
+                "client_screen_width": 1512,
+                "client_screen_height": 982,
+                "client_device_pixel_ratio": 2,
+                "client_hardware_concurrency": 12,
+                "client_device_memory": 16,
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let row = state
+            .db
+            .collection::<AuthDeviceCode>(AUTH_DEVICE_CODES)
+            .find_one(doc! {})
+            .await
+            .expect("query auth-device row")
+            .expect("auth-device row");
+        assert_eq!(row.initiating_origin.as_deref(), Some("https://nyxid.dev"));
+        assert_eq!(row.initiating_origin_status.as_str(), "matched");
+        assert_eq!(row.client_city.as_deref(), Some("Singapore"));
+        assert_eq!(row.client_ip_timezone.as_deref(), Some("Asia/Singapore"));
+        assert_eq!(row.client_timezone.as_deref(), Some("Europe/Moscow"));
+
+        let (status, preview) = post_request(
+            &server,
+            "/api/v1/auth/device/preview",
+            &[("cf-connecting-ip", "103.6.151.200")],
+            serde_json::json!({ "user_code": initiated["user_code"] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(preview["initiating_origin_status"], "matched");
+        assert_eq!(preview["client_city"], "Singapore");
+        assert_eq!(preview["client_ip_timezone"], "Asia/Singapore");
+        assert_eq!(preview["client_timezone"], "Europe/Moscow");
+        assert_eq!(preview["client_timezone_matches_ip"], false);
+        assert_eq!(preview["network_relation"], "same_network");
+        assert_eq!(preview["same_ip_as_viewer"], false);
     }
 
     #[tokio::test]
@@ -1310,6 +1628,9 @@ mod tests {
                 client_label: Some("kitchen-rpi".to_string()),
                 client_user_agent: Some("nyxid-cli/0.7.1".to_string()),
                 client_ip: Some("127.0.0.1".to_string()),
+                client_ip_attribution: AuthDeviceClientIpAttribution::Unavailable,
+                client_country: None,
+                ..Default::default()
             },
         )
         .await
@@ -1353,6 +1674,9 @@ mod tests {
                 client_label: None,
                 client_user_agent: None,
                 client_ip: Some("127.0.0.1".to_string()),
+                client_ip_attribution: AuthDeviceClientIpAttribution::Unavailable,
+                client_country: None,
+                ..Default::default()
             },
         )
         .await
@@ -1459,6 +1783,9 @@ mod tests {
                 client_label: None,
                 client_user_agent: None,
                 client_ip: Some("127.0.0.1".to_string()),
+                client_ip_attribution: AuthDeviceClientIpAttribution::Unavailable,
+                client_country: None,
+                ..Default::default()
             },
         )
         .await

@@ -79,8 +79,19 @@ describe("WebDeviceLogin", () => {
     render(<WebDeviceLogin />);
     expect(mockStart).not.toHaveBeenCalled();
 
-    await user.click(screen.getByRole("button", { name: "Sign in with the NyxID app" }));
+    const trigger = screen.getByRole("button", {
+      name: "Continue with the NyxID app",
+    });
+    expect(trigger).toHaveClass("h-[46px]", "border-border", "bg-background", "px-4");
+    expect(trigger.querySelector("img")).toHaveAttribute(
+      "src",
+      "/nyxid-coloured-icon.svg",
+    );
+    await user.click(trigger);
     expect(mockStart).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("heading", { name: "Continue with the NyxID app" }),
+    ).toHaveFocus();
   });
 
   it("shows the QR code, formatted user code, and manual-entry URI", async () => {
@@ -98,11 +109,15 @@ describe("WebDeviceLogin", () => {
     deviceState.remainingSeconds = 597;
     const user = userEvent.setup();
     render(<WebDeviceLogin />);
-    await user.click(screen.getByRole("button", { name: "Sign in with the NyxID app" }));
+    await user.click(
+      screen.getByRole("button", { name: "Continue with the NyxID app" }),
+    );
 
     expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
     expect(screen.getByText("https://id.example/login/device")).toBeInTheDocument();
-    expect(screen.getByAltText("Scan this QR code with the NyxID app")).toBeInTheDocument();
+    expect(
+      await screen.findByAltText("QR code to continue with the NyxID app"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Expires in 9:57")).toBeInTheDocument();
 
     const expectedOptions = {
@@ -122,6 +137,25 @@ describe("WebDeviceLogin", () => {
     );
   });
 
+  it("tears down on back and restores focus to the trigger row", async () => {
+    const user = userEvent.setup();
+    render(<WebDeviceLogin />);
+    await user.click(
+      screen.getByRole("button", { name: "Continue with the NyxID app" }),
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: "Back to all sign-in options" }),
+    );
+
+    expect(mockClose).toHaveBeenCalledTimes(1);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Continue with the NyxID app" }),
+      ).toHaveFocus(),
+    );
+  });
+
   it("renders a denied terminal state with an explicit regenerate action", async () => {
     deviceState.phase = "denied";
     deviceState.request = {
@@ -135,7 +169,9 @@ describe("WebDeviceLogin", () => {
     };
     const user = userEvent.setup();
     render(<WebDeviceLogin />);
-    await user.click(screen.getByRole("button", { name: "Sign in with the NyxID app" }));
+    await user.click(
+      screen.getByRole("button", { name: "Continue with the NyxID app" }),
+    );
 
     expect(screen.getByText("Sign-in was rejected")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Generate new code" }));
@@ -146,7 +182,9 @@ describe("WebDeviceLogin", () => {
     deviceState.phase = "success";
     const user = userEvent.setup();
     render(<WebDeviceLogin />);
-    await user.click(screen.getByRole("button", { name: "Sign in with the NyxID app" }));
+    await user.click(
+      screen.getByRole("button", { name: "Continue with the NyxID app" }),
+    );
 
     expect(mockNavigate).toHaveBeenCalledWith({ to: "/dashboard" });
   });

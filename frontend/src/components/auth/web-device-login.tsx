@@ -1,20 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import QRCode from "qrcode";
 import {
+  AlertTriangle,
+  ArrowLeft,
   Check,
+  CheckCircle2,
+  ChevronRight,
   Clock3,
   Copy,
-  ExternalLink,
-  QrCode,
   RefreshCw,
-  Smartphone,
-  X,
+  ScanLine,
 } from "lucide-react";
+import { NyxidIcon } from "@/components/brand/nyxid-icon";
 import { Button, ButtonIcon } from "@/components/ui/button";
-import {
-  formatAuthDeviceUserCodeInput,
-} from "@/schemas/auth-device";
+import { formatAuthDeviceUserCodeInput } from "@/schemas/auth-device";
 import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { copyToClipboard } from "@/lib/utils";
 import { formatWebAuthDeviceRemaining } from "@/lib/auth-device-time";
@@ -22,19 +22,31 @@ import { useWebAuthDeviceLogin } from "@/hooks/use-auth-device";
 
 interface WebDeviceLoginProps {
   readonly returnTo?: string;
+  readonly isOpen?: boolean;
+  readonly onOpenChange?: (open: boolean) => void;
 }
 
-export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
+export const LOGIN_PROVIDER_ROW_CLASS =
+  "flex h-[46px] w-full cursor-pointer items-center gap-3 rounded-lg border border-border bg-background px-4 text-[13.5px] font-medium text-foreground transition-colors duration-300 hover:border-border/80 hover:bg-overlay active:scale-[0.99]";
+
+export function WebDeviceLogin({
+  returnTo,
+  isOpen: controlledOpen,
+  onOpenChange,
+}: WebDeviceLoginProps) {
   const navigate = useNavigate();
-  const [isOpen, setIsOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
   const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
   const deviceLogin = useWebAuthDeviceLogin();
+  const isOpen = controlledOpen ?? internalOpen;
 
   useEffect(() => {
     let cancelled = false;
     const payload = deviceLogin.request?.verification_uri_complete;
-    if (!payload) {
+    if (!isOpen || !payload) {
       return () => {
         cancelled = true;
       };
@@ -54,7 +66,11 @@ export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
     return () => {
       cancelled = true;
     };
-  }, [deviceLogin.request?.verification_uri_complete]);
+  }, [deviceLogin.request?.verification_uri_complete, isOpen]);
+
+  useEffect(() => {
+    if (isOpen) headingRef.current?.focus();
+  }, [isOpen]);
 
   useEffect(() => {
     if (deviceLogin.phase !== "success") return;
@@ -66,20 +82,29 @@ export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
     void navigate({ to: "/dashboard" as string });
   }, [deviceLogin.phase, navigate, returnTo]);
 
+  function setOpen(open: boolean) {
+    if (controlledOpen === undefined) setInternalOpen(open);
+    onOpenChange?.(open);
+  }
+
   function openPanel() {
-    setIsOpen(true);
     setCopied(false);
+    setQrDataUrl(null);
+    setOpen(true);
     deviceLogin.start();
   }
 
   function closePanel() {
-    setIsOpen(false);
     setCopied(false);
+    setQrDataUrl(null);
     deviceLogin.close();
+    setOpen(false);
+    window.setTimeout(() => triggerRef.current?.focus(), 0);
   }
 
   function generateNew() {
     setCopied(false);
+    setQrDataUrl(null);
     deviceLogin.generateNew();
   }
 
@@ -94,12 +119,17 @@ export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
   if (!isOpen) {
     return (
       <button
+        ref={triggerRef}
         type="button"
         onClick={openPanel}
-        className="mt-6 flex h-[44px] w-full cursor-pointer items-center justify-center gap-2.5 rounded-lg border border-border bg-transparent text-[13px] font-medium text-foreground transition-colors duration-200 hover:border-hairline-strong hover:bg-overlay"
+        className={LOGIN_PROVIDER_ROW_CLASS}
+        aria-label="Continue with the NyxID app"
       >
-        <Smartphone className="size-4 text-nyx-secondary-400" />
-        Sign in with the NyxID app
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-overlay-strong">
+          <NyxidIcon alt="" className="h-4 w-4 object-contain" />
+        </span>
+        Continue with the NyxID app
+        <ChevronRight className="ml-auto size-4 text-muted-foreground" />
       </button>
     );
   }
@@ -120,77 +150,96 @@ export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
   const pending = deviceLogin.phase === "pending";
 
   return (
-    <section className="mt-6 rounded-lg border border-border bg-background p-4" aria-label="NyxID app sign-in">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h2 className="flex items-center gap-2 text-[15px] font-semibold">
-            <QrCode className="size-4 text-nyx-secondary-400" />
-            Sign in with the NyxID app
-          </h2>
-          <p className="mt-1 text-[12px] text-muted-foreground">
-            Approve this browser from a phone that is already signed in.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={closePanel}
-          className="flex size-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-overlay hover:text-foreground"
-          aria-label="Close NyxID app sign-in"
+    <section aria-labelledby="nyxid-app-login-heading">
+      <button
+        type="button"
+        onClick={closePanel}
+        className="mb-5 flex cursor-pointer items-center gap-1.5 text-[12px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+        aria-label="Back to all sign-in options"
+      >
+        <ArrowLeft className="size-3.5" />
+        Back to all sign-in options
+      </button>
+
+      <div className="text-center">
+        <h2
+          id="nyxid-app-login-heading"
+          ref={headingRef}
+          tabIndex={-1}
+          className="text-[20px] font-semibold outline-none"
         >
-          <X className="size-4" />
-        </button>
+          Continue with the NyxID app
+        </h2>
+        <p className="mx-auto mt-1.5 max-w-[340px] text-[12.5px] leading-relaxed text-muted-foreground">
+          Approve this sign-in from a phone that&apos;s already signed in to
+          NyxID.
+        </p>
       </div>
 
       {deviceLogin.phase === "requesting" && (
-        <p className="mt-5 text-center text-[12px] text-muted-foreground">
+        <div
+          className="mt-8 flex items-center justify-center gap-2 text-[12px] text-muted-foreground"
+          role="status"
+        >
+          <RefreshCw className="size-3.5 animate-spin" />
           Generating a sign-in code...
-        </p>
+        </div>
       )}
 
       {deviceLogin.request && pending && (
-        <div className="mt-5 space-y-4">
+        <div className="mt-6 space-y-5">
           <div className="flex justify-center">
-            {qrDataUrl ? (
-              <img
-                src={qrDataUrl}
-                alt="Scan this QR code with the NyxID app"
-                className="size-[208px] rounded-md border border-border"
-              />
-            ) : (
-              <div className="flex size-[208px] items-center justify-center rounded-md border border-border text-[12px] text-muted-foreground">
-                Preparing QR code...
-              </div>
-            )}
+            <div className="relative flex size-[216px] items-center justify-center rounded-lg border border-border bg-[#0c0b14] p-1">
+              {qrDataUrl ? (
+                <img
+                  src={qrDataUrl}
+                  alt="QR code to continue with the NyxID app"
+                  className="size-[208px] rounded-md object-contain"
+                />
+              ) : (
+                <div className="flex size-[208px] items-center justify-center gap-2 text-[12px] text-muted-foreground">
+                  <ScanLine className="size-4" />
+                  Preparing QR code...
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="text-center">
-            <p className="text-[11px] uppercase tracking-[1.5px] text-text-tertiary">
-              Enter this code if you open the page manually
+            <p className="text-[11px] uppercase text-text-tertiary">
+              Manual code
             </p>
-            <div className="mt-1 flex items-center justify-center gap-2">
-              <span className="font-mono text-[24px] font-semibold tracking-[0.18em] text-foreground">
+            <div className="mt-1.5 flex items-center justify-center gap-2">
+              <span className="font-mono text-[24px] font-semibold text-foreground">
                 {formattedCode}
               </span>
               <button
                 type="button"
                 onClick={() => void copyCode()}
-                className="flex size-7 cursor-pointer items-center justify-center rounded-md text-muted-foreground hover:bg-overlay hover:text-foreground"
-                aria-label={copied ? "Code copied" : "Copy sign-in code"}
+                className="flex size-8 cursor-pointer items-center justify-center rounded-md border border-border text-muted-foreground transition-colors hover:bg-overlay hover:text-foreground"
+                aria-label={copied ? "Sign-in code copied" : "Copy sign-in code"}
               >
-                {copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
+                {copied ? (
+                  <Check className="size-3.5 text-success" />
+                ) : (
+                  <Copy className="size-3.5" />
+                )}
               </button>
             </div>
           </div>
 
           <p className="text-center text-[12px] leading-relaxed text-muted-foreground">
-            Scan with the NyxID app, or open{" "}
-            <span className="font-mono text-[11px] text-foreground">{deviceLogin.request.verification_uri}</span>{" "}
-            on another device and enter this code.
+            Scan the code, or open{" "}
+            <span className="break-all font-mono text-[11px] text-foreground">
+              {deviceLogin.request.verification_uri}
+            </span>{" "}
+            on your phone and enter the manual code.
           </p>
 
           <div className="flex items-center justify-center gap-1.5 text-[11px] text-warning">
             <Clock3 className="size-3.5" />
-            Expires in {formatWebAuthDeviceRemaining(
+            Expires in{" "}
+            {formatWebAuthDeviceRemaining(
               deviceLogin.remainingSeconds ?? deviceLogin.request.expires_in,
             )}
           </div>
@@ -198,8 +247,14 @@ export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
       )}
 
       {terminalMessage && (
-        <div className="mt-5 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-center">
-          <p className="text-[13px] font-medium text-destructive">{terminalMessage}</p>
+        <div
+          className="mt-6 rounded-md border border-destructive/30 bg-destructive/10 p-4 text-center"
+          role="status"
+        >
+          <AlertTriangle className="mx-auto size-5 text-destructive" />
+          <p className="mt-2 text-[13px] font-medium text-destructive">
+            {terminalMessage}
+          </p>
           <Button
             type="button"
             variant="outline"
@@ -216,17 +271,13 @@ export function WebDeviceLogin({ returnTo }: WebDeviceLoginProps) {
       )}
 
       {deviceLogin.phase === "success" && (
-        <div className="mt-5 flex items-center justify-center gap-2 text-[13px] text-success">
-          <Check className="size-4" />
+        <div
+          className="mt-8 flex items-center justify-center gap-2 text-[13px] text-success"
+          role="status"
+        >
+          <CheckCircle2 className="size-4" />
           Signed in. Redirecting...
         </div>
-      )}
-
-      {deviceLogin.phase === "error" && deviceLogin.error?.code === 11206 && (
-        <p className="mt-3 flex items-center justify-center gap-1 text-[11px] text-muted-foreground">
-          <ExternalLink className="size-3" />
-          Please wait before generating another code.
-        </p>
       )}
     </section>
   );

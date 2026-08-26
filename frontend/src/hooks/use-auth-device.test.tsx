@@ -204,10 +204,16 @@ describe("useWebAuthDeviceLogin", () => {
     });
 
     await waitFor(() => expect(result.current.phase).toBe("pending"));
-    expect(mockPost).toHaveBeenCalledWith("/auth/device/request", {
-      client_label: expect.stringMatching(/^NyxID web/),
-      client_user_agent: expect.any(String),
-    });
+    expect(mockPost).toHaveBeenCalledWith(
+      "/auth/device/request",
+      expect.objectContaining({
+        client_label: expect.stringMatching(/ on /),
+        client_user_agent: expect.any(String),
+        client_form_factor: expect.stringMatching(
+          /^(desktop|mobile|tablet|unknown)$/,
+        ),
+      }),
+    );
   });
 
   it("polls at the server interval and adds five seconds after slow_down", async () => {

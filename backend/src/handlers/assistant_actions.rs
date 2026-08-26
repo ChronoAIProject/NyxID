@@ -1226,7 +1226,10 @@ pub async fn get_assistant_actions(Query(query): Query<AssistantActionsQuery>) -
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap as StdHashMap, HashSet};
+    use std::{
+        collections::{HashMap as StdHashMap, HashSet},
+        sync::Arc,
+    };
 
     use axum::{
         Extension,
@@ -1243,6 +1246,7 @@ mod tests {
         ASSISTANT_ACTIONS_REVISION, ASSISTANT_ACTIONS_SCHEMA_VERSION, PINNED_ACTIONS_BY_REVISION,
         manifest_body, resolve_assistant_actions_body,
     };
+    use crate::config::TrustedProxyRange;
     use crate::mw::rate_limit::{
         create_per_ip_rate_limiter, create_rate_limiter, rate_limit_middleware,
     };
@@ -3116,7 +3120,8 @@ mod tests {
             .with_state(state)
             .layer(middleware::from_fn(rate_limit_middleware))
             .layer(Extension(per_ip))
-            .layer(Extension(global));
+            .layer(Extension(global))
+            .layer(Extension(Arc::new(Vec::<TrustedProxyRange>::new())));
 
         let query_uri = "/api/v1/assistant/actions?revision=nyxid-assistant-actions.v7";
         for _ in 0..3 {

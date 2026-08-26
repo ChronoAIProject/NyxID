@@ -4,7 +4,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
 import { AuthFlow } from "./auth-flow";
 
-const { config, mockNavigate, mockOpenExternal, loginFn, registerFn, toastFns } =
+const {
+  config,
+  deviceState,
+  mockDeviceClose,
+  mockDeviceStart,
+  mockNavigate,
+  mockOpenExternal,
+  loginFn,
+  registerFn,
+  toastFns,
+} =
   vi.hoisted(() => ({
     config: {
       value: {
@@ -13,6 +23,14 @@ const { config, mockNavigate, mockOpenExternal, loginFn, registerFn, toastFns } 
         social_providers: ["google", "github"] as string[],
       } as Record<string, unknown> | undefined,
     },
+    deviceState: {
+      phase: "idle" as string,
+      request: null,
+      remainingSeconds: null,
+      error: null,
+    },
+    mockDeviceClose: vi.fn(),
+    mockDeviceStart: vi.fn(),
     mockNavigate: vi.fn(),
     mockOpenExternal: vi.fn(),
     loginFn: vi.fn(),
@@ -46,6 +64,19 @@ vi.mock("@/lib/navigation", () => ({
 
 vi.mock("sonner", () => ({ toast: toastFns }));
 
+vi.mock("@/hooks/use-auth-device", () => ({
+  useWebAuthDeviceLogin: () => ({
+    ...deviceState,
+    start: mockDeviceStart,
+    generateNew: vi.fn(),
+    close: mockDeviceClose,
+  }),
+}));
+
+vi.mock("qrcode", () => ({
+  default: { toDataURL: vi.fn().mockResolvedValue("data:image/png;base64,qr") },
+}));
+
 beforeEach(() => {
   vi.clearAllMocks();
   config.value = {
@@ -53,6 +84,10 @@ beforeEach(() => {
     email_auth_enabled: true,
     social_providers: ["google", "github"],
   };
+  deviceState.phase = "idle";
+  deviceState.request = null;
+  deviceState.remainingSeconds = null;
+  deviceState.error = null;
 });
 
 afterEach(() => {
@@ -72,6 +107,81 @@ async function fillLoginAndSubmit(user: ReturnType<typeof userEvent.setup>) {
 }
 
 describe("AuthFlow — login", () => {
+  it("renders the NyxID app as the last peer provider row with one divider", () => {
+    render(<AuthFlow initialPanel={0} />);
+
+    const google = screen.getByRole("button", { name: "Continue with Google" });
+    const nyxidApp = screen.getByRole("button", {
+      name: "Continue with the NyxID app",
+    });
+    expect(nyxidApp.className).toBe(google.className);
+    expect(nyxidApp.parentElement?.lastElementChild).toBe(nyxidApp);
+    expect(screen.getAllByText("or")).toHaveLength(1);
+  });
+
+  it.each([
+    { social: [] as string[], email: true, divider: 1 },
+    { social: ["google"], email: false, divider: 0 },
+    { social: [] as string[], email: false, divider: 0 },
+  ])(
+    "renders the always-available app method correctly for social=$social email=$email",
+    ({ social, email, divider }) => {
+      config.value = {
+        invite_code_required: true,
+        email_auth_enabled: email,
+        social_providers: social,
+      };
+      render(<AuthFlow initialPanel={0} />);
+
+      expect(
+        screen.getByRole("button", { name: "Continue with the NyxID app" }),
+      ).toBeInTheDocument();
+      expect(screen.queryAllByText("or")).toHaveLength(divider);
+      if (email) {
+        expect(
+          screen.getByPlaceholderText("Enter your password"),
+        ).toBeInTheDocument();
+      } else {
+        expect(
+          screen.queryByPlaceholderText("Enter your password"),
+        ).not.toBeInTheDocument();
+      }
+    },
+  );
+
+  it("replaces all methods, the divider, and the email form while the app panel is open", async () => {
+    const user = userEvent.setup();
+    render(<AuthFlow initialPanel={0} />);
+
+    await user.click(
+      screen.getByRole("button", { name: "Continue with the NyxID app" }),
+    );
+
+    expect(mockDeviceStart).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("heading", { name: "Continue with the NyxID app" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Continue with Google" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("or")).not.toBeInTheDocument();
+    expect(
+      screen.queryByPlaceholderText("Enter your password"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Sign up" }),
+    ).not.toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "Back to all sign-in options" }),
+    );
+    expect(mockDeviceClose).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("button", { name: "Continue with Google" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("or")).toHaveLength(1);
+  });
+
   it("submits credentials and navigates to the dashboard on success", async () => {
     loginFn.mockResolvedValue({ mfaRequired: false });
     const user = userEvent.setup();

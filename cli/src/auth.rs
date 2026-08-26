@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::api::{
     AuthDevicePollBody, AuthDevicePollOutcome, AuthDeviceRequestBody, AuthDeviceRequestOutcome,
-    CLI_USER_AGENT, build_cli_http_client,
+    CLI_USER_AGENT, build_cli_http_client, device_login_user_agent,
 };
 use crate::cli::{AuthArgs, LoginArgs};
 
@@ -1044,7 +1044,7 @@ async fn run_device_code_login_with_api(
     let base_url = base_url.trim_end_matches('/');
     let request = AuthDeviceRequestBody {
         client_label: client_label(),
-        client_user_agent: Some(CLI_USER_AGENT.to_string()),
+        client_user_agent: Some(device_login_user_agent()),
     };
 
     let challenge = match api.request(base_url, &request, profile).await? {
@@ -1286,8 +1286,8 @@ mod tests {
         AuthDeviceApi, BrowserLoginError, DeviceBrowserFallback, LoginSleeper, LoginStrategies,
         build_cli_auth_url, callback_success_html, handle_device_poll_error, is_ci_environment,
         jwt_sub_from_token, parse_callback_request, poll_device_code_login,
-        refresh_token_file_path_for, run_login_with_strategies, token_dir_for_profile,
-        token_file_path_for, validate_profile_name,
+        refresh_token_file_path_for, run_login_with_strategies, sanitize_client_label,
+        token_dir_for_profile, token_file_path_for, validate_profile_name,
     };
     use crate::api::{
         AuthDevicePollBody, AuthDevicePollOutcome, AuthDevicePollResponse, AuthDeviceRequestBody,
@@ -1428,6 +1428,14 @@ mod tests {
             params.get("client_ua").map(|v| v.as_ref()),
             Some(CLI_USER_AGENT)
         );
+    }
+
+    #[test]
+    fn device_client_label_remains_sanitized_and_bounded() {
+        let label = sanitize_client_label(&format!("  host\0{}  ", "x".repeat(100)));
+        assert_eq!(label.chars().count(), 64);
+        assert!(!label.chars().any(char::is_control));
+        assert!(label.starts_with("host"));
     }
 
     #[test]

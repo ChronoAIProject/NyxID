@@ -1,4 +1,114 @@
-use std::env;
+use std::{env, net::IpAddr};
+
+/// Canonicalize IPv4-mapped IPv6 addresses so trust and rate-limit decisions
+/// cannot split one endpoint across two address-family representations.
+pub fn normalize_ip_address(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(address)),
+        address => address,
+    }
+}
+
+/// A single trusted reverse-proxy address or CIDR range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrustedProxyRange {
+    network: IpAddr,
+    prefix_len: u8,
+}
+
+impl TrustedProxyRange {
+    pub fn contains(&self, address: IpAddr) -> bool {
+        let network = normalize_ip_address(self.network);
+        let address = normalize_ip_address(address);
+        match (network, address) {
+            (IpAddr::V4(network), IpAddr::V4(address)) => {
+                let mask = if self.prefix_len == 0 {
+                    0
+                } else {
+                    u32::MAX << (32 - u32::from(self.prefix_len))
+                };
+                u32::from(network) & mask == u32::from(address) & mask
+            }
+            (IpAddr::V6(network), IpAddr::V6(address)) => {
+                let mask = if self.prefix_len == 0 {
+                    0
+                } else {
+                    u128::MAX << (128 - u32::from(self.prefix_len))
+                };
+                u128::from(network) & mask == u128::from(address) & mask
+            }
+            _ => false,
+        }
+    }
+}
+
+impl From<IpAddr> for TrustedProxyRange {
+    fn from(address: IpAddr) -> Self {
+        let address = normalize_ip_address(address);
+        Self {
+            network: address,
+            prefix_len: if address.is_ipv4() { 32 } else { 128 },
+        }
+    }
+}
+
+impl std::str::FromStr for TrustedProxyRange {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let (address, explicit_prefix_len) = match value.split_once('/') {
+            Some((address, prefix)) => {
+                if prefix.contains('/') {
+                    return Err("multiple prefix separators".to_string());
+                }
+                let address = address
+                    .parse::<IpAddr>()
+                    .map_err(|error| error.to_string())?;
+                let prefix_len = prefix
+                    .parse::<u8>()
+                    .map_err(|_| "prefix is not an unsigned integer".to_string())?;
+                (address, Some(prefix_len))
+            }
+            None => {
+                let address = value.parse::<IpAddr>().map_err(|error| error.to_string())?;
+                (address, None)
+            }
+        };
+
+        let parsed_as_mapped_ipv6 =
+            matches!(address, IpAddr::V6(value) if value.to_ipv4_mapped().is_some());
+        let address = normalize_ip_address(address);
+        let prefix_len = match (parsed_as_mapped_ipv6, explicit_prefix_len) {
+            (true, Some(prefix_len)) if prefix_len >= 96 => prefix_len - 96,
+            (true, Some(prefix_len)) => {
+                return Err(format!(
+                    "IPv4-mapped IPv6 prefix {prefix_len} cannot be represented as IPv4"
+                ));
+            }
+            (_, Some(prefix_len)) => prefix_len,
+            (_, None) => {
+                if address.is_ipv4() {
+                    32
+                } else {
+                    128
+                }
+            }
+        };
+
+        let width = if address.is_ipv4() { 32 } else { 128 };
+        if prefix_len > width {
+            return Err(format!("prefix {prefix_len} exceeds address width {width}"));
+        }
+
+        Ok(Self {
+            network: address,
+            prefix_len,
+        })
+    }
+}
 
 /// Application configuration loaded from environment variables.
 #[derive(Clone)]
@@ -101,15 +211,15 @@ pub struct AppConfig {
     pub platform_service_rate_limit_per_second: u32,
     /// Burst capacity for platform-credentialed service requests per user.
     pub platform_service_rate_limit_burst: u32,
-    /// Allowlist of reverse-proxy IPs whose `X-Forwarded-For` /
-    /// `X-Real-IP` headers may be trusted for rate-limit keying.
-    /// When the TCP peer is not in this list, forwarded headers are
-    /// ignored and the peer IP is used instead — so a direct-exposure
-    /// deployment can't be tricked into per-header buckets.
+    /// Allowlist of reverse-proxy IPs or CIDR ranges whose forwarded
+    /// client-IP headers may be trusted for rate-limit keying.
+    /// Strict public paths ignore forwarded headers when the TCP peer is not
+    /// in this list. The global limiter and node WebSocket attribution retain
+    /// their legacy header behavior only while this list is empty.
     ///
     /// Parsed from the comma-separated `TRUSTED_PROXY_IPS` env var.
-    /// Empty (the default) is the strict mode: nothing trusted.
-    pub trusted_proxy_ips: Vec<std::net::IpAddr>,
+    /// Empty (the default) means no peer can produce verified attribution.
+    pub trusted_proxy_ips: Vec<TrustedProxyRange>,
 
     /// Optional reverse-proxy-forwarded client certificate header used for
     /// RFC 8705 certificate-bound broker access tokens. Unset/empty disables
@@ -724,18 +834,18 @@ fn parse_bool_env(name: &str, default: bool) -> bool {
 /// so a typo can't silently extend trust to unparsed input; startup
 /// still succeeds because direct-exposure deployments are the common
 /// case and don't need this set.
-fn parse_trusted_proxy_ips(raw: Option<String>) -> Vec<std::net::IpAddr> {
+fn parse_trusted_proxy_ips(raw: Option<String>) -> Vec<TrustedProxyRange> {
     let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
         return Vec::new();
     };
     let mut ips = Vec::new();
     for entry in raw.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
-        match entry.parse::<std::net::IpAddr>() {
+        match entry.parse::<TrustedProxyRange>() {
             Ok(ip) => ips.push(ip),
             Err(err) => tracing::warn!(
                 entry = %entry,
                 error = %err,
-                "TRUSTED_PROXY_IPS entry is not a valid IP address; dropping",
+                "TRUSTED_PROXY_IPS entry is not a valid IP address or CIDR range; dropping",
             ),
         }
     }
@@ -1753,10 +1863,7 @@ mod tests {
     #[test]
     fn trusted_proxy_ips_parses_single_ipv4() {
         let parsed = parse_trusted_proxy_ips(Some("10.0.0.1".to_string()));
-        assert_eq!(
-            parsed,
-            vec![std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1))]
-        );
+        assert_eq!(parsed, vec!["10.0.0.1".parse().unwrap()]);
     }
 
     #[test]
@@ -1765,9 +1872,9 @@ mod tests {
         assert_eq!(
             parsed,
             vec![
-                std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
-                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-                std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                "10.0.0.1".parse().unwrap(),
+                "127.0.0.1".parse().unwrap(),
+                "::1".parse().unwrap(),
             ]
         );
     }
@@ -1777,11 +1884,66 @@ mod tests {
         let parsed = parse_trusted_proxy_ips(Some("10.0.0.1, not-an-ip, 127.0.0.1".to_string()));
         assert_eq!(
             parsed,
-            vec![
-                std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)),
-                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
-            ]
+            vec!["10.0.0.1".parse().unwrap(), "127.0.0.1".parse().unwrap(),]
         );
+    }
+
+    #[test]
+    fn trusted_proxy_cidr_ipv4_matches_boundaries() {
+        let range: TrustedProxyRange = "10.2.0.0/16".parse().unwrap();
+        assert!(range.contains("10.2.0.0".parse().unwrap()));
+        assert!(range.contains("10.2.255.255".parse().unwrap()));
+        assert!(!range.contains("10.1.255.255".parse().unwrap()));
+        assert!(!range.contains("10.3.0.0".parse().unwrap()));
+
+        let any: TrustedProxyRange = "0.0.0.0/0".parse().unwrap();
+        assert!(any.contains("0.0.0.0".parse().unwrap()));
+        assert!(any.contains("255.255.255.255".parse().unwrap()));
+
+        let host: TrustedProxyRange = "192.0.2.8/32".parse().unwrap();
+        assert!(host.contains("192.0.2.8".parse().unwrap()));
+        assert!(!host.contains("192.0.2.9".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxy_cidr_ipv6_matches_boundaries() {
+        let range: TrustedProxyRange = "fd00::/8".parse().unwrap();
+        assert!(range.contains("fd00::".parse().unwrap()));
+        assert!(range.contains("fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()));
+        assert!(!range.contains("fcff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()));
+        assert!(!range.contains("fe00::".parse().unwrap()));
+
+        let any: TrustedProxyRange = "::/0".parse().unwrap();
+        assert!(any.contains("::".parse().unwrap()));
+        assert!(any.contains("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff".parse().unwrap()));
+
+        let host: TrustedProxyRange = "2001:db8::7/128".parse().unwrap();
+        assert!(host.contains("2001:db8::7".parse().unwrap()));
+        assert!(!host.contains("2001:db8::8".parse().unwrap()));
+        assert!(!host.contains("192.0.2.7".parse().unwrap()));
+    }
+
+    #[test]
+    fn trusted_proxy_ipv4_ranges_match_ipv4_mapped_ipv6_addresses() {
+        let range: TrustedProxyRange = "10.0.0.0/8".parse().unwrap();
+        assert!(range.contains("::ffff:10.2.10.22".parse().unwrap()));
+
+        let mapped_range: TrustedProxyRange = "::ffff:10.0.0.0/104".parse().unwrap();
+        assert_eq!(mapped_range, range);
+        assert!(mapped_range.contains("10.255.255.255".parse().unwrap()));
+        assert!(!mapped_range.contains("11.0.0.0".parse().unwrap()));
+
+        let mapped_host: TrustedProxyRange = "::ffff:10.2.10.22".parse().unwrap();
+        assert_eq!(mapped_host, "10.2.10.22/32".parse().unwrap());
+    }
+
+    #[test]
+    fn trusted_proxy_cidr_parser_drops_malformed_prefixes() {
+        let parsed = parse_trusted_proxy_ips(Some(
+            "10.0.0.0/33,10.0.0.0/not-a-prefix,10.0.0.0/-1,::/129,::ffff:10.0.0.0/95,10.0.0.0/8/4,10.0.0.0/8"
+                .to_string(),
+        ));
+        assert_eq!(parsed, vec!["10.0.0.0/8".parse().unwrap()]);
     }
 
     #[test]

@@ -19,6 +19,7 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
+use crate::config::{TrustedProxyRange, normalize_ip_address};
 use crate::errors::AppError;
 use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode};
 
@@ -408,7 +409,20 @@ pub struct DeviceCodeRateLimiters {
     pub per_ip: SharedPerIpRateLimiter,
     pub per_pubkey: SharedPerPubkeyRateLimiter,
     pub db: Option<Database>,
-    pub trusted_proxies: Arc<Vec<IpAddr>>,
+    pub trusted_proxies: Arc<Vec<TrustedProxyRange>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClientIpAttribution {
+    Verified,
+    Unverified,
+    Unavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ResolvedClientIp {
+    pub ip: IpAddr,
+    pub attribution: ClientIpAttribution,
 }
 
 /// Per-message edit limiter keyed by upstream platform message ID.
@@ -596,7 +610,7 @@ pub fn enforce_public_ip_rate_limit(
     limiter: &SharedPerIpRateLimiter,
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
-    trusted_proxies: &[IpAddr],
+    trusted_proxies: &[TrustedProxyRange],
     path: &str,
 ) -> Result<Option<IpAddr>, AppError> {
     let Some(client_ip) = resolve_client_ip_for_rate_limit(headers, peer, trusted_proxies) else {
@@ -619,8 +633,8 @@ pub fn enforce_public_ip_rate_limit(
     Ok(Some(client_ip))
 }
 
-/// Resolve the client IP for per-IP rate-limit keying behind a
-/// configurable trusted-proxy allowlist.
+/// Resolve a client IP using only forwarded headers authenticated by a
+/// configured trusted-proxy allowlist.
 ///
 /// Most deployments put NyxID behind a reverse proxy (nginx, AWS ALB,
 /// Fly.io, etc.); every request's TCP peer is then the proxy itself,
@@ -642,83 +656,198 @@ pub fn enforce_public_ip_rate_limit(
 ///     `X-Forwarded-For` — the header is ignored so bypass is
 ///     impossible.
 ///
-/// `X-Forwarded-For` is read left-to-right per the de-facto standard:
-/// the leftmost entry is the originating client, each subsequent
-/// entry is a proxy closer to the server. We take the leftmost valid
-/// IP, matching the behavior of `extract_ip` for audit logging. Only
-/// entries that parse as `IpAddr` are accepted; malformed values fall
-/// through to the peer.
 pub fn resolve_client_ip_for_rate_limit(
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
-    trusted_proxies: &[IpAddr],
+    trusted_proxies: &[TrustedProxyRange],
 ) -> Option<IpAddr> {
-    let peer_ip = peer.map(|p| p.ip());
-
-    // Peer must be a trusted proxy before we honor any forwarded
-    // header. Empty allowlist => never trusted, preserving the
-    // pre-change "peer IP wins" behavior.
-    let peer_is_trusted = peer_ip
-        .as_ref()
-        .map(|ip| trusted_proxies.contains(ip))
-        .unwrap_or(false);
-
-    if peer_is_trusted {
-        if let Some(ip) = headers
-            .get("x-forwarded-for")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .and_then(|s| s.parse::<IpAddr>().ok())
-        {
-            return Some(ip);
-        }
-
-        if let Some(ip) = headers
-            .get("x-real-ip")
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .and_then(|s| s.parse::<IpAddr>().ok())
-        {
-            return Some(ip);
-        }
-    }
-
-    peer_ip
+    resolve_client_ip(headers, peer, trusted_proxies).map(|resolved| resolved.ip)
 }
 
-/// Extract the client IP address from the request.
-/// Checks X-Forwarded-For, X-Real-IP headers, then falls back to a default.
+pub fn resolve_client_ip(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    trusted_proxies: &[TrustedProxyRange],
+) -> Option<ResolvedClientIp> {
+    let peer_ip = peer.map(|peer| normalize_ip_address(peer.ip()));
+
+    warn_if_proxy_attribution_is_collapsed(peer_ip, trusted_proxies);
+
+    let peer_is_trusted = peer_ip.is_some_and(|ip| is_trusted_proxy(ip, trusted_proxies));
+
+    if peer_is_trusted {
+        if let Some(ip) = header_ip(headers, "cf-connecting-ip") {
+            return Some(attributed_forwarded_ip(ip));
+        }
+
+        if let Some(ip) = rightmost_untrusted_xff(headers, trusted_proxies) {
+            return Some(attributed_forwarded_ip(ip));
+        }
+
+        if let Some(ip) = header_ip(headers, "x-real-ip") {
+            return Some(attributed_forwarded_ip(ip));
+        }
+    }
+
+    peer_ip.map(|ip| ResolvedClientIp {
+        ip,
+        attribution: classify_unverified_ip(ip),
+    })
+}
+
+/// Resolve rate-limit and audit IPs with a compatibility fallback for the
+/// two legacy surfaces that historically trusted forwarded headers.
 ///
-/// TODO(SEC-2): X-Forwarded-For and X-Real-IP headers can be spoofed by
-/// clients, allowing rate limit bypass. In production, either:
-/// 1. Configure the reverse proxy to strip/override client-supplied headers
-///    and only trust headers from known proxy IPs, or
-/// 2. Use Axum's `ConnectInfo<SocketAddr>` to get the real peer address
-///    and only fall back to forwarded headers when the peer is a trusted proxy.
-///    Document the required reverse proxy configuration in DEPLOYMENT.md.
-fn extract_client_ip(request: &Request<Body>) -> IpAddr {
-    // Try X-Forwarded-For first
-    if let Some(forwarded_for) = request.headers().get("x-forwarded-for")
-        && let Ok(value) = forwarded_for.to_str()
-        && let Some(first_ip) = value.split(',').next()
-        && let Ok(ip) = first_ip.trim().parse::<IpAddr>()
-    {
-        return ip;
+/// When no proxy ranges are configured this preserves the old XFF-first
+/// behavior. As soon as the allowlist is non-empty it uses the strict trusted
+/// resolver above, so forwarded headers from an untrusted peer are ignored.
+pub fn resolve_client_ip_with_legacy_fallback(
+    headers: &HeaderMap,
+    peer: Option<SocketAddr>,
+    trusted_proxies: &[TrustedProxyRange],
+) -> Option<ResolvedClientIp> {
+    if trusted_proxies.is_empty() {
+        let peer_ip = peer.map(|address| normalize_ip_address(address.ip()));
+        warn_if_proxy_attribution_is_collapsed(peer_ip, trusted_proxies);
+        let ip = leftmost_xff(headers)
+            .or_else(|| header_ip(headers, "x-real-ip"))
+            .or(peer_ip)?;
+        return Some(ResolvedClientIp {
+            ip,
+            attribution: classify_unverified_ip(ip),
+        });
     }
 
-    // Try X-Real-IP
-    if let Some(real_ip) = request.headers().get("x-real-ip")
-        && let Ok(value) = real_ip.to_str()
-        && let Ok(ip) = value.trim().parse::<IpAddr>()
-    {
-        return ip;
+    resolve_client_ip(headers, peer, trusted_proxies)
+}
+
+pub fn is_trusted_proxy(ip: IpAddr, trusted_proxies: &[TrustedProxyRange]) -> bool {
+    let ip = normalize_ip_address(ip);
+    trusted_proxies.iter().any(|range| range.contains(ip))
+}
+
+pub fn is_global_unicast(ip: IpAddr) -> bool {
+    let ip = normalize_ip_address(ip);
+    match ip {
+        IpAddr::V4(address) => {
+            let [a, b, c, _] = address.octets();
+            !(a == 0
+                || a == 10
+                || a == 127
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 192 && b == 0 && c == 2)
+                || (a == 192 && b == 88 && c == 99)
+                || (a == 192 && b == 168)
+                || (a == 198 && (b == 18 || b == 19))
+                || (a == 198 && b == 51 && c == 100)
+                || (a == 203 && b == 0 && c == 113)
+                || a >= 224)
+        }
+        IpAddr::V6(address) => {
+            let segments = address.segments();
+            // Current global-unicast allocation is 2000::/3. Documentation
+            // addresses remain non-evidence even though they sit in that range.
+            (segments[0] & 0xe000) == 0x2000 && !(segments[0] == 0x2001 && segments[1] == 0x0db8)
+        }
+    }
+}
+
+fn attributed_forwarded_ip(ip: IpAddr) -> ResolvedClientIp {
+    let ip = normalize_ip_address(ip);
+    ResolvedClientIp {
+        ip,
+        attribution: if is_global_unicast(ip) {
+            ClientIpAttribution::Verified
+        } else {
+            ClientIpAttribution::Unavailable
+        },
+    }
+}
+
+fn classify_unverified_ip(ip: IpAddr) -> ClientIpAttribution {
+    if is_global_unicast(ip) {
+        ClientIpAttribution::Unverified
+    } else {
+        ClientIpAttribution::Unavailable
+    }
+}
+
+fn header_ip(headers: &HeaderMap, name: &'static str) -> Option<IpAddr> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && !value.contains(','))
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .map(normalize_ip_address)
+}
+
+fn leftmost_xff(headers: &HeaderMap) -> Option<IpAddr> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .map(normalize_ip_address)
+}
+
+fn rightmost_untrusted_xff(
+    headers: &HeaderMap,
+    trusted_proxies: &[TrustedProxyRange],
+) -> Option<IpAddr> {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())?
+        .split(',')
+        .rev()
+        .filter_map(|value| {
+            value
+                .trim()
+                .parse::<IpAddr>()
+                .ok()
+                .map(normalize_ip_address)
+        })
+        .find(|ip| !is_trusted_proxy(*ip, trusted_proxies))
+}
+
+pub(crate) fn warn_if_proxy_attribution_is_collapsed(
+    peer_ip: Option<IpAddr>,
+    trusted_proxies: &[TrustedProxyRange],
+) {
+    static WARNED: OnceLock<()> = OnceLock::new();
+    if trusted_proxies.is_empty() && peer_ip.is_some_and(|ip| !is_global_unicast(ip)) {
+        WARNED.get_or_init(|| {
+            tracing::warn!(
+                "Request peer is private or loopback while TRUSTED_PROXY_IPS is empty; client IP attribution and per-IP rate limiting may be collapsing to the proxy address. Configure TRUSTED_PROXY_IPS with only trusted proxy addresses or CIDR ranges."
+            );
+        });
+    }
+}
+
+/// Extract the global rate-limit key. An empty proxy allowlist deliberately
+/// preserves the historical XFF/X-Real-IP/loopback order for deployment
+/// compatibility. Configuring any trusted range switches this path to the
+/// spoof-resistant resolver and its TCP-peer trust gate.
+fn extract_client_ip(request: &Request<Body>, trusted_proxies: &[TrustedProxyRange]) -> IpAddr {
+    let peer = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(address)| *address);
+    if trusted_proxies.is_empty() {
+        warn_if_proxy_attribution_is_collapsed(peer.map(|address| address.ip()), trusted_proxies);
+        return leftmost_xff(request.headers())
+            .or_else(|| header_ip(request.headers(), "x-real-ip"))
+            .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     }
 
-    // Fallback to loopback (in production, the reverse proxy should always set headers)
-    IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+    resolve_client_ip(request.headers(), peer, trusted_proxies)
+        .map(|resolved| resolved.ip)
+        .unwrap_or(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
 }
 
 /// Axum middleware that enforces per-IP rate limiting with global fallback.
@@ -739,6 +868,7 @@ fn is_rate_limit_exempt(path: &str) -> bool {
 pub async fn rate_limit_middleware(
     Extension(per_ip_limiter): Extension<SharedPerIpRateLimiter>,
     Extension(global_limiter): Extension<SharedRateLimiter>,
+    Extension(trusted_proxies): Extension<Arc<Vec<TrustedProxyRange>>>,
     request: Request<Body>,
     next: Next,
 ) -> Result<Response, AppError> {
@@ -749,7 +879,7 @@ pub async fn rate_limit_middleware(
         return Ok(next.run(request).await);
     }
 
-    let client_ip = extract_client_ip(&request);
+    let client_ip = extract_client_ip(&request, trusted_proxies.as_slice());
 
     // Check per-IP rate limit first
     if !per_ip_limiter.check(client_ip) {
@@ -946,7 +1076,7 @@ mod tests {
             .header("x-forwarded-for", "203.0.113.50, 70.41.3.18")
             .body(Body::empty())
             .unwrap();
-        let ip = extract_client_ip(&req);
+        let ip = extract_client_ip(&req, &[]);
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 50)));
     }
 
@@ -956,14 +1086,18 @@ mod tests {
             .header("x-real-ip", "198.51.100.22")
             .body(Body::empty())
             .unwrap();
-        let ip = extract_client_ip(&req);
+        let ip = extract_client_ip(&req, &[]);
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(198, 51, 100, 22)));
     }
 
     #[test]
     fn extract_client_ip_fallback_to_localhost() {
-        let req = Request::builder().body(Body::empty()).unwrap();
-        let ip = extract_client_ip(&req);
+        let mut req = Request::builder().body(Body::empty()).unwrap();
+        req.extensions_mut().insert(ConnectInfo(SocketAddr::new(
+            IpAddr::V4(Ipv4Addr::new(10, 2, 10, 22)),
+            443,
+        )));
+        let ip = extract_client_ip(&req, &[]);
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 
@@ -973,7 +1107,7 @@ mod tests {
             .header("x-forwarded-for", "not-an-ip")
             .body(Body::empty())
             .unwrap();
-        let ip = extract_client_ip(&req);
+        let ip = extract_client_ip(&req, &[]);
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 
@@ -984,8 +1118,22 @@ mod tests {
             .header("x-real-ip", "5.6.7.8")
             .body(Body::empty())
             .unwrap();
-        let ip = extract_client_ip(&req);
+        let ip = extract_client_ip(&req, &[]);
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)));
+    }
+
+    #[test]
+    fn extract_client_ip_switches_to_spoof_resistant_resolution_when_configured() {
+        let peer = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(10, 2, 10, 22)), 443);
+        let mut req = Request::builder()
+            .header("x-forwarded-for", "1.2.3.4, 8.8.8.8, 10.2.10.22")
+            .body(Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(ConnectInfo(peer));
+
+        let ip = extract_client_ip(&req, &["10.0.0.0/8".parse().unwrap()]);
+
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)));
     }
 
     #[test]
@@ -1163,6 +1311,10 @@ mod tests {
         SocketAddr::new(ip, 4242)
     }
 
+    fn trusted(value: &str) -> TrustedProxyRange {
+        value.parse().unwrap()
+    }
+
     #[test]
     fn resolve_client_ip_falls_back_to_peer_when_no_trusted_proxies() {
         let peer_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
@@ -1177,36 +1329,85 @@ mod tests {
     #[test]
     fn resolve_client_ip_honors_xff_when_peer_is_trusted_proxy() {
         let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
-        let client_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
+        let client_ip = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-forwarded-for",
             format!("{client_ip}, 10.0.0.1").parse().unwrap(),
         );
-        let resolved =
-            resolve_client_ip_for_rate_limit(&headers, Some(socket(proxy_ip)), &[proxy_ip]);
-        assert_eq!(resolved, Some(client_ip));
+        let ranges = [trusted("10.0.0.0/8")];
+        let resolved = resolve_client_ip(&headers, Some(socket(proxy_ip)), &ranges);
+        assert_eq!(resolved.map(|value| value.ip), Some(client_ip));
+        assert_eq!(
+            resolved.map(|value| value.attribution),
+            Some(ClientIpAttribution::Verified)
+        );
+    }
+
+    #[test]
+    fn resolve_client_ip_prefers_cloudflare_connecting_ip() {
+        let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "8.8.4.4".parse().unwrap());
+        headers.insert("x-forwarded-for", "1.2.3.4, 9.9.9.9".parse().unwrap());
+        headers.insert("x-real-ip", "4.4.4.4".parse().unwrap());
+        let ranges = [trusted("10.0.0.0/8")];
+
+        let resolved = resolve_client_ip(&headers, Some(socket(proxy_ip)), &ranges).unwrap();
+        assert_eq!(resolved.ip, "8.8.4.4".parse::<IpAddr>().unwrap());
+        assert_eq!(resolved.attribution, ClientIpAttribution::Verified);
+    }
+
+    #[test]
+    fn resolve_client_ip_trusts_an_ipv4_mapped_proxy_peer() {
+        let proxy_ip = "::ffff:10.2.10.22".parse::<IpAddr>().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "8.8.8.8".parse().unwrap());
+        let ranges = [trusted("10.0.0.0/8")];
+
+        let resolved = resolve_client_ip(&headers, Some(socket(proxy_ip)), &ranges).unwrap();
+        assert_eq!(resolved.ip, "8.8.8.8".parse::<IpAddr>().unwrap());
+        assert_eq!(resolved.attribution, ClientIpAttribution::Verified);
+    }
+
+    #[test]
+    fn resolve_client_ip_normalizes_a_public_ipv4_mapped_header() {
+        let proxy_ip = "10.2.10.22".parse::<IpAddr>().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "::ffff:8.8.8.8".parse().unwrap());
+        let ranges = [trusted("10.0.0.0/8")];
+
+        let resolved = resolve_client_ip(&headers, Some(socket(proxy_ip)), &ranges).unwrap();
+        assert_eq!(resolved.ip, "8.8.8.8".parse::<IpAddr>().unwrap());
+        assert_eq!(resolved.attribution, ClientIpAttribution::Verified);
+        assert!(is_global_unicast("::ffff:8.8.8.8".parse().unwrap()));
     }
 
     #[test]
     fn resolve_client_ip_honors_x_real_ip_fallback_when_trusted() {
         let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
-        let client_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9));
+        let client_ip = IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9));
         let mut headers = HeaderMap::new();
         headers.insert("x-real-ip", client_ip.to_string().parse().unwrap());
-        let resolved =
-            resolve_client_ip_for_rate_limit(&headers, Some(socket(proxy_ip)), &[proxy_ip]);
+        let resolved = resolve_client_ip_for_rate_limit(
+            &headers,
+            Some(socket(proxy_ip)),
+            &[trusted("10.0.0.0/8")],
+        );
         assert_eq!(resolved, Some(client_ip));
     }
 
     #[test]
     fn resolve_client_ip_ignores_xff_when_peer_not_in_allowlist() {
         let peer_ip = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 99));
-        let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 3));
         let mut headers = HeaderMap::new();
+        headers.insert("cf-connecting-ip", "8.8.8.8".parse().unwrap());
         headers.insert("x-forwarded-for", "198.51.100.55".parse().unwrap());
-        let resolved =
-            resolve_client_ip_for_rate_limit(&headers, Some(socket(peer_ip)), &[proxy_ip]);
+        let resolved = resolve_client_ip_for_rate_limit(
+            &headers,
+            Some(socket(peer_ip)),
+            &[trusted("10.0.0.0/8")],
+        );
         assert_eq!(resolved, Some(peer_ip));
     }
 
@@ -1215,22 +1416,106 @@ mod tests {
         let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 4));
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "not-an-ip".parse().unwrap());
-        let resolved =
-            resolve_client_ip_for_rate_limit(&headers, Some(socket(proxy_ip)), &[proxy_ip]);
+        let resolved = resolve_client_ip_for_rate_limit(
+            &headers,
+            Some(socket(proxy_ip)),
+            &[trusted("10.0.0.0/8")],
+        );
         assert_eq!(resolved, Some(proxy_ip));
     }
 
     #[test]
-    fn resolve_client_ip_takes_leftmost_xff_entry() {
+    fn resolve_client_ip_takes_rightmost_untrusted_xff_entry() {
         let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-forwarded-for",
-            "198.51.100.11, 192.0.2.1, 10.0.0.5".parse().unwrap(),
+            "1.2.3.4, 8.8.8.8, 10.0.0.5".parse().unwrap(),
         );
-        let resolved =
-            resolve_client_ip_for_rate_limit(&headers, Some(socket(proxy_ip)), &[proxy_ip]);
-        assert_eq!(resolved, Some(IpAddr::V4(Ipv4Addr::new(198, 51, 100, 11))));
+        let resolved = resolve_client_ip_for_rate_limit(
+            &headers,
+            Some(socket(proxy_ip)),
+            &[trusted("10.0.0.0/8")],
+        );
+        assert_eq!(resolved, Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+    }
+
+    #[test]
+    fn resolve_client_ip_skips_ipv4_mapped_trusted_xff_hops() {
+        let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "1.2.3.4, 8.8.8.8, ::ffff:10.0.0.5".parse().unwrap(),
+        );
+        let resolved = resolve_client_ip_for_rate_limit(
+            &headers,
+            Some(socket(proxy_ip)),
+            &[trusted("10.0.0.0/8")],
+        );
+        assert_eq!(resolved, Some(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+    }
+
+    #[test]
+    fn xff_cloudflare_fallback_requires_every_proxy_hop_to_be_trusted() {
+        let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 2, 10, 22));
+        let cloudflare_edge = "104.16.10.20".parse::<IpAddr>().unwrap();
+        let real_client = "8.8.8.8".parse::<IpAddr>().unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            "1.2.3.4, 8.8.8.8, 104.16.10.20".parse().unwrap(),
+        );
+
+        let incomplete =
+            resolve_client_ip(&headers, Some(socket(proxy_ip)), &[trusted("10.0.0.0/8")]).unwrap();
+        assert_eq!(incomplete.ip, cloudflare_edge);
+        assert_eq!(incomplete.attribution, ClientIpAttribution::Verified);
+
+        let complete = resolve_client_ip(
+            &headers,
+            Some(socket(proxy_ip)),
+            &[trusted("10.0.0.0/8"), trusted("104.16.0.0/13")],
+        )
+        .unwrap();
+        assert_eq!(complete.ip, real_client);
+        assert_eq!(complete.attribution, ClientIpAttribution::Verified);
+    }
+
+    #[test]
+    fn legacy_fallback_preserves_leftmost_xff_until_proxy_trust_is_configured() {
+        let peer_ip = IpAddr::V4(Ipv4Addr::new(10, 2, 10, 22));
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", "1.2.3.4, 8.8.8.8".parse().unwrap());
+
+        let resolved = resolve_client_ip_with_legacy_fallback(&headers, Some(socket(peer_ip)), &[]);
+        assert_eq!(
+            resolved.map(|value| value.ip),
+            Some("1.2.3.4".parse().unwrap())
+        );
+        assert_eq!(
+            resolved.map(|value| value.attribution),
+            Some(ClientIpAttribution::Unverified)
+        );
+    }
+
+    #[test]
+    fn private_and_special_addresses_are_unavailable() {
+        for value in [
+            "127.0.0.1",
+            "10.2.10.22",
+            "169.254.1.2",
+            "100.64.0.1",
+            "::1",
+            "fe80::1",
+            "fd00::1",
+        ] {
+            let ip = value.parse::<IpAddr>().unwrap();
+            assert!(!is_global_unicast(ip), "{value}");
+            assert_eq!(classify_unverified_ip(ip), ClientIpAttribution::Unavailable);
+        }
+        assert!(is_global_unicast("8.8.8.8".parse().unwrap()));
+        assert!(is_global_unicast("2606:4700:4700::1111".parse().unwrap()));
     }
 
     #[test]
@@ -1241,11 +1526,7 @@ mod tests {
         // bucket entirely).
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "198.51.100.4".parse().unwrap());
-        let resolved = resolve_client_ip_for_rate_limit(
-            &headers,
-            None,
-            &[IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))],
-        );
+        let resolved = resolve_client_ip_for_rate_limit(&headers, None, &[trusted("10.0.0.1")]);
         assert!(resolved.is_none());
     }
 
@@ -1257,7 +1538,7 @@ mod tests {
             per_ip: Arc::new(PerIpRateLimiter::new(0, 60)),
             per_pubkey: Arc::new(PerPubkeyRateLimiter::new()),
             db: None,
-            trusted_proxies: Arc::new(vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))]),
+            trusted_proxies: Arc::new(vec![trusted("10.0.0.1")]),
         };
 
         let result = enforce_device_code_ip_rate_limit(
@@ -1281,7 +1562,7 @@ mod tests {
             per_ip: Arc::new(PerIpRateLimiter::new(1, 60)),
             per_pubkey: Arc::new(PerPubkeyRateLimiter::new()),
             db: None,
-            trusted_proxies: Arc::new(vec![proxy_ip]),
+            trusted_proxies: Arc::new(vec![trusted("10.0.0.0/8")]),
         };
 
         let first = enforce_device_code_ip_rate_limit(
