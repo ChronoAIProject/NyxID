@@ -780,6 +780,7 @@ mod tests {
             jwt_relay_access_ttl_secs: 300,
             jwt_assistant_forward_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
+            delegation_session_max_secs: 3600,
             release_integrity_manifest_url: None,
             credential_accept_dist_dir: "frontend/dist/credential-accept".to_string(),
             google_client_id: google_id.map(String::from),

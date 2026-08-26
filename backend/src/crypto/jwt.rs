@@ -63,6 +63,18 @@ pub struct Claims {
     /// Flag indicating this is a delegated access token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delegated: Option<bool>,
+    /// Delegation issuer class. `service` identifies proxy-injected tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_kind: Option<String>,
+    /// Exact UserService row through which a service token was minted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_user_service_id: Option<String>,
+    /// Absolute Unix expiry for the refreshable service delegation session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_session_exp: Option<i64>,
+    /// Agent API key that originated the proxied request, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegation_origin_api_key_id: Option<String>,
     /// True if this token was issued to a service account.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sa: Option<bool>,
@@ -451,6 +463,10 @@ fn generate_access_token_for_client(
         sid: rbac.and_then(|r| r.sid.clone()),
         act: None,
         delegated: None,
+        delegation_kind: None,
+        delegation_user_service_id: None,
+        delegation_session_exp: None,
+        delegation_origin_api_key_id: None,
         sa: None,
         cnf,
         relay: None,
@@ -535,6 +551,10 @@ pub fn generate_assistant_forward_access_token(
         sid: None,
         act: None,
         delegated: None,
+        delegation_kind: None,
+        delegation_user_service_id: None,
+        delegation_session_exp: None,
+        delegation_origin_api_key_id: None,
         sa: None,
         cnf: None,
         relay: None,
@@ -604,6 +624,10 @@ pub fn generate_relay_access_token(
         sid: rbac.and_then(|r| r.sid.clone()),
         act: None,
         delegated: None,
+        delegation_kind: None,
+        delegation_user_service_id: None,
+        delegation_session_exp: None,
+        delegation_origin_api_key_id: None,
         sa: None,
         cnf: None,
         relay: Some(true),
@@ -716,6 +740,10 @@ pub fn generate_refresh_token(
         sid: None,
         act: None,
         delegated: None,
+        delegation_kind: None,
+        delegation_user_service_id: None,
+        delegation_session_exp: None,
+        delegation_origin_api_key_id: None,
         sa: None,
         cnf: None,
         relay: None,
@@ -770,6 +798,10 @@ pub fn reissue_refresh_token(
         sid: None,
         act: None,
         delegated: None,
+        delegation_kind: None,
+        delegation_user_service_id: None,
+        delegation_session_exp: None,
+        delegation_origin_api_key_id: None,
         sa: None,
         cnf: None,
         relay: None,
@@ -801,6 +833,71 @@ pub const DELEGATED_TOKEN_TTL_SECS: i64 = 300;
 /// Downstream services can refresh these tokens via `POST /api/v1/delegation/refresh`
 /// for long-running/agentic workflows.
 pub const MCP_DELEGATION_TOKEN_TTL_SECS: i64 = 300;
+
+/// Context fixed at the first proxy mint and preserved verbatim on refresh.
+pub struct ServiceDelegationContext<'a> {
+    pub issued_at: i64,
+    pub user_service_id: &'a str,
+    pub session_exp: i64,
+    pub origin_api_key_id: Option<&'a str>,
+}
+
+/// Generate a proxy-injected service delegation token.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_service_delegation_token(
+    keys: &JwtKeys,
+    config: &AppConfig,
+    user_id: &Uuid,
+    scope: &str,
+    acting_service_slug: &str,
+    expires_at: i64,
+    restrictions: Option<&TokenRestrictionClaims>,
+    context: ServiceDelegationContext<'_>,
+) -> Result<String, AppError> {
+    let claims = Claims {
+        sub: user_id.to_string(),
+        iss: config.jwt_issuer.clone(),
+        aud: config.base_url.clone(),
+        exp: expires_at,
+        iat: context.issued_at,
+        jti: Uuid::new_v4().to_string(),
+        scope: scope.to_string(),
+        token_type: "access".to_string(),
+        client_id: None,
+        roles: None,
+        groups: None,
+        permissions: None,
+        sid: None,
+        act: Some(ActorClaim {
+            sub: acting_service_slug.to_string(),
+        }),
+        delegated: Some(true),
+        delegation_kind: Some("service".to_string()),
+        delegation_user_service_id: Some(context.user_service_id.to_string()),
+        delegation_session_exp: Some(context.session_exp),
+        delegation_origin_api_key_id: context.origin_api_key_id.map(String::from),
+        sa: None,
+        cnf: None,
+        relay: None,
+        relay_api_key_id: None,
+        relay_api_key_name: None,
+        relay_allowed_service_ids: None,
+        relay_allowed_node_ids: None,
+        relay_allow_all_services: None,
+        relay_allow_all_nodes: None,
+        resources: restrictions.and_then(|r| r.resources.as_ref().cloned()),
+        allowed_service_ids: restrictions.and_then(|r| r.allowed_service_ids.as_ref().cloned()),
+        allow_all_services: restrictions.and_then(|r| r.allow_all_services),
+        allowed_node_ids: restrictions.and_then(|r| r.allowed_node_ids.as_ref().cloned()),
+        allow_all_nodes: restrictions.and_then(|r| r.allow_all_nodes),
+        assistant_forward: None,
+    };
+
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = Some(keys.kid.clone());
+    encode(&header, &claims, &keys.encoding)
+        .map_err(|e| AppError::Internal(format!("Failed to encode service delegation token: {e}")))
+}
 
 /// Generate a delegated access token (RFC 8693).
 ///
@@ -866,6 +963,10 @@ pub fn generate_delegated_access_token_for_client(
             sub: acting_client_id.to_string(),
         }),
         delegated: Some(true),
+        delegation_kind: None,
+        delegation_user_service_id: None,
+        delegation_session_exp: None,
+        delegation_origin_api_key_id: None,
         sa: None,
         cnf: None,
         relay: None,
@@ -1012,6 +1113,10 @@ pub fn generate_service_account_token(
         sid: None,
         act: None,
         delegated: None,
+        delegation_kind: None,
+        delegation_user_service_id: None,
+        delegation_session_exp: None,
+        delegation_origin_api_key_id: None,
         sa: Some(true),
         cnf: None,
         relay: None,
@@ -1259,6 +1364,7 @@ mod tests {
             jwt_relay_access_ttl_secs: 300,
             jwt_assistant_forward_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
+            delegation_session_max_secs: 3600,
             release_integrity_manifest_url: None,
             credential_accept_dist_dir: "frontend/dist/credential-accept".to_string(),
             google_client_id: None,
@@ -1642,6 +1748,10 @@ mod tests {
             sid: None,
             act: None,
             delegated: None,
+            delegation_kind: None,
+            delegation_user_service_id: None,
+            delegation_session_exp: None,
+            delegation_origin_api_key_id: None,
             sa: None,
             cnf: None,
             relay: None,
@@ -1760,6 +1870,10 @@ mod tests {
             sid: None,
             act: None,
             delegated: None,
+            delegation_kind: Some("service".to_string()),
+            delegation_user_service_id: Some("service-123".to_string()),
+            delegation_session_exp: Some(1_700_003_600),
+            delegation_origin_api_key_id: Some("key-123".to_string()),
             sa: None,
             cnf: None,
             relay: None,
@@ -1780,6 +1894,39 @@ mod tests {
         let restored: Claims = serde_json::from_str(&json).unwrap();
         assert_eq!(claims.sub, restored.sub);
         assert_eq!(claims.token_type, restored.token_type);
+        assert_eq!(claims.delegation_kind, restored.delegation_kind);
+        assert_eq!(
+            claims.delegation_user_service_id,
+            restored.delegation_user_service_id
+        );
+        assert_eq!(
+            claims.delegation_session_exp,
+            restored.delegation_session_exp
+        );
+        assert_eq!(
+            claims.delegation_origin_api_key_id,
+            restored.delegation_origin_api_key_id
+        );
+    }
+
+    #[test]
+    fn legacy_claims_deserialize_without_service_delegation_fields() {
+        let claims: Claims = serde_json::from_value(serde_json::json!({
+            "sub": "user-123",
+            "iss": "nyxid",
+            "aud": "http://localhost:3001",
+            "exp": 1_700_000_000_i64,
+            "iat": 1_699_999_000_i64,
+            "jti": "legacy-jti",
+            "scope": "llm:proxy",
+            "token_type": "access"
+        }))
+        .expect("legacy claims remain deserializable");
+
+        assert_eq!(claims.delegation_kind, None);
+        assert_eq!(claims.delegation_user_service_id, None);
+        assert_eq!(claims.delegation_session_exp, None);
+        assert_eq!(claims.delegation_origin_api_key_id, None);
     }
 
     #[test]
@@ -1878,6 +2025,10 @@ mod tests {
             session_id: None,
             scope: "llm:proxy".to_string(),
             acting_client_id: Some("test-client-id".to_string()),
+            delegation_kind: None,
+            delegation_user_service_id: None,
+            delegation_session_exp: None,
+            delegation_origin_api_key_id: None,
             oauth_client_id: None,
             token_jti: None,
             approval_owner_user_id: None,

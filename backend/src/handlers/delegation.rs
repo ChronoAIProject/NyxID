@@ -3,6 +3,7 @@ use axum::extract::State;
 use chrono::Utc;
 use mongodb::bson::doc;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -156,19 +157,32 @@ fn invalid_catalog_authority() -> AppError {
     AppError::Unauthorized("Delegated catalog authority is invalid or inactive".to_string())
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct DelegationRefreshResponse {
     pub access_token: String,
     pub token_type: String,
     pub expires_in: i64,
+    /// Seconds remaining before this delegation session can no longer refresh.
+    pub session_expires_in: i64,
     pub scope: String,
 }
 
 /// POST /api/v1/delegation/refresh
 ///
-/// Refresh a delegated access token. Only accepts delegated tokens
-/// (tokens with `act.sub` / `acting_client_id`). Issues a new delegation
-/// token with the same scope and acting client but a fresh 5-minute TTL.
+/// Refresh a delegated access token. Service delegations are bounded by an
+/// absolute session cap and live route authority; OAuth-client delegations
+/// retain their existing consent and scope revalidation.
+#[utoipa::path(
+    post,
+    path = "/api/v1/delegation/refresh",
+    tag = "Delegation",
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Delegation token refreshed", body = DelegationRefreshResponse),
+        (status = 401, description = "Token, user, origin key, or delegation session is no longer active", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Delegation route is revoked or the legacy service token cannot be refreshed", body = crate::errors::ErrorResponse)
+    )
+)]
 pub async fn refresh_delegation_token(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -181,6 +195,76 @@ pub async fn refresh_delegation_token(
 
     let user_id_str = auth_user.user_id.to_string();
 
+    let restrictions = crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(&auth_user);
+
+    if auth_user.delegation_kind.as_deref() == Some("service") {
+        let result = token_exchange_service::refresh_service_delegation_token(
+            &state.db,
+            &state.config,
+            &state.jwt_keys,
+            token_exchange_service::ServiceDelegationRefreshContext {
+                user_id: &user_id_str,
+                acting_service_slug: acting_client_id,
+                user_service_id: auth_user.delegation_user_service_id.as_deref(),
+                session_exp: auth_user.delegation_session_exp,
+                origin_api_key_id: auth_user.delegation_origin_api_key_id.as_deref(),
+                scope: &auth_user.scope,
+                restrictions: &restrictions,
+            },
+        )
+        .await;
+
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                audit_service::log_for_user(
+                    state.db.clone(),
+                    &auth_user,
+                    "delegation_refresh_denied",
+                    Some(serde_json::json!({
+                        "actor_kind": "service",
+                        "acting_service_slug": acting_client_id,
+                        "user_service_id": auth_user.delegation_user_service_id.as_deref(),
+                        "session_exp": auth_user.delegation_session_exp,
+                        "scope": &auth_user.scope,
+                        "reason": error.error_key(),
+                    })),
+                );
+                return Err(error);
+            }
+        };
+
+        emit_event(
+            state.telemetry.as_deref(),
+            &user_id_str,
+            auth_user.delegation_origin_api_key_id.as_deref(),
+            &tele,
+            TelemetryEvent::AuthDelegationRefreshed {
+                client_id: hash_short_id(acting_client_id),
+            },
+        );
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "delegation_token_refreshed",
+            Some(serde_json::json!({
+                "actor_kind": "service",
+                "acting_service_slug": acting_client_id,
+                "user_service_id": &result.user_service_id,
+                "session_exp": result.session_exp,
+                "scope": &result.scope,
+            })),
+        );
+
+        return Ok(Json(DelegationRefreshResponse {
+            access_token: result.access_token,
+            token_type: result.token_type,
+            expires_in: result.expires_in,
+            session_expires_in: result.session_expires_in,
+            scope: result.scope,
+        }));
+    }
+
     let result = token_exchange_service::refresh_delegation_token(
         &state.db,
         &state.config,
@@ -189,7 +273,7 @@ pub async fn refresh_delegation_token(
         acting_client_id,
         auth_user.oauth_client_id.as_deref(),
         &auth_user.scope,
-        &crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(&auth_user),
+        &restrictions,
     )
     .await?;
 
@@ -218,6 +302,7 @@ pub async fn refresh_delegation_token(
         access_token: result.access_token,
         token_type: result.token_type,
         expires_in: result.expires_in,
+        session_expires_in: result.expires_in,
         scope: result.scope,
     }))
 }
@@ -238,6 +323,7 @@ mod tests {
     use mongodb::event::EventHandler;
     use mongodb::event::command::CommandEvent;
     use tower::ServiceExt;
+    use utoipa::OpenApi;
     use uuid::Uuid;
 
     use crate::crypto::{jwt, token::hash_token};
@@ -305,6 +391,7 @@ mod tests {
         operation: mcp_service::ExactOperationViewOperation,
         operation_digest: String,
         provider_calls: Arc<AtomicUsize>,
+        injected_delegation_tokens: Arc<Mutex<Vec<String>>>,
         /// Every `Authorization` header the test router actually received, in
         /// order. Token-continuity assertions read this instead of re-reading
         /// the fixture field that produced the header.
@@ -377,6 +464,8 @@ mod tests {
         let provider_calls = Arc::new(AtomicUsize::new(0));
         let route_calls = provider_calls.clone();
         let fallback_calls = provider_calls.clone();
+        let injected_delegation_tokens = Arc::new(Mutex::new(Vec::new()));
+        let route_delegation_tokens = injected_delegation_tokens.clone();
         let provider_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind full-router provider spy");
@@ -387,10 +476,20 @@ mod tests {
                 Router::new()
                     .route(
                         "/items",
-                        get(move || {
+                        get(move |headers: axum::http::HeaderMap| {
                             let route_calls = route_calls.clone();
+                            let route_delegation_tokens = route_delegation_tokens.clone();
                             async move {
                                 route_calls.fetch_add(1, Ordering::SeqCst);
+                                if let Some(token) = headers
+                                    .get("x-nyxid-delegation-token")
+                                    .and_then(|value| value.to_str().ok())
+                                {
+                                    route_delegation_tokens
+                                        .lock()
+                                        .expect("injected delegation token log")
+                                        .push(token.to_string());
+                                }
                                 AxumJson(serde_json::json!({"ok": true}))
                             }
                         }),
@@ -581,6 +680,7 @@ mod tests {
             operation,
             operation_digest,
             provider_calls,
+            injected_delegation_tokens,
             sent_authorizations,
             provider,
             _node_rx: node_rx,
@@ -942,12 +1042,14 @@ mod tests {
             access_token: "eyJhbGciOi...".to_string(),
             token_type: "Bearer".to_string(),
             expires_in: 300,
+            session_expires_in: 1800,
             scope: "llm:proxy".to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["access_token"], "eyJhbGciOi...");
         assert_eq!(json["token_type"], "Bearer");
         assert_eq!(json["expires_in"], 300);
+        assert_eq!(json["session_expires_in"], 1800);
         assert_eq!(json["scope"], "llm:proxy");
     }
 
@@ -957,6 +1059,7 @@ mod tests {
             access_token: "token".to_string(),
             token_type: "Bearer".to_string(),
             expires_in: 900,
+            session_expires_in: 900,
             scope: "openid".to_string(),
         };
         let json = serde_json::to_value(&resp).unwrap();
@@ -965,8 +1068,327 @@ mod tests {
         assert!(obj.contains_key("access_token"));
         assert!(obj.contains_key("token_type"));
         assert!(obj.contains_key("expires_in"));
+        assert!(obj.contains_key("session_expires_in"));
         assert!(obj.contains_key("scope"));
-        assert_eq!(obj.len(), 4);
+        assert_eq!(obj.len(), 5);
+    }
+
+    #[test]
+    fn delegation_refresh_openapi_registers_session_field_and_denial_responses() {
+        let document = serde_json::to_value(crate::api_docs::ApiDoc::openapi()).unwrap();
+        let operation = &document["paths"]["/api/v1/delegation/refresh"]["post"];
+        assert!(operation.is_object());
+        assert!(operation["responses"].get("200").is_some());
+        assert!(operation["responses"].get("401").is_some());
+        assert!(operation["responses"].get("403").is_some());
+        assert!(
+            document["components"]["schemas"]["DelegationRefreshResponse"]["properties"]
+                .get("session_expires_in")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn service_delegation_refresh_is_audited_and_accepted_by_full_proxy_router() {
+        let fixture = setup_full_router_fixture("service_delegation_refresh_router").await;
+
+        let oauth_audit = audit_service::notify_on_audit_write_for_user(
+            "delegation_token_refreshed",
+            TEST_USER_ID,
+        );
+        let (oauth_status, oauth_body) = full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            "/api/v1/delegation/refresh",
+            &fixture.delegated_token,
+            None,
+        )
+        .await;
+        assert_eq!(
+            oauth_status,
+            StatusCode::OK,
+            "OAuth refresh regressed: {oauth_body}"
+        );
+        let oauth_refreshed = oauth_body["access_token"].as_str().unwrap();
+        let oauth_claims = jwt::verify_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            oauth_refreshed,
+        )
+        .expect("verify refreshed OAuth delegation");
+        assert_eq!(oauth_claims.delegation_kind, None);
+        assert_eq!(
+            oauth_body["session_expires_in"],
+            jwt::DELEGATED_TOKEN_TTL_SECS
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(2), oauth_audit)
+            .await
+            .expect("OAuth refresh audit timeout")
+            .expect("OAuth refresh audit sender dropped");
+
+        let legacy_token = jwt::generate_delegated_access_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &Uuid::parse_str(TEST_USER_ID).unwrap(),
+            "proxy",
+            "legacy-downstream-service",
+            jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+            None,
+        )
+        .expect("mint legacy proxy delegation");
+        let (legacy_status, legacy_body) = full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            "/api/v1/delegation/refresh",
+            &legacy_token,
+            None,
+        )
+        .await;
+        assert_eq!(legacy_status, StatusCode::FORBIDDEN);
+        assert_eq!(legacy_body["error"], "delegation_refresh_unsupported");
+        assert_eq!(legacy_body["error_code"], 11813);
+
+        let now = Utc::now().timestamp();
+        let past_cap_token = jwt::generate_service_delegation_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &Uuid::parse_str(TEST_USER_ID).unwrap(),
+            "proxy",
+            "expired-session-service",
+            now + jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+            None,
+            jwt::ServiceDelegationContext {
+                issued_at: now,
+                user_service_id: &fixture.user_service_id,
+                session_exp: now - 1,
+                origin_api_key_id: None,
+            },
+        )
+        .expect("mint signed token with elapsed session cap");
+        let (past_cap_status, past_cap_body) = full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            "/api/v1/delegation/refresh",
+            &past_cap_token,
+            None,
+        )
+        .await;
+        assert_eq!(past_cap_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(past_cap_body["error_code"], 11810);
+
+        let user_services = fixture.db.collection::<UserService>(USER_SERVICES);
+        user_services
+            .update_one(
+                mongodb::bson::doc! { "_id": &fixture.user_service_id },
+                mongodb::bson::doc! { "$set": {
+                    "inject_delegation_token": true,
+                    "delegation_token_scope": "proxy",
+                } },
+            )
+            .await
+            .expect("enable service delegation refresh on fixture route");
+        let user_service = user_services
+            .find_one(mongodb::bson::doc! { "_id": &fixture.user_service_id })
+            .await
+            .expect("load full-router user service")
+            .expect("full-router user service exists");
+        let catalog_id = user_service
+            .catalog_service_id
+            .as_deref()
+            .expect("fixture service is catalog-backed");
+        let catalog = fixture
+            .db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(mongodb::bson::doc! { "_id": catalog_id })
+            .await
+            .expect("load full-router catalog service")
+            .expect("full-router catalog service exists");
+        fixture
+            .db
+            .collection::<ServiceApprovalConfig>(
+                crate::models::service_approval_config::COLLECTION_NAME,
+            )
+            .update_many(
+                mongodb::bson::doc! {
+                    "user_id": TEST_USER_ID,
+                    "service_id": catalog_id,
+                },
+                mongodb::bson::doc! { "$set": { "approval_required": false } },
+            )
+            .await
+            .expect("disable approval prompt for proxy acceptance assertion");
+
+        let restrictions = jwt::TokenRestrictionClaims {
+            resources: Some(vec![format!(
+                "{}/api/v1/proxy/s/{}",
+                fixture.state.config.base_url, user_service.slug
+            )]),
+            allowed_service_ids: Some(vec![fixture.user_service_id.clone()]),
+            allow_all_services: Some(false),
+            allowed_node_ids: Some(Vec::new()),
+            allow_all_nodes: Some(false),
+        };
+        let now = Utc::now().timestamp();
+        let session_exp = now + fixture.state.config.delegation_session_max_secs;
+        let service_token = jwt::generate_service_delegation_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &Uuid::parse_str(TEST_USER_ID).unwrap(),
+            "proxy",
+            &catalog.slug,
+            now + jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+            Some(&restrictions),
+            jwt::ServiceDelegationContext {
+                issued_at: now,
+                user_service_id: &fixture.user_service_id,
+                session_exp,
+                origin_api_key_id: None,
+            },
+        )
+        .expect("mint refreshable full-router service delegation");
+        let original_claims = jwt::verify_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &service_token,
+        )
+        .unwrap();
+
+        let refreshed_audit = audit_service::notify_on_audit_write_for_user(
+            "delegation_token_refreshed",
+            TEST_USER_ID,
+        );
+        let (refresh_status, refresh_body) = full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            "/api/v1/delegation/refresh",
+            &service_token,
+            None,
+        )
+        .await;
+        assert_eq!(
+            refresh_status,
+            StatusCode::OK,
+            "service refresh failed: {refresh_body}"
+        );
+        assert_eq!(refresh_body["scope"], "proxy");
+        assert!(
+            refresh_body["session_expires_in"].as_i64().unwrap()
+                <= fixture.state.config.delegation_session_max_secs
+        );
+        let refreshed_token = refresh_body["access_token"].as_str().unwrap();
+        let refreshed_claims = jwt::verify_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            refreshed_token,
+        )
+        .expect("verify refreshed full-router service delegation");
+        assert_ne!(refreshed_claims.jti, original_claims.jti);
+        assert_eq!(refreshed_claims.delegation_kind.as_deref(), Some("service"));
+        assert_eq!(refreshed_claims.delegation_session_exp, Some(session_exp));
+        assert_eq!(
+            refreshed_claims.allowed_service_ids,
+            restrictions.allowed_service_ids
+        );
+        let middleware_auth = delegated_auth_from_token(&fixture.state, refreshed_token);
+        assert_eq!(middleware_auth.auth_method, AuthMethod::Delegated);
+        assert_eq!(middleware_auth.delegation_kind.as_deref(), Some("service"));
+        assert_eq!(
+            middleware_auth.delegation_user_service_id.as_deref(),
+            Some(fixture.user_service_id.as_str())
+        );
+
+        let audit_id = tokio::time::timeout(std::time::Duration::from_secs(2), refreshed_audit)
+            .await
+            .expect("service refresh success audit timeout")
+            .expect("service refresh success audit sender dropped");
+        let audit = fixture
+            .db
+            .collection::<crate::models::audit_log::AuditLog>(
+                crate::models::audit_log::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! { "_id": audit_id })
+            .await
+            .expect("load service refresh audit")
+            .expect("service refresh audit exists");
+        let event = audit.event_data.expect("service refresh audit metadata");
+        assert_eq!(event["actor_kind"], "service");
+        assert_eq!(event["acting_service_slug"], catalog.slug);
+        assert_eq!(event["user_service_id"], fixture.user_service_id);
+        assert_eq!(event["session_exp"], session_exp);
+        assert_eq!(event["scope"], "proxy");
+
+        let proxy_path = format!("/api/v1/proxy/s/{}/items", user_service.slug);
+        let (proxy_status, proxy_body) = full_router_json_request(
+            &fixture.app,
+            Method::GET,
+            &proxy_path,
+            refreshed_token,
+            None,
+        )
+        .await;
+        assert_eq!(
+            proxy_status,
+            StatusCode::OK,
+            "refreshed token proxy failed: {proxy_body}"
+        );
+        assert_eq!(proxy_body["ok"], true);
+        let injected_token = fixture
+            .injected_delegation_tokens
+            .lock()
+            .expect("injected delegation token log")
+            .last()
+            .cloned()
+            .expect("proxy request injected a service delegation token");
+        let injected_claims = jwt::verify_token(
+            &fixture.state.jwt_keys,
+            &fixture.state.config,
+            &injected_token,
+        )
+        .expect("verify proxy-injected service delegation");
+        assert_eq!(injected_claims.delegation_kind.as_deref(), Some("service"));
+        assert_eq!(
+            injected_claims.delegation_user_service_id.as_deref(),
+            Some(fixture.user_service_id.as_str())
+        );
+
+        user_services
+            .update_one(
+                mongodb::bson::doc! { "_id": &fixture.user_service_id },
+                mongodb::bson::doc! { "$set": { "inject_delegation_token": false } },
+            )
+            .await
+            .expect("revoke service delegation route");
+        let denied_audit = audit_service::notify_on_audit_write_for_user(
+            "delegation_refresh_denied",
+            TEST_USER_ID,
+        );
+        let (denied_status, denied_body) = full_router_json_request(
+            &fixture.app,
+            Method::POST,
+            "/api/v1/delegation/refresh",
+            refreshed_token,
+            None,
+        )
+        .await;
+        assert_eq!(denied_status, StatusCode::FORBIDDEN);
+        assert_eq!(denied_body["error_code"], 11812);
+        let denied_audit_id = tokio::time::timeout(std::time::Duration::from_secs(2), denied_audit)
+            .await
+            .expect("service refresh denial audit timeout")
+            .expect("service refresh denial audit sender dropped");
+        let denied = fixture
+            .db
+            .collection::<crate::models::audit_log::AuditLog>(
+                crate::models::audit_log::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! { "_id": denied_audit_id })
+            .await
+            .expect("load service refresh denial audit")
+            .expect("service refresh denial audit exists");
+        let denied_event = denied.event_data.expect("service refresh denial metadata");
+        assert_eq!(denied_event["actor_kind"], "service");
+        assert_eq!(denied_event["reason"], "delegation_route_revoked");
+        assert!(denied_event.get("access_token").is_none());
     }
 
     #[test]
@@ -1125,6 +1547,10 @@ mod tests {
             session_id: None,
             scope: catalog_delegation_service::MCP_CATALOG_READ_SCOPE.to_string(),
             acting_client_id: Some(TEST_ACTOR.to_string()),
+            delegation_kind: None,
+            delegation_user_service_id: None,
+            delegation_session_exp: None,
+            delegation_origin_api_key_id: None,
             oauth_client_id: Some(TEST_RECEIVER.to_string()),
             token_jti: Some(uuid::Uuid::new_v4().to_string()),
             approval_owner_user_id: None,
@@ -1592,6 +2018,10 @@ mod tests {
             session_id: None,
             scope: claims.scope,
             acting_client_id: claims.act.map(|actor| actor.sub),
+            delegation_kind: claims.delegation_kind,
+            delegation_user_service_id: claims.delegation_user_service_id,
+            delegation_session_exp: claims.delegation_session_exp,
+            delegation_origin_api_key_id: claims.delegation_origin_api_key_id,
             oauth_client_id: claims.client_id,
             token_jti: Some(claims.jti),
             approval_owner_user_id: None,

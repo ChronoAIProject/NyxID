@@ -2282,7 +2282,7 @@ fn auto_provision_auth_snapshot(service: &DownstreamService) -> (&str, &str) {
 ///
 /// Returns `Ok(())` if the service is still eligible or is not auto-provisioned.
 /// Returns `Err(NotFound)` if the service should no longer be accessible.
-async fn verify_auto_provision_eligibility(
+pub(crate) async fn verify_auto_provision_eligibility(
     db: &mongodb::Database,
     user_service: &crate::models::user_service::UserService,
     effective_owner_id: &str,

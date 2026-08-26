@@ -266,7 +266,7 @@ All API routes under `/api/v1`:
 - `/proxy/{service_id}/{path}` and `/proxy/s/{slug}/{path}` -- authenticated proxy (UUID- and slug-based); HTTP + WebSocket passthrough
 - `/proxy/services` -- service discovery (paginated list of proxyable services)
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
-- `/delegation/refresh` -- refresh delegated access tokens
+- `/delegation/refresh` -- refresh OAuth-client delegations and service-actor delegations subject to their fixed absolute session cap and live route authority
 - `/notifications` -- notification settings CRUD, Telegram link/disconnect, device token management
 - `/approvals` -- approval history, grants, decide, status polling, per-service approval configs (`approval_mode`: `per_request` default or `grant` opt-in)
 - `/webhooks/telegram` -- Telegram webhook (unauthenticated, secret-verified)
@@ -337,6 +337,7 @@ JWT_RELAY_ACCESS_TTL_SECS=300       # X-NyxID-User-Token relay access token TTL.
 JWT_ASSISTANT_FORWARD_TTL_SECS=300  # Legacy tombstone for the retired assistant_forward token.
                                     # Live assistant delegation uses the compile-time 300s
                                     # MCP_DELEGATION_TOKEN_TTL_SECS constant; this env has no effect.
+DELEGATION_SESSION_MAX_SECS=3600    # Absolute service-delegation refresh cap; clamped to 300..86400
 SA_TOKEN_TTL_SECS=3600              # Service account tokens
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
