@@ -834,7 +834,7 @@ async fn resolve_vendor_target(
     let service = assistant_service::resolve_admin_service_by_slug(db, slug)
         .await
         .map_err(|error| vendor_configuration_failed(op, error))?;
-    validate_vendor_binding_shape(requirement, slug, Some(&service))
+    validate_vendor_binding_shape(requirement, slug, Some(&service), false)
         .map_err(|error| vendor_configuration_failed(op, error))?;
     let authorized = proxy_service::authorize_master_credential_server_chosen(db, &service)
         .await
@@ -879,7 +879,7 @@ async fn validate_vendor_binding(
         None => collection.find_one(doc! { "slug": slug }).await?,
     };
     let requirement = vendor_requirement_for_operation(op);
-    validate_vendor_binding_shape(requirement, slug, service.as_ref())?;
+    validate_vendor_binding_shape(requirement, slug, service.as_ref(), true)?;
     let service = service.expect("validated vendor binding must have a service row");
 
     if service.credential_encrypted.is_empty() {
@@ -899,10 +899,16 @@ async fn validate_vendor_binding(
     validate_vendor_credential(requirement, &service, credential.as_slice())
 }
 
+/// `enforce_base_url` is true only at provisioning time. The canonical base URL is a
+/// template default and a bind-time guard against typos -- it is deliberately NOT a
+/// runtime gate, so an operator may legitimately point a vendor row at a regional
+/// endpoint, an egress proxy, or a test double. The security-bearing checks (auth
+/// shape, category, visibility, credential) are enforced on every path.
 fn validate_vendor_binding_shape(
     requirement: &PlatformOperationVendorContract,
     slug: &str,
     service: Option<&DownstreamService>,
+    enforce_base_url: bool,
 ) -> AppResult<()> {
     let op = operation_name(requirement.operation);
     let Some(service) = service else {
@@ -916,7 +922,7 @@ fn validate_vendor_binding_shape(
             requirement.slug
         )));
     }
-    if service.base_url.trim_end_matches('/') != requirement.base_url {
+    if enforce_base_url && service.base_url.trim_end_matches('/') != requirement.base_url {
         return Err(AppError::PlatformVendorProvisioningInvalid(format!(
             "{op} requires base_url '{}'; row '{}' has '{}'",
             requirement.base_url, service.slug, service.base_url
@@ -1287,12 +1293,12 @@ mod tests {
         ];
 
         for (expected, slug, service) in cases {
-            let error = validate_vendor_binding_shape(requirement, slug, service.as_ref())
+            let error = validate_vendor_binding_shape(requirement, slug, service.as_ref(), true)
                 .expect_err("mismatched vendor row must be rejected");
             assert_eq!(provisioning_message(error), expected);
         }
 
-        validate_vendor_binding_shape(requirement, SPEAK_VENDOR_SLUG, Some(&valid))
+        validate_vendor_binding_shape(requirement, SPEAK_VENDOR_SLUG, Some(&valid), true)
             .expect("valid vendor row shape");
         let error = validate_vendor_credential(requirement, &valid, b"")
             .expect_err("empty credential must be rejected");
