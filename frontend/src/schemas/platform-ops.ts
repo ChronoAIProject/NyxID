@@ -4,6 +4,105 @@ export const PLATFORM_OPERATION_QUERY_KEY = [
   "admin",
   "platform-ops",
 ] as const;
+export const PLATFORM_VENDOR_REQUIREMENTS_QUERY_KEY = [
+  "admin",
+  "platform-ops",
+  "vendor-requirements",
+] as const;
+export const PLATFORM_VENDOR_TEMPLATES_QUERY_KEY = [
+  "admin",
+  "platform-ops",
+  "vendor-templates",
+] as const;
+
+export const platformVendorSchema = z
+  .string()
+  .trim()
+  .min(1, "Vendor key is required")
+  .max(64, "Vendor key must be at most 64 characters")
+  .regex(
+    /^[a-z0-9][a-z0-9_-]*$/,
+    "Use lowercase letters, digits, underscores, and hyphens",
+  );
+
+const existingPlatformVendorServiceSchema = z
+  .object({
+    id: z.string().min(1),
+    name: z.string().min(1),
+    auth_method: z.string(),
+    auth_key_name: z.string(),
+    service_category: z.string(),
+    visibility: z.string(),
+    is_active: z.literal(true),
+  })
+  .strict();
+
+export const platformVendorRequirementSchema = z
+  .object({
+    id: z.string().min(1),
+    vendor: platformVendorSchema,
+    display_name: z.string().min(1),
+    operation: z.string().min(1).nullable(),
+    slug: z.string().regex(/^platform-[a-z0-9-]+$/),
+    base_url: z.url(),
+    auth_method: z.enum(["header", "bearer", "basic"]),
+    auth_key_name: z.string().min(1).nullable(),
+    service_category: z.literal("internal"),
+    visibility: z.literal("public"),
+    credential_label: z.string().min(1),
+    credential_note: z.string().min(1),
+    capability_summary: z.string().min(1),
+    restriction_summary: z.string().min(1),
+    is_active: z.boolean(),
+    is_seeded: z.boolean(),
+    existing_service: existingPlatformVendorServiceSchema.nullable(),
+  })
+  .strict();
+
+export const platformVendorRequirementListSchema = z
+  .object({
+    vendors: z.array(platformVendorRequirementSchema),
+  })
+  .strict();
+
+export const platformVendorProvisionSchema = z
+  .object({
+    vendor: platformVendorSchema,
+    credential: z
+      .string()
+      .trim()
+      .min(1, "Credential is required")
+      .max(16_384, "Credential is too large"),
+    note: z
+      .string()
+      .trim()
+      .max(4_096, "Operator note must be at most 4096 characters"),
+  })
+  .strict();
+
+export const platformVendorTemplateFormSchema = z
+  .object({
+    vendor: platformVendorSchema,
+    display_name: z.string().trim().min(1).max(200),
+    slug: z
+      .string()
+      .trim()
+      .regex(
+        /^platform-[a-z0-9-]+$/,
+        "Slug must start with platform- and use lowercase letters, digits, and hyphens",
+      )
+      .max(100),
+    base_url: z.url(),
+    auth_method: z.enum(["header", "bearer", "basic"]),
+    auth_key_name: z.string().trim().max(256).nullable(),
+    credential_label: z.string().trim().min(1).max(120),
+    credential_note: z.string().trim().min(1).max(4_096),
+    operation: z.string().trim().max(64).nullable(),
+    capability_summary: z.string().trim().min(1).max(4_096),
+    restriction_summary: z.string().trim().min(1).max(4_096),
+    is_active: z.boolean(),
+  })
+  .strict();
 
 const vendorServiceSlugSchema = z
   .string()
@@ -190,3 +289,27 @@ export type UpdatePlatformOperationVariables =
   | { readonly op: "x_search"; readonly data: XSearchUpdate }
   | { readonly op: "speak"; readonly data: SpeakUpdate }
   | { readonly op: "call_and_say"; readonly data: CallAndSayUpdate };
+
+export type PlatformVendor = z.infer<typeof platformVendorSchema>;
+export type PlatformVendorRequirement = z.infer<
+  typeof platformVendorRequirementSchema
+>;
+export type PlatformVendorRequirementList = z.infer<
+  typeof platformVendorRequirementListSchema
+>;
+export type PlatformVendorProvision = z.infer<
+  typeof platformVendorProvisionSchema
+>;
+export type PlatformVendorTemplateForm = z.infer<
+  typeof platformVendorTemplateFormSchema
+>;
+
+export interface ProvisionPlatformVendorVariables {
+  readonly requirement: PlatformVendorRequirement;
+  readonly data: PlatformVendorProvision;
+  readonly replaceServiceId?: string;
+}
+
+export type PlatformVendorTemplateInput = z.infer<
+  typeof platformVendorTemplateFormSchema
+>;

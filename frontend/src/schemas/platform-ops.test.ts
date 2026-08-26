@@ -2,11 +2,121 @@ import { describe, expect, it } from "vitest";
 import {
   callAndSayUpdateSchema,
   platformOperationListSchema,
+  platformVendorProvisionSchema,
+  platformVendorRequirementListSchema,
+  platformVendorTemplateFormSchema,
   speakUpdateSchema,
   xSearchUpdateSchema,
 } from "./platform-ops";
 
 describe("platform operation schemas", () => {
+  it("parses the four-vendor provisioning contract", () => {
+    const result = platformVendorRequirementListSchema.parse({
+      vendors: [
+        {
+          id: "template-elevenlabs",
+          vendor: "elevenlabs",
+          display_name: "ElevenLabs",
+          operation: "speak",
+          slug: "platform-elevenlabs",
+          base_url: "https://api.elevenlabs.io",
+          auth_method: "header",
+          auth_key_name: "xi-api-key",
+          service_category: "internal",
+          visibility: "public",
+          credential_label: "API key",
+          credential_note: "Use a restricted key.",
+          capability_summary: "Serves speak.",
+          restriction_summary: "Does not expose vendor tools.",
+          is_active: true,
+          is_seeded: true,
+          existing_service: null,
+        },
+        {
+          id: "template-duffel",
+          vendor: "duffel",
+          display_name: "Duffel",
+          operation: null,
+          slug: "platform-duffel",
+          base_url: "https://api.duffel.com",
+          auth_method: "bearer",
+          auth_key_name: null,
+          service_category: "internal",
+          visibility: "public",
+          credential_label: "Access token",
+          credential_note: "Provision ahead of an operation.",
+          capability_summary: "No operation is shipped yet.",
+          restriction_summary: "Does not expose vendor tools.",
+          is_active: true,
+          is_seeded: true,
+          existing_service: null,
+        },
+      ],
+    });
+
+    expect(result.vendors[0]?.auth_key_name).toBe("xi-api-key");
+    expect(result.vendors[1]?.operation).toBeNull();
+  });
+
+  it("requires a write-only credential and bounds the optional note", () => {
+    expect(
+      platformVendorProvisionSchema.safeParse({
+        vendor: "x",
+        credential: "",
+        note: "",
+      }).success,
+    ).toBe(false);
+    expect(
+      platformVendorProvisionSchema.safeParse({
+        vendor: "x",
+        credential: "secret",
+        note: "n".repeat(4097),
+      }).success,
+    ).toBe(false);
+    expect(
+      platformVendorProvisionSchema.safeParse({
+        vendor: "x",
+        credential: "secret",
+        note: "Read-only app token",
+      }).success,
+    ).toBe(true);
+  });
+
+  it("accepts extensible vendor templates and rejects an invalid template shape", () => {
+    const template = platformVendorTemplateFormSchema.safeParse({
+      vendor: "acme_voice",
+      display_name: "Acme Voice",
+      slug: "platform-acme-voice",
+      base_url: "https://api.acme.example",
+      auth_method: "header",
+      auth_key_name: "X-Acme-Key",
+      credential_label: "API key",
+      credential_note: "Use a restricted production key.",
+      operation: null,
+      capability_summary: "Provides the Acme voice operation.",
+      restriction_summary: "Does not expose the vendor catalog.",
+      is_active: true,
+    });
+    expect(template.success).toBe(true);
+
+    expect(
+      platformVendorTemplateFormSchema.safeParse({
+        vendor: "Acme",
+        display_name: "Acme Voice",
+        slug: "platform-acme-voice",
+        base_url: "https://api.acme.example",
+        auth_method: "bearer",
+        auth_key_name: null,
+        credential_label: "Access token",
+        credential_note: "note",
+        operation: null,
+        capability_summary: "capability",
+        restriction_summary: "restriction",
+        is_active: true,
+      }).success,
+    ).toBe(false);
+  });
+
   it("accepts the disabled defaults returned for missing rows", () => {
     expect(
       platformOperationListSchema.parse({

@@ -4,21 +4,46 @@ import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   PLATFORM_OPERATION_QUERY_KEY,
+  type PlatformVendorRequirement,
   type PlatformOperationList,
 } from "@/schemas/platform-ops";
 import {
   usePlatformOperations,
+  usePlatformVendorRequirements,
+  useProvisionPlatformVendor,
   useUpdatePlatformOperation,
 } from "./use-platform-ops";
 
-const { mockGet, mockPut } = vi.hoisted(() => ({
+const { mockDelete, mockGet, mockPost, mockPut } = vi.hoisted(() => ({
+  mockDelete: vi.fn(),
   mockGet: vi.fn(),
+  mockPost: vi.fn(),
   mockPut: vi.fn(),
 }));
 
 vi.mock("@/lib/api-client", () => ({
-  api: { get: mockGet, put: mockPut },
+  api: { delete: mockDelete, get: mockGet, post: mockPost, put: mockPut },
 }));
+
+const elevenLabsRequirement: PlatformVendorRequirement = {
+  id: "template-elevenlabs",
+  vendor: "elevenlabs",
+  display_name: "ElevenLabs",
+  operation: "speak",
+  slug: "platform-elevenlabs",
+  base_url: "https://api.elevenlabs.io",
+  auth_method: "header",
+  auth_key_name: "xi-api-key",
+  service_category: "internal",
+  visibility: "public",
+  credential_label: "API key",
+  credential_note: "Use a restricted key.",
+  capability_summary: "Serves speak.",
+  restriction_summary: "Does not expose vendor tools.",
+  is_active: true,
+  is_seeded: true,
+  existing_service: null,
+};
 
 const xSearchOperation = {
   op: "x_search" as const,
@@ -58,6 +83,59 @@ describe("platform operation hooks", () => {
 
     expect(mockGet).toHaveBeenCalledWith("/admin/platform-ops");
     expect(result.current.data?.operations).toEqual([xSearchOperation]);
+  });
+
+  it("loads and parses vendor requirements", async () => {
+    mockGet.mockResolvedValue({ vendors: [elevenLabsRequirement] });
+    const { Wrapper } = createHarness();
+    const { result } = renderHook(() => usePlatformVendorRequirements(), {
+      wrapper: Wrapper,
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(mockGet).toHaveBeenCalledWith(
+      "/admin/platform-ops/vendor-requirements",
+    );
+    expect(result.current.data?.vendors).toEqual([elevenLabsRequirement]);
+  });
+
+  it("replaces a vendor row in one mutation while preserving its contract", async () => {
+    mockDelete.mockResolvedValue(undefined);
+    mockPost.mockResolvedValue({ id: "new-service-id" });
+    const { Wrapper } = createHarness();
+    const { result } = renderHook(() => useProvisionPlatformVendor(), {
+      wrapper: Wrapper,
+    });
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        requirement: elevenLabsRequirement,
+        data: {
+          vendor: "elevenlabs",
+          credential: "write-only-key",
+          note: "Restricted to TTS",
+        },
+        replaceServiceId: "old-service-id",
+      });
+    });
+
+    expect(mockDelete).toHaveBeenCalledWith("/services/old-service-id");
+    expect(mockPost).toHaveBeenCalledWith("/services", {
+      name: "Platform ElevenLabs",
+      slug: "platform-elevenlabs",
+      service_type: "http",
+      base_url: "https://api.elevenlabs.io",
+      auth_method: "header",
+      auth_key_name: "xi-api-key",
+      credential: "write-only-key",
+      service_category: "internal",
+      visibility: "public",
+      auth_notes: "Restricted to TTS",
+    });
+    expect(mockDelete.mock.invocationCallOrder[0]).toBeLessThan(
+      mockPost.mock.invocationCallOrder[0] ?? 0,
+    );
   });
 
   it("rejects an invalid response instead of exposing untyped data", async () => {

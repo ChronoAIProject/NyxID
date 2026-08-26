@@ -8,12 +8,17 @@ import {
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   Check,
+  KeyRound,
   PhoneCall,
   Plus,
   Search,
+  Settings2,
   Volume2,
   X,
 } from "lucide-react";
+import { PlatformVendorDialog } from "@/components/admin-platform-ops/platform-vendor-dialog";
+import { PlatformVendorTemplateManager } from "@/components/admin-platform-ops/platform-vendor-template-manager";
+import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
@@ -40,6 +45,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import {
   usePlatformOperations,
+  usePlatformVendorRequirements,
   useUpdatePlatformOperation,
 } from "@/hooks/use-platform-ops";
 import { ApiError } from "@/lib/api-client";
@@ -626,14 +632,75 @@ function OperationCard({
 }
 
 export function AdminPlatformOpsPage() {
-  const { data, error, isLoading, refetch } = usePlatformOperations();
-
+  const [vendorDialogOpen, setVendorDialogOpen] = useState(false);
+  const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
+  const {
+    data,
+    error,
+    isLoading,
+    refetch: refetchOperations,
+  } = usePlatformOperations();
+  const {
+    data: vendorRequirements,
+    error: vendorRequirementsError,
+    isLoading: vendorRequirementsLoading,
+    refetch: refetchVendorRequirements,
+  } = usePlatformVendorRequirements();
   return (
     <div className="space-y-6">
       <PageHeader
         title="Platform Operations"
         description="Configure NyxID-owned vendor operations and their server-enforced limits."
+        actions={
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="lg"
+              onClick={() => setTemplateManagerOpen(true)}
+            >
+              <Settings2 className="size-4" />
+              Manage templates
+            </Button>
+            <AddCtaButton
+              label="Add platform vendor"
+              icon={KeyRound}
+              onClick={() => setVendorDialogOpen(true)}
+              disabled={
+                vendorRequirementsLoading ||
+                !vendorRequirements ||
+                !!vendorRequirementsError ||
+                vendorRequirements.vendors.length === 0
+              }
+            />
+          </div>
+        }
       />
+
+      <PlatformVendorDialog
+        open={vendorDialogOpen}
+        onOpenChange={setVendorDialogOpen}
+        requirements={vendorRequirements?.vendors ?? []}
+      />
+      {templateManagerOpen ? (
+        <PlatformVendorTemplateManager
+          open={templateManagerOpen}
+          onOpenChange={setTemplateManagerOpen}
+        />
+      ) : null}
+
+      {vendorRequirementsError ? (
+        <ErrorBanner
+          message={
+            vendorRequirementsError instanceof ApiError
+              ? vendorRequirementsError.message
+              : "Failed to load platform vendor provisioning data"
+          }
+          onRetry={() => {
+            void refetchVendorRequirements();
+          }}
+        />
+      ) : null}
 
       {error ? (
         <ErrorBanner
@@ -642,7 +709,7 @@ export function AdminPlatformOpsPage() {
               ? error.message
               : "Failed to load platform operations"
           }
-          onRetry={() => void refetch()}
+          onRetry={() => void refetchOperations()}
         />
       ) : isLoading ? (
         <div className="grid gap-4 xl:grid-cols-3">
