@@ -59,6 +59,33 @@ pub struct ServiceDocumentationMetadata {
     pub streaming_supported: bool,
 }
 
+impl ServiceDocumentationMetadata {
+    fn empty() -> Self {
+        Self {
+            openapi_spec_url: None,
+            asyncapi_spec_url: None,
+            streaming_supported: false,
+        }
+    }
+}
+
+pub async fn discover_service_docs_for_category(
+    service_category: &str,
+    base_url: &str,
+    explicit_openapi_spec_url: Option<String>,
+    explicit_asyncapi_spec_url: Option<String>,
+) -> ServiceDocumentationMetadata {
+    if service_category == "internal" {
+        return ServiceDocumentationMetadata::empty();
+    }
+    discover_service_docs(
+        base_url,
+        explicit_openapi_spec_url,
+        explicit_asyncapi_spec_url,
+    )
+    .await
+}
+
 pub async fn discover_service_docs(
     base_url: &str,
     explicit_openapi_spec_url: Option<String>,
@@ -1052,8 +1079,8 @@ mod tests {
     use super::{
         CachedSpecEntry, MAX_SPEC_CACHE_ENTRIES, ServiceDocumentationMetadata, SpecCacheTestGuard,
         build_asyncapi_document, cache_spec, catalog_csp, detect_streaming_from_openapi,
-        fetch_spec_json, get_cached_spec, render_scalar_html, scalar_docs_csp,
-        validate_spec_fetch_target,
+        discover_service_docs_for_category, fetch_spec_json, get_cached_spec, render_scalar_html,
+        scalar_docs_csp, validate_spec_fetch_target,
     };
     use crate::errors::AppError;
     use std::sync::Arc;
@@ -1306,6 +1333,17 @@ mod tests {
     }
 
     // ---- is_auto_discovered_openapi_spec_url ----
+
+    #[tokio::test]
+    async fn internal_services_never_auto_discover_documentation() {
+        let metadata =
+            discover_service_docs_for_category("internal", "https://api.elevenlabs.io", None, None)
+                .await;
+
+        assert_eq!(metadata.openapi_spec_url, None);
+        assert_eq!(metadata.asyncapi_spec_url, None);
+        assert!(!metadata.streaming_supported);
+    }
 
     #[test]
     fn auto_discovered_openapi_matches_probe_paths() {

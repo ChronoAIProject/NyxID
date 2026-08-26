@@ -529,6 +529,12 @@ async fn main() {
         .await
         .expect("Failed to seed default services");
 
+    // Seed the admin-managed platform vendor provisioning templates. Existing
+    // rows are never overwritten so operators can edit or disable templates.
+    services::platform_vendor_template_service::seed_default_templates(&db, "system")
+        .await
+        .expect("Failed to seed platform vendor templates");
+
     // Materialize ServiceEndpoint rows for seeded catalog services from the
     // hosted overlay specs so /api/v1/mcp/config publishes concrete
     // service_id + endpoint_id operations for workflow consumers (#1290).
@@ -1217,7 +1223,7 @@ async fn main() {
 
     // Build router — public OAuth routes get open CORS (per RFC 9207),
     // private API routes get restricted CORS (FRONTEND_URL only).
-    let (public_oauth, private_api) = routes::build_router();
+    let (public_oauth, private_api) = routes::build_router_with_state(state.clone());
 
     let csrf_state = state.clone();
     let private_api = private_api.layer(cors).layer(axum_mw::from_fn_with_state(

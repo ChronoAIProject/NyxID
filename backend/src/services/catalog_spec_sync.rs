@@ -42,6 +42,9 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
         else {
             continue; // Service not seeded on this deployment
         };
+        if is_platform_vendor_service(&service) {
+            continue;
+        }
 
         let inputs = match seeded_endpoint_inputs(slug) {
             Ok(inputs) => inputs,
@@ -90,6 +93,7 @@ pub async fn sync_spec_backed_service_endpoints(db: &mongodb::Database) -> AppRe
         .find(doc! {
             "is_active": true,
             "service_type": "http",
+            "service_category": { "$ne": "internal" },
             "openapi_spec_url": { "$type": "string", "$ne": "" },
         })
         .await?
@@ -119,11 +123,7 @@ pub fn spawn_spec_endpoint_sync(db: mongodb::Database, service_id: String) {
                 return;
             }
         };
-        if service
-            .openapi_spec_url
-            .as_deref()
-            .is_none_or(str::is_empty)
-        {
+        if !should_auto_sync_service_endpoints(&service) {
             return;
         }
         sync_service_endpoints_from_spec_url(&db, &service).await;
@@ -134,6 +134,9 @@ pub fn spawn_spec_endpoint_sync(db: mongodb::Database, service_id: String) {
 /// failure instead of erroring so callers (startup sweep, admin handlers)
 /// are never blocked by a broken spec URL.
 async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &DownstreamService) {
+    if !should_auto_sync_service_endpoints(service) {
+        return;
+    }
     let Some(spec_url) = service.openapi_spec_url.as_deref() else {
         return;
     };
@@ -196,6 +199,24 @@ async fn sync_service_endpoints_from_spec_url(db: &mongodb::Database, service: &
     }
 }
 
+pub fn should_auto_sync_service_endpoints(service: &DownstreamService) -> bool {
+    service.is_active
+        && service.service_type == "http"
+        && service.service_category != "internal"
+        && service
+            .openapi_spec_url
+            .as_deref()
+            .is_some_and(|url| !url.is_empty())
+}
+
+/// Platform vendor rows are credential stores, not catalog surfaces. Their
+/// reserved slug namespace lets hosted catalog overlays continue to hydrate
+/// intentional internal services such as LLM catalogs without publishing
+/// tools for operator-managed vendor credentials.
+pub fn is_platform_vendor_service(service: &DownstreamService) -> bool {
+    service.service_category == "internal" && service.slug.starts_with("platform-")
+}
+
 /// Parse and validate the hosted overlay for a slug into endpoint inputs.
 fn seeded_endpoint_inputs(slug: &str) -> AppResult<Vec<EndpointInput>> {
     let spec = catalog_spec_registry::spec_for_slug(slug).ok_or_else(|| {
@@ -236,6 +257,17 @@ fn endpoint_inputs_from_spec(spec: &serde_json::Value) -> AppResult<Vec<Endpoint
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_services_are_never_auto_materialized_as_tools() {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.slug = "platform-elevenlabs".to_string();
+        service.service_category = "internal".to_string();
+        service.openapi_spec_url = Some("https://api.elevenlabs.io/openapi.json".to_string());
+
+        assert!(!should_auto_sync_service_endpoints(&service));
+        assert!(is_platform_vendor_service(&service));
+    }
 
     #[test]
     fn every_hydrated_slug_produces_valid_endpoint_inputs() {

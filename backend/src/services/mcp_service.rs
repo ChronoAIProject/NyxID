@@ -29,8 +29,8 @@ use crate::services::content_type::{
 };
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{
-    api_docs_service, connect_link_service, connection_service, node_routing_service,
-    openapi_parser, operation_descriptor, proxy_service,
+    api_docs_service, catalog_spec_sync, connect_link_service, connection_service,
+    node_routing_service, openapi_parser, operation_descriptor, proxy_service,
 };
 
 // ---------------------------------------------------------------------------
@@ -950,6 +950,9 @@ async fn load_user_tools_inner(
         "is_active": true,
         "requires_user_credential": false,
         "service_category": { "$ne": "provider" },
+        "$nor": [
+            { "service_category": "internal", "slug": { "$regex": "^platform-" } },
+        ],
     };
     auto_services_filter.extend(legacy_http_service_type_filter());
 
@@ -974,7 +977,10 @@ async fn load_user_tools_inner(
     let mut valid_platform_services: Vec<(&DownstreamService, bool)> = Vec::new();
 
     for svc in &connected_services {
-        if svc.service_type != "http" || svc.service_category == "provider" {
+        if svc.service_type != "http"
+            || svc.service_category == "provider"
+            || catalog_spec_sync::is_platform_vendor_service(svc)
+        {
             continue;
         }
         let mut executable = true;
@@ -1213,15 +1219,24 @@ async fn load_user_tools_inner(
             .catalog_service_id
             .as_deref()
             .and_then(|id| catalog_policy_by_id.get(id).copied());
+        let platform_vendor_catalog =
+            catalog_policy.is_some_and(catalog_spec_sync::is_platform_vendor_service);
         let user_endpoint = endpoints_by_id.get(us.endpoint_id.as_str()).copied();
         let endpoint_label = user_endpoint
             .map(|ep| ep.label.as_str())
             .unwrap_or(&us.slug);
 
         let user_spec_url = user_endpoint.and_then(|ep| ep.openapi_spec_url.as_deref());
-        let (published, is_generic, invalid_openapi_contract) = if let Some(catalog_id) =
-            us.catalog_service_id.as_deref()
-        {
+        let (published, is_generic, invalid_openapi_contract) = if platform_vendor_catalog {
+            (
+                ParsedMcpEndpoints {
+                    endpoints: Vec::new(),
+                    durable_metadata: HashMap::new(),
+                },
+                false,
+                false,
+            )
+        } else if let Some(catalog_id) = us.catalog_service_id.as_deref() {
             // Catalog-backed: the instance's user-mounted spec is a
             // deliberate per-instance override and takes precedence over
             // the template's registered ServiceEndpoint rows. A broken or
@@ -4452,6 +4467,9 @@ pub async fn discover_services(
     let mut filter = doc! {
         "is_active": true,
         "service_category": { "$ne": "provider" },
+        "$nor": [
+            { "service_category": "internal", "slug": { "$regex": "^platform-" } },
+        ],
     };
     filter.extend(legacy_http_service_type_filter());
     if let Some(cat) = category {

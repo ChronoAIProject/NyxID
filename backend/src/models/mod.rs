@@ -61,6 +61,7 @@ pub mod org_role_scope;
 pub mod platform_op_usage;
 pub mod platform_operation;
 pub mod platform_settings;
+pub mod platform_vendor_template;
 pub mod provider_config;
 pub mod pushed_authorization_request;
 pub mod refresh_token;

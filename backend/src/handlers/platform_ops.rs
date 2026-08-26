@@ -3,8 +3,9 @@ use std::time::Instant;
 use axum::{
     Json,
     body::Body,
-    extract::State,
+    extract::{Request, State},
     http::{StatusCode, header},
+    middleware::Next,
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
@@ -31,6 +32,19 @@ async fn require_platform_ops_enabled(state: &AppState, auth_user: &AuthUser) ->
         ));
     }
     Ok(())
+}
+
+/// Structural feature gate for every route in the `/platform-ops` nest.
+/// Handler-level checks remain as belt-and-braces protection for direct calls
+/// and tests, but a newly mounted route inherits this middleware automatically.
+pub async fn platform_services_feature_gate(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    request: Request,
+    next: Next,
+) -> Result<Response, AppError> {
+    require_platform_ops_enabled(&state, &auth_user).await?;
+    Ok(next.run(request).await)
 }
 
 pub async fn x_search(
