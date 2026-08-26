@@ -4,6 +4,7 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import { useService, useUpdateService } from "@/hooks/use-services";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import {
+  DELEGATION_TOKEN_SCOPES,
   updateServiceSchema,
   type UpdateServiceFormData,
   VISIBILITY_OPTIONS,
@@ -1108,7 +1109,8 @@ export function ServiceEditPage() {
                               <p className="text-xs text-muted-foreground">
                                 Space-separated scopes for the delegation token.
                                 Defaults to &quot;llm:proxy&quot; if left empty.
-                                Available scopes: llm:proxy, proxy:*, llm:status
+                                Available scopes:{" "}
+                                {DELEGATION_TOKEN_SCOPES.join(", ")}
                               </p>
                               <FormMessage />
                             </FormItem>
