@@ -68,6 +68,20 @@ After a possible dispatch, transport failure is recorded as
 node. Do not retry a non-replayable write with a new operation ID. Reusing the
 same ID returns the stored uncertain classification rather than dispatching.
 
+## Not a code-execution credential
+
+The bearer from a `scheduled_invocation` key is never forwarded downstream.
+Its durable grant authorizes one exact published write body: request
+constraints use `Exact` or `OneOf`, and an empty JSON Pointer binds the whole
+body. That contract cannot authorize a multi-request `/executions` lifecycle
+whose later calls depend on runtime-created identifiers and outputs.
+
+Unattended code execution instead uses a `purpose = "general"` agent key with
+an exact service allowlist plus downstream admission controls, or a refreshable
+service delegation token. Those credentials cover the runtime session while
+the downstream still enforces which execution operations are admissible; they
+do not turn a durable one-write grant into a general bearer.
+
 ## Manage and renew
 
 ```bash

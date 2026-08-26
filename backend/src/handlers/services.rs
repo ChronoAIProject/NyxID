@@ -308,8 +308,13 @@ pub struct UpdateServiceRequest {
     /// `/anonymous-endpoints` endpoints for single-rule edits.
     #[serde(default)]
     pub anonymous_endpoints: Option<Vec<AnonymousEndpointRule>>,
-    /// Replace the data-plane operation allowlist. Empty rules deny all.
-    pub proxy_operation_policy: Option<ProxyOperationPolicy>,
+    /// Replace or remove the data-plane operation allowlist. Omitted leaves
+    /// the current policy unchanged; explicit JSON `null` removes it.
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub proxy_operation_policy: Option<Option<ProxyOperationPolicy>>,
 }
 
 fn identity_update_fields(body: &UpdateServiceRequest) -> Vec<&'static str> {
@@ -643,6 +648,18 @@ fn validate_service_billing(billing: Option<&ServiceBilling>) -> AppResult<()> {
     }
 
     Ok(())
+}
+
+fn normalize_nonempty_proxy_operation_policy(
+    policy: ProxyOperationPolicy,
+    empty_instruction: &str,
+) -> AppResult<ProxyOperationPolicy> {
+    if policy.rules.is_empty() {
+        return Err(AppError::ValidationError(format!(
+            "proxy_operation_policy.rules must not be empty; {empty_instruction}"
+        )));
+    }
+    crate::services::proxy_authorization::normalize_policy(policy)
 }
 
 // --- Handlers ---
@@ -1097,7 +1114,12 @@ pub async fn create_service(
     let proxy_operation_policy = body
         .proxy_operation_policy
         .clone()
-        .map(crate::services::proxy_authorization::normalize_policy)
+        .map(|policy| {
+            normalize_nonempty_proxy_operation_policy(
+                policy,
+                "omit proxy_operation_policy when creating a service without a policy",
+            )
+        })
         .transpose()?;
     if let Some(billing) = body.billing.as_mut() {
         crate::services::billing::pricing::normalize_platform_pricing(&slug, None, billing)?;
@@ -1413,6 +1435,7 @@ pub async fn update_service(
 
     // Build the $set document with only provided fields
     let mut set_doc = doc! {};
+    let mut unset_doc = doc! { "api_spec_url": "" };
     let mut http_docs_refresh: Option<api_docs_service::ServiceDocumentationMetadata> = None;
     let mut explicit_openapi_spec_url: Option<Option<String>> = None;
     let mut explicit_asyncapi_spec_url: Option<Option<String>> = None;
@@ -1914,13 +1937,24 @@ pub async fn update_service(
         );
     }
 
-    if let Some(policy) = body.proxy_operation_policy.clone() {
-        let normalized = crate::services::proxy_authorization::normalize_policy(policy)?;
-        set_doc.insert(
-            "proxy_operation_policy",
-            bson::to_bson(&normalized)
-                .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?,
-        );
+    if let Some(policy_update) = body.proxy_operation_policy.clone() {
+        match policy_update {
+            Some(policy) => {
+                let normalized = normalize_nonempty_proxy_operation_policy(
+                    policy,
+                    "send `\"proxy_operation_policy\": null` to remove the policy instead",
+                )?;
+                set_doc.insert(
+                    "proxy_operation_policy",
+                    bson::to_bson(&normalized).map_err(|e| {
+                        AppError::Internal(format!("BSON serialization error: {e}"))
+                    })?,
+                );
+            }
+            None => {
+                unset_doc.insert("proxy_operation_policy", "");
+            }
+        }
     }
 
     anonymous_endpoint_service::validate_service_update_anonymous_compatibility(
@@ -1932,7 +1966,7 @@ pub async fn update_service(
         next_resale_billable,
     )?;
 
-    if set_doc.is_empty() {
+    if set_doc.is_empty() && !unset_doc.contains_key("proxy_operation_policy") {
         return Err(AppError::ValidationError(
             "At least one field must be provided for update".to_string(),
         ));
@@ -2005,7 +2039,7 @@ pub async fn update_service(
             catalog_filter,
             doc! {
                 "$set": &set_doc,
-                "$unset": { "api_spec_url": "" },
+                "$unset": &unset_doc,
             },
         )
         .return_document(mongodb::options::ReturnDocument::After)
@@ -2085,6 +2119,9 @@ pub async fn update_service(
         .map(String::as_str)
         .filter(|field| *field != "updated_at")
         .collect();
+    if unset_doc.contains_key("proxy_operation_policy") {
+        changed_fields.push("proxy_operation_policy");
+    }
     changed_fields.sort_unstable();
 
     audit_service::log_for_user(
@@ -2475,7 +2512,7 @@ mod tests {
         validate_master_credential_shape,
     };
     use crate::errors::{AppError, AppResult};
-    use crate::models::audit_log::COLLECTION_NAME as AUDIT_LOGS;
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOGS};
     use crate::models::billing_rate_cache::BillingRateCache;
     use crate::models::catalog_identity_reconciliation::{
         CatalogIdentityReconciliation, CatalogIdentityReconciliationStatus,
@@ -2483,7 +2520,8 @@ mod tests {
     };
     use crate::models::downstream_service::test_helpers::dummy_service;
     use crate::models::downstream_service::{
-        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
+        ProxyOperationRule,
     };
     use crate::models::service_billing::{
         BillingMetric, PricingSyncStatus, ServiceBilling, ServicePlatformPricing,
@@ -3180,6 +3218,230 @@ mod tests {
             Some(Some(list)) => assert!(list.is_empty()),
             other => panic!("expected Some(Some([])), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn update_service_proxy_operation_policy_tri_state_deser() {
+        let omitted: UpdateServiceRequest = serde_json::from_str("{}").expect("parse omitted");
+        assert!(omitted.proxy_operation_policy.is_none());
+
+        let null_body: UpdateServiceRequest =
+            serde_json::from_str(r#"{"proxy_operation_policy":null}"#).expect("parse null");
+        assert_eq!(null_body.proxy_operation_policy, Some(None));
+
+        let object_body: UpdateServiceRequest = serde_json::from_str(
+            r#"{"proxy_operation_policy":{"rules":[{"method":"POST","path_template":"/executions/{id}"}]}}"#,
+        )
+        .expect("parse object");
+        assert_eq!(
+            object_body
+                .proxy_operation_policy
+                .and_then(std::convert::identity)
+                .expect("policy object")
+                .rules
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn update_service_proxy_operation_policy_replace_remove_and_audit() {
+        let Some(db) = connect_test_database("h_services_operation_policy_update").await else {
+            eprintln!("skipping operation-policy update test: no local MongoDB available");
+            return;
+        };
+        let admin_id = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let (base_url, server) = spawn_empty_docs_server().await;
+        let mut service = dummy_service();
+        service.id = "operation-policy-update".to_string();
+        service.slug = "operation-policy-update".to_string();
+        service.created_by = admin_id.clone();
+        service.base_url = base_url;
+        service.proxy_operation_policy = Some(ProxyOperationPolicy {
+            rules: vec![ProxyOperationRule {
+                method: "GET".to_string(),
+                path_template: "/initial/{id}".to_string(),
+            }],
+        });
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert policy service");
+
+        let absent: UpdateServiceRequest =
+            serde_json::from_str(r#"{"name":"Policy unchanged"}"#).expect("parse absent");
+        let absent_audit = crate::services::audit_service::notify_on_audit_write_for_user(
+            "service_updated",
+            admin_id.clone(),
+        );
+        let _ = update_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            crate::telemetry::TelemetryContext::default(),
+            Path(service.id.clone()),
+            Json(absent),
+        )
+        .await
+        .expect("an omitted policy must leave the stored value unchanged");
+        tokio::time::timeout(std::time::Duration::from_secs(5), absent_audit)
+            .await
+            .expect("absent update audit timeout")
+            .expect("absent update audit sender dropped");
+        let unchanged = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": &service.id })
+            .await
+            .expect("find unchanged service")
+            .expect("unchanged service exists");
+        assert_eq!(
+            unchanged.proxy_operation_policy,
+            service.proxy_operation_policy
+        );
+
+        let replacement: UpdateServiceRequest = serde_json::from_str(
+            r#"{"proxy_operation_policy":{"rules":[{"method":"post","path_template":"/executions/{id}"}]}}"#,
+        )
+        .expect("parse replacement");
+        let replacement_audit = crate::services::audit_service::notify_on_audit_write_for_user(
+            "service_updated",
+            admin_id.clone(),
+        );
+        let _ = update_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            crate::telemetry::TelemetryContext::default(),
+            Path(service.id.clone()),
+            Json(replacement),
+        )
+        .await
+        .expect("replace policy");
+        tokio::time::timeout(std::time::Duration::from_secs(5), replacement_audit)
+            .await
+            .expect("replacement audit timeout")
+            .expect("replacement audit sender dropped");
+        let replaced = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": &service.id })
+            .await
+            .expect("find replaced service")
+            .expect("replaced service exists");
+        assert_eq!(
+            replaced
+                .proxy_operation_policy
+                .as_ref()
+                .expect("stored replacement")
+                .rules[0]
+                .method,
+            "POST"
+        );
+
+        let empty: UpdateServiceRequest =
+            serde_json::from_str(r#"{"proxy_operation_policy":{"rules":[]}}"#)
+                .expect("parse empty policy");
+        let error = update_service(
+            State(state.clone()),
+            test_auth_user(&admin_id),
+            crate::telemetry::TelemetryContext::default(),
+            Path(service.id.clone()),
+            Json(empty),
+        )
+        .await
+        .expect_err("an empty policy must not become a deny-all trap");
+        assert!(matches!(
+            error,
+            AppError::ValidationError(message)
+                if message.contains("\"proxy_operation_policy\": null")
+        ));
+
+        let audit_rx = crate::services::audit_service::notify_on_audit_write_for_user(
+            "service_updated",
+            admin_id.clone(),
+        );
+        let removal: UpdateServiceRequest =
+            serde_json::from_str(r#"{"proxy_operation_policy":null}"#).expect("parse removal");
+        let _ = update_service(
+            State(state),
+            test_auth_user(&admin_id),
+            crate::telemetry::TelemetryContext::default(),
+            Path(service.id.clone()),
+            Json(removal),
+        )
+        .await
+        .expect("remove policy");
+        server.abort();
+
+        let raw = db
+            .collection::<bson::Document>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": &service.id })
+            .await
+            .expect("find raw service")
+            .expect("raw service exists");
+        assert!(
+            !raw.contains_key("proxy_operation_policy"),
+            "explicit null must remove the BSON field, not store null"
+        );
+        let removed: DownstreamService = bson::from_document(raw).expect("deserialize service");
+        let arbitrary_path =
+            crate::services::proxy_authorization::CanonicalPath::from_mcp_literal("/unlisted")
+                .expect("canonical path");
+        crate::services::proxy_authorization::authorize_proxy_operation(
+            &removed,
+            "DELETE",
+            &arbitrary_path,
+        )
+        .expect("removing the policy must restore passthrough behavior");
+
+        let audit_id = tokio::time::timeout(std::time::Duration::from_secs(5), audit_rx)
+            .await
+            .expect("service update audit timeout")
+            .expect("service update audit sender dropped");
+        let audit = db
+            .collection::<AuditLog>(AUDIT_LOGS)
+            .find_one(doc! { "_id": audit_id })
+            .await
+            .expect("find service update audit")
+            .expect("service update audit exists");
+        let changed_fields = audit
+            .event_data
+            .as_ref()
+            .and_then(|data| data.get("changed_fields"))
+            .and_then(serde_json::Value::as_array)
+            .expect("changed_fields audit array");
+        assert!(
+            changed_fields
+                .iter()
+                .any(|field| field == "proxy_operation_policy")
+        );
+    }
+
+    #[tokio::test]
+    async fn create_service_rejects_empty_proxy_operation_policy() {
+        let Some(db) = connect_test_database("h_services_empty_operation_policy_create").await
+        else {
+            eprintln!("skipping empty operation-policy create test: no local MongoDB available");
+            return;
+        };
+        let admin_id = seed_user(&db, true).await;
+        let state = test_app_state(db);
+        let (base_url, server) = spawn_empty_docs_server().await;
+        let mut body =
+            create_http_service_request("Empty Policy", "empty-operation-policy", base_url);
+        body.proxy_operation_policy = Some(ProxyOperationPolicy { rules: vec![] });
+
+        let error = create_service(
+            State(state),
+            test_auth_user(&admin_id),
+            crate::telemetry::TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .expect_err("create must reject the same deny-all empty policy trap");
+        server.abort();
+
+        assert!(
+            matches!(error, AppError::ValidationError(message) if message.contains("must not be empty"))
+        );
     }
 
     #[test]

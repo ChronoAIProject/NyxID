@@ -230,6 +230,50 @@ fn is_auto_provisionable_catalog_service(
         || (!has_provider_requirement && is_public_internal_master_credential_service(service))
 }
 
+fn ensure_service_user_creatable(
+    service: &DownstreamService,
+    has_provider_requirement: bool,
+) -> AppResult<()> {
+    if !has_provider_requirement && is_public_internal_master_credential_service(service) {
+        return Err(AppError::PlatformManagedCatalogService(
+            service.slug.clone(),
+        ));
+    }
+    Ok(())
+}
+
+/// Refuse user-created aliases of public internal master-credential services.
+///
+/// These catalog rows are auto-provisioned per owner with the platform
+/// credential, and their identity policy remains catalog-owned. Allowing a
+/// user-owned alias would either inject a caller-supplied credential or expose
+/// the platform credential to a caller-controlled `UserEndpoint.url`.
+pub(crate) async fn ensure_catalog_service_user_creatable(
+    db: &mongodb::Database,
+    service_slug: Option<&str>,
+) -> AppResult<()> {
+    use crate::models::service_provider_requirement::{
+        COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
+    };
+
+    let Some(slug) = service_slug else {
+        return Ok(());
+    };
+    let Some(service) = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "slug": slug, "is_active": true })
+        .await?
+    else {
+        return Ok(());
+    };
+    let has_provider_requirement = db
+        .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
+        .find_one(doc! { "service_id": &service.id })
+        .await?
+        .is_some();
+    ensure_service_user_creatable(&service, has_provider_requirement)
+}
+
 fn auto_provision_auth_snapshot(service: &DownstreamService) -> (&str, &str) {
     if is_public_internal_master_credential_service(service) {
         (service.auth_method.as_str(), service.auth_key_name.as_str())
@@ -773,6 +817,8 @@ async fn create_key_inner(
     hosted_mode: bool,
     reserved_service_id: Option<&str>,
 ) -> AppResult<CreateKeyResult> {
+    ensure_catalog_service_user_creatable(db, service_slug).await?;
+
     let node_id = node_id.filter(|nid| !nid.is_empty());
     if let Some(rules) = ws_frame_injections {
         ws_frame_injector::validate_rules(rules)?;
@@ -851,6 +897,7 @@ async fn create_key_inner(
             .collection::<ServiceProviderRequirement>(SERVICE_PROVIDER_REQUIREMENTS)
             .find_one(doc! { "service_id": &svc.id })
             .await?;
+        ensure_service_user_creatable(&svc, provider_requirement.is_some())?;
         // Multi-connection: OAuth2 / device-code adds are ALWAYS
         // independent. We never reuse an existing provider token for
         // them — `create_key` mints a fresh `connection_id` below and
@@ -4148,9 +4195,10 @@ mod tests {
         AUTO_PROVISION_SOURCE, MAX_SERVICE_SLUG_LEN, OauthClientCredentialsInput,
         OpenApiSpecUrlInput, RANDOM_SLUG_SUFFIX_LEN, SlugCollisionStrategy, SshCreateParams,
         UpdateCredentialAction, auto_provision_no_auth_services, auto_provision_source_id,
-        build_key_view, classify_update_credential_action, create_key, derive_effective_auth,
-        direct_credential_type_for_service, direct_credential_type_from_auth_method,
-        ensure_user_api_key_for_update, exact_slug_conflict, generate_slug_from_label, get_key,
+        build_key_view, classify_update_credential_action, create_key, create_key_with_service_id,
+        derive_effective_auth, direct_credential_type_for_service,
+        direct_credential_type_from_auth_method, ensure_user_api_key_for_update,
+        exact_slug_conflict, generate_slug_from_label, get_key,
         identity_config_from_downstream_service, is_duplicate_reserved_service_id_app_error,
         is_duplicate_slug_app_error, list_keys, oauth_connection_status, random_slug_suffix,
         reconcile_provider_key_for_service_routing, resolve_openapi_spec_url, resolve_unique_slug,
@@ -8257,6 +8305,98 @@ mod tests {
         .expect("direct catalog without credential should fail");
 
         assert!(matches!(err, AppError::BadRequest(ref m) if m.contains("Credential is required")));
+    }
+
+    #[tokio::test]
+    async fn create_key_rejects_platform_managed_catalog_service_before_route_validation() {
+        let Some(db) = connect_test_database("uks_platform_managed_create_rejection").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let enc = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut catalog = sample_catalog_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("platform-managed-{}", uuid::Uuid::new_v4());
+        catalog.service_category = "internal".to_string();
+        catalog.auth_method = "bearer".to_string();
+        catalog.requires_user_credential = false;
+        catalog.credential_encrypted = vec![1, 2, 3];
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let cases = [
+            ("", None, None),
+            ("user-supplied-secret", None, None),
+            ("", Some("missing-node"), None),
+            ("", None, Some("https://user-controlled.example")),
+        ];
+        for (credential, node_id, endpoint_url) in cases {
+            let err = create_key(
+                &db,
+                &enc,
+                &user_id,
+                &user_id,
+                Some(&catalog.slug),
+                endpoint_url,
+                credential,
+                "Forbidden alias",
+                None,
+                None,
+                None,
+                node_id,
+                None,
+                None,
+                OpenApiSpecUrlInput::Inherit,
+                None,
+                false,
+                OauthClientCredentialsInput::None,
+                false,
+            )
+            .await
+            .err()
+            .expect("platform-managed catalog aliases must be rejected");
+
+            assert_eq!(err.error_code(), 11800);
+            assert_eq!(err.error_key(), "platform_managed_catalog_service");
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "'{}' is a platform-managed service: NyxID provisions it automatically with a platform credential and its route policy is catalog-owned. Use the auto-connected service row; ask an operator to change its identity settings.",
+                    catalog.slug
+                )
+            );
+        }
+
+        let err = create_key_with_service_id(
+            &db,
+            &enc,
+            &user_id,
+            &user_id,
+            Some(&catalog.slug),
+            None,
+            "",
+            "Reserved forbidden alias",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            OpenApiSpecUrlInput::Inherit,
+            None,
+            false,
+            OauthClientCredentialsInput::None,
+            false,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .await
+        .err()
+        .expect("reserved-id creates must enforce the same platform-managed rejection");
+        assert_eq!(err.error_code(), 11800);
     }
 
     // ── create_key: node-routed catalog ─────────────────────────────

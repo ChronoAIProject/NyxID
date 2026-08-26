@@ -393,6 +393,27 @@ mod tests {
             value["components"]["securitySchemes"]["bearer_auth"]["scheme"],
             "bearer"
         );
+
+        let policy_schema = &value["components"]["schemas"]["UpdateServiceRequest"]["properties"]["proxy_operation_policy"];
+        fn admits_null(schema: &serde_json::Value) -> bool {
+            schema.get("nullable").and_then(serde_json::Value::as_bool) == Some(true)
+                || schema.get("type").is_some_and(|kind| {
+                    kind == "null"
+                        || kind
+                            .as_array()
+                            .is_some_and(|kinds| kinds.iter().any(|kind| kind == "null"))
+                })
+                || schema
+                    .as_object()
+                    .is_some_and(|object| object.values().any(admits_null))
+                || schema
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(admits_null))
+        }
+        assert!(
+            admits_null(policy_schema),
+            "UpdateServiceRequest.proxy_operation_policy must allow explicit null: {policy_schema}"
+        );
     }
 
     #[tokio::test]

@@ -245,6 +245,63 @@ contract by returning `auto_connected: true` and omitting `url`. The stored
 `UserEndpoint.url` remains intact for proxy routing and MCP configuration, and
 user-facing endpoint or service mutation routes reject changes to these rows.
 
+## Platform-managed (master-credential) catalog services
+
+A catalog row is platform managed when it is active, public, internal,
+provider-less HTTP; has a non-`none`, non-`token_exchange` auth method; does not
+require a user credential; contains an encrypted platform credential; and has
+no `ServiceProviderRequirement`. This is the master-credential branch of
+`is_auto_provisionable_catalog_service`. NyxID auto-provisions one
+`UserEndpoint` and `UserService` per owner with `source = "auto_provision"` and
+no `UserApiKey`. The proxy resolves the credential from the catalog row.
+
+The route's identity policy is also catalog-owned. An admin update to any of
+the eight identity fields (`identity_propagation_mode`, the three
+`identity_include_*` flags, `identity_jwt_audience`, `forward_access_token`,
+`inject_delegation_token`, and `delegation_token_scope`) calls
+`catalog_identity_service::propagate_catalog_update`. Inherited instances are
+backfilled and the reconciliation audit reports `matched_count`,
+`modified_count`, and `skipped_customized_count`. A same-value PUT is a no-op
+because the computed `changes` set is empty. The admin-only
+`POST /api/v1/services/{id}/resync-identity` recovery operation instead
+overwrites all eight fields on every instance, including customized rows.
+
+`POST /api/v1/keys` refuses a user-created alias of one of these services with
+403 / `platform_managed_catalog_service` (11800). A user-created key may carry
+an `endpoint_url`; serving the platform credential through that alias would
+therefore send the platform secret to a user-controlled destination. Supplying
+a user credential, node route, endpoint override, reserved service ID, or org
+owner does not weaken the refusal.
+
+Consumers detect these rows through `GET /keys` and its `auto_connected`
+field. `GET /user-services` deliberately does not carry that projection; a
+consumer starting there must join by the exact `UserService._id`, never infer
+platform management from a slug or a missing API-key ID.
+
+Privilege can be narrowed today with `proxy_operation_policy`: every rule is
+an explicit HTTP method plus a root-anchored path template whose `{param}`
+placeholders match exactly one segment. Wildcards are not supported. Replace a
+policy with an object; roll it back with
+`{"proxy_operation_policy": null}`. An empty `rules` array is rejected because
+it would deny every operation. `visibility = "private"` is not a narrowing
+tool for this class: the predicate requires `public`, so flipping visibility
+de-provisions every auto-connected row. Per-caller route flags also do not
+narrow the platform credential's privilege: forwarded bearer and delegation
+tokens are minted for the current user on each request.
+
+### Operator runbook
+
+1. Read the catalog row and its exact auto-connected `UserService` IDs. Before
+   tightening a policy, migrate any existing consumer that still holds a
+   user-created alias to deterministic exact-ID resolution.
+2. PUT only the intended identity fields and/or a non-empty
+   `proxy_operation_policy` to `/api/v1/services/{id}`.
+3. Review the identity reconciliation audit counts. Investigate every
+   `skipped_customized_count`; use `resync-identity` only when deliberately
+   overwriting all customized instances.
+4. Re-read the catalog row and `GET /keys` projections, then verify allowed and
+   denied method/path pairs through the exact auto-connected routes.
+
 Because a disabled row keeps its slug while a new active service may reuse it,
 this listing can contain two rows with the same slug. Consumers that resolve by
 slug should prefer the active row.

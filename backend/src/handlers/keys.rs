@@ -853,6 +853,7 @@ fn validate_optional_label_for_update(label: Option<&str>) -> AppResult<()> {
         (status = 200, description = "Key created with auto-provisioned endpoint, credential, and service", body = KeyResponse),
         (status = 400, description = "Validation error", body = crate::errors::ErrorResponse),
         (status = 401, description = "Unauthorized", body = crate::errors::ErrorResponse),
+        (status = 403, description = "Catalog service is platform-managed or access is forbidden", body = crate::errors::ErrorResponse),
         (status = 404, description = "Catalog entry not found", body = crate::errors::ErrorResponse)
     ),
     tag = "AI Services"
@@ -897,6 +898,12 @@ pub(crate) async fn create_key_with_service_id(
     } else {
         actor.clone()
     };
+
+    unified_key_service::ensure_catalog_service_user_creatable(
+        &state.db,
+        body.service_slug.as_deref(),
+    )
+    .await?;
 
     let credential = body.credential.as_deref().unwrap_or("");
     if let Some(ref rules) = body.ws_frame_injections {
@@ -4173,6 +4180,51 @@ mod tests {
         .await
         .expect_err("member should not create org key");
         assert!(matches!(err, AppError::OrgRoleInsufficient(_)));
+    }
+
+    #[tokio::test]
+    async fn create_key_for_org_rejects_platform_managed_catalog_alias() {
+        let Some(db) = connect_test_database("h_keys_platform_managed_org_rejection").await else {
+            eprintln!("skipping: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let admin_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &admin_id, UserType::Person).await;
+        insert_user(&db, &org_id, UserType::Org).await;
+        insert_membership(&db, &org_id, &admin_id, OrgRole::Admin).await;
+
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.slug = format!("platform-managed-org-{}", uuid::Uuid::new_v4());
+        catalog.visibility = "public".to_string();
+        catalog.service_category = "internal".to_string();
+        catalog.service_type = "http".to_string();
+        catalog.auth_method = "bearer".to_string();
+        catalog.requires_user_credential = false;
+        catalog.provider_config_id = None;
+        catalog.is_active = true;
+        catalog.credential_encrypted = vec![1, 2, 3];
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+
+        let mut body = make_create_key_request("Forbidden org alias", None, None, None, None);
+        body.service_slug = Some(catalog.slug);
+        body.target_org_id = Some(org_id);
+        let err = super::create_key(
+            State(state),
+            test_auth_user(&admin_id),
+            TelemetryContext::default(),
+            Json(body),
+        )
+        .await
+        .expect_err("org-owned platform-managed aliases must be rejected");
+
+        assert_eq!(err.error_code(), 11800);
+        assert_eq!(err.error_key(), "platform_managed_catalog_service");
     }
 
     #[tokio::test]
