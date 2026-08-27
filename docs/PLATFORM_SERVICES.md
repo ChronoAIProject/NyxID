@@ -1,160 +1,501 @@
-# Platform services
+# Platform services v2
 
-Platform services expose a small set of NyxID-owned operations backed by vendor APIs. A caller selects an operation, never an arbitrary vendor method or URL. NyxID validates a typed request and constructs the upstream path, headers, and body.
+This document specifies the target design for NyxID-managed vendor credentials and
+per-operation billing. It replaces the separate `platform-*` catalog-service model.
+The existing catalog service is the provider identity for both bring-your-own-key
+(BYOK) connections and NyxID-managed access. A platform credential is an alternate
+credential source for that catalog identity, not a second service.
 
-The user-facing feature has three layers, evaluated in this order:
+The `experimental:platform-services` feature flag remains the caller-facing rollout
+gate. Admin configuration and reconciliation remain available while the flag is off.
 
-1. The `experimental:platform-services` feature flag controls who can discover or call the operations. It defaults to off.
-2. Each `PlatformOperation` row has its own `enabled` switch.
-3. Each enabled row has typed, operation-specific configuration.
+## Data model
 
-The flag does not gate the admin page. Administrators can provision vendors, configure operations, and set prices before exposing the feature to users.
+The two collections below organize the subsystem. Catalog rows describe providers,
+`platform_credentials` holds shared secrets, and `platform_operations` describes the
+only operations for which a shared secret may be selected.
 
-## Operation registry
+### Platform credentials
 
-The registry in `services/platform_operation_service.rs` owns the mappings. Database templates cannot add operations or weaken these contracts.
+`platform_credentials` is the only storage location for a NyxID-managed provider
+credential:
 
-| Operation | HTTP route | MCP tool | Platform vendor row | User catalog row |
-| --- | --- | --- | --- | --- |
-| `x_search` | `POST /api/v1/platform-ops/x-search` | `nyx__x_search` | `platform-x` | `api-twitter` |
-| `speak` | `POST /api/v1/platform-ops/speak` | `nyx__speak` | `platform-elevenlabs` | `api-elevenlabs` |
-| `call_and_say` | `POST /api/v1/platform-ops/call-and-say` | `nyx__call_and_say` | `platform-twilio` | `api-twilio` |
-| `flight_search` | `POST /api/v1/platform-ops/flight-search` | `nyx__flight_search` | `platform-duffel` | `duffel` |
-
-`GET /api/v1/platform-ops` returns enabled operations for the caller. It is control-plane discovery and does not create a billing meter.
-
-Session and access-token users may call the routes. API-key access requires a `nyxid_ag_` agent key. Delegated, relay, and service-account tokens are rejected by the route group.
-
-## Credential precedence
-
-Execution and discovery use the same credential-source resolver. Execution uses the normal proxy resolution cascade, including personal, service-pool, and organization fallback. X OAuth refresh follows the same path as `/proxy`.
-
-| Connection state | Result | Billing | Discovery state |
-| --- | --- | --- | --- |
-| No active matching `UserService` | Platform credential | Credits path | No `own_connection` object |
-| Matching row is disabled | Platform credential | Credits path | `usable: false`, `reason: "disabled"` |
-| Active row resolves to a master credential or has no `api_key_id` | Platform credential | Credits path | Platform source |
-| Active row is outside a scoped agent key's `allowed_service_ids` | Platform credential; the row is invisible to that caller | Credits path | No `own_connection` object |
-| Active row has a user-supplied, server-held credential | Own connection | Skipped | `usable: true`, no reason |
-| Active row has an expired, revoked, missing, or unreadable credential | Return the existing resolver error | Skipped | `usable: false`, `reason: "unusable"` |
-| Active row is node-routed or has no server-held credential | HTTP 409, `platform_operation_own_connection_unsupported` | Skipped | `usable: false`, `reason: "node_routed"` |
-| Active row requires approval for each request | HTTP 409, `platform_operation_approval_required` | Skipped | `usable: false`, `reason: "approval_required"` |
-
-An unusable active connection never falls back to platform credits. The user must repair it or disable it. This avoids charging a caller who expected NyxID to use their account.
-
-Agent service bindings are honored before execution, so a bound `UserApiKey` replaces the connection's default credential exactly as it does under `/proxy`. Own-connection requests also evaluate the normal personal or organization approval policy against the server-composed HTTP method, path, and body. A deny returns the same forbidden error as `/proxy`. A per-request approval requirement fails closed because platform operations cannot create approval requests; session callers retain the normal `/proxy` approval bypass.
-
-Discovery and MCP `tools/list` run in read-only mode. They load the caller-visible connections once, load all relevant catalog and vendor rows in one batch, and read billing rollout once per request. They do not decrypt credentials, refresh OAuth tokens, update last-used timestamps, or create approval requests. An unusable connection remains a discovery state instead of becoming an API error.
-
-## Controls by credential source
-
-| Applies to | Controls |
-| --- | --- |
-| Every request | `deny_unknown_fields`; character and result limits; hard caps; E.164 validation; XML escaping and control-character rejection; server-composed paths, queries, headers, and bodies; no caller-supplied URLs, callbacks, recording fields, or vendor operations |
-| Platform credential only | `allowed_voice_ids`; `allowed_destination_prefixes`; `max_calls_per_user_per_day`; `max_searches_per_user_per_day`; the configured Twilio `account_sid` and `call_from` |
-| Own connection only | `speak` accepts any voice identifier that passes the safe-identifier check; `call_and_say.from` is required and must be E.164; the Twilio account SID comes from the stored `AccountSID:AuthToken` credential |
-
-`call_and_say.from` is rejected when the platform credential is selected. This keeps the platform caller identity under administrator control.
-
-## Execution and billing
-
-Every operation follows this order:
-
-1. Feature flag.
-2. Caller credential class.
-3. Per-agent rate limit.
-4. Enabled operation and valid typed configuration.
-5. Credential-source resolution.
-6. Platform-only allowlists and daily-quota reservation.
-7. Billing `open` for a platform credential.
-8. Platform credential decryption.
-9. Billing `mark_forwarded` immediately before the vendor request.
-10. Vendor request.
-11. Deferred settlement on success, or billing failure plus daily-quota release on error.
-
-Platform execution uses `BillingIngress::PlatformOperation`, `CredentialClass::NyxidManagedMaster`, and the vendor row's `ServiceBilling` configuration. The metered quantity is one `requests` unit. Price authoring remains on `DownstreamService.billing.platform_pricing`; there is no price field on `PlatformOperation`.
-
-Billing opens before platform credential decryption or any network request. `AppError::InsufficientCredits` therefore leaves no daily-quota reservation, does not decrypt the vendor credential, and does not contact the vendor. A non-2xx response or an invalid bounded response fails the meter and releases both the wallet hold and daily quota. Successful settlement is persisted before an asynchronous worker completes the charge, so Lago latency does not delay the operation response.
-
-A vendor failure after `mark_forwarded` leaves the usage row terminally `failed` with `released: true`. Retrying `fail` is a no-op and releases the wallet hold only once. Reconciliation does not replay these rows: stale-reservation abandonment selects only unreleased, never-forwarded `reserved` rows, and settlement recovery selects only unreleased rows with a materialized quantity.
-
-Own-connection execution uses a disabled meter. It does not create a `usage_meter` row or touch a wallet.
-
-Audit events contain operation names, caller attribution, sizes, durations, credential source, and normalized outcomes. A scoped caller whose own connection is invisible records `own_connection_out_of_scope: true`. They do not contain message text, audio, full phone numbers, credentials, vendor account identifiers, or upstream payloads.
-
-## Response signaling
-
-Every operation response includes:
-
-```text
-X-NyxID-Credential-Source: platform
-```
-
-or:
-
-```text
-X-NyxID-Credential-Source: own_connection
-```
-
-MCP results carry the same value in `structuredContent.credential_source` and `_meta.credential_source`. JSON text content also includes `credential_source`; audio stays audio content and uses the structured metadata fields. At `tools/list` time, each platform tool description states whether the caller's connection or the platform credential will be used, including the current per-call price when one is active. Platform-credential `speak` descriptions also list the configured allowed voice IDs. Own-connection descriptions omit that platform-only allowlist. Node-routed, unusable, and approval-required connections each get a failure-specific sentence instead of claiming that the connected account is usable.
-
-The discovery response contains dedicated response objects, not database models:
-
-```json
-{
-  "operations": [
-    {
-      "op": "speak",
-      "display_name": "Speak",
-      "description": "Synthesize speech from bounded text input.",
-      "vendor": "elevenlabs",
-      "catalog_service_slug": "api-elevenlabs",
-      "credential_source": "platform",
-      "own_connection": null,
-      "pricing": {
-        "billable": true,
-        "credits_per_call": "0.25",
-        "metric": "requests"
-      },
-      "mcp_tool": "nyx__speak"
-    }
-  ]
+```rust
+PlatformCredential {
+    _id: String,                    // UUID v4
+    catalog_service_id: String,     // unique DownstreamService._id
+    credential_encrypted: Vec<u8>,
+    auth_method: String,
+    auth_key_name: String,
+    created_by: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
 }
 ```
 
-`pricing.billable` requires both the vendor's `platform_billable` setting and the billing rollout flag. `credits_per_call` is the exact stored price string, or `null` when the operator has not set a NyxID price.
+The collection has a unique index on `catalog_service_id`. Credential writes validate
+that the referenced catalog row is active and is registered in the code-owned
+platform-provider safety registry. The credential is encrypted with `EncryptionKeys`.
+The model has a manually redacted `Debug` implementation, and no response object ever
+contains the ciphertext, credential text, or a reversible key identifier.
 
-## Bounded operations
+No catalog, proxy, MCP, auto-provision, or key-list resolver reads this collection.
+Those paths may ask `platform_credential_service` whether a credential is configured,
+but they cannot fetch or decrypt it. The service exposes exactly two execution
+authorizers:
 
-`x_search` searches recent public posts. NyxID limits `query` to 512 characters and `max_results` to the configured cap, with a hard cap of 25. The platform base uses `/2/tweets/search/recent`; an own connection whose base URL already ends in `/2` uses `/tweets/search/recent` relative to that base.
+```rust
+authorize_endpoint(db, catalog_service_id, method, canonical_path)
+    -> (AuthorizedPlatformCredential, PlatformOperationRow)
 
-`speak` sends bounded text and a safe voice identifier to ElevenLabs. NyxID constructs `{text, model_id}` and streams the successful audio response. The platform voice allowlist does not constrain a user's own ElevenLabs key. The request meter settles when ElevenLabs returns a successful response; a client abort while consuming the audio stream is still charged because the vendor has already performed the request.
+authorize_constrained(db, catalog_service_id, constrained_op)
+    -> (AuthorizedPlatformCredential, PlatformOperationRow)
+```
 
-`call_and_say` places one Twilio call with server-generated TwiML. NyxID accepts only `to`, `message`, and the source-dependent `from` field. It never accepts `Url`, `StatusCallback`, recording options, or arbitrary Twilio form fields.
+`AuthorizedPlatformCredential` is a non-serializable type with private fields. Its
+secret is held in `Zeroizing`; its `Debug` output is redacted. It can be converted into
+the bounded proxy target required by the caller, but callers cannot construct it or
+decrypt a `PlatformCredential` directly.
 
-`flight_search` sends `POST /air/offer_requests?return_offers=true` with `Duffel-Version: v2` and gzip support. It accepts IATA origin and destination codes, travel dates within 365 days, one to nine adults, a fixed cabin-class enum, and a bounded offer count. The configured default is 10 offers, with a hard cap of 50 and a default platform quota of 20 searches per user per UTC day.
+Authorization and decryption are one operation. `authorize_endpoint` succeeds only
+after an enabled endpoint row for the same catalog service matches the exact method and
+canonical path. `authorize_constrained` succeeds only after an enabled constrained row
+for the same catalog service and code-owned operation exists. Missing credentials,
+disabled rows, mismatches, and invalid catalog associations fail before decryption.
 
-A Duffel offer request creates a search resource. It does not move money or book travel. NyxID projects Duffel's response into bounded offer, slice, and segment fields. Orders, payments, cancellations, order reads, stays, cars, and Duffel's general API are not reachable through `flight_search`.
+`DownstreamService.credential_encrypted` remains for unrelated legacy/internal catalog
+services, but is not a platform-vendor credential store. There are no live
+`platform-*` provider rows, vendor-template records, vendor slug guards, or special
+deny-all proxy policies in the v2 design.
 
-## Platform vendor isolation
+### Platform operations
 
-Platform vendor rows hold shared credentials, but callers cannot use them through any generic path. Each canonical row carries an explicit empty `proxy_operation_policy`, which is a deny-all policy for actor-addressed requests.
+`platform_operations` contains one row per catalog provider and operation:
 
-Service creation and update accept only an omitted policy or an explicitly empty rule list for canonical vendor slugs, then normalize it to the fixed deny-all policy. A non-empty admin-supplied policy is rejected instead of silently overwritten. Operation binding rejects a row without the policy. Startup and bind-time backfills set the empty policy only on canonical vendor rows whose field is missing or null. The backfill never modifies another row or `credential_encrypted`.
+```rust
+PlatformOperationRow {
+    _id: String,                    // UUID v4
+    catalog_service_id: String,
+    kind_key: String,               // service-derived, not accepted from APIs
+    enabled: bool,
+    kind: PlatformOperationKind,    // serde tag: kind
+    limits: OperationLimits,
+    billing: OperationBilling,
+    billing_cleanup_metric_code: Option<String>,
+    created_by: String,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
 
-The empty policy returns a not-found-shaped denial for both `/api/v1/proxy/{vendor-id}/...` and `/api/v1/proxy/s/{vendor-slug}/...` before credential decryption. The denial does not depend on `PLATFORM_REQUIRE_OPERATION_POLICY` or the platform-services feature flag. Generic MCP catalogs and dispatch, `/llm/*`, `/catalog`, and `list_catalog_all` also exclude the canonical rows. They never auto-provision into `UserService` rows or appear as platform-managed entries on `/keys`.
+PlatformOperationKind {
+    Endpoint {
+        method: String,
+        path_template: String,
+        name: String,
+        description: Option<String>,
+    },
+    Constrained {
+        op: ConstrainedOp,
+        config: ConstrainedConfig,
+    },
+}
 
-Only the code-owned platform operation path may select these rows. Its server-chosen authorization validates the vendor contract but deliberately ignores actor-addressed operation policies. `chrono-llm-public` keeps its existing auto-provision and access behavior.
+ConstrainedOp = Speak | CallAndSay | FlightSearch
 
-## Operator activation
+OperationLimits {
+    per_request: PerRequestCaps,
+    per_user_per_day: Option<u32>,
+}
 
-Turn on platform services in this order:
+OperationBilling {
+    metric: BillingMetric,
+    price_per_unit: String,
+    base_fee_per_call: Option<String>,
+    lago_metric_code: String,
+    sync_status: PricingSyncStatus,
+    sync_error: Option<String>,
+}
+```
 
-1. Grant `experimental:platform-services` to the intended users or organization. Keep the default off while staging.
-2. Create the four canonical vendor rows from Admin Platform Operations and supply their master credentials.
-3. Configure and enable each operation that should be available.
-4. Set the per-request platform price on each vendor's normal service edit page. The operation card links to that page.
+`billing_cleanup_metric_code` is the durable cleanup marker for an obsolete Lago
+charge. It is separate from the active billing tuple so an admin edit can make the new
+price authoritative immediately while reconciliation keeps retrying removal of the old
+metric. The marker is cleared only after Lago removal and local rate-cache cleanup both
+succeed.
 
-An enabled operation with a missing or invalid vendor row fails closed. A price that is absent remains absent in discovery; the UI reports "Price not set" instead of inventing a zero price.
+`kind_key` is persisted because MongoDB cannot create the required unique index from a
+computed tagged-enum expression. It is derived on every write and never trusted from an
+HTTP body:
 
-The main implementation is in `models/platform_operation.rs`, `services/platform_operation_service.rs`, `handlers/platform_ops.rs`, `handlers/admin_platform_ops.rs`, and `services/mcp_service.rs`. Frontend schemas and hooks live in `frontend/src/schemas/platform-ops.ts` and `frontend/src/hooks/use-platform-ops.ts`.
+```text
+endpoint:{METHOD} {normalized_path_template}
+constrained:{snake_case_op}
+```
+
+The unique `(catalog_service_id, kind_key)` index makes retries and migration upserts
+converge on one row. Additional indexes support enabled rows by catalog service and
+pending/failed Lago synchronization.
+
+`PerRequestCaps` is tagged and must match the operation kind. Endpoint rows use the
+ordinary authenticated proxy body and response bounds. Constrained rows retain typed
+caps: speak text characters, call message characters and call-duration ceiling, and
+flight-search result count. Config owns non-cap settings: speak model and voice
+allowlist, Twilio destination-prefix allowlist and vendor identity, and the bounded
+flight-search request contract. Hard maxima remain code-owned. Admin values may lower
+them but never raise them. Unknown fields and a cap/config variant that does not match
+the operation are rejected.
+
+The allowlist for a provider is exactly its enabled `Endpoint` rows. It is empty by
+default. Creating a credential does not create an endpoint row, and enabling a
+constrained operation does not authorize the equivalent generic vendor endpoint.
+
+Constrained rows can only be created from the code-owned registry. Administrators
+cannot introduce a fourth constrained operation or change its provider binding. The
+registry binds:
+
+| Constrained operation | Catalog service | Why it remains constrained |
+| --- | --- | --- |
+| `speak` | `api-elevenlabs` | The server validates text and voice, composes the body, and bounds streamed audio. |
+| `call_and_say` | `api-twilio` | The server owns caller identity and TwiML and excludes callbacks, recording, and arbitrary form fields. |
+| `flight_search` | `duffel` | The server admits search only and projects a bounded response; booking and payment stay unreachable. |
+
+X search is not a constrained operation. It migrates to the endpoint row
+`GET /2/tweets/search/recent` on `api-twitter`.
+
+### Billing extensions
+
+`BillingMetric` adds `Characters` and `Seconds`. `PlatformUsage` adds non-negative
+`characters` and `seconds` counters, and `platform_quantity` maps those variants just
+as it already maps requests, bytes, and tokens. The stable legacy metric codes gain
+`platform_characters` and `platform_seconds`.
+
+Each operation receives a stable code:
+
+```text
+platform_op_{catalog_slug}_{kind_key_slug}
+```
+
+The slugging function is deterministic, bounded, collision-tested, and derived from
+the normalized kind key. The operation row, rather than `DownstreamService.billing`,
+is the NyxID price authority. Prices are normalized decimal credit strings with no
+floating-point conversion. The normal save path attempts to upsert the Lago sum metric
+and standard plan charge. Pending and failed writes are retried by billing
+reconciliation. A stale completion cannot overwrite a newer admin edit. Removing or
+replacing a metric retains a durable cleanup marker until the old plan charge and rate
+cache entry are removed.
+
+The execution adapter must supply a meaningful quantity for the selected metric.
+`characters` counts Unicode scalar values in the validated request text and is known
+before forwarding. `seconds` is supported by `call_and_say` and comes from Twilio's
+completed-call duration. Invalid metric/operation combinations are rejected at admin
+write rather than silently producing a zero quantity.
+
+`UsageMeterRow` gains `base_fee_micros: Option<i64>` and a tagged deferred descriptor:
+
+```rust
+DeferredQuantity::TwilioCall {
+    account_sid: String,
+    call_sid: String,
+}
+```
+
+The base fee and per-unit price are snapshotted when the meter opens. Reservation size
+is:
+
+```text
+base fee + estimated quantity * unit price
+```
+
+For known quantities, the estimate is the already validated quantity. For a Twilio
+call, the estimate is the configured, code-capped maximum duration and the server sends
+the corresponding duration ceiling to Twilio. Quantity allowances cover quantity
+units; the credit-denominated base fee is funded by grants and then wallet credits.
+
+Settlement remains one `UsageMeterRow`, one transaction ID, and one eventual
+`usage_settled` ledger entry. The charged amount is:
+
+```text
+base fee + actual quantity * unit price
+```
+
+The funding/wallet transition includes an idempotent base-fee-applied marker so a
+Twilio row can settle its base fee when the vendor accepts the call while retaining the
+same row and the bounded quantity hold. The row remains `forwarded`; no second meter or
+ledger row is created. Final quantity settlement consumes the remaining hold, releases
+unused reservation, and cannot apply the base twice. Billing-ledger canonical encoding
+adds the new metric names and base-fee field only for the new encoding version, so
+verification of historical entries remains byte-for-byte stable.
+
+### Deferred Twilio seconds
+
+After a successful Twilio create-call response, NyxID validates the returned call SID,
+persists `DeferredQuantity::TwilioCall` on the forwarded meter row, and settles the
+snapshotted base fee. The response can then return without waiting for call completion.
+
+The existing billing reconcile sweep claims due deferred rows in bounded batches. For
+each row it re-authorizes the `call_and_say` constrained operation through
+`platform_credential_service` and polls:
+
+```text
+GET /2010-04-01/Accounts/{account_sid}/Calls/{call_sid}.json
+```
+
+The account and call SIDs are validated opaque identifiers and are never placed in
+audit payloads. A completed response with a valid non-negative duration finalizes the
+same row with `seconds = duration`. Non-terminal responses and transient failures leave
+the descriptor in place with bounded retry scheduling. If the row is still unresolved
+24 hours after forwarding, reconciliation atomically claims it, finalizes quantity
+zero, retains the already settled base fee, clears the descriptor, and emits the
+metadata-only `platform_call_duration_unresolved` audit event.
+
+Every transition filters on the row ID, `status = forwarded`, and the exact deferred
+descriptor. A replay therefore observes the completed state and becomes a no-op. If an
+administrator disables the constrained row or replaces the credential while a call is
+pending, polling fails closed and retries; the 24-hour base-only terminal rule still
+prevents an immortal hold.
+
+## Endpoint authorization
+
+Endpoint authorization is intentionally source-specific. It controls access to the
+platform credential; it does not modify `DownstreamService.proxy_operation_policy` and
+does not restrict a user's own credential.
+
+Methods are normalized to uppercase. The safe-method registry permits `GET` and `HEAD`
+for registered platform providers. A `POST` is permitted only for an exact
+code-registered safe provider/template pair, initially Duffel
+`POST /air/offer_requests`. `PUT`, `PATCH`, `DELETE`, `OPTIONS`, WebSocket upgrades, and
+unregistered POST templates are rejected at admin write. This registry is checked
+again when loading an operation for authorization so a malformed database row cannot
+broaden access.
+
+Path templates use the existing canonical proxy-path semantics without using a catalog
+row's proxy policy:
+
+- Templates are root-anchored and query-free.
+- Static segments are case-sensitive and exact.
+- A full segment such as `{id}` matches exactly one non-empty canonical segment.
+- Globs, regex, alternation, partial placeholders, empty segments, dot segments,
+  backslashes, encoded separators, and ambiguous trailing slashes are rejected.
+- The query string is forwarded but is not part of the path match.
+
+REST UUID, REST slug, typed MCP, and generic MCP entry points first run their existing
+source-specific canonicalization. They pass the same decoded, root-anchored canonical
+path to `authorize_endpoint`. Parity tests must prove that equivalent REST and MCP
+requests select the same row and forward byte-equivalent paths, and that ambiguous
+encodings fail before credential decryption.
+
+## Alternatives considered
+
+| Decision area | Alternative | Result | Reason |
+| --- | --- | --- | --- |
+| Credential store | Reuse `DownstreamService.credential_encrypted` on separate `platform-*` rows | Rejected | It duplicates provider identities, mixes catalog and secret objects in `/keys` and Admin Services, and requires broad exclusion guards on every generic resolver. |
+| Credential store | Put a system-owned `UserApiKey` behind a synthetic `UserService` | Rejected | User ACL, lifecycle, agent binding, and auto-provision rules would treat a shared platform secret as a user connection and make precedence harder to audit. |
+| Credential store | Environment variables per provider | Rejected | It cannot support admin replacement, per-provider status, database migration, or multi-replica convergence without a separate control plane. |
+| Credential store | Dedicated `platform_credentials` keyed by existing catalog service | Chosen | It gives one provider identity, one secret home, a unique association, write-only admin behavior, and an enforceable service-layer decryption boundary. |
+| Allowlist matching | Keep an empty/non-empty `proxy_operation_policy` on the catalog row | Rejected | A catalog policy applies to BYOK traffic too; the new allowlist must constrain only selection of the platform credential. Existing policies serve unrelated services and stay untouched. |
+| Allowlist matching | Authorize by `ServiceEndpoint._id` only | Rejected | Raw REST proxy requests have method/path but no endpoint ID, free-form admin entries would not fit, and a stale or regenerated OpenAPI row could silently change identity. |
+| Allowlist matching | Regex or glob paths | Rejected | Expressive patterns create overlap, encoding, and review hazards and make REST/MCP parity difficult to prove. |
+| Allowlist matching | Exact method plus canonical segment template | Chosen | It supports ordinary resource IDs while remaining anchored, deterministic, source-independent, and easy to deny by default. |
+| Deferred seconds | Hold the HTTP request open until Twilio completes | Rejected | Calls can outlive request, proxy, and deploy lifetimes; disconnect behavior would make billing nondeterministic. |
+| Deferred seconds | Charge the base and duration in two usage rows | Rejected | Two transactions complicate wallet holds, grant precedence, Lago drift, ledger interpretation, and idempotency for one vendor action. |
+| Deferred seconds | Add a separate job collection or depend on Twilio webhooks | Rejected | A second durable queue duplicates the existing meter state machine, while webhooks add public ingress, secret verification, and delivery configuration for data NyxID can poll. |
+| Deferred seconds | Keep one forwarded meter row with a tagged deferred descriptor | Chosen | The existing reconciliation and settlement machinery can retry and converge around one transaction, one funding record, and one ledger entry. |
+
+## Resolution and precedence
+
+Platform fallback is considered only after normal caller and connection authority is
+known. The order is:
+
+1. Check the platform-services rollout flag when the request would discover or select
+   a platform credential.
+2. Resolve owner/org access, agent-key service scope, and the ordinary UserService
+   cascade.
+3. Apply `AgentServiceBinding` before classifying an active own connection.
+4. If a usable own server credential exists, use it and disable platform billing.
+5. If the connection is absent, disabled, or invisible to the scoped agent key, ask the
+   platform credential service to authorize the exact endpoint or constrained op.
+6. If an active own connection is unusable, do not fall back. Return the existing
+   source-specific platform-operation error where applicable, or the ordinary proxy
+   resolver error on a normal proxy request.
+7. Evaluate approvals with the same operation descriptor used by the existing door.
+8. Only after authority succeeds, reserve billing and obtain the authorized platform
+   credential.
+
+A scoped agent key's out-of-scope connection is invisible, preserving the current
+platform-fallback behavior and metadata-only audit attribution. An active revoked,
+expired, missing, or unreadable user credential is visible but unusable and blocks
+fallback. A disabled row deliberately permits fallback. Platform responses set
+`X-NyxID-Credential-Source`; MCP results carry the same source in structured metadata.
+
+| Door | Own connection | Platform fallback |
+| --- | --- | --- |
+| `/proxy/{id}` and `/proxy/s/{slug}` HTTP | Existing direct or node path, agent binding, scope, and approval behavior stays authoritative. | Only authenticated HTTP requests, only after absent/disabled resolution, and only for an enabled endpoint match. |
+| Generic/typed MCP proxy tool | Existing prepared-call, exact-operation, scope, binding, approval, and node behavior stays authoritative. | The prepared canonical method/path must match an enabled endpoint row before billing or decryption. |
+| `speak`, `call_and_say`, `flight_search` HTTP and `nyx__*` | Server-held own credential wins and skips credits. Per-request approval requirements retain the existing fail-closed constrained-op behavior; session bypass remains unchanged. | Requires the enabled constrained row and uses its limits, config, and billing. |
+| Node-routed own request | Ordinary generic proxy/MCP node execution remains available. Constrained operations retain their existing unsupported error. | Never selected after a node route exists, including when the node is offline or a fallback node fails. |
+| Anonymous proxy and public MCP | Existing forced no-auth target only. | Never reads, tests, authorizes, or decrypts a platform credential. |
+
+For ordinary proxy traffic, failure to authorize platform fallback is deliberately
+indistinguishable from today's connect-first/not-found result. Credential presence and
+allowlist contents are not exposed through error shape or timing-sensitive preflight
+APIs.
+
+## Discovery and user keys
+
+`GET /api/v1/keys` is the single user-facing provider inventory. It never persists a
+synthetic UserService for platform access.
+
+For a catalog provider with at least one enabled platform operation:
+
+- With no own row, return one synthesized `KeyInfo` using the catalog slug and identity,
+  `platform_managed: true`, `auto_connected: true`, and platform operation summaries.
+- With an own row, return that row once and attach the platform summary. Do not append a
+  second vendor object.
+- An active usable own row reports `own_connection` and explains that its credential
+  powers the enabled operations without credits.
+- A disabled own row reports `platform_fallback`, the current price summary, and the
+  normal Enable action.
+- An unusable, node-routed, or approval-required own row reports a typed reason and the
+  View connection action; it does not claim that platform fallback will occur.
+
+The additive response shape is:
+
+```text
+KeyInfo {
+    platform_managed: bool,
+    auto_connected: bool,
+    platform: Option<PlatformKeySummary>,
+    // existing KeyInfo fields remain
+}
+
+PlatformKeySummary {
+    operations: Vec<{ name, kind, price_label }>,
+    credential_source:
+        platform
+        | own_connection
+        | platform_fallback
+        | unusable(reason),
+}
+```
+
+A synthesized row uses the catalog slug and a stable synthetic response ID, but is not
+accepted by mutation handlers as if it were a `UserService`. Its primary treatment is
+"Platform managed" with "Connect your own". An active usable own row shows
+"Powers {N} platform operation(s) - your credential, no credits". A disabled own row
+shows "Platform credential in use - {price}" and Enable. Unusable, node-routed, and
+approval-required rows show their reason and View connection. The rendered separators
+may use the design system's middle-dot glyph; the wording and state meanings are fixed.
+
+Each operation summary includes `name`, `kind`, and a server-formatted `price_label`.
+The backend remains authoritative for price wording so `/keys`, platform discovery,
+and MCP descriptions cannot disagree.
+
+The separate "Platform services" section and its `/keys` discovery query are deleted.
+`GET /api/v1/platform-ops` remains for agents and MCP clients, but returns the same
+resolved operation/source projections rather than the old four-operation cards.
+Discovery is read-only: it does not decrypt credentials, refresh OAuth, mutate
+last-used state, create approvals, or open meters.
+
+## Admin surface
+
+`/admin/platform-ops` is a table with Provider, Operation, Kind, Enabled, Metric,
+Price, Limits, and Edit columns.
+
+The header actions are:
+
+- **Add endpoint**: choose a catalog service, then a stored `ServiceEndpoint`, a hosted
+  OpenAPI operation, or a free method/path. Every choice is normalized and checked
+  against the code-owned safe-method/POST registry before persistence.
+- **Add operation**: choose one of the three code-owned constrained operations that is
+  not already present for its provider.
+- **Platform credential**: set or replace the credential for a provider. The response
+  reports only configured state and timestamps; it never reads the secret back.
+
+The edit modal groups Per-request caps, Per-user quotas, Allowlists, Vendor identity,
+and Billing. Each cap shows its code-owned maximum. Endpoint rows have no voice or
+destination allowlists. The billing group edits metric, price per unit, and base fee.
+Its preset picker is the distinct normalized `(metric, price, base fee)` set computed
+from other operation rows; presets have no collection and applying one just fills the
+form.
+
+Frontend mutations use `useAppForm`, Zod schemas in `schemas/platform-ops.ts`, and
+TanStack Query hooks in `hooks/use-platform-ops.ts`. Admin Services shows only the
+existing catalog row. If a platform credential exists, the row gains a
+"Platform credential configured - N operations" badge linking to the operations table
+(rendered with the design system's middle-dot separator).
+
+## Execution order
+
+A platform-credential request follows this side-effect order:
+
+1. Rollout flag and caller class.
+2. Agent-key rate and service scope.
+3. Existing own-connection cascade and binding resolution.
+4. Canonical operation construction.
+5. Enabled exact endpoint or constrained-row authorization.
+6. Existing approval evaluation.
+7. Typed limits, allowlists, and daily-quota reservation.
+8. Billing reservation using the operation price snapshot.
+9. Platform credential decryption through the authorized wrapper.
+10. Meter `mark_forwarded` immediately before provider dispatch.
+11. Immediate settlement for known quantities, or persisted deferred Twilio state.
+
+Any failure before `mark_forwarded` releases the reservation and quota without a
+provider effect. A provider failure uses the existing forwarded-failure cleanup and
+does not become a reconcile replay. Audit is metadata-only: catalog and operation IDs,
+source, bounded sizes/counts, duration, status, and normalized reason. It never contains
+text, speech, phone numbers, account SIDs, call SIDs, credentials, or provider bodies.
+
+## Migration
+
+Startup migration is idempotent and runs after indexes are available. For every old
+active `platform-*` `DownstreamService` with a non-empty credential:
+
+| Legacy slug | Catalog slug |
+| --- | --- |
+| `platform-x` | `api-twitter` |
+| `platform-elevenlabs` | `api-elevenlabs` |
+| `platform-twilio` | `api-twilio` |
+| `platform-duffel` | `duffel` |
+
+The migration resolves the active catalog row, inserts a `PlatformCredential` only if
+that catalog service has none, and never overwrites an already configured v2 secret.
+It converts old operation documents using unique kind-key upserts: `x_search` becomes
+the X endpoint row and the other three become constrained rows. Billing is copied from
+the old vendor row's platform pricing when present and normalized into the per-row
+shape.
+
+Only after the v2 credential and operation upserts succeed does migration set the old
+vendor row `is_active: false` and `migrated_to_platform_credential: <id>`. The old
+ciphertext is retained only as migration evidence on the inactive legacy document
+until a separately approved cleanup; no runtime path reads it. A rerun observes the
+unique credential and operation keys, repeats safe upserts, and converges without
+credential replacement or duplicate rows.
+
+The migration test fixture is serialized from the round-2 model shape, not assembled
+from the v2 Rust type, so it proves compatibility with documents already deployed by
+this branch.
+
+## Verification contract
+
+The implementation is complete only with tests that prove:
+
+- only `platform_credential_service` can decrypt the new credential model;
+- credentials and their `Debug` output are redacted;
+- allowlists default empty and exact method/path matching is identical across REST
+  UUID, REST slug, typed MCP, and generic MCP paths;
+- unsafe POSTs, write methods, WebSockets, ambiguous paths, and anonymous/public doors
+  cannot select the platform credential;
+- own usable, disabled, absent, out-of-scope, unusable, node-routed, binding override,
+  and approval states preserve the precedence matrix;
+- base plus quantity settles once in one row, including allowance/grant/wallet funding;
+- deferred Twilio completion, transient retry, 24-hour timeout, credential failure, and
+  concurrent reconcile replay converge without double charging;
+- Lago operation-price sync round-trips the full charge array, rejects stale writes,
+  retries failures, and removes obsolete charges durably;
+- migration is idempotent and never overwrites a v2 credential;
+- `/keys` renders one provider object in every source state, and admin forms enforce
+  hard caps, safe methods, write-only credentials, and normalized presets.
+
+The existing platform-operation error variants remain unchanged; the authoritative
+HTTP and numeric mappings stay in `backend/src/errors/mod.rs` and `CLAUDE.md`.
