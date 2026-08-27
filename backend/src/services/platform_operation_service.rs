@@ -1280,6 +1280,7 @@ impl PlatformCredentialResolutionContext {
 /// the platform vendor credential. Both execution and discovery enter through
 /// this function. The caller supplies one preloaded request inventory so a
 /// multi-operation discovery does not repeat connection or vendor listings.
+#[allow(clippy::too_many_arguments)]
 pub async fn resolve_operation_credential_source(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,

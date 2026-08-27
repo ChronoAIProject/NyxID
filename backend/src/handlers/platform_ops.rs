@@ -91,8 +91,8 @@ pub(crate) struct PlatformOperationExecution<T> {
 }
 
 enum ExecutionTarget {
-    Platform(crate::models::downstream_service::DownstreamService),
-    OwnConnection(OwnConnectionExecutionTarget),
+    Platform(Box<crate::models::downstream_service::DownstreamService>),
+    OwnConnection(Box<OwnConnectionExecutionTarget>),
 }
 
 struct OwnConnectionExecutionTarget {
@@ -607,7 +607,7 @@ async fn resolve_execution_target(
             disabled_connection,
             own_connection_out_of_scope,
         } => Ok(ResolvedExecutionTarget {
-            target: ExecutionTarget::Platform(*vendor),
+            target: ExecutionTarget::Platform(vendor),
             credential_source: PlatformCredentialSource::Platform,
             own_connection_disabled: disabled_connection.is_some(),
             own_connection_out_of_scope,
@@ -620,12 +620,12 @@ async fn resolve_execution_target(
                 .map(|routing| routing.org_user_id.clone())
                 .unwrap_or_else(|| caller.resolution_user_id.clone());
             Ok(ResolvedExecutionTarget {
-                target: ExecutionTarget::OwnConnection(OwnConnectionExecutionTarget {
+                target: ExecutionTarget::OwnConnection(Box::new(OwnConnectionExecutionTarget {
                     target: resolution.target,
                     user_service_id: resolution.user_service_id,
                     service_owner_id,
                     is_auto_connected: resolution.is_auto_connected,
-                }),
+                })),
                 credential_source: PlatformCredentialSource::OwnConnection,
                 own_connection_disabled: false,
                 own_connection_out_of_scope: false,
@@ -764,7 +764,7 @@ async fn forward_metered_operation(
                 &state.db,
                 &state.encryption_keys,
                 op,
-                vendor,
+                *vendor,
             )
             .await
             {
