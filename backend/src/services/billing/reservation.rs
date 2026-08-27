@@ -886,6 +886,10 @@ async fn finish_applied_lock_before_dead_letter(
     Ok(false)
 }
 
+/// Release funding for active reserved or forwarded rows and mark them with
+/// the requested terminal failure status. The active-state and `released`
+/// filters make retries idempotent; finalized, settled, and already released
+/// rows are never touched.
 pub async fn release_failed_rows(
     db: &mongodb::Database,
     billing_request_id: &str,

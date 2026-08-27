@@ -326,6 +326,9 @@ impl BillingService {
         Ok(())
     }
 
+    /// Terminally fails active reserved or forwarded meter rows and releases
+    /// their funding holds. This is idempotent: already released, finalized,
+    /// or otherwise settled rows are never changed or released again.
     pub async fn fail(&self, metered: &MeteredProxyContext, reason: &str) -> AppResult<()> {
         meter::fail(&self.db, metered, reason).await
     }

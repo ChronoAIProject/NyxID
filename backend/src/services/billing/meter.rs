@@ -1149,25 +1149,52 @@ mod tests {
                 .await
                 .expect("fail");
 
-            let wallet = db
+            let wallet_after_first = db
                 .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
                 .find_one(doc! { "owner_id": &owner_id })
                 .await
                 .expect("find wallet")
                 .expect("wallet exists");
-            let row = db
+            let row_after_first = db
                 .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
                 .find_one(doc! { "billing_request_id": &request_id })
                 .await
                 .expect("find row")
                 .expect("row exists");
 
-            assert_eq!(wallet.reserved_credits, 0);
-            assert_eq!(wallet.pending_lago_debits, 0);
-            assert_eq!(row.status, UsageStatus::Failed);
-            assert_eq!(row.forwarded, forwarded);
-            assert_eq!(row.last_error.as_deref(), Some("vendor request failed"));
-            assert!(row.released);
+            super::fail(&db, &metered, "second failure must be a no-op")
+                .await
+                .expect("idempotent second fail");
+            let wallet_after_second = db
+                .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+                .find_one(doc! { "owner_id": &owner_id })
+                .await
+                .expect("find wallet after second fail")
+                .expect("wallet exists after second fail");
+            let row_after_second = db
+                .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+                .find_one(doc! { "billing_request_id": &request_id })
+                .await
+                .expect("find row after second fail")
+                .expect("row exists after second fail");
+
+            assert_eq!(wallet_after_first.reserved_credits, 0);
+            assert_eq!(wallet_after_first.pending_lago_debits, 0);
+            assert_eq!(wallet_after_second.reserved_credits, 0);
+            assert_eq!(wallet_after_second.pending_lago_debits, 0);
+            assert_eq!(
+                wallet_after_second.updated_at,
+                wallet_after_first.updated_at
+            );
+            assert_eq!(row_after_first.status, UsageStatus::Failed);
+            assert_eq!(row_after_first.forwarded, forwarded);
+            assert_eq!(
+                row_after_first.last_error.as_deref(),
+                Some("vendor request failed")
+            );
+            assert!(row_after_first.released);
+            assert_eq!(row_after_second.updated_at, row_after_first.updated_at);
+            assert_eq!(row_after_second.last_error, row_after_first.last_error);
         }
     }
 

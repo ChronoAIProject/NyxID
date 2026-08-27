@@ -966,7 +966,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_abandons_only_never_forwarded_reserved_rows() {
+    async fn reconcile_abandons_only_never_forwarded_and_ignores_terminal_failures() {
         let Some(db) = connect_test_database("billing_reconcile_abandon").await else {
             return;
         };
@@ -987,10 +987,19 @@ mod tests {
         forwarded.updated_at = stale;
         let forwarded_id = forwarded.id.clone();
 
+        let mut terminal_failure = finalized_row("tx-terminal-failed-released");
+        terminal_failure.status = UsageStatus::Failed;
+        terminal_failure.forwarded = true;
+        terminal_failure.released = true;
+        terminal_failure.quantity = Some(1);
+        terminal_failure.settlement_next_retry_at = Some(stale);
+        terminal_failure.updated_at = stale;
+        let terminal_failure_id = terminal_failure.id.clone();
+
         let collection =
             db.collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME);
         collection
-            .insert_many([never_forwarded, forwarded])
+            .insert_many([never_forwarded, forwarded, terminal_failure])
             .await
             .expect("insert rows");
         let reconciler =
@@ -1007,10 +1016,24 @@ mod tests {
             .await
             .expect("find forwarded")
             .expect("row exists");
+        let still_terminal = collection
+            .find_one(doc! { "_id": terminal_failure_id })
+            .await
+            .expect("find terminal failure")
+            .expect("terminal failure exists");
 
         assert_eq!(stats.abandoned, 1);
+        assert_eq!(stats.recovered_settlements, 0);
         assert_eq!(abandoned.status, UsageStatus::Abandoned);
         assert_eq!(still_forwarded.status, UsageStatus::Forwarded);
+        assert_eq!(still_terminal.status, UsageStatus::Failed);
+        assert!(still_terminal.released);
+        assert_eq!(
+            still_terminal
+                .settlement_next_retry_at
+                .map(|value| value.timestamp_millis()),
+            Some(stale.timestamp_millis())
+        );
     }
 
     #[tokio::test]
