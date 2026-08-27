@@ -34,13 +34,17 @@ Execution and discovery use the same credential-source resolver. Execution uses 
 | No active matching `UserService` | Platform credential | Credits path | No `own_connection` object |
 | Matching row is disabled | Platform credential | Credits path | `usable: false`, `reason: "disabled"` |
 | Active row resolves to a master credential or has no `api_key_id` | Platform credential | Credits path | Platform source |
+| Active row is outside a scoped agent key's `allowed_service_ids` | Platform credential; the row is invisible to that caller | Credits path | No `own_connection` object |
 | Active row has a user-supplied, server-held credential | Own connection | Skipped | `usable: true`, no reason |
 | Active row has an expired, revoked, missing, or unreadable credential | Return the existing resolver error | Skipped | `usable: false`, `reason: "unusable"` |
 | Active row is node-routed or has no server-held credential | HTTP 409, `platform_operation_own_connection_unsupported` | Skipped | `usable: false`, `reason: "node_routed"` |
+| Active row requires approval for each request | HTTP 409, `platform_operation_approval_required` | Skipped | `usable: false`, `reason: "approval_required"` |
 
 An unusable active connection never falls back to platform credits. The user must repair it or disable it. This avoids charging a caller who expected NyxID to use their account.
 
-Discovery runs in read-only mode. It does not decrypt credentials, refresh OAuth tokens, update last-used timestamps, or turn an unusable connection into an API error.
+Agent service bindings are honored before execution, so a bound `UserApiKey` replaces the connection's default credential exactly as it does under `/proxy`. Own-connection requests also evaluate the normal personal or organization approval policy against the server-composed HTTP method, path, and body. A deny returns the same forbidden error as `/proxy`. A per-request approval requirement fails closed because platform operations cannot create approval requests; session callers retain the normal `/proxy` approval bypass.
+
+Discovery and MCP `tools/list` run in read-only mode. They load the caller-visible connections once, load all relevant catalog and vendor rows in one batch, and read billing rollout once per request. They do not decrypt credentials, refresh OAuth tokens, update last-used timestamps, or create approval requests. An unusable connection remains a discovery state instead of becoming an API error.
 
 ## Controls by credential source
 
@@ -72,9 +76,11 @@ Platform execution uses `BillingIngress::PlatformOperation`, `CredentialClass::N
 
 Billing opens before platform credential decryption or any network request. `AppError::InsufficientCredits` therefore leaves no daily-quota reservation, does not decrypt the vendor credential, and does not contact the vendor. A non-2xx response or an invalid bounded response fails the meter and releases both the wallet hold and daily quota. Successful settlement is persisted before an asynchronous worker completes the charge, so Lago latency does not delay the operation response.
 
+A vendor failure after `mark_forwarded` leaves the usage row terminally `failed` with `released: true`. Retrying `fail` is a no-op and releases the wallet hold only once. Reconciliation does not replay these rows: stale-reservation abandonment selects only unreleased, never-forwarded `reserved` rows, and settlement recovery selects only unreleased rows with a materialized quantity.
+
 Own-connection execution uses a disabled meter. It does not create a `usage_meter` row or touch a wallet.
 
-Audit events contain operation names, caller attribution, sizes, durations, credential source, and normalized outcomes. They do not contain message text, audio, full phone numbers, credentials, vendor account identifiers, or upstream payloads.
+Audit events contain operation names, caller attribution, sizes, durations, credential source, and normalized outcomes. A scoped caller whose own connection is invisible records `own_connection_out_of_scope: true`. They do not contain message text, audio, full phone numbers, credentials, vendor account identifiers, or upstream payloads.
 
 ## Response signaling
 
@@ -90,7 +96,7 @@ or:
 X-NyxID-Credential-Source: own_connection
 ```
 
-MCP results carry the same value in `structuredContent.credential_source` and `_meta.credential_source`. JSON text content also includes `credential_source`; audio stays audio content and uses the structured metadata fields. At `tools/list` time, each platform tool description states whether the caller's connection or the platform credential will be used, including the current per-call price when one is active.
+MCP results carry the same value in `structuredContent.credential_source` and `_meta.credential_source`. JSON text content also includes `credential_source`; audio stays audio content and uses the structured metadata fields. At `tools/list` time, each platform tool description states whether the caller's connection or the platform credential will be used, including the current per-call price when one is active. Platform-credential `speak` descriptions also list the configured allowed voice IDs. Own-connection descriptions omit that platform-only allowlist. Node-routed, unusable, and approval-required connections each get a failure-specific sentence instead of claiming that the connected account is usable.
 
 The discovery response contains dedicated response objects, not database models:
 
@@ -122,7 +128,7 @@ The discovery response contains dedicated response objects, not database models:
 
 `x_search` searches recent public posts. NyxID limits `query` to 512 characters and `max_results` to the configured cap, with a hard cap of 25. The platform base uses `/2/tweets/search/recent`; an own connection whose base URL already ends in `/2` uses `/tweets/search/recent` relative to that base.
 
-`speak` sends bounded text and a safe voice identifier to ElevenLabs. NyxID constructs `{text, model_id}` and streams the successful audio response. The platform voice allowlist does not constrain a user's own ElevenLabs key.
+`speak` sends bounded text and a safe voice identifier to ElevenLabs. NyxID constructs `{text, model_id}` and streams the successful audio response. The platform voice allowlist does not constrain a user's own ElevenLabs key. The request meter settles when ElevenLabs returns a successful response; a client abort while consuming the audio stream is still charged because the vendor has already performed the request.
 
 `call_and_say` places one Twilio call with server-generated TwiML. NyxID accepts only `to`, `message`, and the source-dependent `from` field. It never accepts `Url`, `StatusCallback`, recording options, or arbitrary Twilio form fields.
 
@@ -134,7 +140,7 @@ A Duffel offer request creates a search resource. It does not move money or book
 
 Platform vendor rows hold shared credentials, but callers cannot use them through any generic path. Each canonical row carries an explicit empty `proxy_operation_policy`, which is a deny-all policy for actor-addressed requests.
 
-Service creation and update force this policy for canonical vendor slugs. Operation binding rejects a row without the policy. Startup and bind-time backfills set the empty policy only on canonical vendor rows whose field is missing or null. The backfill never modifies another row or `credential_encrypted`.
+Service creation and update accept only an omitted policy or an explicitly empty rule list for canonical vendor slugs, then normalize it to the fixed deny-all policy. A non-empty admin-supplied policy is rejected instead of silently overwritten. Operation binding rejects a row without the policy. Startup and bind-time backfills set the empty policy only on canonical vendor rows whose field is missing or null. The backfill never modifies another row or `credential_encrypted`.
 
 The empty policy returns a not-found-shaped denial for both `/api/v1/proxy/{vendor-id}/...` and `/api/v1/proxy/s/{vendor-slug}/...` before credential decryption. The denial does not depend on `PLATFORM_REQUIRE_OPERATION_POLICY` or the platform-services feature flag. Generic MCP catalogs and dispatch, `/llm/*`, `/catalog`, and `list_catalog_all` also exclude the canonical rows. They never auto-provision into `UserService` rows or appear as platform-managed entries on `/keys`.
 

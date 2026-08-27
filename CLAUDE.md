@@ -45,7 +45,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 11500 `GrantCascadeConfirmationRequired` (HTTP 409)
 - 11600-11606 triggers: 11600 `TriggerNotFound`, 11601 `TriggerSecretInvalid`, 11602 `TriggerRateLimited`, 11603 `TriggerPayloadTooLarge`, 11604 `TriggerDeliveryUnsupported`, 11605 `TriggerDeliveryFailed`, 11606 `TriggerDeliveryRecordNotFound`
 - 11700 `RequestBodyTooLarge` (HTTP 413): a bounded proxy or forwarding ingress exceeded its configured byte limit
-- 11800-11802 platform services: 11800 `PlatformOperationUnavailable`, 11801 `PlatformVendorProvisioningInvalid`, 11802 `PlatformOperationOwnConnectionUnsupported`
+- 11800-11804 platform services: 11800 `PlatformOperationUnavailable`, 11801 `PlatformVendorProvisioningInvalid`, 11802 `PlatformOperationOwnConnectionUnsupported`, 11803 `PlatformOperationOwnConnectionUnusable`, 11804 `PlatformOperationApprovalRequired`
 
 ### 4. Frontend Patterns
 
@@ -199,7 +199,8 @@ Single-use hosted credential setup for agents and CLI callers. An authenticated 
 ### 15. Platform Services
 
 - Platform capabilities are code-owned, named operations with `deny_unknown_fields` requests and server-composed vendor paths, headers, and bodies. The `experimental:platform-services` flag gates caller-facing routes, then each operation's `enabled` switch and typed config apply. See `docs/PLATFORM_SERVICES.md`.
-- Resolve the acting user's connection through the normal proxy cascade before selecting a shared credential. A usable server-held user credential wins and skips billing. A disabled connection selects platform credits. An unusable or node-routed active connection returns an error and must not fall back to a chargeable platform credential.
+- Resolve the acting user's connection through the normal proxy cascade before selecting a shared credential. A usable server-held user credential wins and skips billing. A disabled connection selects platform credits. An unusable or node-routed active connection returns an error and must not fall back to a chargeable platform credential. Scoped agent keys treat an out-of-scope connection as invisible and use platform credits; record that decision in audit metadata.
+- Honor `AgentServiceBinding` credential overrides for own-connection execution. Evaluate the normal approval policy against the server-composed operation: denials stay denied, per-request approval requirements fail closed without creating approval requests, and session callers retain the `/proxy` bypass. Discovery and MCP tool listing are read-only.
 - Platform vendor rows carry an explicit empty `proxy_operation_policy`. They are unreachable through every caller-addressed proxy, catalog, generic MCP, LLM, and auto-provision path by construction. Only bounded platform operations may use the server-chosen credential path. Price remains on the vendor row's `ServiceBilling` configuration.
 
 ## File Structure
