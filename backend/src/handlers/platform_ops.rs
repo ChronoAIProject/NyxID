@@ -1176,6 +1176,18 @@ fn audit_operation<T>(
 fn audit_outcome<T>(result: &AppResult<T>) -> &'static str {
     match result {
         Ok(_) => "succeeded",
+        Err(
+            AppError::BadRequest(message)
+            | AppError::ValidationError(message)
+            | AppError::Unauthorized(message)
+            | AppError::Forbidden(message)
+            | AppError::NotFound(message)
+            | AppError::Conflict(message)
+            | AppError::AuthenticationFailed(message),
+        ) if message.starts_with("Your ") && message.contains(" connection is unusable.") => {
+            "own_connection_unusable"
+        }
+        Err(AppError::TokenExpired) => "own_connection_unusable",
         Err(AppError::NotFound(_)) => "not_found",
         Err(AppError::RateLimited) => "rate_limited",
         Err(AppError::InsufficientCredits) => "insufficient_credits",
@@ -2459,6 +2471,14 @@ mod tests {
     fn audit_payloads_are_metadata_only() {
         let result: AppResult<()> = Ok(());
         assert_eq!(audit_outcome(&result), "succeeded");
+        let unusable: AppResult<()> = Err(AppError::BadRequest(
+            "Your X connection is unusable. The credential is revoked.".to_string(),
+        ));
+        assert_eq!(audit_outcome(&unusable), "own_connection_unusable");
+        let invalid_shape: AppResult<()> = Err(AppError::BadRequest(
+            "query must contain between 1 and 512 characters.".to_string(),
+        ));
+        assert_eq!(audit_outcome(&invalid_shape), "rejected");
         let call_metadata = json!({
             "message_chars": 12,
             "destination_suffix": "***5678",

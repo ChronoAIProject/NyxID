@@ -1337,10 +1337,21 @@ fn execution_mode_error(mode: CredentialResolutionMode<'_>, error: AppError) -> 
 }
 
 fn normalize_own_connection_error(vendor: &str, error: AppError) -> AppError {
+    let contextualize =
+        |message: String| format!("Your {vendor} connection is unusable. {message}");
     match error {
         AppError::Internal(_) => AppError::Conflict(format!(
             "Your {vendor} connection is unusable. Update or disable it before retrying."
         )),
+        AppError::BadRequest(message) => AppError::BadRequest(contextualize(message)),
+        AppError::ValidationError(message) => AppError::ValidationError(contextualize(message)),
+        AppError::Unauthorized(message) => AppError::Unauthorized(contextualize(message)),
+        AppError::Forbidden(message) => AppError::Forbidden(contextualize(message)),
+        AppError::NotFound(message) => AppError::NotFound(contextualize(message)),
+        AppError::Conflict(message) => AppError::Conflict(contextualize(message)),
+        AppError::AuthenticationFailed(message) => {
+            AppError::AuthenticationFailed(contextualize(message))
+        }
         other => other,
     }
 }
@@ -2238,7 +2249,10 @@ mod tests {
             PlatformCredentialResolution::Unusable {
                 error: Some(AppError::BadRequest(message)),
                 ..
-            } => assert!(message.contains("revoked")),
+            } => {
+                assert!(message.starts_with("Your elevenlabs connection is unusable."));
+                assert!(message.contains("revoked"));
+            }
             _ => panic!("revoked active key must be unusable without platform fallback"),
         }
 
