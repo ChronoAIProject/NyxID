@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PLATFORM_OPERATION_DISCOVERY_QUERY_KEY } from "@/schemas/platform-ops";
 import {
   readApiKeyAuthorization,
   readBindingAuthorization,
@@ -20,16 +21,19 @@ vi.mock("@/lib/api-client", () => ({
   api: { get: mockGet, post: mockPost, put: vi.fn(), delete: vi.fn() },
 }));
 
-function wrapperFactory() {
+function harness() {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
       queries: { retry: false },
     },
   });
-  return ({ children }: PropsWithChildren) => (
-    <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
-  );
+  function Wrapper({ children }: PropsWithChildren) {
+    return (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    );
+  }
+  return { queryClient, Wrapper };
 }
 
 beforeEach(() => {
@@ -42,8 +46,9 @@ describe("assistant key action hooks", () => {
       resource: { keyId: "key-1" },
       replayed: false,
     });
+    const { Wrapper } = harness();
     const { result } = renderHook(() => useAssistantKeyUpdate(), {
-      wrapper: wrapperFactory(),
+      wrapper: Wrapper,
     });
     await result.current.mutateAsync({
       actionRequestId: "act-1",
@@ -64,8 +69,9 @@ describe("assistant key action hooks", () => {
       resource: { keyId: "key-1" },
       replayed: false,
     });
+    const { Wrapper } = harness();
     const { result } = renderHook(() => useAssistantKeyDelete(), {
-      wrapper: wrapperFactory(),
+      wrapper: Wrapper,
     });
     await result.current.mutateAsync({
       actionRequestId: "act-1",
@@ -84,8 +90,9 @@ describe("assistant key action hooks", () => {
       resource: { keyId: "key-1" },
       replayed: false,
     });
+    const { Wrapper } = harness();
     const { result } = renderHook(() => useAssistantKeyExtendScope(), {
-      wrapper: wrapperFactory(),
+      wrapper: Wrapper,
     });
     await result.current.mutateAsync({
       actionRequestId: "act-1",
@@ -118,8 +125,10 @@ describe("assistant key action hooks", () => {
       created_at: "2026-08-11T00:00:00Z",
       updated_at: "2026-08-11T00:00:00Z",
     });
+    const { queryClient, Wrapper } = harness();
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
     const { result } = renderHook(() => useAssistantKeyBindCredential(), {
-      wrapper: wrapperFactory(),
+      wrapper: Wrapper,
     });
     await result.current.mutateAsync({
       actionRequestId: "act-1",
@@ -147,6 +156,9 @@ describe("assistant key action hooks", () => {
     expect(mockGet).toHaveBeenCalledWith(
       "/api-keys/key-1/bindings/by-service/svc-1/authorization",
     );
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: PLATFORM_OPERATION_DISCOVERY_QUERY_KEY,
+    });
   });
 
   it("reads API key authorization evidence from the projection route", async () => {

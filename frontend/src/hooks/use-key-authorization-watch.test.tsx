@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PLATFORM_OPERATION_DISCOVERY_QUERY_KEY } from "@/schemas/platform-ops";
 import {
   useKeyAuthorizationStatus,
   useKeyAuthorizationWatch,
@@ -22,7 +23,7 @@ function harness() {
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
     );
   }
-  return { Wrapper };
+  return { queryClient, Wrapper };
 }
 
 beforeEach(() => {
@@ -44,7 +45,8 @@ describe("useKeyAuthorizationWatch", () => {
         status: "active",
         last_authorized_at: "2026-08-06T12:00:00Z",
       });
-    const { Wrapper } = harness();
+    const { queryClient, Wrapper } = harness();
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
     const deadlineAt = Date.now() + 60_000;
     const { result, rerender } = renderHook(
       ({ attemptId }: { readonly attemptId: string }) =>
@@ -64,6 +66,9 @@ describe("useKeyAuthorizationWatch", () => {
 
     await vi.advanceTimersByTimeAsync(2_100);
     await waitFor(() => expect(result.current.authorized).toBe(true));
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: PLATFORM_OPERATION_DISCOVERY_QUERY_KEY,
+    });
   });
 
   it("requires last_authorized_at to advance before reconnect is terminal", async () => {

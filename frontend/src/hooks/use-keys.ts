@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import { connectWatchInterval } from "@/lib/assistant/connect-watch";
+import { invalidateConnectionDependents } from "@/lib/connection-query-invalidation";
 import type {
   KeyInfo,
   KeyListResponse,
@@ -111,6 +112,7 @@ export function useKeyAuthorizationStatus(
           exact: true,
         });
       }
+      invalidateConnectionDependents(queryClient);
     }
   }, [authorizationAdvanced, keyId, status, queryClient]);
 
@@ -227,6 +229,7 @@ export function useKeyAuthorizationWatch(
           exact: true,
         });
       }
+      invalidateConnectionDependents(queryClient);
     }
   }, [keyId, queryClient, status, terminalActive]);
 
@@ -332,6 +335,7 @@ export function useCreateKey() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
       void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
+      invalidateConnectionDependents(queryClient);
     },
   });
 }
@@ -353,6 +357,7 @@ export function useDeleteKey() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
       void queryClient.invalidateQueries({ queryKey: ["llm-status"] });
+      invalidateConnectionDependents(queryClient);
     },
   });
 }
@@ -402,6 +407,7 @@ export function useUpdateKey() {
       void queryClient.invalidateQueries({
         queryKey: ["keys", variables.keyId],
       });
+      invalidateConnectionDependents(queryClient);
     },
   });
 }
@@ -431,6 +437,7 @@ export function useUpdateEndpoint() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
       void queryClient.invalidateQueries({ queryKey: ["external-api-keys"] });
+      invalidateConnectionDependents(queryClient);
     },
   });
 }
@@ -467,6 +474,7 @@ export function useUpdateUserService() {
       void queryClient.invalidateQueries({
         queryKey: ["keys", variables.serviceId],
       });
+      invalidateConnectionDependents(queryClient);
     },
   });
 }
@@ -488,6 +496,7 @@ export function useUpdateExternalApiKey() {
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
       void queryClient.invalidateQueries({ queryKey: ["external-api-keys"] });
+      invalidateConnectionDependents(queryClient);
     },
   });
 }

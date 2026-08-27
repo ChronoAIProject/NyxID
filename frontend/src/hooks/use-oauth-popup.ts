@@ -11,6 +11,7 @@ import {
   validateAuthorizationUrl,
 } from "@/schemas/oauth-popup";
 import { useOAuthPopupStore } from "@/stores/oauth-popup-store";
+import { invalidateConnectionDependents } from "@/lib/connection-query-invalidation";
 
 export interface OAuthPopupRetryResult {
   readonly nextNonce: string;
@@ -48,6 +49,7 @@ export function useOAuthPopupReceiver({
             queryKey: ["keys", attempt.keyId],
           });
         }
+        invalidateConnectionDependents(queryClient);
         return;
       }
       if (!isOAuthActionMessage(event.data)) return;

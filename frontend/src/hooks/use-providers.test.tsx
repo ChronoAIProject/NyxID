@@ -3,6 +3,7 @@ import { renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { PropsWithChildren } from "react";
 import type { TelegramLoginData } from "@/types/api";
+import { PLATFORM_OPERATION_DISCOVERY_QUERY_KEY } from "@/schemas/platform-ops";
 import {
   useConnectApiKey,
   useConnectTelegramWidget,
@@ -38,14 +39,14 @@ vi.mock("@/lib/api-client", () => ({
   },
 }));
 
-function createWrapper() {
-  const queryClient = new QueryClient({
+function createWrapper(
+  queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
       queries: { retry: false },
     },
-  });
-
+  }),
+) {
   return function Wrapper({ children }: PropsWithChildren) {
     return (
       <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
@@ -361,6 +362,26 @@ describe("usePollDeviceCode", () => {
       "/providers/openai/connect/device-code/poll",
       { state: "st-1" },
     );
+  });
+
+  it("invalidates platform discovery when device-code authorization completes", async () => {
+    mockPost.mockResolvedValue({ status: "complete" });
+    const queryClient = new QueryClient({
+      defaultOptions: {
+        mutations: { retry: false },
+        queries: { retry: false },
+      },
+    });
+    const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
+    const { result } = renderHook(() => usePollDeviceCode(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await result.current.mutateAsync({ providerId: "openai", state: "st-1" });
+
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: PLATFORM_OPERATION_DISCOVERY_QUERY_KEY,
+    });
   });
 });
 

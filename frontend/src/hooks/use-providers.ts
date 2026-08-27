@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
+import { invalidateConnectionDependents } from "@/lib/connection-query-invalidation";
 import { telegramLoginDataSchema } from "@/schemas/providers";
 import type {
   MessageResponse,
@@ -251,6 +252,7 @@ export function usePollDeviceCode() {
         // "Not connected" after a successful device-code flow until some
         // unrelated refetch happens.
         void queryClient.invalidateQueries({ queryKey: ["keys"] });
+        invalidateConnectionDependents(queryClient);
       }
     },
   });
