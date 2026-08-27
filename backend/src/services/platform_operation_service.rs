@@ -1464,6 +1464,18 @@ pub async fn resolve_operation_credential_source(
     }
 
     if let CredentialResolutionMode::Discover { descriptor } = mode {
+        let resolved_descriptor = if operation.op == PlatformOperationName::XSearch {
+            Some(
+                crate::services::operation_descriptor::build_http_descriptor(
+                    "GET",
+                    x_search_path_for_base_url(&resolution.target.base_url)?,
+                    None,
+                ),
+            )
+        } else {
+            None
+        };
+        let descriptor = resolved_descriptor.as_ref().unwrap_or(descriptor);
         let service_owner_id = resolution
             .org_routing
             .as_ref()

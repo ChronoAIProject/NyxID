@@ -1775,6 +1775,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn x_discovery_approval_path_matches_execution_for_resolved_base_url() {
+        use crate::models::service_approval_config::{
+            ApprovalEffect, ApprovalMode, ApprovalRule,
+            COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
+        };
+
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_x_discovery_descriptor").await
+        else {
+            eprintln!("skipping X discovery descriptor test: no local MongoDB available");
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        insert_x_vendor(&state, "https://api.x.com".to_string(), "platform-x-key").await;
+        let user_service_id = insert_own_connection(
+            &state,
+            "api-twitter",
+            "https://api.x.com",
+            "bearer",
+            "Authorization",
+            "api_key",
+            "own-x-key",
+            false,
+        )
+        .await;
+        let user_service = db
+            .collection::<UserService>(USER_SERVICES)
+            .find_one(mongodb::bson::doc! { "_id": &user_service_id })
+            .await
+            .expect("read X user service")
+            .expect("X user service exists");
+        let operation = operation(
+            PlatformOperationName::XSearch,
+            true,
+            PlatformOperationConfig::XSearch(XSearchConfig {
+                max_results_cap: 10,
+            }),
+        );
+        let now = Utc::now();
+        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
+            .insert_one(ServiceApprovalConfig {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: USER_ID.to_string(),
+                service_id: user_service_id,
+                service_name: "X".to_string(),
+                approval_required: false,
+                approval_mode: ApprovalMode::PerRequest,
+                rules: vec![
+                    ApprovalRule {
+                        methods: vec!["GET".to_string()],
+                        resource_pattern: "/2/tweets/search/recent".to_string(),
+                        verbs: Vec::new(),
+                        effect: ApprovalEffect::RequireApproval,
+                        mode: ApprovalMode::PerRequest,
+                    },
+                    ApprovalRule {
+                        methods: vec!["GET".to_string()],
+                        resource_pattern: "/tweets/search/recent".to_string(),
+                        verbs: Vec::new(),
+                        effect: ApprovalEffect::Deny,
+                        mode: ApprovalMode::PerRequest,
+                    },
+                ],
+                default_effect: Some(ApprovalEffect::AutoAllow),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert path-specific X approval policy");
+        let mut auth = crate::test_utils::test_auth_user(USER_ID);
+        auth.auth_method = AuthMethod::AccessToken;
+
+        for (base_url, expected_resource, expect_approval) in [
+            ("https://api.x.com", "/2/tweets/search/recent", true),
+            ("https://api.x.com/2", "/tweets/search/recent", false),
+        ] {
+            db.collection::<crate::models::user_endpoint::UserEndpoint>(USER_ENDPOINTS)
+                .update_one(
+                    mongodb::bson::doc! { "_id": &user_service.endpoint_id },
+                    mongodb::bson::doc! { "$set": { "url": base_url } },
+                )
+                .await
+                .expect("update X endpoint base URL");
+            let execution_path = platform_operation_service::x_search_path_for_base_url(base_url)
+                .expect("build execution X path");
+            let execution_descriptor = crate::services::operation_descriptor::build_http_descriptor(
+                "GET",
+                execution_path,
+                None,
+            );
+            assert_eq!(
+                execution_descriptor.resource.as_deref(),
+                Some(expected_resource)
+            );
+
+            let (source, _) = resolve_discovery_source_for_test(&state, &auth, &operation).await;
+            if expect_approval {
+                assert!(matches!(
+                    source,
+                    PlatformCredentialResolution::ApprovalRequired { .. }
+                ));
+            } else {
+                assert!(matches!(
+                    source,
+                    PlatformCredentialResolution::Unusable { error: None, .. }
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn platform_services_flag_off_returns_not_found_for_all_http_operations() {
         let Some(db) =
             crate::test_utils::connect_test_database("platform_ops_flag_default_off").await
