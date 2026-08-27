@@ -244,6 +244,25 @@ describe("platform operation schemas", () => {
         operations: [
           {
             ...result.operations[0],
+            credential_source: "own_connection",
+            own_connection: {
+              user_service_id: "duffel-key",
+              slug: "duffel",
+              label: "My Duffel",
+              is_active: true,
+              usable: false,
+              reason: "approval_required",
+            },
+          },
+        ],
+      }).success,
+    ).toBe(true);
+
+    expect(
+      platformOperationDiscoveryListSchema.safeParse({
+        operations: [
+          {
+            ...result.operations[0],
             vendor_account_id: "should-not-be-exposed",
           },
         ],

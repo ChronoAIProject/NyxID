@@ -325,6 +325,33 @@ describe("KeysPage", () => {
     );
   });
 
+  it("renders approval-required own connections with a detail link", () => {
+    state.platformFlag = true;
+    state.platformOperations = [
+      makePlatformOperation({
+        own_connection: {
+          user_service_id: "approval-key",
+          slug: "approval-elevenlabs",
+          label: "Approval ElevenLabs",
+          is_active: true,
+          usable: false,
+          reason: "approval_required",
+        },
+        credential_source: "own_connection",
+      }),
+    ];
+
+    render(<KeysPage />);
+
+    expect(
+      screen.getByText(/Your ElevenLabs connection requires approval per request/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Review connection" })).toHaveAttribute(
+      "href",
+      "/keys/$keyId:approval-key",
+    );
+  });
+
   it("shows platform pricing and opens the catalog connect flow", async () => {
     const user = userEvent.setup();
     state.platformFlag = true;

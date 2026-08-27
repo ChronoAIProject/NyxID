@@ -703,6 +703,22 @@ function PlatformOperationStatus({
     );
   }
 
+  if (connection?.reason === "approval_required") {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Your {vendor} connection requires approval per request; platform
+        operations cannot request approvals.{" "}
+        <Link
+          to="/keys/$keyId"
+          params={{ keyId: connection.user_service_id }}
+          className="font-medium text-foreground hover:underline"
+        >
+          Review connection
+        </Link>
+      </p>
+    );
+  }
+
   return (
     <p className="text-xs text-muted-foreground">
       Platform credential {"\u00b7"} {platformPriceLabel(operation)}{" "}

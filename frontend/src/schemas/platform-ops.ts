@@ -332,7 +332,9 @@ export const platformOperationDiscoverySchema = z
         label: z.string().min(1),
         is_active: z.boolean(),
         usable: z.boolean(),
-        reason: z.enum(["disabled", "node_routed", "unusable"]).nullable(),
+        reason: z
+          .enum(["disabled", "node_routed", "unusable", "approval_required"])
+          .nullable(),
       })
       .strict()
       .nullable(),
