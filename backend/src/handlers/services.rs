@@ -646,24 +646,9 @@ fn validate_service_billing(billing: Option<&ServiceBilling>) -> AppResult<()> {
 }
 
 fn normalize_service_proxy_operation_policy(
-    slug: &str,
+    _slug: &str,
     policy: Option<ProxyOperationPolicy>,
 ) -> AppResult<Option<ProxyOperationPolicy>> {
-    if crate::services::platform_operation_service::is_platform_vendor_slug(slug) {
-        if policy
-            .as_ref()
-            .is_some_and(|policy| !policy.rules.is_empty())
-        {
-            return Err(AppError::PlatformVendorProvisioningInvalid(
-                "platform vendor rows carry a fixed deny-all policy; omit proxy_operation_policy or send an empty rule list"
-                    .to_string(),
-            ));
-        }
-        return Ok(Some(
-            crate::services::platform_operation_service::platform_vendor_kill_policy(),
-        ));
-    }
-
     policy
         .map(crate::services::proxy_authorization::normalize_policy)
         .transpose()
@@ -1405,12 +1390,6 @@ pub async fn update_service(
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
-    let is_platform_vendor = catalog_spec_sync::is_platform_vendor_service(&service);
-    if is_platform_vendor && (body.openapi_spec_url.is_some() || body.asyncapi_spec_url.is_some()) {
-        return Err(AppError::BadRequest(
-            "Platform vendor rows cannot configure OpenAPI or AsyncAPI specs".to_string(),
-        ));
-    }
     let mut platform_price_changed = false;
     if let Some(billing) = body.billing.as_mut() {
         let current_pricing = service
@@ -1640,18 +1619,14 @@ pub async fn update_service(
             } else {
                 service.asyncapi_spec_url.clone()
             };
-            http_docs_refresh = if is_platform_vendor {
-                None
-            } else {
-                Some(
-                    api_docs_service::discover_service_docs(
-                        docs_base_url,
-                        explicit_openapi,
-                        explicit_asyncapi,
-                    )
-                    .await,
+            http_docs_refresh = Some(
+                api_docs_service::discover_service_docs(
+                    docs_base_url,
+                    explicit_openapi,
+                    explicit_asyncapi,
                 )
-            };
+                .await,
+            );
         }
         "ssh" => {
             let has_http_only_updates = body.base_url.is_some()
@@ -1951,8 +1926,7 @@ pub async fn update_service(
         &service.slug,
         body.proxy_operation_policy.clone(),
     )?;
-    if (body.proxy_operation_policy.is_some()
-        || crate::services::platform_operation_service::is_platform_vendor_slug(&service.slug))
+    if body.proxy_operation_policy.is_some()
         && let Some(normalized) = normalized_proxy_policy
     {
         set_doc.insert(
@@ -2518,8 +2492,7 @@ mod tests {
     };
     use crate::models::downstream_service::test_helpers::dummy_service;
     use crate::models::downstream_service::{
-        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
-        ProxyOperationRule,
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
     };
     use crate::models::service_billing::{
         BillingMetric, PricingSyncStatus, ServiceBilling, ServicePlatformPricing,
@@ -2753,150 +2726,6 @@ mod tests {
             .await
             .expect("count created downstream service");
         assert_eq!(service_count, 1);
-    }
-
-    #[tokio::test]
-    async fn create_platform_vendor_rejects_nonempty_policy_and_normalizes_safe_inputs() {
-        let Some(db) = connect_test_database("h_services_platform_vendor_create_policy").await
-        else {
-            eprintln!("skipping platform vendor create-policy test: no local MongoDB available");
-            return;
-        };
-        let admin_id = seed_user(&db, true).await;
-        let state = test_app_state(db.clone());
-        let auth = test_auth_user(&admin_id);
-        let (base_url, server) = spawn_empty_docs_server().await;
-
-        let mut unsafe_request =
-            create_http_service_request("Platform Duffel", "platform-duffel", base_url.clone());
-        unsafe_request.proxy_operation_policy = Some(ProxyOperationPolicy {
-            rules: vec![ProxyOperationRule {
-                method: "GET".to_string(),
-                path_template: "/air/orders/{id}".to_string(),
-            }],
-        });
-        let error = create_service(
-            State(state.clone()),
-            auth.clone(),
-            crate::telemetry::TelemetryContext::default(),
-            Json(unsafe_request),
-        )
-        .await
-        .expect_err("non-empty platform vendor policy must be rejected");
-        assert!(matches!(
-            error,
-            AppError::PlatformVendorProvisioningInvalid(ref message)
-                if message == "platform vendor rows carry a fixed deny-all policy; omit proxy_operation_policy or send an empty rule list"
-        ));
-        assert_eq!(
-            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-                .count_documents(doc! { "slug": "platform-duffel" })
-                .await
-                .expect("count rejected platform vendor rows"),
-            0
-        );
-
-        for (slug, policy) in [
-            ("platform-x", None),
-            (
-                "platform-elevenlabs",
-                Some(ProxyOperationPolicy { rules: Vec::new() }),
-            ),
-        ] {
-            let mut request =
-                create_http_service_request("Platform Vendor", slug, base_url.clone());
-            request.proxy_operation_policy = policy;
-            let Json(_) = create_service(
-                State(state.clone()),
-                auth.clone(),
-                crate::telemetry::TelemetryContext::default(),
-                Json(request),
-            )
-            .await
-            .expect("safe platform vendor policy input is accepted");
-            let stored = db
-                .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-                .find_one(doc! { "slug": slug })
-                .await
-                .expect("read created platform vendor")
-                .expect("created platform vendor exists");
-            assert!(
-                stored
-                    .proxy_operation_policy
-                    .is_some_and(|policy| policy.rules.is_empty())
-            );
-        }
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn update_platform_vendor_rejects_nonempty_policy_and_normalizes_safe_inputs() {
-        let Some(db) = connect_test_database("h_services_platform_vendor_update_policy").await
-        else {
-            eprintln!("skipping platform vendor update-policy test: no local MongoDB available");
-            return;
-        };
-        let admin_id = seed_user(&db, true).await;
-        let state = test_app_state(db.clone());
-        let auth = test_auth_user(&admin_id);
-        let mut service = dummy_service();
-        service.id = uuid::Uuid::new_v4().to_string();
-        service.slug = "platform-twilio".to_string();
-        service.created_by = admin_id;
-        service.proxy_operation_policy = None;
-        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_one(&service)
-            .await
-            .expect("insert platform vendor update fixture");
-
-        let unsafe_body: UpdateServiceRequest = serde_json::from_value(serde_json::json!({
-            "proxy_operation_policy": {
-                "rules": [{ "method": "POST", "path_template": "/Calls.json" }]
-            }
-        }))
-        .expect("parse unsafe update");
-        let error = update_service(
-            State(state.clone()),
-            auth.clone(),
-            crate::telemetry::TelemetryContext::default(),
-            Path(service.id.clone()),
-            Json(unsafe_body),
-        )
-        .await
-        .expect_err("non-empty platform vendor update policy must be rejected");
-        assert!(matches!(
-            error,
-            AppError::PlatformVendorProvisioningInvalid(ref message)
-                if message == "platform vendor rows carry a fixed deny-all policy; omit proxy_operation_policy or send an empty rule list"
-        ));
-
-        for body in [
-            serde_json::json!({ "name": "Platform Twilio Renamed" }),
-            serde_json::json!({ "proxy_operation_policy": { "rules": [] } }),
-        ] {
-            let body: UpdateServiceRequest =
-                serde_json::from_value(body).expect("parse safe platform vendor update");
-            let Json(_) = update_service(
-                State(state.clone()),
-                auth.clone(),
-                crate::telemetry::TelemetryContext::default(),
-                Path(service.id.clone()),
-                Json(body),
-            )
-            .await
-            .expect("safe platform vendor policy update is accepted");
-            let stored = db
-                .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-                .find_one(doc! { "_id": &service.id })
-                .await
-                .expect("read updated platform vendor")
-                .expect("updated platform vendor exists");
-            assert!(
-                stored
-                    .proxy_operation_policy
-                    .is_some_and(|policy| policy.rules.is_empty())
-            );
-        }
     }
 
     #[tokio::test]

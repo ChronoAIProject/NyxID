@@ -6,17 +6,9 @@ pub const COLLECTION_NAME: &str = "platform_operations";
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PlatformOperationName {
-    XSearch,
     Speak,
     CallAndSay,
     FlightSearch,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct XSearchConfig {
-    #[serde(default = "default_x_search_max_results_cap")]
-    pub max_results_cap: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,7 +48,6 @@ pub struct FlightSearchConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlatformOperationConfig {
-    XSearch(XSearchConfig),
     Speak(SpeakConfig),
     CallAndSay(CallAndSayConfig),
     FlightSearch(FlightSearchConfig),
@@ -74,10 +65,6 @@ pub struct PlatformOperation {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
     pub updated_by: String,
-}
-
-pub const fn default_x_search_max_results_cap() -> u32 {
-    10
 }
 
 pub const fn default_speak_max_chars() -> u32 {
@@ -137,11 +124,13 @@ mod tests {
     fn bson_roundtrip_preserves_typed_config_and_datetime() {
         let operation = PlatformOperation {
             id: uuid::Uuid::new_v4().to_string(),
-            op: PlatformOperationName::XSearch,
+            op: PlatformOperationName::Speak,
             enabled: false,
-            vendor_service_slug: "platform-x".to_string(),
-            config: PlatformOperationConfig::XSearch(XSearchConfig {
-                max_results_cap: 10,
+            vendor_service_slug: "platform-elevenlabs".to_string(),
+            config: PlatformOperationConfig::Speak(SpeakConfig {
+                allowed_voice_ids: vec!["voice-a".to_string()],
+                max_chars: 100,
+                model_id: "eleven_multilingual_v2".to_string(),
             }),
             updated_at: Utc::now(),
             updated_by: uuid::Uuid::new_v4().to_string(),

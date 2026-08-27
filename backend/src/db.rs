@@ -2054,29 +2054,6 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
-    // ── platform_vendor_templates ──
-    // Vendor keys and canonical slugs are the stable admin-facing identities;
-    // inactive templates remain available for audit/history, so uniqueness is
-    // enforced across all rows.
-    let platform_vendor_templates =
-        db.collection::<Document>(crate::models::platform_vendor_template::COLLECTION_NAME);
-    platform_vendor_templates
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "vendor": 1 })
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
-    platform_vendor_templates
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "slug": 1 })
-                .options(IndexOptions::builder().unique(true).build())
-                .build(),
-        )
-        .await?;
-
     // ── feature_flag_overrides ──
     // One override per (org, flag, target scope). target_key is null for
     // org-scope rows, the role string for role scope, the member_user_id for

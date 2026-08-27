@@ -29,8 +29,8 @@ use crate::services::content_type::{
 };
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{
-    api_docs_service, catalog_spec_sync, connect_link_service, connection_service,
-    node_routing_service, openapi_parser, operation_descriptor, proxy_service,
+    api_docs_service, connect_link_service, connection_service, node_routing_service,
+    openapi_parser, operation_descriptor, proxy_service,
 };
 
 // ---------------------------------------------------------------------------
@@ -977,10 +977,7 @@ async fn load_user_tools_inner(
     let mut valid_platform_services: Vec<(&DownstreamService, bool)> = Vec::new();
 
     for svc in &connected_services {
-        if svc.service_type != "http"
-            || svc.service_category == "provider"
-            || catalog_spec_sync::is_platform_vendor_service(svc)
-        {
+        if svc.service_type != "http" || svc.service_category == "provider" {
             continue;
         }
         let mut executable = true;
@@ -1219,24 +1216,15 @@ async fn load_user_tools_inner(
             .catalog_service_id
             .as_deref()
             .and_then(|id| catalog_policy_by_id.get(id).copied());
-        let platform_vendor_catalog =
-            catalog_policy.is_some_and(catalog_spec_sync::is_platform_vendor_service);
         let user_endpoint = endpoints_by_id.get(us.endpoint_id.as_str()).copied();
         let endpoint_label = user_endpoint
             .map(|ep| ep.label.as_str())
             .unwrap_or(&us.slug);
 
         let user_spec_url = user_endpoint.and_then(|ep| ep.openapi_spec_url.as_deref());
-        let (published, is_generic, invalid_openapi_contract) = if platform_vendor_catalog {
-            (
-                ParsedMcpEndpoints {
-                    endpoints: Vec::new(),
-                    durable_metadata: HashMap::new(),
-                },
-                false,
-                false,
-            )
-        } else if let Some(catalog_id) = us.catalog_service_id.as_deref() {
+        let (published, is_generic, invalid_openapi_contract) = if let Some(catalog_id) =
+            us.catalog_service_id.as_deref()
+        {
             // Catalog-backed: the instance's user-mounted spec is a
             // deliberate per-instance override and takes precedence over
             // the template's registered ServiceEndpoint rows. A broken or
@@ -2252,35 +2240,6 @@ pub fn generate_tool_definitions(
             continue;
         }
         let definition = match &operation.config {
-            PlatformOperationConfig::XSearch(config)
-                if operation.op
-                    == crate::models::platform_operation::PlatformOperationName::XSearch =>
-            {
-                McpToolDefinition {
-                    name: "nyx__x_search".to_string(),
-                    description: "Search recent posts on X through NyxID's constrained platform operation."
-                        .to_string(),
-                    input_schema: serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 512,
-                                "description": "Search query"
-                            },
-                            "max_results": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": config.max_results_cap,
-                                "description": "Maximum results to return"
-                            }
-                        },
-                        "required": ["query"],
-                        "additionalProperties": false
-                    }),
-                }
-            }
             PlatformOperationConfig::Speak(config)
                 if operation.op
                     == crate::models::platform_operation::PlatformOperationName::Speak =>
@@ -5539,84 +5498,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_mcp_catalog_excludes_platform_vendor_rows_even_when_legacy_connected() {
-        let Some(db) = connect_test_database("mcp_platform_vendor_excluded").await else {
-            eprintln!("skipping MCP platform vendor exclusion test: no local MongoDB available");
-            return;
-        };
-        let user_id = uuid::Uuid::new_v4().to_string();
-        let service_id = uuid::Uuid::new_v4().to_string();
-        let mut service = dummy_service();
-        service.id = service_id.clone();
-        service.name = "Platform Duffel".to_string();
-        service.slug = "platform-duffel".to_string();
-        service.base_url = "https://api.duffel.com".to_string();
-        service.service_category = "internal".to_string();
-        service.visibility = "public".to_string();
-        service.auth_method = "bearer".to_string();
-        service.requires_user_credential = false;
-        service.credential_encrypted = vec![1, 2, 3];
-        service.proxy_operation_policy =
-            Some(crate::services::platform_operation_service::platform_vendor_kill_policy());
-        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_one(service)
-            .await
-            .expect("insert platform vendor");
-        db.collection::<UserServiceConnection>(CONNECTIONS)
-            .insert_one(UserServiceConnection {
-                id: uuid::Uuid::new_v4().to_string(),
-                user_id: user_id.clone(),
-                service_id: service_id.clone(),
-                credential_encrypted: None,
-                credential_type: None,
-                credential_label: None,
-                metadata: None,
-                is_active: true,
-                state_version: 1,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            })
-            .await
-            .expect("insert stale platform vendor connection");
-        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
-            .insert_one(ServiceEndpoint {
-                id: uuid::Uuid::new_v4().to_string(),
-                service_id: service_id.clone(),
-                name: "create_order".to_string(),
-                description: Some("Must never be callable".to_string()),
-                method: "POST".to_string(),
-                path: "/air/orders".to_string(),
-                parameters: None,
-                request_body_schema: Some(serde_json::json!({ "type": "object" })),
-                request_content_type: Some("application/json".to_string()),
-                request_body_required: true,
-                response_description: None,
-                response: OperationResponseContract::default(),
-                risk: None,
-                supports_idempotency_key: false,
-                is_active: true,
-                operation_generation: 1,
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            })
-            .await
-            .expect("insert forbidden platform endpoint");
-
-        let catalog = load_operation_catalog(
-            &db,
-            &NodeWsManager::new(30, 100),
-            &user_id,
-            NodeScope::Unrestricted,
-            ServiceScope::Unrestricted,
-        )
-        .await
-        .expect("load MCP operation catalog");
-
-        assert!(catalog.services.is_empty());
-        assert!(resolve_tool_call("platform_duffel__create_order", &catalog.services).is_none());
-    }
-
-    #[tokio::test]
     async fn unavailable_unpinned_user_service_does_not_shadow_executable_platform_route() {
         let Some(db) = connect_test_database("mcp_non_executable_dedup").await else {
             eprintln!("skipping MCP dedup test: no local MongoDB available");
@@ -6336,13 +6217,18 @@ mod tests {
             updated_by: "admin-user".to_string(),
         };
         let disabled_operation = PlatformOperation {
-            id: "platform-x-search".to_string(),
-            op: crate::models::platform_operation::PlatformOperationName::XSearch,
+            id: "platform-call-and-say".to_string(),
+            op: crate::models::platform_operation::PlatformOperationName::CallAndSay,
             enabled: false,
-            vendor_service_slug: "platform-x".to_string(),
-            config: PlatformOperationConfig::XSearch(
-                crate::models::platform_operation::XSearchConfig {
-                    max_results_cap: 10,
+            vendor_service_slug: "platform-twilio".to_string(),
+            config: PlatformOperationConfig::CallAndSay(
+                crate::models::platform_operation::CallAndSayConfig {
+                    allowed_destination_prefixes: vec!["+65".to_string()],
+                    max_message_chars: 500,
+                    voice: "alice".to_string(),
+                    max_calls_per_user_per_day: 3,
+                    account_sid: format!("AC{}", "1".repeat(32)),
+                    call_from: "+6512345678".to_string(),
                 },
             ),
             updated_at: chrono::Utc::now(),
@@ -6373,7 +6259,6 @@ mod tests {
             .find(|tool| tool.name == "nyx__speak")
             .expect("enabled speak tool");
 
-        assert!(!tools.iter().any(|tool| tool.name == "nyx__x_search"));
         assert!(!tools.iter().any(|tool| tool.name == "nyx__call_and_say"));
         let flight = tools
             .iter()

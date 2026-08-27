@@ -1540,7 +1540,7 @@ mod tests {
             "/api/v1/oracle/pools",
             "/api/v1/channel-bots",
             "/api/v1/channel-conversations/conversation-id",
-            "/api/v1/platform-ops/x-search",
+            "/api/v1/platform-ops/speak",
             "/api/v1/nodes/ws",
             "/api/v1/nodes/node-id/credentials",
             "/api/v1/nodes/node-id/credentials/pending",
@@ -3047,7 +3047,7 @@ mod tests {
             (Method::POST, "/api/v1/llm/gateway/v1/chat/completions"),
             (Method::POST, "/api/v1/channel-relay/reply"),
             (Method::POST, "/api/v1/channel-events/conversation-1"),
-            (Method::POST, "/api/v1/platform-ops/x-search"),
+            (Method::POST, "/api/v1/platform-ops/speak"),
             (Method::POST, "/api/v1/ssh/service-1/exec"),
             (Method::POST, "/oauth/token"),
         ];

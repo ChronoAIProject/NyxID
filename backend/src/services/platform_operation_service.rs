@@ -12,15 +12,15 @@ use zeroize::Zeroizing;
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::platform_op_usage::{COLLECTION_NAME as PLATFORM_OP_USAGE, PlatformOpUsage};
 use crate::models::platform_operation::{
     COLLECTION_NAME as PLATFORM_OPERATIONS, CallAndSayConfig, FlightSearchConfig,
-    PlatformOperation, PlatformOperationConfig, PlatformOperationName, SpeakConfig, XSearchConfig,
+    PlatformOperation, PlatformOperationConfig, PlatformOperationName, SpeakConfig,
     default_call_max_message_chars, default_call_max_per_user_per_day, default_call_voice,
     default_flight_search_max_offers_cap, default_flight_search_max_per_user_per_day,
-    default_speak_max_chars, default_speak_model_id, default_x_search_max_results_cap,
+    default_speak_max_chars, default_speak_model_id,
 };
 use crate::models::service_approval_config::ApprovalEffect;
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
@@ -32,65 +32,19 @@ use crate::services::{
     user_service_service,
 };
 
-pub const X_SEARCH_HARD_MAX_RESULTS: u32 = 25;
 pub const SPEAK_HARD_MAX_CHARS: u32 = 5_000;
 pub const CALL_AND_SAY_HARD_MAX_MESSAGE_CHARS: u32 = 1_000;
 pub const FLIGHT_SEARCH_HARD_MAX_OFFERS: u32 = 50;
 pub const MCP_SPEAK_HARD_MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 const MAX_VENDOR_JSON_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
-pub const X_SEARCH_VENDOR_SLUG: &str = "platform-x";
 pub const SPEAK_VENDOR_SLUG: &str = "platform-elevenlabs";
 pub const CALL_AND_SAY_VENDOR_SLUG: &str = "platform-twilio";
 pub const FLIGHT_SEARCH_VENDOR_SLUG: &str = "platform-duffel";
-pub const PLATFORM_OPERATION_NAMES: [PlatformOperationName; 4] = [
-    PlatformOperationName::XSearch,
+pub const PLATFORM_OPERATION_NAMES: [PlatformOperationName; 3] = [
     PlatformOperationName::Speak,
     PlatformOperationName::CallAndSay,
     PlatformOperationName::FlightSearch,
-];
-
-/// Runtime-enforced operation contract. Keep this registry code-owned: admin
-/// templates are provisioning metadata and must never be able to weaken these
-/// checks.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PlatformOperationVendorContract {
-    pub operation: PlatformOperationName,
-    pub slug: &'static str,
-    pub base_url: &'static str,
-    pub auth_method: &'static str,
-    pub auth_key_name: Option<&'static str>,
-}
-
-pub const PLATFORM_OPERATION_VENDOR_CONTRACTS: [PlatformOperationVendorContract; 4] = [
-    PlatformOperationVendorContract {
-        operation: PlatformOperationName::CallAndSay,
-        slug: CALL_AND_SAY_VENDOR_SLUG,
-        base_url: "https://api.twilio.com",
-        auth_method: "basic",
-        auth_key_name: None,
-    },
-    PlatformOperationVendorContract {
-        operation: PlatformOperationName::Speak,
-        slug: SPEAK_VENDOR_SLUG,
-        base_url: "https://api.elevenlabs.io",
-        auth_method: "header",
-        auth_key_name: Some("xi-api-key"),
-    },
-    PlatformOperationVendorContract {
-        operation: PlatformOperationName::XSearch,
-        slug: X_SEARCH_VENDOR_SLUG,
-        base_url: "https://api.x.com",
-        auth_method: "bearer",
-        auth_key_name: None,
-    },
-    PlatformOperationVendorContract {
-        operation: PlatformOperationName::FlightSearch,
-        slug: FLIGHT_SEARCH_VENDOR_SLUG,
-        base_url: "https://api.duffel.com",
-        auth_method: "bearer",
-        auth_key_name: None,
-    },
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,15 +57,7 @@ pub struct PlatformOperationCatalogContract {
     pub mcp_tool: &'static str,
 }
 
-pub const PLATFORM_OPERATION_CATALOG_CONTRACTS: [PlatformOperationCatalogContract; 4] = [
-    PlatformOperationCatalogContract {
-        operation: PlatformOperationName::XSearch,
-        catalog_service_slug: "api-twitter",
-        vendor: "x",
-        display_name: "X Search",
-        description: "Search recent public posts on X.",
-        mcp_tool: "nyx__x_search",
-    },
+pub const PLATFORM_OPERATION_CATALOG_CONTRACTS: [PlatformOperationCatalogContract; 3] = [
     PlatformOperationCatalogContract {
         operation: PlatformOperationName::Speak,
         catalog_service_slug: "api-elevenlabs",
@@ -138,94 +84,6 @@ pub const PLATFORM_OPERATION_CATALOG_CONTRACTS: [PlatformOperationCatalogContrac
     },
 ];
 
-/// Seed data for the admin-managed template collection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SeededPlatformVendorTemplate {
-    pub vendor: &'static str,
-    pub display_name: &'static str,
-    pub slug: &'static str,
-    pub base_url: &'static str,
-    pub auth_method: &'static str,
-    pub auth_key_name: Option<&'static str>,
-    pub credential_label: &'static str,
-    pub credential_note: &'static str,
-    pub operation: Option<&'static str>,
-    pub capability_summary: &'static str,
-    pub restriction_summary: &'static str,
-}
-
-pub const DEFAULT_PLATFORM_VENDOR_TEMPLATES: [SeededPlatformVendorTemplate; 4] = [
-    SeededPlatformVendorTemplate {
-        vendor: "twilio",
-        display_name: "Twilio",
-        slug: CALL_AND_SAY_VENDOR_SLUG,
-        base_url: "https://api.twilio.com",
-        auth_method: "basic",
-        auth_key_name: None,
-        credential_label: "Auth token",
-        credential_note: "Use the Auth Token paired with the Account SID configured on Call and Say.",
-        operation: Some("call_and_say"),
-        capability_summary: "Places server-constructed voice calls through call_and_say.",
-        restriction_summary: "Does not expose Twilio's general API or import its OpenAPI operations.",
-    },
-    SeededPlatformVendorTemplate {
-        vendor: "elevenlabs",
-        display_name: "ElevenLabs",
-        slug: SPEAK_VENDOR_SLUG,
-        base_url: "https://api.elevenlabs.io",
-        auth_method: "header",
-        auth_key_name: Some("xi-api-key"),
-        credential_label: "API key",
-        credential_note: "Use a restricted ElevenLabs API key with text-to-speech access.",
-        operation: Some("speak"),
-        capability_summary: "Synthesizes speech through the server-constructed speak operation.",
-        restriction_summary: "Does not expose voice cloning or import ElevenLabs vendor tools.",
-    },
-    SeededPlatformVendorTemplate {
-        vendor: "x",
-        display_name: "X",
-        slug: X_SEARCH_VENDOR_SLUG,
-        base_url: "https://api.x.com",
-        auth_method: "bearer",
-        auth_key_name: None,
-        credential_label: "Bearer token",
-        credential_note: "Use an app bearer token with read access to recent search.",
-        operation: Some("x_search"),
-        capability_summary: "Searches recent posts through the bounded x_search operation.",
-        restriction_summary: "Does not publish, modify accounts, or expose X's general API.",
-    },
-    SeededPlatformVendorTemplate {
-        vendor: "duffel",
-        display_name: "Duffel",
-        slug: FLIGHT_SEARCH_VENDOR_SLUG,
-        base_url: "https://api.duffel.com",
-        auth_method: "bearer",
-        auth_key_name: None,
-        credential_label: "Access token",
-        credential_note: "Use a Duffel access token with permission to create offer requests.",
-        operation: Some("flight_search"),
-        capability_summary: "Searches flight offers through the bounded flight_search operation.",
-        restriction_summary: "Does not create orders, payments, or cancellations and does not expose Duffel's general API.",
-    },
-];
-
-pub fn vendor_requirement_for_operation(
-    op: PlatformOperationName,
-) -> &'static PlatformOperationVendorContract {
-    PLATFORM_OPERATION_VENDOR_CONTRACTS
-        .iter()
-        .find(|contract| contract.operation == op)
-        .expect("every shipped platform operation must bind one vendor contract")
-}
-
-pub fn vendor_contract_for_operation_name(
-    name: &str,
-) -> Option<&'static PlatformOperationVendorContract> {
-    PLATFORM_OPERATION_VENDOR_CONTRACTS
-        .iter()
-        .find(|contract| operation_name(contract.operation) == name)
-}
-
 pub fn catalog_contract_for_operation(
     op: PlatformOperationName,
 ) -> &'static PlatformOperationCatalogContract {
@@ -233,12 +91,6 @@ pub fn catalog_contract_for_operation(
         .iter()
         .find(|contract| contract.operation == op)
         .expect("every shipped platform operation must bind one user catalog contract")
-}
-
-pub fn is_platform_vendor_slug(slug: &str) -> bool {
-    PLATFORM_OPERATION_VENDOR_CONTRACTS
-        .iter()
-        .any(|contract| contract.slug == slug)
 }
 
 pub fn vendor_display_name(vendor: &str) -> String {
@@ -249,17 +101,6 @@ pub fn vendor_display_name(vendor: &str) -> String {
         "duffel" => "Duffel".to_string(),
         other => other.to_string(),
     }
-}
-
-pub fn platform_vendor_kill_policy() -> ProxyOperationPolicy {
-    ProxyOperationPolicy { rules: Vec::new() }
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct XSearchRequest {
-    pub query: String,
-    pub max_results: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -287,13 +128,6 @@ pub struct FlightSearchRequest {
     pub adults: Option<u32>,
     pub cabin_class: Option<String>,
     pub max_offers: Option<u32>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct XSearchUpstreamRequest {
-    pub path: &'static str,
-    pub query: String,
-    pub max_results: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -441,7 +275,6 @@ pub enum CredentialResolutionMode<'a> {
 
 pub fn operation_name(op: PlatformOperationName) -> &'static str {
     match op {
-        PlatformOperationName::XSearch => "x_search",
         PlatformOperationName::Speak => "speak",
         PlatformOperationName::CallAndSay => "call_and_say",
         PlatformOperationName::FlightSearch => "flight_search",
@@ -450,7 +283,6 @@ pub fn operation_name(op: PlatformOperationName) -> &'static str {
 
 pub fn parse_operation_name(value: &str) -> AppResult<PlatformOperationName> {
     match value {
-        "x_search" => Ok(PlatformOperationName::XSearch),
         "speak" => Ok(PlatformOperationName::Speak),
         "call_and_say" => Ok(PlatformOperationName::CallAndSay),
         "flight_search" => Ok(PlatformOperationName::FlightSearch),
@@ -462,9 +294,6 @@ pub fn parse_operation_name(value: &str) -> AppResult<PlatformOperationName> {
 
 pub fn default_operation_config(op: PlatformOperationName) -> PlatformOperationConfig {
     match op {
-        PlatformOperationName::XSearch => PlatformOperationConfig::XSearch(XSearchConfig {
-            max_results_cap: default_x_search_max_results_cap(),
-        }),
         PlatformOperationName::Speak => PlatformOperationConfig::Speak(SpeakConfig {
             allowed_voice_ids: Vec::new(),
             max_chars: default_speak_max_chars(),
@@ -490,7 +319,11 @@ pub fn default_operation_config(op: PlatformOperationName) -> PlatformOperationC
 }
 
 pub fn default_vendor_service_slug(op: PlatformOperationName) -> &'static str {
-    vendor_requirement_for_operation(op).slug
+    match op {
+        PlatformOperationName::Speak => SPEAK_VENDOR_SLUG,
+        PlatformOperationName::CallAndSay => CALL_AND_SAY_VENDOR_SLUG,
+        PlatformOperationName::FlightSearch => FLIGHT_SEARCH_VENDOR_SLUG,
+    }
 }
 
 pub fn validate_operation_config(
@@ -501,13 +334,6 @@ pub fn validate_operation_config(
     validate_vendor_service_slug(vendor_service_slug)?;
 
     match (op, config) {
-        (PlatformOperationName::XSearch, PlatformOperationConfig::XSearch(config)) => {
-            if !(1..=X_SEARCH_HARD_MAX_RESULTS).contains(&config.max_results_cap) {
-                return Err(AppError::BadRequest(format!(
-                    "max_results_cap must be between 1 and {X_SEARCH_HARD_MAX_RESULTS}."
-                )));
-            }
-        }
         (PlatformOperationName::Speak, PlatformOperationConfig::Speak(config)) => {
             validate_speak_config(config)?;
         }
@@ -673,53 +499,6 @@ pub fn is_e164_number(value: &str) -> bool {
 
 pub fn destination_matches_prefixes(to: &str, prefixes: &[String]) -> bool {
     prefixes.iter().any(|prefix| to.starts_with(prefix))
-}
-
-pub fn build_x_search_request(
-    config: &XSearchConfig,
-    request: &XSearchRequest,
-) -> AppResult<XSearchUpstreamRequest> {
-    let query_chars = request.query.chars().count();
-    if !(1..=512).contains(&query_chars) {
-        return Err(AppError::BadRequest(
-            "query must contain between 1 and 512 characters.".to_string(),
-        ));
-    }
-    let configured_cap = config.max_results_cap.min(X_SEARCH_HARD_MAX_RESULTS);
-    if configured_cap == 0 {
-        return Err(AppError::PlatformOperationUnavailable);
-    }
-    let requested = request.max_results.unwrap_or(configured_cap);
-    if requested == 0 {
-        return Err(AppError::BadRequest(
-            "max_results must be at least 1.".to_string(),
-        ));
-    }
-    let max_results = requested.min(configured_cap);
-    let query = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("query", &request.query)
-        .append_pair("max_results", &max_results.to_string())
-        .finish();
-
-    Ok(XSearchUpstreamRequest {
-        path: "2/tweets/search/recent",
-        query,
-        max_results,
-    })
-}
-
-pub fn x_search_path_for_base_url(base_url: &str) -> AppResult<&'static str> {
-    let url = url::Url::parse(base_url)
-        .map_err(|_| AppError::BadRequest("X connection has an invalid base URL.".to_string()))?;
-    let has_version_segment = url
-        .path_segments()
-        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
-        == Some("2");
-    Ok(if has_version_segment {
-        "tweets/search/recent"
-    } else {
-        "2/tweets/search/recent"
-    })
 }
 
 #[cfg(test)]
@@ -1464,18 +1243,6 @@ pub async fn resolve_operation_credential_source(
     }
 
     if let CredentialResolutionMode::Discover { descriptor } = mode {
-        let resolved_descriptor = if operation.op == PlatformOperationName::XSearch {
-            Some(
-                crate::services::operation_descriptor::build_http_descriptor(
-                    "GET",
-                    x_search_path_for_base_url(&resolution.target.base_url)?,
-                    None,
-                ),
-            )
-        } else {
-            None
-        };
-        let descriptor = resolved_descriptor.as_ref().unwrap_or(descriptor);
         let service_owner_id = resolution
             .org_routing
             .as_ref()
@@ -1529,9 +1296,8 @@ fn resolve_platform_vendor_from_context(
     context: &PlatformCredentialResolutionContext,
     operation: &PlatformOperation,
 ) -> AppResult<DownstreamService> {
-    let requirement = vendor_requirement_for_operation(operation.op);
     let service = context.service_by_slug(&operation.vendor_service_slug);
-    validate_vendor_binding_shape(requirement, &operation.vendor_service_slug, service, false)
+    validate_vendor_binding_shape(operation.op, &operation.vendor_service_slug, service, false)
         .map_err(|error| vendor_configuration_failed(operation.op, error))?;
     Ok(service
         .expect("validated platform vendor context must contain a service")
@@ -1566,7 +1332,6 @@ pub async fn upsert_operation(
     updated_by: &str,
 ) -> AppResult<PlatformOperation> {
     validate_operation_config(op, &vendor_service_slug, &config)?;
-    backfill_platform_vendor_kill_policy_for_slug(db, &vendor_service_slug).await?;
     validate_vendor_binding(db, encryption_keys, op, &vendor_service_slug).await?;
 
     let config = bson::to_bson(&config).map_err(|error| {
@@ -1598,75 +1363,6 @@ pub async fn upsert_operation(
         .ok_or_else(|| {
             AppError::Internal("Platform operation upsert returned no document".to_string())
         })
-}
-
-pub async fn backfill_platform_vendor_kill_policies(db: &mongodb::Database) -> AppResult<u64> {
-    let slugs = PLATFORM_OPERATION_VENDOR_CONTRACTS
-        .iter()
-        .map(|contract| contract.slug)
-        .collect::<Vec<_>>();
-    backfill_platform_vendor_kill_policy_for_slugs(db, &slugs).await
-}
-
-async fn backfill_platform_vendor_kill_policy_for_slug(
-    db: &mongodb::Database,
-    slug: &str,
-) -> AppResult<u64> {
-    if !is_platform_vendor_slug(slug) {
-        return Ok(0);
-    }
-    backfill_platform_vendor_kill_policy_for_slugs(db, &[slug]).await
-}
-
-async fn backfill_platform_vendor_kill_policy_for_slugs(
-    db: &mongodb::Database,
-    slugs: &[&str],
-) -> AppResult<u64> {
-    let collection = db.collection::<mongodb::bson::Document>(DOWNSTREAM_SERVICES);
-    let rows: Vec<mongodb::bson::Document> = collection
-        .find(doc! {
-            "slug": { "$in": slugs },
-            "$or": [
-                { "proxy_operation_policy": { "$exists": false } },
-                { "proxy_operation_policy": bson::Bson::Null },
-            ],
-        })
-        .await?
-        .try_collect()
-        .await?;
-    let policy = bson::to_bson(&platform_vendor_kill_policy()).map_err(|error| {
-        AppError::Internal(format!(
-            "Failed to serialize platform vendor kill policy: {error}"
-        ))
-    })?;
-    let mut modified = 0_u64;
-    for row in rows {
-        let Some(id) = row.get_str("_id").ok() else {
-            continue;
-        };
-        let slug = row.get_str("slug").unwrap_or("unknown");
-        let result = collection
-            .update_one(
-                doc! {
-                    "_id": id,
-                    "$or": [
-                        { "proxy_operation_policy": { "$exists": false } },
-                        { "proxy_operation_policy": bson::Bson::Null },
-                    ],
-                },
-                doc! { "$set": { "proxy_operation_policy": policy.clone() } },
-            )
-            .await?;
-        if result.modified_count == 1 {
-            modified += 1;
-            tracing::warn!(
-                service_id = id,
-                service_slug = slug,
-                "Backfilled deny-all policy on platform vendor row"
-            );
-        }
-    }
-    Ok(modified)
 }
 
 pub async fn collect_speak_audio(vendor: SpeakVendorResponse) -> AppResult<Vec<u8>> {
@@ -1813,12 +1509,11 @@ async fn validate_vendor_binding(
         Some(service) => Some(service),
         None => collection.find_one(doc! { "slug": slug }).await?,
     };
-    let requirement = vendor_requirement_for_operation(op);
-    validate_vendor_binding_shape(requirement, slug, service.as_ref(), true)?;
+    validate_vendor_binding_shape(op, slug, service.as_ref(), true)?;
     let service = service.expect("validated vendor binding must have a service row");
 
     if service.credential_encrypted.is_empty() {
-        return validate_vendor_credential(requirement, &service, b"");
+        return validate_vendor_credential(op, &service, b"");
     }
     let credential = Zeroizing::new(
         encryption_keys
@@ -1831,7 +1526,37 @@ async fn validate_vendor_binding(
                 ))
             })?,
     );
-    validate_vendor_credential(requirement, &service, credential.as_slice())
+    validate_vendor_credential(op, &service, credential.as_slice())
+}
+
+fn legacy_vendor_shape(
+    op: PlatformOperationName,
+) -> (
+    &'static str,
+    &'static str,
+    &'static str,
+    Option<&'static str>,
+) {
+    match op {
+        PlatformOperationName::Speak => (
+            SPEAK_VENDOR_SLUG,
+            "https://api.elevenlabs.io",
+            "header",
+            Some("xi-api-key"),
+        ),
+        PlatformOperationName::CallAndSay => (
+            CALL_AND_SAY_VENDOR_SLUG,
+            "https://api.twilio.com",
+            "basic",
+            None,
+        ),
+        PlatformOperationName::FlightSearch => (
+            FLIGHT_SEARCH_VENDOR_SLUG,
+            "https://api.duffel.com",
+            "bearer",
+            None,
+        ),
+    }
 }
 
 /// `enforce_base_url` is true only at provisioning time. The canonical base URL is a
@@ -1840,27 +1565,29 @@ async fn validate_vendor_binding(
 /// endpoint, an egress proxy, or a test double. The security-bearing checks (auth
 /// shape, category, visibility, credential) are enforced on every path.
 fn validate_vendor_binding_shape(
-    requirement: &PlatformOperationVendorContract,
+    operation: PlatformOperationName,
     slug: &str,
     service: Option<&DownstreamService>,
     enforce_base_url: bool,
 ) -> AppResult<()> {
-    let op = operation_name(requirement.operation);
+    let op = operation_name(operation);
+    let (expected_slug, expected_base_url, expected_auth_method, expected_auth_key_name) =
+        legacy_vendor_shape(operation);
     let Some(service) = service else {
         return Err(AppError::PlatformVendorProvisioningInvalid(format!(
             "{op} requires vendor row '{slug}'; no row with that slug exists"
         )));
     };
-    if slug != requirement.slug {
+    if slug != expected_slug {
         return Err(AppError::PlatformVendorProvisioningInvalid(format!(
             "{op} requires canonical vendor_service_slug '{}'; requested row slug is '{slug}'",
-            requirement.slug
+            expected_slug
         )));
     }
-    if enforce_base_url && service.base_url.trim_end_matches('/') != requirement.base_url {
+    if enforce_base_url && service.base_url.trim_end_matches('/') != expected_base_url {
         return Err(AppError::PlatformVendorProvisioningInvalid(format!(
             "{op} requires base_url '{}'; row '{}' has '{}'",
-            requirement.base_url, service.slug, service.base_url
+            expected_base_url, service.slug, service.base_url
         )));
     }
     if !service.is_active {
@@ -1869,13 +1596,13 @@ fn validate_vendor_binding_shape(
             service.slug
         )));
     }
-    if service.auth_method != requirement.auth_method {
+    if service.auth_method != expected_auth_method {
         return Err(AppError::PlatformVendorProvisioningInvalid(format!(
             "{op} requires auth_method '{}'; row '{}' has '{}'",
-            requirement.auth_method, service.slug, service.auth_method
+            expected_auth_method, service.slug, service.auth_method
         )));
     }
-    if let Some(expected) = requirement.auth_key_name
+    if let Some(expected) = expected_auth_key_name
         && !service.auth_key_name.eq_ignore_ascii_case(expected)
     {
         return Err(AppError::PlatformVendorProvisioningInvalid(format!(
@@ -1914,32 +1641,16 @@ fn validate_vendor_binding_shape(
             service.slug
         )));
     }
-    match service.proxy_operation_policy.as_ref() {
-        None => {
-            return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-                "{op} requires the actor-addressed deny-all kill policy; row '{}' has no proxy_operation_policy",
-                service.slug
-            )));
-        }
-        Some(policy) if !policy.rules.is_empty() => {
-            return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-                "{op} requires an empty actor-addressed deny-all kill policy; row '{}' has {} rule(s)",
-                service.slug,
-                policy.rules.len()
-            )));
-        }
-        Some(_) => {}
-    }
     Ok(())
 }
 
 fn validate_vendor_credential(
-    requirement: &PlatformOperationVendorContract,
+    operation: PlatformOperationName,
     service: &DownstreamService,
     credential: &[u8],
 ) -> AppResult<()> {
     if credential.is_empty() {
-        let op = operation_name(requirement.operation);
+        let op = operation_name(operation);
         return Err(AppError::PlatformVendorProvisioningInvalid(format!(
             "{op} requires a non-empty credential; row '{}' has an empty credential",
             service.slug
@@ -2132,25 +1843,23 @@ mod tests {
         service.visibility = "public".to_string();
         service.requires_user_credential = false;
         service.credential_encrypted = vec![1];
-        service.proxy_operation_policy = Some(platform_vendor_kill_policy());
         service
     }
 
     fn valid_vendor_service(
         op: PlatformOperationName,
     ) -> crate::models::downstream_service::DownstreamService {
-        let requirement = vendor_requirement_for_operation(op);
+        let (slug, base_url, auth_method, auth_key_name) = legacy_vendor_shape(op);
         let mut service = dummy_service();
         service.id = uuid::Uuid::new_v4().to_string();
-        service.slug = requirement.slug.to_string();
-        service.base_url = requirement.base_url.to_string();
-        service.auth_method = requirement.auth_method.to_string();
-        service.auth_key_name = requirement.auth_key_name.unwrap_or_default().to_string();
+        service.slug = slug.to_string();
+        service.base_url = base_url.to_string();
+        service.auth_method = auth_method.to_string();
+        service.auth_key_name = auth_key_name.unwrap_or_default().to_string();
         service.service_category = "internal".to_string();
         service.visibility = "public".to_string();
         service.requires_user_credential = false;
         service.credential_encrypted = vec![1];
-        service.proxy_operation_policy = Some(platform_vendor_kill_policy());
         service
     }
 
@@ -2188,89 +1897,6 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
-    }
-
-    #[test]
-    fn operation_contracts_and_seeded_templates_are_consistent() {
-        assert_eq!(PLATFORM_OPERATION_VENDOR_CONTRACTS.len(), 4);
-        for contract in PLATFORM_OPERATION_VENDOR_CONTRACTS {
-            assert_eq!(
-                vendor_requirement_for_operation(contract.operation),
-                &contract
-            );
-            assert_eq!(
-                default_vendor_service_slug(contract.operation),
-                contract.slug
-            );
-        }
-
-        for template in DEFAULT_PLATFORM_VENDOR_TEMPLATES {
-            let operation = template
-                .operation
-                .expect("every platform vendor template binds a shipped operation");
-            let operation = parse_operation_name(operation).expect("seeded operation name");
-            let contract = vendor_requirement_for_operation(operation);
-            assert_eq!(template.auth_method, contract.auth_method);
-            assert_eq!(template.auth_key_name, contract.auth_key_name);
-        }
-    }
-
-    #[tokio::test]
-    async fn kill_policy_backfill_changes_only_canonical_vendor_policy_fields() {
-        let Some(db) =
-            crate::test_utils::connect_test_database("platform_vendor_policy_backfill").await
-        else {
-            eprintln!("skipping platform vendor backfill test: no local MongoDB available");
-            return;
-        };
-        let mut platform = valid_speak_vendor_service();
-        platform.id = uuid::Uuid::new_v4().to_string();
-        platform.proxy_operation_policy = None;
-        platform.credential_encrypted = vec![9, 8, 7, 6];
-        let mut unrelated = platform.clone();
-        unrelated.id = uuid::Uuid::new_v4().to_string();
-        unrelated.slug = "internal-unrelated".to_string();
-        unrelated.credential_encrypted = vec![1, 2, 3, 4];
-        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_many([platform.clone(), unrelated.clone()])
-            .await
-            .expect("insert backfill fixtures");
-
-        assert_eq!(
-            backfill_platform_vendor_kill_policies(&db)
-                .await
-                .expect("backfill platform policies"),
-            1
-        );
-
-        let platform_after = db
-            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .find_one(doc! { "_id": &platform.id })
-            .await
-            .expect("read platform vendor")
-            .expect("platform vendor exists");
-        assert!(
-            platform_after
-                .proxy_operation_policy
-                .as_ref()
-                .is_some_and(|policy| policy.rules.is_empty())
-        );
-        assert_eq!(
-            platform_after.credential_encrypted,
-            platform.credential_encrypted
-        );
-
-        let unrelated_after = db
-            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .find_one(doc! { "_id": &unrelated.id })
-            .await
-            .expect("read unrelated row")
-            .expect("unrelated row exists");
-        assert!(unrelated_after.proxy_operation_policy.is_none());
-        assert_eq!(
-            unrelated_after.credential_encrypted,
-            unrelated.credential_encrypted
-        );
     }
 
     #[tokio::test]
@@ -2713,7 +2339,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn four_operation_discovery_reuses_one_resolution_inventory() {
+    async fn constrained_operation_discovery_reuses_one_resolution_inventory() {
         let Some(db) =
             crate::test_utils::connect_test_database("platform_shared_resolution_inventory").await
         else {
@@ -2740,7 +2366,7 @@ mod tests {
 
         // Loading is intentionally outside the operation loop. The resolver
         // accepts only this inventory and has no connection-listing path of
-        // its own, so all four decisions share one org-aware listing and one
+        // its own, so all decisions share one org-aware listing and one
         // batched vendor query.
         let context = load_credential_resolution_context(&db, &user_id, &operations)
             .await
@@ -2785,7 +2411,6 @@ mod tests {
 
     #[test]
     fn bind_validation_names_every_vendor_row_mismatch() {
-        let requirement = vendor_requirement_for_operation(PlatformOperationName::Speak);
         let valid = valid_speak_vendor_service();
 
         let cases: Vec<(
@@ -2862,25 +2487,27 @@ mod tests {
                     ..valid.clone()
                 }),
             ),
-            (
-                "speak requires the actor-addressed deny-all kill policy; row 'platform-elevenlabs' has no proxy_operation_policy",
-                SPEAK_VENDOR_SLUG,
-                Some(crate::models::downstream_service::DownstreamService {
-                    proxy_operation_policy: None,
-                    ..valid.clone()
-                }),
-            ),
         ];
 
         for (expected, slug, service) in cases {
-            let error = validate_vendor_binding_shape(requirement, slug, service.as_ref(), true)
-                .expect_err("mismatched vendor row must be rejected");
+            let error = validate_vendor_binding_shape(
+                PlatformOperationName::Speak,
+                slug,
+                service.as_ref(),
+                true,
+            )
+            .expect_err("mismatched vendor row must be rejected");
             assert_eq!(provisioning_message(error), expected);
         }
 
-        validate_vendor_binding_shape(requirement, SPEAK_VENDOR_SLUG, Some(&valid), true)
-            .expect("valid vendor row shape");
-        let error = validate_vendor_credential(requirement, &valid, b"")
+        validate_vendor_binding_shape(
+            PlatformOperationName::Speak,
+            SPEAK_VENDOR_SLUG,
+            Some(&valid),
+            true,
+        )
+        .expect("valid vendor row shape");
+        let error = validate_vendor_credential(PlatformOperationName::Speak, &valid, b"")
             .expect_err("empty credential must be rejected");
         assert_eq!(
             provisioning_message(error),
@@ -2899,21 +2526,22 @@ mod tests {
         let rows = [
             PlatformOperation {
                 id: uuid::Uuid::new_v4().to_string(),
-                op: PlatformOperationName::XSearch,
+                op: PlatformOperationName::Speak,
                 enabled: true,
-                vendor_service_slug: X_SEARCH_VENDOR_SLUG.to_string(),
-                config: PlatformOperationConfig::XSearch(XSearchConfig {
-                    max_results_cap: 10,
-                }),
+                vendor_service_slug: SPEAK_VENDOR_SLUG.to_string(),
+                config: PlatformOperationConfig::Speak(speak_config()),
                 updated_at: now,
                 updated_by: "admin-user".to_string(),
             },
             PlatformOperation {
                 id: uuid::Uuid::new_v4().to_string(),
-                op: PlatformOperationName::Speak,
+                op: PlatformOperationName::FlightSearch,
                 enabled: false,
-                vendor_service_slug: SPEAK_VENDOR_SLUG.to_string(),
-                config: PlatformOperationConfig::Speak(speak_config()),
+                vendor_service_slug: FLIGHT_SEARCH_VENDOR_SLUG.to_string(),
+                config: PlatformOperationConfig::FlightSearch(FlightSearchConfig {
+                    max_offers_cap: 10,
+                    max_searches_per_user_per_day: 20,
+                }),
                 updated_at: now,
                 updated_by: "admin-user".to_string(),
             },
@@ -2939,19 +2567,11 @@ mod tests {
             .await
             .expect("list enabled operations");
         assert_eq!(enabled.len(), 1);
-        assert_eq!(enabled[0].op, PlatformOperationName::XSearch);
+        assert_eq!(enabled[0].op, PlatformOperationName::Speak);
     }
 
     #[test]
     fn config_validation_enforces_hard_caps() {
-        let x = PlatformOperationConfig::XSearch(XSearchConfig {
-            max_results_cap: X_SEARCH_HARD_MAX_RESULTS + 1,
-        });
-        assert!(
-            validate_operation_config(PlatformOperationName::XSearch, X_SEARCH_VENDOR_SLUG, &x)
-                .is_err()
-        );
-
         let speak = PlatformOperationConfig::Speak(SpeakConfig {
             max_chars: SPEAK_HARD_MAX_CHARS + 1,
             ..speak_config()
@@ -3138,22 +2758,6 @@ mod tests {
         assert!(destination_matches_prefixes("+6512345678", &prefixes));
         assert!(!destination_matches_prefixes("+16512345678", &prefixes));
         assert!(!destination_matches_prefixes("+1650000065", &prefixes));
-    }
-
-    #[test]
-    fn x_search_path_respects_catalog_base_versioning() {
-        assert_eq!(
-            x_search_path_for_base_url("https://api.x.com").expect("platform X path"),
-            "2/tweets/search/recent"
-        );
-        assert_eq!(
-            x_search_path_for_base_url("https://api.x.com/2").expect("own X path"),
-            "tweets/search/recent"
-        );
-        assert_eq!(
-            x_search_path_for_base_url("https://api.x.com/2/").expect("own X trailing slash path"),
-            "tweets/search/recent"
-        );
     }
 
     #[test]

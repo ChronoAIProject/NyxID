@@ -8314,7 +8314,7 @@ mod tests {
 #[cfg(test)]
 mod proxy_resolution_integration_tests {
     use super::{
-        enforce_node_route_scope, execute_admin_proxy, execute_proxy, proxy_request_by_slug_inner,
+        enforce_node_route_scope, execute_admin_proxy, proxy_request_by_slug_inner,
         proxy_request_inner,
     };
     use crate::AppState;
@@ -9771,95 +9771,6 @@ mod proxy_resolution_integration_tests {
             forwarded.load(Ordering::SeqCst),
             1,
             "blocked REST operations must not reach the downstream"
-        );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn platform_vendor_kill_policy_denies_id_and_slug_proxy_paths_before_decryption() {
-        let Some(db) = connect_test_database("proxy_platform_vendor_kill_policy").await else {
-            panic!("MongoDB is required for platform vendor proxy denial test");
-        };
-        let forwarded = Arc::new(AtomicUsize::new(0));
-        let app = Router::new()
-            .route(
-                "/{*path}",
-                any(|State(counter): State<Arc<AtomicUsize>>| async move {
-                    counter.fetch_add(1, Ordering::SeqCst);
-                    StatusCode::OK
-                }),
-            )
-            .with_state(forwarded.clone());
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind platform vendor denial downstream");
-        let base_url = format!(
-            "http://{}",
-            listener.local_addr().expect("platform vendor address")
-        );
-        let server = tokio::spawn(async move {
-            axum::serve(listener, app)
-                .await
-                .expect("serve platform vendor denial downstream");
-        });
-
-        let user_id = Uuid::new_v4().to_string();
-        db.collection::<crate::models::user::User>(USERS)
-            .insert_one(test_user(&user_id, UserType::Person))
-            .await
-            .expect("insert platform vendor denial user");
-        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
-        service.id = Uuid::new_v4().to_string();
-        service.slug = "platform-twilio".to_string();
-        service.name = "Platform Twilio".to_string();
-        service.base_url = base_url;
-        service.service_category = "internal".to_string();
-        service.visibility = "public".to_string();
-        service.auth_method = "basic".to_string();
-        service.requires_user_credential = false;
-        service.provider_config_id = None;
-        // Deliberately not valid ciphertext. A not-found result proves the
-        // kill policy ran before credential materialization.
-        service.credential_encrypted = vec![1, 2, 3];
-        service.proxy_operation_policy =
-            Some(crate::services::platform_operation_service::platform_vendor_kill_policy());
-        db.collection::<crate::models::downstream_service::DownstreamService>(
-            crate::models::downstream_service::COLLECTION_NAME,
-        )
-        .insert_one(&service)
-        .await
-        .expect("insert platform vendor row");
-
-        let state = test_app_state(db);
-        let auth = access_token_auth(&user_id);
-        let path = "2010-04-01/Accounts/AC00000000000000000000000000000000/Calls.json";
-        let mut resolved_slug = String::new();
-        let by_id = execute_proxy(
-            &state,
-            &auth,
-            &service.id,
-            path,
-            proxy_request(&format!("/api/v1/proxy/{}/{path}", service.id)),
-            &mut resolved_slug,
-        )
-        .await;
-        assert!(matches!(by_id, Err(AppError::NotFound(_))));
-
-        let mut resolved_slug = String::new();
-        let by_slug = proxy_request_by_slug_inner(
-            &state,
-            &auth,
-            &service.slug,
-            path,
-            proxy_request(&format!("/api/v1/proxy/s/{}/{path}", service.slug)),
-            &mut resolved_slug,
-        )
-        .await;
-        assert!(matches!(by_slug, Err(AppError::NotFound(_))));
-        assert_eq!(
-            forwarded.load(Ordering::SeqCst),
-            0,
-            "caller-addressed platform vendor requests must never reach downstream"
         );
         server.abort();
     }

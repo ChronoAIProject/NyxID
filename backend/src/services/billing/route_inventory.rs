@@ -107,11 +107,6 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Exempt("control-plane discovery; no downstream request"),
     },
     BillingRouteSpec {
-        handler: "handlers::platform_ops::x_search",
-        route: "/api/v1/platform-ops/x-search",
-        policy: BillingRoutePolicy::Metered(BillingIngress::PlatformOperation),
-    },
-    BillingRouteSpec {
         handler: "handlers::platform_ops::speak",
         route: "/api/v1/platform-ops/speak",
         policy: BillingRoutePolicy::Metered(BillingIngress::PlatformOperation),

@@ -2291,8 +2291,7 @@ async fn lookup_user_service(
 }
 
 fn is_public_internal_master_credential_service(service: &DownstreamService) -> bool {
-    !crate::services::platform_operation_service::is_platform_vendor_slug(&service.slug)
-        && service.visibility == "public"
+    service.visibility == "public"
         && service.service_category == "internal"
         && master_credential_required(service)
         && service.auth_method != "token_exchange"

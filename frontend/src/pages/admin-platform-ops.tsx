@@ -9,19 +9,13 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import {
   Check,
   ExternalLink,
-  KeyRound,
   PhoneCall,
   Plane,
   Plus,
-  Search,
-  Settings2,
   Volume2,
   X,
 } from "lucide-react";
 import { Link } from "@tanstack/react-router";
-import { PlatformVendorDialog } from "@/components/admin-platform-ops/platform-vendor-dialog";
-import { PlatformVendorTemplateManager } from "@/components/admin-platform-ops/platform-vendor-template-manager";
-import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { toast } from "sonner";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
@@ -48,7 +42,6 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import {
   usePlatformOperations,
-  usePlatformVendorRequirements,
   useUpdatePlatformOperation,
 } from "@/hooks/use-platform-ops";
 import { ApiError } from "@/lib/api-client";
@@ -56,7 +49,6 @@ import {
   callAndSayUpdateSchema,
   flightSearchUpdateSchema,
   speakUpdateSchema,
-  xSearchUpdateSchema,
   type CallAndSayOperation,
   type CallAndSayUpdate,
   type FlightSearchOperation,
@@ -64,8 +56,6 @@ import {
   type PlatformOperation,
   type SpeakOperation,
   type SpeakUpdate,
-  type XSearchOperation,
-  type XSearchUpdate,
 } from "@/schemas/platform-ops";
 
 function updateErrorMessage(error: unknown): string {
@@ -181,7 +171,7 @@ function OperationHeader({
   enabled,
   onEnabledChange,
 }: {
-  readonly icon: typeof Search;
+  readonly icon: typeof Volume2;
   readonly title: string;
   readonly enabled: boolean;
   readonly onEnabledChange: (enabled: boolean) => void;
@@ -240,107 +230,6 @@ function OperationPricing({
         <span className="shrink-0 text-muted-foreground">Vendor missing</span>
       )}
     </div>
-  );
-}
-
-function XSearchOperationCard({
-  operation,
-}: {
-  readonly operation: XSearchOperation;
-}) {
-  const update = useUpdatePlatformOperation();
-  const form = useAppForm<XSearchUpdate>({
-    resolver: zodResolver(xSearchUpdateSchema),
-    defaultValues: {
-      enabled: operation.enabled,
-      vendor_service_slug: operation.vendor_service_slug,
-      config: operation.config,
-    },
-  });
-
-  useEffect(() => {
-    form.reset({
-      enabled: operation.enabled,
-      vendor_service_slug: operation.vendor_service_slug,
-      config: operation.config,
-    });
-  }, [form, operation]);
-
-  const onSubmit = async (data: XSearchUpdate) => {
-    try {
-      const saved = await update.mutateAsync({ op: "x_search", data });
-      if (saved.op === "x_search") {
-        form.reset({
-          enabled: saved.enabled,
-          vendor_service_slug: saved.vendor_service_slug,
-          config: saved.config,
-        });
-      }
-      toast.success("X Search configuration saved");
-    } catch (error) {
-      toast.error(updateErrorMessage(error));
-    }
-  };
-
-  return (
-    <Form {...form}>
-      <form onSubmit={form.handleSubmit(onSubmit)}>
-        <Card className="h-full">
-          <OperationHeader
-            icon={Search}
-            title="X Search"
-            enabled={form.watch("enabled")}
-            onEnabledChange={(enabled) => form.setValue("enabled", enabled)}
-          />
-          <CardContent className="space-y-4 pt-4">
-            <FormField
-              control={form.control}
-              name="vendor_service_slug"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Vendor Service Slug</FormLabel>
-                  <FormControl>
-                    <Input {...field} />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <OperationPricing operation={operation} />
-            <FormField
-              control={form.control}
-              name="config.max_results_cap"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Maximum Results</FormLabel>
-                  <FormControl>
-                    <NumberInput
-                      value={field.value}
-                      onChange={field.onChange}
-                      min={1}
-                      max={25}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
-            <FormSubmitErrors />
-          </CardContent>
-          <CardFooter>
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={!form.formState.isDirty || update.isPending}
-              isLoading={update.isPending}
-            >
-              <Check className="h-4 w-4" />
-              Save X Search
-            </Button>
-          </CardFooter>
-        </Card>
-      </form>
-    </Form>
   );
 }
 
@@ -785,8 +674,6 @@ function OperationCard({
   readonly operation: PlatformOperation;
 }) {
   switch (operation.op) {
-    case "x_search":
-      return <XSearchOperationCard operation={operation} />;
     case "speak":
       return <SpeakOperationCard operation={operation} />;
     case "call_and_say":
@@ -797,75 +684,18 @@ function OperationCard({
 }
 
 export function AdminPlatformOpsPage() {
-  const [vendorDialogOpen, setVendorDialogOpen] = useState(false);
-  const [templateManagerOpen, setTemplateManagerOpen] = useState(false);
   const {
     data,
     error,
     isLoading,
     refetch: refetchOperations,
   } = usePlatformOperations();
-  const {
-    data: vendorRequirements,
-    error: vendorRequirementsError,
-    isLoading: vendorRequirementsLoading,
-    refetch: refetchVendorRequirements,
-  } = usePlatformVendorRequirements();
   return (
     <div className="space-y-6">
       <PageHeader
         title="Platform Operations"
         description="Configure NyxID-owned vendor operations and their server-enforced limits."
-        actions={
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              size="lg"
-              onClick={() => setTemplateManagerOpen(true)}
-            >
-              <Settings2 className="size-4" />
-              Manage templates
-            </Button>
-            <AddCtaButton
-              label="Add platform vendor"
-              icon={KeyRound}
-              onClick={() => setVendorDialogOpen(true)}
-              disabled={
-                vendorRequirementsLoading ||
-                !vendorRequirements ||
-                !!vendorRequirementsError ||
-                vendorRequirements.vendors.length === 0
-              }
-            />
-          </div>
-        }
       />
-
-      <PlatformVendorDialog
-        open={vendorDialogOpen}
-        onOpenChange={setVendorDialogOpen}
-        requirements={vendorRequirements?.vendors ?? []}
-      />
-      {templateManagerOpen ? (
-        <PlatformVendorTemplateManager
-          open={templateManagerOpen}
-          onOpenChange={setTemplateManagerOpen}
-        />
-      ) : null}
-
-      {vendorRequirementsError ? (
-        <ErrorBanner
-          message={
-            vendorRequirementsError instanceof ApiError
-              ? vendorRequirementsError.message
-              : "Failed to load platform vendor provisioning data"
-          }
-          onRetry={() => {
-            void refetchVendorRequirements();
-          }}
-        />
-      ) : null}
 
       {error ? (
         <ErrorBanner
@@ -878,7 +708,7 @@ export function AdminPlatformOpsPage() {
         />
       ) : isLoading ? (
         <div className="grid gap-4 xl:grid-cols-2">
-          {Array.from({ length: 4 }).map((_, index) => (
+          {Array.from({ length: 3 }).map((_, index) => (
             <Skeleton
               key={`platform-operation-${String(index)}`}
               className="h-[420px] w-full"

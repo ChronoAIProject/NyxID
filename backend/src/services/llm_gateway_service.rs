@@ -906,26 +906,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn platform_vendor_rows_cannot_match_llm_gateway_routes() {
-        let filter = build_llm_service_filter(Some("provider-123"));
-        let slug_regex = filter
-            .get_document("slug")
-            .expect("slug filter")
-            .get_str("$regex")
-            .expect("slug regex");
-        assert_eq!(slug_regex, "^llm-");
-        for contract in
-            crate::services::platform_operation_service::PLATFORM_OPERATION_VENDOR_CONTRACTS
-        {
-            assert!(
-                !contract.slug.starts_with(LLM_SERVICE_SLUG_PREFIX),
-                "{} must remain unreachable from /llm/*",
-                contract.slug
-            );
-        }
-    }
-
     // --- resolve_provider_for_model tests ---
 
     #[test]

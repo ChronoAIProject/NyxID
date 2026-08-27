@@ -42,7 +42,7 @@ use crate::models::notification_channel::{
 };
 use crate::models::platform_operation::{
     COLLECTION_NAME as PLATFORM_OPERATIONS, CallAndSayConfig, FlightSearchConfig,
-    PlatformOperation, PlatformOperationConfig, PlatformOperationName, SpeakConfig, XSearchConfig,
+    PlatformOperation, PlatformOperationConfig, PlatformOperationName, SpeakConfig,
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::service_approval_config::ApprovalMode;
@@ -343,11 +343,6 @@ async fn billing_route_coverage_smoke() {
         .format("%Y-%m-%d")
         .to_string();
     for (path, mounted_route, body) in [
-        (
-            "/api/v1/platform-ops/x-search",
-            "/api/v1/platform-ops/x-search",
-            serde_json::json!({ "query": "billing route", "max_results": 2 }),
-        ),
         (
             "/api/v1/platform-ops/speak",
             "/api/v1/platform-ops/speak",
@@ -1796,28 +1791,41 @@ async fn insert_platform_route_services(
 ) -> Vec<DownstreamService> {
     let encryption_keys = crate::test_utils::test_encryption_keys();
     let mut vendors = Vec::new();
-    for contract in crate::services::platform_operation_service::PLATFORM_OPERATION_VENDOR_CONTRACTS
-    {
+    for (operation, slug, auth_method, auth_key_name) in [
+        (
+            PlatformOperationName::Speak,
+            "platform-elevenlabs",
+            "header",
+            "xi-api-key",
+        ),
+        (
+            PlatformOperationName::CallAndSay,
+            "platform-twilio",
+            "basic",
+            "Authorization",
+        ),
+        (
+            PlatformOperationName::FlightSearch,
+            "platform-duffel",
+            "bearer",
+            "Authorization",
+        ),
+    ] {
         let mut vendor = crate::models::downstream_service::test_helpers::dummy_service();
         vendor.id = Uuid::new_v4().to_string();
-        vendor.slug = contract.slug.to_string();
-        vendor.name = format!("{} billing route", contract.slug);
+        vendor.slug = slug.to_string();
+        vendor.name = format!("{slug} billing route");
         vendor.base_url = base_url.to_string();
         vendor.service_category = "internal".to_string();
         vendor.visibility = "public".to_string();
-        vendor.auth_method = contract.auth_method.to_string();
-        vendor.auth_key_name = contract
-            .auth_key_name
-            .unwrap_or("Authorization")
-            .to_string();
+        vendor.auth_method = auth_method.to_string();
+        vendor.auth_key_name = auth_key_name.to_string();
         vendor.requires_user_credential = false;
         vendor.provider_config_id = None;
         vendor.credential_encrypted = encryption_keys
-            .encrypt(format!("{}-route-secret", contract.slug).as_bytes())
+            .encrypt(format!("{slug}-route-secret").as_bytes())
             .await
             .expect("encrypt platform route credential");
-        vendor.proxy_operation_policy =
-            Some(crate::services::platform_operation_service::platform_vendor_kill_policy());
         vendor.billing = Some(ServiceBilling {
             platform_billable: false,
             platform_metric: Some(BillingMetric::Requests),
@@ -1828,10 +1836,7 @@ async fn insert_platform_route_services(
             .await
             .expect("insert platform route vendor");
 
-        let config = match contract.operation {
-            PlatformOperationName::XSearch => PlatformOperationConfig::XSearch(XSearchConfig {
-                max_results_cap: 10,
-            }),
+        let config = match operation {
             PlatformOperationName::Speak => PlatformOperationConfig::Speak(SpeakConfig {
                 allowed_voice_ids: vec!["route-voice".to_string()],
                 max_chars: 1_000,
@@ -1857,9 +1862,9 @@ async fn insert_platform_route_services(
         db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
             .insert_one(PlatformOperation {
                 id: Uuid::new_v4().to_string(),
-                op: contract.operation,
+                op: operation,
                 enabled: true,
-                vendor_service_slug: contract.slug.to_string(),
+                vendor_service_slug: slug.to_string(),
                 config,
                 updated_at: Utc::now(),
                 updated_by: "billing-route-test".to_string(),

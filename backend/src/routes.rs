@@ -226,15 +226,6 @@ macro_rules! platform_operation_billing_routes {
                 )
             ),
             (
-                "/x-search",
-                "/api/v1/platform-ops/x-search",
-                "handlers::platform_ops::x_search",
-                post(handlers::platform_ops::x_search),
-                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
-                    crate::services::billing::BillingIngress::PlatformOperation
-                )
-            ),
-            (
                 "/speak",
                 "/api/v1/platform-ops/speak",
                 "handlers::platform_ops::speak",
@@ -846,20 +837,6 @@ fn build_router_internal(
         .route(
             "/platform-ops",
             get(handlers::admin_platform_ops::list_platform_operations),
-        )
-        .route(
-            "/platform-ops/vendor-requirements",
-            get(handlers::admin_platform_ops::get_vendor_requirements),
-        )
-        .route(
-            "/platform-ops/vendor-templates",
-            get(handlers::admin_platform_ops::list_vendor_templates)
-                .post(handlers::admin_platform_ops::create_vendor_template),
-        )
-        .route(
-            "/platform-ops/vendor-templates/{template_id}",
-            put(handlers::admin_platform_ops::update_vendor_template)
-                .delete(handlers::admin_platform_ops::disable_vendor_template),
         )
         .route(
             "/platform-ops/{op}",

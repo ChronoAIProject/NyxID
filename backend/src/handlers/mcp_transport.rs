@@ -20,7 +20,7 @@ use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, Servic
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{self, AuthMethod};
 use crate::services::platform_operation_service::{
-    CallAndSayRequest, FlightSearchRequest, SpeakRequest, XSearchRequest,
+    CallAndSayRequest, FlightSearchRequest, SpeakRequest,
 };
 use crate::services::{
     approval_service, audit_service, connect_link_service, feature_flag_service, mcp_service,
@@ -1465,16 +1465,6 @@ async fn handle_tools_call(
             )
             .await;
         }
-        "nyx__x_search" => {
-            return handle_platform_x_search(
-                state,
-                auth,
-                &arguments,
-                request.id.clone(),
-                billing_egress_permit,
-            )
-            .await;
-        }
         "nyx__speak" => {
             return handle_platform_speak(
                 state,
@@ -1922,52 +1912,6 @@ fn audit_mcp_platform_operation<T>(
         auth.api_key_id.clone(),
         auth.api_key_name.clone(),
     );
-}
-
-async fn handle_platform_x_search(
-    state: &AppState,
-    auth: &McpAuthContext,
-    arguments: &serde_json::Value,
-    request_id: Option<serde_json::Value>,
-    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
-) -> Response {
-    if !platform_operations_allowed(auth) || !platform_services_flag_enabled(state, auth).await {
-        return tool_result(request_id, "Platform operation is not available", true);
-    }
-    let request = match parse_platform_operation_arguments::<XSearchRequest>(arguments) {
-        Ok(request) => request,
-        Err(error) => return tool_result(request_id, &error, true),
-    };
-    let started = Instant::now();
-    let query_chars = request.query.chars().count();
-    let requested_max_results = request.max_results;
-    let caller = platform_operation_caller(auth);
-    let result = super::platform_ops::execute_x_search_for_caller(
-        state,
-        &caller,
-        request,
-        crate::services::billing::BillingIngress::Mcp,
-        billing_egress_permit,
-    )
-    .await;
-    audit_mcp_platform_operation(
-        state,
-        auth,
-        "x_search",
-        &result,
-        started,
-        serde_json::json!({
-            "query_chars": query_chars,
-            "requested_max_results": requested_max_results,
-        }),
-    );
-
-    match result {
-        Ok(response) => {
-            platform_json_tool_result(request_id, response.value, response.credential_source)
-        }
-        Err(error) => platform_operation_error_result(request_id, &error),
-    }
 }
 
 async fn handle_platform_speak(
@@ -3559,7 +3503,7 @@ mod tests {
     };
     use crate::models::platform_operation::{
         COLLECTION_NAME as PLATFORM_OPERATIONS, PlatformOperation, PlatformOperationConfig,
-        PlatformOperationName, SpeakConfig, XSearchConfig,
+        PlatformOperationName, SpeakConfig,
     };
     use crate::models::service_approval_config::{
         ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
@@ -3689,34 +3633,34 @@ mod tests {
         .expect("enable platform-services flag for MCP test");
     }
 
-    async fn insert_platform_x_vendor_for_mcp_tests(db: &mongodb::Database) {
+    async fn insert_platform_speak_vendor_for_mcp_tests(db: &mongodb::Database) {
         let mut vendor = crate::models::downstream_service::test_helpers::dummy_service();
         vendor.id = uuid::Uuid::new_v4().to_string();
-        vendor.slug = "platform-x".to_string();
-        vendor.name = "Platform X".to_string();
-        vendor.base_url = "https://api.x.com".to_string();
+        vendor.slug = "platform-elevenlabs".to_string();
+        vendor.name = "Platform ElevenLabs".to_string();
+        vendor.base_url = "https://api.elevenlabs.io".to_string();
         vendor.service_category = "internal".to_string();
-        vendor.auth_method = "bearer".to_string();
-        vendor.auth_key_name = "Authorization".to_string();
+        vendor.auth_method = "header".to_string();
+        vendor.auth_key_name = "xi-api-key".to_string();
         vendor.credential_encrypted = vec![1];
-        vendor.proxy_operation_policy =
-            Some(crate::services::platform_operation_service::platform_vendor_kill_policy());
         db.collection::<crate::models::downstream_service::DownstreamService>(
             crate::models::downstream_service::COLLECTION_NAME,
         )
         .insert_one(vendor)
         .await
-        .expect("insert platform X vendor");
+        .expect("insert platform speak vendor");
     }
 
-    fn enabled_x_search_operation() -> PlatformOperation {
+    fn enabled_speak_operation() -> PlatformOperation {
         PlatformOperation {
             id: uuid::Uuid::new_v4().to_string(),
-            op: PlatformOperationName::XSearch,
+            op: PlatformOperationName::Speak,
             enabled: true,
-            vendor_service_slug: "platform-x".to_string(),
-            config: PlatformOperationConfig::XSearch(XSearchConfig {
-                max_results_cap: 10,
+            vendor_service_slug: "platform-elevenlabs".to_string(),
+            config: PlatformOperationConfig::Speak(SpeakConfig {
+                allowed_voice_ids: vec!["voice-a".to_string()],
+                max_chars: 1_000,
+                model_id: "eleven_multilingual_v2".to_string(),
             }),
             updated_at: chrono::Utc::now(),
             updated_by: "mcp-test-actor".to_string(),
@@ -3739,7 +3683,7 @@ mod tests {
             return;
         };
         db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
-            .insert_one(enabled_x_search_operation())
+            .insert_one(enabled_speak_operation())
             .await
             .expect("insert enabled platform operation");
         let state = test_app_state(db);
@@ -3753,7 +3697,6 @@ mod tests {
         let tools = payload["result"]["tools"]
             .as_array()
             .expect("tools/list result contains tools");
-        assert!(!tools.iter().any(|tool| tool["name"] == "nyx__x_search"));
         assert!(!tools.iter().any(|tool| tool["name"] == "nyx__speak"));
         assert!(!tools.iter().any(|tool| tool["name"] == "nyx__call_and_say"));
         assert!(
@@ -3770,9 +3713,9 @@ mod tests {
             return;
         };
         enable_platform_services_for_mcp_tests(&db).await;
-        insert_platform_x_vendor_for_mcp_tests(&db).await;
+        insert_platform_speak_vendor_for_mcp_tests(&db).await;
         db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
-            .insert_one(enabled_x_search_operation())
+            .insert_one(enabled_speak_operation())
             .await
             .expect("insert enabled platform operation");
         let state = test_app_state(db);
@@ -3786,12 +3729,12 @@ mod tests {
         let tools = payload["result"]["tools"]
             .as_array()
             .expect("tools/list result contains tools");
-        let x_search = tools
+        let speak = tools
             .iter()
-            .find(|tool| tool["name"] == "nyx__x_search")
-            .expect("tools/list publishes enabled X search");
-        assert!(x_search["description"].as_str().is_some_and(|description| {
-            description.ends_with("Uses the platform credential (free).")
+            .find(|tool| tool["name"] == "nyx__speak")
+            .expect("tools/list publishes enabled speak operation");
+        assert!(speak["description"].as_str().is_some_and(|description| {
+            description.contains("Uses the platform credential (free).")
         }));
     }
 
@@ -3812,8 +3755,6 @@ mod tests {
         platform_vendor.auth_method = "header".to_string();
         platform_vendor.auth_key_name = "xi-api-key".to_string();
         platform_vendor.credential_encrypted = vec![1];
-        platform_vendor.proxy_operation_policy =
-            Some(crate::services::platform_operation_service::platform_vendor_kill_policy());
 
         let catalog_id = uuid::Uuid::new_v4().to_string();
         let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
@@ -3993,14 +3934,6 @@ mod tests {
         let auth = McpAuthContext::user("user-1".to_string(), AuthMethod::Session);
 
         let responses = [
-            handle_platform_x_search(
-                &state,
-                &auth,
-                &serde_json::json!({}),
-                Some(serde_json::json!(1)),
-                mcp_billing_permit(),
-            )
-            .await,
             handle_platform_speak(
                 &state,
                 &auth,
@@ -4049,7 +3982,7 @@ mod tests {
         enable_platform_services_for_mcp_tests(&db).await;
         let state = test_app_state(db);
         let auth = McpAuthContext::user("user-1".to_string(), AuthMethod::Session);
-        let response = handle_platform_x_search(
+        let response = handle_platform_speak(
             &state,
             &auth,
             &serde_json::json!({}),

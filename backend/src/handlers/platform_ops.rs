@@ -23,7 +23,7 @@ use crate::services::billing::route_inventory::{
 };
 use crate::services::platform_operation_service::{
     CallAndSayRequest, FlightSearchRequest, PlatformCredentialResolution, PlatformCredentialSource,
-    SpeakRequest, XSearchRequest,
+    SpeakRequest,
 };
 use crate::services::{audit_service, feature_flag_service, platform_operation_service};
 
@@ -134,44 +134,6 @@ pub async fn platform_services_feature_gate(
 ) -> Result<Response, AppError> {
     require_platform_ops_enabled(&state, &auth_user).await?;
     Ok(next.run(request).await)
-}
-
-pub async fn x_search(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    Extension(billing_route_policy): Extension<BillingRoutePolicy>,
-    Json(request): Json<XSearchRequest>,
-) -> AppResult<Response> {
-    require_platform_ops_enabled(&state, &auth_user).await?;
-    ensure_platform_operation_caller(&state, &auth_user).await?;
-    enforce_agent_rate_limit(&state, &auth_user)?;
-
-    let started = Instant::now();
-    let query_chars = request.query.chars().count();
-    let requested_max_results = request.max_results;
-    let billing_egress_permit = enforce_platform_billing_classification(billing_route_policy)?;
-    let result = execute_x_search_for_caller(
-        &state,
-        &PlatformOperationCaller::from_auth_user(&auth_user),
-        request,
-        BillingIngress::PlatformOperation,
-        billing_egress_permit,
-    )
-    .await;
-    audit_operation(
-        &state,
-        &auth_user,
-        "x_search",
-        &result,
-        started,
-        json!({
-            "query_chars": query_chars,
-            "requested_max_results": requested_max_results,
-        }),
-    );
-
-    let result = result?;
-    response_with_credential_source(Json(result.value).into_response(), result.credential_source)
 }
 
 pub async fn speak(
@@ -537,7 +499,6 @@ pub(crate) fn platform_operation_discovery_descriptor(
     use crate::models::platform_operation::PlatformOperationName;
 
     let (method, path) = match op {
-        PlatformOperationName::XSearch => ("GET", "/tweets/search/recent"),
         PlatformOperationName::Speak => ("POST", "/v1/text-to-speech/{voice_id}"),
         PlatformOperationName::CallAndSay => {
             ("POST", "/2010-04-01/Accounts/{account_sid}/Calls.json")
@@ -922,84 +883,6 @@ async fn release_daily_limit(
     }
 }
 
-pub(crate) async fn execute_x_search_for_caller(
-    state: &AppState,
-    caller: &PlatformOperationCaller,
-    request: XSearchRequest,
-    ingress: BillingIngress,
-    billing_egress_permit: BillingEgressPermit,
-) -> AppResult<PlatformOperationExecution<serde_json::Value>> {
-    use crate::models::platform_operation::{PlatformOperationConfig, PlatformOperationName};
-
-    let operation = platform_operation_service::load_enabled_operation(
-        &state.db,
-        PlatformOperationName::XSearch,
-    )
-    .await?;
-    let PlatformOperationConfig::XSearch(config) = &operation.config else {
-        return Err(AppError::PlatformOperationUnavailable);
-    };
-    let upstream = platform_operation_service::build_x_search_request(config, &request)?;
-    let resolved = resolve_execution_target(state, caller, &operation).await?;
-    let path = match &resolved.target {
-        ExecutionTarget::Platform(_) => upstream.path,
-        ExecutionTarget::OwnConnection(own) => {
-            platform_operation_service::x_search_path_for_base_url(&own.target.base_url)?
-        }
-    };
-    let result = forward_metered_operation(
-        state,
-        caller,
-        ingress,
-        PlatformOperationName::XSearch,
-        resolved,
-        reqwest::Method::GET,
-        path,
-        Some(&upstream.query),
-        reqwest::header::HeaderMap::new(),
-        None,
-        None,
-        None,
-        billing_egress_permit,
-    )
-    .await?;
-    let ForwardedOperation {
-        response,
-        credential_source,
-        own_connection_disabled,
-        own_connection_out_of_scope,
-        metered,
-        daily_limit,
-    } = result;
-    let value = match platform_operation_service::read_vendor_json(
-        PlatformOperationName::XSearch,
-        response,
-    )
-    .await
-    {
-        Ok(value) => value,
-        Err(error) => {
-            fail_platform_attempt(
-                state,
-                &metered,
-                "vendor_response_invalid",
-                PlatformOperationName::XSearch,
-                caller,
-                daily_limit.as_ref(),
-            )
-            .await;
-            return Err(error);
-        }
-    };
-    settle_meter_async(state.billing.clone(), metered).await;
-    Ok(PlatformOperationExecution {
-        value,
-        credential_source,
-        own_connection_disabled,
-        own_connection_out_of_scope,
-    })
-}
-
 pub(crate) async fn execute_speak_for_caller(
     state: &AppState,
     caller: &PlatformOperationCaller,
@@ -1372,7 +1255,7 @@ mod tests {
     use crate::models::platform_op_usage::{COLLECTION_NAME as PLATFORM_OP_USAGE, PlatformOpUsage};
     use crate::models::platform_operation::{
         COLLECTION_NAME as PLATFORM_OPERATIONS, CallAndSayConfig, PlatformOperation,
-        PlatformOperationConfig, PlatformOperationName, SpeakConfig, XSearchConfig,
+        PlatformOperationConfig, PlatformOperationName, SpeakConfig,
     };
     use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
     use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
@@ -1424,8 +1307,6 @@ mod tests {
         service.visibility = "public".to_string();
         service.auth_method = "basic".to_string();
         service.auth_key_name = "Authorization".to_string();
-        service.proxy_operation_policy =
-            Some(platform_operation_service::platform_vendor_kill_policy());
         service.credential_encrypted = state
             .encryption_keys
             .encrypt(b"twilio-auth-token")
@@ -1440,34 +1321,32 @@ mod tests {
         service
     }
 
-    async fn insert_x_vendor(
+    async fn insert_speak_vendor(
         state: &AppState,
         base_url: String,
         credential: &str,
     ) -> DownstreamService {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.id = uuid::Uuid::new_v4().to_string();
-        service.slug = platform_operation_service::X_SEARCH_VENDOR_SLUG.to_string();
-        service.name = "Platform X".to_string();
+        service.slug = platform_operation_service::SPEAK_VENDOR_SLUG.to_string();
+        service.name = "Platform ElevenLabs".to_string();
         service.base_url = base_url;
         service.service_category = "internal".to_string();
         service.visibility = "public".to_string();
-        service.auth_method = "bearer".to_string();
-        service.auth_key_name = "Authorization".to_string();
+        service.auth_method = "header".to_string();
+        service.auth_key_name = "xi-api-key".to_string();
         service.requires_user_credential = false;
-        service.proxy_operation_policy =
-            Some(platform_operation_service::platform_vendor_kill_policy());
         service.credential_encrypted = state
             .encryption_keys
             .encrypt(credential.as_bytes())
             .await
-            .expect("encrypt X vendor credential");
+            .expect("encrypt ElevenLabs vendor credential");
         state
             .db
             .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(&service)
             .await
-            .expect("insert X vendor row");
+            .expect("insert ElevenLabs vendor row");
         service
     }
 
@@ -1775,117 +1654,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn x_discovery_approval_path_matches_execution_for_resolved_base_url() {
-        use crate::models::service_approval_config::{
-            ApprovalEffect, ApprovalMode, ApprovalRule,
-            COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
-        };
-
-        let Some(db) =
-            crate::test_utils::connect_test_database("platform_x_discovery_descriptor").await
-        else {
-            eprintln!("skipping X discovery descriptor test: no local MongoDB available");
-            return;
-        };
-        let state = crate::test_utils::test_app_state(db.clone());
-        insert_x_vendor(&state, "https://api.x.com".to_string(), "platform-x-key").await;
-        let user_service_id = insert_own_connection(
-            &state,
-            "api-twitter",
-            "https://api.x.com",
-            "bearer",
-            "Authorization",
-            "api_key",
-            "own-x-key",
-            false,
-        )
-        .await;
-        let user_service = db
-            .collection::<UserService>(USER_SERVICES)
-            .find_one(mongodb::bson::doc! { "_id": &user_service_id })
-            .await
-            .expect("read X user service")
-            .expect("X user service exists");
-        let operation = operation(
-            PlatformOperationName::XSearch,
-            true,
-            PlatformOperationConfig::XSearch(XSearchConfig {
-                max_results_cap: 10,
-            }),
-        );
-        let now = Utc::now();
-        db.collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
-            .insert_one(ServiceApprovalConfig {
-                id: uuid::Uuid::new_v4().to_string(),
-                user_id: USER_ID.to_string(),
-                service_id: user_service_id,
-                service_name: "X".to_string(),
-                approval_required: false,
-                approval_mode: ApprovalMode::PerRequest,
-                rules: vec![
-                    ApprovalRule {
-                        methods: vec!["GET".to_string()],
-                        resource_pattern: "/2/tweets/search/recent".to_string(),
-                        verbs: Vec::new(),
-                        effect: ApprovalEffect::RequireApproval,
-                        mode: ApprovalMode::PerRequest,
-                    },
-                    ApprovalRule {
-                        methods: vec!["GET".to_string()],
-                        resource_pattern: "/tweets/search/recent".to_string(),
-                        verbs: Vec::new(),
-                        effect: ApprovalEffect::Deny,
-                        mode: ApprovalMode::PerRequest,
-                    },
-                ],
-                default_effect: Some(ApprovalEffect::AutoAllow),
-                created_at: now,
-                updated_at: now,
-            })
-            .await
-            .expect("insert path-specific X approval policy");
-        let mut auth = crate::test_utils::test_auth_user(USER_ID);
-        auth.auth_method = AuthMethod::AccessToken;
-
-        for (base_url, expected_resource, expect_approval) in [
-            ("https://api.x.com", "/2/tweets/search/recent", true),
-            ("https://api.x.com/2", "/tweets/search/recent", false),
-        ] {
-            db.collection::<crate::models::user_endpoint::UserEndpoint>(USER_ENDPOINTS)
-                .update_one(
-                    mongodb::bson::doc! { "_id": &user_service.endpoint_id },
-                    mongodb::bson::doc! { "$set": { "url": base_url } },
-                )
-                .await
-                .expect("update X endpoint base URL");
-            let execution_path = platform_operation_service::x_search_path_for_base_url(base_url)
-                .expect("build execution X path");
-            let execution_descriptor = crate::services::operation_descriptor::build_http_descriptor(
-                "GET",
-                execution_path,
-                None,
-            );
-            assert_eq!(
-                execution_descriptor.resource.as_deref(),
-                Some(expected_resource)
-            );
-
-            let (source, _) = resolve_discovery_source_for_test(&state, &auth, &operation).await;
-            if expect_approval {
-                assert!(matches!(
-                    source,
-                    PlatformCredentialResolution::ApprovalRequired { .. }
-                ));
-            } else {
-                assert!(matches!(
-                    source,
-                    PlatformCredentialResolution::Unusable { error: None, .. }
-                ));
-            }
-        }
-    }
-
-    #[tokio::test]
     async fn platform_services_flag_off_returns_not_found_for_all_http_operations() {
         let Some(db) =
             crate::test_utils::connect_test_database("platform_ops_flag_default_off").await
@@ -1895,18 +1663,6 @@ mod tests {
         };
         let state = crate::test_utils::test_app_state(db);
         let auth_user = crate::test_utils::test_auth_user(USER_ID);
-
-        let x_search_result = x_search(
-            State(state.clone()),
-            auth_user.clone(),
-            billing_extension(),
-            Json(XSearchRequest {
-                query: "nyxid".to_string(),
-                max_results: None,
-            }),
-        )
-        .await;
-        assert!(matches!(x_search_result, Err(AppError::NotFound(_))));
 
         let speak_result = speak(
             State(state.clone()),
@@ -1944,21 +1700,23 @@ mod tests {
         enable_platform_services_for_tests(&db).await;
         db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
             .insert_one(operation(
-                PlatformOperationName::XSearch,
+                PlatformOperationName::Speak,
                 false,
-                PlatformOperationConfig::XSearch(XSearchConfig {
-                    max_results_cap: 10,
+                PlatformOperationConfig::Speak(SpeakConfig {
+                    allowed_voice_ids: vec!["voice".to_string()],
+                    max_chars: 1_000,
+                    model_id: "eleven_multilingual_v2".to_string(),
                 }),
             ))
             .await
             .expect("insert disabled operation");
-        let result = x_search(
+        let result = speak(
             State(crate::test_utils::test_app_state(db)),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(XSearchRequest {
-                query: "nyxid".to_string(),
-                max_results: None,
+            Json(SpeakRequest {
+                text: "Hello".to_string(),
+                voice_id: "voice".to_string(),
             }),
         )
         .await;
@@ -1976,21 +1734,23 @@ mod tests {
         enable_platform_services_for_tests(&db).await;
         db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
             .insert_one(operation(
-                PlatformOperationName::XSearch,
+                PlatformOperationName::Speak,
                 true,
-                PlatformOperationConfig::XSearch(XSearchConfig {
-                    max_results_cap: 10,
+                PlatformOperationConfig::Speak(SpeakConfig {
+                    allowed_voice_ids: vec!["voice".to_string()],
+                    max_chars: 1_000,
+                    model_id: "eleven_multilingual_v2".to_string(),
                 }),
             ))
             .await
             .expect("insert enabled operation");
-        let result = x_search(
+        let result = speak(
             State(crate::test_utils::test_app_state(db)),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(XSearchRequest {
-                query: "nyxid".to_string(),
-                max_results: None,
+            Json(SpeakRequest {
+                text: "Hello".to_string(),
+                voice_id: "voice".to_string(),
             }),
         )
         .await;
@@ -2390,17 +2150,6 @@ mod tests {
 
         insert_own_connection(
             &state,
-            "api-twitter",
-            &format!("{base_url}/2"),
-            "bearer",
-            "Authorization",
-            "oauth2",
-            "x-oauth-token",
-            true,
-        )
-        .await;
-        insert_own_connection(
-            &state,
             "api-elevenlabs",
             &base_url,
             "header",
@@ -2427,13 +2176,6 @@ mod tests {
         db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
             .insert_many([
                 operation(
-                    PlatformOperationName::XSearch,
-                    true,
-                    PlatformOperationConfig::XSearch(XSearchConfig {
-                        max_results_cap: 10,
-                    }),
-                ),
-                operation(
                     PlatformOperationName::Speak,
                     true,
                     PlatformOperationConfig::Speak(SpeakConfig {
@@ -2453,22 +2195,6 @@ mod tests {
             ])
             .await
             .expect("insert own-connection operations");
-
-        let x_response = x_search(
-            State(state.clone()),
-            crate::test_utils::test_auth_user(USER_ID),
-            billing_extension(),
-            Json(XSearchRequest {
-                query: "nyxid platform".to_string(),
-                max_results: Some(3),
-            }),
-        )
-        .await
-        .expect("execute own X search");
-        assert_eq!(
-            x_response.headers()[CREDENTIAL_SOURCE_HEADER],
-            PlatformCredentialSource::OwnConnection.as_str()
-        );
 
         let speak_response = speak(
             State(state.clone()),
@@ -2504,17 +2230,8 @@ mod tests {
         );
 
         let requests = captured.lock().await.clone();
-        assert_eq!(requests.len(), 3);
-        let x_request = &requests[0];
-        assert_eq!(x_request.method, Method::GET);
-        assert!(x_request.uri.starts_with("/2/tweets/search/recent?"));
-        assert!(x_request.uri.contains("max_results=3"));
-        assert_eq!(
-            x_request.authorization.as_deref(),
-            Some("Bearer x-oauth-token")
-        );
-
-        let speak_request = &requests[1];
+        assert_eq!(requests.len(), 2);
+        let speak_request = &requests[0];
         assert_eq!(speak_request.method, Method::POST);
         assert_eq!(speak_request.uri, "/v1/text-to-speech/voice-own");
         assert_eq!(
@@ -2522,7 +2239,7 @@ mod tests {
             Some("elevenlabs-own-key")
         );
 
-        let call_request = &requests[2];
+        let call_request = &requests[1];
         assert_eq!(call_request.method, Method::POST);
         assert_eq!(
             call_request.uri,
@@ -2583,29 +2300,31 @@ mod tests {
         };
         let state = crate::test_utils::test_app_state(db.clone());
         let (base_url, captured, server) = spawn_capturing_vendor().await;
-        insert_x_vendor(&state, base_url.clone(), "platform-x-secret").await;
+        insert_speak_vendor(&state, base_url.clone(), "platform-speak-secret").await;
         let user_service_id = insert_own_connection(
             &state,
-            "api-twitter",
-            &format!("{base_url}/2"),
-            "bearer",
-            "Authorization",
-            "oauth2",
-            "own-x-secret",
-            true,
+            "api-elevenlabs",
+            &base_url,
+            "header",
+            "xi-api-key",
+            "api_key",
+            "own-speak-secret",
+            false,
         )
         .await;
         let operation = operation(
-            PlatformOperationName::XSearch,
+            PlatformOperationName::Speak,
             true,
-            PlatformOperationConfig::XSearch(XSearchConfig {
-                max_results_cap: 10,
+            PlatformOperationConfig::Speak(SpeakConfig {
+                allowed_voice_ids: vec!["voice-a".to_string()],
+                max_chars: 1_000,
+                model_id: "eleven_multilingual_v2".to_string(),
             }),
         );
         db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
             .insert_one(operation)
             .await
-            .expect("insert scoped X operation");
+            .expect("insert scoped speak operation");
         let caller = PlatformOperationCaller {
             actor_user_id: USER_ID.to_string(),
             resolution_user_id: USER_ID.to_string(),
@@ -2615,12 +2334,12 @@ mod tests {
             allow_all_services: false,
             allowed_service_ids: Vec::new(),
         };
-        let result = execute_x_search_for_caller(
+        let result = execute_speak_for_caller(
             &state,
             &caller,
-            XSearchRequest {
-                query: "nyxid".to_string(),
-                max_results: Some(2),
+            SpeakRequest {
+                text: "nyxid".to_string(),
+                voice_id: "voice-a".to_string(),
             },
             BillingIngress::PlatformOperation,
             enforce_platform_billing_classification(BillingRoutePolicy::Metered(
@@ -2635,8 +2354,7 @@ mod tests {
             PlatformCredentialSource::Platform
         );
         assert!(execution.own_connection_out_of_scope);
-        let audit =
-            platform_operation_audit_metadata("x_search", &result, Instant::now(), json!({}));
+        let audit = platform_operation_audit_metadata("speak", &result, Instant::now(), json!({}));
         assert_eq!(audit["own_connection_out_of_scope"], Value::Bool(true));
         assert_eq!(
             audit["credential_source"],
@@ -2645,17 +2363,14 @@ mod tests {
 
         let requests = captured.lock().await.clone();
         assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].uri, "/v1/text-to-speech/voice-a");
         assert_eq!(
-            requests[0].uri,
-            "/2/tweets/search/recent?query=nyxid&max_results=2"
-        );
-        assert_eq!(
-            requests[0].authorization.as_deref(),
-            Some("Bearer platform-x-secret")
+            requests[0].elevenlabs_key.as_deref(),
+            Some("platform-speak-secret")
         );
         assert_ne!(
-            requests[0].authorization.as_deref(),
-            Some("Bearer own-x-secret")
+            requests[0].elevenlabs_key.as_deref(),
+            Some("own-speak-secret")
         );
         assert!(!caller.allowed_service_ids.contains(&user_service_id));
         server.abort();
@@ -2672,13 +2387,13 @@ mod tests {
         let (base_url, captured, server) = spawn_capturing_vendor().await;
         let user_service_id = insert_own_connection(
             &state,
-            "api-twitter",
-            &format!("{base_url}/2"),
-            "bearer",
-            "Authorization",
-            "oauth2",
-            "default-x-secret",
-            true,
+            "api-elevenlabs",
+            &base_url,
+            "header",
+            "xi-api-key",
+            "api_key",
+            "default-speak-secret",
+            false,
         )
         .await;
         let default_key_id = db
@@ -2695,11 +2410,11 @@ mod tests {
             .expect("read default key")
             .expect("default key exists");
         bound_key.id = uuid::Uuid::new_v4().to_string();
-        bound_key.label = "bound X credential".to_string();
-        bound_key.access_token_encrypted = Some(
+        bound_key.label = "bound ElevenLabs credential".to_string();
+        bound_key.credential_encrypted = Some(
             state
                 .encryption_keys
-                .encrypt(b"bound-x-secret")
+                .encrypt(b"bound-speak-secret")
                 .await
                 .expect("encrypt bound key"),
         );
@@ -2724,14 +2439,16 @@ mod tests {
         .expect("insert agent binding");
         db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
             .insert_one(operation(
-                PlatformOperationName::XSearch,
+                PlatformOperationName::Speak,
                 true,
-                PlatformOperationConfig::XSearch(XSearchConfig {
-                    max_results_cap: 10,
+                PlatformOperationConfig::Speak(SpeakConfig {
+                    allowed_voice_ids: vec!["voice-a".to_string()],
+                    max_chars: 1_000,
+                    model_id: "eleven_multilingual_v2".to_string(),
                 }),
             ))
             .await
-            .expect("insert bound X operation");
+            .expect("insert bound speak operation");
         let caller = PlatformOperationCaller {
             actor_user_id: USER_ID.to_string(),
             resolution_user_id: USER_ID.to_string(),
@@ -2741,12 +2458,12 @@ mod tests {
             allow_all_services: false,
             allowed_service_ids: vec![user_service_id],
         };
-        let execution = execute_x_search_for_caller(
+        let execution = execute_speak_for_caller(
             &state,
             &caller,
-            XSearchRequest {
-                query: "binding".to_string(),
-                max_results: None,
+            SpeakRequest {
+                text: "binding".to_string(),
+                voice_id: "voice-a".to_string(),
             },
             BillingIngress::PlatformOperation,
             enforce_platform_billing_classification(BillingRoutePolicy::Metered(
@@ -2763,8 +2480,8 @@ mod tests {
         let requests = captured.lock().await.clone();
         assert_eq!(requests.len(), 1);
         assert_eq!(
-            requests[0].authorization.as_deref(),
-            Some("Bearer bound-x-secret")
+            requests[0].elevenlabs_key.as_deref(),
+            Some("bound-speak-secret")
         );
         server.abort();
     }
@@ -2780,25 +2497,27 @@ mod tests {
         let (base_url, captured, server) = spawn_capturing_vendor().await;
         let user_service_id = insert_own_connection(
             &state,
-            "api-twitter",
-            &format!("{base_url}/2"),
-            "bearer",
-            "Authorization",
-            "oauth2",
-            "approval-x-secret",
-            true,
+            "api-elevenlabs",
+            &base_url,
+            "header",
+            "xi-api-key",
+            "api_key",
+            "approval-speak-secret",
+            false,
         )
         .await;
         db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
             .insert_one(operation(
-                PlatformOperationName::XSearch,
+                PlatformOperationName::Speak,
                 true,
-                PlatformOperationConfig::XSearch(XSearchConfig {
-                    max_results_cap: 10,
+                PlatformOperationConfig::Speak(SpeakConfig {
+                    allowed_voice_ids: vec!["voice-a".to_string()],
+                    max_chars: 1_000,
+                    model_id: "eleven_multilingual_v2".to_string(),
                 }),
             ))
             .await
-            .expect("insert approval X operation");
+            .expect("insert approval speak operation");
         let now = Utc::now();
         db.collection::<crate::models::service_approval_config::ServiceApprovalConfig>(
             crate::models::service_approval_config::COLLECTION_NAME,
@@ -2808,7 +2527,7 @@ mod tests {
                 id: uuid::Uuid::new_v4().to_string(),
                 user_id: USER_ID.to_string(),
                 service_id: user_service_id.clone(),
-                service_name: "X".to_string(),
+                service_name: "ElevenLabs".to_string(),
                 approval_required: true,
                 approval_mode: crate::models::service_approval_config::ApprovalMode::PerRequest,
                 rules: Vec::new(),
@@ -2834,12 +2553,12 @@ mod tests {
             ))
             .expect("platform billing classification")
         };
-        let error = match execute_x_search_for_caller(
+        let error = match execute_speak_for_caller(
             &state,
             &agent,
-            XSearchRequest {
-                query: "approval".to_string(),
-                max_results: None,
+            SpeakRequest {
+                text: "approval".to_string(),
+                voice_id: "voice-a".to_string(),
             },
             BillingIngress::PlatformOperation,
             permit(),
@@ -2874,12 +2593,12 @@ mod tests {
             allow_all_services: true,
             allowed_service_ids: Vec::new(),
         };
-        execute_x_search_for_caller(
+        execute_speak_for_caller(
             &state,
             &session,
-            XSearchRequest {
-                query: "session".to_string(),
-                max_results: None,
+            SpeakRequest {
+                text: "session".to_string(),
+                voice_id: "voice-a".to_string(),
             },
             BillingIngress::PlatformOperation,
             permit(),
@@ -2919,8 +2638,6 @@ mod tests {
         vendor.requires_user_credential = false;
         vendor.auth_method = "header".to_string();
         vendor.auth_key_name = "xi-api-key".to_string();
-        vendor.proxy_operation_policy =
-            Some(platform_operation_service::platform_vendor_kill_policy());
         vendor.credential_encrypted = state
             .encryption_keys
             .encrypt(b"platform-elevenlabs-key")

@@ -17,7 +17,7 @@ use crate::models::service_provider_requirement::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-use crate::services::{catalog_spec_sync, org_service, role_service};
+use crate::services::{org_service, role_service};
 
 /// A catalog entry combining DownstreamService + ProviderConfig info.
 pub struct CatalogEntry {
@@ -462,10 +462,6 @@ pub async fn get_downstream_service_by_slug(
         .await?
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
 
-    if catalog_spec_sync::is_platform_vendor_service(&svc) {
-        return Err(AppError::NotFound("Catalog entry not found".to_string()));
-    }
-
     enforce_catalog_read_access(db, user_id, &svc).await?;
 
     Ok(svc)
@@ -566,10 +562,6 @@ pub async fn get_catalog_entry(
         .find_one(doc! { "slug": slug, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
-
-    if catalog_spec_sync::is_platform_vendor_service(&svc) {
-        return Err(AppError::NotFound("Catalog entry not found".to_string()));
-    }
 
     enforce_catalog_read_access(db, user_id, &svc).await?;
 
@@ -1039,37 +1031,6 @@ mod tests {
             .unwrap();
         assert_eq!(all_entries.len(), 1);
         assert_eq!(all_entries[0].slug, "system-svc");
-    }
-
-    #[tokio::test]
-    async fn caller_catalogs_hide_platform_vendor_rows() {
-        let Some(db) = connect_test_database("cat_svc_hide_platform_vendor").await else {
-            eprintln!("skipping: no MongoDB");
-            return;
-        };
-        let encryption_keys = test_encryption_keys();
-        let user_id = uuid::Uuid::new_v4().to_string();
-        let mut svc = make_catalog_service("platform-duffel", "Platform Duffel", &user_id);
-        svc.requires_user_credential = false;
-        svc.auth_method = "bearer".to_string();
-        svc.provider_config_id = None;
-        svc.service_category = "internal".to_string();
-        svc.proxy_operation_policy =
-            Some(crate::services::platform_operation_service::platform_vendor_kill_policy());
-        insert_service(&db, &svc).await;
-
-        assert!(
-            super::list_catalog(&db, &encryption_keys, &user_id)
-                .await
-                .unwrap()
-                .is_empty()
-        );
-        assert!(
-            super::list_catalog_all(&db, &encryption_keys, &user_id)
-                .await
-                .unwrap()
-                .is_empty()
-        );
     }
 
     #[tokio::test]

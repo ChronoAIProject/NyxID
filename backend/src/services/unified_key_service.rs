@@ -24,9 +24,8 @@ use crate::models::user_service::{AUTO_PROVISION_SOURCE, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::services::{
     audit_service::{self, AuditActor},
-    catalog_spec_sync, node_service, oauth_revocation, ssh_service, user_api_key_service,
-    user_credentials_service, user_endpoint_service, user_service_service, user_token_service,
-    ws_frame_injector,
+    node_service, oauth_revocation, ssh_service, user_api_key_service, user_credentials_service,
+    user_endpoint_service, user_service_service, user_token_service, ws_frame_injector,
 };
 
 const MAX_SERVICE_SLUG_LEN: usize = 80;
@@ -205,8 +204,7 @@ fn identity_config_from_downstream_service(
 }
 
 fn is_public_internal_master_credential_service(service: &DownstreamService) -> bool {
-    !crate::services::platform_operation_service::is_platform_vendor_slug(&service.slug)
-        && service.visibility == "public"
+    service.visibility == "public"
         && service.service_category == "internal"
         && service.auth_method != "none"
         && service.auth_method != "token_exchange"
@@ -822,12 +820,6 @@ async fn create_key_inner(
             .find_one(doc! { "slug": slug, "is_active": true })
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Catalog service '{slug}' not found")))?;
-
-        if catalog_spec_sync::is_platform_vendor_service(&svc) {
-            return Err(AppError::NotFound(format!(
-                "Catalog service '{slug}' not found"
-            )));
-        }
 
         let is_ssh = svc.service_type == "ssh";
         let provider = if let Some(ref pid) = svc.provider_config_id {
@@ -8912,52 +8904,6 @@ mod tests {
         assert!(services[0].api_key_id.is_none());
         assert_eq!(services[0].auth_method, "bearer");
         assert_eq!(services[0].auth_key_name, "Authorization");
-    }
-
-    #[tokio::test]
-    async fn platform_vendor_rows_never_auto_provision_user_services() {
-        let Some(db) = connect_test_database("uks_platform_vendor_no_auto_provision").await else {
-            eprintln!("skipping: no MongoDB");
-            return;
-        };
-        let user_id = uuid::Uuid::new_v4().to_string();
-
-        for (index, contract) in
-            crate::services::platform_operation_service::PLATFORM_OPERATION_VENDOR_CONTRACTS
-                .iter()
-                .enumerate()
-        {
-            let mut catalog = sample_catalog_service();
-            catalog.id = uuid::Uuid::new_v4().to_string();
-            catalog.slug = contract.slug.to_string();
-            catalog.base_url = contract.base_url.to_string();
-            catalog.auth_method = contract.auth_method.to_string();
-            catalog.auth_key_name = contract
-                .auth_key_name
-                .unwrap_or("Authorization")
-                .to_string();
-            catalog.requires_user_credential = false;
-            catalog.visibility = "public".to_string();
-            catalog.service_category = "internal".to_string();
-            catalog.credential_encrypted = vec![index as u8 + 1];
-            catalog.proxy_operation_policy =
-                Some(crate::services::platform_operation_service::platform_vendor_kill_policy());
-            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-                .insert_one(catalog)
-                .await
-                .unwrap();
-        }
-
-        auto_provision_no_auth_services(&db, &user_id)
-            .await
-            .unwrap();
-
-        let count = db
-            .collection::<UserService>(USER_SERVICES)
-            .count_documents(doc! { "user_id": &user_id })
-            .await
-            .unwrap();
-        assert_eq!(count, 0);
     }
 
     #[tokio::test]
