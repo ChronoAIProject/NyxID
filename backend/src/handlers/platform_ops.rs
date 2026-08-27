@@ -1254,9 +1254,12 @@ mod tests {
     };
     use crate::models::platform_op_usage::{COLLECTION_NAME as PLATFORM_OP_USAGE, PlatformOpUsage};
     use crate::models::platform_operation::{
-        COLLECTION_NAME as PLATFORM_OPERATIONS, CallAndSayConfig, PlatformOperation,
-        PlatformOperationConfig, PlatformOperationName, SpeakConfig,
+        COLLECTION_NAME as PLATFORM_OPERATIONS, CallAndSayConfig, CallAndSayOperationConfig,
+        ConstrainedConfig, FlightSearchOperationConfig, OperationBilling, OperationLimits,
+        PerRequestCaps, PlatformOperation, PlatformOperationConfig, PlatformOperationKind,
+        PlatformOperationName, PlatformOperationRow, SpeakConfig, SpeakOperationConfig,
     };
+    use crate::models::service_billing::BillingMetric;
     use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
     use crate::models::user_endpoint::COLLECTION_NAME as USER_ENDPOINTS;
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
@@ -1267,23 +1270,78 @@ mod tests {
         op: PlatformOperationName,
         enabled: bool,
         config: PlatformOperationConfig,
-    ) -> PlatformOperation {
-        PlatformOperation {
-            id: uuid::Uuid::new_v4().to_string(),
+    ) -> PlatformOperationRow {
+        let (kind, limits) = match config {
+            PlatformOperationConfig::Speak(config) => (
+                PlatformOperationKind::Constrained {
+                    op,
+                    config: ConstrainedConfig::Speak(SpeakOperationConfig {
+                        allowed_voice_ids: config.allowed_voice_ids,
+                        model_id: config.model_id,
+                    }),
+                },
+                OperationLimits {
+                    per_request: PerRequestCaps::Speak {
+                        max_chars: config.max_chars,
+                    },
+                    per_user_per_day: None,
+                },
+            ),
+            PlatformOperationConfig::CallAndSay(config) => (
+                PlatformOperationKind::Constrained {
+                    op,
+                    config: ConstrainedConfig::CallAndSay(CallAndSayOperationConfig {
+                        allowed_destination_prefixes: config.allowed_destination_prefixes,
+                        voice: config.voice,
+                        account_sid: config.account_sid,
+                        call_from: config.call_from,
+                    }),
+                },
+                OperationLimits {
+                    per_request: PerRequestCaps::CallAndSay {
+                        max_message_chars: config.max_message_chars,
+                        max_duration_seconds: config.max_duration_seconds,
+                    },
+                    per_user_per_day: Some(config.max_calls_per_user_per_day),
+                },
+            ),
+            PlatformOperationConfig::FlightSearch(config) => (
+                PlatformOperationKind::Constrained {
+                    op,
+                    config: ConstrainedConfig::FlightSearch(FlightSearchOperationConfig::default()),
+                },
+                OperationLimits {
+                    per_request: PerRequestCaps::FlightSearch {
+                        max_offers: config.max_offers_cap,
+                    },
+                    per_user_per_day: Some(config.max_searches_per_user_per_day),
+                },
+            ),
+        };
+        let mut row = PlatformOperationRow::new_constrained(
+            catalog_service_id(platform_operation_service::default_vendor_service_slug(op)),
             op,
-            enabled,
-            vendor_service_slug: platform_operation_service::default_vendor_service_slug(op)
-                .to_string(),
-            config,
-            updated_at: Utc::now(),
-            updated_by: USER_ID.to_string(),
-        }
+            match kind {
+                PlatformOperationKind::Constrained { config, .. } => config,
+                PlatformOperationKind::Endpoint { .. } => unreachable!(),
+            },
+            limits,
+            OperationBilling::free(BillingMetric::Requests),
+            USER_ID.to_string(),
+        );
+        row.enabled = enabled;
+        row
+    }
+
+    fn catalog_service_id(slug: &str) -> String {
+        format!("test-catalog-{slug}")
     }
 
     fn call_config(cap: u32) -> CallAndSayConfig {
         CallAndSayConfig {
             allowed_destination_prefixes: vec!["+65".to_string()],
             max_message_chars: 500,
+            max_duration_seconds: 600,
             voice: "alice".to_string(),
             max_calls_per_user_per_day: cap,
             account_sid: format!("AC{}", "1".repeat(32)),
@@ -1299,7 +1357,7 @@ mod tests {
 
     async fn insert_twilio_vendor(state: &AppState, base_url: String) -> DownstreamService {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
-        service.id = uuid::Uuid::new_v4().to_string();
+        service.id = catalog_service_id(platform_operation_service::CALL_AND_SAY_VENDOR_SLUG);
         service.slug = platform_operation_service::CALL_AND_SAY_VENDOR_SLUG.to_string();
         service.name = "Platform Twilio".to_string();
         service.base_url = base_url;
@@ -1307,17 +1365,22 @@ mod tests {
         service.visibility = "public".to_string();
         service.auth_method = "basic".to_string();
         service.auth_key_name = "Authorization".to_string();
-        service.credential_encrypted = state
-            .encryption_keys
-            .encrypt(b"twilio-auth-token")
-            .await
-            .expect("encrypt Twilio token");
+        service.credential_encrypted = Vec::new();
         state
             .db
             .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(&service)
             .await
             .expect("insert Twilio vendor row");
+        crate::services::platform_credential_service::set_credential(
+            &state.db,
+            &state.encryption_keys,
+            &service.id,
+            "twilio-auth-token",
+            USER_ID,
+        )
+        .await
+        .expect("set Twilio platform credential");
         service
     }
 
@@ -1327,7 +1390,7 @@ mod tests {
         credential: &str,
     ) -> DownstreamService {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
-        service.id = uuid::Uuid::new_v4().to_string();
+        service.id = catalog_service_id(platform_operation_service::SPEAK_VENDOR_SLUG);
         service.slug = platform_operation_service::SPEAK_VENDOR_SLUG.to_string();
         service.name = "Platform ElevenLabs".to_string();
         service.base_url = base_url;
@@ -1336,17 +1399,22 @@ mod tests {
         service.auth_method = "header".to_string();
         service.auth_key_name = "xi-api-key".to_string();
         service.requires_user_credential = false;
-        service.credential_encrypted = state
-            .encryption_keys
-            .encrypt(credential.as_bytes())
-            .await
-            .expect("encrypt ElevenLabs vendor credential");
+        service.credential_encrypted = Vec::new();
         state
             .db
             .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(&service)
             .await
             .expect("insert ElevenLabs vendor row");
+        crate::services::platform_credential_service::set_credential(
+            &state.db,
+            &state.encryption_keys,
+            &service.id,
+            credential,
+            USER_ID,
+        )
+        .await
+        .expect("set ElevenLabs platform credential");
         service
     }
 
@@ -1521,7 +1589,16 @@ mod tests {
         credential: &str,
         oauth_access_token: bool,
     ) -> String {
-        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let existing_catalog = state
+            .db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(mongodb::bson::doc! { "slug": catalog_slug, "is_active": true })
+            .await
+            .expect("look up existing catalog service");
+        let catalog_id = existing_catalog
+            .as_ref()
+            .map(|service| service.id.clone())
+            .unwrap_or_else(|| catalog_service_id(catalog_slug));
         let endpoint_id = uuid::Uuid::new_v4().to_string();
         let key_id = uuid::Uuid::new_v4().to_string();
         let service_id = uuid::Uuid::new_v4().to_string();
@@ -1535,12 +1612,14 @@ mod tests {
         catalog.auth_method = auth_method.to_string();
         catalog.auth_key_name = auth_key_name.to_string();
         catalog.credential_encrypted = Vec::new();
-        state
-            .db
-            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_one(catalog)
-            .await
-            .expect("insert user catalog service");
+        if existing_catalog.is_none() {
+            state
+                .db
+                .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(catalog)
+                .await
+                .expect("insert user catalog service");
+        }
 
         let endpoint = crate::test_utils::test_user_endpoint(
             &endpoint_id,
@@ -1698,7 +1777,7 @@ mod tests {
             return;
         };
         enable_platform_services_for_tests(&db).await;
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_one(operation(
                 PlatformOperationName::Speak,
                 false,
@@ -1724,7 +1803,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn enabled_operation_with_missing_vendor_returns_bad_gateway_error() {
+    async fn enabled_operation_with_missing_platform_credential_returns_bad_gateway_error() {
         let Some(db) =
             crate::test_utils::connect_test_database("platform_ops_vendor_missing").await
         else {
@@ -1732,7 +1811,17 @@ mod tests {
             return;
         };
         enable_platform_services_for_tests(&db).await;
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = catalog_service_id(platform_operation_service::SPEAK_VENDOR_SLUG);
+        catalog.slug = platform_operation_service::SPEAK_VENDOR_SLUG.to_string();
+        catalog.auth_method = "header".to_string();
+        catalog.auth_key_name = "xi-api-key".to_string();
+        catalog.credential_encrypted = Vec::new();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog)
+            .await
+            .expect("insert catalog service without platform credential");
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_one(operation(
                 PlatformOperationName::Speak,
                 true,
@@ -1754,7 +1843,7 @@ mod tests {
             }),
         )
         .await;
-        let error = result.expect_err("missing vendor must fail closed");
+        let error = result.expect_err("missing platform credential must fail closed");
         assert!(matches!(error, AppError::PlatformOperationUnavailable));
         assert_eq!(error.into_response().status(), StatusCode::BAD_GATEWAY);
     }
@@ -1771,7 +1860,7 @@ mod tests {
         let state = crate::test_utils::test_app_state(db.clone());
         let (base_url, server) = spawn_twilio(StatusCode::CREATED).await;
         insert_twilio_vendor(&state, base_url).await;
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_one(operation(
                 PlatformOperationName::CallAndSay,
                 true,
@@ -1821,7 +1910,7 @@ mod tests {
         let state = crate::test_utils::test_app_state(db.clone());
         let (base_url, server) = spawn_twilio(StatusCode::INTERNAL_SERVER_ERROR).await;
         insert_twilio_vendor(&state, base_url).await;
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_one(operation(
                 PlatformOperationName::CallAndSay,
                 true,
@@ -1901,14 +1990,29 @@ mod tests {
             platform_metric: Some(crate::models::service_billing::BillingMetric::Requests),
             ..Default::default()
         });
-        // Deliberately invalid ciphertext proves billing rejects before the
-        // platform credential is materialized.
-        vendor.credential_encrypted = vec![1, 2, 3];
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .replace_one(mongodb::bson::doc! { "_id": &vendor.id }, &vendor)
             .await
             .expect("make Twilio vendor billable");
-        db.collection::<crate::models::platform_operation::PlatformOperation>(PLATFORM_OPERATIONS)
+        // Deliberately invalid ciphertext proves billing rejects before the
+        // v2 platform credential is materialized.
+        db.collection::<mongodb::bson::Document>(
+            crate::models::platform_credential::COLLECTION_NAME,
+        )
+        .update_one(
+            mongodb::bson::doc! { "catalog_service_id": &vendor.id },
+            mongodb::bson::doc! {
+                "$set": {
+                    "credential_encrypted": mongodb::bson::Binary {
+                        subtype: mongodb::bson::spec::BinarySubtype::Generic,
+                        bytes: vec![1, 2, 3],
+                    }
+                }
+            },
+        )
+        .await
+        .expect("corrupt Twilio platform credential");
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_one(operation(
                 PlatformOperationName::CallAndSay,
                 true,
@@ -1960,6 +2064,8 @@ mod tests {
         .await
         .expect("insert request price");
 
+        let decryption_probe = state.encryption_keys.clone();
+        let decrypts_before = decryption_probe.decrypt_stats();
         let result = call_and_say(
             State(state),
             crate::test_utils::test_auth_user(USER_ID),
@@ -1973,6 +2079,7 @@ mod tests {
         .await;
         assert_eq!(audit_outcome(&result), "insufficient_credits");
         assert!(matches!(result, Err(AppError::InsufficientCredits)));
+        assert_eq!(decryption_probe.decrypt_stats(), decrypts_before);
         assert_eq!(forwarded.load(Ordering::SeqCst), 0);
         assert_eq!(
             db.collection::<PlatformOpUsage>(PLATFORM_OP_USAGE)
@@ -2050,7 +2157,7 @@ mod tests {
             .replace_one(mongodb::bson::doc! { "_id": &vendor.id }, &vendor)
             .await
             .expect("make Twilio vendor billable");
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_one(operation(
                 PlatformOperationName::CallAndSay,
                 true,
@@ -2173,7 +2280,7 @@ mod tests {
         )
         .await;
 
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_many([
                 operation(
                     PlatformOperationName::Speak,
@@ -2263,6 +2370,7 @@ mod tests {
             call_form.get("From").map(String::as_str),
             Some("+14155550123")
         );
+        assert_eq!(call_form.get("TimeLimit").map(String::as_str), Some("600"));
 
         assert_eq!(
             db.collection::<mongodb::bson::Document>(crate::models::usage_meter::COLLECTION_NAME,)
@@ -2321,7 +2429,7 @@ mod tests {
                 model_id: "eleven_multilingual_v2".to_string(),
             }),
         );
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_one(operation)
             .await
             .expect("insert scoped speak operation");
@@ -2437,7 +2545,7 @@ mod tests {
         })
         .await
         .expect("insert agent binding");
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_one(operation(
                 PlatformOperationName::Speak,
                 true,
@@ -2506,7 +2614,7 @@ mod tests {
             false,
         )
         .await;
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_one(operation(
                 PlatformOperationName::Speak,
                 true,
@@ -2629,7 +2737,7 @@ mod tests {
         .expect("enable billing rollout for discovery test");
         let state = crate::test_utils::test_app_state(db.clone());
         let mut vendor = crate::models::downstream_service::test_helpers::dummy_service();
-        vendor.id = uuid::Uuid::new_v4().to_string();
+        vendor.id = catalog_service_id(platform_operation_service::SPEAK_VENDOR_SLUG);
         vendor.slug = platform_operation_service::SPEAK_VENDOR_SLUG.to_string();
         vendor.name = "Platform ElevenLabs".to_string();
         vendor.base_url = "https://api.elevenlabs.io".to_string();
@@ -2638,11 +2746,7 @@ mod tests {
         vendor.requires_user_credential = false;
         vendor.auth_method = "header".to_string();
         vendor.auth_key_name = "xi-api-key".to_string();
-        vendor.credential_encrypted = state
-            .encryption_keys
-            .encrypt(b"platform-elevenlabs-key")
-            .await
-            .expect("encrypt discovery vendor key");
+        vendor.credential_encrypted = Vec::new();
         vendor.billing = Some(crate::models::service_billing::ServiceBilling {
             platform_billable: true,
             platform_metric: Some(crate::models::service_billing::BillingMetric::Requests),
@@ -2655,10 +2759,19 @@ mod tests {
             ..Default::default()
         });
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_one(vendor)
+            .insert_one(&vendor)
             .await
             .expect("insert priced discovery vendor");
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        crate::services::platform_credential_service::set_credential(
+            &db,
+            &state.encryption_keys,
+            &vendor.id,
+            "platform-elevenlabs-key",
+            USER_ID,
+        )
+        .await
+        .expect("set discovery platform credential");
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_one(operation(
                 PlatformOperationName::Speak,
                 true,
@@ -2670,12 +2783,10 @@ mod tests {
             ))
             .await
             .expect("insert discovery operation");
-        let operation_row = db
-            .collection::<PlatformOperation>(PLATFORM_OPERATIONS)
-            .find_one(mongodb::bson::doc! { "op": "speak" })
-            .await
-            .expect("read discovery operation")
-            .expect("discovery operation exists");
+        let operation_row =
+            platform_operation_service::load_enabled_operation(&db, PlatformOperationName::Speak)
+                .await
+                .expect("read discovery operation");
         let auth = crate::test_utils::test_auth_user(USER_ID);
 
         let no_connection = list_operations(State(state.clone()), auth.clone())

@@ -202,6 +202,14 @@ fn rule_matches(rule: &ProxyOperationRule, method: &str, path: &CanonicalPath) -
             })
 }
 
+pub fn operation_rule_matches(
+    rule: &ProxyOperationRule,
+    method: &str,
+    path: &CanonicalPath,
+) -> bool {
+    rule_matches(rule, &method.trim().to_ascii_uppercase(), path)
+}
+
 pub fn authorize_proxy_operation(
     service: &DownstreamService,
     method: &str,

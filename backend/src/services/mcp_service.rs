@@ -6205,7 +6205,7 @@ mod tests {
             id: "platform-speak".to_string(),
             op: crate::models::platform_operation::PlatformOperationName::Speak,
             enabled: true,
-            vendor_service_slug: "platform-elevenlabs".to_string(),
+            vendor_service_slug: "api-elevenlabs".to_string(),
             config: PlatformOperationConfig::Speak(
                 crate::models::platform_operation::SpeakConfig {
                     allowed_voice_ids: vec!["voice-a".to_string(), "voice-b".to_string()],
@@ -6220,11 +6220,12 @@ mod tests {
             id: "platform-call-and-say".to_string(),
             op: crate::models::platform_operation::PlatformOperationName::CallAndSay,
             enabled: false,
-            vendor_service_slug: "platform-twilio".to_string(),
+            vendor_service_slug: "api-twilio".to_string(),
             config: PlatformOperationConfig::CallAndSay(
                 crate::models::platform_operation::CallAndSayConfig {
                     allowed_destination_prefixes: vec!["+65".to_string()],
                     max_message_chars: 500,
+                    max_duration_seconds: 600,
                     voice: "alice".to_string(),
                     max_calls_per_user_per_day: 3,
                     account_sid: format!("AC{}", "1".repeat(32)),
@@ -6238,7 +6239,7 @@ mod tests {
             id: "platform-flight-search".to_string(),
             op: crate::models::platform_operation::PlatformOperationName::FlightSearch,
             enabled: true,
-            vendor_service_slug: "platform-duffel".to_string(),
+            vendor_service_slug: "duffel".to_string(),
             config: PlatformOperationConfig::FlightSearch(
                 crate::models::platform_operation::FlightSearchConfig {
                     max_offers_cap: 12,

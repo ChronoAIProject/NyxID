@@ -58,6 +58,7 @@ pub mod oracle_worker;
 pub mod org_invite;
 pub mod org_membership;
 pub mod org_role_scope;
+pub mod platform_credential;
 pub mod platform_op_usage;
 pub mod platform_operation;
 pub mod platform_settings;

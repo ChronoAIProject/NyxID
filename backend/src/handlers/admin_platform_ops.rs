@@ -59,6 +59,7 @@ pub struct AdminSpeakConfigResponse {
 pub struct AdminCallAndSayConfigResponse {
     pub allowed_destination_prefixes: Vec<String>,
     pub max_message_chars: u32,
+    pub max_duration_seconds: u32,
     pub voice: String,
     pub max_calls_per_user_per_day: u32,
     pub account_sid: String,
@@ -220,6 +221,7 @@ impl From<PlatformOperationConfig> for AdminPlatformOperationConfigResponse {
             PlatformOperationConfig::CallAndSay(CallAndSayConfig {
                 allowed_destination_prefixes,
                 max_message_chars,
+                max_duration_seconds,
                 voice,
                 max_calls_per_user_per_day,
                 account_sid,
@@ -227,6 +229,7 @@ impl From<PlatformOperationConfig> for AdminPlatformOperationConfigResponse {
             }) => Self::CallAndSay(AdminCallAndSayConfigResponse {
                 allowed_destination_prefixes,
                 max_message_chars,
+                max_duration_seconds,
                 voice,
                 max_calls_per_user_per_day,
                 account_sid,
@@ -246,14 +249,16 @@ impl From<PlatformOperationConfig> for AdminPlatformOperationConfigResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::platform_operation::COLLECTION_NAME as PLATFORM_OPERATIONS;
+    use crate::models::platform_operation::{
+        COLLECTION_NAME as PLATFORM_OPERATIONS, PlatformOperationRow,
+    };
 
     #[test]
     fn missing_rows_render_as_disabled_defaults() {
         let response = platform_operation_response(PlatformOperationName::Speak, None, None);
         assert_eq!(response.op, "speak");
         assert!(!response.enabled);
-        assert_eq!(response.vendor_service_slug, "platform-elevenlabs");
+        assert_eq!(response.vendor_service_slug, "api-elevenlabs");
         assert!(response.updated_at.is_none());
         assert!(matches!(
             response.config,
@@ -269,7 +274,7 @@ mod tests {
     fn update_request_rejects_unknown_fields() {
         let value = serde_json::json!({
             "enabled": false,
-            "vendor_service_slug": "platform-elevenlabs",
+            "vendor_service_slug": "api-elevenlabs",
             "config": {
                 "type": "speak",
                 "allowed_voice_ids": ["voice-a"],
@@ -292,30 +297,24 @@ mod tests {
         let encryption_keys = crate::test_utils::test_encryption_keys();
         let mut vendor = crate::models::downstream_service::test_helpers::dummy_service();
         vendor.id = uuid::Uuid::new_v4().to_string();
-        vendor.slug = "platform-elevenlabs".to_string();
+        vendor.slug = "api-elevenlabs".to_string();
         vendor.base_url = "https://api.elevenlabs.io".to_string();
         vendor.auth_method = "header".to_string();
         vendor.auth_key_name = "xi-api-key".to_string();
-        vendor.service_category = "internal".to_string();
-        vendor.visibility = "public".to_string();
-        vendor.requires_user_credential = false;
-        vendor.credential_encrypted = encryption_keys
-            .encrypt(b"elevenlabs-key")
-            .await
-            .expect("encrypt vendor credential");
+        vendor.credential_encrypted = Vec::new();
         db.collection::<crate::models::downstream_service::DownstreamService>(
             crate::models::downstream_service::COLLECTION_NAME,
         )
-        .insert_one(vendor)
+        .insert_one(&vendor)
         .await
-        .expect("insert platform vendor row");
+        .expect("insert catalog provider row");
 
         let operation = platform_operation_service::upsert_operation(
             &db,
             &encryption_keys,
             PlatformOperationName::Speak,
             true,
-            "platform-elevenlabs".to_string(),
+            "api-elevenlabs".to_string(),
             PlatformOperationConfig::Speak(SpeakConfig {
                 allowed_voice_ids: vec!["voice-a".to_string()],
                 max_chars: 1_200,
@@ -337,8 +336,11 @@ mod tests {
             })
         );
         assert_eq!(
-            db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
-                .count_documents(mongodb::bson::doc! { "op": "speak" })
+            db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+                .count_documents(mongodb::bson::doc! {
+                    "catalog_service_id": &vendor.id,
+                    "kind_key": "constrained:speak",
+                })
                 .await
                 .expect("count operation rows"),
             1

@@ -3502,12 +3502,14 @@ mod tests {
         COLLECTION_NAME as ORG_MEMBERSHIPS, OrgMembership, OrgRole,
     };
     use crate::models::platform_operation::{
-        COLLECTION_NAME as PLATFORM_OPERATIONS, PlatformOperation, PlatformOperationConfig,
-        PlatformOperationName, SpeakConfig,
+        COLLECTION_NAME as PLATFORM_OPERATIONS, ConstrainedConfig, OperationBilling,
+        OperationLimits, PerRequestCaps, PlatformOperationName, PlatformOperationRow,
+        SpeakOperationConfig,
     };
     use crate::models::service_approval_config::{
         ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
     };
+    use crate::models::service_billing::BillingMetric;
     use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, ServiceEndpoint};
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
     use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
@@ -3633,38 +3635,50 @@ mod tests {
         .expect("enable platform-services flag for MCP test");
     }
 
-    async fn insert_platform_speak_vendor_for_mcp_tests(db: &mongodb::Database) {
+    async fn insert_platform_speak_vendor_for_mcp_tests(db: &mongodb::Database) -> String {
         let mut vendor = crate::models::downstream_service::test_helpers::dummy_service();
         vendor.id = uuid::Uuid::new_v4().to_string();
-        vendor.slug = "platform-elevenlabs".to_string();
+        vendor.slug = "api-elevenlabs".to_string();
         vendor.name = "Platform ElevenLabs".to_string();
         vendor.base_url = "https://api.elevenlabs.io".to_string();
-        vendor.service_category = "internal".to_string();
         vendor.auth_method = "header".to_string();
         vendor.auth_key_name = "xi-api-key".to_string();
-        vendor.credential_encrypted = vec![1];
+        vendor.credential_encrypted = Vec::new();
         db.collection::<crate::models::downstream_service::DownstreamService>(
             crate::models::downstream_service::COLLECTION_NAME,
         )
-        .insert_one(vendor)
+        .insert_one(&vendor)
         .await
-        .expect("insert platform speak vendor");
+        .expect("insert ElevenLabs catalog service");
+        crate::services::platform_credential_service::set_credential(
+            db,
+            &crate::test_utils::test_encryption_keys(),
+            &vendor.id,
+            "mcp-platform-secret",
+            "mcp-test-actor",
+        )
+        .await
+        .expect("set MCP platform credential");
+        vendor.id
     }
 
-    fn enabled_speak_operation() -> PlatformOperation {
-        PlatformOperation {
-            id: uuid::Uuid::new_v4().to_string(),
-            op: PlatformOperationName::Speak,
-            enabled: true,
-            vendor_service_slug: "platform-elevenlabs".to_string(),
-            config: PlatformOperationConfig::Speak(SpeakConfig {
+    fn enabled_speak_operation(catalog_service_id: &str) -> PlatformOperationRow {
+        let mut row = PlatformOperationRow::new_constrained(
+            catalog_service_id.to_string(),
+            PlatformOperationName::Speak,
+            ConstrainedConfig::Speak(SpeakOperationConfig {
                 allowed_voice_ids: vec!["voice-a".to_string()],
-                max_chars: 1_000,
                 model_id: "eleven_multilingual_v2".to_string(),
             }),
-            updated_at: chrono::Utc::now(),
-            updated_by: "mcp-test-actor".to_string(),
-        }
+            OperationLimits {
+                per_request: PerRequestCaps::Speak { max_chars: 1_000 },
+                per_user_per_day: None,
+            },
+            OperationBilling::free(BillingMetric::Requests),
+            "mcp-test-actor".to_string(),
+        );
+        row.enabled = true;
+        row
     }
 
     fn tools_list_request() -> JsonRpcRequest {
@@ -3682,8 +3696,8 @@ mod tests {
             eprintln!("skipping MCP platform operation flag test: no local MongoDB available");
             return;
         };
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
-            .insert_one(enabled_speak_operation())
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(enabled_speak_operation("missing-catalog"))
             .await
             .expect("insert enabled platform operation");
         let state = test_app_state(db);
@@ -3713,9 +3727,9 @@ mod tests {
             return;
         };
         enable_platform_services_for_mcp_tests(&db).await;
-        insert_platform_speak_vendor_for_mcp_tests(&db).await;
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
-            .insert_one(enabled_speak_operation())
+        let catalog_service_id = insert_platform_speak_vendor_for_mcp_tests(&db).await;
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(enabled_speak_operation(&catalog_service_id))
             .await
             .expect("insert enabled platform operation");
         let state = test_app_state(db);
@@ -3746,16 +3760,6 @@ mod tests {
         };
         enable_platform_services_for_mcp_tests(&db).await;
 
-        let mut platform_vendor = crate::models::downstream_service::test_helpers::dummy_service();
-        platform_vendor.id = uuid::Uuid::new_v4().to_string();
-        platform_vendor.slug = "platform-elevenlabs".to_string();
-        platform_vendor.name = "Platform ElevenLabs".to_string();
-        platform_vendor.base_url = "https://api.elevenlabs.io".to_string();
-        platform_vendor.service_category = "internal".to_string();
-        platform_vendor.auth_method = "header".to_string();
-        platform_vendor.auth_key_name = "xi-api-key".to_string();
-        platform_vendor.credential_encrypted = vec![1];
-
         let catalog_id = uuid::Uuid::new_v4().to_string();
         let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
         catalog.id = catalog_id.clone();
@@ -3768,24 +3772,30 @@ mod tests {
         db.collection::<crate::models::downstream_service::DownstreamService>(
             crate::models::downstream_service::COLLECTION_NAME,
         )
-        .insert_many([platform_vendor, catalog])
+        .insert_one(&catalog)
         .await
-        .expect("insert MCP speak vendor rows");
+        .expect("insert MCP ElevenLabs catalog row");
+        crate::services::platform_credential_service::set_credential(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &catalog_id,
+            "mcp-platform-secret",
+            "mcp-test-actor",
+        )
+        .await
+        .expect("set MCP platform credential");
 
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
-            .insert_one(PlatformOperation {
-                id: uuid::Uuid::new_v4().to_string(),
-                op: PlatformOperationName::Speak,
-                enabled: true,
-                vendor_service_slug: "platform-elevenlabs".to_string(),
-                config: PlatformOperationConfig::Speak(SpeakConfig {
-                    allowed_voice_ids: vec!["voice-a".to_string(), "voice-b".to_string()],
-                    max_chars: 500,
-                    model_id: "eleven_multilingual_v2".to_string(),
-                }),
-                updated_at: chrono::Utc::now(),
-                updated_by: "mcp-test-actor".to_string(),
-            })
+        let mut operation = enabled_speak_operation(&catalog_id);
+        if let crate::models::platform_operation::PlatformOperationKind::Constrained {
+            config: ConstrainedConfig::Speak(config),
+            ..
+        } = &mut operation.kind
+        {
+            config.allowed_voice_ids.push("voice-b".to_string());
+        }
+        operation.limits.per_request = PerRequestCaps::Speak { max_chars: 500 };
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(operation)
             .await
             .expect("insert enabled speak operation");
 

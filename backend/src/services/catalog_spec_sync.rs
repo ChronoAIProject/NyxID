@@ -249,7 +249,7 @@ mod tests {
     #[test]
     fn internal_services_are_never_auto_materialized_as_tools() {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
-        service.slug = "platform-elevenlabs".to_string();
+        service.slug = "internal-control-plane".to_string();
         service.service_category = "internal".to_string();
         service.openapi_spec_url = Some("https://api.elevenlabs.io/openapi.json".to_string());
 

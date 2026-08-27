@@ -41,8 +41,8 @@ use crate::models::notification_channel::{
     COLLECTION_NAME as NOTIFICATION_CHANNELS, NotificationChannel,
 };
 use crate::models::platform_operation::{
-    COLLECTION_NAME as PLATFORM_OPERATIONS, CallAndSayConfig, FlightSearchConfig,
-    PlatformOperation, PlatformOperationConfig, PlatformOperationName, SpeakConfig,
+    CallAndSayConfig, FlightSearchConfig, PlatformOperationConfig, PlatformOperationName,
+    SpeakConfig,
 };
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::service_approval_config::ApprovalMode;
@@ -1794,19 +1794,19 @@ async fn insert_platform_route_services(
     for (operation, slug, auth_method, auth_key_name) in [
         (
             PlatformOperationName::Speak,
-            "platform-elevenlabs",
+            "api-elevenlabs",
             "header",
             "xi-api-key",
         ),
         (
             PlatformOperationName::CallAndSay,
-            "platform-twilio",
+            "api-twilio",
             "basic",
             "Authorization",
         ),
         (
             PlatformOperationName::FlightSearch,
-            "platform-duffel",
+            "duffel",
             "bearer",
             "Authorization",
         ),
@@ -1822,10 +1822,7 @@ async fn insert_platform_route_services(
         vendor.auth_key_name = auth_key_name.to_string();
         vendor.requires_user_credential = false;
         vendor.provider_config_id = None;
-        vendor.credential_encrypted = encryption_keys
-            .encrypt(format!("{slug}-route-secret").as_bytes())
-            .await
-            .expect("encrypt platform route credential");
+        vendor.credential_encrypted = Vec::new();
         vendor.billing = Some(ServiceBilling {
             platform_billable: false,
             platform_metric: Some(BillingMetric::Requests),
@@ -1834,7 +1831,16 @@ async fn insert_platform_route_services(
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_one(&vendor)
             .await
-            .expect("insert platform route vendor");
+            .expect("insert platform route catalog service");
+        crate::services::platform_credential_service::set_credential(
+            db,
+            &encryption_keys,
+            &vendor.id,
+            &format!("{slug}-route-secret"),
+            "billing-route-test",
+        )
+        .await
+        .expect("set platform route credential");
 
         let config = match operation {
             PlatformOperationName::Speak => PlatformOperationConfig::Speak(SpeakConfig {
@@ -1846,6 +1852,7 @@ async fn insert_platform_route_services(
                 PlatformOperationConfig::CallAndSay(CallAndSayConfig {
                     allowed_destination_prefixes: vec!["+65".to_string()],
                     max_message_chars: 500,
+                    max_duration_seconds: 600,
                     voice: "alice".to_string(),
                     max_calls_per_user_per_day: 3,
                     account_sid: format!("AC{}", "1".repeat(32)),
@@ -1859,18 +1866,17 @@ async fn insert_platform_route_services(
                 })
             }
         };
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
-            .insert_one(PlatformOperation {
-                id: Uuid::new_v4().to_string(),
-                op: operation,
-                enabled: true,
-                vendor_service_slug: slug.to_string(),
-                config,
-                updated_at: Utc::now(),
-                updated_by: "billing-route-test".to_string(),
-            })
-            .await
-            .expect("insert platform route operation");
+        crate::services::platform_operation_service::upsert_operation(
+            db,
+            &encryption_keys,
+            operation,
+            true,
+            slug.to_string(),
+            config,
+            "billing-route-test",
+        )
+        .await
+        .expect("insert platform route operation");
         vendors.push(vendor);
     }
     vendors

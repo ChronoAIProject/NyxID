@@ -28,6 +28,7 @@ use crate::models::node_service_binding::{
 use crate::models::oauth_broker_binding::{
     COLLECTION_NAME as OAUTH_BROKER_BINDINGS, OauthBrokerBinding,
 };
+use crate::models::platform_credential::COLLECTION_NAME as PLATFORM_CREDENTIALS;
 use crate::models::platform_op_usage::COLLECTION_NAME as PLATFORM_OP_USAGE;
 use crate::models::platform_operation::COLLECTION_NAME as PLATFORM_OPERATIONS;
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
@@ -298,15 +299,63 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
-    // ── platform operations ──
-    db.collection::<mongodb::bson::Document>(PLATFORM_OPERATIONS)
+    // ── platform credentials and operations ──
+    db.collection::<mongodb::bson::Document>(PLATFORM_CREDENTIALS)
         .create_index(
             IndexModel::builder()
-                .keys(doc! { "op": 1 })
+                .keys(doc! { "catalog_service_id": 1 })
                 .options(
                     IndexOptions::builder()
-                        .name("platform_operations_op_unique".to_string())
+                        .name("platform_credentials_catalog_unique".to_string())
                         .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    let platform_operations = db.collection::<mongodb::bson::Document>(PLATFORM_OPERATIONS);
+    let _ = platform_operations
+        .drop_index("platform_operations_op_unique")
+        .await;
+    platform_operations
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "catalog_service_id": 1, "kind_key": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("platform_operations_catalog_kind_unique".to_string())
+                        .unique(true)
+                        .partial_filter_expression(doc! {
+                            "catalog_service_id": { "$type": "string" },
+                            "kind_key": { "$type": "string" },
+                        })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    platform_operations
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "catalog_service_id": 1, "enabled": 1, "kind_key": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("platform_operations_enabled_lookup".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    platform_operations
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "billing.sync_status": 1,
+                    "billing_cleanup_metric_code": 1,
+                })
+                .options(
+                    IndexOptions::builder()
+                        .name("platform_operations_pricing_reconcile".to_string())
                         .build(),
                 )
                 .build(),

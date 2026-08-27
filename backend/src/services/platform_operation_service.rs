@@ -7,7 +7,6 @@ use mongodb::bson::doc;
 use mongodb::options::ReturnDocument;
 use reqwest::header::{ACCEPT, ACCEPT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
@@ -16,31 +15,36 @@ use crate::models::downstream_service::{
 };
 use crate::models::platform_op_usage::{COLLECTION_NAME as PLATFORM_OP_USAGE, PlatformOpUsage};
 use crate::models::platform_operation::{
-    COLLECTION_NAME as PLATFORM_OPERATIONS, CallAndSayConfig, FlightSearchConfig,
-    PlatformOperation, PlatformOperationConfig, PlatformOperationName, SpeakConfig,
+    COLLECTION_NAME as PLATFORM_OPERATIONS, CallAndSayConfig, CallAndSayOperationConfig,
+    ConstrainedConfig, FlightSearchConfig, FlightSearchOperationConfig, OperationBilling,
+    OperationLimits, PerRequestCaps, PlatformOperation, PlatformOperationConfig,
+    PlatformOperationKind, PlatformOperationName, PlatformOperationRow, SpeakConfig,
+    SpeakOperationConfig, constrained_kind_key, default_call_max_duration_seconds,
     default_call_max_message_chars, default_call_max_per_user_per_day, default_call_voice,
     default_flight_search_max_offers_cap, default_flight_search_max_per_user_per_day,
     default_speak_max_chars, default_speak_model_id,
 };
 use crate::models::service_approval_config::ApprovalEffect;
+use crate::models::service_billing::BillingMetric;
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::services::billing::route_inventory::BillingEgressPermit;
 use crate::services::connection_expiry_service::ConnectionExpiryNotifier;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{
-    approval_service, operation_descriptor::OperationDescriptor, proxy_service,
-    user_service_service,
+    approval_service, operation_descriptor::OperationDescriptor, platform_credential_service,
+    proxy_service, user_service_service,
 };
 
 pub const SPEAK_HARD_MAX_CHARS: u32 = 5_000;
 pub const CALL_AND_SAY_HARD_MAX_MESSAGE_CHARS: u32 = 1_000;
+pub const CALL_AND_SAY_HARD_MAX_DURATION_SECONDS: u32 = 3_600;
 pub const FLIGHT_SEARCH_HARD_MAX_OFFERS: u32 = 50;
 pub const MCP_SPEAK_HARD_MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 const MAX_VENDOR_JSON_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
-pub const SPEAK_VENDOR_SLUG: &str = "platform-elevenlabs";
-pub const CALL_AND_SAY_VENDOR_SLUG: &str = "platform-twilio";
-pub const FLIGHT_SEARCH_VENDOR_SLUG: &str = "platform-duffel";
+pub const SPEAK_VENDOR_SLUG: &str = "api-elevenlabs";
+pub const CALL_AND_SAY_VENDOR_SLUG: &str = "api-twilio";
+pub const FLIGHT_SEARCH_VENDOR_SLUG: &str = "duffel";
 pub const PLATFORM_OPERATION_NAMES: [PlatformOperationName; 3] = [
     PlatformOperationName::Speak,
     PlatformOperationName::CallAndSay,
@@ -303,6 +307,7 @@ pub fn default_operation_config(op: PlatformOperationName) -> PlatformOperationC
             PlatformOperationConfig::CallAndSay(CallAndSayConfig {
                 allowed_destination_prefixes: Vec::new(),
                 max_message_chars: default_call_max_message_chars(),
+                max_duration_seconds: default_call_max_duration_seconds(),
                 voice: default_call_voice(),
                 max_calls_per_user_per_day: default_call_max_per_user_per_day(),
                 account_sid: String::new(),
@@ -328,10 +333,18 @@ pub fn default_vendor_service_slug(op: PlatformOperationName) -> &'static str {
 
 pub fn validate_operation_config(
     op: PlatformOperationName,
-    vendor_service_slug: &str,
+    catalog_service_slug: &str,
     config: &PlatformOperationConfig,
 ) -> AppResult<()> {
-    validate_vendor_service_slug(vendor_service_slug)?;
+    let expected_slug = catalog_contract_for_operation(op).catalog_service_slug;
+    if catalog_service_slug != expected_slug {
+        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+            "{} is bound to catalog service '{}', not '{}'.",
+            operation_name(op),
+            expected_slug,
+            catalog_service_slug
+        )));
+    }
 
     match (op, config) {
         (PlatformOperationName::Speak, PlatformOperationConfig::Speak(config)) => {
@@ -350,21 +363,6 @@ pub fn validate_operation_config(
         }
     }
 
-    Ok(())
-}
-
-fn validate_vendor_service_slug(slug: &str) -> AppResult<()> {
-    let valid = !slug.is_empty()
-        && slug.len() <= 128
-        && slug
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
-    if !valid {
-        return Err(AppError::BadRequest(
-            "vendor_service_slug must contain only lowercase letters, digits, and hyphens."
-                .to_string(),
-        ));
-    }
     Ok(())
 }
 
@@ -429,6 +427,11 @@ fn validate_call_and_say_config(config: &CallAndSayConfig) -> AppResult<()> {
     if !(1..=CALL_AND_SAY_HARD_MAX_MESSAGE_CHARS).contains(&config.max_message_chars) {
         return Err(AppError::BadRequest(format!(
             "max_message_chars must be between 1 and {CALL_AND_SAY_HARD_MAX_MESSAGE_CHARS}."
+        )));
+    }
+    if !(1..=CALL_AND_SAY_HARD_MAX_DURATION_SECONDS).contains(&config.max_duration_seconds) {
+        return Err(AppError::BadRequest(format!(
+            "max_duration_seconds must be between 1 and {CALL_AND_SAY_HARD_MAX_DURATION_SECONDS}."
         )));
     }
     if !is_safe_identifier(&config.voice, 128) {
@@ -636,6 +639,13 @@ pub fn build_call_and_say_request_for_source(
             ("To", request.to.clone()),
             ("From", call_from),
             ("Twiml", twiml),
+            (
+                "TimeLimit",
+                config
+                    .max_duration_seconds
+                    .min(CALL_AND_SAY_HARD_MAX_DURATION_SECONDS)
+                    .to_string(),
+            ),
         ],
     })
 }
@@ -943,69 +953,154 @@ pub async fn load_enabled_operation(
     db: &mongodb::Database,
     op: PlatformOperationName,
 ) -> AppResult<PlatformOperation> {
-    let operation = db
-        .collection::<PlatformOperation>(PLATFORM_OPERATIONS)
-        .find_one(doc! { "op": operation_name(op), "enabled": true })
+    load_constrained_operation(db, op, true)
         .await?
-        .ok_or_else(|| AppError::NotFound("Platform operation not found".to_string()))?;
-
-    validate_operation_config(
-        operation.op,
-        &operation.vendor_service_slug,
-        &operation.config,
-    )
-    .map_err(|error| {
-        tracing::error!(
-            op = operation_name(op),
-            error = %error,
-            "Stored platform operation config is invalid"
-        );
-        AppError::PlatformOperationUnavailable
-    })?;
-    if operation.op != op {
-        return Err(AppError::PlatformOperationUnavailable);
-    }
-    Ok(operation)
+        .ok_or_else(|| AppError::NotFound("Platform operation not found".to_string()))
 }
 
 pub async fn list_configured_operations(
     db: &mongodb::Database,
 ) -> AppResult<Vec<PlatformOperation>> {
-    let operation_names = PLATFORM_OPERATION_NAMES
-        .iter()
-        .map(|op| operation_name(*op))
-        .collect::<Vec<_>>();
-    db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
-        .find(doc! { "op": { "$in": operation_names } })
-        .await?
-        .try_collect()
-        .await
-        .map_err(AppError::DatabaseError)
+    let mut operations = Vec::new();
+    for op in PLATFORM_OPERATION_NAMES {
+        if let Some(operation) = load_constrained_operation(db, op, false).await? {
+            operations.push(operation);
+        }
+    }
+    Ok(operations)
 }
 
 pub async fn list_enabled_operations(db: &mongodb::Database) -> AppResult<Vec<PlatformOperation>> {
-    let configured = list_configured_operations(db).await?;
-    Ok(configured
-        .into_iter()
-        .filter(|operation| {
-            if !operation.enabled {
-                return false;
-            }
-            if let Err(error) = validate_operation_config(
-                operation.op,
-                &operation.vendor_service_slug,
-                &operation.config,
-            ) {
+    let mut operations = Vec::new();
+    for op in PLATFORM_OPERATION_NAMES {
+        match load_constrained_operation(db, op, true).await {
+            Ok(Some(operation)) => operations.push(operation),
+            Ok(None) => {}
+            Err(AppError::PlatformOperationUnavailable) => {
                 tracing::error!(
-                    op = operation_name(operation.op),
-                    error = %error,
+                    op = operation_name(op),
                     "Omitting invalid enabled platform operation from discovery"
                 );
-                return false;
             }
-            true
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(operations)
+}
+
+async fn load_constrained_operation(
+    db: &mongodb::Database,
+    op: PlatformOperationName,
+    enabled_only: bool,
+) -> AppResult<Option<PlatformOperation>> {
+    let contract = catalog_contract_for_operation(op);
+    let Some(catalog_service) = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "slug": contract.catalog_service_slug, "is_active": true })
+        .await?
+    else {
+        return Ok(None);
+    };
+    let mut filter = doc! {
+        "catalog_service_id": &catalog_service.id,
+        "kind_key": constrained_kind_key(op),
+    };
+    if enabled_only {
+        filter.insert("enabled", true);
+    }
+    let Some(row) = db
+        .collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .find_one(filter)
+        .await?
+    else {
+        return Ok(None);
+    };
+    project_constrained_row(row, &catalog_service.slug)
+        .map(Some)
+        .map_err(|error| {
+            tracing::error!(
+                op = operation_name(op),
+                error = %error,
+                "Stored platform operation row is invalid"
+            );
+            AppError::PlatformOperationUnavailable
         })
-        .collect())
+}
+
+fn project_constrained_row(
+    row: PlatformOperationRow,
+    catalog_service_slug: &str,
+) -> AppResult<PlatformOperation> {
+    let (op, config) = match (row.kind, row.limits.per_request) {
+        (
+            PlatformOperationKind::Constrained {
+                op: PlatformOperationName::Speak,
+                config: ConstrainedConfig::Speak(config),
+            },
+            PerRequestCaps::Speak { max_chars },
+        ) => (
+            PlatformOperationName::Speak,
+            PlatformOperationConfig::Speak(SpeakConfig {
+                allowed_voice_ids: config.allowed_voice_ids,
+                max_chars,
+                model_id: config.model_id,
+            }),
+        ),
+        (
+            PlatformOperationKind::Constrained {
+                op: PlatformOperationName::CallAndSay,
+                config: ConstrainedConfig::CallAndSay(config),
+            },
+            PerRequestCaps::CallAndSay {
+                max_message_chars,
+                max_duration_seconds,
+            },
+        ) => (
+            PlatformOperationName::CallAndSay,
+            PlatformOperationConfig::CallAndSay(CallAndSayConfig {
+                allowed_destination_prefixes: config.allowed_destination_prefixes,
+                max_message_chars,
+                max_duration_seconds,
+                voice: config.voice,
+                max_calls_per_user_per_day: row
+                    .limits
+                    .per_user_per_day
+                    .unwrap_or_else(default_call_max_per_user_per_day),
+                account_sid: config.account_sid,
+                call_from: config.call_from,
+            }),
+        ),
+        (
+            PlatformOperationKind::Constrained {
+                op: PlatformOperationName::FlightSearch,
+                config: ConstrainedConfig::FlightSearch(_),
+            },
+            PerRequestCaps::FlightSearch { max_offers },
+        ) => (
+            PlatformOperationName::FlightSearch,
+            PlatformOperationConfig::FlightSearch(FlightSearchConfig {
+                max_offers_cap: max_offers,
+                max_searches_per_user_per_day: row
+                    .limits
+                    .per_user_per_day
+                    .unwrap_or_else(default_flight_search_max_per_user_per_day),
+            }),
+        ),
+        _ => return Err(AppError::PlatformOperationUnavailable),
+    };
+    if row.kind_key != constrained_kind_key(op) {
+        return Err(AppError::PlatformOperationUnavailable);
+    }
+    validate_operation_config(op, catalog_service_slug, &config)?;
+    Ok(PlatformOperation {
+        id: row.id,
+        op,
+        enabled: row.enabled,
+        vendor_service_slug: catalog_service_slug.to_string(),
+        config,
+        updated_at: row.updated_at,
+        updated_by: row.created_by,
+    })
 }
 
 /// Load the caller-visible connection rows and every catalog/vendor row needed
@@ -1029,7 +1124,6 @@ pub async fn load_credential_resolution_context(
                 .catalog_service_slug
                 .to_string(),
         );
-        slugs.insert(operation.vendor_service_slug.clone());
     }
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -1074,7 +1168,7 @@ pub async fn resolve_operation_credential_source(
     let catalog_service = context.service_by_slug(contract.catalog_service_slug);
 
     let Some(catalog_service) = catalog_service else {
-        let vendor = resolve_platform_vendor_from_context(context, operation)?;
+        let vendor = resolve_platform_vendor_from_context(db, context, operation).await?;
         return Ok(PlatformCredentialResolution::Platform {
             vendor: Box::new(vendor),
             disabled_connection: None,
@@ -1103,7 +1197,7 @@ pub async fn resolve_operation_credential_source(
     };
 
     let Some(active_candidate) = active_candidate else {
-        let vendor = resolve_platform_vendor_from_context(context, operation)?;
+        let vendor = resolve_platform_vendor_from_context(db, context, operation).await?;
         return Ok(PlatformCredentialResolution::Platform {
             vendor: Box::new(vendor),
             disabled_connection,
@@ -1112,7 +1206,7 @@ pub async fn resolve_operation_credential_source(
     };
 
     if !caller.allow_all_services && !caller.allowed_service_ids.contains(&active_candidate.id) {
-        let vendor = resolve_platform_vendor_from_context(context, operation)?;
+        let vendor = resolve_platform_vendor_from_context(db, context, operation).await?;
         return Ok(PlatformCredentialResolution::Platform {
             vendor: Box::new(vendor),
             disabled_connection: None,
@@ -1177,7 +1271,7 @@ pub async fn resolve_operation_credential_source(
             .allowed_service_ids
             .contains(&resolution.user_service_id)
     {
-        let vendor = resolve_platform_vendor_from_context(context, operation)?;
+        let vendor = resolve_platform_vendor_from_context(db, context, operation).await?;
         return Ok(PlatformCredentialResolution::Platform {
             vendor: Box::new(vendor),
             disabled_connection: None,
@@ -1185,7 +1279,7 @@ pub async fn resolve_operation_credential_source(
         });
     }
     if resolution.master_credential || resolution.api_key_id.is_none() {
-        let vendor = resolve_platform_vendor_from_context(context, operation)?;
+        let vendor = resolve_platform_vendor_from_context(db, context, operation).await?;
         return Ok(PlatformCredentialResolution::Platform {
             vendor: Box::new(vendor),
             disabled_connection: None,
@@ -1292,16 +1386,21 @@ fn normalize_own_connection_error(vendor: &str, error: AppError) -> AppError {
     }
 }
 
-fn resolve_platform_vendor_from_context(
+async fn resolve_platform_vendor_from_context(
+    db: &mongodb::Database,
     context: &PlatformCredentialResolutionContext,
     operation: &PlatformOperation,
 ) -> AppResult<DownstreamService> {
-    let service = context.service_by_slug(&operation.vendor_service_slug);
-    validate_vendor_binding_shape(operation.op, &operation.vendor_service_slug, service, false)
-        .map_err(|error| vendor_configuration_failed(operation.op, error))?;
-    Ok(service
-        .expect("validated platform vendor context must contain a service")
-        .clone())
+    let contract = catalog_contract_for_operation(operation.op);
+    let service = context
+        .service_by_slug(contract.catalog_service_slug)
+        .ok_or(AppError::PlatformOperationUnavailable)?;
+    if service.id.is_empty()
+        || !platform_credential_service::credential_is_configured(db, &service.id).await?
+    {
+        return Err(AppError::PlatformOperationUnavailable);
+    }
+    Ok(service.clone())
 }
 
 async fn connection_metadata(
@@ -1324,7 +1423,7 @@ async fn connection_metadata(
 
 pub async fn upsert_operation(
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
+    _encryption_keys: &EncryptionKeys,
     op: PlatformOperationName,
     enabled: bool,
     vendor_service_slug: String,
@@ -1332,28 +1431,55 @@ pub async fn upsert_operation(
     updated_by: &str,
 ) -> AppResult<PlatformOperation> {
     validate_operation_config(op, &vendor_service_slug, &config)?;
-    validate_vendor_binding(db, encryption_keys, op, &vendor_service_slug).await?;
-
-    let config = bson::to_bson(&config).map_err(|error| {
+    let catalog_service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "slug": &vendor_service_slug, "is_active": true })
+        .await?
+        .ok_or_else(|| {
+            AppError::PlatformVendorProvisioningInvalid(format!(
+                "Catalog service '{vendor_service_slug}' is missing or inactive."
+            ))
+        })?;
+    platform_credential_service::validate_catalog_provider(db, &catalog_service.id).await?;
+    let (kind, limits) = split_constrained_config(op, config)?;
+    let kind = bson::to_bson(&kind).map_err(|error| {
         AppError::Internal(format!(
-            "Failed to serialize platform operation config: {error}"
+            "Failed to serialize platform operation kind: {error}"
         ))
     })?;
+    let limits = bson::to_bson(&limits).map_err(|error| {
+        AppError::Internal(format!(
+            "Failed to serialize platform operation limits: {error}"
+        ))
+    })?;
+    let default_billing =
+        bson::to_bson(&OperationBilling::free(BillingMetric::Requests)).map_err(|error| {
+            AppError::Internal(format!(
+                "Failed to serialize platform operation billing: {error}"
+            ))
+        })?;
     let updated_at = Utc::now();
-    db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+    let row = db
+        .collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
         .find_one_and_update(
-            doc! { "op": operation_name(op) },
+            doc! {
+                "catalog_service_id": &catalog_service.id,
+                "kind_key": constrained_kind_key(op),
+            },
             doc! {
                 "$set": {
                     "enabled": enabled,
-                    "vendor_service_slug": vendor_service_slug,
-                    "config": config,
+                    "kind": kind,
+                    "limits": limits,
                     "updated_at": bson::DateTime::from_chrono(updated_at),
-                    "updated_by": updated_by,
                 },
                 "$setOnInsert": {
                     "_id": uuid::Uuid::new_v4().to_string(),
-                    "op": operation_name(op),
+                    "catalog_service_id": &catalog_service.id,
+                    "kind_key": constrained_kind_key(op),
+                    "billing": default_billing,
+                    "created_by": updated_by,
+                    "created_at": bson::DateTime::from_chrono(updated_at),
                 },
             },
         )
@@ -1362,7 +1488,66 @@ pub async fn upsert_operation(
         .await?
         .ok_or_else(|| {
             AppError::Internal("Platform operation upsert returned no document".to_string())
-        })
+        })?;
+    project_constrained_row(row, &catalog_service.slug)
+}
+
+fn split_constrained_config(
+    op: PlatformOperationName,
+    config: PlatformOperationConfig,
+) -> AppResult<(PlatformOperationKind, OperationLimits)> {
+    match (op, config) {
+        (PlatformOperationName::Speak, PlatformOperationConfig::Speak(config)) => Ok((
+            PlatformOperationKind::Constrained {
+                op,
+                config: ConstrainedConfig::Speak(SpeakOperationConfig {
+                    allowed_voice_ids: config.allowed_voice_ids,
+                    model_id: config.model_id,
+                }),
+            },
+            OperationLimits {
+                per_request: PerRequestCaps::Speak {
+                    max_chars: config.max_chars,
+                },
+                per_user_per_day: None,
+            },
+        )),
+        (PlatformOperationName::CallAndSay, PlatformOperationConfig::CallAndSay(config)) => Ok((
+            PlatformOperationKind::Constrained {
+                op,
+                config: ConstrainedConfig::CallAndSay(CallAndSayOperationConfig {
+                    allowed_destination_prefixes: config.allowed_destination_prefixes,
+                    voice: config.voice,
+                    account_sid: config.account_sid,
+                    call_from: config.call_from,
+                }),
+            },
+            OperationLimits {
+                per_request: PerRequestCaps::CallAndSay {
+                    max_message_chars: config.max_message_chars,
+                    max_duration_seconds: config.max_duration_seconds,
+                },
+                per_user_per_day: Some(config.max_calls_per_user_per_day),
+            },
+        )),
+        (PlatformOperationName::FlightSearch, PlatformOperationConfig::FlightSearch(config)) => {
+            Ok((
+                PlatformOperationKind::Constrained {
+                    op,
+                    config: ConstrainedConfig::FlightSearch(FlightSearchOperationConfig::default()),
+                },
+                OperationLimits {
+                    per_request: PerRequestCaps::FlightSearch {
+                        max_offers: config.max_offers_cap,
+                    },
+                    per_user_per_day: Some(config.max_searches_per_user_per_day),
+                },
+            ))
+        }
+        _ => Err(AppError::BadRequest(
+            "config type must match the platform operation.".to_string(),
+        )),
+    }
 }
 
 pub async fn collect_speak_audio(vendor: SpeakVendorResponse) -> AppResult<Vec<u8>> {
@@ -1458,205 +1643,13 @@ pub async fn materialize_platform_vendor_target(
     op: PlatformOperationName,
     service: DownstreamService,
 ) -> AppResult<VendorTarget> {
-    let authorized = proxy_service::authorize_master_credential_server_chosen(db, &service)
-        .await
-        .map_err(|error| vendor_configuration_failed(op, error))?;
-    let decrypted = Zeroizing::new(
-        authorized
-            .decrypt(encryption_keys)
+    let (authorized, _) =
+        platform_credential_service::authorize_constrained(db, encryption_keys, &service.id, op)
             .await
-            .map_err(|error| vendor_configuration_failed(op, error))?,
-    );
-    let credential = Zeroizing::new(String::from_utf8((*decrypted).clone()).map_err(|error| {
-        tracing::error!(
-            op = operation_name(op),
-            error = %error,
-            "Platform operation vendor credential is not UTF-8"
-        );
-        AppError::PlatformOperationUnavailable
-    })?);
-    if credential.is_empty() {
-        return Err(AppError::PlatformOperationUnavailable);
-    }
-
-    let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
+            .map_err(|error| vendor_configuration_failed(op, error))?;
     Ok(VendorTarget {
-        target: proxy_service::ProxyTarget {
-            base_url: service.base_url.clone(),
-            auth_method: service.auth_method.clone(),
-            auth_key_name: service.auth_key_name.clone(),
-            credential: credential.to_string(),
-            service,
-            catalog_default_headers,
-            user_service_default_headers: Vec::new(),
-            ws_frame_injections: Vec::new(),
-            connection_id: None,
-        },
+        target: authorized.into_proxy_target(),
     })
-}
-
-async fn validate_vendor_binding(
-    db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
-    op: PlatformOperationName,
-    slug: &str,
-) -> AppResult<()> {
-    let collection = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
-    let service = match collection
-        .find_one(doc! { "slug": slug, "is_active": true })
-        .await?
-    {
-        Some(service) => Some(service),
-        None => collection.find_one(doc! { "slug": slug }).await?,
-    };
-    validate_vendor_binding_shape(op, slug, service.as_ref(), true)?;
-    let service = service.expect("validated vendor binding must have a service row");
-
-    if service.credential_encrypted.is_empty() {
-        return validate_vendor_credential(op, &service, b"");
-    }
-    let credential = Zeroizing::new(
-        encryption_keys
-            .decrypt(&service.credential_encrypted)
-            .await
-            .map_err(|_| {
-                AppError::PlatformVendorProvisioningInvalid(format!(
-                    "{} requires a readable credential; row '{}' cannot be decrypted and must be replaced",
-                    operation_name(op), service.slug
-                ))
-            })?,
-    );
-    validate_vendor_credential(op, &service, credential.as_slice())
-}
-
-fn legacy_vendor_shape(
-    op: PlatformOperationName,
-) -> (
-    &'static str,
-    &'static str,
-    &'static str,
-    Option<&'static str>,
-) {
-    match op {
-        PlatformOperationName::Speak => (
-            SPEAK_VENDOR_SLUG,
-            "https://api.elevenlabs.io",
-            "header",
-            Some("xi-api-key"),
-        ),
-        PlatformOperationName::CallAndSay => (
-            CALL_AND_SAY_VENDOR_SLUG,
-            "https://api.twilio.com",
-            "basic",
-            None,
-        ),
-        PlatformOperationName::FlightSearch => (
-            FLIGHT_SEARCH_VENDOR_SLUG,
-            "https://api.duffel.com",
-            "bearer",
-            None,
-        ),
-    }
-}
-
-/// `enforce_base_url` is true only at provisioning time. The canonical base URL is a
-/// template default and a bind-time guard against typos -- it is deliberately NOT a
-/// runtime gate, so an operator may legitimately point a vendor row at a regional
-/// endpoint, an egress proxy, or a test double. The security-bearing checks (auth
-/// shape, category, visibility, credential) are enforced on every path.
-fn validate_vendor_binding_shape(
-    operation: PlatformOperationName,
-    slug: &str,
-    service: Option<&DownstreamService>,
-    enforce_base_url: bool,
-) -> AppResult<()> {
-    let op = operation_name(operation);
-    let (expected_slug, expected_base_url, expected_auth_method, expected_auth_key_name) =
-        legacy_vendor_shape(operation);
-    let Some(service) = service else {
-        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-            "{op} requires vendor row '{slug}'; no row with that slug exists"
-        )));
-    };
-    if slug != expected_slug {
-        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-            "{op} requires canonical vendor_service_slug '{}'; requested row slug is '{slug}'",
-            expected_slug
-        )));
-    }
-    if enforce_base_url && service.base_url.trim_end_matches('/') != expected_base_url {
-        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-            "{op} requires base_url '{}'; row '{}' has '{}'",
-            expected_base_url, service.slug, service.base_url
-        )));
-    }
-    if !service.is_active {
-        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-            "{op} requires an active vendor row; row '{}' is inactive",
-            service.slug
-        )));
-    }
-    if service.auth_method != expected_auth_method {
-        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-            "{op} requires auth_method '{}'; row '{}' has '{}'",
-            expected_auth_method, service.slug, service.auth_method
-        )));
-    }
-    if let Some(expected) = expected_auth_key_name
-        && !service.auth_key_name.eq_ignore_ascii_case(expected)
-    {
-        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-            "{op} requires auth_key_name '{expected}'; row '{}' has '{}'",
-            service.slug, service.auth_key_name
-        )));
-    }
-    if service.service_category != "internal" {
-        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-            "{op} requires service_category 'internal'; row '{}' has '{}'",
-            service.slug, service.service_category
-        )));
-    }
-    if service.visibility != "public" {
-        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-            "{op} requires visibility 'public'; row '{}' has '{}'",
-            service.slug, service.visibility
-        )));
-    }
-    if service.provider_config_id.is_some() {
-        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-            "{op} requires provider_config_id to be absent; row '{}' has '{}'",
-            service.slug,
-            service.provider_config_id.as_deref().unwrap_or_default()
-        )));
-    }
-    if service.service_type != "http" {
-        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-            "{op} requires service_type 'http'; row '{}' has '{}'",
-            service.slug, service.service_type
-        )));
-    }
-    if service.requires_user_credential {
-        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-            "{op} requires requires_user_credential false; row '{}' has true",
-            service.slug
-        )));
-    }
-    Ok(())
-}
-
-fn validate_vendor_credential(
-    operation: PlatformOperationName,
-    service: &DownstreamService,
-    credential: &[u8],
-) -> AppResult<()> {
-    if credential.is_empty() {
-        let op = operation_name(operation);
-        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
-            "{op} requires a non-empty credential; row '{}' has an empty credential",
-            service.slug
-        )));
-    }
-    Ok(())
 }
 
 fn vendor_configuration_failed(op: PlatformOperationName, error: AppError) -> AppError {
@@ -1826,6 +1819,7 @@ mod tests {
         CallAndSayConfig {
             allowed_destination_prefixes: prefixes,
             max_message_chars: 500,
+            max_duration_seconds: 600,
             voice: "alice".to_string(),
             max_calls_per_user_per_day: 3,
             account_sid: format!("AC{}", "1".repeat(32)),
@@ -1833,34 +1827,54 @@ mod tests {
         }
     }
 
-    fn valid_speak_vendor_service() -> crate::models::downstream_service::DownstreamService {
+    fn valid_speak_catalog_service() -> crate::models::downstream_service::DownstreamService {
         let mut service = dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
         service.slug = SPEAK_VENDOR_SLUG.to_string();
         service.base_url = "https://api.elevenlabs.io".to_string();
         service.auth_method = "header".to_string();
         service.auth_key_name = "xi-api-key".to_string();
-        service.service_category = "internal".to_string();
-        service.visibility = "public".to_string();
-        service.requires_user_credential = false;
-        service.credential_encrypted = vec![1];
+        service.credential_encrypted = Vec::new();
         service
     }
 
-    fn valid_vendor_service(
+    fn valid_catalog_service(
         op: PlatformOperationName,
     ) -> crate::models::downstream_service::DownstreamService {
-        let (slug, base_url, auth_method, auth_key_name) = legacy_vendor_shape(op);
+        let slug = default_vendor_service_slug(op);
+        let contract = platform_credential_service::provider_contract_for_slug(slug)
+            .expect("registered platform provider");
         let mut service = dummy_service();
         service.id = uuid::Uuid::new_v4().to_string();
         service.slug = slug.to_string();
-        service.base_url = base_url.to_string();
-        service.auth_method = auth_method.to_string();
-        service.auth_key_name = auth_key_name.unwrap_or_default().to_string();
-        service.service_category = "internal".to_string();
-        service.visibility = "public".to_string();
-        service.requires_user_credential = false;
-        service.credential_encrypted = vec![1];
+        service.base_url = "https://vendor.example".to_string();
+        service.auth_method = contract.auth_method.to_string();
+        service.auth_key_name = contract.auth_key_name.to_string();
+        service.credential_encrypted = Vec::new();
         service
+    }
+
+    fn persisted_operation(
+        catalog_service_id: &str,
+        op: PlatformOperationName,
+        enabled: bool,
+        config: PlatformOperationConfig,
+    ) -> PlatformOperationRow {
+        let (kind, limits) = split_constrained_config(op, config)
+            .expect("test constrained config must match operation");
+        let PlatformOperationKind::Constrained { config, .. } = kind else {
+            unreachable!("split constrained config returned endpoint kind");
+        };
+        let mut row = PlatformOperationRow::new_constrained(
+            catalog_service_id.to_string(),
+            op,
+            config,
+            limits,
+            OperationBilling::free(BillingMetric::Requests),
+            "admin-user".to_string(),
+        );
+        row.enabled = enabled;
+        row
     }
 
     fn provisioning_message(error: AppError) -> String {
@@ -1915,26 +1929,21 @@ mod tests {
         let api_key_id = uuid::Uuid::new_v4().to_string();
         let node_ws_manager = Arc::new(NodeWsManager::new(30, 100));
 
-        let mut vendor = valid_speak_vendor_service();
-        vendor.id = uuid::Uuid::new_v4().to_string();
-        vendor.credential_encrypted = encryption_keys
-            .encrypt(b"platform-elevenlabs-secret")
-            .await
-            .expect("encrypt platform credential");
-        let mut catalog = dummy_service();
+        let mut catalog = valid_speak_catalog_service();
         catalog.id = catalog_id.clone();
-        catalog.slug = "api-elevenlabs".to_string();
-        catalog.name = "ElevenLabs".to_string();
-        catalog.base_url = "https://api.elevenlabs.io".to_string();
-        catalog.service_category = "connection".to_string();
-        catalog.auth_method = "header".to_string();
-        catalog.auth_key_name = "xi-api-key".to_string();
-        catalog.requires_user_credential = true;
-        catalog.credential_encrypted = Vec::new();
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_many([vendor, catalog])
+            .insert_one(&catalog)
             .await
-            .expect("insert vendor catalogs");
+            .expect("insert ElevenLabs catalog");
+        platform_credential_service::set_credential(
+            &db,
+            &encryption_keys,
+            &catalog.id,
+            "platform-elevenlabs-secret",
+            "admin",
+        )
+        .await
+        .expect("set platform credential");
 
         let operation = PlatformOperation {
             id: uuid::Uuid::new_v4().to_string(),
@@ -2195,22 +2204,21 @@ mod tests {
             .await
             .expect("insert both org memberships");
 
-        let mut vendor = valid_speak_vendor_service();
-        vendor.id = uuid::Uuid::new_v4().to_string();
-        let mut catalog = dummy_service();
+        let mut catalog = valid_speak_catalog_service();
         catalog.id = catalog_id.clone();
-        catalog.slug = "api-elevenlabs".to_string();
-        catalog.name = "ElevenLabs".to_string();
-        catalog.base_url = "https://api.elevenlabs.io".to_string();
-        catalog.service_category = "connection".to_string();
-        catalog.auth_method = "header".to_string();
-        catalog.auth_key_name = "xi-api-key".to_string();
-        catalog.requires_user_credential = true;
-        catalog.credential_encrypted = Vec::new();
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_many([vendor, catalog])
+            .insert_one(&catalog)
             .await
-            .expect("insert ElevenLabs vendor and catalog rows");
+            .expect("insert ElevenLabs catalog row");
+        platform_credential_service::set_credential(
+            &db,
+            &encryption_keys,
+            &catalog.id,
+            "platform-elevenlabs-secret",
+            "admin",
+        )
+        .await
+        .expect("set platform credential");
 
         let primary_endpoint_id = uuid::Uuid::new_v4().to_string();
         let secondary_endpoint_id = uuid::Uuid::new_v4().to_string();
@@ -2359,10 +2367,23 @@ mod tests {
                 updated_by: "admin".to_string(),
             })
             .collect::<Vec<_>>();
+        let catalog_services = PLATFORM_OPERATION_NAMES.map(valid_catalog_service);
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .insert_many(PLATFORM_OPERATION_NAMES.map(valid_vendor_service))
+            .insert_many(catalog_services.clone())
             .await
-            .expect("insert all platform vendors");
+            .expect("insert all platform catalog services");
+        let encryption_keys = crate::test_utils::test_encryption_keys();
+        for service in catalog_services {
+            platform_credential_service::set_credential(
+                &db,
+                &encryption_keys,
+                &service.id,
+                "platform-secret",
+                "admin",
+            )
+            .await
+            .expect("set platform credential");
+        }
 
         // Loading is intentionally outside the operation loop. The resolver
         // accepts only this inventory and has no connection-listing path of
@@ -2371,7 +2392,6 @@ mod tests {
         let context = load_credential_resolution_context(&db, &user_id, &operations)
             .await
             .expect("load one shared resolution inventory");
-        let encryption_keys = crate::test_utils::test_encryption_keys();
         let node_ws_manager = Arc::new(NodeWsManager::new(30, 100));
         for operation in &operations {
             let descriptor = crate::services::operation_descriptor::build_http_descriptor(
@@ -2409,110 +2429,72 @@ mod tests {
         }
     }
 
-    #[test]
-    fn bind_validation_names_every_vendor_row_mismatch() {
-        let valid = valid_speak_vendor_service();
-
-        let cases: Vec<(
-            &str,
-            &str,
-            Option<crate::models::downstream_service::DownstreamService>,
-        )> = vec![
-            (
-                "speak requires canonical vendor_service_slug 'platform-elevenlabs'; requested row slug is 'platform-other'",
-                "platform-other",
-                Some(crate::models::downstream_service::DownstreamService {
-                    slug: "platform-other".to_string(),
-                    ..valid.clone()
-                }),
-            ),
-            (
-                "speak requires base_url 'https://api.elevenlabs.io'; row 'platform-elevenlabs' has 'https://wrong.example'",
-                SPEAK_VENDOR_SLUG,
-                Some(crate::models::downstream_service::DownstreamService {
-                    base_url: "https://wrong.example".to_string(),
-                    ..valid.clone()
-                }),
-            ),
-            (
-                "speak requires vendor row 'platform-elevenlabs'; no row with that slug exists",
-                SPEAK_VENDOR_SLUG,
-                None,
-            ),
-            (
-                "speak requires an active vendor row; row 'platform-elevenlabs' is inactive",
-                SPEAK_VENDOR_SLUG,
-                Some(crate::models::downstream_service::DownstreamService {
-                    is_active: false,
-                    ..valid.clone()
-                }),
-            ),
-            (
-                "speak requires auth_method 'header'; row 'platform-elevenlabs' has 'bearer'",
-                SPEAK_VENDOR_SLUG,
-                Some(crate::models::downstream_service::DownstreamService {
-                    auth_method: "bearer".to_string(),
-                    ..valid.clone()
-                }),
-            ),
-            (
-                "speak requires auth_key_name 'xi-api-key'; row 'platform-elevenlabs' has 'X-API-Key'",
-                SPEAK_VENDOR_SLUG,
-                Some(crate::models::downstream_service::DownstreamService {
-                    auth_key_name: "X-API-Key".to_string(),
-                    ..valid.clone()
-                }),
-            ),
-            (
-                "speak requires service_category 'internal'; row 'platform-elevenlabs' has 'connection'",
-                SPEAK_VENDOR_SLUG,
-                Some(crate::models::downstream_service::DownstreamService {
-                    service_category: "connection".to_string(),
-                    ..valid.clone()
-                }),
-            ),
-            (
-                "speak requires visibility 'public'; row 'platform-elevenlabs' has 'private'",
-                SPEAK_VENDOR_SLUG,
-                Some(crate::models::downstream_service::DownstreamService {
-                    visibility: "private".to_string(),
-                    ..valid.clone()
-                }),
-            ),
-            (
-                "speak requires provider_config_id to be absent; row 'platform-elevenlabs' has 'provider-1'",
-                SPEAK_VENDOR_SLUG,
-                Some(crate::models::downstream_service::DownstreamService {
-                    provider_config_id: Some("provider-1".to_string()),
-                    ..valid.clone()
-                }),
-            ),
+    #[tokio::test]
+    async fn catalog_provider_validation_rejects_unregistered_inactive_and_wrong_auth_shapes() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_catalog_provider_validation").await
+        else {
+            eprintln!("skipping platform provider validation test: no local MongoDB available");
+            return;
+        };
+        let valid = valid_speak_catalog_service();
+        let invalid = [
+            DownstreamService {
+                slug: "unregistered-provider".to_string(),
+                ..valid.clone()
+            },
+            DownstreamService {
+                is_active: false,
+                ..valid.clone()
+            },
+            DownstreamService {
+                auth_method: "bearer".to_string(),
+                ..valid.clone()
+            },
+            DownstreamService {
+                auth_key_name: "X-API-Key".to_string(),
+                ..valid.clone()
+            },
         ];
-
-        for (expected, slug, service) in cases {
-            let error = validate_vendor_binding_shape(
-                PlatformOperationName::Speak,
-                slug,
-                service.as_ref(),
-                true,
-            )
-            .expect_err("mismatched vendor row must be rejected");
-            assert_eq!(provisioning_message(error), expected);
+        for service in invalid {
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .delete_many(doc! {})
+                .await
+                .expect("clear provider fixture");
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(&service)
+                .await
+                .expect("insert invalid provider fixture");
+            let error = platform_credential_service::validate_catalog_provider(&db, &service.id)
+                .await
+                .expect_err("invalid catalog provider must be rejected");
+            assert!(matches!(
+                error,
+                AppError::PlatformVendorProvisioningInvalid(_)
+            ));
         }
 
-        validate_vendor_binding_shape(
-            PlatformOperationName::Speak,
-            SPEAK_VENDOR_SLUG,
-            Some(&valid),
-            true,
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .delete_many(doc! {})
+            .await
+            .expect("clear provider fixture");
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&valid)
+            .await
+            .expect("insert valid catalog provider");
+        platform_credential_service::validate_catalog_provider(&db, &valid.id)
+            .await
+            .expect("registered provider with exact auth shape");
+        let error = platform_credential_service::set_credential(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &valid.id,
+            "",
+            "admin",
         )
-        .expect("valid vendor row shape");
-        let error = validate_vendor_credential(PlatformOperationName::Speak, &valid, b"")
-            .expect_err("empty credential must be rejected");
-        assert_eq!(
-            provisioning_message(error),
-            "speak requires a non-empty credential; row 'platform-elevenlabs' has an empty credential"
-        );
+        .await
+        .expect_err("empty platform credential must be rejected");
+        assert!(provisioning_message(error).contains("between 1 and"));
     }
 
     #[tokio::test]
@@ -2522,43 +2504,39 @@ mod tests {
             eprintln!("skipping platform operation listing test: no local MongoDB available");
             return;
         };
-        let now = Utc::now();
+        let [speak_service, call_service, flight_service] =
+            PLATFORM_OPERATION_NAMES.map(valid_catalog_service);
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many([&speak_service, &call_service, &flight_service])
+            .await
+            .expect("insert platform catalog services");
         let rows = [
-            PlatformOperation {
-                id: uuid::Uuid::new_v4().to_string(),
-                op: PlatformOperationName::Speak,
-                enabled: true,
-                vendor_service_slug: SPEAK_VENDOR_SLUG.to_string(),
-                config: PlatformOperationConfig::Speak(speak_config()),
-                updated_at: now,
-                updated_by: "admin-user".to_string(),
-            },
-            PlatformOperation {
-                id: uuid::Uuid::new_v4().to_string(),
-                op: PlatformOperationName::FlightSearch,
-                enabled: false,
-                vendor_service_slug: FLIGHT_SEARCH_VENDOR_SLUG.to_string(),
-                config: PlatformOperationConfig::FlightSearch(FlightSearchConfig {
+            persisted_operation(
+                &speak_service.id,
+                PlatformOperationName::Speak,
+                true,
+                PlatformOperationConfig::Speak(speak_config()),
+            ),
+            persisted_operation(
+                &flight_service.id,
+                PlatformOperationName::FlightSearch,
+                false,
+                PlatformOperationConfig::FlightSearch(FlightSearchConfig {
                     max_offers_cap: 10,
                     max_searches_per_user_per_day: 20,
                 }),
-                updated_at: now,
-                updated_by: "admin-user".to_string(),
-            },
-            PlatformOperation {
-                id: uuid::Uuid::new_v4().to_string(),
-                op: PlatformOperationName::CallAndSay,
-                enabled: true,
-                vendor_service_slug: CALL_AND_SAY_VENDOR_SLUG.to_string(),
-                config: PlatformOperationConfig::CallAndSay(CallAndSayConfig {
+            ),
+            persisted_operation(
+                &call_service.id,
+                PlatformOperationName::CallAndSay,
+                true,
+                PlatformOperationConfig::CallAndSay(CallAndSayConfig {
                     max_message_chars: CALL_AND_SAY_HARD_MAX_MESSAGE_CHARS + 1,
                     ..call_config(vec!["+65".to_string()])
                 }),
-                updated_at: now,
-                updated_by: "admin-user".to_string(),
-            },
+            ),
         ];
-        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_many(rows)
             .await
             .expect("insert platform operation rows");
@@ -2837,6 +2815,28 @@ mod tests {
         );
         assert!(!twiml.contains("<tag>"));
         assert!(!twiml.contains("]]>"));
+    }
+
+    #[test]
+    fn call_and_say_time_limit_is_code_capped() {
+        let config = CallAndSayConfig {
+            max_duration_seconds: CALL_AND_SAY_HARD_MAX_DURATION_SECONDS + 1,
+            ..call_config(vec!["+65".to_string()])
+        };
+        let upstream = build_call_and_say_request(
+            &config,
+            &CallAndSayRequest {
+                to: "+6512345678".to_string(),
+                message: "Hello".to_string(),
+                from: None,
+            },
+        )
+        .expect("request builder applies the code-owned duration ceiling");
+
+        assert!(upstream.form.contains(&(
+            "TimeLimit",
+            CALL_AND_SAY_HARD_MAX_DURATION_SECONDS.to_string(),
+        )));
     }
 
     #[test]
