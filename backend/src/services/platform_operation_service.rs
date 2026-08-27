@@ -1393,6 +1393,18 @@ pub async fn resolve_operation_credential_source(
         }
     };
 
+    if !caller.allow_all_services
+        && !caller
+            .allowed_service_ids
+            .contains(&resolution.user_service_id)
+    {
+        let vendor = resolve_platform_vendor_from_context(context, operation)?;
+        return Ok(PlatformCredentialResolution::Platform {
+            vendor: Box::new(vendor),
+            disabled_connection: None,
+            own_connection_out_of_scope: true,
+        });
+    }
     if resolution.master_credential || resolution.api_key_id.is_none() {
         let vendor = resolve_platform_vendor_from_context(context, operation)?;
         return Ok(PlatformCredentialResolution::Platform {
@@ -2492,6 +2504,197 @@ mod tests {
             .expect("resolve credentialless connection"),
             PlatformCredentialResolution::Platform {
                 disabled_connection: None,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn resolved_org_connection_scope_is_checked_after_cascade() {
+        use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgRole};
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_resolved_org_scope").await
+        else {
+            eprintln!("skipping resolved org scope test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = crate::test_utils::test_encryption_keys();
+        let node_ws_manager = Arc::new(NodeWsManager::new(30, 100));
+        let actor_id = uuid::Uuid::new_v4().to_string();
+        let primary_org_id = uuid::Uuid::new_v4().to_string();
+        let secondary_org_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let primary_service_id = uuid::Uuid::new_v4().to_string();
+        let secondary_service_id = uuid::Uuid::new_v4().to_string();
+
+        let mut actor = crate::test_utils::test_user(&actor_id, UserType::Person);
+        actor.primary_org_id = Some(primary_org_id.clone());
+        db.collection(USERS)
+            .insert_many([
+                actor,
+                crate::test_utils::test_user(&primary_org_id, UserType::Org),
+                crate::test_utils::test_user(&secondary_org_id, UserType::Org),
+            ])
+            .await
+            .expect("insert actor and org users");
+        db.collection(ORG_MEMBERSHIPS)
+            .insert_many([
+                crate::test_utils::test_membership(
+                    &secondary_org_id,
+                    &actor_id,
+                    OrgRole::Member,
+                    None,
+                ),
+                crate::test_utils::test_membership(
+                    &primary_org_id,
+                    &actor_id,
+                    OrgRole::Member,
+                    None,
+                ),
+            ])
+            .await
+            .expect("insert both org memberships");
+
+        let mut vendor = valid_speak_vendor_service();
+        vendor.id = uuid::Uuid::new_v4().to_string();
+        let mut catalog = dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "api-elevenlabs".to_string();
+        catalog.name = "ElevenLabs".to_string();
+        catalog.base_url = "https://api.elevenlabs.io".to_string();
+        catalog.service_category = "connection".to_string();
+        catalog.auth_method = "header".to_string();
+        catalog.auth_key_name = "xi-api-key".to_string();
+        catalog.requires_user_credential = true;
+        catalog.credential_encrypted = Vec::new();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many([vendor, catalog])
+            .await
+            .expect("insert ElevenLabs vendor and catalog rows");
+
+        let primary_endpoint_id = uuid::Uuid::new_v4().to_string();
+        let secondary_endpoint_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_many([
+                crate::test_utils::test_user_endpoint(
+                    &primary_endpoint_id,
+                    &primary_org_id,
+                    "Primary ElevenLabs",
+                    "https://api.elevenlabs.io",
+                    None,
+                    Some(&catalog_id),
+                ),
+                crate::test_utils::test_user_endpoint(
+                    &secondary_endpoint_id,
+                    &secondary_org_id,
+                    "Secondary ElevenLabs",
+                    "https://api.elevenlabs.io",
+                    None,
+                    Some(&catalog_id),
+                ),
+            ])
+            .await
+            .expect("insert org endpoints");
+
+        let primary_key_id = uuid::Uuid::new_v4().to_string();
+        let secondary_key_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_many([
+                test_user_key(&primary_key_id, &primary_org_id, Some(vec![1])),
+                test_user_key(&secondary_key_id, &secondary_org_id, Some(vec![2])),
+            ])
+            .await
+            .expect("insert org credentials");
+        let mut primary_service = crate::test_utils::test_user_service(
+            &primary_service_id,
+            &primary_org_id,
+            "primary-elevenlabs",
+            &primary_endpoint_id,
+            Some(&catalog_id),
+            None,
+        );
+        primary_service.api_key_id = Some(primary_key_id);
+        primary_service.auth_method = "header".to_string();
+        primary_service.auth_key_name = "xi-api-key".to_string();
+        let mut secondary_service = crate::test_utils::test_user_service(
+            &secondary_service_id,
+            &secondary_org_id,
+            "secondary-elevenlabs",
+            &secondary_endpoint_id,
+            Some(&catalog_id),
+            None,
+        );
+        secondary_service.api_key_id = Some(secondary_key_id);
+        secondary_service.auth_method = "header".to_string();
+        secondary_service.auth_key_name = "xi-api-key".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_many([secondary_service, primary_service])
+            .await
+            .expect("insert org services");
+
+        let operation = PlatformOperation {
+            id: uuid::Uuid::new_v4().to_string(),
+            op: PlatformOperationName::Speak,
+            enabled: true,
+            vendor_service_slug: SPEAK_VENDOR_SLUG.to_string(),
+            config: PlatformOperationConfig::Speak(speak_config()),
+            updated_at: Utc::now(),
+            updated_by: "admin".to_string(),
+        };
+        let resolved = proxy_service::read_proxy_authority_snapshot_from_user_service(
+            &db,
+            &encryption_keys,
+            &actor_id,
+            None,
+            Some(&catalog_id),
+        )
+        .await
+        .expect("resolve proxy cascade")
+        .expect("resolve primary org service");
+        assert_eq!(resolved.user_service_id, primary_service_id);
+
+        let mut context =
+            load_credential_resolution_context(&db, &actor_id, std::slice::from_ref(&operation))
+                .await
+                .expect("load credential context");
+        context.visible_connections.sort_by_key(|entry| {
+            if entry.service.id == secondary_service_id {
+                0
+            } else {
+                1
+            }
+        });
+        let descriptor = crate::services::operation_descriptor::build_http_descriptor(
+            "POST",
+            "/v1/text-to-speech/{voice_id}",
+            None,
+        );
+        let source = resolve_operation_credential_source(
+            &db,
+            &encryption_keys,
+            &node_ws_manager,
+            &actor_id,
+            PlatformCredentialCaller {
+                actor_user_id: &actor_id,
+                api_key_id: None,
+                allow_all_services: false,
+                allowed_service_ids: std::slice::from_ref(&secondary_service_id),
+                bypass_approval_flow: false,
+            },
+            &operation,
+            CredentialResolutionMode::Discover {
+                descriptor: &descriptor,
+            },
+            &context,
+        )
+        .await
+        .expect("classify resolved org connection");
+        assert!(matches!(
+            source,
+            PlatformCredentialResolution::Platform {
+                own_connection_out_of_scope: true,
                 ..
             }
         ));
