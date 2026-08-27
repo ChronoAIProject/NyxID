@@ -42,6 +42,7 @@ const OPERATION_OPTIONS = [
   { value: "x_search", label: "X Search" },
   { value: "speak", label: "Speak" },
   { value: "call_and_say", label: "Call and Say" },
+  { value: "flight_search", label: "Flight Search" },
 ] as const;
 
 const EMPTY_FORM: PlatformVendorTemplateForm = {

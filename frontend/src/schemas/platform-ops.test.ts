@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   callAndSayUpdateSchema,
+  flightSearchUpdateSchema,
+  platformOperationDiscoveryListSchema,
   platformOperationListSchema,
   platformVendorProvisionSchema,
   platformVendorRequirementListSchema,
@@ -36,7 +38,7 @@ describe("platform operation schemas", () => {
           id: "template-duffel",
           vendor: "duffel",
           display_name: "Duffel",
-          operation: null,
+          operation: "flight_search",
           slug: "platform-duffel",
           base_url: "https://api.duffel.com",
           auth_method: "bearer",
@@ -44,9 +46,9 @@ describe("platform operation schemas", () => {
           service_category: "internal",
           visibility: "public",
           credential_label: "Access token",
-          credential_note: "Provision ahead of an operation.",
-          capability_summary: "No operation is shipped yet.",
-          restriction_summary: "Does not expose vendor tools.",
+          credential_note: "Use a Duffel access token.",
+          capability_summary: "Searches bounded flight offers.",
+          restriction_summary: "Does not create orders or payments.",
           is_active: true,
           is_seeded: true,
           existing_service: null,
@@ -55,7 +57,7 @@ describe("platform operation schemas", () => {
     });
 
     expect(result.vendors[0]?.auth_key_name).toBe("xi-api-key");
-    expect(result.vendors[1]?.operation).toBeNull();
+    expect(result.vendors[1]?.operation).toBe("flight_search");
   });
 
   it("requires a write-only credential and bounds the optional note", () => {
@@ -133,6 +135,12 @@ describe("platform operation schemas", () => {
             },
             updated_at: null,
             updated_by: null,
+            vendor_service_id: "platform-elevenlabs-id",
+            pricing: {
+              billable: false,
+              credits_per_call: null,
+              metric: "requests",
+            },
           },
           {
             op: "call_and_say",
@@ -149,6 +157,12 @@ describe("platform operation schemas", () => {
             },
             updated_at: null,
             updated_by: null,
+            vendor_service_id: "platform-twilio-id",
+            pricing: {
+              billable: true,
+              credits_per_call: "0.25",
+              metric: "requests",
+            },
           },
         ],
       }).operations,
@@ -188,6 +202,51 @@ describe("platform operation schemas", () => {
           account_sid: `AC${"0".repeat(32)}`,
           call_from: "+6512345678",
         },
+      }).success,
+    ).toBe(false);
+    expect(
+      flightSearchUpdateSchema.safeParse({
+        enabled: true,
+        vendor_service_slug: "platform-duffel",
+        config: {
+          type: "flight_search",
+          max_offers_cap: 51,
+          max_searches_per_user_per_day: 20,
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it("parses discovery without accepting credential or account fields", () => {
+    const result = platformOperationDiscoveryListSchema.parse({
+      operations: [
+        {
+          op: "flight_search",
+          display_name: "Flight Search",
+          description: "Searches bounded flight offers.",
+          vendor: "duffel",
+          catalog_service_slug: "duffel",
+          credential_source: "platform",
+          own_connection: null,
+          pricing: {
+            billable: true,
+            credits_per_call: "0.5",
+            metric: "requests",
+          },
+          mcp_tool: "nyx__flight_search",
+        },
+      ],
+    });
+    expect(result.operations[0]?.mcp_tool).toBe("nyx__flight_search");
+
+    expect(
+      platformOperationDiscoveryListSchema.safeParse({
+        operations: [
+          {
+            ...result.operations[0],
+            vendor_account_id: "should-not-be-exposed",
+          },
+        ],
       }).success,
     ).toBe(false);
   });

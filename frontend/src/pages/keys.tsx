@@ -1,7 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useKeys } from "@/hooks/use-keys";
 import { useUserServices } from "@/hooks/use-user-services";
+import { usePlatformOperationDiscovery } from "@/hooks/use-platform-ops";
+import { useFeature } from "@/hooks/use-feature-flag";
 import { PageHeader } from "@/components/shared/page-header";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { TeachingEmptyState } from "@/components/shared/teaching-empty-state";
@@ -42,6 +44,8 @@ import { RoleBadge } from "@/components/orgs/role-badge";
 import { OrgAvatar } from "@/components/orgs/org-avatar";
 import type { KeyInfo } from "@/types/keys";
 import type { CredentialSource } from "@/schemas/orgs";
+import type { PlatformOperationDiscovery } from "@/schemas/platform-ops";
+import { FEATURE_FLAG } from "@/lib/feature-flags";
 import {
   KEYS_TABS,
   KEYS_TAB_DEFAULT,
@@ -617,17 +621,169 @@ function LoadingSkeleton() {
   );
 }
 
+function platformPriceLabel(operation: PlatformOperationDiscovery): string {
+  if (!operation.pricing.billable) return "Free";
+  if (!operation.pricing.credits_per_call) return "Price not set";
+  return `${operation.pricing.credits_per_call} credits/call`;
+}
+
+function platformVendorLabel(vendor: string): string {
+  if (vendor === "x") return "X";
+  if (vendor === "elevenlabs") return "ElevenLabs";
+  return vendor.charAt(0).toUpperCase() + vendor.slice(1);
+}
+
+function PlatformOperationStatus({
+  operation,
+  onConnect,
+}: {
+  readonly operation: PlatformOperationDiscovery;
+  readonly onConnect: (slug: string) => void;
+}) {
+  const connection = operation.own_connection;
+  const vendor = platformVendorLabel(operation.vendor);
+
+  if (connection?.usable) {
+    return (
+      <Link
+        to="/keys/$keyId"
+        params={{ keyId: connection.user_service_id }}
+        className="inline-flex"
+      >
+        <Badge variant="success">Using your {vendor} connection</Badge>
+      </Link>
+    );
+  }
+
+  if (connection?.reason === "disabled") {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Your {vendor} connection is disabled {"\u2014"} platform credential in
+        use ({platformPriceLabel(operation)}){" "}
+        <Link
+          to="/keys/$keyId"
+          params={{ keyId: connection.user_service_id }}
+          className="font-medium text-foreground hover:underline"
+        >
+          Enable
+        </Link>
+      </p>
+    );
+  }
+
+  if (connection?.reason === "node_routed") {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Your {vendor} connection is node-routed; platform operations need a
+        server-held credential.{" "}
+        <Link
+          to="/keys/$keyId"
+          params={{ keyId: connection.user_service_id }}
+          className="font-medium text-foreground hover:underline"
+        >
+          View connection
+        </Link>
+      </p>
+    );
+  }
+
+  if (connection?.reason === "unusable") {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Your {vendor} connection is unusable; reconnect or disable it before
+        using this operation.{" "}
+        <Link
+          to="/keys/$keyId"
+          params={{ keyId: connection.user_service_id }}
+          className="font-medium text-foreground hover:underline"
+        >
+          View connection
+        </Link>
+      </p>
+    );
+  }
+
+  return (
+    <p className="text-xs text-muted-foreground">
+      Platform credential {"\u00b7"} {platformPriceLabel(operation)}{" "}
+      <button
+        type="button"
+        className="font-medium text-foreground hover:underline"
+        onClick={() => onConnect(operation.catalog_service_slug)}
+      >
+        Connect your own
+      </button>
+    </p>
+  );
+}
+
+function PlatformServicesSection({
+  operations,
+  onConnect,
+}: {
+  readonly operations: readonly PlatformOperationDiscovery[];
+  readonly onConnect: (slug: string) => void;
+}) {
+  return (
+    <section className="space-y-3" aria-labelledby="platform-services-heading">
+      <div className="flex items-center gap-2">
+        <Shield className="h-4 w-4 text-muted-foreground" />
+        <h3
+          id="platform-services-heading"
+          className="text-[13px] font-semibold text-foreground"
+        >
+          Platform services
+        </h3>
+      </div>
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        {operations.map((operation) => (
+          <Card key={operation.op} className="h-full">
+            <CardContent className="flex h-full min-h-[132px] flex-col gap-3 p-4">
+              <div className="flex min-w-0 items-center gap-3">
+                <ServiceIcon slug={operation.catalog_service_slug} size="md" />
+                <div className="min-w-0">
+                  <p className="truncate text-[12px] font-medium text-foreground">
+                    {operation.display_name}
+                  </p>
+                  <p className="truncate text-xs text-muted-foreground">
+                    {platformVendorLabel(operation.vendor)}
+                  </p>
+                </div>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {operation.description}
+              </p>
+              <div className="mt-auto">
+                <PlatformOperationStatus
+                  operation={operation}
+                  onConnect={onConnect}
+                />
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function ExternalServicesTab({
   onAdd,
+  onConnectPlatform,
   onReconnect,
   showAutoConnected,
   viewMode,
 }: {
   readonly onAdd: () => void;
+  readonly onConnectPlatform: (slug: string) => void;
   readonly onReconnect: (keyInfo: KeyInfo) => void;
   readonly showAutoConnected: boolean;
   readonly viewMode: ViewMode;
 }) {
+  const platformServicesEnabled = useFeature(FEATURE_FLAG.PLATFORM_SERVICES);
+  const platformOperations = usePlatformOperationDiscovery(
+    platformServicesEnabled,
+  );
   const { data: keys, isLoading, error, refetch } = useKeys();
   // user-services carries credential_source for both personal and
   // org-inherited items. When the backend augments /keys directly in a
@@ -643,10 +799,27 @@ function ExternalServicesTab({
     return map;
   }, [userServices]);
 
-  if (isLoading) return <LoadingSkeleton />;
+  const platformSection =
+    platformServicesEnabled &&
+    platformOperations.data &&
+    platformOperations.data.operations.length > 0 ? (
+      <PlatformServicesSection
+        operations={platformOperations.data.operations}
+        onConnect={onConnectPlatform}
+      />
+    ) : null;
+
+  const withPlatformSection = (content: ReactNode) => (
+    <div className="space-y-8">
+      {platformSection}
+      {content}
+    </div>
+  );
+
+  if (isLoading) return withPlatformSection(<LoadingSkeleton />);
 
   if (error) {
-    return (
+    return withPlatformSection(
       <ErrorBanner message="Failed to load services. Please try again." onRetry={refetch} />
     );
   }
@@ -656,24 +829,26 @@ function ExternalServicesTab({
   const visibleKeys = showAutoConnected ? (keys ?? []) : userKeys;
 
   if (visibleKeys.length === 0 && autoKeys.length === 0) {
-    return <ServicesEmptyState onAdd={onAdd} />;
+    return withPlatformSection(<ServicesEmptyState onAdd={onAdd} />);
   }
 
   if (visibleKeys.length === 0) {
-    return <ServicesEmptyState onAdd={onAdd} />;
+    return withPlatformSection(<ServicesEmptyState onAdd={onAdd} />);
   }
 
   const groups = groupKeysBySource(visibleKeys, sourceById);
 
   if (viewMode === "table") {
-    return <ServiceTableView groups={groups} onReconnect={onReconnect} />;
+    return withPlatformSection(
+      <ServiceTableView groups={groups} onReconnect={onReconnect} />,
+    );
   }
 
   // If only personal services exist, skip section headers to preserve the
   // current flat-grid look-and-feel.
   const [firstGroup] = groups;
   if (groups.length === 1 && firstGroup && firstGroup.icon === "personal") {
-    return (
+    return withPlatformSection(
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {firstGroup.keys.map(({ keyInfo, source }) => (
           <KeyCard
@@ -683,11 +858,11 @@ function ExternalServicesTab({
             onReconnect={onReconnect}
           />
         ))}
-      </div>
+      </div>,
     );
   }
 
-  return (
+  return withPlatformSection(
     <div className="space-y-8">
       {groups.map((group) => (
         <section key={group.key} className="space-y-3">
@@ -725,7 +900,7 @@ function ExternalServicesTab({
           </div>
         </section>
       ))}
-    </div>
+    </div>,
   );
 }
 
@@ -967,6 +1142,10 @@ export function KeysPage() {
         <TabsContent value="services" className="mt-6">
           <ExternalServicesTab
             onAdd={() => setAddServiceOpen(true)}
+            onConnectPlatform={(slug) => {
+              setPendingPrefillSlug(slug);
+              setAddServiceOpen(true);
+            }}
             onReconnect={(keyInfo) => {
               setReconnectKey(keyInfo);
               setAddServiceOpen(true);

@@ -4,6 +4,9 @@ export const PLATFORM_OPERATION_QUERY_KEY = [
   "admin",
   "platform-ops",
 ] as const;
+export const PLATFORM_OPERATION_DISCOVERY_QUERY_KEY = [
+  "platform-ops",
+] as const;
 export const PLATFORM_VENDOR_REQUIREMENTS_QUERY_KEY = [
   "admin",
   "platform-ops",
@@ -141,6 +144,14 @@ const operationMetadataSchema = {
   vendor_service_slug: vendorServiceSlugSchema,
   updated_at: z.string().nullable(),
   updated_by: z.string().nullable(),
+  vendor_service_id: z.string().min(1).nullable(),
+  pricing: z
+    .object({
+      billable: z.boolean(),
+      credits_per_call: z.string().min(1).nullable(),
+      metric: z.literal("requests"),
+    })
+    .strict(),
 };
 
 export const xSearchConfigSchema = z
@@ -212,6 +223,22 @@ export const callAndSayConfigSchema = callAndSayConfigResponseSchema.extend({
   call_from: e164Schema,
 });
 
+export const flightSearchConfigSchema = z
+  .object({
+    type: z.literal("flight_search"),
+    max_offers_cap: z
+      .number()
+      .int("Maximum offers must be an integer")
+      .min(1, "Maximum offers must be at least 1")
+      .max(50, "Maximum offers cannot exceed 50"),
+    max_searches_per_user_per_day: z
+      .number()
+      .int("Daily search limit must be an integer")
+      .min(1, "Daily search limit must be at least 1")
+      .max(4_294_967_295, "Daily search limit is too large"),
+  })
+  .strict();
+
 export const xSearchOperationSchema = z
   .object({
     op: z.literal("x_search"),
@@ -236,10 +263,19 @@ export const callAndSayOperationSchema = z
   })
   .strict();
 
+export const flightSearchOperationSchema = z
+  .object({
+    op: z.literal("flight_search"),
+    ...operationMetadataSchema,
+    config: flightSearchConfigSchema,
+  })
+  .strict();
+
 export const platformOperationSchema = z.discriminatedUnion("op", [
   xSearchOperationSchema,
   speakOperationSchema,
   callAndSayOperationSchema,
+  flightSearchOperationSchema,
 ]);
 
 export const platformOperationListSchema = z
@@ -274,6 +310,49 @@ export const callAndSayUpdateSchema = z
   })
   .strict();
 
+export const flightSearchUpdateSchema = z
+  .object({
+    ...updateMetadataSchema,
+    config: flightSearchConfigSchema,
+  })
+  .strict();
+
+export const platformOperationDiscoverySchema = z
+  .object({
+    op: z.enum(["x_search", "speak", "call_and_say", "flight_search"]),
+    display_name: z.string().min(1),
+    description: z.string().min(1),
+    vendor: z.string().min(1),
+    catalog_service_slug: z.string().min(1),
+    credential_source: z.enum(["platform", "own_connection"]),
+    own_connection: z
+      .object({
+        user_service_id: z.string().min(1),
+        slug: z.string().min(1),
+        label: z.string().min(1),
+        is_active: z.boolean(),
+        usable: z.boolean(),
+        reason: z.enum(["disabled", "node_routed", "unusable"]).nullable(),
+      })
+      .strict()
+      .nullable(),
+    pricing: z
+      .object({
+        billable: z.boolean(),
+        credits_per_call: z.string().min(1).nullable(),
+        metric: z.literal("requests"),
+      })
+      .strict(),
+    mcp_tool: z.string().min(1),
+  })
+  .strict();
+
+export const platformOperationDiscoveryListSchema = z
+  .object({
+    operations: z.array(platformOperationDiscoverySchema),
+  })
+  .strict();
+
 export type PlatformOperation = z.infer<typeof platformOperationSchema>;
 export type PlatformOperationList = z.infer<
   typeof platformOperationListSchema
@@ -281,14 +360,23 @@ export type PlatformOperationList = z.infer<
 export type XSearchOperation = z.infer<typeof xSearchOperationSchema>;
 export type SpeakOperation = z.infer<typeof speakOperationSchema>;
 export type CallAndSayOperation = z.infer<typeof callAndSayOperationSchema>;
+export type FlightSearchOperation = z.infer<typeof flightSearchOperationSchema>;
 export type XSearchUpdate = z.infer<typeof xSearchUpdateSchema>;
 export type SpeakUpdate = z.infer<typeof speakUpdateSchema>;
 export type CallAndSayUpdate = z.infer<typeof callAndSayUpdateSchema>;
+export type FlightSearchUpdate = z.infer<typeof flightSearchUpdateSchema>;
+export type PlatformOperationDiscovery = z.infer<
+  typeof platformOperationDiscoverySchema
+>;
+export type PlatformOperationDiscoveryList = z.infer<
+  typeof platformOperationDiscoveryListSchema
+>;
 
 export type UpdatePlatformOperationVariables =
   | { readonly op: "x_search"; readonly data: XSearchUpdate }
   | { readonly op: "speak"; readonly data: SpeakUpdate }
-  | { readonly op: "call_and_say"; readonly data: CallAndSayUpdate };
+  | { readonly op: "call_and_say"; readonly data: CallAndSayUpdate }
+  | { readonly op: "flight_search"; readonly data: FlightSearchUpdate };
 
 export type PlatformVendor = z.infer<typeof platformVendorSchema>;
 export type PlatformVendorRequirement = z.infer<

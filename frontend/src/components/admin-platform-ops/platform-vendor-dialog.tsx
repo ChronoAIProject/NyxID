@@ -42,6 +42,7 @@ const OPERATION_LABELS = {
   x_search: "X Search",
   speak: "Speak",
   call_and_say: "Call and Say",
+  flight_search: "Flight Search",
 } as const;
 
 function LockedField({
