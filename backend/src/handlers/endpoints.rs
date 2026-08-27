@@ -11,7 +11,7 @@ use crate::mw::auth::AuthUser;
 use crate::services::service_endpoint_service::{
     EndpointInput, EndpointUpdate, validate_request_content_type, validate_response_contract,
 };
-use crate::services::{openapi_parser, service_endpoint_service};
+use crate::services::{catalog_spec_sync, openapi_parser, service_endpoint_service};
 
 use super::services_helpers::{fetch_service, require_admin_or_creator, require_http_service};
 
@@ -196,6 +196,11 @@ pub async fn create_endpoint(
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    if catalog_spec_sync::is_platform_vendor_service(&service) {
+        return Err(AppError::BadRequest(
+            "Platform vendor rows cannot publish endpoint tools".to_string(),
+        ));
+    }
 
     validate_endpoint_name(&body.name)?;
     validate_method(&body.method)?;
@@ -248,6 +253,11 @@ pub async fn update_endpoint(
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    if catalog_spec_sync::is_platform_vendor_service(&service) {
+        return Err(AppError::BadRequest(
+            "Platform vendor rows cannot publish endpoint tools".to_string(),
+        ));
+    }
 
     if let Some(ref name) = body.name {
         validate_endpoint_name(name)?;
@@ -332,6 +342,11 @@ pub async fn discover_endpoints(
     let service = fetch_service(&state, &service_id).await?;
     require_http_service(&service)?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    if catalog_spec_sync::is_platform_vendor_service(&service) {
+        return Err(AppError::BadRequest(
+            "Platform vendor rows cannot publish endpoint tools".to_string(),
+        ));
+    }
 
     let api_spec_url = service.openapi_spec_url.ok_or_else(|| {
         AppError::BadRequest("Service has no openapi_spec_url configured".to_string())

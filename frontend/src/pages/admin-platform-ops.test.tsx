@@ -1,16 +1,77 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { PlatformOperationList } from "@/schemas/platform-ops";
+import type {
+  PlatformOperationList,
+  PlatformVendorRequirementList,
+} from "@/schemas/platform-ops";
 import { AdminPlatformOpsPage } from "./admin-platform-ops";
 
-const { mockMutateAsync, mockRefetch, mockToastError, mockToastSuccess } =
+const {
+  mockMutateAsync,
+  mockProvisionAsync,
+  mockRefetch,
+  mockToastError,
+  mockToastSuccess,
+} =
   vi.hoisted(() => ({
     mockMutateAsync: vi.fn(),
+    mockProvisionAsync: vi.fn(),
     mockRefetch: vi.fn(),
     mockToastError: vi.fn(),
     mockToastSuccess: vi.fn(),
   }));
+
+const vendorRequirements: PlatformVendorRequirementList = {
+  vendors: [
+    {
+      id: "template-twilio",
+      vendor: "twilio",
+      display_name: "Twilio",
+      operation: "call_and_say",
+      slug: "platform-twilio",
+      base_url: "https://api.twilio.com",
+      auth_method: "basic",
+      auth_key_name: null,
+      service_category: "internal",
+      visibility: "public",
+      credential_label: "Auth token",
+      credential_note: "Use the Twilio Auth Token.",
+      capability_summary: "Serves call_and_say.",
+      restriction_summary: "Does not expose general Twilio tools.",
+      is_active: true,
+      is_seeded: true,
+      existing_service: null,
+    },
+    {
+      id: "template-elevenlabs",
+      vendor: "elevenlabs",
+      display_name: "ElevenLabs",
+      operation: "speak",
+      slug: "platform-elevenlabs",
+      base_url: "https://api.elevenlabs.io",
+      auth_method: "header",
+      auth_key_name: "xi-api-key",
+      service_category: "internal",
+      visibility: "public",
+      credential_label: "API key",
+      credential_note: "Use a restricted ElevenLabs API key.",
+      capability_summary: "Serves speak.",
+      restriction_summary: "Does not expose voice cloning or vendor tools.",
+      is_active: true,
+      is_seeded: true,
+      existing_service: {
+        id: "existing-elevenlabs-id",
+        name: "Broken ElevenLabs",
+        auth_method: "header",
+        auth_key_name: "X-API-Key",
+        service_category: "internal",
+        visibility: "public",
+        is_active: true,
+      },
+    },
+  ],
+};
 
 const operations: PlatformOperationList = {
   operations: [
@@ -65,6 +126,16 @@ vi.mock("@/hooks/use-platform-ops", () => ({
     isPending: false,
     mutateAsync: mockMutateAsync,
   }),
+  usePlatformVendorRequirements: () => ({
+    data: vendorRequirements,
+    error: null,
+    isLoading: false,
+    refetch: mockRefetch,
+  }),
+  useProvisionPlatformVendor: () => ({
+    isPending: false,
+    mutateAsync: mockProvisionAsync,
+  }),
 }));
 
 vi.mock("sonner", () => ({
@@ -82,6 +153,7 @@ describe("AdminPlatformOpsPage", () => {
         updated_by: "admin-1",
       }),
     );
+    mockProvisionAsync.mockResolvedValue({ id: "replacement-id" });
   });
 
   it("renders one typed form for each fixed operation", () => {
@@ -139,5 +211,52 @@ describe("AdminPlatformOpsPage", () => {
       screen.getByRole("button", { name: "Remove voice ID voice-b" }),
     ).toBeInTheDocument();
     expect(screen.queryByRole("textbox", { name: /json/i })).toBeNull();
+  });
+
+  it("prefills locked vendor fields and replaces a broken row in one action", async () => {
+    render(<AdminPlatformOpsPage />);
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("button", { name: "Add platform vendor" }),
+    );
+    await user.click(screen.getByRole("combobox", { name: "Vendor" }));
+    await user.click(screen.getByRole("option", { name: "ElevenLabs" }));
+
+    expect(screen.getByLabelText("Slug")).toHaveValue(
+      "platform-elevenlabs",
+    );
+    expect(screen.getByLabelText("Slug")).toBeDisabled();
+    expect(screen.getByLabelText("Base URL")).toHaveValue(
+      "https://api.elevenlabs.io",
+    );
+    expect(screen.getByLabelText("Auth method")).toHaveValue("header");
+    expect(screen.getByLabelText("Auth key name")).toHaveValue("xi-api-key");
+    expect(screen.getByText("Serves speak.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Does not expose voice cloning or vendor tools."),
+    ).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("API key"), "write-only-key");
+    await user.type(
+      screen.getByLabelText("Operator note (optional)"),
+      "Restricted to TTS",
+    );
+    await user.click(
+      screen.getByRole("button", { name: "Replace vendor row" }),
+    );
+
+    await waitFor(() =>
+      expect(mockProvisionAsync).toHaveBeenCalledWith({
+        requirement: vendorRequirements.vendors[1],
+        data: {
+          vendor: "elevenlabs",
+          credential: "write-only-key",
+          note: "Restricted to TTS",
+        },
+        replaceServiceId: "existing-elevenlabs-id",
+      }),
+    );
+    expect(screen.queryByDisplayValue("write-only-key")).toBeNull();
   });
 });

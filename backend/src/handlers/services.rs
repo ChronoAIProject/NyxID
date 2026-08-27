@@ -967,7 +967,13 @@ pub async fn create_service(
             (enc, None)
         };
 
-        let docs_metadata = api_docs_service::discover_service_docs(base_url, None, None).await;
+        let docs_metadata = api_docs_service::discover_service_docs_for_category(
+            &service_category,
+            base_url,
+            None,
+            None,
+        )
+        .await;
 
         (
             base_url.to_string(),
@@ -1205,11 +1211,7 @@ pub async fn create_service(
     // Auto-run endpoint discovery when the new service already carries a
     // spec URL so MCP tools and workflow operations appear without a
     // manual discover-endpoints call (#1290 follow-up).
-    if new_service
-        .openapi_spec_url
-        .as_deref()
-        .is_some_and(|url| !url.is_empty())
-    {
+    if catalog_spec_sync::should_auto_sync_service_endpoints(&new_service) {
         catalog_spec_sync::spawn_spec_endpoint_sync(state.db.clone(), id.clone());
     }
 
@@ -1382,6 +1384,12 @@ pub async fn update_service(
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    let is_platform_vendor = catalog_spec_sync::is_platform_vendor_service(&service);
+    if is_platform_vendor && (body.openapi_spec_url.is_some() || body.asyncapi_spec_url.is_some()) {
+        return Err(AppError::BadRequest(
+            "Platform vendor rows cannot configure OpenAPI or AsyncAPI specs".to_string(),
+        ));
+    }
     let mut platform_price_changed = false;
     if let Some(billing) = body.billing.as_mut() {
         let current_pricing = service
@@ -1611,14 +1619,18 @@ pub async fn update_service(
             } else {
                 service.asyncapi_spec_url.clone()
             };
-            http_docs_refresh = Some(
-                api_docs_service::discover_service_docs(
-                    docs_base_url,
-                    explicit_openapi,
-                    explicit_asyncapi,
+            http_docs_refresh = if is_platform_vendor {
+                None
+            } else {
+                Some(
+                    api_docs_service::discover_service_docs(
+                        docs_base_url,
+                        explicit_openapi,
+                        explicit_asyncapi,
+                    )
+                    .await,
                 )
-                .await,
-            );
+            };
         }
         "ssh" => {
             let has_http_only_updates = body.base_url.is_some()
@@ -2120,11 +2132,7 @@ pub async fn update_service(
     // so setting openapi_spec_url is enough to surface MCP tools and
     // workflow operations without a manual discover-endpoints call
     // (#1290 follow-up).
-    if updated
-        .openapi_spec_url
-        .as_deref()
-        .is_some_and(|url| !url.is_empty())
-    {
+    if catalog_spec_sync::should_auto_sync_service_endpoints(&updated) {
         catalog_spec_sync::spawn_spec_endpoint_sync(state.db.clone(), service_id.clone());
     }
 

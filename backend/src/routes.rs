@@ -424,7 +424,26 @@ fn oauth_public_cors() -> CorsLayer {
 /// The caller must attach separate CORS layers to each before merging.
 /// Public OAuth endpoints allow any origin (per RFC 9207) while private
 /// API endpoints restrict origin to FRONTEND_URL.
+///
+/// The no-state builder remains for integration tests and compatibility
+/// callers that attach application state themselves; production uses
+/// `build_router_with_state` so the platform-operations feature gate can be
+/// installed at the router boundary.
+#[allow(dead_code)]
 pub fn build_router() -> (Router<AppState>, Router<AppState>) {
+    build_router_internal(None)
+}
+
+/// Build the production router with state-aware middleware attached to the
+/// caller-facing platform-operations nest. Admin platform-ops routes remain
+/// deliberately ungated so operators can stage templates and configuration.
+pub fn build_router_with_state(state: AppState) -> (Router<AppState>, Router<AppState>) {
+    build_router_internal(Some(state))
+}
+
+fn build_router_internal(
+    platform_gate_state: Option<AppState>,
+) -> (Router<AppState>, Router<AppState>) {
     let mfa_routes = Router::new()
         .route("/setup", post(handlers::mfa::setup))
         .route("/confirm", post(handlers::mfa::confirm))
@@ -771,6 +790,20 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
         .route(
             "/platform-ops",
             get(handlers::admin_platform_ops::list_platform_operations),
+        )
+        .route(
+            "/platform-ops/vendor-requirements",
+            get(handlers::admin_platform_ops::get_vendor_requirements),
+        )
+        .route(
+            "/platform-ops/vendor-templates",
+            get(handlers::admin_platform_ops::list_vendor_templates)
+                .post(handlers::admin_platform_ops::create_vendor_template),
+        )
+        .route(
+            "/platform-ops/vendor-templates/{template_id}",
+            put(handlers::admin_platform_ops::update_vendor_template)
+                .delete(handlers::admin_platform_ops::disable_vendor_template),
         )
         .route(
             "/platform-ops/{op}",
@@ -1565,10 +1598,20 @@ pub fn build_router() -> (Router<AppState>, Router<AppState>) {
     let platform_operation_routes = Router::new()
         .route("/x-search", post(handlers::platform_ops::x_search))
         .route("/speak", post(handlers::platform_ops::speak))
-        .route("/call-and-say", post(handlers::platform_ops::call_and_say))
-        .layer(middleware::from_fn(reject_delegated_tokens))
-        .layer(middleware::from_fn(reject_service_account_tokens))
-        .layer(middleware::from_fn(reject_relay_tokens));
+        .route("/call-and-say", post(handlers::platform_ops::call_and_say));
+    let platform_operation_routes = match platform_gate_state {
+        Some(state) => platform_operation_routes.layer(middleware::from_fn_with_state(
+            state,
+            handlers::platform_ops::platform_services_feature_gate,
+        )),
+        None => platform_operation_routes,
+    }
+    // Every current and future caller-facing operation inherits the flag gate
+    // at the nest boundary. Admin routes are mounted separately below and
+    // intentionally stay ungated for staged provisioning.
+    .layer(middleware::from_fn(reject_delegated_tokens))
+    .layer(middleware::from_fn(reject_service_account_tokens))
+    .layer(middleware::from_fn(reject_relay_tokens));
 
     let api_v1_platform_operations = Router::new().nest("/platform-ops", platform_operation_routes);
 

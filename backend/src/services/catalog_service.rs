@@ -17,7 +17,7 @@ use crate::models::service_provider_requirement::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-use crate::services::{org_service, role_service};
+use crate::services::{catalog_spec_sync, org_service, role_service};
 
 /// A catalog entry combining DownstreamService + ProviderConfig info.
 pub struct CatalogEntry {
@@ -308,6 +308,11 @@ pub async fn list_catalog(
                     ],
                 },
                 legacy_service_category_filter(&["connection", "internal"]),
+                {
+                    "$nor": [
+                        { "service_category": "internal", "slug": { "$regex": "^platform-" } },
+                    ],
+                },
                 visibility_filter(user_id),
             ],
         },
@@ -326,6 +331,11 @@ pub async fn list_catalog_all(
         "is_active": true,
         "$and": [
             legacy_service_category_filter(&["connection", "internal"]),
+            {
+                "$nor": [
+                    { "service_category": "internal", "slug": { "$regex": "^platform-" } },
+                ],
+            },
             visibility_filter(user_id),
         ],
     };
@@ -452,6 +462,10 @@ pub async fn get_downstream_service_by_slug(
         .await?
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
 
+    if catalog_spec_sync::is_platform_vendor_service(&svc) {
+        return Err(AppError::NotFound("Catalog entry not found".to_string()));
+    }
+
     enforce_catalog_read_access(db, user_id, &svc).await?;
 
     Ok(svc)
@@ -552,6 +566,10 @@ pub async fn get_catalog_entry(
         .find_one(doc! { "slug": slug, "is_active": true })
         .await?
         .ok_or_else(|| AppError::NotFound("Catalog entry not found".to_string()))?;
+
+    if catalog_spec_sync::is_platform_vendor_service(&svc) {
+        return Err(AppError::NotFound("Catalog entry not found".to_string()));
+    }
 
     enforce_catalog_read_access(db, user_id, &svc).await?;
 

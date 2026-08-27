@@ -73,6 +73,9 @@ pub enum AppError {
     #[error("Platform operation vendor is unavailable")]
     PlatformOperationUnavailable,
 
+    #[error("{0}")]
+    PlatformVendorProvisioningInvalid(String),
+
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
@@ -531,6 +534,7 @@ impl AppError {
             Self::BadRequest(_) | Self::ValidationError(_) => StatusCode::BAD_REQUEST,
             Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::PlatformOperationUnavailable => StatusCode::BAD_GATEWAY,
+            Self::PlatformVendorProvisioningInvalid(_) => StatusCode::BAD_REQUEST,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
@@ -683,6 +687,7 @@ impl AppError {
             Self::BadRequest(_) => 1000,
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::PlatformOperationUnavailable => 11800,
+            Self::PlatformVendorProvisioningInvalid(_) => 11801,
             Self::Unauthorized(_) => 1001,
             Self::Forbidden(_) => 1002,
             Self::NotFound(_) => 1003,
@@ -875,6 +880,7 @@ impl AppError {
             Self::BadRequest(_) => "bad_request",
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::PlatformOperationUnavailable => "platform_operation_unavailable",
+            Self::PlatformVendorProvisioningInvalid(_) => "platform_vendor_provisioning_invalid",
             Self::Unauthorized(_) => "unauthorized",
             Self::Forbidden(_) => "forbidden",
             Self::NotFound(_) => "not_found",

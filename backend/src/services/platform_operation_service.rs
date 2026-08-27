@@ -10,6 +10,9 @@ use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
 use crate::models::platform_op_usage::{COLLECTION_NAME as PLATFORM_OP_USAGE, PlatformOpUsage};
 use crate::models::platform_operation::{
     COLLECTION_NAME as PLATFORM_OPERATIONS, CallAndSayConfig, PlatformOperation,
@@ -33,6 +36,132 @@ pub const PLATFORM_OPERATION_NAMES: [PlatformOperationName; 3] = [
     PlatformOperationName::Speak,
     PlatformOperationName::CallAndSay,
 ];
+
+/// Runtime-enforced operation contract. Keep this registry code-owned: admin
+/// templates are provisioning metadata and must never be able to weaken these
+/// checks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlatformOperationVendorContract {
+    pub operation: PlatformOperationName,
+    pub slug: &'static str,
+    pub base_url: &'static str,
+    pub auth_method: &'static str,
+    pub auth_key_name: Option<&'static str>,
+}
+
+pub const PLATFORM_OPERATION_VENDOR_CONTRACTS: [PlatformOperationVendorContract; 3] = [
+    PlatformOperationVendorContract {
+        operation: PlatformOperationName::CallAndSay,
+        slug: CALL_AND_SAY_VENDOR_SLUG,
+        base_url: "https://api.twilio.com",
+        auth_method: "basic",
+        auth_key_name: None,
+    },
+    PlatformOperationVendorContract {
+        operation: PlatformOperationName::Speak,
+        slug: SPEAK_VENDOR_SLUG,
+        base_url: "https://api.elevenlabs.io",
+        auth_method: "header",
+        auth_key_name: Some("xi-api-key"),
+    },
+    PlatformOperationVendorContract {
+        operation: PlatformOperationName::XSearch,
+        slug: X_SEARCH_VENDOR_SLUG,
+        base_url: "https://api.x.com",
+        auth_method: "bearer",
+        auth_key_name: None,
+    },
+];
+
+/// Seed data for the admin-managed template collection. Duffel deliberately
+/// has no operation binding yet; a future operation adds a code contract and
+/// sets this row's `operation` to that operation name before it can be bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeededPlatformVendorTemplate {
+    pub vendor: &'static str,
+    pub display_name: &'static str,
+    pub slug: &'static str,
+    pub base_url: &'static str,
+    pub auth_method: &'static str,
+    pub auth_key_name: Option<&'static str>,
+    pub credential_label: &'static str,
+    pub credential_note: &'static str,
+    pub operation: Option<&'static str>,
+    pub capability_summary: &'static str,
+    pub restriction_summary: &'static str,
+}
+
+pub const DEFAULT_PLATFORM_VENDOR_TEMPLATES: [SeededPlatformVendorTemplate; 4] = [
+    SeededPlatformVendorTemplate {
+        vendor: "twilio",
+        display_name: "Twilio",
+        slug: CALL_AND_SAY_VENDOR_SLUG,
+        base_url: "https://api.twilio.com",
+        auth_method: "basic",
+        auth_key_name: None,
+        credential_label: "Auth token",
+        credential_note: "Use the Auth Token paired with the Account SID configured on Call and Say.",
+        operation: Some("call_and_say"),
+        capability_summary: "Places server-constructed voice calls through call_and_say.",
+        restriction_summary: "Does not expose Twilio's general API or import its OpenAPI operations.",
+    },
+    SeededPlatformVendorTemplate {
+        vendor: "elevenlabs",
+        display_name: "ElevenLabs",
+        slug: SPEAK_VENDOR_SLUG,
+        base_url: "https://api.elevenlabs.io",
+        auth_method: "header",
+        auth_key_name: Some("xi-api-key"),
+        credential_label: "API key",
+        credential_note: "Use a restricted ElevenLabs API key with text-to-speech access.",
+        operation: Some("speak"),
+        capability_summary: "Synthesizes speech through the server-constructed speak operation.",
+        restriction_summary: "Does not expose voice cloning or import ElevenLabs vendor tools.",
+    },
+    SeededPlatformVendorTemplate {
+        vendor: "x",
+        display_name: "X",
+        slug: X_SEARCH_VENDOR_SLUG,
+        base_url: "https://api.x.com",
+        auth_method: "bearer",
+        auth_key_name: None,
+        credential_label: "Bearer token",
+        credential_note: "Use an app bearer token with read access to recent search.",
+        operation: Some("x_search"),
+        capability_summary: "Searches recent posts through the bounded x_search operation.",
+        restriction_summary: "Does not publish, modify accounts, or expose X's general API.",
+    },
+    SeededPlatformVendorTemplate {
+        vendor: "duffel",
+        display_name: "Duffel",
+        slug: "platform-duffel",
+        base_url: "https://api.duffel.com",
+        auth_method: "bearer",
+        auth_key_name: None,
+        credential_label: "Access token",
+        credential_note: "Store a server-side Duffel access token for a future platform operation.",
+        operation: None,
+        capability_summary: "Pre-provisions the credential row; no Duffel platform operation is shipped yet.",
+        restriction_summary: "Does not expose Duffel endpoints or publish any executable vendor tools.",
+    },
+];
+
+pub fn vendor_requirement_for_operation(
+    op: PlatformOperationName,
+) -> &'static PlatformOperationVendorContract {
+    PLATFORM_OPERATION_VENDOR_CONTRACTS
+        .iter()
+        .find(|contract| contract.operation == op)
+        .expect("every shipped platform operation must bind one vendor contract")
+}
+
+pub fn vendor_contract_for_operation_name(
+    name: &str,
+) -> Option<&'static PlatformOperationVendorContract> {
+    PLATFORM_OPERATION_VENDOR_CONTRACTS
+        .iter()
+        .find(|contract| operation_name(contract.operation) == name)
+}
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -128,11 +257,7 @@ pub fn default_operation_config(op: PlatformOperationName) -> PlatformOperationC
 }
 
 pub fn default_vendor_service_slug(op: PlatformOperationName) -> &'static str {
-    match op {
-        PlatformOperationName::XSearch => X_SEARCH_VENDOR_SLUG,
-        PlatformOperationName::Speak => SPEAK_VENDOR_SLUG,
-        PlatformOperationName::CallAndSay => CALL_AND_SAY_VENDOR_SLUG,
-    }
+    vendor_requirement_for_operation(op).slug
 }
 
 pub fn validate_operation_config(
@@ -509,6 +634,7 @@ pub async fn list_enabled_operations(db: &mongodb::Database) -> AppResult<Vec<Pl
 
 pub async fn upsert_operation(
     db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
     op: PlatformOperationName,
     enabled: bool,
     vendor_service_slug: String,
@@ -516,6 +642,7 @@ pub async fn upsert_operation(
     updated_by: &str,
 ) -> AppResult<PlatformOperation> {
     validate_operation_config(op, &vendor_service_slug, &config)?;
+    validate_vendor_binding(db, encryption_keys, op, &vendor_service_slug).await?;
 
     let config = bson::to_bson(&config).map_err(|error| {
         AppError::Internal(format!(
@@ -564,8 +691,6 @@ pub async fn execute_x_search(
         encryption_keys,
         PlatformOperationName::XSearch,
         &operation.vendor_service_slug,
-        "bearer",
-        None,
     )
     .await?;
     let url = format!(
@@ -599,8 +724,6 @@ pub async fn execute_speak(
         encryption_keys,
         PlatformOperationName::Speak,
         &operation.vendor_service_slug,
-        "header",
-        Some("xi-api-key"),
     )
     .await?;
     let url = format!(
@@ -664,8 +787,6 @@ pub async fn execute_call_and_say(
         encryption_keys,
         PlatformOperationName::CallAndSay,
         &operation.vendor_service_slug,
-        "basic",
-        None,
     )
     .await?;
 
@@ -708,28 +829,16 @@ async fn resolve_vendor_target(
     encryption_keys: &EncryptionKeys,
     op: PlatformOperationName,
     slug: &str,
-    expected_auth_method: &str,
-    expected_auth_key_name: Option<&str>,
 ) -> AppResult<VendorTarget> {
+    let requirement = vendor_requirement_for_operation(op);
     let service = assistant_service::resolve_admin_service_by_slug(db, slug)
         .await
+        .map_err(|error| vendor_configuration_failed(op, error))?;
+    validate_vendor_binding_shape(requirement, slug, Some(&service), false)
         .map_err(|error| vendor_configuration_failed(op, error))?;
     let authorized = proxy_service::authorize_master_credential_server_chosen(db, &service)
         .await
         .map_err(|error| vendor_configuration_failed(op, error))?;
-    if service.auth_method != expected_auth_method
-        || expected_auth_key_name
-            .is_some_and(|expected| !service.auth_key_name.eq_ignore_ascii_case(expected))
-    {
-        tracing::error!(
-            op = operation_name(op),
-            service_slug = %service.slug,
-            auth_method = %service.auth_method,
-            auth_key_name = %service.auth_key_name,
-            "Platform operation vendor row has an invalid authentication shape"
-        );
-        return Err(AppError::PlatformOperationUnavailable);
-    }
     let decrypted = Zeroizing::new(
         authorized
             .decrypt(encryption_keys)
@@ -753,6 +862,139 @@ async fn resolve_vendor_target(
         auth_key_name: service.auth_key_name,
         credential,
     })
+}
+
+async fn validate_vendor_binding(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    op: PlatformOperationName,
+    slug: &str,
+) -> AppResult<()> {
+    let collection = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+    let service = match collection
+        .find_one(doc! { "slug": slug, "is_active": true })
+        .await?
+    {
+        Some(service) => Some(service),
+        None => collection.find_one(doc! { "slug": slug }).await?,
+    };
+    let requirement = vendor_requirement_for_operation(op);
+    validate_vendor_binding_shape(requirement, slug, service.as_ref(), true)?;
+    let service = service.expect("validated vendor binding must have a service row");
+
+    if service.credential_encrypted.is_empty() {
+        return validate_vendor_credential(requirement, &service, b"");
+    }
+    let credential = Zeroizing::new(
+        encryption_keys
+            .decrypt(&service.credential_encrypted)
+            .await
+            .map_err(|_| {
+                AppError::PlatformVendorProvisioningInvalid(format!(
+                    "{} requires a readable credential; row '{}' cannot be decrypted and must be replaced",
+                    operation_name(op), service.slug
+                ))
+            })?,
+    );
+    validate_vendor_credential(requirement, &service, credential.as_slice())
+}
+
+/// `enforce_base_url` is true only at provisioning time. The canonical base URL is a
+/// template default and a bind-time guard against typos -- it is deliberately NOT a
+/// runtime gate, so an operator may legitimately point a vendor row at a regional
+/// endpoint, an egress proxy, or a test double. The security-bearing checks (auth
+/// shape, category, visibility, credential) are enforced on every path.
+fn validate_vendor_binding_shape(
+    requirement: &PlatformOperationVendorContract,
+    slug: &str,
+    service: Option<&DownstreamService>,
+    enforce_base_url: bool,
+) -> AppResult<()> {
+    let op = operation_name(requirement.operation);
+    let Some(service) = service else {
+        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+            "{op} requires vendor row '{slug}'; no row with that slug exists"
+        )));
+    };
+    if slug != requirement.slug {
+        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+            "{op} requires canonical vendor_service_slug '{}'; requested row slug is '{slug}'",
+            requirement.slug
+        )));
+    }
+    if enforce_base_url && service.base_url.trim_end_matches('/') != requirement.base_url {
+        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+            "{op} requires base_url '{}'; row '{}' has '{}'",
+            requirement.base_url, service.slug, service.base_url
+        )));
+    }
+    if !service.is_active {
+        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+            "{op} requires an active vendor row; row '{}' is inactive",
+            service.slug
+        )));
+    }
+    if service.auth_method != requirement.auth_method {
+        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+            "{op} requires auth_method '{}'; row '{}' has '{}'",
+            requirement.auth_method, service.slug, service.auth_method
+        )));
+    }
+    if let Some(expected) = requirement.auth_key_name
+        && !service.auth_key_name.eq_ignore_ascii_case(expected)
+    {
+        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+            "{op} requires auth_key_name '{expected}'; row '{}' has '{}'",
+            service.slug, service.auth_key_name
+        )));
+    }
+    if service.service_category != "internal" {
+        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+            "{op} requires service_category 'internal'; row '{}' has '{}'",
+            service.slug, service.service_category
+        )));
+    }
+    if service.visibility != "public" {
+        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+            "{op} requires visibility 'public'; row '{}' has '{}'",
+            service.slug, service.visibility
+        )));
+    }
+    if service.provider_config_id.is_some() {
+        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+            "{op} requires provider_config_id to be absent; row '{}' has '{}'",
+            service.slug,
+            service.provider_config_id.as_deref().unwrap_or_default()
+        )));
+    }
+    if service.service_type != "http" {
+        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+            "{op} requires service_type 'http'; row '{}' has '{}'",
+            service.slug, service.service_type
+        )));
+    }
+    if service.requires_user_credential {
+        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+            "{op} requires requires_user_credential false; row '{}' has true",
+            service.slug
+        )));
+    }
+    Ok(())
+}
+
+fn validate_vendor_credential(
+    requirement: &PlatformOperationVendorContract,
+    service: &DownstreamService,
+    credential: &[u8],
+) -> AppResult<()> {
+    if credential.is_empty() {
+        let op = operation_name(requirement.operation);
+        return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+            "{op} requires a non-empty credential; row '{}' has an empty credential",
+            service.slug
+        )));
+    }
+    Ok(())
 }
 
 fn vendor_configuration_failed(op: PlatformOperationName, error: AppError) -> AppError {
@@ -901,6 +1143,7 @@ fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::downstream_service::test_helpers::dummy_service;
 
     fn speak_config() -> SpeakConfig {
         SpeakConfig {
@@ -919,6 +1162,150 @@ mod tests {
             account_sid: format!("AC{}", "1".repeat(32)),
             call_from: "+16505550100".to_string(),
         }
+    }
+
+    fn valid_speak_vendor_service() -> crate::models::downstream_service::DownstreamService {
+        let mut service = dummy_service();
+        service.slug = SPEAK_VENDOR_SLUG.to_string();
+        service.base_url = "https://api.elevenlabs.io".to_string();
+        service.auth_method = "header".to_string();
+        service.auth_key_name = "xi-api-key".to_string();
+        service.service_category = "internal".to_string();
+        service.visibility = "public".to_string();
+        service.requires_user_credential = false;
+        service.credential_encrypted = vec![1];
+        service
+    }
+
+    fn provisioning_message(error: AppError) -> String {
+        let AppError::PlatformVendorProvisioningInvalid(message) = error else {
+            panic!("expected a platform vendor provisioning error, got {error:?}");
+        };
+        message
+    }
+
+    #[test]
+    fn operation_contracts_and_seeded_templates_are_consistent() {
+        assert_eq!(PLATFORM_OPERATION_VENDOR_CONTRACTS.len(), 3);
+        for contract in PLATFORM_OPERATION_VENDOR_CONTRACTS {
+            assert_eq!(
+                vendor_requirement_for_operation(contract.operation),
+                &contract
+            );
+            assert_eq!(
+                default_vendor_service_slug(contract.operation),
+                contract.slug
+            );
+        }
+
+        for template in DEFAULT_PLATFORM_VENDOR_TEMPLATES {
+            let Some(operation) = template.operation else {
+                // Duffel is intentionally a credential template until a code
+                // operation is shipped; there is no contract to cross-check.
+                continue;
+            };
+            let operation = parse_operation_name(operation).expect("seeded operation name");
+            let contract = vendor_requirement_for_operation(operation);
+            assert_eq!(template.auth_method, contract.auth_method);
+            assert_eq!(template.auth_key_name, contract.auth_key_name);
+        }
+    }
+
+    #[test]
+    fn bind_validation_names_every_vendor_row_mismatch() {
+        let requirement = vendor_requirement_for_operation(PlatformOperationName::Speak);
+        let valid = valid_speak_vendor_service();
+
+        let cases: Vec<(
+            &str,
+            &str,
+            Option<crate::models::downstream_service::DownstreamService>,
+        )> = vec![
+            (
+                "speak requires canonical vendor_service_slug 'platform-elevenlabs'; requested row slug is 'platform-other'",
+                "platform-other",
+                Some(crate::models::downstream_service::DownstreamService {
+                    slug: "platform-other".to_string(),
+                    ..valid.clone()
+                }),
+            ),
+            (
+                "speak requires base_url 'https://api.elevenlabs.io'; row 'platform-elevenlabs' has 'https://wrong.example'",
+                SPEAK_VENDOR_SLUG,
+                Some(crate::models::downstream_service::DownstreamService {
+                    base_url: "https://wrong.example".to_string(),
+                    ..valid.clone()
+                }),
+            ),
+            (
+                "speak requires vendor row 'platform-elevenlabs'; no row with that slug exists",
+                SPEAK_VENDOR_SLUG,
+                None,
+            ),
+            (
+                "speak requires an active vendor row; row 'platform-elevenlabs' is inactive",
+                SPEAK_VENDOR_SLUG,
+                Some(crate::models::downstream_service::DownstreamService {
+                    is_active: false,
+                    ..valid.clone()
+                }),
+            ),
+            (
+                "speak requires auth_method 'header'; row 'platform-elevenlabs' has 'bearer'",
+                SPEAK_VENDOR_SLUG,
+                Some(crate::models::downstream_service::DownstreamService {
+                    auth_method: "bearer".to_string(),
+                    ..valid.clone()
+                }),
+            ),
+            (
+                "speak requires auth_key_name 'xi-api-key'; row 'platform-elevenlabs' has 'X-API-Key'",
+                SPEAK_VENDOR_SLUG,
+                Some(crate::models::downstream_service::DownstreamService {
+                    auth_key_name: "X-API-Key".to_string(),
+                    ..valid.clone()
+                }),
+            ),
+            (
+                "speak requires service_category 'internal'; row 'platform-elevenlabs' has 'connection'",
+                SPEAK_VENDOR_SLUG,
+                Some(crate::models::downstream_service::DownstreamService {
+                    service_category: "connection".to_string(),
+                    ..valid.clone()
+                }),
+            ),
+            (
+                "speak requires visibility 'public'; row 'platform-elevenlabs' has 'private'",
+                SPEAK_VENDOR_SLUG,
+                Some(crate::models::downstream_service::DownstreamService {
+                    visibility: "private".to_string(),
+                    ..valid.clone()
+                }),
+            ),
+            (
+                "speak requires provider_config_id to be absent; row 'platform-elevenlabs' has 'provider-1'",
+                SPEAK_VENDOR_SLUG,
+                Some(crate::models::downstream_service::DownstreamService {
+                    provider_config_id: Some("provider-1".to_string()),
+                    ..valid.clone()
+                }),
+            ),
+        ];
+
+        for (expected, slug, service) in cases {
+            let error = validate_vendor_binding_shape(requirement, slug, service.as_ref(), true)
+                .expect_err("mismatched vendor row must be rejected");
+            assert_eq!(provisioning_message(error), expected);
+        }
+
+        validate_vendor_binding_shape(requirement, SPEAK_VENDOR_SLUG, Some(&valid), true)
+            .expect("valid vendor row shape");
+        let error = validate_vendor_credential(requirement, &valid, b"")
+            .expect_err("empty credential must be rejected");
+        assert_eq!(
+            provisioning_message(error),
+            "speak requires a non-empty credential; row 'platform-elevenlabs' has an empty credential"
+        );
     }
 
     #[tokio::test]

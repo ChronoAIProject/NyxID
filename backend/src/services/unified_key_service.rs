@@ -24,8 +24,9 @@ use crate::models::user_service::{AUTO_PROVISION_SOURCE, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::services::{
     audit_service::{self, AuditActor},
-    node_service, oauth_revocation, ssh_service, user_api_key_service, user_credentials_service,
-    user_endpoint_service, user_service_service, user_token_service, ws_frame_injector,
+    catalog_spec_sync, node_service, oauth_revocation, ssh_service, user_api_key_service,
+    user_credentials_service, user_endpoint_service, user_service_service, user_token_service,
+    ws_frame_injector,
 };
 
 const MAX_SERVICE_SLUG_LEN: usize = 80;
@@ -820,6 +821,12 @@ async fn create_key_inner(
             .find_one(doc! { "slug": slug, "is_active": true })
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Catalog service '{slug}' not found")))?;
+
+        if catalog_spec_sync::is_platform_vendor_service(&svc) {
+            return Err(AppError::NotFound(format!(
+                "Catalog service '{slug}' not found"
+            )));
+        }
 
         let is_ssh = svc.service_type == "ssh";
         let provider = if let Some(ref pid) = svc.provider_config_id {
