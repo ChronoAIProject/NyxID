@@ -352,7 +352,7 @@ pub async fn fail(
         return Ok(());
     };
 
-    reservation::release_unforwarded_rows(
+    reservation::release_failed_rows(
         db,
         &ctx.billing_request_id,
         UsageStatus::Failed,
@@ -1110,55 +1110,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fail_releases_only_never_forwarded_wallet_hold() {
+    async fn fail_releases_wallet_holds_before_and_after_forwarding() {
         let Some(db) = connect_test_database("billing_fail_releases_hold").await else {
             return;
         };
         create_usage_transaction_index(&db).await;
-        let owner_id = "owner-fail-release";
-        insert_wallet(&db, owner_id, 10, 0).await;
 
-        let ctx = platform_context("billing-wallet-fail", owner_id);
-        let reservation = BillingReservation {
-            owner_id: owner_id.to_string(),
-            wallet_id: "wallet-owner-fail-release".to_string(),
-            total_reserved_credits: 4,
-            layers: vec![crate::services::billing::reservation::LayerReservation {
-                layer: BillingLayer::Platform,
-                estimated_quantity: 1,
-                credits_per_unit_micros: 4_000_000,
-                reserved_credits: 4,
-                allowance_reservations: Vec::new(),
-                grant_reservations: Vec::new(),
-            }],
-        };
-        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 4)
-            .await
-            .expect("reserve")
-            .expect("reserved");
+        for forwarded in [false, true] {
+            let suffix = if forwarded { "forwarded" } else { "reserved" };
+            let owner_id = format!("owner-fail-release-{suffix}");
+            let request_id = format!("billing-wallet-fail-{suffix}");
+            insert_wallet(&db, &owner_id, 10, 0).await;
 
-        let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
-        super::fail(&db, &metered, "before send")
-            .await
-            .expect("fail");
+            let ctx = platform_context(&request_id, &owner_id);
+            let reservation = BillingReservation {
+                owner_id: owner_id.clone(),
+                wallet_id: format!("wallet-{owner_id}"),
+                total_reserved_credits: 4,
+                layers: vec![crate::services::billing::reservation::LayerReservation {
+                    layer: BillingLayer::Platform,
+                    estimated_quantity: 1,
+                    credits_per_unit_micros: 4_000_000,
+                    reserved_credits: 4,
+                    allowance_reservations: Vec::new(),
+                    grant_reservations: Vec::new(),
+                }],
+            };
+            crate::services::billing::reservation::try_reserve_prepaid(&db, &owner_id, 4)
+                .await
+                .expect("reserve")
+                .expect("reserved");
 
-        let wallet = db
-            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
-            .find_one(doc! { "owner_id": owner_id })
-            .await
-            .expect("find wallet")
-            .expect("wallet exists");
-        let row = db
-            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
-            .find_one(doc! { "billing_request_id": "billing-wallet-fail" })
-            .await
-            .expect("find row")
-            .expect("row exists");
+            let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
+            if forwarded {
+                mark_forwarded(&db, &metered).await.expect("mark forwarded");
+            }
+            super::fail(&db, &metered, "vendor request failed")
+                .await
+                .expect("fail");
 
-        assert_eq!(wallet.reserved_credits, 0);
-        assert_eq!(wallet.pending_lago_debits, 0);
-        assert_eq!(row.status, UsageStatus::Failed);
-        assert!(row.released);
+            let wallet = db
+                .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+                .find_one(doc! { "owner_id": &owner_id })
+                .await
+                .expect("find wallet")
+                .expect("wallet exists");
+            let row = db
+                .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+                .find_one(doc! { "billing_request_id": &request_id })
+                .await
+                .expect("find row")
+                .expect("row exists");
+
+            assert_eq!(wallet.reserved_credits, 0);
+            assert_eq!(wallet.pending_lago_debits, 0);
+            assert_eq!(row.status, UsageStatus::Failed);
+            assert_eq!(row.forwarded, forwarded);
+            assert_eq!(row.last_error.as_deref(), Some("vendor request failed"));
+            assert!(row.released);
+        }
     }
 
     /// ChronoAIProject/NyxID#1023 — the settle path and the reconciler's
