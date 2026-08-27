@@ -276,9 +276,22 @@ fn actor_addressed_policy_required() -> bool {
 }
 
 fn validate_actor_addressed_master_credential_policy(service: &DownstreamService) -> AppResult<()> {
-    // A row holding a platform credential must state what it may do. Absent
-    // policy is deny, not passthrough (V1_SPEC item 2). Present-but-empty
-    // policy still resolves here and denies at the operation layer.
+    if service
+        .proxy_operation_policy
+        .as_ref()
+        .is_some_and(|policy| policy.rules.is_empty())
+    {
+        tracing::warn!(
+            service_id = %service.id,
+            service_slug = %service.slug,
+            reason = "master_credential_actor_addressed_deny_all",
+            "Catalog master credential authorization denied"
+        );
+        return Err(AppError::NotFound("Service not found".to_string()));
+    }
+    // Non-empty policies continue to the operation matcher. Policy-less legacy
+    // rows retain their rollout-flag behavior; an explicit empty policy was
+    // denied above before any credential wrapping or decryption.
     validate_actor_addressed_master_credential_policy_with(
         service,
         actor_addressed_policy_required(),
@@ -1372,7 +1385,46 @@ pub async fn resolve_proxy_target_from_user_service(
     catalog_service_id: Option<&str>,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<Option<UserServiceResolution>> {
-    let credential_resolution = ProxyCredentialResolution::materialize(connection_expiry_notifier);
+    resolve_proxy_target_from_user_service_with_mode(
+        db,
+        encryption_keys,
+        user_id,
+        slug,
+        catalog_service_id,
+        ProxyCredentialResolution::materialize(connection_expiry_notifier),
+    )
+    .await
+}
+
+/// Read-only form of the normal proxy resolution cascade. It applies the same
+/// personal, legacy, and organization precedence as execution while avoiding
+/// credential decryption, OAuth refresh, last-used writes, and rate limiting.
+pub async fn read_proxy_authority_snapshot_from_user_service(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+) -> AppResult<Option<UserServiceResolution>> {
+    resolve_proxy_target_from_user_service_with_mode(
+        db,
+        encryption_keys,
+        user_id,
+        slug,
+        catalog_service_id,
+        ProxyCredentialResolution::read_only_snapshot(),
+    )
+    .await
+}
+
+async fn resolve_proxy_target_from_user_service_with_mode(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    slug: Option<&str>,
+    catalog_service_id: Option<&str>,
+    credential_resolution: ProxyCredentialResolution<'_>,
+) -> AppResult<Option<UserServiceResolution>> {
     // NyxID#974 routing boundary: identical-instance service pools belong
     // here, before `finish_resolution()`, because this function is the
     // authoritative place that preserves personal/legacy/org precedence and
@@ -2239,7 +2291,8 @@ async fn lookup_user_service(
 }
 
 fn is_public_internal_master_credential_service(service: &DownstreamService) -> bool {
-    service.visibility == "public"
+    !crate::services::platform_operation_service::is_platform_vendor_slug(&service.slug)
+        && service.visibility == "public"
         && service.service_category == "internal"
         && master_credential_required(service)
         && service.auth_method != "token_exchange"
@@ -3952,7 +4005,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn master_credential_with_empty_policy_resolves() {
+    async fn master_credential_with_empty_policy_is_actor_denied_but_server_chosen() {
         let Some(db) = connect_test_database("proxy_master_credential_empty_policy").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -3960,10 +4013,15 @@ mod tests {
         let service = valid_master_service(Some(ProxyOperationPolicy { rules: vec![] }));
         let actor = EffectiveActor::from_user_id(uuid::Uuid::new_v4().to_string());
 
+        assert_service_not_found(
+            authorize_master_credential(&db, &service, &actor).await,
+            "empty kill policies must deny actor-addressed authorization",
+        );
         assert!(
-            authorize_master_credential(&db, &service, &actor)
+            authorize_master_credential_server_chosen(&db, &service)
                 .await
-                .is_ok()
+                .is_ok(),
+            "the bounded server-chosen platform path must ignore actor policies"
         );
     }
 
@@ -4108,7 +4166,12 @@ mod tests {
             eprintln!("skipping: no MongoDB");
             return;
         };
-        let service = valid_master_service(Some(ProxyOperationPolicy { rules: vec![] }));
+        let service = valid_master_service(Some(ProxyOperationPolicy {
+            rules: vec![crate::models::downstream_service::ProxyOperationRule {
+                method: "GET".to_string(),
+                path_template: "/health".to_string(),
+            }],
+        }));
         let actor = EffectiveActor::from_user_id(uuid::Uuid::new_v4().to_string());
 
         for _ in 0..3 {

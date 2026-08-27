@@ -4,6 +4,7 @@ pub enum BillingIngress {
     LlmProvider,
     Proxy,
     Mcp,
+    PlatformOperation,
     SshExec,
     SshTunnel,
     SshWebTerminal,
@@ -16,6 +17,7 @@ impl BillingIngress {
             Self::LlmProvider => "llm_provider",
             Self::Proxy => "proxy",
             Self::Mcp => "mcp",
+            Self::PlatformOperation => "platform_operation",
             Self::SshExec => "ssh_exec",
             Self::SshTunnel => "ssh_tunnel",
             Self::SshWebTerminal => "ssh_web_terminal",
@@ -29,6 +31,7 @@ pub const ALL_BILLING_INGRESSES: &[BillingIngress] = &[
     BillingIngress::LlmProvider,
     BillingIngress::Proxy,
     BillingIngress::Mcp,
+    BillingIngress::PlatformOperation,
     BillingIngress::SshExec,
     BillingIngress::SshTunnel,
     BillingIngress::SshWebTerminal,
@@ -98,6 +101,31 @@ pub struct BillingRouteSpec {
 // smoke requires exact Metered/Exempt equality.
 #[cfg(test)]
 pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
+    BillingRouteSpec {
+        handler: "handlers::platform_ops::list_operations",
+        route: "/api/v1/platform-ops",
+        policy: BillingRoutePolicy::Exempt("control-plane discovery; no downstream request"),
+    },
+    BillingRouteSpec {
+        handler: "handlers::platform_ops::x_search",
+        route: "/api/v1/platform-ops/x-search",
+        policy: BillingRoutePolicy::Metered(BillingIngress::PlatformOperation),
+    },
+    BillingRouteSpec {
+        handler: "handlers::platform_ops::speak",
+        route: "/api/v1/platform-ops/speak",
+        policy: BillingRoutePolicy::Metered(BillingIngress::PlatformOperation),
+    },
+    BillingRouteSpec {
+        handler: "handlers::platform_ops::call_and_say",
+        route: "/api/v1/platform-ops/call-and-say",
+        policy: BillingRoutePolicy::Metered(BillingIngress::PlatformOperation),
+    },
+    BillingRouteSpec {
+        handler: "handlers::platform_ops::flight_search",
+        route: "/api/v1/platform-ops/flight-search",
+        policy: BillingRoutePolicy::Metered(BillingIngress::PlatformOperation),
+    },
     BillingRouteSpec {
         handler: "handlers::llm_gateway::gateway_request",
         route: "/api/v1/llm/gateway/v1/{*path}",

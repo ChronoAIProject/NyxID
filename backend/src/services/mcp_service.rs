@@ -2300,8 +2300,9 @@ pub fn generate_tool_definitions(
                             },
                             "voice_id": {
                                 "type": "string",
-                                "enum": config.allowed_voice_ids,
-                                "description": "Allowlisted ElevenLabs voice ID"
+                                "pattern": "^[A-Za-z0-9._-]+$",
+                                "maxLength": 128,
+                                "description": "ElevenLabs voice ID"
                             }
                         },
                         "required": ["text", "voice_id"],
@@ -2330,9 +2331,65 @@ pub fn generate_tool_definitions(
                                 "minLength": 1,
                                 "maxLength": config.max_message_chars,
                                 "description": "Message to speak"
+                            },
+                            "from": {
+                                "type": "string",
+                                "pattern": "^\\+[1-9][0-9]{0,14}$",
+                                "description": "Caller identity required only when using your own Twilio connection"
                             }
                         },
                         "required": ["to", "message"],
+                        "additionalProperties": false
+                    }),
+                }
+            }
+            PlatformOperationConfig::FlightSearch(config)
+                if operation.op
+                    == crate::models::platform_operation::PlatformOperationName::FlightSearch =>
+            {
+                McpToolDefinition {
+                    name: "nyx__flight_search".to_string(),
+                    description: "Search bounded Duffel flight offers without creating a booking."
+                        .to_string(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "origin": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z]{3}$",
+                                "description": "Origin IATA airport or city code"
+                            },
+                            "destination": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z]{3}$",
+                                "description": "Destination IATA airport or city code"
+                            },
+                            "departure_date": {
+                                "type": "string",
+                                "format": "date",
+                                "description": "Departure date in YYYY-MM-DD format"
+                            },
+                            "return_date": {
+                                "type": "string",
+                                "format": "date",
+                                "description": "Optional return date in YYYY-MM-DD format"
+                            },
+                            "adults": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 9
+                            },
+                            "cabin_class": {
+                                "type": "string",
+                                "enum": ["economy", "premium_economy", "business", "first"]
+                            },
+                            "max_offers": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": config.max_offers_cap
+                            }
+                        },
+                        "required": ["origin", "destination", "departure_date"],
                         "additionalProperties": false
                     }),
                 }
@@ -5482,6 +5539,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn generic_mcp_catalog_excludes_platform_vendor_rows_even_when_legacy_connected() {
+        let Some(db) = connect_test_database("mcp_platform_vendor_excluded").await else {
+            eprintln!("skipping MCP platform vendor exclusion test: no local MongoDB available");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let mut service = dummy_service();
+        service.id = service_id.clone();
+        service.name = "Platform Duffel".to_string();
+        service.slug = "platform-duffel".to_string();
+        service.base_url = "https://api.duffel.com".to_string();
+        service.service_category = "internal".to_string();
+        service.visibility = "public".to_string();
+        service.auth_method = "bearer".to_string();
+        service.requires_user_credential = false;
+        service.credential_encrypted = vec![1, 2, 3];
+        service.proxy_operation_policy =
+            Some(crate::services::platform_operation_service::platform_vendor_kill_policy());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(service)
+            .await
+            .expect("insert platform vendor");
+        db.collection::<UserServiceConnection>(CONNECTIONS)
+            .insert_one(UserServiceConnection {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: user_id.clone(),
+                service_id: service_id.clone(),
+                credential_encrypted: None,
+                credential_type: None,
+                credential_label: None,
+                metadata: None,
+                is_active: true,
+                state_version: 1,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert stale platform vendor connection");
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(ServiceEndpoint {
+                id: uuid::Uuid::new_v4().to_string(),
+                service_id: service_id.clone(),
+                name: "create_order".to_string(),
+                description: Some("Must never be callable".to_string()),
+                method: "POST".to_string(),
+                path: "/air/orders".to_string(),
+                parameters: None,
+                request_body_schema: Some(serde_json::json!({ "type": "object" })),
+                request_content_type: Some("application/json".to_string()),
+                request_body_required: true,
+                response_description: None,
+                response: OperationResponseContract::default(),
+                risk: None,
+                supports_idempotency_key: false,
+                is_active: true,
+                operation_generation: 1,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert forbidden platform endpoint");
+
+        let catalog = load_operation_catalog(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &user_id,
+            NodeScope::Unrestricted,
+            ServiceScope::Unrestricted,
+        )
+        .await
+        .expect("load MCP operation catalog");
+
+        assert!(catalog.services.is_empty());
+        assert!(resolve_tool_call("platform_duffel__create_order", &catalog.services).is_none());
+    }
+
+    #[tokio::test]
     async fn unavailable_unpinned_user_service_does_not_shadow_executable_platform_route() {
         let Some(db) = connect_test_database("mcp_non_executable_dedup").await else {
             eprintln!("skipping MCP dedup test: no local MongoDB available");
@@ -6213,8 +6348,26 @@ mod tests {
             updated_at: chrono::Utc::now(),
             updated_by: "admin-user".to_string(),
         };
+        let flight_operation = PlatformOperation {
+            id: "platform-flight-search".to_string(),
+            op: crate::models::platform_operation::PlatformOperationName::FlightSearch,
+            enabled: true,
+            vendor_service_slug: "platform-duffel".to_string(),
+            config: PlatformOperationConfig::FlightSearch(
+                crate::models::platform_operation::FlightSearchConfig {
+                    max_offers_cap: 12,
+                    max_searches_per_user_per_day: 20,
+                },
+            ),
+            updated_at: chrono::Utc::now(),
+            updated_by: "admin-user".to_string(),
+        };
 
-        let tools = generate_tool_definitions(&[], None, &[enabled_operation, disabled_operation]);
+        let tools = generate_tool_definitions(
+            &[],
+            None,
+            &[enabled_operation, disabled_operation, flight_operation],
+        );
         let speak = tools
             .iter()
             .find(|tool| tool.name == "nyx__speak")
@@ -6222,12 +6375,21 @@ mod tests {
 
         assert!(!tools.iter().any(|tool| tool.name == "nyx__x_search"));
         assert!(!tools.iter().any(|tool| tool.name == "nyx__call_and_say"));
+        let flight = tools
+            .iter()
+            .find(|tool| tool.name == "nyx__flight_search")
+            .expect("enabled flight search tool");
         assert_eq!(speak.input_schema["properties"]["text"]["maxLength"], 321);
         assert_eq!(
-            speak.input_schema["properties"]["voice_id"]["enum"],
-            serde_json::json!(["voice-a", "voice-b"])
+            speak.input_schema["properties"]["voice_id"]["pattern"],
+            "^[A-Za-z0-9._-]+$"
         );
         assert_eq!(speak.input_schema["additionalProperties"], false);
+        assert_eq!(
+            flight.input_schema["properties"]["max_offers"]["maximum"],
+            12
+        );
+        assert_eq!(flight.input_schema["additionalProperties"], false);
     }
 
     #[test]

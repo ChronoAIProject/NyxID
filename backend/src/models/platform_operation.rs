@@ -9,6 +9,7 @@ pub enum PlatformOperationName {
     XSearch,
     Speak,
     CallAndSay,
+    FlightSearch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,11 +45,21 @@ pub struct CallAndSayConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FlightSearchConfig {
+    #[serde(default = "default_flight_search_max_offers_cap")]
+    pub max_offers_cap: u32,
+    #[serde(default = "default_flight_search_max_per_user_per_day")]
+    pub max_searches_per_user_per_day: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum PlatformOperationConfig {
     XSearch(XSearchConfig),
     Speak(SpeakConfig),
     CallAndSay(CallAndSayConfig),
+    FlightSearch(FlightSearchConfig),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -89,6 +100,14 @@ pub const fn default_call_max_per_user_per_day() -> u32 {
     3
 }
 
+pub const fn default_flight_search_max_offers_cap() -> u32 {
+    10
+}
+
+pub const fn default_flight_search_max_per_user_per_day() -> u32 {
+    20
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -104,6 +123,14 @@ mod tests {
         });
 
         assert!(serde_json::from_value::<PlatformOperationConfig>(value).is_err());
+
+        let flight = serde_json::json!({
+            "type": "flight_search",
+            "max_offers_cap": 10,
+            "max_searches_per_user_per_day": 20,
+            "create_order": true,
+        });
+        assert!(serde_json::from_value::<PlatformOperationConfig>(flight).is_err());
     }
 
     #[test]

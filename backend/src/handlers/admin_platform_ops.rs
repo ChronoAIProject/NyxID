@@ -11,8 +11,8 @@ use crate::AppState;
 use crate::errors::AppResult;
 use crate::handlers::admin_helpers::require_admin;
 use crate::models::platform_operation::{
-    CallAndSayConfig, PlatformOperation, PlatformOperationConfig, PlatformOperationName,
-    SpeakConfig, XSearchConfig,
+    CallAndSayConfig, FlightSearchConfig, PlatformOperation, PlatformOperationConfig,
+    PlatformOperationName, SpeakConfig, XSearchConfig,
 };
 use crate::models::platform_vendor_template::PlatformVendorTemplate;
 use crate::mw::auth::AuthUser;
@@ -99,6 +99,15 @@ pub struct AdminPlatformOperationResponse {
     pub config: AdminPlatformOperationConfigResponse,
     pub updated_at: Option<String>,
     pub updated_by: Option<String>,
+    pub vendor_service_id: Option<String>,
+    pub pricing: AdminPlatformOperationPricingResponse,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminPlatformOperationPricingResponse {
+    pub billable: bool,
+    pub credits_per_call: Option<String>,
+    pub metric: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +116,7 @@ pub enum AdminPlatformOperationConfigResponse {
     XSearch(AdminXSearchConfigResponse),
     Speak(AdminSpeakConfigResponse),
     CallAndSay(AdminCallAndSayConfigResponse),
+    FlightSearch(AdminFlightSearchConfigResponse),
 }
 
 #[derive(Debug, Serialize)]
@@ -129,6 +139,12 @@ pub struct AdminCallAndSayConfigResponse {
     pub max_calls_per_user_per_day: u32,
     pub account_sid: String,
     pub call_from: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminFlightSearchConfigResponse {
+    pub max_offers_cap: u32,
+    pub max_searches_per_user_per_day: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -246,11 +262,29 @@ pub async fn list_platform_operations(
     // while the caller-facing platform-services feature flag remains disabled.
     require_admin(&state, &auth_user).await?;
     let configured = platform_operation_service::list_configured_operations(&state.db).await?;
+    let vendor_slugs = platform_operation_service::PLATFORM_OPERATION_VENDOR_CONTRACTS
+        .iter()
+        .map(|contract| contract.slug)
+        .collect::<Vec<_>>();
+    let vendor_services: Vec<crate::models::downstream_service::DownstreamService> = state
+        .db
+        .collection(crate::models::downstream_service::COLLECTION_NAME)
+        .find(doc! { "slug": { "$in": vendor_slugs }, "is_active": true })
+        .await?
+        .try_collect()
+        .await?;
     let operations = platform_operation_service::PLATFORM_OPERATION_NAMES
         .into_iter()
         .map(|op| {
             let row = configured.iter().find(|row| row.op == op).cloned();
-            platform_operation_response(op, row)
+            let vendor_slug = row
+                .as_ref()
+                .map(|operation| operation.vendor_service_slug.as_str())
+                .unwrap_or_else(|| platform_operation_service::default_vendor_service_slug(op));
+            let vendor = vendor_services
+                .iter()
+                .find(|service| service.slug == vendor_slug);
+            platform_operation_response(op, row, vendor)
         })
         .collect();
 
@@ -290,7 +324,18 @@ pub async fn update_platform_operation(
         })),
     );
 
-    Ok(Json(platform_operation_response(op, Some(operation))))
+    let vendor = state
+        .db
+        .collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .find_one(doc! { "slug": &operation.vendor_service_slug, "is_active": true })
+        .await?;
+    Ok(Json(platform_operation_response(
+        op,
+        Some(operation),
+        vendor.as_ref(),
+    )))
 }
 
 async fn list_active_vendor_services(
@@ -389,7 +434,19 @@ impl From<PlatformVendorTemplateRequest>
 fn platform_operation_response(
     op: PlatformOperationName,
     operation: Option<PlatformOperation>,
+    vendor: Option<&crate::models::downstream_service::DownstreamService>,
 ) -> AdminPlatformOperationResponse {
+    let pricing = AdminPlatformOperationPricingResponse {
+        billable: vendor
+            .and_then(|service| service.billing.as_ref())
+            .is_some_and(|billing| billing.platform_billable),
+        credits_per_call: vendor
+            .and_then(|service| service.billing.as_ref())
+            .and_then(|billing| billing.platform_pricing.as_ref())
+            .map(|pricing| pricing.credits_per_unit.clone()),
+        metric: "requests",
+    };
+    let vendor_service_id = vendor.map(|service| service.id.clone());
     match operation {
         Some(operation) => AdminPlatformOperationResponse {
             op: platform_operation_service::operation_name(op),
@@ -398,6 +455,8 @@ fn platform_operation_response(
             config: operation.config.into(),
             updated_at: Some(operation.updated_at.to_rfc3339()),
             updated_by: Some(operation.updated_by),
+            vendor_service_id,
+            pricing,
         },
         None => AdminPlatformOperationResponse {
             op: platform_operation_service::operation_name(op),
@@ -407,6 +466,8 @@ fn platform_operation_response(
             config: platform_operation_service::default_operation_config(op).into(),
             updated_at: None,
             updated_by: None,
+            vendor_service_id,
+            pricing,
         },
     }
 }
@@ -440,6 +501,13 @@ impl From<PlatformOperationConfig> for AdminPlatformOperationConfigResponse {
                 max_calls_per_user_per_day,
                 account_sid,
                 call_from,
+            }),
+            PlatformOperationConfig::FlightSearch(FlightSearchConfig {
+                max_offers_cap,
+                max_searches_per_user_per_day,
+            }) => Self::FlightSearch(AdminFlightSearchConfigResponse {
+                max_offers_cap,
+                max_searches_per_user_per_day,
             }),
         }
     }
@@ -501,14 +569,14 @@ mod tests {
             .iter()
             .find(|vendor| vendor.vendor == "duffel")
             .expect("Duffel requirement");
-        assert_eq!(duffel.operation, None);
+        assert_eq!(duffel.operation.as_deref(), Some("flight_search"));
         assert_eq!(duffel.slug, "platform-duffel");
         assert_eq!(duffel.auth_method, "bearer");
     }
 
     #[test]
     fn missing_rows_render_as_disabled_defaults() {
-        let response = platform_operation_response(PlatformOperationName::XSearch, None);
+        let response = platform_operation_response(PlatformOperationName::XSearch, None, None);
         assert_eq!(response.op, "x_search");
         assert!(!response.enabled);
         assert_eq!(response.vendor_service_slug, "platform-x");

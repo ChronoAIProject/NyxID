@@ -468,7 +468,51 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 7c. ElevenLabs (API Key)
+    // 7c. Duffel (API Key)
+    if !slug_exists!("duffel") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "duffel".to_string(),
+            name: "Duffel".to_string(),
+            description: Some("Duffel flight offer search API access.".to_string()),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some(
+                "Create a Duffel access token in the Duffel dashboard and paste the raw token. Test tokens beginning with `duffel_test_` use the same API host. NyxID adds the Bearer prefix automatically."
+                    .to_string(),
+            ),
+            api_key_url: Some("https://app.duffel.com/duffel/tokens".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://duffel.com/docs/api/overview/welcome".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "duffel", "Seeded default provider: Duffel");
+        seeded_count += 1;
+    }
+
+    // 7d. ElevenLabs (API Key)
     if !slug_exists!("elevenlabs") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -2350,6 +2394,18 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
             },
             true,
         )),
+        "duffel" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: true,
+                supports_authoring_via_nyx: false,
+                supports_websocket: false,
+                supports_streaming: false,
+            },
+            false,
+        )),
         "api-elevenlabs" => Some((
             ServiceCapabilities {
                 supports_proxy_read: true,
@@ -2419,6 +2475,21 @@ const OPENROUTER_DEFAULT_HEADERS: &[SeededHeader] = &[
         name: "X-OpenRouter-Title",
         value: "NyxID",
         overridable: true,
+        sensitive: false,
+    },
+];
+
+const DUFFEL_DEFAULT_HEADERS: &[SeededHeader] = &[
+    SeededHeader {
+        name: "Duffel-Version",
+        value: "v2",
+        overridable: false,
+        sensitive: false,
+    },
+    SeededHeader {
+        name: "Accept-Encoding",
+        value: "gzip",
+        overridable: false,
         sensitive: false,
     },
 ];
@@ -2567,6 +2638,29 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
         known_limitations: Some(
             "The NyxID-hosted OpenAPI overlay covers the scrape and search operations for Aevatar typed tool discovery; other Firecrawl operations remain available through the generic proxy.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "duffel",
+        service_slug: "duffel",
+        service_name: "Duffel",
+        base_url: "https://api.duffel.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: Some("bearer"),
+        service_auth_key_name: Some("Authorization"),
+        description: Some(
+            "Duffel API connection for flight offer searches. NyxID injects the access token as bearer authentication and applies Duffel's required version and compression headers.",
+        ),
+        default_request_headers: Some(DUFFEL_DEFAULT_HEADERS),
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://duffel.com"),
+        auth_notes: Some(
+            "Paste a Duffel access token, including `duffel_test_...` tokens. Test and live tokens use the same API host; NyxID adds the `Bearer` prefix.",
+        ),
+        known_limitations: Some(
+            "No NyxID-hosted OpenAPI overlay is available yet. Generic proxy access follows the upstream Duffel API contract.",
         ),
     },
     DefaultServiceSeed {
@@ -7719,6 +7813,7 @@ mod tests {
             "mistral",
             "cohere",
             "deepseek",
+            "duffel",
             "elevenlabs",
             "twilio",
             "twitter",
@@ -8271,7 +8366,13 @@ mod tests {
         super::seed_default_services(&db, &enc).await.unwrap();
 
         let service_col = db.collection::<super::DownstreamService>(super::DOWNSTREAM_SERVICES);
-        let expected = ["llm-openai", "llm-anthropic", "llm-google-ai", "api-github"];
+        let expected = [
+            "llm-openai",
+            "llm-anthropic",
+            "llm-google-ai",
+            "api-github",
+            "duffel",
+        ];
         for slug in expected {
             let found = service_col.find_one(doc! { "slug": slug }).await.unwrap();
             assert!(found.is_some(), "expected seeded service slug: {slug}");
@@ -8855,6 +8956,7 @@ mod tests {
         let direct_auth_slugs = [
             "api-elevenlabs",
             "api-twilio",
+            "duffel",
             "api-github-pat",
             "api-telegram-bot",
             "api-discord-bot",
