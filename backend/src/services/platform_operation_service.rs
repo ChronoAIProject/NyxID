@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{Days, NaiveDate, Utc};
@@ -22,11 +22,15 @@ use crate::models::platform_operation::{
     default_flight_search_max_offers_cap, default_flight_search_max_per_user_per_day,
     default_speak_max_chars, default_speak_model_id, default_x_search_max_results_cap,
 };
+use crate::models::service_approval_config::ApprovalEffect;
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::services::billing::route_inventory::BillingEgressPermit;
 use crate::services::connection_expiry_service::ConnectionExpiryNotifier;
 use crate::services::node_ws_manager::NodeWsManager;
-use crate::services::{assistant_service, proxy_service, user_service_service};
+use crate::services::{
+    approval_service, operation_descriptor::OperationDescriptor, proxy_service,
+    user_service_service,
+};
 
 pub const X_SEARCH_HARD_MAX_RESULTS: u32 = 25;
 pub const SPEAK_HARD_MAX_CHARS: u32 = 5_000;
@@ -237,6 +241,16 @@ pub fn is_platform_vendor_slug(slug: &str) -> bool {
         .any(|contract| contract.slug == slug)
 }
 
+pub fn vendor_display_name(vendor: &str) -> String {
+    match vendor {
+        "x" => "X".to_string(),
+        "elevenlabs" => "ElevenLabs".to_string(),
+        "twilio" => "Twilio".to_string(),
+        "duffel" => "Duffel".to_string(),
+        other => other.to_string(),
+    }
+}
+
 pub fn platform_vendor_kill_policy() -> ProxyOperationPolicy {
     ProxyOperationPolicy { rules: Vec::new() }
 }
@@ -384,6 +398,7 @@ pub enum PlatformCredentialResolution {
     Platform {
         vendor: Box<DownstreamService>,
         disabled_connection: Option<OwnConnectionMetadata>,
+        own_connection_out_of_scope: bool,
     },
     OwnConnection {
         resolution: Box<proxy_service::UserServiceResolution>,
@@ -392,10 +407,26 @@ pub enum PlatformCredentialResolution {
     NodeRouted {
         connection: OwnConnectionMetadata,
     },
+    ApprovalRequired {
+        connection: OwnConnectionMetadata,
+    },
     Unusable {
         connection: OwnConnectionMetadata,
         error: Option<AppError>,
     },
+}
+
+pub struct PlatformCredentialCaller<'a> {
+    pub actor_user_id: &'a str,
+    pub api_key_id: Option<&'a str>,
+    pub allow_all_services: bool,
+    pub allowed_service_ids: &'a [String],
+    pub bypass_approval_flow: bool,
+}
+
+pub struct PlatformCredentialResolutionContext {
+    visible_connections: Vec<user_service_service::UserServiceWithSource>,
+    services_by_slug: HashMap<String, DownstreamService>,
 }
 
 #[derive(Clone, Copy)]
@@ -403,7 +434,9 @@ pub enum CredentialResolutionMode<'a> {
     Execute {
         connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
     },
-    Discover,
+    Discover {
+        descriptor: &'a OperationDescriptor,
+    },
 }
 
 pub fn operation_name(op: PlatformOperationName) -> &'static str {
@@ -1196,40 +1229,82 @@ pub async fn list_enabled_operations(db: &mongodb::Database) -> AppResult<Vec<Pl
         .collect())
 }
 
+/// Load the caller-visible connection rows and every catalog/vendor row needed
+/// for a set of operations. Discovery and MCP tool listing reuse this inventory
+/// across all operations so org membership and vendor metadata are read once.
+pub async fn load_credential_resolution_context(
+    db: &mongodb::Database,
+    resolution_user_id: &str,
+    operations: &[PlatformOperation],
+) -> AppResult<PlatformCredentialResolutionContext> {
+    let visible_connections =
+        user_service_service::list_user_services_with_sources_including_disabled(
+            db,
+            resolution_user_id,
+        )
+        .await?;
+    let mut slugs = HashSet::new();
+    for operation in operations {
+        slugs.insert(
+            catalog_contract_for_operation(operation.op)
+                .catalog_service_slug
+                .to_string(),
+        );
+        slugs.insert(operation.vendor_service_slug.clone());
+    }
+    let services: Vec<DownstreamService> = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(doc! {
+            "slug": { "$in": slugs.into_iter().collect::<Vec<_>>() },
+            "is_active": true,
+        })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(PlatformCredentialResolutionContext {
+        visible_connections,
+        services_by_slug: services
+            .into_iter()
+            .map(|service| (service.slug.clone(), service))
+            .collect(),
+    })
+}
+
+impl PlatformCredentialResolutionContext {
+    pub fn service_by_slug(&self, slug: &str) -> Option<&DownstreamService> {
+        self.services_by_slug.get(slug)
+    }
+}
+
 /// Resolve whether an operation should use a user-owned server credential or
 /// the platform vendor credential. Both execution and discovery enter through
-/// this function; discovery selects the read-only proxy resolver mode.
+/// this function. The caller supplies one preloaded request inventory so a
+/// multi-operation discovery does not repeat connection or vendor listings.
 pub async fn resolve_operation_credential_source(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     node_ws_manager: &Arc<NodeWsManager>,
     resolution_user_id: &str,
+    caller: PlatformCredentialCaller<'_>,
     operation: &PlatformOperation,
     mode: CredentialResolutionMode<'_>,
+    context: &PlatformCredentialResolutionContext,
 ) -> AppResult<PlatformCredentialResolution> {
     let contract = catalog_contract_for_operation(operation.op);
-    let catalog_service = db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-        .find_one(doc! { "slug": contract.catalog_service_slug, "is_active": true })
-        .await?;
+    let catalog_service = context.service_by_slug(contract.catalog_service_slug);
 
     let Some(catalog_service) = catalog_service else {
-        let vendor =
-            resolve_platform_vendor_service(db, operation.op, &operation.vendor_service_slug)
-                .await?;
+        let vendor = resolve_platform_vendor_from_context(context, operation)?;
         return Ok(PlatformCredentialResolution::Platform {
             vendor: Box::new(vendor),
             disabled_connection: None,
+            own_connection_out_of_scope: false,
         });
     };
 
-    let visible = user_service_service::list_user_services_with_sources_including_disabled(
-        db,
-        resolution_user_id,
-    )
-    .await?;
-    let matching = visible
-        .into_iter()
+    let matching = context
+        .visible_connections
+        .iter()
         .filter(|entry| {
             entry.service.catalog_service_id.as_deref() == Some(catalog_service.id.as_str())
         })
@@ -1248,14 +1323,22 @@ pub async fn resolve_operation_credential_source(
     };
 
     let Some(active_candidate) = active_candidate else {
-        let vendor =
-            resolve_platform_vendor_service(db, operation.op, &operation.vendor_service_slug)
-                .await?;
+        let vendor = resolve_platform_vendor_from_context(context, operation)?;
         return Ok(PlatformCredentialResolution::Platform {
             vendor: Box::new(vendor),
             disabled_connection,
+            own_connection_out_of_scope: false,
         });
     };
+
+    if !caller.allow_all_services && !caller.allowed_service_ids.contains(&active_candidate.id) {
+        let vendor = resolve_platform_vendor_from_context(context, operation)?;
+        return Ok(PlatformCredentialResolution::Platform {
+            vendor: Box::new(vendor),
+            disabled_connection: None,
+            own_connection_out_of_scope: true,
+        });
+    }
     let connection = connection_metadata(db, &active_candidate).await?;
 
     let resolved = match mode {
@@ -1273,7 +1356,7 @@ pub async fn resolve_operation_credential_source(
             )
             .await
         }
-        CredentialResolutionMode::Discover => {
+        CredentialResolutionMode::Discover { .. } => {
             proxy_service::read_proxy_authority_snapshot_from_user_service(
                 db,
                 encryption_keys,
@@ -1292,10 +1375,11 @@ pub async fn resolve_operation_credential_source(
                 connection,
                 error: execution_mode_error(
                     mode,
-                    AppError::Conflict(format!(
-                        "Your {} connection could not be resolved.",
-                        contract.vendor
-                    )),
+                    AppError::PlatformOperationOwnConnectionUnusable {
+                        vendor: vendor_display_name(contract.vendor),
+                        detail: "The connection could not be resolved; reconnect or disable it."
+                            .to_string(),
+                    },
                 ),
             });
         }
@@ -1309,12 +1393,11 @@ pub async fn resolve_operation_credential_source(
     };
 
     if resolution.master_credential || resolution.api_key_id.is_none() {
-        let vendor =
-            resolve_platform_vendor_service(db, operation.op, &operation.vendor_service_slug)
-                .await?;
+        let vendor = resolve_platform_vendor_from_context(context, operation)?;
         return Ok(PlatformCredentialResolution::Platform {
             vendor: Box::new(vendor),
             disabled_connection: None,
+            own_connection_out_of_scope: false,
         });
     }
     if resolution
@@ -1324,6 +1407,73 @@ pub async fn resolve_operation_credential_source(
         || !resolution.has_server_credential
     {
         return Ok(PlatformCredentialResolution::NodeRouted { connection });
+    }
+
+    let mut resolution = resolution;
+    if let Some(api_key_id) = caller.api_key_id {
+        let override_result = match mode {
+            CredentialResolutionMode::Execute {
+                connection_expiry_notifier,
+            } => proxy_service::resolve_agent_credential_override(
+                db,
+                encryption_keys,
+                resolution_user_id,
+                api_key_id,
+                &resolution.user_service_id,
+                connection_expiry_notifier,
+            )
+            .await
+            .map(|resolved| {
+                resolved.map(|credential| {
+                    resolution.target.credential = credential;
+                })
+            }),
+            CredentialResolutionMode::Discover { .. } => {
+                proxy_service::read_agent_credential_override_identity(
+                    db,
+                    resolution_user_id,
+                    api_key_id,
+                    &resolution.user_service_id,
+                )
+                .await
+                .map(|_| None)
+            }
+        };
+        if let Err(error) = override_result {
+            return Ok(PlatformCredentialResolution::Unusable {
+                connection,
+                error: execution_mode_error(
+                    mode,
+                    normalize_own_connection_error(contract.vendor, error),
+                ),
+            });
+        }
+    }
+
+    if let CredentialResolutionMode::Discover { descriptor } = mode {
+        let service_owner_id = resolution
+            .org_routing
+            .as_ref()
+            .map(|routing| routing.org_user_id.as_str())
+            .unwrap_or(resolution_user_id);
+        let approval = approval_service::resolve_org_aware_approval(
+            db,
+            caller.actor_user_id,
+            service_owner_id,
+            &resolution.user_service_id,
+            descriptor,
+            resolution.is_auto_connected,
+        )
+        .await?;
+        if approval.effect == ApprovalEffect::Deny {
+            return Ok(PlatformCredentialResolution::Unusable {
+                connection,
+                error: None,
+            });
+        }
+        if approval.required && !caller.bypass_approval_flow {
+            return Ok(PlatformCredentialResolution::ApprovalRequired { connection });
+        }
     }
 
     Ok(PlatformCredentialResolution::OwnConnection {
@@ -1337,23 +1487,30 @@ fn execution_mode_error(mode: CredentialResolutionMode<'_>, error: AppError) -> 
 }
 
 fn normalize_own_connection_error(vendor: &str, error: AppError) -> AppError {
-    let contextualize =
-        |message: String| format!("Your {vendor} connection is unusable. {message}");
     match error {
-        AppError::Internal(_) => AppError::Conflict(format!(
-            "Your {vendor} connection is unusable. Update or disable it before retrying."
-        )),
-        AppError::BadRequest(message) => AppError::BadRequest(contextualize(message)),
-        AppError::ValidationError(message) => AppError::ValidationError(contextualize(message)),
-        AppError::Unauthorized(message) => AppError::Unauthorized(contextualize(message)),
-        AppError::Forbidden(message) => AppError::Forbidden(contextualize(message)),
-        AppError::NotFound(message) => AppError::NotFound(contextualize(message)),
-        AppError::Conflict(message) => AppError::Conflict(contextualize(message)),
-        AppError::AuthenticationFailed(message) => {
-            AppError::AuthenticationFailed(contextualize(message))
-        }
+        AppError::Internal(_) => AppError::PlatformOperationOwnConnectionUnusable {
+            vendor: vendor_display_name(vendor),
+            detail: "Update or disable it before retrying.".to_string(),
+        },
+        AppError::Conflict(detail) => AppError::PlatformOperationOwnConnectionUnusable {
+            vendor: vendor_display_name(vendor),
+            detail,
+        },
         other => other,
     }
+}
+
+fn resolve_platform_vendor_from_context(
+    context: &PlatformCredentialResolutionContext,
+    operation: &PlatformOperation,
+) -> AppResult<DownstreamService> {
+    let requirement = vendor_requirement_for_operation(operation.op);
+    let service = context.service_by_slug(&operation.vendor_service_slug);
+    validate_vendor_binding_shape(requirement, &operation.vendor_service_slug, service, false)
+        .map_err(|error| vendor_configuration_failed(operation.op, error))?;
+    Ok(service
+        .expect("validated platform vendor context must contain a service")
+        .clone())
 }
 
 async fn connection_metadata(
@@ -1572,20 +1729,6 @@ pub fn duffel_request_headers() -> HeaderMap {
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
     headers
-}
-
-pub async fn resolve_platform_vendor_service(
-    db: &mongodb::Database,
-    op: PlatformOperationName,
-    slug: &str,
-) -> AppResult<DownstreamService> {
-    let requirement = vendor_requirement_for_operation(op);
-    let service = assistant_service::resolve_admin_service_by_slug(db, slug)
-        .await
-        .map_err(|error| vendor_configuration_failed(op, error))?;
-    validate_vendor_binding_shape(requirement, slug, Some(&service), false)
-        .map_err(|error| vendor_configuration_failed(op, error))?;
-    Ok(service)
 }
 
 pub async fn materialize_platform_vendor_target(
@@ -1968,6 +2111,24 @@ mod tests {
         service
     }
 
+    fn valid_vendor_service(
+        op: PlatformOperationName,
+    ) -> crate::models::downstream_service::DownstreamService {
+        let requirement = vendor_requirement_for_operation(op);
+        let mut service = dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.slug = requirement.slug.to_string();
+        service.base_url = requirement.base_url.to_string();
+        service.auth_method = requirement.auth_method.to_string();
+        service.auth_key_name = requirement.auth_key_name.unwrap_or_default().to_string();
+        service.service_category = "internal".to_string();
+        service.visibility = "public".to_string();
+        service.requires_user_credential = false;
+        service.credential_encrypted = vec![1];
+        service.proxy_operation_policy = Some(platform_vendor_kill_policy());
+        service
+    }
+
     fn provisioning_message(error: AppError) -> String {
         let AppError::PlatformVendorProvisioningInvalid(message) = error else {
             panic!("expected a platform vendor provisioning error, got {error:?}");
@@ -2133,21 +2294,50 @@ mod tests {
             updated_at: Utc::now(),
             updated_by: "admin".to_string(),
         };
-        let resolve = |mode| {
-            resolve_operation_credential_source(
-                &db,
-                &encryption_keys,
-                &node_ws_manager,
-                &user_id,
-                &operation,
-                mode,
-            )
+        let descriptor = crate::services::operation_descriptor::build_http_descriptor(
+            "POST",
+            "/v1/text-to-speech/{voice_id}",
+            None,
+        );
+        let db_ref = &db;
+        let encryption_keys_ref = &encryption_keys;
+        let node_ws_manager_ref = &node_ws_manager;
+        let user_id_ref = user_id.as_str();
+        let operation_ref = &operation;
+        let resolve = move |mode| {
+            let context = load_credential_resolution_context(
+                db_ref,
+                user_id_ref,
+                std::slice::from_ref(operation_ref),
+            );
+            async move {
+                let context = context.await?;
+                resolve_operation_credential_source(
+                    db_ref,
+                    encryption_keys_ref,
+                    node_ws_manager_ref,
+                    user_id_ref,
+                    PlatformCredentialCaller {
+                        actor_user_id: user_id_ref,
+                        api_key_id: None,
+                        allow_all_services: true,
+                        allowed_service_ids: &[],
+                        bypass_approval_flow: true,
+                    },
+                    operation_ref,
+                    mode,
+                    &context,
+                )
+                .await
+            }
         };
 
         assert!(matches!(
-            resolve(CredentialResolutionMode::Discover)
-                .await
-                .expect("resolve no connection"),
+            resolve(CredentialResolutionMode::Discover {
+                descriptor: &descriptor,
+            })
+            .await
+            .expect("resolve no connection"),
             PlatformCredentialResolution::Platform {
                 disabled_connection: None,
                 ..
@@ -2182,9 +2372,11 @@ mod tests {
             .await
             .expect("insert disabled user service");
 
-        match resolve(CredentialResolutionMode::Discover)
-            .await
-            .expect("resolve disabled connection")
+        match resolve(CredentialResolutionMode::Discover {
+            descriptor: &descriptor,
+        })
+        .await
+        .expect("resolve disabled connection")
         {
             PlatformCredentialResolution::Platform {
                 disabled_connection: Some(connection),
@@ -2250,7 +2442,6 @@ mod tests {
                 error: Some(AppError::BadRequest(message)),
                 ..
             } => {
-                assert!(message.starts_with("Your elevenlabs connection is unusable."));
                 assert!(message.contains("revoked"));
             }
             _ => panic!("revoked active key must be unusable without platform fallback"),
@@ -2293,14 +2484,87 @@ mod tests {
             .await
             .expect("make active row credentialless");
         assert!(matches!(
-            resolve(CredentialResolutionMode::Discover)
-                .await
-                .expect("resolve credentialless connection"),
+            resolve(CredentialResolutionMode::Discover {
+                descriptor: &descriptor,
+            })
+            .await
+            .expect("resolve credentialless connection"),
             PlatformCredentialResolution::Platform {
                 disabled_connection: None,
                 ..
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn four_operation_discovery_reuses_one_resolution_inventory() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_shared_resolution_inventory").await
+        else {
+            eprintln!("skipping shared resolution inventory test: no local MongoDB available");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let operations = PLATFORM_OPERATION_NAMES
+            .into_iter()
+            .map(|op| PlatformOperation {
+                id: uuid::Uuid::new_v4().to_string(),
+                op,
+                enabled: true,
+                vendor_service_slug: default_vendor_service_slug(op).to_string(),
+                config: default_operation_config(op),
+                updated_at: Utc::now(),
+                updated_by: "admin".to_string(),
+            })
+            .collect::<Vec<_>>();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many(PLATFORM_OPERATION_NAMES.map(valid_vendor_service))
+            .await
+            .expect("insert all platform vendors");
+
+        // Loading is intentionally outside the operation loop. The resolver
+        // accepts only this inventory and has no connection-listing path of
+        // its own, so all four decisions share one org-aware listing and one
+        // batched vendor query.
+        let context = load_credential_resolution_context(&db, &user_id, &operations)
+            .await
+            .expect("load one shared resolution inventory");
+        let encryption_keys = crate::test_utils::test_encryption_keys();
+        let node_ws_manager = Arc::new(NodeWsManager::new(30, 100));
+        for operation in &operations {
+            let descriptor = crate::services::operation_descriptor::build_http_descriptor(
+                "POST",
+                "/discovery",
+                None,
+            );
+            let source = resolve_operation_credential_source(
+                &db,
+                &encryption_keys,
+                &node_ws_manager,
+                &user_id,
+                PlatformCredentialCaller {
+                    actor_user_id: &user_id,
+                    api_key_id: None,
+                    allow_all_services: true,
+                    allowed_service_ids: &[],
+                    bypass_approval_flow: true,
+                },
+                operation,
+                CredentialResolutionMode::Discover {
+                    descriptor: &descriptor,
+                },
+                &context,
+            )
+            .await
+            .expect("resolve operation from shared inventory");
+            assert!(matches!(
+                source,
+                PlatformCredentialResolution::Platform {
+                    own_connection_out_of_scope: false,
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]

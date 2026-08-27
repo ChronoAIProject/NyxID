@@ -1280,24 +1280,66 @@ async fn handle_tools_list(
             Vec::new()
         };
     let mut platform_description_suffixes = std::collections::HashMap::new();
-    for operation in &platform_operations {
-        let contract = platform_operation_service::catalog_contract_for_operation(operation.op);
-        match super::platform_ops::platform_tool_credential_sentence(
-            state,
+    if !platform_operations.is_empty() {
+        let context = platform_operation_service::load_credential_resolution_context(
+            &state.db,
             &auth.user_id,
-            &auth.user_id,
-            operation,
+            &platform_operations,
         )
-        .await
-        {
-            Ok(sentence) => {
-                platform_description_suffixes.insert(contract.mcp_tool, sentence);
+        .await;
+        let rollout = crate::services::feature_flag_service::billing_rollout_enabled(
+            &state.db,
+            &auth.user_id,
+            &auth.user_id,
+        )
+        .await;
+        match (context, rollout) {
+            (Ok(context), Ok(rollout_enabled)) => {
+                let caller = platform_operation_caller(auth);
+                for operation in &platform_operations {
+                    let contract =
+                        platform_operation_service::catalog_contract_for_operation(operation.op);
+                    let descriptor =
+                        super::platform_ops::platform_operation_discovery_descriptor(operation.op);
+                    match platform_operation_service::resolve_operation_credential_source(
+                        &state.db,
+                        &state.encryption_keys,
+                        &state.node_ws_manager,
+                        &auth.user_id,
+                        caller.credential_caller(),
+                        operation,
+                        platform_operation_service::CredentialResolutionMode::Discover {
+                            descriptor: &descriptor,
+                        },
+                        &context,
+                    )
+                    .await
+                    {
+                        Ok(source) => {
+                            platform_description_suffixes.insert(
+                                contract.mcp_tool,
+                                super::platform_ops::platform_tool_credential_sentence(
+                                    operation,
+                                    &source,
+                                    context.service_by_slug(&operation.vendor_service_slug),
+                                    rollout_enabled,
+                                ),
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                op = platform_operation_service::operation_name(operation.op),
+                                error = %error,
+                                "Failed to resolve MCP platform credential description"
+                            );
+                        }
+                    }
+                }
             }
-            Err(error) => {
+            (Err(error), _) | (_, Err(error)) => {
                 tracing::warn!(
-                    op = platform_operation_service::operation_name(operation.op),
                     error = %error,
-                    "Failed to resolve MCP platform credential description"
+                    "Failed to load MCP platform credential description context"
                 );
             }
         }
@@ -1814,6 +1856,20 @@ async fn authorize_mcp_operation(
 // Platform-operation tool dispatch
 // ---------------------------------------------------------------------------
 
+fn platform_operation_caller(
+    auth: &McpAuthContext,
+) -> super::platform_ops::PlatformOperationCaller {
+    super::platform_ops::PlatformOperationCaller {
+        actor_user_id: auth.user_id.clone(),
+        resolution_user_id: auth.user_id.clone(),
+        api_key_id: auth.api_key_id.clone(),
+        auth_method: auth.auth_method.clone(),
+        acting_client_id: auth.acting_client_id.clone(),
+        allow_all_services: auth.allow_all_services,
+        allowed_service_ids: auth.allowed_service_ids.clone(),
+    }
+}
+
 fn parse_platform_operation_arguments<T: DeserializeOwned>(
     arguments: &serde_json::Value,
 ) -> Result<T, String> {
@@ -1831,9 +1887,9 @@ fn platform_operation_error_result(
         AppError::BadRequest(message) | AppError::ValidationError(message) => message.clone(),
         AppError::RateLimited => "Daily platform operation limit reached".to_string(),
         AppError::InsufficientCredits => error.to_string(),
-        AppError::PlatformOperationOwnConnectionUnsupported { .. } | AppError::Conflict(_) => {
-            error.to_string()
-        }
+        AppError::PlatformOperationOwnConnectionUnsupported { .. }
+        | AppError::PlatformOperationOwnConnectionUnusable { .. }
+        | AppError::PlatformOperationApprovalRequired { .. } => error.to_string(),
         AppError::NotFound(_) => "Platform operation is not available".to_string(),
         AppError::PlatformOperationUnavailable => {
             "Platform operation vendor is unavailable".to_string()
@@ -1854,28 +1910,8 @@ fn audit_mcp_platform_operation<T>(
     started: Instant,
     metadata: serde_json::Value,
 ) {
-    let mut data = metadata.as_object().cloned().unwrap_or_default();
-    data.insert("op".to_string(), serde_json::Value::String(op.to_string()));
-    data.insert(
-        "outcome".to_string(),
-        serde_json::Value::String(platform_operation_audit_outcome(result).to_string()),
-    );
-    data.insert(
-        "duration_ms".to_string(),
-        serde_json::Value::from(started.elapsed().as_millis() as u64),
-    );
-    if let Ok(execution) = result {
-        data.insert(
-            "credential_source".to_string(),
-            serde_json::Value::String(execution.credential_source.as_str().to_string()),
-        );
-        if execution.own_connection_disabled {
-            data.insert(
-                "own_connection_disabled".to_string(),
-                serde_json::Value::Bool(true),
-            );
-        }
-    }
+    let data =
+        super::platform_ops::platform_operation_audit_metadata(op, result, started, metadata);
     audit_service::log_async(
         state.db.clone(),
         Some(auth.user_id.clone()),
@@ -1886,26 +1922,6 @@ fn audit_mcp_platform_operation<T>(
         auth.api_key_id.clone(),
         auth.api_key_name.clone(),
     );
-}
-
-fn platform_operation_audit_outcome<T>(result: &crate::errors::AppResult<T>) -> &'static str {
-    use crate::errors::AppError;
-
-    match result {
-        Ok(_) => "succeeded",
-        Err(AppError::NotFound(_)) => "not_found",
-        Err(AppError::RateLimited) => "rate_limited",
-        Err(AppError::InsufficientCredits) => "insufficient_credits",
-        Err(AppError::PlatformOperationOwnConnectionUnsupported { .. }) => {
-            "own_connection_unusable"
-        }
-        Err(AppError::Conflict(message)) if message.starts_with("Your ") => {
-            "own_connection_unusable"
-        }
-        Err(AppError::BadRequest(_) | AppError::ValidationError(_)) => "rejected",
-        Err(AppError::PlatformOperationUnavailable) => "vendor_unavailable",
-        Err(_) => "failed",
-    }
 }
 
 async fn handle_platform_x_search(
@@ -1925,11 +1941,7 @@ async fn handle_platform_x_search(
     let started = Instant::now();
     let query_chars = request.query.chars().count();
     let requested_max_results = request.max_results;
-    let caller = super::platform_ops::PlatformOperationCaller {
-        actor_user_id: auth.user_id.clone(),
-        resolution_user_id: auth.user_id.clone(),
-        api_key_id: auth.api_key_id.clone(),
-    };
+    let caller = platform_operation_caller(auth);
     let result = super::platform_ops::execute_x_search_for_caller(
         state,
         &caller,
@@ -1976,11 +1988,7 @@ async fn handle_platform_speak(
     let text_chars = request.text.chars().count();
     let voice_id = request.voice_id.clone();
     let result = async {
-        let caller = super::platform_ops::PlatformOperationCaller {
-            actor_user_id: auth.user_id.clone(),
-            resolution_user_id: auth.user_id.clone(),
-            api_key_id: auth.api_key_id.clone(),
-        };
+        let caller = platform_operation_caller(auth);
         let execution = super::platform_ops::execute_speak_for_caller(
             state,
             &caller,
@@ -1994,6 +2002,7 @@ async fn handle_platform_speak(
             value: audio,
             credential_source: execution.credential_source,
             own_connection_disabled: execution.own_connection_disabled,
+            own_connection_out_of_scope: execution.own_connection_out_of_scope,
         })
     }
     .await;
@@ -2040,11 +2049,7 @@ async fn handle_platform_call_and_say(
     };
     // The transport edge owns the UTC date; quota logic receives it explicitly.
     let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
-    let caller = super::platform_ops::PlatformOperationCaller {
-        actor_user_id: auth.user_id.clone(),
-        resolution_user_id: auth.user_id.clone(),
-        api_key_id: auth.api_key_id.clone(),
-    };
+    let caller = platform_operation_caller(auth);
     let result = super::platform_ops::execute_call_and_say_for_caller(
         state,
         &caller,
@@ -2091,11 +2096,7 @@ async fn handle_platform_flight_search(
     let started = Instant::now();
     let requested_max_offers = request.max_offers;
     let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
-    let caller = super::platform_ops::PlatformOperationCaller {
-        actor_user_id: auth.user_id.clone(),
-        resolution_user_id: auth.user_id.clone(),
-        api_key_id: auth.api_key_id.clone(),
-    };
+    let caller = platform_operation_caller(auth);
     let result = super::platform_ops::execute_flight_search_for_caller(
         state,
         &caller,
@@ -3535,6 +3536,7 @@ async fn execute_ssh_command_internal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::AppError;
 
     fn mcp_billing_permit() -> crate::services::billing::route_inventory::BillingEgressPermit {
         crate::services::billing::route_inventory::enforce_billing_egress_classification(
@@ -3557,13 +3559,14 @@ mod tests {
     };
     use crate::models::platform_operation::{
         COLLECTION_NAME as PLATFORM_OPERATIONS, PlatformOperation, PlatformOperationConfig,
-        PlatformOperationName, XSearchConfig,
+        PlatformOperationName, SpeakConfig, XSearchConfig,
     };
     use crate::models::service_approval_config::{
         ApprovalMode, COLLECTION_NAME as SERVICE_APPROVAL_CONFIGS, ServiceApprovalConfig,
     };
     use crate::models::service_endpoint::{COLLECTION_NAME as SERVICE_ENDPOINTS, ServiceEndpoint};
     use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+    use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
     use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
     use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
     use crate::mw::auth::AuthUser;
@@ -3790,6 +3793,194 @@ mod tests {
         assert!(x_search["description"].as_str().is_some_and(|description| {
             description.ends_with("Uses the platform credential (free).")
         }));
+    }
+
+    #[tokio::test]
+    async fn mcp_speak_description_honors_agent_scope_and_platform_voice_allowlist() {
+        let Some(db) = connect_test_database("mcp_platform_ops_scoped_description").await else {
+            eprintln!("skipping MCP scoped platform description test: no local MongoDB available");
+            return;
+        };
+        enable_platform_services_for_mcp_tests(&db).await;
+
+        let mut platform_vendor = crate::models::downstream_service::test_helpers::dummy_service();
+        platform_vendor.id = uuid::Uuid::new_v4().to_string();
+        platform_vendor.slug = "platform-elevenlabs".to_string();
+        platform_vendor.name = "Platform ElevenLabs".to_string();
+        platform_vendor.base_url = "https://api.elevenlabs.io".to_string();
+        platform_vendor.service_category = "internal".to_string();
+        platform_vendor.auth_method = "header".to_string();
+        platform_vendor.auth_key_name = "xi-api-key".to_string();
+        platform_vendor.credential_encrypted = vec![1];
+        platform_vendor.proxy_operation_policy =
+            Some(crate::services::platform_operation_service::platform_vendor_kill_policy());
+
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "api-elevenlabs".to_string();
+        catalog.name = "ElevenLabs".to_string();
+        catalog.base_url = "https://api.elevenlabs.io".to_string();
+        catalog.auth_method = "header".to_string();
+        catalog.auth_key_name = "xi-api-key".to_string();
+        catalog.requires_user_credential = true;
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_many([platform_vendor, catalog])
+        .await
+        .expect("insert MCP speak vendor rows");
+
+        db.collection::<PlatformOperation>(PLATFORM_OPERATIONS)
+            .insert_one(PlatformOperation {
+                id: uuid::Uuid::new_v4().to_string(),
+                op: PlatformOperationName::Speak,
+                enabled: true,
+                vendor_service_slug: "platform-elevenlabs".to_string(),
+                config: PlatformOperationConfig::Speak(SpeakConfig {
+                    allowed_voice_ids: vec!["voice-a".to_string(), "voice-b".to_string()],
+                    max_chars: 500,
+                    model_id: "eleven_multilingual_v2".to_string(),
+                }),
+                updated_at: chrono::Utc::now(),
+                updated_by: "mcp-test-actor".to_string(),
+            })
+            .await
+            .expect("insert enabled speak operation");
+
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let user_api_key_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                "user-1",
+                "My ElevenLabs",
+                "https://api.elevenlabs.io",
+                None,
+                Some(&catalog_id),
+            ))
+            .await
+            .expect("insert MCP own endpoint");
+        let mut user_service = test_user_service(
+            &user_service_id,
+            "user-1",
+            "my-elevenlabs",
+            &endpoint_id,
+            Some(&catalog_id),
+            None,
+        );
+        user_service.api_key_id = Some(user_api_key_id.clone());
+        user_service.auth_method = "header".to_string();
+        user_service.auth_key_name = "xi-api-key".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(user_service)
+            .await
+            .expect("insert MCP own service");
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(UserApiKey {
+                id: user_api_key_id,
+                user_id: "user-1".to_string(),
+                label: "ElevenLabs key".to_string(),
+                credential_type: "api_key".to_string(),
+                credential_encrypted: Some(vec![1]),
+                access_token_encrypted: None,
+                refresh_token_encrypted: None,
+                token_scopes: None,
+                expires_at: None,
+                provider_config_id: None,
+                connection_id: None,
+                oauth_attempt_nonce: None,
+                user_oauth_client_id_encrypted: None,
+                user_oauth_client_secret_encrypted: None,
+                credential_source: None,
+                status: "active".to_string(),
+                last_used_at: None,
+                last_authorized_at: None,
+                error_message: None,
+                source: None,
+                source_id: None,
+                credential_epoch: 1,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .expect("insert MCP own credential");
+
+        let state = test_app_state(db);
+        let description_for = |payload: &serde_json::Value| {
+            payload["result"]["tools"]
+                .as_array()
+                .expect("tools/list result contains tools")
+                .iter()
+                .find(|tool| tool["name"] == "nyx__speak")
+                .and_then(|tool| tool["description"].as_str())
+                .expect("tools/list publishes speak description")
+                .to_string()
+        };
+
+        let scoped_response = handle_tools_list(
+            &state,
+            &api_key_auth(Vec::new()),
+            None,
+            &tools_list_request(),
+        )
+        .await;
+        let scoped_body = axum::body::to_bytes(scoped_response.into_body(), 1024 * 1024)
+            .await
+            .expect("read scoped MCP tools/list response");
+        let scoped_payload: serde_json::Value =
+            serde_json::from_slice(&scoped_body).expect("decode scoped MCP tools/list response");
+        let scoped_description = description_for(&scoped_payload);
+        assert!(scoped_description.contains("Uses the platform credential (free)."));
+        assert!(scoped_description.contains("Allowed voice ids: voice-a, voice-b."));
+
+        let own_response = handle_tools_list(
+            &state,
+            &api_key_auth(vec![user_service_id]),
+            None,
+            &tools_list_request(),
+        )
+        .await;
+        let own_body = axum::body::to_bytes(own_response.into_body(), 1024 * 1024)
+            .await
+            .expect("read own MCP tools/list response");
+        let own_payload: serde_json::Value =
+            serde_json::from_slice(&own_body).expect("decode own MCP tools/list response");
+        let own_description = description_for(&own_payload);
+        assert!(own_description.contains("Uses your connected ElevenLabs account."));
+        assert!(!own_description.contains("Allowed voice ids:"));
+    }
+
+    #[tokio::test]
+    async fn mcp_platform_error_mapping_exposes_only_typed_connection_conflicts() {
+        let typed = AppError::PlatformOperationOwnConnectionUnusable {
+            vendor: "X".to_string(),
+            detail: "Reconnect or disable it.".to_string(),
+        };
+        let typed_response = platform_operation_error_result(Some(serde_json::json!(1)), &typed);
+        let typed_body = axum::body::to_bytes(typed_response.into_body(), 16 * 1024)
+            .await
+            .expect("read typed platform error");
+        let typed_payload: serde_json::Value =
+            serde_json::from_slice(&typed_body).expect("decode typed platform error");
+        assert_eq!(
+            typed_payload["result"]["content"][0]["text"],
+            "Your X connection is unusable. Reconnect or disable it."
+        );
+
+        let generic = AppError::Conflict("internal conflict detail".to_string());
+        let generic_response =
+            platform_operation_error_result(Some(serde_json::json!(2)), &generic);
+        let generic_body = axum::body::to_bytes(generic_response.into_body(), 16 * 1024)
+            .await
+            .expect("read generic platform error");
+        let generic_payload: serde_json::Value =
+            serde_json::from_slice(&generic_body).expect("decode generic platform error");
+        assert_eq!(
+            generic_payload["result"]["content"][0]["text"],
+            "Platform operation failed"
+        );
     }
 
     #[tokio::test]
