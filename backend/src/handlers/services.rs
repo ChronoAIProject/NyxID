@@ -1100,11 +1100,15 @@ pub async fn create_service(
     };
     crate::services::ws_frame_injector::validate_rules(&body.ws_frame_injections)?;
     anonymous_endpoint_service::validate_rule_list(&body.anonymous_endpoints)?;
-    let proxy_operation_policy = body
+    let mut proxy_operation_policy = body
         .proxy_operation_policy
         .clone()
         .map(crate::services::proxy_authorization::normalize_policy)
         .transpose()?;
+    if crate::services::platform_operation_service::is_platform_vendor_slug(&slug) {
+        proxy_operation_policy =
+            Some(crate::services::platform_operation_service::platform_vendor_kill_policy());
+    }
     if let Some(billing) = body.billing.as_mut() {
         crate::services::billing::pricing::normalize_platform_pricing(&slug, None, billing)?;
     }
@@ -1932,6 +1936,15 @@ pub async fn update_service(
             "proxy_operation_policy",
             bson::to_bson(&normalized)
                 .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?,
+        );
+    }
+    if crate::services::platform_operation_service::is_platform_vendor_slug(&service.slug) {
+        set_doc.insert(
+            "proxy_operation_policy",
+            bson::to_bson(
+                &crate::services::platform_operation_service::platform_vendor_kill_policy(),
+            )
+            .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?,
         );
     }
 

@@ -8,14 +8,17 @@ import {
 import { zodResolver } from "@hookform/resolvers/zod";
 import {
   Check,
+  ExternalLink,
   KeyRound,
   PhoneCall,
+  Plane,
   Plus,
   Search,
   Settings2,
   Volume2,
   X,
 } from "lucide-react";
+import { Link } from "@tanstack/react-router";
 import { PlatformVendorDialog } from "@/components/admin-platform-ops/platform-vendor-dialog";
 import { PlatformVendorTemplateManager } from "@/components/admin-platform-ops/platform-vendor-template-manager";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
@@ -51,10 +54,13 @@ import {
 import { ApiError } from "@/lib/api-client";
 import {
   callAndSayUpdateSchema,
+  flightSearchUpdateSchema,
   speakUpdateSchema,
   xSearchUpdateSchema,
   type CallAndSayOperation,
   type CallAndSayUpdate,
+  type FlightSearchOperation,
+  type FlightSearchUpdate,
   type PlatformOperation,
   type SpeakOperation,
   type SpeakUpdate,
@@ -204,6 +210,39 @@ function OperationHeader({
   );
 }
 
+function OperationPricing({
+  operation,
+}: {
+  readonly operation: PlatformOperation;
+}) {
+  const price = !operation.pricing.billable
+    ? "Free"
+    : operation.pricing.credits_per_call
+      ? `${operation.pricing.credits_per_call} credits per call`
+      : "Price not set";
+
+  return (
+    <div className="flex min-h-9 items-center justify-between gap-3 rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs">
+      <div className="min-w-0">
+        <span className="text-muted-foreground">Platform price</span>
+        <span className="ml-2 font-medium text-foreground">{price}</span>
+      </div>
+      {operation.vendor_service_id ? (
+        <Link
+          to="/services/$serviceId/edit"
+          params={{ serviceId: operation.vendor_service_id }}
+          className="inline-flex shrink-0 items-center gap-1 text-foreground hover:underline"
+        >
+          Edit service
+          <ExternalLink className="h-3 w-3" />
+        </Link>
+      ) : (
+        <span className="shrink-0 text-muted-foreground">Vendor missing</span>
+      )}
+    </div>
+  );
+}
+
 function XSearchOperationCard({
   operation,
 }: {
@@ -267,6 +306,7 @@ function XSearchOperationCard({
                 </FormItem>
               )}
             />
+            <OperationPricing operation={operation} />
             <FormField
               control={form.control}
               name="config.max_results_cap"
@@ -367,6 +407,7 @@ function SpeakOperationCard({
                 </FormItem>
               )}
             />
+            <OperationPricing operation={operation} />
             <FormField
               control={form.control}
               name="config.allowed_voice_ids"
@@ -501,6 +542,7 @@ function CallAndSayOperationCard({
                 </FormItem>
               )}
             />
+            <OperationPricing operation={operation} />
             <FormField
               control={form.control}
               name="config.allowed_destination_prefixes"
@@ -616,6 +658,127 @@ function CallAndSayOperationCard({
   );
 }
 
+function FlightSearchOperationCard({
+  operation,
+}: {
+  readonly operation: FlightSearchOperation;
+}) {
+  const update = useUpdatePlatformOperation();
+  const form = useAppForm<FlightSearchUpdate>({
+    resolver: zodResolver(flightSearchUpdateSchema),
+    defaultValues: {
+      enabled: operation.enabled,
+      vendor_service_slug: operation.vendor_service_slug,
+      config: operation.config,
+    },
+  });
+
+  useEffect(() => {
+    form.reset({
+      enabled: operation.enabled,
+      vendor_service_slug: operation.vendor_service_slug,
+      config: operation.config,
+    });
+  }, [form, operation]);
+
+  const onSubmit = async (data: FlightSearchUpdate) => {
+    try {
+      const saved = await update.mutateAsync({ op: "flight_search", data });
+      if (saved.op === "flight_search") {
+        form.reset({
+          enabled: saved.enabled,
+          vendor_service_slug: saved.vendor_service_slug,
+          config: saved.config,
+        });
+      }
+      toast.success("Flight Search configuration saved");
+    } catch (error) {
+      toast.error(updateErrorMessage(error));
+    }
+  };
+
+  return (
+    <Form {...form}>
+      <form onSubmit={form.handleSubmit(onSubmit)}>
+        <Card className="h-full">
+          <OperationHeader
+            icon={Plane}
+            title="Flight Search"
+            enabled={form.watch("enabled")}
+            onEnabledChange={(enabled) => form.setValue("enabled", enabled)}
+          />
+          <CardContent className="space-y-4 pt-4">
+            <FormField
+              control={form.control}
+              name="vendor_service_slug"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Vendor Service Slug</FormLabel>
+                  <FormControl>
+                    <Input {...field} />
+                  </FormControl>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
+            <OperationPricing operation={operation} />
+            <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1 2xl:grid-cols-2">
+              <FormField
+                control={form.control}
+                name="config.max_offers_cap"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Maximum Offers</FormLabel>
+                    <FormControl>
+                      <NumberInput
+                        value={field.value}
+                        onChange={field.onChange}
+                        min={1}
+                        max={50}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="config.max_searches_per_user_per_day"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Daily Searches Per User</FormLabel>
+                    <FormControl>
+                      <NumberInput
+                        value={field.value}
+                        onChange={field.onChange}
+                        min={1}
+                        max={4_294_967_295}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+            </div>
+            <FormSubmitErrors />
+          </CardContent>
+          <CardFooter>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={!form.formState.isDirty || update.isPending}
+              isLoading={update.isPending}
+            >
+              <Check className="h-4 w-4" />
+              Save Flight Search
+            </Button>
+          </CardFooter>
+        </Card>
+      </form>
+    </Form>
+  );
+}
+
 function OperationCard({
   operation,
 }: {
@@ -628,6 +791,8 @@ function OperationCard({
       return <SpeakOperationCard operation={operation} />;
     case "call_and_say":
       return <CallAndSayOperationCard operation={operation} />;
+    case "flight_search":
+      return <FlightSearchOperationCard operation={operation} />;
   }
 }
 
@@ -712,8 +877,8 @@ export function AdminPlatformOpsPage() {
           onRetry={() => void refetchOperations()}
         />
       ) : isLoading ? (
-        <div className="grid gap-4 xl:grid-cols-3">
-          {Array.from({ length: 3 }).map((_, index) => (
+        <div className="grid gap-4 xl:grid-cols-2">
+          {Array.from({ length: 4 }).map((_, index) => (
             <Skeleton
               key={`platform-operation-${String(index)}`}
               className="h-[420px] w-full"
@@ -721,7 +886,7 @@ export function AdminPlatformOpsPage() {
           ))}
         </div>
       ) : (
-        <div className="grid items-start gap-4 xl:grid-cols-3">
+        <div className="grid items-start gap-4 xl:grid-cols-2">
           {data?.operations.map((operation) => (
             <OperationCard key={operation.op} operation={operation} />
           ))}

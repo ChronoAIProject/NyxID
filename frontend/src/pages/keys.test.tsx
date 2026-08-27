@@ -3,6 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { KeyInfo } from "@/types/keys";
+import type { PlatformOperationDiscovery } from "@/schemas/platform-ops";
 
 const { mockNavigate, state } = vi.hoisted(() => ({
   mockNavigate: vi.fn(),
@@ -14,6 +15,8 @@ const { mockNavigate, state } = vi.hoisted(() => ({
     keysError: null as unknown,
     userServices: [] as unknown[],
     nodes: [] as { id: string; name: string }[],
+    platformFlag: false,
+    platformOperations: [] as PlatformOperationDiscovery[],
   },
 }));
 
@@ -50,6 +53,18 @@ vi.mock("@/hooks/use-user-services", () => ({
 
 vi.mock("@/hooks/use-nodes", () => ({
   useNodes: () => ({ data: state.nodes }),
+}));
+
+vi.mock("@/hooks/use-feature-flag", () => ({
+  useFeature: () => state.platformFlag,
+}));
+
+vi.mock("@/hooks/use-platform-ops", () => ({
+  usePlatformOperationDiscovery: () => ({
+    data: { operations: state.platformOperations },
+    error: null,
+    isLoading: false,
+  }),
 }));
 
 // Heavy children — stubbed to assert wiring (open state, presence), not driven.
@@ -139,6 +154,27 @@ function makeKey(overrides: Partial<KeyInfo> = {}): KeyInfo {
   };
 }
 
+function makePlatformOperation(
+  overrides: Partial<PlatformOperationDiscovery> = {},
+): PlatformOperationDiscovery {
+  return {
+    op: "speak",
+    display_name: "Speak",
+    description: "Converts bounded text to speech.",
+    vendor: "elevenlabs",
+    catalog_service_slug: "api-elevenlabs",
+    credential_source: "platform",
+    own_connection: null,
+    pricing: {
+      billable: true,
+      credits_per_call: "0.25",
+      metric: "requests",
+    },
+    mcp_tool: "nyx__speak",
+    ...overrides,
+  };
+}
+
 describe("KeysPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -148,6 +184,8 @@ describe("KeysPage", () => {
     state.keysError = null;
     state.userServices = [];
     state.nodes = [];
+    state.platformFlag = false;
+    state.platformOperations = [];
   });
 
   it("defaults to the External Services tab and lists personal services as a flat grid", () => {
@@ -182,6 +220,162 @@ describe("KeysPage", () => {
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /connect service/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("hides platform services when the flag is off or discovery is empty", () => {
+    state.platformOperations = [makePlatformOperation()];
+    const { rerender } = render(<KeysPage />);
+    expect(
+      screen.queryByRole("heading", { name: "Platform services" }),
+    ).not.toBeInTheDocument();
+
+    state.platformFlag = true;
+    state.platformOperations = [];
+    rerender(<KeysPage />);
+    expect(
+      screen.queryByRole("heading", { name: "Platform services" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("renders usable, disabled, node-routed, and unusable connection states", () => {
+    state.platformFlag = true;
+    state.platformOperations = [
+      makePlatformOperation({
+        own_connection: {
+          user_service_id: "eleven-key",
+          slug: "elevenlabs",
+          label: "My ElevenLabs",
+          is_active: true,
+          usable: true,
+          reason: null,
+        },
+        credential_source: "own_connection",
+      }),
+      makePlatformOperation({
+        op: "x_search",
+        display_name: "X Search",
+        vendor: "x",
+        catalog_service_slug: "api-twitter",
+        mcp_tool: "nyx__x_search",
+        own_connection: {
+          user_service_id: "x-key",
+          slug: "twitter",
+          label: "My X",
+          is_active: false,
+          usable: false,
+          reason: "disabled",
+        },
+      }),
+      makePlatformOperation({
+        op: "call_and_say",
+        display_name: "Call and Say",
+        vendor: "twilio",
+        catalog_service_slug: "api-twilio",
+        mcp_tool: "nyx__call_and_say",
+        own_connection: {
+          user_service_id: "twilio-key",
+          slug: "twilio",
+          label: "Node Twilio",
+          is_active: true,
+          usable: false,
+          reason: "node_routed",
+        },
+        credential_source: "own_connection",
+      }),
+      makePlatformOperation({
+        op: "flight_search",
+        display_name: "Flight Search",
+        vendor: "duffel",
+        catalog_service_slug: "duffel",
+        mcp_tool: "nyx__flight_search",
+        own_connection: {
+          user_service_id: "duffel-key",
+          slug: "duffel",
+          label: "Old Duffel",
+          is_active: true,
+          usable: false,
+          reason: "unusable",
+        },
+        credential_source: "own_connection",
+      }),
+    ];
+
+    render(<KeysPage />);
+
+    expect(screen.getByText("Using your ElevenLabs connection")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        (_, element) =>
+          element?.tagName === "P" &&
+          (element.textContent?.includes(
+            "Your X connection is disabled \u2014 platform credential in use (0.25 credits/call)",
+          ) ?? false),
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Your Twilio connection is node-routed/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Your Duffel connection is unusable/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Enable" })).toHaveAttribute(
+      "href",
+      "/keys/$keyId:x-key",
+    );
+  });
+
+  it("shows platform pricing and opens the catalog connect flow", async () => {
+    const user = userEvent.setup();
+    state.platformFlag = true;
+    state.platformOperations = [makePlatformOperation()];
+
+    render(<KeysPage />);
+
+    expect(
+      screen.getByText("Platform credential \u00b7 0.25 credits/call"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Connect your own" }));
+    expect(screen.getByTestId("add-key-dialog")).toHaveAttribute(
+      "data-prefill",
+      "api-elevenlabs",
+    );
+  });
+
+  it("labels free operations and missing prices honestly", () => {
+    state.platformFlag = true;
+    state.platformOperations = [
+      makePlatformOperation({
+        op: "x_search",
+        display_name: "X Search",
+        vendor: "x",
+        catalog_service_slug: "api-twitter",
+        mcp_tool: "nyx__x_search",
+        pricing: {
+          billable: false,
+          credits_per_call: "0.25",
+          metric: "requests",
+        },
+      }),
+      makePlatformOperation({
+        op: "flight_search",
+        display_name: "Flight Search",
+        vendor: "duffel",
+        catalog_service_slug: "duffel",
+        mcp_tool: "nyx__flight_search",
+        pricing: {
+          billable: true,
+          credits_per_call: null,
+          metric: "requests",
+        },
+      }),
+    ];
+
+    render(<KeysPage />);
+
+    expect(screen.getByText("Platform credential \u00b7 Free")).toBeInTheDocument();
+    expect(
+      screen.getByText("Platform credential \u00b7 Price not set"),
     ).toBeInTheDocument();
   });
 

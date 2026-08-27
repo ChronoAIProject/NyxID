@@ -2,9 +2,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import {
   PLATFORM_OPERATION_QUERY_KEY,
+  PLATFORM_OPERATION_DISCOVERY_QUERY_KEY,
   PLATFORM_VENDOR_REQUIREMENTS_QUERY_KEY,
   PLATFORM_VENDOR_TEMPLATES_QUERY_KEY,
   platformOperationListSchema,
+  platformOperationDiscoveryListSchema,
   platformOperationSchema,
   platformVendorRequirementSchema,
   platformVendorRequirementListSchema,
@@ -14,6 +16,7 @@ import {
   type ProvisionPlatformVendorVariables,
   type PlatformOperation,
   type PlatformOperationList,
+  type PlatformOperationDiscoveryList,
   type UpdatePlatformOperationVariables,
 } from "@/schemas/platform-ops";
 import type { DownstreamService } from "@/types/api";
@@ -24,6 +27,17 @@ export function usePlatformOperations() {
     queryFn: async (): Promise<PlatformOperationList> => {
       const response = await api.get<unknown>("/admin/platform-ops");
       return platformOperationListSchema.parse(response);
+    },
+  });
+}
+
+export function usePlatformOperationDiscovery(enabled = true) {
+  return useQuery({
+    queryKey: PLATFORM_OPERATION_DISCOVERY_QUERY_KEY,
+    enabled,
+    queryFn: async (): Promise<PlatformOperationDiscoveryList> => {
+      const response = await api.get<unknown>("/platform-ops");
+      return platformOperationDiscoveryListSchema.parse(response);
     },
   });
 }

@@ -886,7 +886,7 @@ async fn finish_applied_lock_before_dead_letter(
     Ok(false)
 }
 
-pub async fn release_unforwarded_rows(
+pub async fn release_failed_rows(
     db: &mongodb::Database,
     billing_request_id: &str,
     terminal_status: UsageStatus,
@@ -896,14 +896,13 @@ pub async fn release_unforwarded_rows(
         .collection::<UsageMeterRow>(USAGE_METER)
         .find(doc! {
             "billing_request_id": billing_request_id,
-            "forwarded": false,
-            "status": "reserved",
+            "status": { "$in": ["reserved", "forwarded"] },
             "released": false,
         })
         .await?;
     let mut released_count = 0;
     while let Some(row) = cursor.try_next().await? {
-        if release_one_unforwarded_row(db, &row, terminal_status, reason).await? {
+        if release_one_failed_row(db, &row, terminal_status, reason).await? {
             released_count += 1;
         }
     }
@@ -1277,6 +1276,50 @@ async fn release_one_unforwarded_row(
                 "_id": &row.id,
                 "forwarded": false,
                 "status": "reserved",
+                "released": false,
+            },
+            doc! { "$set": set_doc },
+        )
+        .with_options(
+            FindOneAndUpdateOptions::builder()
+                .return_document(ReturnDocument::Before)
+                .build(),
+        )
+        .await?;
+
+    let Some(claimed) = claimed else {
+        return Ok(false);
+    };
+
+    release_wallet_hold(db, &claimed.billing_owner_id, claimed.reserved_credits).await?;
+    super::funding::release_usage_reservations(db, &claimed).await?;
+    Ok(true)
+}
+
+async fn release_one_failed_row(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+    terminal_status: UsageStatus,
+    reason: Option<&str>,
+) -> AppResult<bool> {
+    let now = Utc::now();
+    let mut set_doc = doc! {
+        "status": bson::to_bson(&terminal_status)
+            .unwrap_or_else(|_| bson::Bson::String("failed".to_string())),
+        "released": true,
+        "updated_at": bson::DateTime::from_chrono(now),
+        "finalized_at": bson::DateTime::from_chrono(now),
+    };
+    if let Some(reason) = reason {
+        set_doc.insert("last_error", reason);
+    }
+
+    let claimed = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find_one_and_update(
+            doc! {
+                "_id": &row.id,
+                "status": { "$in": ["reserved", "forwarded"] },
                 "released": false,
             },
             doc! { "$set": set_doc },

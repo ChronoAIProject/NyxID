@@ -45,6 +45,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 11500 `GrantCascadeConfirmationRequired` (HTTP 409)
 - 11600-11606 triggers: 11600 `TriggerNotFound`, 11601 `TriggerSecretInvalid`, 11602 `TriggerRateLimited`, 11603 `TriggerPayloadTooLarge`, 11604 `TriggerDeliveryUnsupported`, 11605 `TriggerDeliveryFailed`, 11606 `TriggerDeliveryRecordNotFound`
 - 11700 `RequestBodyTooLarge` (HTTP 413): a bounded proxy or forwarding ingress exceeded its configured byte limit
+- 11800-11802 platform services: 11800 `PlatformOperationUnavailable`, 11801 `PlatformVendorProvisioningInvalid`, 11802 `PlatformOperationOwnConnectionUnsupported`
 
 ### 4. Frontend Patterns
 
@@ -195,6 +196,12 @@ Single-use hosted credential setup for agents and CLI callers. An authenticated 
 - Trigger inbound secrets use the `nyx_trg_` prefix and are SHA-256 hashed. HMAC verification additionally retains an encrypted copy because verification requires the raw key. Trigger and delivery types are serde-tagged enums; all secret-bearing structs use redacted `Debug` implementations.
 - Trigger ingress is public; unknown and disabled triggers are not-found-shaped, then per-trigger rate limiting runs before body reads, HMAC decryption, or verification. Webhook-target envelopes are persisted only in `trigger_deliveries`, encrypted with `EncryptionKeys`, and TTL-expired for durable dedup and authenticated replay; `TRIGGER_DELIVERY_RETENTION_HOURS=0` stores metadata only. Agent and notification payloads are never persisted and retain bounded per-process dedup after synchronous success. Agent targets enter through the trusted channel-event service path without broadening the public channel-event auth contract.
 
+### 15. Platform Services
+
+- Platform capabilities are code-owned, named operations with `deny_unknown_fields` requests and server-composed vendor paths, headers, and bodies. The `experimental:platform-services` flag gates caller-facing routes, then each operation's `enabled` switch and typed config apply. See `docs/PLATFORM_SERVICES.md`.
+- Resolve the acting user's connection through the normal proxy cascade before selecting a shared credential. A usable server-held user credential wins and skips billing. A disabled connection selects platform credits. An unusable or node-routed active connection returns an error and must not fall back to a chargeable platform credential.
+- Platform vendor rows carry an explicit empty `proxy_operation_policy`. They are unreachable through every caller-addressed proxy, catalog, generic MCP, LLM, and auto-provision path by construction. Only bounded platform operations may use the server-chosen credential path. Price remains on the vendor row's `ServiceBilling` configuration.
+
 ## File Structure
 
 ```
@@ -257,6 +264,7 @@ All API routes under `/api/v1`:
 - `/providers` -- CRUD + OAuth/device-code/API-key flows + token management + per-user credentials
 - `/admin` -- user management, audit log, OAuth clients, service accounts
 - `/assistant/actions` -- public static assistant action manifest for Aevatar startup discovery
+- `/platform-ops` -- feature-gated discovery plus the bounded `x-search`, `speak`, `call-and-say`, and `flight-search` operations; admin configuration is under `/admin/platform-ops` (Critical Rule 15)
 - `/proxy/{service_id}/{path}` and `/proxy/s/{slug}/{path}` -- authenticated proxy (UUID- and slug-based); HTTP + WebSocket passthrough
 - `/proxy/services` -- service discovery (paginated list of proxyable services)
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)

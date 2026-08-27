@@ -1,40 +1,49 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{Days, NaiveDate, Utc};
 use futures::{StreamExt, TryStreamExt};
 use mongodb::bson::doc;
 use mongodb::options::ReturnDocument;
-use reqwest::header::CONTENT_TYPE;
-use serde::Deserialize;
+use reqwest::header::{ACCEPT, ACCEPT_ENCODING, CONTENT_TYPE, HeaderMap, HeaderValue};
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
-    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
 };
 use crate::models::platform_op_usage::{COLLECTION_NAME as PLATFORM_OP_USAGE, PlatformOpUsage};
 use crate::models::platform_operation::{
-    COLLECTION_NAME as PLATFORM_OPERATIONS, CallAndSayConfig, PlatformOperation,
-    PlatformOperationConfig, PlatformOperationName, SpeakConfig, XSearchConfig,
+    COLLECTION_NAME as PLATFORM_OPERATIONS, CallAndSayConfig, FlightSearchConfig,
+    PlatformOperation, PlatformOperationConfig, PlatformOperationName, SpeakConfig, XSearchConfig,
     default_call_max_message_chars, default_call_max_per_user_per_day, default_call_voice,
+    default_flight_search_max_offers_cap, default_flight_search_max_per_user_per_day,
     default_speak_max_chars, default_speak_model_id, default_x_search_max_results_cap,
 };
-use crate::services::{assistant_service, proxy_service};
+use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
+use crate::services::billing::route_inventory::BillingEgressPermit;
+use crate::services::connection_expiry_service::ConnectionExpiryNotifier;
+use crate::services::node_ws_manager::NodeWsManager;
+use crate::services::{assistant_service, proxy_service, user_service_service};
 
 pub const X_SEARCH_HARD_MAX_RESULTS: u32 = 25;
 pub const SPEAK_HARD_MAX_CHARS: u32 = 5_000;
 pub const CALL_AND_SAY_HARD_MAX_MESSAGE_CHARS: u32 = 1_000;
+pub const FLIGHT_SEARCH_HARD_MAX_OFFERS: u32 = 50;
 pub const MCP_SPEAK_HARD_MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 const MAX_VENDOR_JSON_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
 pub const X_SEARCH_VENDOR_SLUG: &str = "platform-x";
 pub const SPEAK_VENDOR_SLUG: &str = "platform-elevenlabs";
 pub const CALL_AND_SAY_VENDOR_SLUG: &str = "platform-twilio";
-pub const PLATFORM_OPERATION_NAMES: [PlatformOperationName; 3] = [
+pub const FLIGHT_SEARCH_VENDOR_SLUG: &str = "platform-duffel";
+pub const PLATFORM_OPERATION_NAMES: [PlatformOperationName; 4] = [
     PlatformOperationName::XSearch,
     PlatformOperationName::Speak,
     PlatformOperationName::CallAndSay,
+    PlatformOperationName::FlightSearch,
 ];
 
 /// Runtime-enforced operation contract. Keep this registry code-owned: admin
@@ -49,7 +58,7 @@ pub struct PlatformOperationVendorContract {
     pub auth_key_name: Option<&'static str>,
 }
 
-pub const PLATFORM_OPERATION_VENDOR_CONTRACTS: [PlatformOperationVendorContract; 3] = [
+pub const PLATFORM_OPERATION_VENDOR_CONTRACTS: [PlatformOperationVendorContract; 4] = [
     PlatformOperationVendorContract {
         operation: PlatformOperationName::CallAndSay,
         slug: CALL_AND_SAY_VENDOR_SLUG,
@@ -71,11 +80,61 @@ pub const PLATFORM_OPERATION_VENDOR_CONTRACTS: [PlatformOperationVendorContract;
         auth_method: "bearer",
         auth_key_name: None,
     },
+    PlatformOperationVendorContract {
+        operation: PlatformOperationName::FlightSearch,
+        slug: FLIGHT_SEARCH_VENDOR_SLUG,
+        base_url: "https://api.duffel.com",
+        auth_method: "bearer",
+        auth_key_name: None,
+    },
 ];
 
-/// Seed data for the admin-managed template collection. Duffel deliberately
-/// has no operation binding yet; a future operation adds a code contract and
-/// sets this row's `operation` to that operation name before it can be bound.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlatformOperationCatalogContract {
+    pub operation: PlatformOperationName,
+    pub catalog_service_slug: &'static str,
+    pub vendor: &'static str,
+    pub display_name: &'static str,
+    pub description: &'static str,
+    pub mcp_tool: &'static str,
+}
+
+pub const PLATFORM_OPERATION_CATALOG_CONTRACTS: [PlatformOperationCatalogContract; 4] = [
+    PlatformOperationCatalogContract {
+        operation: PlatformOperationName::XSearch,
+        catalog_service_slug: "api-twitter",
+        vendor: "x",
+        display_name: "X Search",
+        description: "Search recent public posts on X.",
+        mcp_tool: "nyx__x_search",
+    },
+    PlatformOperationCatalogContract {
+        operation: PlatformOperationName::Speak,
+        catalog_service_slug: "api-elevenlabs",
+        vendor: "elevenlabs",
+        display_name: "Speak",
+        description: "Synthesize speech from bounded text input.",
+        mcp_tool: "nyx__speak",
+    },
+    PlatformOperationCatalogContract {
+        operation: PlatformOperationName::CallAndSay,
+        catalog_service_slug: "api-twilio",
+        vendor: "twilio",
+        display_name: "Call and Say",
+        description: "Place a voice call that speaks a bounded message.",
+        mcp_tool: "nyx__call_and_say",
+    },
+    PlatformOperationCatalogContract {
+        operation: PlatformOperationName::FlightSearch,
+        catalog_service_slug: "duffel",
+        vendor: "duffel",
+        display_name: "Flight Search",
+        description: "Search available flight offers without booking.",
+        mcp_tool: "nyx__flight_search",
+    },
+];
+
+/// Seed data for the admin-managed template collection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SeededPlatformVendorTemplate {
     pub vendor: &'static str,
@@ -134,15 +193,15 @@ pub const DEFAULT_PLATFORM_VENDOR_TEMPLATES: [SeededPlatformVendorTemplate; 4] =
     SeededPlatformVendorTemplate {
         vendor: "duffel",
         display_name: "Duffel",
-        slug: "platform-duffel",
+        slug: FLIGHT_SEARCH_VENDOR_SLUG,
         base_url: "https://api.duffel.com",
         auth_method: "bearer",
         auth_key_name: None,
         credential_label: "Access token",
-        credential_note: "Store a server-side Duffel access token for a future platform operation.",
-        operation: None,
-        capability_summary: "Pre-provisions the credential row; no Duffel platform operation is shipped yet.",
-        restriction_summary: "Does not expose Duffel endpoints or publish any executable vendor tools.",
+        credential_note: "Use a Duffel access token with permission to create offer requests.",
+        operation: Some("flight_search"),
+        capability_summary: "Searches flight offers through the bounded flight_search operation.",
+        restriction_summary: "Does not create orders, payments, or cancellations and does not expose Duffel's general API.",
     },
 ];
 
@@ -161,6 +220,25 @@ pub fn vendor_contract_for_operation_name(
     PLATFORM_OPERATION_VENDOR_CONTRACTS
         .iter()
         .find(|contract| operation_name(contract.operation) == name)
+}
+
+pub fn catalog_contract_for_operation(
+    op: PlatformOperationName,
+) -> &'static PlatformOperationCatalogContract {
+    PLATFORM_OPERATION_CATALOG_CONTRACTS
+        .iter()
+        .find(|contract| contract.operation == op)
+        .expect("every shipped platform operation must bind one user catalog contract")
+}
+
+pub fn is_platform_vendor_slug(slug: &str) -> bool {
+    PLATFORM_OPERATION_VENDOR_CONTRACTS
+        .iter()
+        .any(|contract| contract.slug == slug)
+}
+
+pub fn platform_vendor_kill_policy() -> ProxyOperationPolicy {
+    ProxyOperationPolicy { rules: Vec::new() }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -182,6 +260,19 @@ pub struct SpeakRequest {
 pub struct CallAndSayRequest {
     pub to: String,
     pub message: String,
+    pub from: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FlightSearchRequest {
+    pub origin: String,
+    pub destination: String,
+    pub departure_date: String,
+    pub return_date: Option<String>,
+    pub adults: Option<u32>,
+    pub cabin_class: Option<String>,
+    pub max_offers: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -203,15 +294,116 @@ pub struct CallAndSayUpstreamRequest {
     pub form: Vec<(&'static str, String)>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FlightSearchUpstreamRequest {
+    pub path: &'static str,
+    pub query: &'static str,
+    pub body: serde_json::Value,
+    pub max_offers: u32,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct FlightSearchResponse {
+    pub offer_request_id: String,
+    pub offers: Vec<FlightOffer>,
+    pub offer_count_returned: usize,
+    pub offer_count_available: usize,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct FlightOffer {
+    pub id: String,
+    pub total_amount: String,
+    pub total_currency: String,
+    pub owner: FlightCarrier,
+    pub expires_at: Option<String>,
+    pub slices: Vec<FlightSlice>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FlightCarrier {
+    #[serde(default)]
+    pub iata_code: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct FlightSlice {
+    pub origin: Option<String>,
+    pub destination: Option<String>,
+    pub duration: Option<String>,
+    pub segments: Vec<FlightSegment>,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct FlightSegment {
+    pub carrier: FlightCarrier,
+    pub flight_number: Option<String>,
+    pub origin: Option<String>,
+    pub destination: Option<String>,
+    pub departing_at: Option<String>,
+    pub arriving_at: Option<String>,
+    pub aircraft: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct SpeakVendorResponse {
     pub response: reqwest::Response,
 }
 
-struct VendorTarget {
-    base_url: String,
-    auth_key_name: String,
-    credential: Zeroizing<String>,
+pub struct VendorTarget {
+    pub target: proxy_service::ProxyTarget,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformCredentialSource {
+    Platform,
+    OwnConnection,
+}
+
+impl PlatformCredentialSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Platform => "platform",
+            Self::OwnConnection => "own_connection",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OwnConnectionMetadata {
+    pub user_service_id: String,
+    pub slug: String,
+    pub label: String,
+    pub is_active: bool,
+}
+
+pub enum PlatformCredentialResolution {
+    Platform {
+        vendor: Box<DownstreamService>,
+        disabled_connection: Option<OwnConnectionMetadata>,
+    },
+    OwnConnection {
+        resolution: Box<proxy_service::UserServiceResolution>,
+        connection: OwnConnectionMetadata,
+    },
+    NodeRouted {
+        connection: OwnConnectionMetadata,
+    },
+    Unusable {
+        connection: OwnConnectionMetadata,
+        error: Option<AppError>,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub enum CredentialResolutionMode<'a> {
+    Execute {
+        connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
+    },
+    Discover,
 }
 
 pub fn operation_name(op: PlatformOperationName) -> &'static str {
@@ -219,6 +411,7 @@ pub fn operation_name(op: PlatformOperationName) -> &'static str {
         PlatformOperationName::XSearch => "x_search",
         PlatformOperationName::Speak => "speak",
         PlatformOperationName::CallAndSay => "call_and_say",
+        PlatformOperationName::FlightSearch => "flight_search",
     }
 }
 
@@ -227,6 +420,7 @@ pub fn parse_operation_name(value: &str) -> AppResult<PlatformOperationName> {
         "x_search" => Ok(PlatformOperationName::XSearch),
         "speak" => Ok(PlatformOperationName::Speak),
         "call_and_say" => Ok(PlatformOperationName::CallAndSay),
+        "flight_search" => Ok(PlatformOperationName::FlightSearch),
         _ => Err(AppError::NotFound(
             "Platform operation not found".to_string(),
         )),
@@ -251,6 +445,12 @@ pub fn default_operation_config(op: PlatformOperationName) -> PlatformOperationC
                 max_calls_per_user_per_day: default_call_max_per_user_per_day(),
                 account_sid: String::new(),
                 call_from: String::new(),
+            })
+        }
+        PlatformOperationName::FlightSearch => {
+            PlatformOperationConfig::FlightSearch(FlightSearchConfig {
+                max_offers_cap: default_flight_search_max_offers_cap(),
+                max_searches_per_user_per_day: default_flight_search_max_per_user_per_day(),
             })
         }
     }
@@ -280,6 +480,9 @@ pub fn validate_operation_config(
         }
         (PlatformOperationName::CallAndSay, PlatformOperationConfig::CallAndSay(config)) => {
             validate_call_and_say_config(config)?
+        }
+        (PlatformOperationName::FlightSearch, PlatformOperationConfig::FlightSearch(config)) => {
+            validate_flight_search_config(config)?
         }
         _ => {
             return Err(AppError::BadRequest(
@@ -393,6 +596,20 @@ fn validate_call_and_say_config(config: &CallAndSayConfig) -> AppResult<()> {
     Ok(())
 }
 
+fn validate_flight_search_config(config: &FlightSearchConfig) -> AppResult<()> {
+    if !(1..=FLIGHT_SEARCH_HARD_MAX_OFFERS).contains(&config.max_offers_cap) {
+        return Err(AppError::BadRequest(format!(
+            "max_offers_cap must be between 1 and {FLIGHT_SEARCH_HARD_MAX_OFFERS}."
+        )));
+    }
+    if config.max_searches_per_user_per_day == 0 {
+        return Err(AppError::BadRequest(
+            "max_searches_per_user_per_day must be at least 1.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn is_safe_identifier(value: &str, max_len: usize) -> bool {
     !value.is_empty()
         && value.len() <= max_len
@@ -401,7 +618,7 @@ fn is_safe_identifier(value: &str, max_len: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
 }
 
-fn is_twilio_account_sid(value: &str) -> bool {
+pub fn is_twilio_account_sid(value: &str) -> bool {
     value.len() == 34
         && value.starts_with("AC")
         && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -458,15 +675,45 @@ pub fn build_x_search_request(
     })
 }
 
+pub fn x_search_path_for_base_url(base_url: &str) -> AppResult<&'static str> {
+    let url = url::Url::parse(base_url)
+        .map_err(|_| AppError::BadRequest("X connection has an invalid base URL.".to_string()))?;
+    let has_version_segment = url
+        .path_segments()
+        .and_then(|mut segments| segments.rfind(|segment| !segment.is_empty()))
+        == Some("2");
+    Ok(if has_version_segment {
+        "tweets/search/recent"
+    } else {
+        "2/tweets/search/recent"
+    })
+}
+
+#[cfg(test)]
 pub fn build_speak_request(
     config: &SpeakConfig,
     request: &SpeakRequest,
 ) -> AppResult<SpeakUpstreamRequest> {
-    let allowed = config
-        .allowed_voice_ids
-        .iter()
-        .any(|voice_id| voice_id == &request.voice_id);
-    if !allowed {
+    build_speak_request_for_source(config, request, true)
+}
+
+pub fn build_speak_request_for_source(
+    config: &SpeakConfig,
+    request: &SpeakRequest,
+    enforce_platform_allowlist: bool,
+) -> AppResult<SpeakUpstreamRequest> {
+    if !is_safe_identifier(&request.voice_id, 128) {
+        return Err(AppError::BadRequest(
+            "voice_id must use only letters, digits, periods, hyphens, and underscores."
+                .to_string(),
+        ));
+    }
+    if enforce_platform_allowlist
+        && !config
+            .allowed_voice_ids
+            .iter()
+            .any(|voice_id| voice_id == &request.voice_id)
+    {
         return Err(AppError::BadRequest(format!(
             "voice_id must be one of the allowed values: {}.",
             config.allowed_voice_ids.join(", ")
@@ -490,20 +737,65 @@ pub fn build_speak_request(
     })
 }
 
+#[cfg(test)]
 pub fn build_call_and_say_request(
     config: &CallAndSayConfig,
     request: &CallAndSayRequest,
+) -> AppResult<CallAndSayUpstreamRequest> {
+    build_call_and_say_request_for_source(config, request, CallCredentialIdentity::Platform)
+}
+
+pub enum CallCredentialIdentity<'a> {
+    Platform,
+    OwnConnection { credential: &'a str },
+}
+
+pub fn build_call_and_say_request_for_source(
+    config: &CallAndSayConfig,
+    request: &CallAndSayRequest,
+    identity: CallCredentialIdentity<'_>,
 ) -> AppResult<CallAndSayUpstreamRequest> {
     if !is_e164_number(&request.to) {
         return Err(AppError::BadRequest(
             "to must be a valid E.164 phone number.".to_string(),
         ));
     }
-    if !destination_matches_prefixes(&request.to, &config.allowed_destination_prefixes) {
-        return Err(AppError::BadRequest(
-            "Destination is not allowed for this platform operation.".to_string(),
-        ));
-    }
+
+    let (account_sid, call_from) = match identity {
+        CallCredentialIdentity::Platform => {
+            if request.from.is_some() {
+                return Err(AppError::BadRequest(
+                    "`from` is not accepted when using the platform credential".to_string(),
+                ));
+            }
+            if !destination_matches_prefixes(&request.to, &config.allowed_destination_prefixes) {
+                return Err(AppError::BadRequest(
+                    "Destination is not allowed for this platform operation.".to_string(),
+                ));
+            }
+            (config.account_sid.clone(), config.call_from.clone())
+        }
+        CallCredentialIdentity::OwnConnection { credential } => {
+            let from = request.from.as_deref().ok_or_else(|| {
+                AppError::BadRequest(
+                    "from is required when using your own Twilio connection.".to_string(),
+                )
+            })?;
+            if !is_e164_number(from) {
+                return Err(AppError::BadRequest(
+                    "from must be a valid E.164 phone number.".to_string(),
+                ));
+            }
+            let account_sid = credential.split_once(':').map(|(sid, _)| sid).unwrap_or("");
+            if !is_twilio_account_sid(account_sid) {
+                return Err(AppError::BadRequest(
+                    "The stored Twilio credential must use AccountSID:AuthToken format."
+                        .to_string(),
+                ));
+            }
+            (account_sid.to_string(), from.to_string())
+        }
+    };
 
     let message_chars = request.message.chars().count();
     let max_chars = config
@@ -527,12 +819,284 @@ pub fn build_call_and_say_request(
     );
 
     Ok(CallAndSayUpstreamRequest {
-        path: format!("2010-04-01/Accounts/{}/Calls.json", config.account_sid),
+        path: format!("2010-04-01/Accounts/{account_sid}/Calls.json"),
         form: vec![
             ("To", request.to.clone()),
-            ("From", config.call_from.clone()),
+            ("From", call_from),
             ("Twiml", twiml),
         ],
+    })
+}
+
+pub fn build_flight_search_request(
+    config: &FlightSearchConfig,
+    request: &FlightSearchRequest,
+) -> AppResult<FlightSearchUpstreamRequest> {
+    build_flight_search_request_at(config, request, Utc::now().date_naive())
+}
+
+fn build_flight_search_request_at(
+    config: &FlightSearchConfig,
+    request: &FlightSearchRequest,
+    today: NaiveDate,
+) -> AppResult<FlightSearchUpstreamRequest> {
+    let origin = normalize_iata_code("origin", &request.origin)?;
+    let destination = normalize_iata_code("destination", &request.destination)?;
+    if origin == destination {
+        return Err(AppError::BadRequest(
+            "destination must differ from origin.".to_string(),
+        ));
+    }
+
+    let departure_date = parse_flight_date("departure_date", &request.departure_date)?;
+    let latest = today.checked_add_days(Days::new(365)).ok_or_else(|| {
+        AppError::Internal("Unable to calculate the flight search date window".to_string())
+    })?;
+    if departure_date < today {
+        return Err(AppError::BadRequest(
+            "departure_date must not be in the past.".to_string(),
+        ));
+    }
+    if departure_date > latest {
+        return Err(AppError::BadRequest(
+            "departure_date must be within 365 days.".to_string(),
+        ));
+    }
+
+    let return_date = request
+        .return_date
+        .as_deref()
+        .map(|value| parse_flight_date("return_date", value))
+        .transpose()?;
+    if let Some(return_date) = return_date {
+        if return_date < departure_date {
+            return Err(AppError::BadRequest(
+                "return_date must be on or after departure_date.".to_string(),
+            ));
+        }
+        if return_date > latest {
+            return Err(AppError::BadRequest(
+                "return_date must be within 365 days.".to_string(),
+            ));
+        }
+    }
+
+    let adults = request.adults.unwrap_or(1);
+    if !(1..=9).contains(&adults) {
+        return Err(AppError::BadRequest(
+            "adults must be between 1 and 9.".to_string(),
+        ));
+    }
+
+    let cabin_class = request
+        .cabin_class
+        .as_deref()
+        .map(|value| value.trim().to_ascii_lowercase());
+    if let Some(value) = cabin_class.as_deref()
+        && !matches!(value, "economy" | "premium_economy" | "business" | "first")
+    {
+        return Err(AppError::BadRequest(
+            "cabin_class must be economy, premium_economy, business, or first.".to_string(),
+        ));
+    }
+
+    let configured_cap = config.max_offers_cap.min(FLIGHT_SEARCH_HARD_MAX_OFFERS);
+    if configured_cap == 0 {
+        return Err(AppError::PlatformOperationUnavailable);
+    }
+    let requested_offers = request.max_offers.unwrap_or(configured_cap);
+    if requested_offers == 0 {
+        return Err(AppError::BadRequest(
+            "max_offers must be at least 1.".to_string(),
+        ));
+    }
+    let max_offers = requested_offers.min(configured_cap);
+
+    let mut slices = vec![serde_json::json!({
+        "origin": origin,
+        "destination": destination,
+        "departure_date": departure_date.format("%Y-%m-%d").to_string(),
+    })];
+    if let Some(return_date) = return_date {
+        slices.push(serde_json::json!({
+            "origin": destination,
+            "destination": origin,
+            "departure_date": return_date.format("%Y-%m-%d").to_string(),
+        }));
+    }
+    let passengers = (0..adults)
+        .map(|_| serde_json::json!({ "type": "adult" }))
+        .collect::<Vec<_>>();
+    let mut data = serde_json::Map::from_iter([
+        ("slices".to_string(), serde_json::Value::Array(slices)),
+        (
+            "passengers".to_string(),
+            serde_json::Value::Array(passengers),
+        ),
+    ]);
+    if let Some(cabin_class) = cabin_class {
+        data.insert(
+            "cabin_class".to_string(),
+            serde_json::Value::String(cabin_class),
+        );
+    }
+
+    Ok(FlightSearchUpstreamRequest {
+        path: "air/offer_requests",
+        query: "return_offers=true",
+        body: serde_json::json!({ "data": data }),
+        max_offers,
+    })
+}
+
+fn normalize_iata_code(field: &str, value: &str) -> AppResult<String> {
+    let normalized = value.trim().to_ascii_uppercase();
+    if normalized.len() != 3 || !normalized.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        return Err(AppError::BadRequest(format!(
+            "{field} must be a three-letter IATA code."
+        )));
+    }
+    Ok(normalized)
+}
+
+fn parse_flight_date(field: &str, value: &str) -> AppResult<NaiveDate> {
+    NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d")
+        .map_err(|_| AppError::BadRequest(format!("{field} must use YYYY-MM-DD format.")))
+}
+
+#[derive(Default, Deserialize)]
+struct DuffelOfferRequestEnvelope {
+    #[serde(default)]
+    data: DuffelOfferRequestData,
+}
+
+#[derive(Default, Deserialize)]
+struct DuffelOfferRequestData {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    offers: Vec<DuffelOffer>,
+}
+
+#[derive(Default, Deserialize)]
+struct DuffelOffer {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    total_amount: String,
+    #[serde(default)]
+    total_currency: String,
+    #[serde(default)]
+    owner: FlightCarrier,
+    #[serde(default)]
+    expires_at: Option<String>,
+    #[serde(default)]
+    slices: Vec<DuffelSlice>,
+}
+
+#[derive(Default, Deserialize)]
+struct DuffelSlice {
+    #[serde(default)]
+    origin: DuffelPlace,
+    #[serde(default)]
+    destination: DuffelPlace,
+    #[serde(default)]
+    duration: Option<String>,
+    #[serde(default)]
+    segments: Vec<DuffelSegment>,
+}
+
+#[derive(Default, Deserialize)]
+struct DuffelSegment {
+    #[serde(default)]
+    marketing_carrier: FlightCarrier,
+    #[serde(default)]
+    flight_number: Option<String>,
+    #[serde(default)]
+    origin: DuffelPlace,
+    #[serde(default)]
+    destination: DuffelPlace,
+    #[serde(default)]
+    departing_at: Option<String>,
+    #[serde(default)]
+    arriving_at: Option<String>,
+    #[serde(default)]
+    aircraft: Option<DuffelAircraft>,
+}
+
+#[derive(Default, Deserialize)]
+struct DuffelPlace {
+    #[serde(default)]
+    iata_code: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct DuffelAircraft {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+impl DuffelPlace {
+    fn display_code(self) -> Option<String> {
+        self.iata_code.or(self.name)
+    }
+}
+
+pub fn project_flight_search_response(
+    value: serde_json::Value,
+    max_offers: u32,
+) -> AppResult<FlightSearchResponse> {
+    let payload: DuffelOfferRequestEnvelope = serde_json::from_value(value).map_err(|error| {
+        tracing::error!(
+            op = "flight_search",
+            error = %error,
+            "Duffel returned an invalid offer request response"
+        );
+        AppError::PlatformOperationUnavailable
+    })?;
+    let offer_count_available = payload.data.offers.len();
+    let offers = payload
+        .data
+        .offers
+        .into_iter()
+        .take(max_offers.min(FLIGHT_SEARCH_HARD_MAX_OFFERS) as usize)
+        .map(|offer| FlightOffer {
+            id: offer.id,
+            total_amount: offer.total_amount,
+            total_currency: offer.total_currency,
+            owner: offer.owner,
+            expires_at: offer.expires_at,
+            slices: offer
+                .slices
+                .into_iter()
+                .map(|slice| FlightSlice {
+                    origin: slice.origin.display_code(),
+                    destination: slice.destination.display_code(),
+                    duration: slice.duration,
+                    segments: slice
+                        .segments
+                        .into_iter()
+                        .map(|segment| FlightSegment {
+                            carrier: segment.marketing_carrier,
+                            flight_number: segment.flight_number,
+                            origin: segment.origin.display_code(),
+                            destination: segment.destination.display_code(),
+                            departing_at: segment.departing_at,
+                            arriving_at: segment.arriving_at,
+                            aircraft: segment.aircraft.and_then(|aircraft| aircraft.name),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+    Ok(FlightSearchResponse {
+        offer_request_id: payload.data.id,
+        offer_count_returned: offers.len(),
+        offer_count_available,
+        offers,
     })
 }
 
@@ -632,6 +1196,173 @@ pub async fn list_enabled_operations(db: &mongodb::Database) -> AppResult<Vec<Pl
         .collect())
 }
 
+/// Resolve whether an operation should use a user-owned server credential or
+/// the platform vendor credential. Both execution and discovery enter through
+/// this function; discovery selects the read-only proxy resolver mode.
+pub async fn resolve_operation_credential_source(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    node_ws_manager: &Arc<NodeWsManager>,
+    resolution_user_id: &str,
+    operation: &PlatformOperation,
+    mode: CredentialResolutionMode<'_>,
+) -> AppResult<PlatformCredentialResolution> {
+    let contract = catalog_contract_for_operation(operation.op);
+    let catalog_service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "slug": contract.catalog_service_slug, "is_active": true })
+        .await?;
+
+    let Some(catalog_service) = catalog_service else {
+        let vendor =
+            resolve_platform_vendor_service(db, operation.op, &operation.vendor_service_slug)
+                .await?;
+        return Ok(PlatformCredentialResolution::Platform {
+            vendor: Box::new(vendor),
+            disabled_connection: None,
+        });
+    };
+
+    let visible = user_service_service::list_user_services_with_sources_including_disabled(
+        db,
+        resolution_user_id,
+    )
+    .await?;
+    let matching = visible
+        .into_iter()
+        .filter(|entry| {
+            entry.service.catalog_service_id.as_deref() == Some(catalog_service.id.as_str())
+        })
+        .collect::<Vec<_>>();
+    let active_candidate = matching
+        .iter()
+        .find(|entry| entry.service.is_active)
+        .map(|entry| entry.service.clone());
+    let disabled_connection = if active_candidate.is_none() {
+        match matching.iter().find(|entry| !entry.service.is_active) {
+            Some(entry) => Some(connection_metadata(db, &entry.service).await?),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let Some(active_candidate) = active_candidate else {
+        let vendor =
+            resolve_platform_vendor_service(db, operation.op, &operation.vendor_service_slug)
+                .await?;
+        return Ok(PlatformCredentialResolution::Platform {
+            vendor: Box::new(vendor),
+            disabled_connection,
+        });
+    };
+    let connection = connection_metadata(db, &active_candidate).await?;
+
+    let resolved = match mode {
+        CredentialResolutionMode::Execute {
+            connection_expiry_notifier,
+        } => {
+            proxy_service::resolve_proxy_target_from_user_service(
+                db,
+                encryption_keys,
+                node_ws_manager,
+                resolution_user_id,
+                None,
+                Some(&catalog_service.id),
+                connection_expiry_notifier,
+            )
+            .await
+        }
+        CredentialResolutionMode::Discover => {
+            proxy_service::read_proxy_authority_snapshot_from_user_service(
+                db,
+                encryption_keys,
+                resolution_user_id,
+                None,
+                Some(&catalog_service.id),
+            )
+            .await
+        }
+    };
+
+    let resolution = match resolved {
+        Ok(Some(resolution)) => resolution,
+        Ok(None) => {
+            return Ok(PlatformCredentialResolution::Unusable {
+                connection,
+                error: execution_mode_error(
+                    mode,
+                    AppError::Conflict(format!(
+                        "Your {} connection could not be resolved.",
+                        contract.vendor
+                    )),
+                ),
+            });
+        }
+        Err(error) => {
+            let error = normalize_own_connection_error(contract.vendor, error);
+            return Ok(PlatformCredentialResolution::Unusable {
+                connection,
+                error: execution_mode_error(mode, error),
+            });
+        }
+    };
+
+    if resolution.master_credential || resolution.api_key_id.is_none() {
+        let vendor =
+            resolve_platform_vendor_service(db, operation.op, &operation.vendor_service_slug)
+                .await?;
+        return Ok(PlatformCredentialResolution::Platform {
+            vendor: Box::new(vendor),
+            disabled_connection: None,
+        });
+    }
+    if resolution
+        .node_id
+        .as_deref()
+        .is_some_and(|id| !id.is_empty())
+        || !resolution.has_server_credential
+    {
+        return Ok(PlatformCredentialResolution::NodeRouted { connection });
+    }
+
+    Ok(PlatformCredentialResolution::OwnConnection {
+        resolution: Box::new(resolution),
+        connection,
+    })
+}
+
+fn execution_mode_error(mode: CredentialResolutionMode<'_>, error: AppError) -> Option<AppError> {
+    matches!(mode, CredentialResolutionMode::Execute { .. }).then_some(error)
+}
+
+fn normalize_own_connection_error(vendor: &str, error: AppError) -> AppError {
+    match error {
+        AppError::Internal(_) => AppError::Conflict(format!(
+            "Your {vendor} connection is unusable. Update or disable it before retrying."
+        )),
+        other => other,
+    }
+}
+
+async fn connection_metadata(
+    db: &mongodb::Database,
+    service: &crate::models::user_service::UserService,
+) -> AppResult<OwnConnectionMetadata> {
+    let label = db
+        .collection::<UserEndpoint>(USER_ENDPOINTS)
+        .find_one(doc! { "_id": &service.endpoint_id })
+        .await?
+        .map(|endpoint| endpoint.label)
+        .unwrap_or_else(|| service.slug.clone());
+    Ok(OwnConnectionMetadata {
+        user_service_id: service.id.clone(),
+        slug: service.slug.clone(),
+        label,
+        is_active: service.is_active,
+    })
+}
+
 pub async fn upsert_operation(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -642,6 +1373,7 @@ pub async fn upsert_operation(
     updated_by: &str,
 ) -> AppResult<PlatformOperation> {
     validate_operation_config(op, &vendor_service_slug, &config)?;
+    backfill_platform_vendor_kill_policy_for_slug(db, &vendor_service_slug).await?;
     validate_vendor_binding(db, encryption_keys, op, &vendor_service_slug).await?;
 
     let config = bson::to_bson(&config).map_err(|error| {
@@ -675,73 +1407,73 @@ pub async fn upsert_operation(
         })
 }
 
-pub async fn execute_x_search(
-    db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
-    http_client: &reqwest::Client,
-    request: XSearchRequest,
-) -> AppResult<serde_json::Value> {
-    let operation = load_enabled_operation(db, PlatformOperationName::XSearch).await?;
-    let PlatformOperationConfig::XSearch(config) = &operation.config else {
-        return Err(AppError::PlatformOperationUnavailable);
-    };
-    let upstream = build_x_search_request(config, &request)?;
-    let target = resolve_vendor_target(
-        db,
-        encryption_keys,
-        PlatformOperationName::XSearch,
-        &operation.vendor_service_slug,
-    )
-    .await?;
-    let url = format!(
-        "{}/{}?{}",
-        target.base_url.trim_end_matches('/'),
-        upstream.path,
-        upstream.query
-    );
-    let response = http_client
-        .get(url)
-        .bearer_auth(target.credential.as_str())
-        .send()
-        .await
-        .map_err(|error| vendor_request_failed(PlatformOperationName::XSearch, error))?;
-    read_vendor_json(PlatformOperationName::XSearch, response).await
+pub async fn backfill_platform_vendor_kill_policies(db: &mongodb::Database) -> AppResult<u64> {
+    let slugs = PLATFORM_OPERATION_VENDOR_CONTRACTS
+        .iter()
+        .map(|contract| contract.slug)
+        .collect::<Vec<_>>();
+    backfill_platform_vendor_kill_policy_for_slugs(db, &slugs).await
 }
 
-pub async fn execute_speak(
+async fn backfill_platform_vendor_kill_policy_for_slug(
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
-    http_client: &reqwest::Client,
-    request: SpeakRequest,
-) -> AppResult<SpeakVendorResponse> {
-    let operation = load_enabled_operation(db, PlatformOperationName::Speak).await?;
-    let PlatformOperationConfig::Speak(config) = &operation.config else {
-        return Err(AppError::PlatformOperationUnavailable);
-    };
-    let upstream = build_speak_request(config, &request)?;
-    let target = resolve_vendor_target(
-        db,
-        encryption_keys,
-        PlatformOperationName::Speak,
-        &operation.vendor_service_slug,
-    )
-    .await?;
-    let url = format!(
-        "{}/{}",
-        target.base_url.trim_end_matches('/'),
-        upstream.path
-    );
-    let response = http_client
-        .post(url)
-        .header(&target.auth_key_name, target.credential.as_str())
-        .header(CONTENT_TYPE, "application/json")
-        .json(&upstream.body)
-        .send()
-        .await
-        .map_err(|error| vendor_request_failed(PlatformOperationName::Speak, error))?;
-    ensure_vendor_success(PlatformOperationName::Speak, &response)?;
+    slug: &str,
+) -> AppResult<u64> {
+    if !is_platform_vendor_slug(slug) {
+        return Ok(0);
+    }
+    backfill_platform_vendor_kill_policy_for_slugs(db, &[slug]).await
+}
 
-    Ok(SpeakVendorResponse { response })
+async fn backfill_platform_vendor_kill_policy_for_slugs(
+    db: &mongodb::Database,
+    slugs: &[&str],
+) -> AppResult<u64> {
+    let collection = db.collection::<mongodb::bson::Document>(DOWNSTREAM_SERVICES);
+    let rows: Vec<mongodb::bson::Document> = collection
+        .find(doc! {
+            "slug": { "$in": slugs },
+            "$or": [
+                { "proxy_operation_policy": { "$exists": false } },
+                { "proxy_operation_policy": bson::Bson::Null },
+            ],
+        })
+        .await?
+        .try_collect()
+        .await?;
+    let policy = bson::to_bson(&platform_vendor_kill_policy()).map_err(|error| {
+        AppError::Internal(format!(
+            "Failed to serialize platform vendor kill policy: {error}"
+        ))
+    })?;
+    let mut modified = 0_u64;
+    for row in rows {
+        let Some(id) = row.get_str("_id").ok() else {
+            continue;
+        };
+        let slug = row.get_str("slug").unwrap_or("unknown");
+        let result = collection
+            .update_one(
+                doc! {
+                    "_id": id,
+                    "$or": [
+                        { "proxy_operation_policy": { "$exists": false } },
+                        { "proxy_operation_policy": bson::Bson::Null },
+                    ],
+                },
+                doc! { "$set": { "proxy_operation_policy": policy.clone() } },
+            )
+            .await?;
+        if result.modified_count == 1 {
+            modified += 1;
+            tracing::warn!(
+                service_id = id,
+                service_slug = slug,
+                "Backfilled deny-all policy on platform vendor row"
+            );
+        }
+    }
+    Ok(modified)
 }
 
 pub async fn collect_speak_audio(vendor: SpeakVendorResponse) -> AppResult<Vec<u8>> {
@@ -768,74 +1500,89 @@ pub async fn collect_speak_audio(vendor: SpeakVendorResponse) -> AppResult<Vec<u
     Ok(audio)
 }
 
-pub async fn execute_call_and_say(
-    db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
+#[allow(clippy::too_many_arguments)]
+pub async fn forward_operation_request(
     http_client: &reqwest::Client,
-    user_id: &str,
-    yyyymmdd: &str,
-    request: CallAndSayRequest,
-) -> AppResult<serde_json::Value> {
-    validate_usage_date(yyyymmdd)?;
-    let operation = load_enabled_operation(db, PlatformOperationName::CallAndSay).await?;
-    let PlatformOperationConfig::CallAndSay(config) = &operation.config else {
-        return Err(AppError::PlatformOperationUnavailable);
-    };
-    let upstream = build_call_and_say_request(config, &request)?;
-    let target = resolve_vendor_target(
-        db,
-        encryption_keys,
-        PlatformOperationName::CallAndSay,
-        &operation.vendor_service_slug,
+    target: &proxy_service::ProxyTarget,
+    op: PlatformOperationName,
+    method: reqwest::Method,
+    path: &str,
+    query: Option<&str>,
+    headers: HeaderMap,
+    body: Option<bytes::Bytes>,
+    token_exchange_cache: &crate::services::provider_token_exchange_service::TokenExchangeCache,
+    cloud_response_cache: &crate::services::cloud_response_cache::CloudResponseCache,
+    billing_egress_permit: BillingEgressPermit,
+) -> AppResult<reqwest::Response> {
+    proxy_service::forward_request(
+        http_client,
+        target,
+        method,
+        path,
+        query,
+        headers,
+        proxy_service::ProxyBody::Buffered(body),
+        Vec::new(),
+        Vec::new(),
+        None,
+        token_exchange_cache,
+        cloud_response_cache,
+        billing_egress_permit,
     )
-    .await?;
-
-    reserve_daily_call(db, user_id, yyyymmdd, config.max_calls_per_user_per_day).await?;
-    let response = send_call_and_say(http_client, config, &target, &upstream).await;
-    let response = match response {
-        Ok(response) => response,
-        Err(error) => {
-            release_daily_call(db, user_id, yyyymmdd).await?;
-            return Err(error);
-        }
-    };
-
-    Ok(response)
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            op = operation_name(op),
+            error = %error,
+            "Platform operation vendor request failed"
+        );
+        AppError::PlatformOperationUnavailable
+    })
 }
 
-async fn send_call_and_say(
-    http_client: &reqwest::Client,
-    config: &CallAndSayConfig,
-    target: &VendorTarget,
-    upstream: &CallAndSayUpstreamRequest,
-) -> AppResult<serde_json::Value> {
-    let url = format!(
-        "{}/{}",
-        target.base_url.trim_end_matches('/'),
-        upstream.path
+pub fn json_request_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+    headers
+}
+
+pub fn form_request_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("application/x-www-form-urlencoded"),
     );
-    let response = http_client
-        .post(url)
-        .basic_auth(&config.account_sid, Some(target.credential.as_str()))
-        .form(&upstream.form)
-        .send()
-        .await
-        .map_err(|error| vendor_request_failed(PlatformOperationName::CallAndSay, error))?;
-    read_vendor_json(PlatformOperationName::CallAndSay, response).await
+    headers
 }
 
-async fn resolve_vendor_target(
+pub fn duffel_request_headers() -> HeaderMap {
+    let mut headers = json_request_headers();
+    headers.insert("duffel-version", HeaderValue::from_static("v2"));
+    headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+    headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    headers
+}
+
+pub async fn resolve_platform_vendor_service(
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
     op: PlatformOperationName,
     slug: &str,
-) -> AppResult<VendorTarget> {
+) -> AppResult<DownstreamService> {
     let requirement = vendor_requirement_for_operation(op);
     let service = assistant_service::resolve_admin_service_by_slug(db, slug)
         .await
         .map_err(|error| vendor_configuration_failed(op, error))?;
     validate_vendor_binding_shape(requirement, slug, Some(&service), false)
         .map_err(|error| vendor_configuration_failed(op, error))?;
+    Ok(service)
+}
+
+pub async fn materialize_platform_vendor_target(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    op: PlatformOperationName,
+    service: DownstreamService,
+) -> AppResult<VendorTarget> {
     let authorized = proxy_service::authorize_master_credential_server_chosen(db, &service)
         .await
         .map_err(|error| vendor_configuration_failed(op, error))?;
@@ -857,10 +1604,19 @@ async fn resolve_vendor_target(
         return Err(AppError::PlatformOperationUnavailable);
     }
 
+    let catalog_default_headers = service.default_request_headers.clone().unwrap_or_default();
     Ok(VendorTarget {
-        base_url: service.base_url,
-        auth_key_name: service.auth_key_name,
-        credential,
+        target: proxy_service::ProxyTarget {
+            base_url: service.base_url.clone(),
+            auth_method: service.auth_method.clone(),
+            auth_key_name: service.auth_key_name.clone(),
+            credential: credential.to_string(),
+            service,
+            catalog_default_headers,
+            user_service_default_headers: Vec::new(),
+            ws_frame_injections: Vec::new(),
+            connection_id: None,
+        },
     })
 }
 
@@ -979,6 +1735,22 @@ fn validate_vendor_binding_shape(
             service.slug
         )));
     }
+    match service.proxy_operation_policy.as_ref() {
+        None => {
+            return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+                "{op} requires the actor-addressed deny-all kill policy; row '{}' has no proxy_operation_policy",
+                service.slug
+            )));
+        }
+        Some(policy) if !policy.rules.is_empty() => {
+            return Err(AppError::PlatformVendorProvisioningInvalid(format!(
+                "{op} requires an empty actor-addressed deny-all kill policy; row '{}' has {} rule(s)",
+                service.slug,
+                policy.rules.len()
+            )));
+        }
+        Some(_) => {}
+    }
     Ok(())
 }
 
@@ -1015,7 +1787,10 @@ fn vendor_request_failed(op: PlatformOperationName, error: reqwest::Error) -> Ap
     AppError::PlatformOperationUnavailable
 }
 
-fn ensure_vendor_success(op: PlatformOperationName, response: &reqwest::Response) -> AppResult<()> {
+pub fn ensure_vendor_success(
+    op: PlatformOperationName,
+    response: &reqwest::Response,
+) -> AppResult<()> {
     if response.status().is_success() {
         return Ok(());
     }
@@ -1027,7 +1802,7 @@ fn ensure_vendor_success(op: PlatformOperationName, response: &reqwest::Response
     Err(AppError::PlatformOperationUnavailable)
 }
 
-async fn read_vendor_json(
+pub async fn read_vendor_json(
     op: PlatformOperationName,
     response: reqwest::Response,
 ) -> AppResult<serde_json::Value> {
@@ -1062,24 +1837,16 @@ async fn read_vendor_json(
     })
 }
 
-fn validate_usage_date(yyyymmdd: &str) -> AppResult<()> {
-    if yyyymmdd.len() == 8 && yyyymmdd.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Ok(());
-    }
-    Err(AppError::Internal(
-        "Platform operation usage date must use YYYYMMDD format".to_string(),
-    ))
-}
-
-async fn reserve_daily_call(
+pub async fn reserve_daily_operation(
     db: &mongodb::Database,
+    op: PlatformOperationName,
     user_id: &str,
     yyyymmdd: &str,
     cap: u32,
 ) -> AppResult<()> {
     let collection = db.collection::<PlatformOpUsage>(PLATFORM_OP_USAGE);
     let filter = doc! {
-        "op": operation_name(PlatformOperationName::CallAndSay),
+        "op": operation_name(op),
         "user_id": user_id,
         "yyyymmdd": yyyymmdd,
         "count": { "$lt": i64::from(cap) },
@@ -1087,7 +1854,7 @@ async fn reserve_daily_call(
     let update = doc! {
         "$setOnInsert": {
             "_id": uuid::Uuid::new_v4().to_string(),
-            "op": operation_name(PlatformOperationName::CallAndSay),
+            "op": operation_name(op),
             "user_id": user_id,
             "yyyymmdd": yyyymmdd,
         },
@@ -1107,15 +1874,17 @@ async fn reserve_daily_call(
     }
 }
 
-async fn release_daily_call(
+pub async fn release_daily_operation(
     db: &mongodb::Database,
+    op: PlatformOperationName,
     user_id: &str,
     yyyymmdd: &str,
 ) -> AppResult<()> {
-    db.collection::<PlatformOpUsage>(PLATFORM_OP_USAGE)
+    let collection = db.collection::<PlatformOpUsage>(PLATFORM_OP_USAGE);
+    collection
         .update_one(
             doc! {
-                "op": operation_name(PlatformOperationName::CallAndSay),
+                "op": operation_name(op),
                 "user_id": user_id,
                 "yyyymmdd": yyyymmdd,
                 "count": { "$gt": 0_i64 },
@@ -1125,6 +1894,14 @@ async fn release_daily_call(
                 "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
             },
         )
+        .await?;
+    collection
+        .delete_one(doc! {
+            "op": operation_name(op),
+            "user_id": user_id,
+            "yyyymmdd": yyyymmdd,
+            "count": { "$lte": 0_i64 },
+        })
         .await?;
     Ok(())
 }
@@ -1144,6 +1921,8 @@ fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
 mod tests {
     use super::*;
     use crate::models::downstream_service::test_helpers::dummy_service;
+    use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 
     fn speak_config() -> SpeakConfig {
         SpeakConfig {
@@ -1174,6 +1953,7 @@ mod tests {
         service.visibility = "public".to_string();
         service.requires_user_credential = false;
         service.credential_encrypted = vec![1];
+        service.proxy_operation_policy = Some(platform_vendor_kill_policy());
         service
     }
 
@@ -1184,9 +1964,38 @@ mod tests {
         message
     }
 
+    fn test_user_key(id: &str, user_id: &str, credential_encrypted: Option<Vec<u8>>) -> UserApiKey {
+        UserApiKey {
+            id: id.to_string(),
+            user_id: user_id.to_string(),
+            label: "Own ElevenLabs key".to_string(),
+            credential_type: "api_key".to_string(),
+            credential_encrypted,
+            access_token_encrypted: None,
+            refresh_token_encrypted: None,
+            token_scopes: None,
+            expires_at: None,
+            provider_config_id: None,
+            connection_id: None,
+            oauth_attempt_nonce: None,
+            user_oauth_client_id_encrypted: None,
+            user_oauth_client_secret_encrypted: None,
+            credential_source: None,
+            status: "active".to_string(),
+            last_used_at: None,
+            last_authorized_at: None,
+            error_message: None,
+            source: Some("user_created".to_string()),
+            source_id: None,
+            credential_epoch: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
     #[test]
     fn operation_contracts_and_seeded_templates_are_consistent() {
-        assert_eq!(PLATFORM_OPERATION_VENDOR_CONTRACTS.len(), 3);
+        assert_eq!(PLATFORM_OPERATION_VENDOR_CONTRACTS.len(), 4);
         for contract in PLATFORM_OPERATION_VENDOR_CONTRACTS {
             assert_eq!(
                 vendor_requirement_for_operation(contract.operation),
@@ -1199,16 +2008,285 @@ mod tests {
         }
 
         for template in DEFAULT_PLATFORM_VENDOR_TEMPLATES {
-            let Some(operation) = template.operation else {
-                // Duffel is intentionally a credential template until a code
-                // operation is shipped; there is no contract to cross-check.
-                continue;
-            };
+            let operation = template
+                .operation
+                .expect("every platform vendor template binds a shipped operation");
             let operation = parse_operation_name(operation).expect("seeded operation name");
             let contract = vendor_requirement_for_operation(operation);
             assert_eq!(template.auth_method, contract.auth_method);
             assert_eq!(template.auth_key_name, contract.auth_key_name);
         }
+    }
+
+    #[tokio::test]
+    async fn kill_policy_backfill_changes_only_canonical_vendor_policy_fields() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_vendor_policy_backfill").await
+        else {
+            eprintln!("skipping platform vendor backfill test: no local MongoDB available");
+            return;
+        };
+        let mut platform = valid_speak_vendor_service();
+        platform.id = uuid::Uuid::new_v4().to_string();
+        platform.proxy_operation_policy = None;
+        platform.credential_encrypted = vec![9, 8, 7, 6];
+        let mut unrelated = platform.clone();
+        unrelated.id = uuid::Uuid::new_v4().to_string();
+        unrelated.slug = "internal-unrelated".to_string();
+        unrelated.credential_encrypted = vec![1, 2, 3, 4];
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many([platform.clone(), unrelated.clone()])
+            .await
+            .expect("insert backfill fixtures");
+
+        assert_eq!(
+            backfill_platform_vendor_kill_policies(&db)
+                .await
+                .expect("backfill platform policies"),
+            1
+        );
+
+        let platform_after = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": &platform.id })
+            .await
+            .expect("read platform vendor")
+            .expect("platform vendor exists");
+        assert!(
+            platform_after
+                .proxy_operation_policy
+                .as_ref()
+                .is_some_and(|policy| policy.rules.is_empty())
+        );
+        assert_eq!(
+            platform_after.credential_encrypted,
+            platform.credential_encrypted
+        );
+
+        let unrelated_after = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": &unrelated.id })
+            .await
+            .expect("read unrelated row")
+            .expect("unrelated row exists");
+        assert!(unrelated_after.proxy_operation_policy.is_none());
+        assert_eq!(
+            unrelated_after.credential_encrypted,
+            unrelated.credential_encrypted
+        );
+    }
+
+    #[tokio::test]
+    async fn credential_source_resolution_covers_every_connection_state() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_credential_resolution").await
+        else {
+            eprintln!("skipping platform credential resolution test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = crate::test_utils::test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let catalog_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let api_key_id = uuid::Uuid::new_v4().to_string();
+        let node_ws_manager = Arc::new(NodeWsManager::new(30, 100));
+
+        let mut vendor = valid_speak_vendor_service();
+        vendor.id = uuid::Uuid::new_v4().to_string();
+        vendor.credential_encrypted = encryption_keys
+            .encrypt(b"platform-elevenlabs-secret")
+            .await
+            .expect("encrypt platform credential");
+        let mut catalog = dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "api-elevenlabs".to_string();
+        catalog.name = "ElevenLabs".to_string();
+        catalog.base_url = "https://api.elevenlabs.io".to_string();
+        catalog.service_category = "connection".to_string();
+        catalog.auth_method = "header".to_string();
+        catalog.auth_key_name = "xi-api-key".to_string();
+        catalog.requires_user_credential = true;
+        catalog.credential_encrypted = Vec::new();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many([vendor, catalog])
+            .await
+            .expect("insert vendor catalogs");
+
+        let operation = PlatformOperation {
+            id: uuid::Uuid::new_v4().to_string(),
+            op: PlatformOperationName::Speak,
+            enabled: true,
+            vendor_service_slug: SPEAK_VENDOR_SLUG.to_string(),
+            config: PlatformOperationConfig::Speak(speak_config()),
+            updated_at: Utc::now(),
+            updated_by: "admin".to_string(),
+        };
+        let resolve = |mode| {
+            resolve_operation_credential_source(
+                &db,
+                &encryption_keys,
+                &node_ws_manager,
+                &user_id,
+                &operation,
+                mode,
+            )
+        };
+
+        assert!(matches!(
+            resolve(CredentialResolutionMode::Discover)
+                .await
+                .expect("resolve no connection"),
+            PlatformCredentialResolution::Platform {
+                disabled_connection: None,
+                ..
+            }
+        ));
+
+        let endpoint = crate::test_utils::test_user_endpoint(
+            &endpoint_id,
+            &user_id,
+            "My ElevenLabs",
+            "https://api.elevenlabs.io",
+            None,
+            Some(&catalog_id),
+        );
+        let mut user_service = crate::test_utils::test_user_service(
+            &user_service_id,
+            &user_id,
+            "my-elevenlabs",
+            &endpoint_id,
+            Some(&catalog_id),
+            None,
+        );
+        user_service.is_active = false;
+        user_service.auth_method = "header".to_string();
+        user_service.auth_key_name = "xi-api-key".to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(endpoint)
+            .await
+            .expect("insert user endpoint");
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&user_service)
+            .await
+            .expect("insert disabled user service");
+
+        match resolve(CredentialResolutionMode::Discover)
+            .await
+            .expect("resolve disabled connection")
+        {
+            PlatformCredentialResolution::Platform {
+                disabled_connection: Some(connection),
+                ..
+            } => {
+                assert_eq!(connection.user_service_id, user_service_id);
+                assert!(!connection.is_active);
+            }
+            _ => panic!("disabled connection must select platform credentials"),
+        }
+
+        let encrypted = encryption_keys
+            .encrypt(b"own-elevenlabs-secret")
+            .await
+            .expect("encrypt own credential");
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .insert_one(test_user_key(&api_key_id, &user_id, Some(encrypted)))
+            .await
+            .expect("insert own key");
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &user_service_id },
+                doc! {
+                    "$set": {
+                        "is_active": true,
+                        "api_key_id": &api_key_id,
+                        "auth_method": "header",
+                        "auth_key_name": "xi-api-key",
+                    }
+                },
+            )
+            .await
+            .expect("activate own connection");
+
+        match resolve(CredentialResolutionMode::Execute {
+            connection_expiry_notifier: None,
+        })
+        .await
+        .expect("resolve own connection")
+        {
+            PlatformCredentialResolution::OwnConnection { resolution, .. } => {
+                assert_eq!(resolution.api_key_id.as_deref(), Some(api_key_id.as_str()));
+                assert_eq!(resolution.target.credential, "own-elevenlabs-secret");
+                assert!(resolution.has_server_credential);
+            }
+            _ => panic!("active server-held key must select the own connection"),
+        }
+
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &api_key_id },
+                doc! { "$set": { "status": "revoked" } },
+            )
+            .await
+            .expect("revoke own key");
+        match resolve(CredentialResolutionMode::Execute {
+            connection_expiry_notifier: None,
+        })
+        .await
+        .expect("classify unusable connection")
+        {
+            PlatformCredentialResolution::Unusable {
+                error: Some(AppError::BadRequest(message)),
+                ..
+            } => assert!(message.contains("revoked")),
+            _ => panic!("revoked active key must be unusable without platform fallback"),
+        }
+
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &api_key_id },
+                doc! {
+                    "$set": { "status": "active", "credential_type": "node_managed" },
+                    "$unset": { "credential_encrypted": "" },
+                },
+            )
+            .await
+            .expect("make key node-managed");
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &user_service_id },
+                doc! { "$set": { "node_id": "node-1" } },
+            )
+            .await
+            .expect("route connection through node");
+        assert!(matches!(
+            resolve(CredentialResolutionMode::Execute {
+                connection_expiry_notifier: None,
+            })
+            .await
+            .expect("resolve node connection"),
+            PlatformCredentialResolution::NodeRouted { .. }
+        ));
+
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &user_service_id },
+                doc! {
+                    "$set": { "auth_method": "none" },
+                    "$unset": { "api_key_id": "", "node_id": "" },
+                },
+            )
+            .await
+            .expect("make active row credentialless");
+        assert!(matches!(
+            resolve(CredentialResolutionMode::Discover)
+                .await
+                .expect("resolve credentialless connection"),
+            PlatformCredentialResolution::Platform {
+                disabled_connection: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1287,6 +2365,14 @@ mod tests {
                 SPEAK_VENDOR_SLUG,
                 Some(crate::models::downstream_service::DownstreamService {
                     provider_config_id: Some("provider-1".to_string()),
+                    ..valid.clone()
+                }),
+            ),
+            (
+                "speak requires the actor-addressed deny-all kill policy; row 'platform-elevenlabs' has no proxy_operation_policy",
+                SPEAK_VENDOR_SLUG,
+                Some(crate::models::downstream_service::DownstreamService {
+                    proxy_operation_policy: None,
                     ..valid.clone()
                 }),
             ),
@@ -1393,6 +2479,151 @@ mod tests {
             )
             .is_err()
         );
+
+        let flight = PlatformOperationConfig::FlightSearch(FlightSearchConfig {
+            max_offers_cap: FLIGHT_SEARCH_HARD_MAX_OFFERS + 1,
+            max_searches_per_user_per_day: 20,
+        });
+        assert!(
+            validate_operation_config(
+                PlatformOperationName::FlightSearch,
+                FLIGHT_SEARCH_VENDOR_SLUG,
+                &flight
+            )
+            .is_err()
+        );
+    }
+
+    fn flight_request() -> FlightSearchRequest {
+        FlightSearchRequest {
+            origin: " sin ".to_string(),
+            destination: "lhr".to_string(),
+            departure_date: "2026-09-01".to_string(),
+            return_date: Some("2026-09-08".to_string()),
+            adults: Some(2),
+            cabin_class: Some("business".to_string()),
+            max_offers: Some(40),
+        }
+    }
+
+    #[test]
+    fn flight_search_builder_normalizes_and_bounds_server_composed_request() {
+        let upstream = build_flight_search_request_at(
+            &FlightSearchConfig {
+                max_offers_cap: 10,
+                max_searches_per_user_per_day: 20,
+            },
+            &flight_request(),
+            NaiveDate::from_ymd_opt(2026, 8, 27).expect("valid test date"),
+        )
+        .expect("valid flight search");
+
+        assert_eq!(upstream.path, "air/offer_requests");
+        assert_eq!(upstream.query, "return_offers=true");
+        assert_eq!(upstream.max_offers, 10);
+        assert_eq!(
+            upstream.body,
+            serde_json::json!({
+                "data": {
+                    "slices": [
+                        { "origin": "SIN", "destination": "LHR", "departure_date": "2026-09-01" },
+                        { "origin": "LHR", "destination": "SIN", "departure_date": "2026-09-08" }
+                    ],
+                    "passengers": [{ "type": "adult" }, { "type": "adult" }],
+                    "cabin_class": "business"
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn flight_search_builder_enforces_dates_codes_and_bounds() {
+        let config = FlightSearchConfig {
+            max_offers_cap: 10,
+            max_searches_per_user_per_day: 20,
+        };
+        let today = NaiveDate::from_ymd_opt(2026, 8, 27).expect("valid test date");
+        let mut request = flight_request();
+
+        request.origin = "S1N".to_string();
+        assert!(build_flight_search_request_at(&config, &request, today).is_err());
+        request = flight_request();
+        request.destination = "sin".to_string();
+        assert!(build_flight_search_request_at(&config, &request, today).is_err());
+        request = flight_request();
+        request.departure_date = "2026-08-26".to_string();
+        assert!(build_flight_search_request_at(&config, &request, today).is_err());
+        request = flight_request();
+        request.departure_date = "2027-08-28".to_string();
+        request.return_date = None;
+        assert!(build_flight_search_request_at(&config, &request, today).is_err());
+        request = flight_request();
+        request.return_date = Some("2026-08-31".to_string());
+        assert!(build_flight_search_request_at(&config, &request, today).is_err());
+        request = flight_request();
+        request.adults = Some(10);
+        assert!(build_flight_search_request_at(&config, &request, today).is_err());
+        request = flight_request();
+        request.cabin_class = Some("private_jet".to_string());
+        assert!(build_flight_search_request_at(&config, &request, today).is_err());
+        request = flight_request();
+        request.max_offers = Some(0);
+        assert!(build_flight_search_request_at(&config, &request, today).is_err());
+    }
+
+    #[test]
+    fn flight_search_projection_is_bounded_and_tolerates_missing_optional_fields() {
+        let projected = project_flight_search_response(
+            serde_json::json!({
+                "data": {
+                    "id": "orq_123",
+                    "offers": [
+                        {
+                            "id": "off_1",
+                            "total_amount": "123.45",
+                            "total_currency": "SGD",
+                            "owner": { "iata_code": "SQ", "name": "Singapore Airlines" },
+                            "expires_at": "2026-08-27T12:00:00Z",
+                            "slices": [{
+                                "origin": { "iata_code": "SIN" },
+                                "destination": { "iata_code": "LHR" },
+                                "duration": "PT13H30M",
+                                "segments": [{
+                                    "marketing_carrier": { "iata_code": "SQ", "name": "Singapore Airlines" },
+                                    "flight_number": "322",
+                                    "origin": { "iata_code": "SIN" },
+                                    "destination": { "iata_code": "LHR" },
+                                    "departing_at": "2026-09-01T23:30:00",
+                                    "arriving_at": "2026-09-02T05:55:00",
+                                    "aircraft": { "name": "Airbus A380" },
+                                    "ignored_vendor_field": { "large": true }
+                                }],
+                                "ignored_vendor_field": true
+                            }]
+                        },
+                        { "id": "off_2" },
+                        { "id": "off_3" }
+                    ],
+                    "ignored_vendor_field": [1, 2, 3]
+                }
+            }),
+            2,
+        )
+        .expect("valid Duffel projection");
+
+        assert_eq!(projected.offer_request_id, "orq_123");
+        assert_eq!(projected.offer_count_available, 3);
+        assert_eq!(projected.offer_count_returned, 2);
+        assert_eq!(projected.offers[0].owner.iata_code.as_deref(), Some("SQ"));
+        assert_eq!(projected.offers[0].slices[0].origin.as_deref(), Some("SIN"));
+        assert_eq!(
+            projected.offers[0].slices[0].segments[0]
+                .aircraft
+                .as_deref(),
+            Some("Airbus A380")
+        );
+        assert_eq!(projected.offers[1].id, "off_2");
+        assert!(projected.offers[1].expires_at.is_none());
     }
 
     #[test]
@@ -1401,6 +2632,7 @@ mod tests {
         let request = CallAndSayRequest {
             to: "+16505550199".to_string(),
             message: "Hello".to_string(),
+            from: None,
         };
 
         assert!(build_call_and_say_request(&config, &request).is_err());
@@ -1415,11 +2647,83 @@ mod tests {
     }
 
     #[test]
+    fn x_search_path_respects_catalog_base_versioning() {
+        assert_eq!(
+            x_search_path_for_base_url("https://api.x.com").expect("platform X path"),
+            "2/tweets/search/recent"
+        );
+        assert_eq!(
+            x_search_path_for_base_url("https://api.x.com/2").expect("own X path"),
+            "tweets/search/recent"
+        );
+        assert_eq!(
+            x_search_path_for_base_url("https://api.x.com/2/").expect("own X trailing slash path"),
+            "tweets/search/recent"
+        );
+    }
+
+    #[test]
+    fn call_source_controls_require_exactly_the_applicable_caller_identity() {
+        let config = call_config(vec!["+1".to_string()]);
+        let platform_with_from = build_call_and_say_request_for_source(
+            &config,
+            &CallAndSayRequest {
+                to: "+14155550100".to_string(),
+                message: "Hello".to_string(),
+                from: Some("+14155550101".to_string()),
+            },
+            CallCredentialIdentity::Platform,
+        )
+        .expect_err("platform calls must reject caller-provided from");
+        assert!(matches!(
+            platform_with_from,
+            AppError::BadRequest(message)
+                if message == "`from` is not accepted when using the platform credential"
+        ));
+
+        let own_without_from = build_call_and_say_request_for_source(
+            &config,
+            &CallAndSayRequest {
+                to: "+6512345678".to_string(),
+                message: "Hello".to_string(),
+                from: None,
+            },
+            CallCredentialIdentity::OwnConnection {
+                credential: "ACaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:token",
+            },
+        )
+        .expect_err("own calls must require from");
+        assert!(matches!(
+            own_without_from,
+            AppError::BadRequest(message) if message.contains("from is required")
+        ));
+
+        let own = build_call_and_say_request_for_source(
+            &config,
+            &CallAndSayRequest {
+                to: "+6512345678".to_string(),
+                message: "Hello".to_string(),
+                from: Some("+14155550101".to_string()),
+            },
+            CallCredentialIdentity::OwnConnection {
+                credential: "ACaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:token:with:colons",
+            },
+        )
+        .expect("own calls use the SID before the first colon");
+        assert_eq!(
+            own.path,
+            "2010-04-01/Accounts/ACaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/Calls.json"
+        );
+        assert!(own.form.contains(&("From", "+14155550101".to_string())));
+    }
+
+    #[test]
     fn twiml_composition_escapes_xml_and_cdata_terminators() {
         let config = call_config(vec!["+65".to_string()]);
         let request = CallAndSayRequest {
             to: "+6512345678".to_string(),
             message: "A & B <tag> \"quoted\" 'single' ]]> done".to_string(),
+            from: None,
         };
 
         let upstream = build_call_and_say_request(&config, &request).expect("valid request");
@@ -1443,6 +2747,7 @@ mod tests {
         let request = CallAndSayRequest {
             to: "+6512345678".to_string(),
             message: "hello\nworld".to_string(),
+            from: None,
         };
 
         assert!(build_call_and_say_request(&config, &request).is_err());
@@ -1501,6 +2806,15 @@ mod tests {
                 "text": "hello",
                 "voice_id": "voice-a",
                 "model_id": "caller-model",
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<FlightSearchRequest>(serde_json::json!({
+                "origin": "SIN",
+                "destination": "LHR",
+                "departure_date": "2026-09-01",
+                "create_order": true,
             }))
             .is_err()
         );

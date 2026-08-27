@@ -205,7 +205,8 @@ fn identity_config_from_downstream_service(
 }
 
 fn is_public_internal_master_credential_service(service: &DownstreamService) -> bool {
-    service.visibility == "public"
+    !crate::services::platform_operation_service::is_platform_vendor_slug(&service.slug)
+        && service.visibility == "public"
         && service.service_category == "internal"
         && service.auth_method != "none"
         && service.auth_method != "token_exchange"
@@ -8871,7 +8872,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_provision_creates_services_for_public_internal_master_credential_catalog() {
+    async fn chrono_llm_public_still_auto_provisions_as_internal_master_credential_catalog() {
         let Some(db) = connect_test_database("uks_auto_provision_master_credential").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -8880,7 +8881,7 @@ mod tests {
 
         let mut catalog = sample_catalog_service();
         catalog.id = uuid::Uuid::new_v4().to_string();
-        catalog.slug = format!("public-internal-master-{}", uuid::Uuid::new_v4());
+        catalog.slug = "chrono-llm-public".to_string();
         catalog.auth_method = "bearer".to_string();
         catalog.auth_key_name = "Authorization".to_string();
         catalog.requires_user_credential = false;
@@ -8911,6 +8912,52 @@ mod tests {
         assert!(services[0].api_key_id.is_none());
         assert_eq!(services[0].auth_method, "bearer");
         assert_eq!(services[0].auth_key_name, "Authorization");
+    }
+
+    #[tokio::test]
+    async fn platform_vendor_rows_never_auto_provision_user_services() {
+        let Some(db) = connect_test_database("uks_platform_vendor_no_auto_provision").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+
+        for (index, contract) in
+            crate::services::platform_operation_service::PLATFORM_OPERATION_VENDOR_CONTRACTS
+                .iter()
+                .enumerate()
+        {
+            let mut catalog = sample_catalog_service();
+            catalog.id = uuid::Uuid::new_v4().to_string();
+            catalog.slug = contract.slug.to_string();
+            catalog.base_url = contract.base_url.to_string();
+            catalog.auth_method = contract.auth_method.to_string();
+            catalog.auth_key_name = contract
+                .auth_key_name
+                .unwrap_or("Authorization")
+                .to_string();
+            catalog.requires_user_credential = false;
+            catalog.visibility = "public".to_string();
+            catalog.service_category = "internal".to_string();
+            catalog.credential_encrypted = vec![index as u8 + 1];
+            catalog.proxy_operation_policy =
+                Some(crate::services::platform_operation_service::platform_vendor_kill_policy());
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(catalog)
+                .await
+                .unwrap();
+        }
+
+        auto_provision_no_auth_services(&db, &user_id)
+            .await
+            .unwrap();
+
+        let count = db
+            .collection::<UserService>(USER_SERVICES)
+            .count_documents(doc! { "user_id": &user_id })
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 
     #[tokio::test]

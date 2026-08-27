@@ -1042,6 +1042,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn caller_catalogs_hide_platform_vendor_rows() {
+        let Some(db) = connect_test_database("cat_svc_hide_platform_vendor").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut svc = make_catalog_service("platform-duffel", "Platform Duffel", &user_id);
+        svc.requires_user_credential = false;
+        svc.auth_method = "bearer".to_string();
+        svc.provider_config_id = None;
+        svc.service_category = "internal".to_string();
+        svc.proxy_operation_policy =
+            Some(crate::services::platform_operation_service::platform_vendor_kill_policy());
+        insert_service(&db, &svc).await;
+
+        assert!(
+            super::list_catalog(&db, &encryption_keys, &user_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            super::list_catalog_all(&db, &encryption_keys, &user_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn list_catalog_all_also_hides_private_from_non_creator() {
         let Some(db) = connect_test_database("cat_svc_list_all_priv").await else {
             eprintln!("skipping: no MongoDB");

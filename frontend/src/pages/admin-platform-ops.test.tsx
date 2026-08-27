@@ -1,6 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReactNode } from "react";
 import type {
   PlatformOperationList,
   PlatformVendorRequirementList,
@@ -82,6 +83,12 @@ const operations: PlatformOperationList = {
       config: { type: "x_search", max_results_cap: 10 },
       updated_at: null,
       updated_by: null,
+      vendor_service_id: "platform-x-id",
+      pricing: {
+        billable: true,
+        credits_per_call: "0.25",
+        metric: "requests",
+      },
     },
     {
       op: "speak",
@@ -95,6 +102,12 @@ const operations: PlatformOperationList = {
       },
       updated_at: null,
       updated_by: null,
+      vendor_service_id: "existing-elevenlabs-id",
+      pricing: {
+        billable: false,
+        credits_per_call: null,
+        metric: "requests",
+      },
     },
     {
       op: "call_and_say",
@@ -111,9 +124,39 @@ const operations: PlatformOperationList = {
       },
       updated_at: null,
       updated_by: null,
+      vendor_service_id: "platform-twilio-id",
+      pricing: {
+        billable: true,
+        credits_per_call: null,
+        metric: "requests",
+      },
+    },
+    {
+      op: "flight_search",
+      enabled: false,
+      vendor_service_slug: "platform-duffel",
+      config: {
+        type: "flight_search",
+        max_offers_cap: 10,
+        max_searches_per_user_per_day: 20,
+      },
+      updated_at: null,
+      updated_by: null,
+      vendor_service_id: "platform-duffel-id",
+      pricing: {
+        billable: true,
+        credits_per_call: "0.5",
+        metric: "requests",
+      },
     },
   ],
 };
+
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ children, to }: { readonly children: ReactNode; readonly to: string }) => (
+    <a href={to}>{children}</a>
+  ),
+}));
 
 vi.mock("@/hooks/use-platform-ops", () => ({
   usePlatformOperations: () => ({
@@ -162,6 +205,7 @@ describe("AdminPlatformOpsPage", () => {
     expect(screen.getByText("X Search")).toBeInTheDocument();
     expect(screen.getByText("Speak")).toBeInTheDocument();
     expect(screen.getByText("Call and Say")).toBeInTheDocument();
+    expect(screen.getByText("Flight Search")).toBeInTheDocument();
     expect(screen.getByLabelText("Maximum Results")).toHaveValue(10);
     expect(screen.getByLabelText("Allowed Voice IDs")).toBeInTheDocument();
     expect(
@@ -170,6 +214,12 @@ describe("AdminPlatformOpsPage", () => {
     expect(screen.getByLabelText("Account SID")).toHaveValue(
       `AC${"a".repeat(32)}`,
     );
+    expect(screen.getByLabelText("Maximum Offers")).toHaveValue(10);
+    expect(screen.getByLabelText("Daily Searches Per User")).toHaveValue(20);
+    expect(screen.getByText("0.5 credits per call")).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("link", { name: /edit service/i }),
+    ).toHaveLength(4);
   });
 
   it("keeps saves dirty-gated and submits the typed operation payload", async () => {

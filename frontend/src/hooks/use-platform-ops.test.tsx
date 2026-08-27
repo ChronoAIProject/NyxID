@@ -9,6 +9,7 @@ import {
 } from "@/schemas/platform-ops";
 import {
   usePlatformOperations,
+  usePlatformOperationDiscovery,
   usePlatformVendorRequirements,
   useProvisionPlatformVendor,
   useUpdatePlatformOperation,
@@ -52,6 +53,12 @@ const xSearchOperation = {
   config: { type: "x_search" as const, max_results_cap: 10 },
   updated_at: null,
   updated_by: null,
+  vendor_service_id: "platform-x-id",
+  pricing: {
+    billable: true,
+    credits_per_call: "0.25",
+    metric: "requests" as const,
+  },
 };
 
 function createHarness() {
@@ -83,6 +90,39 @@ describe("platform operation hooks", () => {
 
     expect(mockGet).toHaveBeenCalledWith("/admin/platform-ops");
     expect(result.current.data?.operations).toEqual([xSearchOperation]);
+  });
+
+  it("loads and parses user-facing operation discovery", async () => {
+    mockGet.mockResolvedValue({
+      operations: [
+        {
+          op: "speak",
+          display_name: "Speak",
+          description: "Converts bounded text to speech.",
+          vendor: "elevenlabs",
+          catalog_service_slug: "api-elevenlabs",
+          credential_source: "platform",
+          own_connection: null,
+          pricing: {
+            billable: true,
+            credits_per_call: "0.25",
+            metric: "requests",
+          },
+          mcp_tool: "nyx__speak",
+        },
+      ],
+    });
+    const { Wrapper } = createHarness();
+    const { result } = renderHook(() => usePlatformOperationDiscovery(), {
+      wrapper: Wrapper,
+    });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(mockGet).toHaveBeenCalledWith("/platform-ops");
+    expect(result.current.data?.operations[0]?.credential_source).toBe(
+      "platform",
+    );
   });
 
   it("loads and parses vendor requirements", async () => {

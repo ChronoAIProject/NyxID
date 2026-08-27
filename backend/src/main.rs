@@ -534,6 +534,9 @@ async fn main() {
     services::platform_vendor_template_service::seed_default_templates(&db, "system")
         .await
         .expect("Failed to seed platform vendor templates");
+    services::platform_operation_service::backfill_platform_vendor_kill_policies(&db)
+        .await
+        .expect("Failed to backfill platform vendor deny-all policies");
 
     // Materialize ServiceEndpoint rows for seeded catalog services from the
     // hosted overlay specs so /api/v1/mcp/config publishes concrete

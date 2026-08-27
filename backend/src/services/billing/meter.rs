@@ -352,7 +352,7 @@ pub async fn fail(
         return Ok(());
     };
 
-    reservation::release_unforwarded_rows(
+    reservation::release_failed_rows(
         db,
         &ctx.billing_request_id,
         UsageStatus::Failed,

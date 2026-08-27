@@ -76,6 +76,11 @@ pub enum AppError {
     #[error("{0}")]
     PlatformVendorProvisioningInvalid(String),
 
+    #[error(
+        "Your {vendor} connection is node-routed; platform operations need a server-held credential. Disable that connection to use platform credits, or connect a server-held key."
+    )]
+    PlatformOperationOwnConnectionUnsupported { vendor: String },
+
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
@@ -535,6 +540,7 @@ impl AppError {
             Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::PlatformOperationUnavailable => StatusCode::BAD_GATEWAY,
             Self::PlatformVendorProvisioningInvalid(_) => StatusCode::BAD_REQUEST,
+            Self::PlatformOperationOwnConnectionUnsupported { .. } => StatusCode::CONFLICT,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
@@ -688,6 +694,7 @@ impl AppError {
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::PlatformOperationUnavailable => 11800,
             Self::PlatformVendorProvisioningInvalid(_) => 11801,
+            Self::PlatformOperationOwnConnectionUnsupported { .. } => 11802,
             Self::Unauthorized(_) => 1001,
             Self::Forbidden(_) => 1002,
             Self::NotFound(_) => 1003,
@@ -881,6 +888,9 @@ impl AppError {
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::PlatformOperationUnavailable => "platform_operation_unavailable",
             Self::PlatformVendorProvisioningInvalid(_) => "platform_vendor_provisioning_invalid",
+            Self::PlatformOperationOwnConnectionUnsupported { .. } => {
+                "platform_operation_own_connection_unsupported"
+            }
             Self::Unauthorized(_) => "unauthorized",
             Self::Forbidden(_) => "forbidden",
             Self::NotFound(_) => "not_found",
