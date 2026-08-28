@@ -15,6 +15,7 @@ use tokio_stream::StreamExt;
 
 use crate::AppState;
 use crate::crypto::jwt;
+use crate::errors::AppResult;
 use crate::models::mcp_session::{MCP_SESSION_COLLECTION, McpSessionRecord};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -325,6 +326,7 @@ struct McpAuthContext {
     is_api_key: bool,
     /// True only for the scoped `nyxid_ag_` API-key class.
     is_agent_api_key: bool,
+    platform_spend_authorized: bool,
     api_key_id: Option<String>,
     api_key_name: Option<String>,
     /// If false, `allowed_service_ids` constrains which UserServices this request may call.
@@ -341,6 +343,7 @@ struct McpAuthContext {
 
 impl McpAuthContext {
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
+        let platform_spend_authorized = auth_method == AuthMethod::Session;
         Self {
             user_id,
             auth_method,
@@ -348,6 +351,7 @@ impl McpAuthContext {
             approval_owner_user_id: None,
             is_api_key: false,
             is_agent_api_key: false,
+            platform_spend_authorized,
             api_key_id: None,
             api_key_name: None,
             allow_all_services: true,
@@ -485,6 +489,10 @@ async fn authenticate_mcp(
                     approval_owner_user_id: None,
                     is_api_key: true,
                     is_agent_api_key: api_key.key_prefix.starts_with("nyxid_ag_"),
+                    platform_spend_authorized: api_key
+                        .scopes
+                        .split_ascii_whitespace()
+                        .any(|scope| scope == super::platform_ops::PLATFORM_SPEND_SCOPE),
                     api_key_id: Some(api_key.id.clone()),
                     api_key_name: Some(api_key.name.clone()),
                     allow_all_services: api_key.allow_all_services,
@@ -569,6 +577,10 @@ async fn authenticate_mcp(
                 };
 
                 let mut ctx = McpAuthContext::user(user_id, auth_method);
+                ctx.platform_spend_authorized = claims
+                    .scope
+                    .split_ascii_whitespace()
+                    .any(|scope| scope == super::platform_ops::PLATFORM_SPEND_SCOPE);
                 if matches!(
                     ctx.auth_method,
                     AuthMethod::AccessToken | AuthMethod::Delegated
@@ -728,6 +740,52 @@ async fn platform_services_flag_enabled(state: &AppState, auth: &McpAuthContext)
             false
         }
     }
+}
+
+async fn augment_platform_endpoint_catalog(
+    state: &AppState,
+    auth: &McpAuthContext,
+    catalog: &mut mcp_service::McpOperationCatalog,
+) -> AppResult<()> {
+    if !platform_operations_allowed(auth)
+        || !auth.platform_spend_authorized
+        || !auth.allow_all_services
+        || !platform_services_flag_enabled(state, auth).await
+    {
+        return Ok(());
+    }
+    let user_managed_catalog_ids = catalog
+        .services
+        .iter()
+        .filter_map(|service| match &service.source {
+            mcp_service::McpToolSource::UserManaged {
+                catalog_service_id, ..
+            } => catalog_service_id.clone(),
+            mcp_service::McpToolSource::Platform { .. } => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let mut paid = mcp_service::load_platform_endpoint_tools(&state.db).await?;
+    paid.retain(|service| !user_managed_catalog_ids.contains(&service.service_id));
+    if !paid.is_empty() {
+        let paid_catalog_ids = paid
+            .iter()
+            .map(|service| service.service_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        catalog.services.retain(|service| {
+            !matches!(
+                &service.source,
+                mcp_service::McpToolSource::Platform {
+                    downstream_service_id,
+                } if paid_catalog_ids.contains(downstream_service_id)
+            )
+        });
+        catalog.diagnostics.no_visible_connections = false;
+        catalog.services.extend(paid);
+        catalog
+            .services
+            .sort_by(|left, right| left.service_id.cmp(&right.service_id));
+    }
+    Ok(())
 }
 
 fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
@@ -1247,7 +1305,7 @@ async fn handle_tools_list(
     // Thread API-key node scope into the discovery chain so scoped
     // keys don't see tools whose only dispatchable routes are all out of
     // scope (seventeenth-round Codex review P2).
-    let catalog = match mcp_service::load_operation_catalog(
+    let mut catalog = match mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
@@ -1262,6 +1320,10 @@ async fn handle_tools_list(
             return rpc_error(request.id.clone(), -32603, "Failed to load tools");
         }
     };
+    if let Err(error) = augment_platform_endpoint_catalog(state, auth, &mut catalog).await {
+        tracing::error!(error = %error, "Failed to load platform endpoint tools");
+        return rpc_error(request.id.clone(), -32603, "Failed to load tools");
+    }
 
     let services = catalog.services;
     let platform_operations =
@@ -1543,7 +1605,7 @@ async fn handle_tools_call(
     // Scoped discovery so resolve_tool_call can't match tools whose
     // only dispatchable routes fall outside the caller's API-key node scope
     // (twentieth-round Codex P2).
-    let catalog = match mcp_service::load_operation_catalog(
+    let mut catalog = match mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
@@ -1558,6 +1620,10 @@ async fn handle_tools_call(
             return tool_result(request.id.clone(), "Failed to load tools", true);
         }
     };
+    if let Err(error) = augment_platform_endpoint_catalog(state, auth, &mut catalog).await {
+        tracing::error!(error = %error, "Failed to load platform endpoint tools for execution");
+        return tool_result(request.id.clone(), "Failed to load tools", true);
+    }
 
     let services = catalog.services;
     let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
@@ -1605,36 +1671,55 @@ async fn handle_tools_call(
             );
         }
     };
-    let operation = prepared.operation_descriptor();
-    if let Err(resp) =
-        authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone()).await
-    {
-        return resp;
+    let is_paid_platform_endpoint =
+        service.service_category == mcp_service::PLATFORM_CREDENTIAL_SERVICE_CATEGORY;
+    if !is_paid_platform_endpoint {
+        let operation = prepared.operation_descriptor();
+        if let Err(resp) =
+            authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone()).await
+        {
+            return resp;
+        }
     }
 
-    let exec_ctx = mcp_exec_context(auth);
-    let (status, body) = match mcp_service::execute_tool(
-        &state.http_client,
-        &state.db,
-        &state.encryption_keys,
-        &state.node_ws_manager,
-        &state.billing,
-        &auth.user_id,
-        auth.billing_principal_user_id(),
-        service,
-        endpoint,
-        prepared,
-        &state.jwt_keys,
-        &state.config,
-        &state.connection_expiry_notifier,
-        &state.token_exchange_cache,
-        &state.cloud_response_cache,
-        &exec_ctx,
-        billing_egress_permit,
-    )
-    .await
-    {
+    let execution = if is_paid_platform_endpoint {
+        execute_paid_platform_endpoint_mcp(
+            state,
+            auth,
+            service,
+            endpoint,
+            prepared,
+            billing_egress_permit,
+        )
+        .await
+    } else {
+        let exec_ctx = mcp_exec_context(auth);
+        mcp_service::execute_tool(
+            &state.http_client,
+            &state.db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            &state.billing,
+            &auth.user_id,
+            auth.billing_principal_user_id(),
+            service,
+            endpoint,
+            prepared,
+            &state.jwt_keys,
+            &state.config,
+            &state.connection_expiry_notifier,
+            &state.token_exchange_cache,
+            &state.cloud_response_cache,
+            &exec_ctx,
+            billing_egress_permit,
+        )
+        .await
+    };
+    let (status, body) = match execution {
         Ok(r) => r,
+        Err(error) if is_paid_platform_endpoint => {
+            return platform_operation_error_result(request.id.clone(), &error);
+        }
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request.id.clone(), &msg, true);
         }
@@ -1893,6 +1978,84 @@ fn platform_operation_error_result(
     tool_result(request_id, &message, true)
 }
 
+async fn execute_paid_platform_endpoint_mcp(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    endpoint: &mcp_service::McpToolEndpoint,
+    prepared: mcp_service::PreparedProxyCall,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> AppResult<(u16, String)> {
+    use crate::errors::AppError;
+
+    if service.service_category != mcp_service::PLATFORM_CREDENTIAL_SERVICE_CATEGORY {
+        return Err(AppError::PlatformOperationUnavailable);
+    }
+    if !platform_operations_allowed(auth)
+        || !auth.platform_spend_authorized
+        || !auth.allow_all_services
+        || !platform_services_flag_enabled(state, auth).await
+    {
+        return Err(AppError::Forbidden(
+            "Platform endpoint spending is not authorized for this MCP caller".to_string(),
+        ));
+    }
+
+    let canonical_path = prepared.platform_canonical_path()?;
+    let operation = prepared.operation_descriptor();
+    let method = operation
+        .method
+        .as_deref()
+        .ok_or(AppError::PlatformOperationUnavailable)?;
+    let caller = platform_operation_caller(auth);
+    let platform = super::platform_ops::resolve_platform_endpoint(
+        state,
+        &caller,
+        &service.service_id,
+        method,
+        &canonical_path,
+    )
+    .await?
+    .ok_or(AppError::PlatformOperationUnavailable)?;
+    let (method, path, query, headers, body) = prepared.into_platform_parts(endpoint)?;
+    let result = super::platform_ops::execute_platform_endpoint(
+        state,
+        &caller,
+        platform,
+        method,
+        &path,
+        query.as_deref(),
+        headers,
+        body,
+        crate::services::billing::BillingIngress::Mcp,
+        billing_egress_permit,
+    )
+    .await?;
+    audit_service::log_async(
+        state.db.clone(),
+        Some(auth.user_id.clone()),
+        "platform_endpoint_call".to_string(),
+        Some(serde_json::json!({
+            "operation_id": result.attribution.operation_id,
+            "catalog_service_id": result.attribution.catalog_service_id,
+            "billing_request_id": result.attribution.billing_request_id,
+            "credential_source": "platform",
+            "credential_intent": result.credential_intent,
+            "fallback_reason": result.fallback_reason,
+            "response_status": result.status.as_u16(),
+            "ingress": "mcp",
+        })),
+        auth.ip_address.clone(),
+        auth.user_agent.clone(),
+        auth.api_key_id.clone(),
+        auth.api_key_name.clone(),
+    );
+    Ok((
+        result.status.as_u16(),
+        String::from_utf8_lossy(&result.body).into_owned(),
+    ))
+}
+
 fn audit_mcp_platform_operation<T>(
     state: &AppState,
     auth: &McpAuthContext,
@@ -2136,7 +2299,7 @@ async fn handle_meta_call_tool(
     // `nyx__call_tool` can't auto-invoke a tool whose only dispatchable
     // routes are outside the caller's allow-list (twentieth-round
     // Codex P2). Service scope is still applied downstream below.
-    let catalog = match mcp_service::load_operation_catalog(
+    let mut catalog = match mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
@@ -2151,6 +2314,10 @@ async fn handle_meta_call_tool(
             return tool_result(request_id, "Failed to load tools", true);
         }
     };
+    if let Err(error) = augment_platform_endpoint_catalog(state, auth, &mut catalog).await {
+        tracing::error!(error = %error, "Failed to load platform endpoint tools for call_tool");
+        return tool_result(request_id, "Failed to load tools", true);
+    }
     let services = catalog.services;
 
     // Resolve tool (no activation gate -- that's the whole point)
@@ -2173,11 +2340,15 @@ async fn handle_meta_call_tool(
             return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
         }
     };
-    let operation = prepared.operation_descriptor();
-    if let Err(resp) =
-        authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone()).await
-    {
-        return resp;
+    let is_paid_platform_endpoint =
+        service.service_category == mcp_service::PLATFORM_CREDENTIAL_SERVICE_CATEGORY;
+    if !is_paid_platform_endpoint {
+        let operation = prepared.operation_descriptor();
+        if let Err(resp) =
+            authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone()).await
+        {
+            return resp;
+        }
     }
 
     // Auto-activate so future tools/list responses include this service.
@@ -2195,29 +2366,44 @@ async fn handle_meta_call_tool(
         None => false,
     };
 
-    let exec_ctx = mcp_exec_context(auth);
-    let (status, body) = match mcp_service::execute_tool(
-        &state.http_client,
-        &state.db,
-        &state.encryption_keys,
-        &state.node_ws_manager,
-        &state.billing,
-        &auth.user_id,
-        auth.billing_principal_user_id(),
-        service,
-        endpoint,
-        prepared,
-        &state.jwt_keys,
-        &state.config,
-        &state.connection_expiry_notifier,
-        &state.token_exchange_cache,
-        &state.cloud_response_cache,
-        &exec_ctx,
-        billing_egress_permit,
-    )
-    .await
-    {
+    let execution = if is_paid_platform_endpoint {
+        execute_paid_platform_endpoint_mcp(
+            state,
+            auth,
+            service,
+            endpoint,
+            prepared,
+            billing_egress_permit,
+        )
+        .await
+    } else {
+        let exec_ctx = mcp_exec_context(auth);
+        mcp_service::execute_tool(
+            &state.http_client,
+            &state.db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            &state.billing,
+            &auth.user_id,
+            auth.billing_principal_user_id(),
+            service,
+            endpoint,
+            prepared,
+            &state.jwt_keys,
+            &state.config,
+            &state.connection_expiry_notifier,
+            &state.token_exchange_cache,
+            &state.cloud_response_cache,
+            &exec_ctx,
+            billing_egress_permit,
+        )
+        .await
+    };
+    let (status, body) = match execution {
         Ok(r) => r,
+        Err(error) if is_paid_platform_endpoint => {
+            return platform_operation_error_result(request_id, &error);
+        }
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request_id, &msg, true);
         }
@@ -3585,6 +3771,7 @@ mod tests {
             approval_owner_user_id: None,
             is_api_key: true,
             is_agent_api_key: true,
+            platform_spend_authorized: true,
             api_key_id: Some("key-1".into()),
             api_key_name: Some("agent".into()),
             allow_all_services: false,

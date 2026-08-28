@@ -360,6 +360,28 @@ pub async fn release_daily_spend(
     Ok(())
 }
 
+pub async fn settle_daily_spend(
+    db: &mongodb::Database,
+    reservation: &PlatformSpendReservation,
+    actual_charge_micros: i64,
+) -> AppResult<()> {
+    let actual = actual_charge_micros
+        .max(0)
+        .min(reservation.reserved_micros.max(0));
+    let release = reservation.reserved_micros.saturating_sub(actual);
+    if release == 0 {
+        return Ok(());
+    }
+    release_daily_spend(
+        db,
+        &PlatformSpendReservation {
+            reserved_micros: release,
+            ..reservation.clone()
+        },
+    )
+    .await
+}
+
 async fn ensure_can_manage_owner(
     db: &mongodb::Database,
     actor_user_id: &str,

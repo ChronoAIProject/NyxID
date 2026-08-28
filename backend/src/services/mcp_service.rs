@@ -11,7 +11,10 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
     legacy_http_service_type_filter,
 };
-use crate::models::platform_operation::{PlatformOperation, PlatformOperationConfig};
+use crate::models::platform_operation::{
+    COLLECTION_NAME as PLATFORM_OPERATIONS, PlatformOperation, PlatformOperationConfig,
+    PlatformOperationKind, PlatformOperationRow,
+};
 use crate::models::service_billing::{BillingMetric, PlatformUsage};
 use crate::models::service_endpoint::{
     COLLECTION_NAME as SERVICE_ENDPOINTS, EndpointRisk, OperationResponseContract, ServiceEndpoint,
@@ -56,6 +59,8 @@ pub enum McpToolSource {
         has_server_credential: bool,
     },
 }
+
+pub const PLATFORM_CREDENTIAL_SERVICE_CATEGORY: &str = "platform_credential";
 
 impl McpToolSource {
     pub fn is_user_service(&self) -> bool {
@@ -785,6 +790,168 @@ pub async fn load_operation_catalog(
     })
 }
 
+pub async fn load_platform_endpoint_tools(
+    db: &mongodb::Database,
+) -> AppResult<Vec<McpToolService>> {
+    let rows: Vec<PlatformOperationRow> = db
+        .collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .find(doc! { "enabled": true, "kind.kind": "endpoint" })
+        .await?
+        .try_collect()
+        .await?;
+    let service_ids = rows
+        .iter()
+        .map(|row| row.catalog_service_id.as_str())
+        .collect::<HashSet<_>>();
+    if service_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let services: Vec<DownstreamService> = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(doc! {
+            "_id": { "$in": service_ids.into_iter().collect::<Vec<_>>() },
+            "is_active": true,
+        })
+        .await?
+        .try_collect()
+        .await?;
+    let endpoints: Vec<ServiceEndpoint> = db
+        .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+        .find(doc! {
+            "service_id": { "$in": services.iter().map(|service| service.id.as_str()).collect::<Vec<_>>() },
+            "is_active": true,
+        })
+        .await?
+        .try_collect()
+        .await?;
+    let endpoints_by_service = endpoints.iter().fold(
+        HashMap::<&str, Vec<&ServiceEndpoint>>::new(),
+        |mut grouped, endpoint| {
+            grouped
+                .entry(endpoint.service_id.as_str())
+                .or_default()
+                .push(endpoint);
+            grouped
+        },
+    );
+    let mut result = Vec::new();
+    for service in services {
+        if crate::services::platform_credential_service::provider_contract_for_slug(&service.slug)
+            .is_none()
+        {
+            continue;
+        }
+        let mut published = Vec::new();
+        for row in rows
+            .iter()
+            .filter(|row| row.catalog_service_id == service.id)
+        {
+            let PlatformOperationKind::Endpoint {
+                method,
+                path_template,
+                name,
+                description,
+            } = &row.kind
+            else {
+                continue;
+            };
+            let endpoint = endpoints_by_service
+                .get(service.id.as_str())
+                .into_iter()
+                .flatten()
+                .find(|endpoint| {
+                    crate::services::platform_credential_service::normalize_endpoint_definition(
+                        &service.slug,
+                        &endpoint.method,
+                        &endpoint.path,
+                    )
+                    .is_ok_and(|(endpoint_method, endpoint_path)| {
+                        endpoint_method == *method && endpoint_path == *path_template
+                    })
+                })
+                .map(|endpoint| McpToolEndpoint {
+                    endpoint_id: row.id.clone(),
+                    name: endpoint.name.clone(),
+                    description: endpoint.description.clone(),
+                    method: endpoint.method.clone(),
+                    path: endpoint.path.clone(),
+                    parameters: endpoint.parameters.clone(),
+                    request_body_schema: endpoint.request_body_schema.clone(),
+                    request_content_type: endpoint.request_content_type.clone(),
+                    request_body_required: endpoint.effective_request_body_required(),
+                    response_description: endpoint.response_description.clone(),
+                    response: endpoint.response.clone(),
+                })
+                .unwrap_or_else(|| {
+                    platform_row_to_mcp_endpoint(
+                        row,
+                        method,
+                        path_template,
+                        name,
+                        description.as_deref(),
+                    )
+                });
+            published.push(endpoint);
+        }
+        if published.is_empty() {
+            continue;
+        }
+        result.push(McpToolService {
+            service_id: service.id.clone(),
+            service_name: service.name.clone(),
+            service_slug: service.slug.clone(),
+            description: service.description.clone(),
+            service_category: PLATFORM_CREDENTIAL_SERVICE_CATEGORY.to_string(),
+            endpoints: published,
+            durable_endpoint_metadata: HashMap::new(),
+            source: McpToolSource::Platform {
+                downstream_service_id: service.id.clone(),
+            },
+            executable: true,
+            is_generic_proxy: false,
+            invalid_openapi_contract: false,
+            recommended_skills: service.recommended_skills.unwrap_or_default(),
+            proxy_operation_policy: None,
+        });
+    }
+    Ok(result)
+}
+
+fn platform_row_to_mcp_endpoint(
+    row: &PlatformOperationRow,
+    method: &str,
+    path_template: &str,
+    name: &str,
+    description: Option<&str>,
+) -> McpToolEndpoint {
+    let parameters = path_template
+        .split('/')
+        .filter_map(|segment| segment.strip_prefix('{')?.strip_suffix('}'))
+        .map(|name| {
+            serde_json::json!({
+                "name": name,
+                "in": "path",
+                "required": true,
+                "schema": { "type": "string" },
+            })
+        })
+        .collect::<Vec<_>>();
+    let has_body = method == "POST";
+    McpToolEndpoint {
+        endpoint_id: row.id.clone(),
+        name: name.to_string(),
+        description: description.map(str::to_string),
+        method: method.to_string(),
+        path: path_template.to_string(),
+        parameters: (!parameters.is_empty()).then(|| serde_json::Value::Array(parameters)),
+        request_body_schema: has_body.then(|| serde_json::json!({ "type": "object" })),
+        request_content_type: has_body.then(|| "application/json".to_string()),
+        request_body_required: has_body,
+        response_description: None,
+        response: OperationResponseContract::default(),
+    }
+}
+
 fn operation_set_is_publishable(service: &McpToolService) -> bool {
     if service.endpoints.is_empty() {
         return false;
@@ -806,7 +973,7 @@ fn operation_descriptor_is_publishable(endpoint: &McpToolEndpoint) -> bool {
         || !endpoint.path.starts_with('/')
         || !matches!(
             endpoint.method.as_str(),
-            "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
+            "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE"
         )
         || endpoint.parameters.as_ref().is_some_and(|parameters| {
             !parameters.as_array().is_some_and(|parameters| {
@@ -3128,6 +3295,55 @@ impl PreparedProxyCall {
             &self.path,
             self.body.as_ref().map(|bytes| bytes.as_ref()),
         )
+    }
+
+    pub fn platform_canonical_path(
+        &self,
+    ) -> AppResult<crate::services::proxy_authorization::CanonicalPath> {
+        if self.is_generic_proxy_endpoint {
+            crate::services::proxy_authorization::CanonicalPath::from_mcp_literal(&self.path)
+        } else {
+            crate::services::proxy_authorization::CanonicalPath::from_mcp_built(&self.path)
+        }
+    }
+
+    pub fn into_platform_parts(
+        self,
+        endpoint: &McpToolEndpoint,
+    ) -> AppResult<(
+        reqwest::Method,
+        String,
+        Option<String>,
+        reqwest::header::HeaderMap,
+        Option<bytes::Bytes>,
+    )> {
+        let mut headers = if self.is_generic_proxy_endpoint {
+            let mut headers = reqwest::header::HeaderMap::new();
+            if self.body.is_some() {
+                headers.insert(
+                    reqwest::header::CONTENT_TYPE,
+                    reqwest::header::HeaderValue::from_static("application/json"),
+                );
+            }
+            headers
+        } else {
+            build_downstream_request_headers(endpoint, self.body.is_some())?
+        };
+        for (name, value) in self
+            .parameter_headers
+            .iter()
+            .chain(self.server_owned_headers.iter())
+        {
+            let name =
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                    AppError::BadRequest(format!("Invalid endpoint header name `{name}`: {error}"))
+                })?;
+            let value = reqwest::header::HeaderValue::from_str(value).map_err(|error| {
+                AppError::BadRequest(format!("Invalid endpoint header value: {error}"))
+            })?;
+            headers.append(name, value);
+        }
+        Ok((self.method, self.path, self.query, headers, self.body))
     }
 }
 

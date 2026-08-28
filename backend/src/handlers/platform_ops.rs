@@ -9,6 +9,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
+use futures::StreamExt;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -43,7 +44,7 @@ pub(crate) struct PlatformOperationCaller {
 }
 
 impl PlatformOperationCaller {
-    fn from_auth_user(auth_user: &AuthUser) -> Self {
+    pub(crate) fn from_auth_user(auth_user: &AuthUser) -> Self {
         Self {
             actor_user_id: auth_user.user_id.to_string(),
             resolution_user_id: auth_user.proxy_resolution_user_id(),
@@ -119,6 +120,7 @@ enum ExecutionTarget {
 
 struct PlatformExecutionTarget {
     vendor: crate::models::downstream_service::DownstreamService,
+    authorization: crate::services::platform_credential_service::AuthorizedPlatformOperation,
     billing_owner_id: String,
     preference: crate::services::platform_preference_service::EffectivePlatformPreference,
 }
@@ -137,7 +139,39 @@ struct ResolvedExecutionTarget {
     fallback_reason: Option<platform_operation_service::PlatformFallbackReason>,
 }
 
-async fn require_platform_ops_enabled(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
+pub(crate) struct PreparedPlatformEndpoint {
+    authorization: crate::services::platform_credential_service::AuthorizedPlatformOperation,
+    vendor: crate::models::downstream_service::DownstreamService,
+    billing_owner_id: String,
+    preference: crate::services::platform_preference_service::EffectivePlatformPreference,
+    credential_intent: CredentialIntent,
+    fallback_reason: platform_operation_service::PlatformFallbackReason,
+}
+
+#[cfg(test)]
+impl PreparedPlatformEndpoint {
+    fn operation_id(&self) -> &str {
+        &self.authorization.operation().id
+    }
+}
+
+pub(crate) struct PlatformEndpointResponse {
+    pub status: reqwest::StatusCode,
+    pub headers: reqwest::header::HeaderMap,
+    pub body: bytes::Bytes,
+    pub credential_intent: CredentialIntent,
+    pub fallback_reason: platform_operation_service::PlatformFallbackReason,
+    pub catalog_service_slug: String,
+    pub attribution: PlatformOperationAttribution,
+}
+
+const PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
+const PLATFORM_ENDPOINT_TIMEOUT_SECS: u64 = 60;
+
+pub(crate) async fn require_platform_ops_enabled(
+    state: &AppState,
+    auth_user: &AuthUser,
+) -> AppResult<()> {
     let enabled =
         feature_flag_service::resolve_personal_features(&state.db, &auth_user.user_id.to_string())
             .await?
@@ -149,6 +183,85 @@ async fn require_platform_ops_enabled(state: &AppState, auth_user: &AuthUser) ->
         ));
     }
     Ok(())
+}
+
+pub(crate) async fn resolve_platform_endpoint(
+    state: &AppState,
+    caller: &PlatformOperationCaller,
+    catalog_service_id: &str,
+    method: &str,
+    canonical_path: &crate::services::proxy_authorization::CanonicalPath,
+) -> AppResult<Option<PreparedPlatformEndpoint>> {
+    let authorization = match crate::services::platform_credential_service::authorize_endpoint(
+        &state.db,
+        catalog_service_id,
+        method,
+        canonical_path,
+    )
+    .await
+    {
+        Ok(authorization) => authorization,
+        Err(AppError::NotFound(_)) | Err(AppError::PlatformOperationUnavailable) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let context = platform_operation_service::load_endpoint_credential_resolution_context(
+        &state.db,
+        &caller.resolution_user_id,
+        &authorization,
+    )
+    .await?;
+    let resolution = platform_operation_service::resolve_endpoint_credential_source(
+        &state.db,
+        &state.encryption_keys,
+        &state.node_ws_manager,
+        &caller.resolution_user_id,
+        caller.credential_caller(),
+        &authorization,
+        platform_operation_service::CredentialResolutionMode::Execute {
+            connection_expiry_notifier: Some(&state.connection_expiry_notifier),
+        },
+        &context,
+    )
+    .await?;
+    match resolution {
+        PlatformCredentialResolution::Platform {
+            vendor,
+            owner_id,
+            intent,
+            preference,
+            fallback_reason,
+        } => Ok(Some(PreparedPlatformEndpoint {
+            authorization,
+            vendor: *vendor,
+            billing_owner_id: owner_id,
+            preference,
+            credential_intent: intent,
+            fallback_reason,
+        })),
+        PlatformCredentialResolution::OutOfScope { .. } => {
+            Err(AppError::PlatformOperationOwnConnectionOutOfScope {
+                vendor: authorization.catalog_service().name.clone(),
+            })
+        }
+        PlatformCredentialResolution::Unavailable {
+            reason: platform_operation_service::PlatformUnavailableReason::OwnConnectionDisabled,
+            ..
+        } => Err(AppError::PlatformOperationUnavailable),
+        PlatformCredentialResolution::Unusable {
+            error: Some(error), ..
+        } => Err(error),
+        PlatformCredentialResolution::ApprovalRequired { .. } => {
+            Err(AppError::PlatformOperationApprovalRequired {
+                vendor: authorization.catalog_service().name.clone(),
+            })
+        }
+        PlatformCredentialResolution::OwnConnection { .. }
+        | PlatformCredentialResolution::NodeRouted { .. }
+        | PlatformCredentialResolution::Unusable { error: None, .. }
+        | PlatformCredentialResolution::Unavailable { .. } => Ok(None),
+    }
 }
 
 /// Structural feature gate for every route in the `/platform-ops` nest.
@@ -745,6 +858,12 @@ async fn resolve_execution_target(
             fallback_reason,
         } => Ok(ResolvedExecutionTarget {
             target: ExecutionTarget::Platform(Box::new(PlatformExecutionTarget {
+                authorization: crate::services::platform_credential_service::authorize_constrained(
+                    &state.db,
+                    &vendor.id,
+                    operation.op,
+                )
+                .await?,
                 vendor: *vendor,
                 billing_owner_id: owner_id,
                 preference,
@@ -805,6 +924,539 @@ async fn resolve_execution_target(
 
 fn vendor_display_name(vendor: &str) -> String {
     platform_operation_service::vendor_display_name(vendor)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_platform_endpoint(
+    state: &AppState,
+    caller: &PlatformOperationCaller,
+    prepared: PreparedPlatformEndpoint,
+    method: reqwest::Method,
+    path: &str,
+    query: Option<&str>,
+    headers: reqwest::header::HeaderMap,
+    body: Option<bytes::Bytes>,
+    ingress: BillingIngress,
+    billing_egress_permit: BillingEgressPermit,
+) -> AppResult<PlatformEndpointResponse> {
+    use crate::models::platform_operation::{PerRequestCaps, PlatformOperationKind};
+    use crate::models::service_billing::TokenBreakdown;
+
+    let operation = prepared.authorization.operation().clone();
+    if !matches!(operation.kind, PlatformOperationKind::Endpoint { .. })
+        || !matches!(operation.limits.per_request, PerRequestCaps::Endpoint)
+    {
+        return Err(AppError::PlatformOperationUnavailable);
+    }
+    let daily_cap = operation
+        .limits
+        .per_user_per_day
+        .filter(|cap| *cap > 0)
+        .ok_or(AppError::PlatformOperationUnavailable)?;
+    let request_len = body
+        .as_ref()
+        .map_or(0_i64, |body| i64::try_from(body.len()).unwrap_or(i64::MAX));
+    let estimated_usage = PlatformUsage {
+        requests: 1,
+        bytes: PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES as i64,
+        tokens: request_len.saturating_add(PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES as i64),
+        characters: PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES as i64,
+        seconds: PLATFORM_ENDPOINT_TIMEOUT_SECS as i64,
+        token_breakdown: Some(TokenBreakdown {
+            prompt_tokens: request_len,
+            completion_tokens: PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES as i64,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
+        }),
+    };
+
+    let descriptor = crate::services::operation_descriptor::build_http_descriptor(
+        method.as_str(),
+        path,
+        body.as_deref(),
+    );
+    match crate::services::approval_service::evaluate_and_check(
+        &state.db,
+        &caller.actor_user_id,
+        &prepared.billing_owner_id,
+        &operation.catalog_service_id,
+        &descriptor,
+        caller.approval_requester_type(),
+        caller.approval_requester_id(),
+        caller.auth_method == AuthMethod::Session,
+        false,
+    )
+    .await?
+    {
+        crate::services::approval_service::ApprovalOutcome::Allowed { .. } => {}
+        crate::services::approval_service::ApprovalOutcome::Denied => {
+            return Err(AppError::Forbidden(
+                "Operation denied by approval policy".to_string(),
+            ));
+        }
+        crate::services::approval_service::ApprovalOutcome::NeedsApproval(_) => {
+            return Err(AppError::PlatformOperationApprovalRequired {
+                vendor: prepared.vendor.name.clone(),
+            });
+        }
+    }
+
+    crate::mw::rate_limit::enforce_platform_user_limit(
+        crate::mw::rate_limit::platform_user_rate_limiter(),
+        &operation.catalog_service_id,
+        &prepared.billing_owner_id,
+    )?;
+
+    let estimated_charge_micros =
+        crate::services::platform_preference_service::estimated_charge_micros(
+            &operation.billing,
+            &estimated_usage,
+        )?;
+    let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
+    let spend = crate::services::platform_preference_service::reserve_daily_spend(
+        &state.db,
+        &prepared.billing_owner_id,
+        &operation.catalog_service_id,
+        &yyyymmdd,
+        estimated_charge_micros,
+        prepared.preference,
+    )
+    .await?;
+    if let Err(error) = platform_operation_service::reserve_daily_operation(
+        &state.db,
+        &operation.id,
+        &prepared.billing_owner_id,
+        &yyyymmdd,
+        daily_cap,
+    )
+    .await
+    {
+        release_endpoint_spend(state, &spend).await;
+        return Err(error);
+    }
+
+    let billing_owner = match state
+        .billing
+        .owner_resolver()
+        .resolve_for_resource(&caller.resolution_user_id, &prepared.billing_owner_id)
+        .await
+    {
+        Ok(owner) => owner,
+        Err(error) => {
+            release_endpoint_limits(
+                state,
+                &operation.id,
+                &prepared.billing_owner_id,
+                &yyyymmdd,
+                &spend,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let primary_rate = crate::services::billing::lago_client::decimal_credits_to_micros(
+        &operation.billing.price_per_unit,
+    )
+    .ok_or(AppError::PlatformOperationUnavailable)?;
+    let secondary_rate = operation
+        .billing
+        .secondary
+        .as_ref()
+        .map(|component| {
+            crate::services::billing::lago_client::decimal_credits_to_micros(
+                &component.price_per_unit,
+            )
+            .ok_or(AppError::PlatformOperationUnavailable)
+        })
+        .transpose()?;
+    let base_fee = match operation.billing.base_fee_per_call.as_deref() {
+        Some(value) => crate::services::billing::lago_client::decimal_credits_to_micros(value)
+            .ok_or(AppError::PlatformOperationUnavailable)?,
+        None => 0,
+    };
+    let billing_context = crate::services::billing::BillingRouteContext::new(
+        ingress,
+        uuid::Uuid::new_v4().to_string(),
+        billing_owner.owner_id,
+        caller.actor_user_id.clone(),
+        caller.api_key_id.clone(),
+        None,
+        Some(operation.catalog_service_id.clone()),
+        Some(prepared.vendor.slug.clone()),
+        crate::services::billing::NodeIntent::Direct,
+        prepared.vendor.auth_method.clone(),
+        CredentialClass::NyxidManagedMaster,
+        BillingMetric::Requests,
+        None,
+        false,
+    )
+    .with_platform_operation_billing(
+        &operation.billing,
+        primary_rate,
+        secondary_rate,
+        base_fee,
+        &estimated_usage,
+    );
+    let metered = match state.billing.open(&billing_context).await {
+        Ok(metered) => metered,
+        Err(error) => {
+            release_endpoint_limits(
+                state,
+                &operation.id,
+                &prepared.billing_owner_id,
+                &yyyymmdd,
+                &spend,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let target = match crate::services::platform_credential_service::materialize_authorized(
+        &state.db,
+        &state.encryption_keys,
+        prepared.authorization,
+    )
+    .await
+    {
+        Ok(credential) => credential.into_proxy_target(),
+        Err(error) => {
+            fail_endpoint_attempt(
+                state,
+                &metered,
+                "credential_unavailable",
+                &operation.id,
+                &prepared.billing_owner_id,
+                &yyyymmdd,
+                &spend,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = state.billing.mark_forwarded(&metered).await {
+        fail_endpoint_attempt(
+            state,
+            &metered,
+            "mark_forwarded_failed",
+            &operation.id,
+            &prepared.billing_owner_id,
+            &yyyymmdd,
+            &spend,
+        )
+        .await;
+        return Err(error);
+    }
+
+    let dispatched_at = Instant::now();
+    let forwarded = tokio::time::timeout(
+        std::time::Duration::from_secs(PLATFORM_ENDPOINT_TIMEOUT_SECS),
+        async {
+            let response =
+                crate::services::proxy_service::forward_request_with_extra_outbound_headers(
+                    &state.http_client,
+                    &target,
+                    method,
+                    path,
+                    query,
+                    headers,
+                    crate::services::proxy_service::ProxyBody::Buffered(body),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    &state.token_exchange_cache,
+                    &state.cloud_response_cache,
+                    Vec::new(),
+                    billing_egress_permit,
+                )
+                .await
+                .map_err(PlatformEndpointDispatchError::BeforeResponse)?;
+            let status = response.status();
+            collect_platform_endpoint_response(response)
+                .await
+                .map_err(|error| PlatformEndpointDispatchError::AfterResponse { status, error })
+        },
+    )
+    .await;
+
+    let collected = match forwarded {
+        Ok(Ok(collected)) => collected,
+        Ok(Err(PlatformEndpointDispatchError::BeforeResponse(
+            crate::services::proxy_service::ForwardRequestError::Application(error),
+        ))) => {
+            fail_endpoint_attempt(
+                state,
+                &metered,
+                "request_build_failed",
+                &operation.id,
+                &prepared.billing_owner_id,
+                &yyyymmdd,
+                &spend,
+            )
+            .await;
+            return Err(error);
+        }
+        Ok(Err(PlatformEndpointDispatchError::BeforeResponse(
+            crate::services::proxy_service::ForwardRequestError::Transport(error),
+        ))) if error.is_connect() || error.is_builder() => {
+            fail_endpoint_attempt(
+                state,
+                &metered,
+                "provider_unreachable",
+                &operation.id,
+                &prepared.billing_owner_id,
+                &yyyymmdd,
+                &spend,
+            )
+            .await;
+            return Err(AppError::PlatformOperationUnavailable);
+        }
+        Ok(Err(PlatformEndpointDispatchError::BeforeResponse(
+            crate::services::proxy_service::ForwardRequestError::Transport(_),
+        )))
+        | Err(_) => {
+            settle_endpoint_usage(state, &metered, &spend, &operation.billing, estimated_usage)
+                .await;
+            return Err(AppError::PlatformOperationUnavailable);
+        }
+        Ok(Err(PlatformEndpointDispatchError::AfterResponse { status, error })) => {
+            if status.is_client_error() {
+                fail_endpoint_attempt(
+                    state,
+                    &metered,
+                    "vendor_client_error",
+                    &operation.id,
+                    &prepared.billing_owner_id,
+                    &yyyymmdd,
+                    &spend,
+                )
+                .await;
+            } else {
+                settle_endpoint_usage(state, &metered, &spend, &operation.billing, estimated_usage)
+                    .await;
+            }
+            return Err(error);
+        }
+    };
+
+    if collected.status.is_client_error() {
+        fail_endpoint_attempt(
+            state,
+            &metered,
+            "vendor_client_error",
+            &operation.id,
+            &prepared.billing_owner_id,
+            &yyyymmdd,
+            &spend,
+        )
+        .await;
+    } else if collected.status.is_server_error() {
+        settle_endpoint_usage(state, &metered, &spend, &operation.billing, estimated_usage).await;
+    } else {
+        let elapsed = dispatched_at.elapsed();
+        let seconds = elapsed
+            .as_secs()
+            .saturating_add(u64::from(elapsed.subsec_nanos() > 0));
+        let reported = serde_json::from_slice::<serde_json::Value>(&collected.body)
+            .ok()
+            .and_then(|value| crate::services::llm_usage_service::extract_reported_usage(&value));
+        let requires_reported_tokens = [
+            operation.billing.metric,
+            operation
+                .billing
+                .secondary
+                .as_ref()
+                .map(|component| component.metric)
+                .unwrap_or(BillingMetric::Requests),
+        ]
+        .into_iter()
+        .any(|metric| {
+            matches!(
+                metric,
+                BillingMetric::Tokens | BillingMetric::InputTokens | BillingMetric::OutputTokens
+            )
+        });
+        let actual_usage = if requires_reported_tokens && reported.is_none() {
+            estimated_usage
+        } else {
+            clamp_endpoint_usage(
+                measure_endpoint_response(&collected.body, seconds, reported.as_ref()),
+                &estimated_usage,
+            )
+        };
+        settle_endpoint_usage(state, &metered, &spend, &operation.billing, actual_usage).await;
+    }
+
+    Ok(PlatformEndpointResponse {
+        status: collected.status,
+        headers: collected.headers,
+        body: collected.body,
+        credential_intent: prepared.credential_intent,
+        fallback_reason: prepared.fallback_reason,
+        catalog_service_slug: prepared.vendor.slug,
+        attribution: PlatformOperationAttribution {
+            operation_id: operation.id,
+            catalog_service_id: operation.catalog_service_id,
+            billing_request_id: metered.billing_request_id().map(str::to_string),
+        },
+    })
+}
+
+struct CollectedPlatformEndpointResponse {
+    status: reqwest::StatusCode,
+    headers: reqwest::header::HeaderMap,
+    body: bytes::Bytes,
+}
+
+enum PlatformEndpointDispatchError {
+    BeforeResponse(crate::services::proxy_service::ForwardRequestError),
+    AfterResponse {
+        status: reqwest::StatusCode,
+        error: AppError,
+    },
+}
+
+async fn collect_platform_endpoint_response(
+    response: reqwest::Response,
+) -> AppResult<CollectedPlatformEndpointResponse> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(AppError::RequestBodyTooLarge {
+            max_bytes: PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES,
+            context: "Platform endpoint response".to_string(),
+        });
+    }
+    let status = response.status();
+    let headers = response.headers().clone();
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| AppError::PlatformOperationUnavailable)?;
+        if body.len().saturating_add(chunk.len()) > PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES {
+            return Err(AppError::RequestBodyTooLarge {
+                max_bytes: PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES,
+                context: "Platform endpoint response".to_string(),
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(CollectedPlatformEndpointResponse {
+        status,
+        headers,
+        body: bytes::Bytes::from(body),
+    })
+}
+
+fn clamp_endpoint_usage(mut actual: PlatformUsage, estimate: &PlatformUsage) -> PlatformUsage {
+    actual.requests = actual.requests.min(estimate.requests);
+    actual.bytes = actual.bytes.min(estimate.bytes);
+    actual.tokens = actual.tokens.min(estimate.tokens);
+    actual.characters = actual.characters.min(estimate.characters);
+    actual.seconds = actual.seconds.min(estimate.seconds);
+    actual.token_breakdown = actual.token_breakdown.map(|mut breakdown| {
+        if let Some(estimated) = estimate.token_breakdown {
+            breakdown.prompt_tokens = breakdown.prompt_tokens.min(estimated.prompt_tokens);
+            breakdown.completion_tokens =
+                breakdown.completion_tokens.min(estimated.completion_tokens);
+        }
+        breakdown
+    });
+    actual
+}
+
+fn measure_endpoint_response(
+    body: &[u8],
+    elapsed_seconds: u64,
+    reported: Option<&crate::services::llm_usage_service::ReportedLlmUsage>,
+) -> PlatformUsage {
+    let text_characters = std::str::from_utf8(body)
+        .map(|text| i64::try_from(text.chars().count()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    PlatformUsage {
+        requests: 1,
+        bytes: i64::try_from(body.len()).unwrap_or(i64::MAX),
+        tokens: reported
+            .map(|usage| usage.total_tokens.min(i64::MAX as u64) as i64)
+            .unwrap_or(0),
+        characters: text_characters,
+        seconds: elapsed_seconds.min(i64::MAX as u64) as i64,
+        token_breakdown: reported.map(|usage| usage.token_breakdown()),
+    }
+}
+
+async fn settle_endpoint_usage(
+    state: &AppState,
+    metered: &crate::services::billing::MeteredProxyContext,
+    spend: &crate::services::platform_preference_service::PlatformSpendReservation,
+    billing: &crate::models::platform_operation::OperationBilling,
+    usage: PlatformUsage,
+) {
+    let actual_charge =
+        crate::services::platform_preference_service::estimated_charge_micros(billing, &usage)
+            .unwrap_or(spend.reserved_micros);
+    if let Err(error) = crate::services::platform_preference_service::settle_daily_spend(
+        &state.db,
+        spend,
+        actual_charge,
+    )
+    .await
+    {
+        tracing::error!(error = %error, "Failed to settle platform endpoint spend reservation");
+    }
+    if let Err(error) = state
+        .billing
+        .settle_deferred(metered, usage, None, None)
+        .await
+    {
+        tracing::error!(error = %error, "Failed to persist platform endpoint settlement");
+    }
+}
+
+async fn fail_endpoint_attempt(
+    state: &AppState,
+    metered: &crate::services::billing::MeteredProxyContext,
+    reason: &str,
+    operation_id: &str,
+    owner_id: &str,
+    yyyymmdd: &str,
+    spend: &crate::services::platform_preference_service::PlatformSpendReservation,
+) {
+    if let Err(error) = state.billing.fail(metered, reason).await {
+        tracing::error!(error = %error, "Failed to release platform endpoint billing reservation");
+    }
+    release_endpoint_limits(state, operation_id, owner_id, yyyymmdd, spend).await;
+}
+
+async fn release_endpoint_limits(
+    state: &AppState,
+    operation_id: &str,
+    owner_id: &str,
+    yyyymmdd: &str,
+    spend: &crate::services::platform_preference_service::PlatformSpendReservation,
+) {
+    if let Err(error) = platform_operation_service::release_daily_operation(
+        &state.db,
+        operation_id,
+        owner_id,
+        yyyymmdd,
+    )
+    .await
+    {
+        tracing::error!(operation_id, error = %error, "Failed to release platform endpoint quota");
+    }
+    release_endpoint_spend(state, spend).await;
+}
+
+async fn release_endpoint_spend(
+    state: &AppState,
+    spend: &crate::services::platform_preference_service::PlatformSpendReservation,
+) {
+    if let Err(error) =
+        crate::services::platform_preference_service::release_daily_spend(&state.db, spend).await
+    {
+        tracing::error!(error = %error, "Failed to release platform endpoint spend reservation");
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1048,7 +1700,7 @@ async fn forward_metered_operation(
                 &state.db,
                 &state.encryption_keys,
                 op,
-                platform.vendor,
+                platform.authorization,
             )
             .await
             {
@@ -1635,7 +2287,10 @@ async fn ensure_platform_operation_caller(state: &AppState, auth_user: &AuthUser
 /// Without this, any principal that clears the class check could spend: an app
 /// holding a token granted for `profile email`, or an agent key issued with
 /// only `read`. Nothing else on the execution path inspects scope.
-async fn ensure_platform_spend_authority(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
+pub(crate) async fn ensure_platform_spend_authority(
+    state: &AppState,
+    auth_user: &AuthUser,
+) -> AppResult<()> {
     // Scope is checked before the caller class so an unscoped caller is refused
     // without a database round trip. Classes that can never spend fall through
     // to `ensure_platform_operation_caller`, which explains why by name.
@@ -1658,7 +2313,7 @@ async fn ensure_platform_spend_authority(state: &AppState, auth_user: &AuthUser)
     ensure_platform_operation_caller(state, auth_user).await
 }
 
-fn enforce_agent_rate_limit(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
+pub(crate) fn enforce_agent_rate_limit(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
     crate::mw::rate_limit::check_agent_rate_limit_raw(
         &state.per_agent_limiter,
         auth_user.api_key_id.as_deref(),
@@ -1986,6 +2641,24 @@ mod tests {
             .expect("create platform operation usage index");
     }
 
+    fn endpoint_operation(catalog_service_id: &str, path: &str) -> PlatformOperationRow {
+        let mut row = PlatformOperationRow::new_endpoint(
+            catalog_service_id.to_string(),
+            "GET".to_string(),
+            path.to_string(),
+            "Read test resource".to_string(),
+            Some("Endpoint authorization parity test".to_string()),
+            OperationLimits {
+                per_request: PerRequestCaps::Endpoint,
+                per_user_per_day: Some(10),
+            },
+            OperationBilling::free(BillingMetric::Requests),
+            USER_ID.to_string(),
+        );
+        row.enabled = true;
+        row
+    }
+
     async fn enable_platform_services_for_tests(db: &mongodb::Database) {
         crate::services::feature_flag_service::set_platform_override(
             db,
@@ -2148,6 +2821,271 @@ mod tests {
                 .expect("serve credential capture server");
         });
         (format!("http://{address}"), captured, server)
+    }
+
+    #[tokio::test]
+    async fn endpoint_authorization_is_transport_equivalent_and_decrypts_only_at_execution() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_endpoint_transport_parity").await
+        else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("create endpoint execution indexes");
+        let state = crate::test_utils::test_app_state(db.clone());
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                USER_ID,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert endpoint execution owner");
+        let (base_url, captured, server) = spawn_capturing_vendor().await;
+        let service = insert_speak_vendor(&state, base_url, "platform-endpoint-secret").await;
+        let row = endpoint_operation(&service.id, "/v1/resources/{resource_id}");
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(&row)
+            .await
+            .expect("insert endpoint operation");
+        let caller = PlatformOperationCaller {
+            actor_user_id: USER_ID.to_string(),
+            resolution_user_id: USER_ID.to_string(),
+            api_key_id: None,
+            auth_method: AuthMethod::Session,
+            acting_client_id: None,
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
+            credential_intent: CredentialIntent::Auto,
+        };
+        let rest_path = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
+            "/v1/resources/resource-1",
+        )
+        .expect("REST canonical path");
+        let mcp_path = crate::services::proxy_authorization::CanonicalPath::from_mcp_built(
+            "/v1/resources/resource-1",
+        )
+        .expect("MCP canonical path");
+        assert_eq!(
+            db.collection::<crate::models::platform_service_preference::PlatformServicePreference>(
+                crate::models::platform_service_preference::COLLECTION_NAME,
+            )
+            .count_documents(mongodb::bson::doc! {
+                "owner_id": USER_ID,
+                "catalog_service_id": &service.id,
+            })
+            .await
+            .expect("count endpoint preference rows"),
+            1
+        );
+        assert!(
+            crate::services::platform_credential_service::credential_is_configured(
+                &db,
+                &service.id,
+            )
+            .await
+            .expect("read endpoint credential status")
+        );
+        let diagnostic_authorization =
+            crate::services::platform_credential_service::authorize_endpoint(
+                &db,
+                &service.id,
+                "GET",
+                &rest_path,
+            )
+            .await
+            .expect("authorize endpoint for resolution diagnostic");
+        let diagnostic_context =
+            platform_operation_service::load_endpoint_credential_resolution_context(
+                &db,
+                USER_ID,
+                &diagnostic_authorization,
+            )
+            .await
+            .expect("load endpoint resolution context");
+        let diagnostic_resolution = platform_operation_service::resolve_endpoint_credential_source(
+            &db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            USER_ID,
+            caller.credential_caller(),
+            &diagnostic_authorization,
+            platform_operation_service::CredentialResolutionMode::Execute {
+                connection_expiry_notifier: Some(&state.connection_expiry_notifier),
+            },
+            &diagnostic_context,
+        )
+        .await
+        .expect("resolve endpoint credential source");
+        match diagnostic_resolution {
+            PlatformCredentialResolution::Platform { .. } => {}
+            PlatformCredentialResolution::OwnConnection { .. } => {
+                panic!("unexpected own connection")
+            }
+            PlatformCredentialResolution::NodeRouted { .. } => panic!("unexpected node route"),
+            PlatformCredentialResolution::ApprovalRequired { .. } => {
+                panic!("unexpected approval requirement")
+            }
+            PlatformCredentialResolution::OutOfScope { .. } => panic!("unexpected scope denial"),
+            PlatformCredentialResolution::Unusable { .. } => {
+                panic!("unexpected unusable own connection")
+            }
+            PlatformCredentialResolution::Unavailable { reason, .. } => {
+                panic!("unexpected unavailable resolution: {}", reason.as_str())
+            }
+        }
+        let decrypts_before = state.encryption_keys.decrypt_stats();
+        let rest = resolve_platform_endpoint(&state, &caller, &service.id, "GET", &rest_path)
+            .await
+            .expect("resolve REST platform endpoint")
+            .expect("REST endpoint is platform-funded");
+        let mcp = resolve_platform_endpoint(&state, &caller, &service.id, "GET", &mcp_path)
+            .await
+            .expect("resolve MCP platform endpoint")
+            .expect("MCP endpoint is platform-funded");
+        assert_eq!(rest.operation_id(), row.id);
+        assert_eq!(mcp.operation_id(), row.id);
+        assert_eq!(state.encryption_keys.decrypt_stats(), decrypts_before);
+
+        let result = execute_platform_endpoint(
+            &state,
+            &caller,
+            rest,
+            reqwest::Method::GET,
+            "/v1/resources/resource-1",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            BillingIngress::Proxy,
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(BillingRoutePolicy::Metered(BillingIngress::Proxy)),
+                BillingIngress::Proxy,
+            )
+            .expect("proxy billing classification"),
+        )
+        .await
+        .expect("execute authorized platform endpoint");
+
+        assert_eq!(result.status, reqwest::StatusCode::OK);
+        assert_eq!(result.attribution.operation_id, row.id);
+        assert_eq!(result.catalog_service_slug, service.slug);
+        assert_ne!(state.encryption_keys.decrypt_stats(), decrypts_before);
+        let requests = captured.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].uri, "/v1/resources/resource-1");
+        assert_eq!(
+            requests[0].elevenlabs_key.as_deref(),
+            Some("platform-endpoint-secret")
+        );
+        drop(requests);
+        server.abort();
+
+        let quota_count = || async {
+            db.collection::<PlatformOpUsage>(PLATFORM_OP_USAGE)
+                .find_one(mongodb::bson::doc! {
+                    "operation_id": &row.id,
+                    "user_id": USER_ID,
+                })
+                .await
+                .expect("read endpoint quota")
+                .expect("endpoint quota exists")
+                .count
+        };
+        assert_eq!(quota_count().await, 1);
+
+        let (client_error_url, client_error_server) =
+            spawn_vendor_status(StatusCode::BAD_REQUEST).await;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                mongodb::bson::doc! { "_id": &service.id },
+                mongodb::bson::doc! { "$set": { "base_url": client_error_url } },
+            )
+            .await
+            .expect("point endpoint provider at 4xx server");
+        let prepared = resolve_platform_endpoint(&state, &caller, &service.id, "GET", &rest_path)
+            .await
+            .expect("resolve 4xx endpoint")
+            .expect("4xx endpoint is platform-funded");
+        let client_error = execute_platform_endpoint(
+            &state,
+            &caller,
+            prepared,
+            reqwest::Method::GET,
+            "/v1/resources/resource-1",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            BillingIngress::Proxy,
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(BillingRoutePolicy::Metered(BillingIngress::Proxy)),
+                BillingIngress::Proxy,
+            )
+            .expect("4xx proxy billing classification"),
+        )
+        .await
+        .expect("return provider 4xx response");
+        assert_eq!(client_error.status, reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(quota_count().await, 1, "provider 4xx must release quota");
+        client_error_server.abort();
+
+        let (server_error_url, server_error_server) =
+            spawn_vendor_status(StatusCode::INTERNAL_SERVER_ERROR).await;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                mongodb::bson::doc! { "_id": &service.id },
+                mongodb::bson::doc! { "$set": { "base_url": server_error_url } },
+            )
+            .await
+            .expect("point endpoint provider at 5xx server");
+        let prepared = resolve_platform_endpoint(&state, &caller, &service.id, "GET", &rest_path)
+            .await
+            .expect("resolve 5xx endpoint")
+            .expect("5xx endpoint is platform-funded");
+        let server_error = execute_platform_endpoint(
+            &state,
+            &caller,
+            prepared,
+            reqwest::Method::GET,
+            "/v1/resources/resource-1",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            BillingIngress::Proxy,
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(BillingRoutePolicy::Metered(BillingIngress::Proxy)),
+                BillingIngress::Proxy,
+            )
+            .expect("5xx proxy billing classification"),
+        )
+        .await
+        .expect("return provider 5xx response");
+        assert_eq!(
+            server_error.status,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(quota_count().await, 2, "provider 5xx must retain quota");
+        server_error_server.abort();
+    }
+
+    #[test]
+    fn endpoint_measurement_prices_response_bytes_and_reported_token_components() {
+        let reported = crate::services::llm_usage_service::extract_reported_usage(&json!({
+            "usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 7,
+                "total_tokens": 10
+            }
+        }))
+        .expect("parse reported token split");
+        let usage = measure_endpoint_response("NyxID".as_bytes(), 2, Some(&reported));
+
+        assert_eq!(usage.bytes, 5, "bytes are the response body only");
+        assert_eq!(usage.characters, 5);
+        assert_eq!(usage.seconds, 2);
+        assert_eq!(usage.tokens, 10);
+        let split = usage.token_breakdown.expect("reported token breakdown");
+        assert_eq!(split.prompt_tokens, 3);
+        assert_eq!(split.completion_tokens, 7);
     }
 
     #[allow(clippy::too_many_arguments)]

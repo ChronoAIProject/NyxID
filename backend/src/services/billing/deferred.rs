@@ -193,13 +193,13 @@ async fn poll_twilio(
     let catalog_service_id = row.service_id.as_deref().ok_or_else(|| {
         AppError::Internal("deferred Twilio row has no catalog service id".to_string())
     })?;
-    let (authorized, operation) = platform_credential_service::authorize_constrained(
+    let authorization = platform_credential_service::authorize_constrained(
         db,
-        &runtime.encryption_keys,
         catalog_service_id,
         ConstrainedOp::CallAndSay,
     )
     .await?;
+    let operation = authorization.operation();
     let PlatformOperationKind::Constrained {
         config: ConstrainedConfig::CallAndSay(config),
         ..
@@ -211,7 +211,13 @@ async fn poll_twilio(
         return Err(AppError::PlatformOperationUnavailable);
     }
 
-    let target = authorized.into_proxy_target();
+    let target = platform_credential_service::materialize_authorized(
+        db,
+        &runtime.encryption_keys,
+        authorization,
+    )
+    .await?
+    .into_proxy_target();
     let (credential_sid, auth_token) = target
         .credential
         .split_once(':')

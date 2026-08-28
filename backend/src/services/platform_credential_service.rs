@@ -94,6 +94,31 @@ pub struct AuthorizedPlatformCredential {
     credential: Zeroizing<String>,
 }
 
+pub struct AuthorizedPlatformOperation {
+    catalog_service: DownstreamService,
+    operation: PlatformOperationRow,
+}
+
+impl std::fmt::Debug for AuthorizedPlatformOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AuthorizedPlatformOperation")
+            .field("catalog_service_id", &self.catalog_service.id)
+            .field("operation_id", &self.operation.id)
+            .finish()
+    }
+}
+
+impl AuthorizedPlatformOperation {
+    pub fn catalog_service(&self) -> &DownstreamService {
+        &self.catalog_service
+    }
+
+    pub fn operation(&self) -> &PlatformOperationRow {
+        &self.operation
+    }
+}
+
 impl std::fmt::Debug for AuthorizedPlatformCredential {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -106,10 +131,12 @@ impl std::fmt::Debug for AuthorizedPlatformCredential {
 }
 
 impl AuthorizedPlatformCredential {
+    #[cfg(test)]
     pub fn catalog_service_id(&self) -> &str {
         &self.catalog_service.id
     }
 
+    #[cfg(test)]
     pub fn operation(&self) -> &PlatformOperationRow {
         &self.operation
     }
@@ -523,11 +550,10 @@ pub fn normalize_endpoint_definition(
 
 pub async fn authorize_endpoint(
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
     catalog_service_id: &str,
     method: &str,
     canonical_path: &proxy_authorization::CanonicalPath,
-) -> AppResult<(AuthorizedPlatformCredential, PlatformOperationRow)> {
+) -> AppResult<AuthorizedPlatformOperation> {
     let method = method.trim().to_ascii_uppercase();
     let rows: Vec<PlatformOperationRow> = db
         .collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
@@ -577,16 +603,17 @@ pub async fn authorize_endpoint(
         ));
     }
     let row = matches.pop().expect("one matching endpoint row");
-    let authorized = materialize_authorized(db, encryption_keys, service, row.clone()).await?;
-    Ok((authorized, row))
+    Ok(AuthorizedPlatformOperation {
+        catalog_service: service,
+        operation: row,
+    })
 }
 
 pub async fn authorize_constrained(
     db: &mongodb::Database,
-    encryption_keys: &EncryptionKeys,
     catalog_service_id: &str,
     constrained_op: ConstrainedOp,
-) -> AppResult<(AuthorizedPlatformCredential, PlatformOperationRow)> {
+) -> AppResult<AuthorizedPlatformOperation> {
     let row = db
         .collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
         .find_one(doc! {
@@ -601,8 +628,10 @@ pub async fn authorize_constrained(
     if service.slug != catalog_slug_for_constrained(constrained_op) {
         return Err(AppError::PlatformOperationUnavailable);
     }
-    let authorized = materialize_authorized(db, encryption_keys, service, row.clone()).await?;
-    Ok((authorized, row))
+    Ok(AuthorizedPlatformOperation {
+        catalog_service: service,
+        operation: row,
+    })
 }
 
 fn validate_constrained_row(
@@ -670,12 +699,15 @@ async fn validate_catalog_provider_for_authorization(
     Ok(service)
 }
 
-async fn materialize_authorized(
+pub async fn materialize_authorized(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
-    catalog_service: DownstreamService,
-    operation: PlatformOperationRow,
+    authorization: AuthorizedPlatformOperation,
 ) -> AppResult<AuthorizedPlatformCredential> {
+    let AuthorizedPlatformOperation {
+        catalog_service,
+        operation,
+    } = authorization;
     let credential = db
         .collection::<PlatformCredential>(PLATFORM_CREDENTIALS)
         .find_one(doc! { "catalog_service_id": &catalog_service.id })
@@ -975,7 +1007,7 @@ mod tests {
         let path = proxy_authorization::CanonicalPath::from_mcp_literal("/air/offers/offer-1")
             .expect("canonical path");
 
-        let error = authorize_endpoint(&db, &keys, &service.id, "GET", &path)
+        let error = authorize_endpoint(&db, &service.id, "GET", &path)
             .await
             .expect_err("missing promotion must deny authorization");
 
@@ -1063,7 +1095,7 @@ mod tests {
         let path = proxy_authorization::CanonicalPath::from_mcp_literal("/air/offers")
             .expect("canonical path");
 
-        let error = authorize_endpoint(&db, &keys, &service.id, "GET", &path)
+        let error = authorize_endpoint(&db, &service.id, "GET", &path)
             .await
             .expect_err("missing endpoint authorizer must deny");
 
@@ -1108,12 +1140,19 @@ mod tests {
             .expect("insert endpoint row");
         let path = proxy_authorization::CanonicalPath::from_mcp_literal("/air/offer_requests")
             .expect("canonical path");
+        let decrypts_before = keys.decrypt_stats();
 
-        let (authorized, selected) = authorize_endpoint(&db, &keys, &service.id, "POST", &path)
+        let authorization = authorize_endpoint(&db, &service.id, "POST", &path)
             .await
             .expect("authorize endpoint");
 
-        assert_eq!(selected.id, row.id);
+        assert_eq!(authorization.operation().id, row.id);
+        assert_eq!(keys.decrypt_stats(), decrypts_before);
+        let authorization_debug = format!("{authorization:?}");
+        assert!(!authorization_debug.contains("duffel-secret"));
+        let authorized = materialize_authorized(&db, &keys, authorization)
+            .await
+            .expect("materialize credential after authorization");
         let debug = format!("{authorized:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("duffel-secret"));
@@ -1165,7 +1204,7 @@ mod tests {
             .expect("insert invalid tagged row");
         let before = keys.decrypt_stats();
 
-        let error = authorize_constrained(&db, &keys, &service.id, ConstrainedOp::Speak)
+        let error = authorize_constrained(&db, &service.id, ConstrainedOp::Speak)
             .await
             .expect_err("mismatched constrained row must fail closed");
         assert!(matches!(error, AppError::PlatformOperationUnavailable));
@@ -1196,11 +1235,14 @@ mod tests {
             .await
             .expect("insert valid constrained row");
 
-        let (authorized, selected) =
-            authorize_constrained(&db, &keys, &service.id, ConstrainedOp::Speak)
-                .await
-                .expect("authorize exact constrained row");
-        assert_eq!(selected.id, valid.id);
+        let authorization = authorize_constrained(&db, &service.id, ConstrainedOp::Speak)
+            .await
+            .expect("authorize exact constrained row");
+        assert_eq!(authorization.operation().id, valid.id);
+        assert_eq!(keys.decrypt_stats(), before);
+        let authorized = materialize_authorized(&db, &keys, authorization)
+            .await
+            .expect("materialize exact constrained credential");
         assert_eq!(authorized.catalog_service_id(), service.id);
         assert_eq!(authorized.operation().id, valid.id);
         assert_eq!(

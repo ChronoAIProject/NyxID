@@ -15,18 +15,22 @@ use crate::models::downstream_service::{
 };
 use crate::models::platform_op_usage::{COLLECTION_NAME as PLATFORM_OP_USAGE, PlatformOpUsage};
 use crate::models::platform_operation::{
-    COLLECTION_NAME as PLATFORM_OPERATIONS, CallAndSayConfig, CallAndSayOperationConfig,
-    ConstrainedConfig, FlightSearchConfig, FlightSearchOperationConfig, OperationBilling,
-    OperationLimits, PerRequestCaps, PlatformOperation, PlatformOperationConfig,
-    PlatformOperationKind, PlatformOperationName, PlatformOperationRow, SpeakConfig,
-    SpeakOperationConfig, constrained_kind_key, default_call_max_duration_seconds,
-    default_call_max_message_chars, default_call_max_per_user_per_day, default_call_voice,
-    default_flight_search_max_offers_cap, default_flight_search_max_per_user_per_day,
-    default_speak_max_chars, default_speak_max_per_user_per_day, default_speak_model_id,
-    endpoint_kind_key,
+    COLLECTION_NAME as PLATFORM_OPERATIONS, CallAndSayConfig, ConstrainedConfig,
+    FlightSearchConfig, OperationBilling, OperationLimits, PerRequestCaps, PlatformOperation,
+    PlatformOperationConfig, PlatformOperationKind, PlatformOperationName, PlatformOperationRow,
+    SpeakConfig, constrained_kind_key, default_call_max_per_user_per_day,
+    default_flight_search_max_per_user_per_day, endpoint_kind_key,
+};
+#[cfg(test)]
+use crate::models::platform_operation::{
+    CallAndSayOperationConfig, FlightSearchOperationConfig, SpeakOperationConfig,
+    default_call_max_duration_seconds, default_call_max_message_chars, default_call_voice,
+    default_flight_search_max_offers_cap, default_speak_max_chars,
+    default_speak_max_per_user_per_day, default_speak_model_id,
 };
 use crate::models::platform_service_preference::{CredentialIntent, PlatformServicePreference};
 use crate::models::service_approval_config::ApprovalEffect;
+#[cfg(test)]
 use crate::models::service_billing::BillingMetric;
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::services::billing::route_inventory::BillingEgressPermit;
@@ -44,8 +48,11 @@ pub const FLIGHT_SEARCH_HARD_MAX_OFFERS: u32 = 50;
 pub const MCP_SPEAK_HARD_MAX_AUDIO_BYTES: usize = 16 * 1024 * 1024;
 const MAX_VENDOR_JSON_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
 
+#[cfg(test)]
 pub const SPEAK_VENDOR_SLUG: &str = "api-elevenlabs";
+#[cfg(test)]
 pub const CALL_AND_SAY_VENDOR_SLUG: &str = "api-twilio";
+#[cfg(test)]
 pub const FLIGHT_SEARCH_VENDOR_SLUG: &str = "duffel";
 pub const PLATFORM_OPERATION_NAMES: [PlatformOperationName; 3] = [
     PlatformOperationName::Speak,
@@ -345,6 +352,7 @@ pub fn operation_name(op: PlatformOperationName) -> &'static str {
     }
 }
 
+#[cfg(test)]
 pub fn default_operation_config(op: PlatformOperationName) -> PlatformOperationConfig {
     match op {
         PlatformOperationName::Speak => PlatformOperationConfig::Speak(SpeakConfig {
@@ -373,6 +381,7 @@ pub fn default_operation_config(op: PlatformOperationName) -> PlatformOperationC
     }
 }
 
+#[cfg(test)]
 pub fn default_vendor_service_slug(op: PlatformOperationName) -> &'static str {
     match op {
         PlatformOperationName::Speak => SPEAK_VENDOR_SLUG,
@@ -1158,20 +1167,41 @@ pub async fn load_credential_resolution_context(
     resolution_user_id: &str,
     operations: &[PlatformOperation],
 ) -> AppResult<PlatformCredentialResolutionContext> {
+    let slugs = operations
+        .iter()
+        .map(|operation| {
+            catalog_contract_for_operation(operation.op)
+                .catalog_service_slug
+                .to_string()
+        })
+        .collect::<HashSet<_>>();
+    load_credential_resolution_context_for_slugs(db, resolution_user_id, slugs).await
+}
+
+pub async fn load_endpoint_credential_resolution_context(
+    db: &mongodb::Database,
+    resolution_user_id: &str,
+    authorization: &platform_credential_service::AuthorizedPlatformOperation,
+) -> AppResult<PlatformCredentialResolutionContext> {
+    load_credential_resolution_context_for_slugs(
+        db,
+        resolution_user_id,
+        HashSet::from([authorization.catalog_service().slug.clone()]),
+    )
+    .await
+}
+
+async fn load_credential_resolution_context_for_slugs(
+    db: &mongodb::Database,
+    resolution_user_id: &str,
+    slugs: HashSet<String>,
+) -> AppResult<PlatformCredentialResolutionContext> {
     let visible_connections =
         user_service_service::list_user_services_with_sources_including_disabled(
             db,
             resolution_user_id,
         )
         .await?;
-    let mut slugs = HashSet::new();
-    for operation in operations {
-        slugs.insert(
-            catalog_contract_for_operation(operation.op)
-                .catalog_service_slug
-                .to_string(),
-        );
-    }
     let services: Vec<DownstreamService> = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find(doc! {
@@ -1218,6 +1248,14 @@ pub async fn load_credential_resolution_context(
     })
 }
 
+#[derive(Clone, Copy)]
+struct CredentialOperation<'a> {
+    id: &'a str,
+    catalog_service_id: &'a str,
+    catalog_service_slug: &'a str,
+    vendor: &'a str,
+}
+
 impl PlatformCredentialResolutionContext {
     pub fn service_by_slug(&self, slug: &str) -> Option<&DownstreamService> {
         self.services_by_slug.get(slug)
@@ -1249,9 +1287,71 @@ pub async fn resolve_operation_credential_source(
     context: &PlatformCredentialResolutionContext,
 ) -> AppResult<PlatformCredentialResolution> {
     let contract = catalog_contract_for_operation(operation.op);
+    resolve_credential_source(
+        db,
+        encryption_keys,
+        node_ws_manager,
+        resolution_user_id,
+        caller,
+        CredentialOperation {
+            id: &operation.id,
+            catalog_service_id: &operation.catalog_service_id,
+            catalog_service_slug: contract.catalog_service_slug,
+            vendor: contract.vendor,
+        },
+        mode,
+        context,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn resolve_endpoint_credential_source(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    node_ws_manager: &Arc<NodeWsManager>,
+    resolution_user_id: &str,
+    caller: PlatformCredentialCaller<'_>,
+    authorization: &platform_credential_service::AuthorizedPlatformOperation,
+    mode: CredentialResolutionMode<'_>,
+    context: &PlatformCredentialResolutionContext,
+) -> AppResult<PlatformCredentialResolution> {
+    let service = authorization.catalog_service();
+    resolve_credential_source(
+        db,
+        encryption_keys,
+        node_ws_manager,
+        resolution_user_id,
+        caller,
+        CredentialOperation {
+            id: &authorization.operation().id,
+            catalog_service_id: &service.id,
+            catalog_service_slug: &service.slug,
+            vendor: &service.slug,
+        },
+        mode,
+        context,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn resolve_credential_source(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    node_ws_manager: &Arc<NodeWsManager>,
+    resolution_user_id: &str,
+    caller: PlatformCredentialCaller<'_>,
+    operation: CredentialOperation<'_>,
+    mode: CredentialResolutionMode<'_>,
+    context: &PlatformCredentialResolutionContext,
+) -> AppResult<PlatformCredentialResolution> {
     let catalog_service = context
-        .service_by_slug(contract.catalog_service_slug)
+        .service_by_slug(operation.catalog_service_slug)
         .ok_or(AppError::PlatformOperationUnavailable)?;
+    if catalog_service.id != operation.catalog_service_id {
+        return Err(AppError::PlatformOperationUnavailable);
+    }
 
     let matching = context
         .visible_connections
@@ -1301,7 +1401,7 @@ pub async fn resolve_operation_credential_source(
         let resolved_intent = platform_preference_service::resolve_credential_intent(
             caller.credential_intent,
             context.preference(&disabled_candidate.user_id, &catalog_service.id),
-            &operation.id,
+            operation.id,
         )?;
         return Ok(PlatformCredentialResolution::Unavailable {
             connection: Some(connection_metadata(db, &disabled_candidate).await?),
@@ -1314,7 +1414,7 @@ pub async fn resolve_operation_credential_source(
         let resolved_intent = platform_preference_service::resolve_credential_intent(
             caller.credential_intent,
             context.preference(resolution_user_id, &catalog_service.id),
-            &operation.id,
+            operation.id,
         )?;
         return match resolved_intent.platform_preference {
             Some(preference) => {
@@ -1351,7 +1451,7 @@ pub async fn resolve_operation_credential_source(
     let resolved_intent = platform_preference_service::resolve_credential_intent(
         caller.credential_intent,
         context.preference(&preference_owner_id, &catalog_service.id),
-        &operation.id,
+        operation.id,
     )?;
 
     let resolved = match mode {
@@ -1404,7 +1504,7 @@ pub async fn resolve_operation_credential_source(
                 error: execution_mode_error(
                     mode,
                     AppError::PlatformOperationOwnConnectionUnusable {
-                        vendor: vendor_display_name(contract.vendor),
+                        vendor: vendor_display_name(operation.vendor),
                         detail:
                             "The connection could not be resolved; reconnect it before retrying."
                                 .to_string(),
@@ -1433,7 +1533,7 @@ pub async fn resolve_operation_credential_source(
                 )
                 .await;
             }
-            let error = normalize_own_connection_error(contract.vendor, error);
+            let error = normalize_own_connection_error(operation.vendor, error);
             return Ok(PlatformCredentialResolution::Unusable {
                 connection,
                 error: execution_mode_error(mode, error),
@@ -1484,7 +1584,7 @@ pub async fn resolve_operation_credential_source(
             error: execution_mode_error(
                 mode,
                 AppError::PlatformOperationOwnConnectionUnusable {
-                    vendor: vendor_display_name(contract.vendor),
+                    vendor: vendor_display_name(operation.vendor),
                     detail: "The active connection has no usable owner credential.".to_string(),
                 },
             ),
@@ -1557,7 +1657,7 @@ pub async fn resolve_operation_credential_source(
                 connection,
                 error: execution_mode_error(
                     mode,
-                    normalize_own_connection_error(contract.vendor, error),
+                    normalize_own_connection_error(operation.vendor, error),
                 ),
                 intent: resolved_intent.intent,
             });
@@ -1604,7 +1704,7 @@ pub async fn resolve_operation_credential_source(
 async fn platform_resolution(
     db: &mongodb::Database,
     context: &PlatformCredentialResolutionContext,
-    operation: &PlatformOperation,
+    operation: CredentialOperation<'_>,
     owner_id: &str,
     intent: CredentialIntent,
     preference: platform_preference_service::EffectivePlatformPreference,
@@ -1674,13 +1774,12 @@ fn normalize_own_connection_error(vendor: &str, error: AppError) -> AppError {
 async fn resolve_platform_vendor_from_context(
     db: &mongodb::Database,
     context: &PlatformCredentialResolutionContext,
-    operation: &PlatformOperation,
+    operation: CredentialOperation<'_>,
 ) -> AppResult<DownstreamService> {
-    let contract = catalog_contract_for_operation(operation.op);
     let service = context
-        .service_by_slug(contract.catalog_service_slug)
+        .service_by_slug(operation.catalog_service_slug)
         .ok_or(AppError::PlatformOperationUnavailable)?;
-    if service.id.is_empty()
+    if service.id != operation.catalog_service_id
         || !platform_credential_service::credential_is_configured(db, &service.id).await?
     {
         return Err(AppError::PlatformOperationUnavailable);
@@ -1706,6 +1805,7 @@ async fn connection_metadata(
     })
 }
 
+#[cfg(test)]
 pub async fn upsert_operation(
     db: &mongodb::Database,
     _encryption_keys: &EncryptionKeys,
@@ -1727,6 +1827,7 @@ pub async fn upsert_operation(
     .await
 }
 
+#[cfg(test)]
 pub async fn upsert_operation_with_billing(
     db: &mongodb::Database,
     op: PlatformOperationName,
@@ -1854,6 +1955,7 @@ pub async fn upsert_operation_with_billing(
     project_constrained_row(row, &catalog_service.slug)
 }
 
+#[cfg(test)]
 pub fn default_operation_billing(op: PlatformOperationName) -> OperationBilling {
     OperationBilling::free(match op {
         PlatformOperationName::Speak => BillingMetric::Characters,
@@ -2136,6 +2238,7 @@ fn operation_metric_codes(row: &PlatformOperationRow) -> impl Iterator<Item = &s
     )
 }
 
+#[cfg(test)]
 fn split_constrained_config(
     op: PlatformOperationName,
     config: PlatformOperationConfig,
@@ -2286,10 +2389,10 @@ pub async fn materialize_platform_vendor_target(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     op: PlatformOperationName,
-    service: DownstreamService,
+    authorization: platform_credential_service::AuthorizedPlatformOperation,
 ) -> AppResult<VendorTarget> {
-    let (authorized, _) =
-        platform_credential_service::authorize_constrained(db, encryption_keys, &service.id, op)
+    let authorized =
+        platform_credential_service::materialize_authorized(db, encryption_keys, authorization)
             .await
             .map_err(|error| vendor_configuration_failed(op, error))?;
     Ok(VendorTarget {
@@ -3164,11 +3267,13 @@ mod tests {
             return;
         };
         let user_id = uuid::Uuid::new_v4().to_string();
+        let catalog_services = PLATFORM_OPERATION_NAMES.map(valid_catalog_service);
         let operations = PLATFORM_OPERATION_NAMES
             .into_iter()
-            .map(|op| PlatformOperation {
+            .zip(&catalog_services)
+            .map(|(op, service)| PlatformOperation {
                 id: uuid::Uuid::new_v4().to_string(),
-                catalog_service_id: format!("catalog-{}", default_vendor_service_slug(op)),
+                catalog_service_id: service.id.clone(),
                 op,
                 enabled: true,
                 vendor_service_slug: default_vendor_service_slug(op).to_string(),
@@ -3176,7 +3281,6 @@ mod tests {
                 billing: default_operation_billing(op),
             })
             .collect::<Vec<_>>();
-        let catalog_services = PLATFORM_OPERATION_NAMES.map(valid_catalog_service);
         db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
             .insert_many(catalog_services.clone())
             .await
