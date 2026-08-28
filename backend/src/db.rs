@@ -31,6 +31,7 @@ use crate::models::oauth_broker_binding::{
 use crate::models::platform_credential::COLLECTION_NAME as PLATFORM_CREDENTIALS;
 use crate::models::platform_op_usage::COLLECTION_NAME as PLATFORM_OP_USAGE;
 use crate::models::platform_operation::COLLECTION_NAME as PLATFORM_OPERATIONS;
+use crate::models::platform_provider_promotion::COLLECTION_NAME as PLATFORM_PROVIDER_PROMOTIONS;
 use crate::models::platform_service_preference::COLLECTION_NAME as PLATFORM_SERVICE_PREFERENCES;
 use crate::models::platform_spend_usage::COLLECTION_NAME as PLATFORM_SPEND_USAGE;
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
@@ -309,6 +310,19 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .options(
                     IndexOptions::builder()
                         .name("platform_credentials_catalog_unique".to_string())
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    db.collection::<mongodb::bson::Document>(PLATFORM_PROVIDER_PROMOTIONS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "catalog_service_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("platform_provider_promotions_catalog_unique".to_string())
                         .unique(true)
                         .build(),
                 )

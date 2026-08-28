@@ -854,6 +854,21 @@ fn build_router_internal(
 
     let admin_routes = Router::new()
         .route(
+            "/platform-providers",
+            get(handlers::admin_platform_providers::list_platform_providers),
+        )
+        .route(
+            "/platform-providers/{catalog_service_id}",
+            get(handlers::admin_platform_providers::get_platform_provider)
+                .put(handlers::admin_platform_providers::promote_platform_provider)
+                .delete(handlers::admin_platform_providers::demote_platform_provider),
+        )
+        .route(
+            "/platform-providers/{catalog_service_id}/credential",
+            put(handlers::admin_platform_providers::set_platform_credential)
+                .delete(handlers::admin_platform_providers::delete_platform_credential),
+        )
+        .route(
             "/platform-ops",
             get(handlers::admin_platform_ops::list_platform_operations),
         )

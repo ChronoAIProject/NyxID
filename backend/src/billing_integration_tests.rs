@@ -1880,7 +1880,7 @@ async fn insert_platform_route_services(
             .insert_one(&vendor)
             .await
             .expect("insert platform route catalog service");
-        crate::services::platform_credential_service::set_credential(
+        crate::services::platform_credential_service::set_credential_for_test(
             db,
             &encryption_keys,
             &vendor.id,

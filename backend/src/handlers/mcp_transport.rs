@@ -3654,7 +3654,7 @@ mod tests {
         .insert_one(&vendor)
         .await
         .expect("insert ElevenLabs catalog service");
-        crate::services::platform_credential_service::set_credential(
+        crate::services::platform_credential_service::set_credential_for_test(
             db,
             &crate::test_utils::test_encryption_keys(),
             &vendor.id,
@@ -3820,7 +3820,7 @@ mod tests {
         .insert_one(&catalog)
         .await
         .expect("insert MCP ElevenLabs catalog row");
-        crate::services::platform_credential_service::set_credential(
+        crate::services::platform_credential_service::set_credential_for_test(
             &db,
             &crate::test_utils::test_encryption_keys(),
             &catalog_id,

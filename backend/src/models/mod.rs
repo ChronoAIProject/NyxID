@@ -61,6 +61,7 @@ pub mod org_role_scope;
 pub mod platform_credential;
 pub mod platform_op_usage;
 pub mod platform_operation;
+pub mod platform_provider_promotion;
 pub mod platform_service_preference;
 pub mod platform_settings;
 pub mod platform_spend_usage;

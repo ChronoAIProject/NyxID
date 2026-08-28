@@ -392,6 +392,15 @@ mod tests {
         .insert_one(&vendor)
         .await
         .expect("insert catalog provider row");
+        crate::services::platform_credential_service::set_credential_for_test(
+            &db,
+            &encryption_keys,
+            &vendor.id,
+            "elevenlabs-secret",
+            "admin-user",
+        )
+        .await
+        .expect("promote provider and set credential");
 
         let operation = platform_operation_service::upsert_operation(
             &db,

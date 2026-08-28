@@ -1773,6 +1773,14 @@ pub async fn upsert_operation_with_billing(
             ))
         })?;
     platform_credential_service::validate_catalog_provider(db, &catalog_service.id).await?;
+    if enabled
+        && !platform_credential_service::credential_is_configured(db, &catalog_service.id).await?
+    {
+        return Err(AppError::PlatformVendorProvisioningInvalid(
+            "Promote the provider, accept its vendor terms, and configure its platform credential before enabling an operation."
+                .to_string(),
+        ));
+    }
     let (kind, limits) = split_constrained_config(op, config)?;
     let kind_key = constrained_kind_key(op);
     let current = db
@@ -2346,7 +2354,7 @@ mod tests {
             .insert_one(&catalog)
             .await
             .expect("insert ElevenLabs catalog");
-        platform_credential_service::set_credential(
+        platform_credential_service::set_credential_for_test(
             &db,
             &encryption_keys,
             &catalog.id,
@@ -2687,7 +2695,7 @@ mod tests {
             .insert_one(&catalog)
             .await
             .expect("insert ElevenLabs catalog row");
-        platform_credential_service::set_credential(
+        platform_credential_service::set_credential_for_test(
             &db,
             &encryption_keys,
             &catalog.id,
@@ -2928,7 +2936,7 @@ mod tests {
         }
         let encryption_keys = crate::test_utils::test_encryption_keys();
         for service in catalog_services {
-            platform_credential_service::set_credential(
+            platform_credential_service::set_credential_for_test(
                 &db,
                 &encryption_keys,
                 &service.id,
@@ -3037,7 +3045,7 @@ mod tests {
         platform_credential_service::validate_catalog_provider(&db, &valid.id)
             .await
             .expect("registered provider with exact auth shape");
-        let error = platform_credential_service::set_credential(
+        let error = platform_credential_service::set_credential_for_test(
             &db,
             &crate::test_utils::test_encryption_keys(),
             &valid.id,
@@ -3098,6 +3106,73 @@ mod tests {
             .expect("list enabled operations");
         assert_eq!(enabled.len(), 1);
         assert_eq!(enabled[0].op, PlatformOperationName::Speak);
+    }
+
+    #[tokio::test]
+    async fn enabling_an_operation_requires_terms_promotion_and_a_credential() {
+        let Some(db) = crate::test_utils::connect_test_database("platform_ops_enable_gate").await
+        else {
+            return;
+        };
+        let service = valid_catalog_service(PlatformOperationName::Speak);
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert catalog provider");
+        let config = PlatformOperationConfig::Speak(speak_config());
+
+        let error = upsert_operation(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            PlatformOperationName::Speak,
+            true,
+            service.slug.clone(),
+            config.clone(),
+            "admin",
+        )
+        .await
+        .expect_err("unpromoted provider must not enable an operation");
+        assert!(matches!(
+            error,
+            AppError::PlatformVendorProvisioningInvalid(_)
+        ));
+
+        platform_credential_service::promote_provider(&db, &service.id, true, "admin")
+            .await
+            .expect("promote provider");
+        upsert_operation(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            PlatformOperationName::Speak,
+            true,
+            service.slug.clone(),
+            config.clone(),
+            "admin",
+        )
+        .await
+        .expect_err("promoted provider without a credential must stay disabled");
+
+        platform_credential_service::set_credential(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            &service.id,
+            "elevenlabs-secret",
+            "admin",
+        )
+        .await
+        .expect("set credential");
+        let operation = upsert_operation(
+            &db,
+            &crate::test_utils::test_encryption_keys(),
+            PlatformOperationName::Speak,
+            true,
+            service.slug,
+            config,
+            "admin",
+        )
+        .await
+        .expect("enable operation after promotion and credential setup");
+        assert!(operation.enabled);
     }
 
     #[test]

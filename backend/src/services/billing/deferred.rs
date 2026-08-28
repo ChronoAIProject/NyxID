@@ -431,7 +431,7 @@ mod tests {
             .insert_one(&service)
             .await
             .expect("insert Twilio catalog service");
-        platform_credential_service::set_credential(
+        platform_credential_service::set_credential_for_test(
             db,
             keys,
             &service.id,

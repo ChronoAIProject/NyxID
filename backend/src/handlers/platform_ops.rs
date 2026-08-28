@@ -1904,7 +1904,7 @@ mod tests {
             .insert_one(&service)
             .await
             .expect("insert Twilio vendor row");
-        crate::services::platform_credential_service::set_credential(
+        crate::services::platform_credential_service::set_credential_for_test(
             &state.db,
             &state.encryption_keys,
             &service.id,
@@ -1939,7 +1939,7 @@ mod tests {
             .insert_one(&service)
             .await
             .expect("insert ElevenLabs vendor row");
-        crate::services::platform_credential_service::set_credential(
+        crate::services::platform_credential_service::set_credential_for_test(
             &state.db,
             &state.encryption_keys,
             &service.id,
@@ -3438,7 +3438,7 @@ mod tests {
             .insert_one(&vendor)
             .await
             .expect("insert priced discovery vendor");
-        crate::services::platform_credential_service::set_credential(
+        crate::services::platform_credential_service::set_credential_for_test(
             &db,
             &state.encryption_keys,
             &vendor.id,
