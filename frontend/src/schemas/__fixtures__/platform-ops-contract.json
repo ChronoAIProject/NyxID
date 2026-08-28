@@ -84,6 +84,34 @@
           "sync_status": "pending",
           "sync_error": null
         }
+      },
+      {
+        "op": "flight_search",
+        "enabled": true,
+        "vendor_service_slug": "duffel",
+        "config": {
+          "type": "flight_search",
+          "max_offers_cap": 10,
+          "max_searches_per_user_per_day": 5
+        },
+        "updated_at": "2023-11-14T22:13:20+00:00",
+        "updated_by": "admin-user-id",
+        "vendor_service_id": null,
+        "pricing": {
+          "billable": true,
+          "metric": "input_tokens",
+          "price_per_unit": "0.01",
+          "secondary": {
+            "metric": "output_tokens",
+            "price_per_unit": "0.03",
+            "lago_metric_code": "platform_op_duffel_split_output"
+          },
+          "base_fee_per_call": "0.5",
+          "display": "0.5 credits per call + 0.01 credits per input token + 0.03 credits per output token",
+          "lago_metric_code": "platform_op_duffel_split_input",
+          "sync_status": "synced",
+          "sync_error": null
+        }
       }
     ]
   },
@@ -163,6 +191,30 @@
           "secondary": null,
           "base_fee_per_call": null,
           "display": "Free"
+        },
+        "mcp_tool": "nyx__flight_search"
+      },
+      {
+        "op": "flight_search",
+        "display_name": "Flight Search",
+        "description": "Search available flight offers without booking.",
+        "vendor": "duffel",
+        "catalog_service_slug": "duffel",
+        "credential_source": "platform",
+        "credential_intent": "auto",
+        "availability_reason": null,
+        "fallback_reason": "own_credential_absent",
+        "own_connection": null,
+        "pricing": {
+          "billable": true,
+          "metric": "input_tokens",
+          "price_per_unit": "0.01",
+          "secondary": {
+            "metric": "output_tokens",
+            "price_per_unit": "0.03"
+          },
+          "base_fee_per_call": "0.5",
+          "display": "0.5 credits per call + 0.01 credits per input token + 0.03 credits per output token"
         },
         "mcp_tool": "nyx__flight_search"
       }

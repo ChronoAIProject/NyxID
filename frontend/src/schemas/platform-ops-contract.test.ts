@@ -24,6 +24,7 @@ describe("platform operations backend contract", () => {
       "speak",
       "call_and_say",
       "flight_search",
+      "flight_search",
     ]);
   });
 
@@ -32,14 +33,14 @@ describe("platform operations backend contract", () => {
       contract.discovery,
     );
 
-    expect(parsed.operations).toHaveLength(3);
+    expect(parsed.operations).toHaveLength(4);
   });
 
   it("accepts every metric the backend can bill, not just requests", () => {
     const parsed = platformOperationListSchema.parse(contract.admin);
 
     expect(parsed.operations.map((operation) => operation.pricing.metric))
-      .toEqual(["characters", "seconds", "requests"]);
+      .toEqual(["characters", "seconds", "requests", "input_tokens"]);
   });
 
   it("carries a server-rendered price for each priced shape", () => {
@@ -48,9 +49,16 @@ describe("platform operations backend contract", () => {
     expect(parsed.operations.map((operation) => operation.pricing.display))
       .toEqual([
         "0.002 credits per character",
-        "1.5 credits per call + 0.05 per second",
+        "1.5 credits per call + 0.05 credits per second",
         "Free",
+        "0.5 credits per call + 0.01 credits per input token + 0.03 credits per output token",
       ]);
+
+    expect(parsed.operations[3]?.pricing.secondary).toEqual({
+      metric: "output_tokens",
+      price_per_unit: "0.03",
+      lago_metric_code: "platform_op_duffel_split_output",
+    });
   });
 
   it("exposes Lago sync state so the admin table can report it", () => {

@@ -24,8 +24,8 @@ use crate::handlers::platform_ops::{
     OwnConnectionDiscoveryResponse, platform_operation_discovery_response,
 };
 use crate::models::platform_operation::{
-    CallAndSayConfig, FlightSearchConfig, OperationBilling, PlatformOperation,
-    PlatformOperationConfig, PlatformOperationName, SpeakConfig,
+    CallAndSayConfig, FlightSearchConfig, OperationBilling, OperationBillingComponent,
+    PlatformOperation, PlatformOperationConfig, PlatformOperationName, SpeakConfig,
 };
 use crate::models::platform_service_preference::CredentialIntent;
 use crate::models::service_billing::{BillingMetric, PricingSyncStatus};
@@ -63,8 +63,8 @@ fn operation(
 }
 
 /// One operation per priced shape the UI has to render:
-/// a variable-only price, a base fee combined with a variable rate, and an
-/// unpriced operation.
+/// a variable-only price, a base fee combined with a variable rate, an
+/// unpriced operation, and split input/output token rates.
 fn contract_operations() -> Vec<PlatformOperation> {
     vec![
         operation(
@@ -113,6 +113,26 @@ fn contract_operations() -> Vec<PlatformOperation> {
                 max_searches_per_user_per_day: 25,
             }),
             OperationBilling::free(BillingMetric::Requests),
+        ),
+        operation(
+            PlatformOperationName::FlightSearch,
+            PlatformOperationConfig::FlightSearch(FlightSearchConfig {
+                max_offers_cap: 10,
+                max_searches_per_user_per_day: 5,
+            }),
+            OperationBilling {
+                metric: BillingMetric::InputTokens,
+                price_per_unit: "0.01".to_string(),
+                secondary: Some(OperationBillingComponent {
+                    metric: BillingMetric::OutputTokens,
+                    price_per_unit: "0.03".to_string(),
+                    lago_metric_code: "platform_op_duffel_split_output".to_string(),
+                }),
+                base_fee_per_call: Some("0.5".to_string()),
+                lago_metric_code: "platform_op_duffel_split_input".to_string(),
+                sync_status: PricingSyncStatus::Synced,
+                sync_error: None,
+            },
         ),
     ]
 }
@@ -169,6 +189,13 @@ fn contract_document() -> serde_json::Value {
             Some("own_connection_disabled"),
             None,
             Some(blocked_connection),
+        ),
+        (
+            PlatformCredentialSource::Platform,
+            CredentialIntent::Auto,
+            None,
+            Some(PlatformFallbackReason::OwnCredentialAbsent),
+            None,
         ),
     ];
 
