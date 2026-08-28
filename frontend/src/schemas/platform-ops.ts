@@ -101,6 +101,14 @@ export const speakConfigResponseSchema = z
       .min(1, "Maximum characters must be at least 1")
       .max(5_000, "Maximum characters cannot exceed 5000"),
     model_id: safeIdentifierSchema("Model ID"),
+    // Speak is priced per character, so a per-call count is a coarse bound.
+    // It is still the difference between a looping agent spending a bounded
+    // amount and spending until the wallet stops it.
+    max_calls_per_user_per_day: z
+      .number()
+      .int("Daily call limit must be an integer")
+      .min(1, "Daily call limit must be at least 1")
+      .max(4_294_967_295, "Daily call limit is too large"),
   })
   .strict();
 

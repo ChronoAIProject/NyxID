@@ -165,10 +165,12 @@ pub async fn speak(
     let started = Instant::now();
     let text_chars = request.text.chars().count();
     let voice_id = request.voice_id.clone();
+    let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
     let billing_egress_permit = enforce_platform_billing_classification(billing_route_policy)?;
     let result = execute_speak_for_caller(
         &state,
         &PlatformOperationCaller::from_auth_user(&auth_user),
+        &yyyymmdd,
         request,
         BillingIngress::PlatformOperation,
         billing_egress_permit,
@@ -994,6 +996,7 @@ async fn release_daily_limit(
 pub(crate) async fn execute_speak_for_caller(
     state: &AppState,
     caller: &PlatformOperationCaller,
+    yyyymmdd: &str,
     request: SpeakRequest,
     ingress: BillingIngress,
     billing_egress_permit: BillingEgressPermit,
@@ -1014,6 +1017,11 @@ pub(crate) async fn execute_speak_for_caller(
         &request,
         enforce_allowlist,
     )?;
+    let daily_limit =
+        (resolved.credential_source == PlatformCredentialSource::Platform).then_some(DailyLimit {
+            yyyymmdd: yyyymmdd.to_string(),
+            cap: config.max_calls_per_user_per_day,
+        });
     let result = forward_metered_operation(
         state,
         caller,
@@ -1031,7 +1039,7 @@ pub(crate) async fn execute_speak_for_caller(
             })?,
         )),
         None,
-        None,
+        daily_limit,
         billing_egress_permit,
     )
     .await?;
@@ -1486,13 +1494,14 @@ mod tests {
                     config: ConstrainedConfig::Speak(SpeakOperationConfig {
                         allowed_voice_ids: config.allowed_voice_ids,
                         model_id: config.model_id,
+                        max_calls_per_user_per_day: config.max_calls_per_user_per_day,
                     }),
                 },
                 OperationLimits {
                     per_request: PerRequestCaps::Speak {
                         max_chars: config.max_chars,
                     },
-                    per_user_per_day: None,
+                    per_user_per_day: Some(config.max_calls_per_user_per_day),
                 },
             ),
             PlatformOperationConfig::CallAndSay(config) => (
@@ -1999,6 +2008,7 @@ mod tests {
                     allowed_voice_ids: vec!["voice".to_string()],
                     max_chars: 1_000,
                     model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
                 }),
             ))
             .await
@@ -2043,6 +2053,7 @@ mod tests {
                     allowed_voice_ids: vec!["voice".to_string()],
                     max_chars: 1_000,
                     model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
                 }),
             ))
             .await
@@ -2507,6 +2518,7 @@ mod tests {
                         allowed_voice_ids: vec!["platform-voice".to_string()],
                         max_chars: 100,
                         model_id: "eleven_multilingual_v2".to_string(),
+                        max_calls_per_user_per_day: 50,
                     }),
                 ),
                 operation(
@@ -2645,6 +2657,7 @@ mod tests {
                 allowed_voice_ids: vec!["voice-a".to_string()],
                 max_chars: 1_000,
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             }),
         );
         db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
@@ -2663,6 +2676,7 @@ mod tests {
         let result = execute_speak_for_caller(
             &state,
             &caller,
+            "20260101",
             SpeakRequest {
                 text: "nyxid".to_string(),
                 voice_id: "voice-a".to_string(),
@@ -2767,6 +2781,7 @@ mod tests {
                     allowed_voice_ids: vec!["voice-a".to_string()],
                     max_chars: 1_000,
                     model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
                 }),
             ))
             .await
@@ -2783,6 +2798,7 @@ mod tests {
         let execution = execute_speak_for_caller(
             &state,
             &caller,
+            "20260101",
             SpeakRequest {
                 text: "binding".to_string(),
                 voice_id: "voice-a".to_string(),
@@ -2836,6 +2852,7 @@ mod tests {
                     allowed_voice_ids: vec!["voice-a".to_string()],
                     max_chars: 1_000,
                     model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
                 }),
             ))
             .await
@@ -2878,6 +2895,7 @@ mod tests {
         let error = match execute_speak_for_caller(
             &state,
             &agent,
+            "20260101",
             SpeakRequest {
                 text: "approval".to_string(),
                 voice_id: "voice-a".to_string(),
@@ -2918,6 +2936,7 @@ mod tests {
         execute_speak_for_caller(
             &state,
             &session,
+            "20260101",
             SpeakRequest {
                 text: "session".to_string(),
                 voice_id: "voice-a".to_string(),
@@ -2992,6 +3011,7 @@ mod tests {
                 allowed_voice_ids: vec!["platform-voice".to_string()],
                 max_chars: 100,
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             }),
         );
         speak_operation.billing = OperationBilling {
@@ -3357,6 +3377,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn speak_enforces_a_daily_cap_on_platform_funded_calls() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_ops_speak_daily_cap").await
+        else {
+            eprintln!("skipping speak daily cap test: no local MongoDB available");
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        // The quota is enforced by a conditional upsert, so the unique index is
+        // what makes a second reservation fail rather than insert a second row.
+        ensure_usage_index(&db).await;
+        let (base_url, captured, server) = spawn_capturing_vendor().await;
+        insert_speak_vendor(&state, base_url.clone(), "platform-speak-secret").await;
+
+        let row = operation(
+            PlatformOperationName::Speak,
+            true,
+            PlatformOperationConfig::Speak(SpeakConfig {
+                allowed_voice_ids: vec!["voice-a".to_string()],
+                max_chars: 1_000,
+                model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 1,
+            }),
+        );
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(row)
+            .await
+            .expect("insert capped speak operation");
+
+        let caller = PlatformOperationCaller {
+            actor_user_id: USER_ID.to_string(),
+            resolution_user_id: USER_ID.to_string(),
+            api_key_id: Some("agent-key".to_string()),
+            auth_method: AuthMethod::ApiKey,
+            acting_client_id: None,
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
+        };
+        let call = || async {
+            execute_speak_for_caller(
+                &state,
+                &caller,
+                "20260101",
+                SpeakRequest {
+                    text: "nyxid".to_string(),
+                    voice_id: "voice-a".to_string(),
+                },
+                BillingIngress::PlatformOperation,
+                enforce_platform_billing_classification(BillingRoutePolicy::Metered(
+                    BillingIngress::PlatformOperation,
+                ))
+                .expect("platform billing classification"),
+            )
+            .await
+        };
+
+        call().await.expect("first call is within the cap");
+        // Speak previously had no daily cap at all, so a looping agent was
+        // bounded only by the wallet. Per-character pricing makes a per-call
+        // count coarse, but unbounded is the failure mode that matters.
+        assert!(
+            call().await.is_err(),
+            "the second call must be refused by the daily cap"
+        );
+        assert_eq!(
+            captured.lock().await.len(),
+            1,
+            "a capped call must not reach the vendor"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn audit_can_join_a_platform_charge_back_to_the_call_that_made_it() {
         let Some(db) =
             crate::test_utils::connect_test_database("platform_ops_audit_attribution").await
@@ -3380,6 +3473,7 @@ mod tests {
                 allowed_voice_ids: vec!["voice-a".to_string()],
                 max_chars: 1_000,
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             }),
         );
         let operation_id = row.id.clone();
@@ -3401,6 +3495,7 @@ mod tests {
         let result = execute_speak_for_caller(
             &state,
             &caller,
+            "20260101",
             SpeakRequest {
                 text: "nyxid".to_string(),
                 voice_id: "voice-a".to_string(),
@@ -3453,6 +3548,7 @@ mod tests {
                     allowed_voice_ids: vec!["voice-a".to_string()],
                     max_chars: 1_000,
                     model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
                 }),
             ))
             .await
@@ -3482,6 +3578,7 @@ mod tests {
         let execution = execute_speak_for_caller(
             &state,
             &caller,
+            "20260101",
             SpeakRequest {
                 text: "nyxid".to_string(),
                 voice_id: "voice-a".to_string(),
@@ -3528,6 +3625,7 @@ mod tests {
                     allowed_voice_ids: vec!["voice-a".to_string()],
                     max_chars: 1_000,
                     model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
                 }),
             ))
             .await
@@ -3558,6 +3656,7 @@ mod tests {
         let allowed = execute_speak_for_caller(
             &state,
             &caller,
+            "20260101",
             speak(),
             BillingIngress::PlatformOperation,
             permit(),
@@ -3597,6 +3696,7 @@ mod tests {
         let blocked = execute_speak_for_caller(
             &state,
             &caller,
+            "20260101",
             speak(),
             BillingIngress::PlatformOperation,
             permit(),

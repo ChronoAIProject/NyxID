@@ -1931,11 +1931,13 @@ async fn handle_platform_speak(
     let started = Instant::now();
     let text_chars = request.text.chars().count();
     let voice_id = request.voice_id.clone();
+    let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
     let result = async {
         let caller = platform_operation_caller(auth);
         let execution = super::platform_ops::execute_speak_for_caller(
             state,
             &caller,
+            &yyyymmdd,
             request,
             crate::services::billing::BillingIngress::Mcp,
             billing_egress_permit,
@@ -3669,6 +3671,7 @@ mod tests {
             ConstrainedConfig::Speak(SpeakOperationConfig {
                 allowed_voice_ids: vec!["voice-a".to_string()],
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             }),
             OperationLimits {
                 per_request: PerRequestCaps::Speak { max_chars: 1_000 },

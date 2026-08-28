@@ -34,6 +34,7 @@ const speakOperation = {
     allowed_voice_ids: ["voice-a"],
     max_chars: 1_000,
     model_id: "eleven_multilingual_v2",
+    max_calls_per_user_per_day: 50,
   },
   updated_at: null,
   updated_by: null,

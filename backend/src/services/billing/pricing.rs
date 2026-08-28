@@ -821,6 +821,7 @@ mod tests {
             config: ConstrainedConfig::Speak(SpeakOperationConfig {
                 allowed_voice_ids: Vec::new(),
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             }),
         };
         let mut billing = OperationBilling {

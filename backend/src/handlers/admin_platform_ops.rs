@@ -61,6 +61,7 @@ pub struct AdminSpeakConfigResponse {
     pub allowed_voice_ids: Vec<String>,
     pub max_chars: u32,
     pub model_id: String,
+    pub max_calls_per_user_per_day: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -262,10 +263,12 @@ impl From<PlatformOperationConfig> for AdminPlatformOperationConfigResponse {
                 allowed_voice_ids,
                 max_chars,
                 model_id,
+                max_calls_per_user_per_day,
             }) => Self::Speak(AdminSpeakConfigResponse {
                 allowed_voice_ids,
                 max_chars,
                 model_id,
+                max_calls_per_user_per_day,
             }),
             PlatformOperationConfig::CallAndSay(CallAndSayConfig {
                 allowed_destination_prefixes,
@@ -368,6 +371,7 @@ mod tests {
                 allowed_voice_ids: vec!["voice-a".to_string()],
                 max_chars: 1_200,
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             }),
             "admin-user",
         )
@@ -382,6 +386,7 @@ mod tests {
                 allowed_voice_ids: vec!["voice-a".to_string()],
                 max_chars: 1_200,
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             })
         );
         assert_eq!(

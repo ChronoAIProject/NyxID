@@ -70,6 +70,7 @@ fn contract_operations() -> Vec<PlatformOperation> {
                 allowed_voice_ids: vec!["voice-a".to_string()],
                 max_chars: 1_000,
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             }),
             OperationBilling {
                 metric: BillingMetric::Characters,

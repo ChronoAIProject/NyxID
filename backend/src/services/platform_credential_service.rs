@@ -677,6 +677,7 @@ mod tests {
             ConstrainedConfig::Speak(crate::models::platform_operation::SpeakOperationConfig {
                 allowed_voice_ids: vec!["voice-a".to_string()],
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             }),
             OperationLimits {
                 per_request: PerRequestCaps::Speak { max_chars: 500 },

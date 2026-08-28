@@ -22,7 +22,7 @@ use crate::models::platform_operation::{
     SpeakOperationConfig, constrained_kind_key, default_call_max_duration_seconds,
     default_call_max_message_chars, default_call_max_per_user_per_day, default_call_voice,
     default_flight_search_max_offers_cap, default_flight_search_max_per_user_per_day,
-    default_speak_max_chars, default_speak_model_id,
+    default_speak_max_chars, default_speak_max_per_user_per_day, default_speak_model_id,
 };
 use crate::models::service_approval_config::ApprovalEffect;
 use crate::models::service_billing::BillingMetric;
@@ -309,6 +309,7 @@ pub fn default_operation_config(op: PlatformOperationName) -> PlatformOperationC
             allowed_voice_ids: Vec::new(),
             max_chars: default_speak_max_chars(),
             model_id: default_speak_model_id(),
+            max_calls_per_user_per_day: default_speak_max_per_user_per_day(),
         }),
         PlatformOperationName::CallAndSay => {
             PlatformOperationConfig::CallAndSay(CallAndSayConfig {
@@ -1060,6 +1061,7 @@ fn project_constrained_row(
                 allowed_voice_ids: config.allowed_voice_ids,
                 max_chars,
                 model_id: config.model_id,
+                max_calls_per_user_per_day: config.max_calls_per_user_per_day,
             }),
         ),
         (
@@ -1580,13 +1582,14 @@ fn split_constrained_config(
                 config: ConstrainedConfig::Speak(SpeakOperationConfig {
                     allowed_voice_ids: config.allowed_voice_ids,
                     model_id: config.model_id,
+                    max_calls_per_user_per_day: config.max_calls_per_user_per_day,
                 }),
             },
             OperationLimits {
                 per_request: PerRequestCaps::Speak {
                     max_chars: config.max_chars,
                 },
-                per_user_per_day: None,
+                per_user_per_day: Some(config.max_calls_per_user_per_day),
             },
         )),
         (PlatformOperationName::CallAndSay, PlatformOperationConfig::CallAndSay(config)) => Ok((
@@ -1889,6 +1892,7 @@ mod tests {
             allowed_voice_ids: vec!["voice-a".to_string(), "voice-b".to_string()],
             max_chars: 100,
             model_id: "eleven_multilingual_v2".to_string(),
+            max_calls_per_user_per_day: 50,
         }
     }
 

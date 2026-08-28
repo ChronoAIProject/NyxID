@@ -335,6 +335,24 @@ function SpeakOperationCard({
               />
               <FormField
                 control={form.control}
+                name="config.max_calls_per_user_per_day"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Daily Calls Per User</FormLabel>
+                    <FormControl>
+                      <NumberInput
+                        value={field.value}
+                        onChange={field.onChange}
+                        min={1}
+                        max={4_294_967_295}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
                 name="config.model_id"
                 render={({ field }) => (
                   <FormItem>

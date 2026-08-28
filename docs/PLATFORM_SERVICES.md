@@ -449,6 +449,17 @@ A platform-credential request follows this side-effect order:
 10. Meter `mark_forwarded` immediately before provider dispatch.
 11. Immediate settlement for known quantities, or persisted deferred Twilio state.
 
+### Daily caps
+
+Every constrained operation carries a per-user daily cap, including `speak`, which
+previously had none. Speak is priced per character, so a per-call count is a coarse
+bound; it is still the difference between a looping agent spending a bounded amount and
+spending until the wallet stops it.
+
+The cap is enforced by a conditional upsert against `platform_op_usage`. The unique
+`(op, user_id, yyyymmdd)` index is load-bearing: without it a second reservation inserts
+a second row instead of failing, and the cap silently does nothing.
+
 ### Spend authority
 
 Executing a platform operation requires the `platform:spend` API-key or access-token

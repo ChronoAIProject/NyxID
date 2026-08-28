@@ -6212,6 +6212,7 @@ mod tests {
                     allowed_voice_ids: vec!["voice-a".to_string(), "voice-b".to_string()],
                     max_chars: 321,
                     model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
                 },
             ),
             billing: crate::services::platform_operation_service::default_operation_billing(

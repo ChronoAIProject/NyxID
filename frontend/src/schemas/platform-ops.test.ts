@@ -26,6 +26,7 @@ describe("platform operation schemas", () => {
               allowed_voice_ids: [],
               max_chars: 1000,
               model_id: "eleven_multilingual_v2",
+              max_calls_per_user_per_day: 50,
             },
             updated_at: null,
             updated_by: null,
@@ -66,6 +67,7 @@ describe("platform operation schemas", () => {
           allowed_voice_ids: ["voice-a"],
           max_chars: 5001,
           model_id: "eleven_multilingual_v2",
+          max_calls_per_user_per_day: 50,
         },
       }).success,
     ).toBe(false);
@@ -160,6 +162,7 @@ describe("platform operation schemas", () => {
         allowed_voice_ids: [],
         max_chars: 1000,
         model_id: "eleven_multilingual_v2",
+        max_calls_per_user_per_day: 50,
       },
     });
     const call = callAndSayUpdateSchema.safeParse({
@@ -190,6 +193,7 @@ describe("platform operation schemas", () => {
         allowed_voice_ids: ["voice-a", "voice-a"],
         max_chars: 1000,
         model_id: "eleven_multilingual_v2",
+        max_calls_per_user_per_day: 50,
       },
     });
     const malformedPrefix = callAndSayUpdateSchema.safeParse({
@@ -228,6 +232,7 @@ describe("platform operation schemas", () => {
           allowed_voice_ids: ["voice-a"],
           max_chars: 1_000,
           model_id: "eleven_multilingual_v2",
+          max_calls_per_user_per_day: 50,
         },
         vendor_body: { query: "caller controlled" },
       }).success,

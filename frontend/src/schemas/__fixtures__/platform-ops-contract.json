@@ -12,7 +12,8 @@
             "voice-a"
           ],
           "max_chars": 1000,
-          "model_id": "eleven_multilingual_v2"
+          "model_id": "eleven_multilingual_v2",
+          "max_calls_per_user_per_day": 50
         },
         "updated_at": "2023-11-14T22:13:20+00:00",
         "updated_by": "admin-user-id",

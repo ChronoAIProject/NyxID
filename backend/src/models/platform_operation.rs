@@ -22,6 +22,8 @@ pub struct SpeakOperationConfig {
     pub allowed_voice_ids: Vec<String>,
     #[serde(default = "default_speak_model_id")]
     pub model_id: String,
+    #[serde(default = "default_speak_max_per_user_per_day")]
+    pub max_calls_per_user_per_day: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +226,8 @@ pub struct SpeakConfig {
     pub max_chars: u32,
     #[serde(default = "default_speak_model_id")]
     pub model_id: String,
+    #[serde(default = "default_speak_max_per_user_per_day")]
+    pub max_calls_per_user_per_day: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,6 +280,13 @@ pub struct PlatformOperation {
 
 pub const fn default_speak_max_chars() -> u32 {
     1_000
+}
+
+/// Speak is priced per character, so a per-call count is a coarse bound. It is
+/// still the difference between a looping agent spending a bounded amount and
+/// spending until the wallet stops it.
+pub const fn default_speak_max_per_user_per_day() -> u32 {
+    50
 }
 
 pub fn default_speak_model_id() -> String {
@@ -337,6 +348,7 @@ mod tests {
             ConstrainedConfig::Speak(SpeakOperationConfig {
                 allowed_voice_ids: vec!["voice-a".to_string()],
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 25,
             }),
             OperationLimits {
                 per_request: PerRequestCaps::Speak { max_chars: 500 },
