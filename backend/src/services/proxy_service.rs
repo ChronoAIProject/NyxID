@@ -1310,7 +1310,7 @@ fn admin_only_allows_role(
     user_service: &UserService,
     role: crate::models::org_membership::OrgRole,
 ) -> bool {
-    !user_service.admin_only || role.can_admin()
+    crate::services::user_service_service::role_can_proxy_service(role, user_service)
 }
 
 async fn lookup_service_pool_member(
@@ -4968,6 +4968,28 @@ mod tests {
                 .map(|r| r.org_user_id.as_str()),
             Some(org_id.as_str())
         );
+
+        db.collection::<crate::models::user_service::UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service_id },
+                doc! { "$set": { "admin_only": false } },
+            )
+            .await
+            .expect("disable admin-only policy");
+
+        let member_resolved = resolve_proxy_target_from_user_service(
+            &db,
+            &test_encryption_keys(),
+            &node_manager,
+            &member_id,
+            Some("admin-svc"),
+            None,
+            None,
+        )
+        .await
+        .expect("member resolution should succeed after disabling admin-only")
+        .expect("member should resolve the org service after disabling admin-only");
+        assert_eq!(member_resolved.user_service_id, service_id);
     }
 
     // ---- agent credential override resolution (issue #788) ----

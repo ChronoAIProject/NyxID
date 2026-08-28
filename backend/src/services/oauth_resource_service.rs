@@ -161,8 +161,7 @@ fn owner_access_can_grant_user_service(
         org_service::OwnerAccess::Direct => true,
         org_service::OwnerAccess::AsOrgAdmin { .. } => access.allows_resource(&service.id),
         org_service::OwnerAccess::AsOrgMember { role, .. } => {
-            role.can_proxy()
-                && (!service.admin_only || role.can_admin())
+            crate::services::user_service_service::role_can_proxy_service(*role, service)
                 && access.allows_resource(&service.id)
         }
         org_service::OwnerAccess::Forbidden => false,

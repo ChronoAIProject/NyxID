@@ -76,6 +76,8 @@ effective = if scope_source == Override { m.allowed_service_ids }
             else { org_role_scopes.get(org_user_id, role).allowed_service_ids }
 ```
 
+Creating an org service with admin-only execution disabled automatically adds its `UserService.id` to an explicitly configured Member role scope. Disabling admin-only execution later does the same, so inheriting members can discover and execute the service immediately. Admin-only creation does not grant Member scope. Per-member overrides remain fixed and are never expanded automatically.
+
 Enforcement runs at proxy time (members cannot call services outside their effective scope), at write time (admins cannot edit services outside their effective scope), and on every secondary read path that resolves org-inherited credentials (catalog, LLM gateway, MCP, approvals). Deleting an org-owned service automatically prunes its id from every role scope and every membership override so stale ids cannot linger.
 
 ### Org user vs. person user

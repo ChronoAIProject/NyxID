@@ -555,6 +555,49 @@ describe("KeyDetailPage — edit flows", () => {
     hooks.updateUserService.mock.calls[0]![1].onSuccess();
     expect(mockToastSuccess).toHaveBeenCalledWith("Custom User-Agent saved");
   });
+
+  it("keeps the admin-only explanation stable while toggling the policy", async () => {
+    const user = userEvent.setup();
+    hooks.key.data = makeKey({
+      admin_only: false,
+      credential_source: {
+        type: "org",
+        org_id: "org-1",
+        org_name: "Acme Org",
+        avatar_url: null,
+        role: "admin",
+        allowed: true,
+      },
+    });
+
+    render(<KeyDetailPage />);
+    await user.click(screen.getByRole("tab", { name: "Advanced" }));
+
+    const explanation =
+      "When enabled, regular organization members cannot proxy this service. Organization admins retain access.";
+    expect(screen.getByText(explanation)).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("switch", { name: "Admin-only execution" }),
+    );
+
+    expect(hooks.updateUserService).toHaveBeenCalledWith(
+      { serviceId: "key-1", admin_only: true },
+      expect.any(Object),
+    );
+    expect(screen.getByText(explanation)).toBeInTheDocument();
+  });
+
+  it("does not offer the organization policy for a personal service", async () => {
+    const user = userEvent.setup();
+
+    render(<KeyDetailPage />);
+    await user.click(screen.getByRole("tab", { name: "Advanced" }));
+
+    expect(
+      screen.queryByRole("switch", { name: "Admin-only execution" }),
+    ).not.toBeInTheDocument();
+  });
 });
 
 describe("KeyDetailPage — delete flow", () => {

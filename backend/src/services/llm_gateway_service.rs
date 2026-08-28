@@ -6,6 +6,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
+use crate::models::org_membership::OrgRole;
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_provider_token::{
@@ -107,6 +108,7 @@ pub async fn get_llm_status(
                 credential_owners.push(CredentialOwner::Org {
                     org_user_id: m.org_user_id,
                     effective_scope,
+                    role: m.role,
                 });
             }
         }
@@ -237,6 +239,7 @@ enum CredentialOwner {
     Org {
         org_user_id: String,
         effective_scope: Option<Vec<String>>,
+        role: OrgRole,
     },
 }
 
@@ -248,15 +251,20 @@ impl CredentialOwner {
         }
     }
 
-    fn allows(&self, user_service_id: &str) -> bool {
+    fn allows(&self, user_service: &crate::models::user_service::UserService) -> bool {
         match self {
             CredentialOwner::Personal(_) => true,
             CredentialOwner::Org {
-                effective_scope, ..
-            } => crate::services::org_role_scope_service::scope_allows(
                 effective_scope,
-                user_service_id,
-            ),
+                role,
+                ..
+            } => {
+                user_service_service::role_can_proxy_service(*role, user_service)
+                    && crate::services::org_role_scope_service::scope_allows(
+                        effective_scope,
+                        &user_service.id,
+                    )
+            }
         }
     }
 }
@@ -295,7 +303,7 @@ async fn lookup_user_service_status(
     else {
         return Ok(LlmStatusRank::NotConnected);
     };
-    if !owner.allows(&us.id) {
+    if !owner.allows(&us) {
         return Ok(LlmStatusRank::NotConnected);
     }
     let Some(api_key_id) = us.api_key_id.as_deref() else {
@@ -882,6 +890,33 @@ impl LlmTranslator for GoogleAiTranslator {
 mod tests {
     use super::*;
     use mongodb::bson::Bson;
+
+    #[test]
+    fn org_credential_owner_rejects_admin_only_service_for_member() {
+        let mut service = crate::test_utils::test_user_service(
+            "service-id",
+            "org-id",
+            "llm-openai",
+            "endpoint-id",
+            None,
+            None,
+        );
+        service.admin_only = true;
+
+        let member = CredentialOwner::Org {
+            org_user_id: "org-id".to_string(),
+            effective_scope: None,
+            role: OrgRole::Member,
+        };
+        let admin = CredentialOwner::Org {
+            org_user_id: "org-id".to_string(),
+            effective_scope: None,
+            role: OrgRole::Admin,
+        };
+
+        assert!(!member.allows(&service));
+        assert!(admin.allows(&service));
+    }
 
     #[test]
     fn build_llm_service_filter_targets_llm_service_slugs() {

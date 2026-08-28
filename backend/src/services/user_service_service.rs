@@ -80,6 +80,38 @@ fn ensure_user_managed_service(service: &UserService) -> AppResult<()> {
     Ok(())
 }
 
+/// Whether an organization role can execute a service after applying the
+/// service's admin-only policy. Personal service access does not use this
+/// predicate because admin-only applies only to organization membership.
+pub(crate) fn role_can_proxy_service(role: OrgRole, service: &UserService) -> bool {
+    role.can_proxy() && (!service.admin_only || role.can_admin())
+}
+
+#[cfg(test)]
+mod access_policy_tests {
+    use super::*;
+
+    #[test]
+    fn admin_only_execution_policy_distinguishes_members_from_admins() {
+        let mut service = crate::test_utils::test_user_service(
+            "service-id",
+            "org-id",
+            "service",
+            "endpoint-id",
+            None,
+            None,
+        );
+
+        assert!(role_can_proxy_service(OrgRole::Member, &service));
+        assert!(!role_can_proxy_service(OrgRole::Viewer, &service));
+
+        service.admin_only = true;
+        assert!(!role_can_proxy_service(OrgRole::Member, &service));
+        assert!(!role_can_proxy_service(OrgRole::Viewer, &service));
+        assert!(role_can_proxy_service(OrgRole::Admin, &service));
+    }
+}
+
 /// Return endpoint ids whose target URL is owned by platform auto-provisioning.
 /// The URL remains stored normally for proxy resolution; callers use this set
 /// only when constructing user-facing endpoint responses.
@@ -499,8 +531,7 @@ async fn list_user_services_with_sources_impl(
             }
             // Viewer can see but not proxy. Admin-only services are also
             // visible to members, but not executable by them.
-            let allowed =
-                scope_allowed && m.role.can_proxy() && (!svc.admin_only || m.role.can_admin());
+            let allowed = scope_allowed && role_can_proxy_service(m.role, &svc);
 
             out.push(UserServiceWithSource {
                 service: svc,
@@ -910,6 +941,17 @@ pub async fn create_user_service_with_id(
         .insert_one(&service)
         .await?;
 
+    if !service.admin_only {
+        crate::services::org_role_scope_service::add_service_to_configured_role_scope(
+            db,
+            user_id,
+            OrgRole::Member,
+            &service.id,
+            actor_user_id,
+        )
+        .await?;
+    }
+
     Ok(service)
 }
 
@@ -1196,6 +1238,17 @@ pub async fn update_user_service(
 
     if result.matched_count == 0 {
         return Err(AppError::NotFound("User service not found".to_string()));
+    }
+
+    if admin_only == Some(false) {
+        crate::services::org_role_scope_service::add_service_to_configured_role_scope(
+            db,
+            user_id,
+            OrgRole::Member,
+            service_id,
+            actor_user_id,
+        )
+        .await?;
     }
 
     // Audit per-user default header mutations (NyxID#356). Names only —
@@ -2027,6 +2080,70 @@ mod tests {
             inject_delegation_token: true,
             delegation_token_scope: "llm:proxy".to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn update_user_service_round_trips_admin_only_policy() {
+        let Some(db) = connect_test_database("user_service_admin_only_update").await else {
+            eprintln!("skipping user service admin-only update test: no local MongoDB available");
+            return;
+        };
+
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserService>(COLLECTION_NAME)
+            .insert_one(test_user_service(
+                &service_id,
+                &user_id,
+                "org-service",
+                "endpoint-id",
+                None,
+                None,
+            ))
+            .await
+            .expect("insert user service");
+        crate::services::org_role_scope_service::set_scope(
+            &db,
+            &user_id,
+            OrgRole::Member,
+            Some(Vec::new()),
+            &user_id,
+        )
+        .await
+        .expect("set restricted member role scope");
+
+        for expected in [true, false] {
+            update_user_service(
+                &db,
+                &user_id,
+                &user_id,
+                &service_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(expected),
+            )
+            .await
+            .expect("update admin-only policy");
+
+            let stored = get_user_service(&db, &user_id, &service_id)
+                .await
+                .expect("reload updated service");
+            assert_eq!(stored.admin_only, expected);
+        }
+
+        let member_scope =
+            crate::services::org_role_scope_service::get_scope(&db, &user_id, OrgRole::Member)
+                .await
+                .expect("get member role scope")
+                .expect("stored member role scope");
+        assert_eq!(member_scope.allowed_service_ids, Some(vec![service_id]));
     }
 
     #[tokio::test]

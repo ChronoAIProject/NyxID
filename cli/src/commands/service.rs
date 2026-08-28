@@ -46,6 +46,18 @@ pub(crate) fn display_status(svc: &Value) -> &'static str {
     credential_status
 }
 
+/// Render the service policy reported by `GET /keys` without deriving it
+/// from the caller's current execution permission. Organization members must
+/// still be able to identify an admin-only service even though its
+/// `credential_source.allowed` value is false for them.
+pub(crate) fn display_access_policy(svc: &Value) -> &'static str {
+    if svc["admin_only"].as_bool().unwrap_or(false) {
+        "admin-only"
+    } else {
+        "members"
+    }
+}
+
 /// Parse one or more `--default-header NAME=VALUE[:overridable]` flag values
 /// into a JSON-shaped list that the backend `validate_headers` helper will
 /// then normalize and persist. NyxID#356.
@@ -978,11 +990,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                             let label = svc["label"].as_str().unwrap_or("-");
                             let endpoint = display_endpoint(svc, "endpoint_url", None);
                             let status = display_status(svc);
-                            let access = if svc["admin_only"].as_bool().unwrap_or(false) {
-                                "admin-only"
-                            } else {
-                                "members"
-                            };
+                            let access = display_access_policy(svc);
                             let node = svc["node_id"].as_str().unwrap_or("--");
                             table.add_row([id, slug, label, endpoint, status, access, node]);
                         }
@@ -1038,14 +1046,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     eprintln!("Type:       {svc_type}");
                     eprintln!("Status:     {status}");
                     eprintln!("Active:     {is_active}");
-                    eprintln!(
-                        "Access:     {}",
-                        if svc["admin_only"].as_bool().unwrap_or(false) {
-                            "admin-only"
-                        } else {
-                            "members"
-                        }
-                    );
+                    eprintln!("Access:     {}", display_access_policy(&svc));
                     eprintln!();
                     eprintln!("Endpoint:   {endpoint}");
                     eprintln!("Auth:       {auth_method} / {auth_key}");
@@ -2595,6 +2596,29 @@ mod tests {
     }
 
     #[test]
+    fn access_policy_exposes_both_admin_only_states() {
+        let member_access = serde_json::json!({
+            "admin_only": false,
+            "credential_source": {
+                "type": "org",
+                "role": "member",
+                "allowed": true,
+            },
+        });
+        assert_eq!(display_access_policy(&member_access), "members");
+
+        let admin_only = serde_json::json!({
+            "admin_only": true,
+            "credential_source": {
+                "type": "org",
+                "role": "member",
+                "allowed": false,
+            },
+        });
+        assert_eq!(display_access_policy(&admin_only), "admin-only");
+    }
+
+    #[test]
     fn test_format_credential_lines() {
         let lines1 = format_credential_lines("node_managed", Some("abc-123"), "home-assistant");
         assert_eq!(
@@ -3327,6 +3351,36 @@ mod command_tests {
         })
         .await
         .expect("empty list should succeed");
+    }
+
+    #[tokio::test]
+    async fn list_table_accepts_visible_admin_only_org_service() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/keys"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "keys": [{
+                    "id": "svc-org",
+                    "slug": "org-service",
+                    "label": "Org Service",
+                    "endpoint_url": "https://org.example.test",
+                    "admin_only": true,
+                    "credential_source": {
+                        "type": "org",
+                        "role": "member",
+                        "allowed": false
+                    }
+                }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        run(ServiceCommands::List {
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
+        })
+        .await
+        .expect("admin-only org service should remain listable");
     }
 
     #[tokio::test]
