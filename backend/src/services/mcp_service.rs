@@ -2026,6 +2026,7 @@ fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
 
 pub(crate) const GENERIC_PROXY_ENDPOINT_ID: &str = "nyx_generic_proxy_v1";
 pub(crate) const GENERIC_PROXY_OPERATION_GENERATION: i64 = 1;
+pub(crate) const PLATFORM_CREDENTIAL_INTENT_ARGUMENT: &str = "credential_intent";
 
 fn opaque_operation_id(source_operation_id: Option<&str>, method: &str, path: &str) -> String {
     let canonical = match source_operation_id {
@@ -2065,6 +2066,23 @@ fn build_generic_proxy_input_schema() -> serde_json::Value {
         },
         "required": ["path"]
     })
+}
+
+fn add_platform_credential_intent_argument(schema: &mut serde_json::Value) {
+    let Some(properties) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    properties.insert(
+        PLATFORM_CREDENTIAL_INTENT_ARGUMENT.to_string(),
+        serde_json::json!({
+            "type": "string",
+            "enum": ["auto", "own_only", "platform_only"],
+            "description": "Credential selection policy for this call. Defaults to auto; platform_only still requires the owner's stored platform-spend preference."
+        }),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2406,7 +2424,7 @@ pub fn generate_tool_definitions(
         if !operation.enabled {
             continue;
         }
-        let definition = match &operation.config {
+        let mut definition = match &operation.config {
             PlatformOperationConfig::Speak(config)
                 if operation.op
                     == crate::models::platform_operation::PlatformOperationName::Speak =>
@@ -2522,6 +2540,7 @@ pub fn generate_tool_definitions(
             }
             _ => continue,
         };
+        add_platform_credential_intent_argument(&mut definition.input_schema);
         tools.push(definition);
     }
 
@@ -2541,11 +2560,14 @@ pub fn generate_tool_definitions(
                 service.service_name,
                 endpoint.description.as_deref().unwrap_or(&endpoint.name)
             );
-            let input_schema = if service.is_generic_proxy {
+            let mut input_schema = if service.is_generic_proxy {
                 build_generic_proxy_input_schema()
             } else {
                 build_input_schema(endpoint)
             };
+            if service.service_category == PLATFORM_CREDENTIAL_SERVICE_CATEGORY {
+                add_platform_credential_intent_argument(&mut input_schema);
+            }
             tools.push(McpToolDefinition {
                 name,
                 description,
@@ -6503,10 +6525,67 @@ mod tests {
         );
         assert_eq!(speak.input_schema["additionalProperties"], false);
         assert_eq!(
+            speak.input_schema["properties"]["credential_intent"]["enum"],
+            serde_json::json!(["auto", "own_only", "platform_only"])
+        );
+        assert_eq!(
             flight.input_schema["properties"]["max_offers"]["maximum"],
             12
         );
         assert_eq!(flight.input_schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn platform_endpoint_tool_schemas_expose_credential_intent_only_as_transport_control() {
+        let mut direct = make_service(
+            "platform-direct",
+            "Platform Direct",
+            "platform-direct",
+            vec![make_endpoint("read_resource", "Read a resource")],
+        );
+        direct.service_category = PLATFORM_CREDENTIAL_SERVICE_CATEGORY.to_string();
+
+        let mut generic = make_service(
+            "platform-generic",
+            "Platform Generic",
+            "platform-generic",
+            vec![build_generic_proxy_endpoint("Platform Generic")],
+        );
+        generic.service_category = PLATFORM_CREDENTIAL_SERVICE_CATEGORY.to_string();
+        generic.is_generic_proxy = true;
+
+        let ordinary = make_service(
+            "ordinary",
+            "Ordinary",
+            "ordinary",
+            vec![make_endpoint("read_resource", "Read a resource")],
+        );
+
+        let tools = generate_tool_definitions(&[direct, generic, ordinary], None, &[]);
+        for name in [
+            "platform-direct__read_resource",
+            "platform-generic__request",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("missing platform endpoint tool {name}"));
+            assert_eq!(
+                tool.input_schema["properties"]["credential_intent"]["enum"],
+                serde_json::json!(["auto", "own_only", "platform_only"])
+            );
+        }
+
+        let ordinary = tools
+            .iter()
+            .find(|tool| tool.name == "ordinary__read_resource")
+            .expect("ordinary endpoint tool");
+        assert!(
+            ordinary.input_schema["properties"]
+                .get("credential_intent")
+                .is_none(),
+            "credential_intent is a NyxID platform transport control, not a provider argument"
+        );
     }
 
     #[test]

@@ -1454,6 +1454,21 @@ async fn resolve_credential_source(
         operation.id,
     )?;
 
+    if resolved_intent.intent == CredentialIntent::PlatformOnly {
+        return platform_resolution(
+            db,
+            context,
+            operation,
+            &preference_owner_id,
+            resolved_intent.intent,
+            resolved_intent
+                .platform_preference
+                .expect("platform_only requires stored consent"),
+            PlatformFallbackReason::ExplicitPlatformOnly,
+        )
+        .await;
+    }
+
     let resolved = match mode {
         CredentialResolutionMode::Execute {
             connection_expiry_notifier,
@@ -1589,21 +1604,6 @@ async fn resolve_credential_source(
             intent: resolved_intent.intent,
         });
     }
-    if resolved_intent.intent == CredentialIntent::PlatformOnly {
-        return platform_resolution(
-            db,
-            context,
-            operation,
-            &preference_owner_id,
-            resolved_intent.intent,
-            resolved_intent
-                .platform_preference
-                .expect("platform_only requires stored consent"),
-            PlatformFallbackReason::ExplicitPlatformOnly,
-        )
-        .await;
-    }
-
     let mut resolution = resolution;
     if let Some(api_key_id) = caller.api_key_id {
         let override_result = match mode {
@@ -2906,6 +2906,94 @@ mod tests {
             }
             _ => panic!("active server-held key must select the own connection"),
         }
+
+        let context =
+            load_credential_resolution_context(&db, &user_id, std::slice::from_ref(&operation))
+                .await
+                .expect("load explicit platform resolution context");
+        let decrypts_before_explicit = encryption_keys.decrypt_stats();
+        let explicit = resolve_operation_credential_source(
+            &db,
+            &encryption_keys,
+            &node_ws_manager,
+            &user_id,
+            PlatformCredentialCaller {
+                actor_user_id: &user_id,
+                api_key_id: None,
+                allow_all_services: true,
+                allowed_service_ids: &[],
+                bypass_approval_flow: true,
+                credential_intent: CredentialIntent::PlatformOnly,
+            },
+            &operation,
+            CredentialResolutionMode::Execute {
+                connection_expiry_notifier: None,
+            },
+            &context,
+        )
+        .await
+        .expect("explicit platform resolution with stored consent");
+        assert!(matches!(
+            explicit,
+            PlatformCredentialResolution::Platform {
+                intent: CredentialIntent::PlatformOnly,
+                fallback_reason: PlatformFallbackReason::ExplicitPlatformOnly,
+                ..
+            }
+        ));
+        assert_eq!(
+            encryption_keys.decrypt_stats(),
+            decrypts_before_explicit,
+            "platform_only must bypass own-credential materialization"
+        );
+
+        assert!(
+            platform_preference_service::delete_preference(&db, &user_id, &user_id, &catalog.id,)
+                .await
+                .expect("delete stored platform consent")
+        );
+        let context_without_consent =
+            load_credential_resolution_context(&db, &user_id, std::slice::from_ref(&operation))
+                .await
+                .expect("load resolution context without consent");
+        let without_consent = resolve_operation_credential_source(
+            &db,
+            &encryption_keys,
+            &node_ws_manager,
+            &user_id,
+            PlatformCredentialCaller {
+                actor_user_id: &user_id,
+                api_key_id: None,
+                allow_all_services: true,
+                allowed_service_ids: &[],
+                bypass_approval_flow: true,
+                credential_intent: CredentialIntent::PlatformOnly,
+            },
+            &operation,
+            CredentialResolutionMode::Execute {
+                connection_expiry_notifier: None,
+            },
+            &context_without_consent,
+        )
+        .await;
+        assert!(matches!(
+            without_consent,
+            Err(AppError::PlatformOperationUnavailable)
+        ));
+        platform_preference_service::upsert_preference(
+            &db,
+            &user_id,
+            &user_id,
+            &catalog.id,
+            platform_preference_service::PreferenceWrite {
+                platform_enabled: true,
+                max_credits_per_call: "1000".to_string(),
+                max_credits_per_day: "10000".to_string(),
+                operation_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("restore platform consent for remaining state coverage");
 
         db.collection::<UserApiKey>(USER_API_KEYS)
             .update_one(

@@ -19,6 +19,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::api_key::ApiKeyPurpose;
 use crate::models::durable_operation_execution::DurableExecutionStatus;
 use crate::models::durable_operation_grant::DurableReplayPolicy;
+use crate::models::platform_service_preference::CredentialIntent;
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
 use crate::models::usage_meter::CredentialClass;
@@ -954,7 +955,7 @@ async fn proxy_request_inner(
     auth_user: &AuthUser,
     service_id: &str,
     path: &str,
-    request: Request<Body>,
+    mut request: Request<Body>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
     validate_original_proxy_request_path(&request)?;
@@ -962,6 +963,15 @@ async fn proxy_request_inner(
 
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
+    let credential_intent = super::platform_ops::credential_intent_from_headers(request.headers())?;
+    if credential_intent == CredentialIntent::PlatformOnly && via_service.is_some() {
+        return Err(AppError::BadRequest(
+            "platform_only cannot be combined with _nyxid_via".to_string(),
+        ));
+    }
+    request
+        .headers_mut()
+        .remove(super::platform_ops::CREDENTIAL_INTENT_HEADER);
     preflight_proxy_deny_before_resolution(
         state,
         auth_user,
@@ -1038,6 +1048,30 @@ async fn proxy_request_inner(
         )));
     }
 
+    if credential_intent == CredentialIntent::PlatformOnly {
+        let prepared = prepare_platform_endpoint_rest(
+            state,
+            auth_user,
+            service_id,
+            path,
+            request.method().as_str(),
+            is_ws_upgrade_request(&request),
+            credential_intent,
+        )
+        .await?
+        .ok_or(AppError::PlatformOperationUnavailable)?;
+        return execute_platform_endpoint_rest(
+            state,
+            auth_user,
+            path,
+            request,
+            resolved_slug,
+            credential_intent,
+            prepared,
+        )
+        .await;
+    }
+
     // Try new UserService path first (lookup by catalog_service_id).
     let own_resolution = proxy_service::resolve_proxy_target_from_user_service(
         &state.db,
@@ -1096,15 +1130,17 @@ async fn proxy_request_inner(
         .await;
     }
 
-    if let Some(prepared) = prepare_platform_endpoint_rest(
-        state,
-        auth_user,
-        service_id,
-        path,
-        request.method().as_str(),
-        is_ws_upgrade_request(&request),
-    )
-    .await?
+    if credential_intent != CredentialIntent::OwnOnly
+        && let Some(prepared) = prepare_platform_endpoint_rest(
+            state,
+            auth_user,
+            service_id,
+            path,
+            request.method().as_str(),
+            is_ws_upgrade_request(&request),
+            credential_intent,
+        )
+        .await?
     {
         return execute_platform_endpoint_rest(
             state,
@@ -1112,6 +1148,7 @@ async fn proxy_request_inner(
             path,
             request,
             resolved_slug,
+            credential_intent,
             prepared,
         )
         .await;
@@ -1207,7 +1244,7 @@ async fn proxy_request_by_slug_inner(
     auth_user: &AuthUser,
     slug: &str,
     path: &str,
-    request: Request<Body>,
+    mut request: Request<Body>,
     resolved_slug: &mut String,
 ) -> AppResult<Response> {
     validate_original_proxy_request_path(&request)?;
@@ -1215,6 +1252,15 @@ async fn proxy_request_by_slug_inner(
 
     let user_id_str = auth_user.proxy_resolution_user_id();
     let via_service = extract_via_service(&request);
+    let credential_intent = super::platform_ops::credential_intent_from_headers(request.headers())?;
+    if credential_intent == CredentialIntent::PlatformOnly && via_service.is_some() {
+        return Err(AppError::BadRequest(
+            "platform_only cannot be combined with _nyxid_via".to_string(),
+        ));
+    }
+    request
+        .headers_mut()
+        .remove(super::platform_ops::CREDENTIAL_INTENT_HEADER);
     preflight_proxy_deny_before_resolution(
         state,
         auth_user,
@@ -1291,6 +1337,31 @@ async fn proxy_request_by_slug_inner(
         )));
     }
 
+    if credential_intent == CredentialIntent::PlatformOnly {
+        let catalog_service = proxy_service::resolve_service_by_slug(&state.db, slug).await?;
+        let prepared = prepare_platform_endpoint_rest(
+            state,
+            auth_user,
+            &catalog_service.id,
+            path,
+            request.method().as_str(),
+            is_ws_upgrade_request(&request),
+            credential_intent,
+        )
+        .await?
+        .ok_or(AppError::PlatformOperationUnavailable)?;
+        return execute_platform_endpoint_rest(
+            state,
+            auth_user,
+            path,
+            request,
+            resolved_slug,
+            credential_intent,
+            prepared,
+        )
+        .await;
+    }
+
     // Try new UserService path first (by slug).
     let own_resolution = proxy_service::resolve_proxy_target_from_user_service(
         &state.db,
@@ -1350,15 +1421,17 @@ async fn proxy_request_by_slug_inner(
     }
 
     let catalog_service = proxy_service::resolve_service_by_slug(&state.db, slug).await?;
-    if let Some(prepared) = prepare_platform_endpoint_rest(
-        state,
-        auth_user,
-        &catalog_service.id,
-        path,
-        request.method().as_str(),
-        is_ws_upgrade_request(&request),
-    )
-    .await?
+    if credential_intent != CredentialIntent::OwnOnly
+        && let Some(prepared) = prepare_platform_endpoint_rest(
+            state,
+            auth_user,
+            &catalog_service.id,
+            path,
+            request.method().as_str(),
+            is_ws_upgrade_request(&request),
+            credential_intent,
+        )
+        .await?
     {
         return execute_platform_endpoint_rest(
             state,
@@ -1366,6 +1439,7 @@ async fn proxy_request_by_slug_inner(
             path,
             request,
             resolved_slug,
+            credential_intent,
             prepared,
         )
         .await;
@@ -1395,6 +1469,7 @@ async fn prepare_platform_endpoint_rest(
     path: &str,
     method: &str,
     is_websocket: bool,
+    credential_intent: CredentialIntent,
 ) -> AppResult<Option<super::platform_ops::PreparedPlatformEndpoint>> {
     if is_websocket
         || super::platform_ops::require_platform_ops_enabled(state, auth_user)
@@ -1404,7 +1479,8 @@ async fn prepare_platform_endpoint_rest(
         return Ok(None);
     }
     let canonical = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
-    let caller = super::platform_ops::PlatformOperationCaller::from_auth_user(auth_user);
+    let caller =
+        super::platform_ops::PlatformOperationCaller::from_auth_user(auth_user, credential_intent);
     super::platform_ops::resolve_platform_endpoint(
         state,
         &caller,
@@ -1421,10 +1497,12 @@ async fn execute_platform_endpoint_rest(
     path: &str,
     request: Request<Body>,
     resolved_slug: &mut String,
+    credential_intent: CredentialIntent,
     prepared: super::platform_ops::PreparedPlatformEndpoint,
 ) -> AppResult<Response> {
     let canonical = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
-    let caller = super::platform_ops::PlatformOperationCaller::from_auth_user(auth_user);
+    let caller =
+        super::platform_ops::PlatformOperationCaller::from_auth_user(auth_user, credential_intent);
     super::platform_ops::ensure_platform_spend_authority(state, auth_user).await?;
     super::platform_ops::enforce_agent_rate_limit(state, auth_user)?;
     let billing_egress_permit = enforce_proxy_billing_classification(&request)?;

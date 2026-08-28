@@ -4,13 +4,13 @@ use axum::{
     Extension, Json,
     body::Body,
     extract::{Request, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
 use futures::StreamExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::AppState;
@@ -30,6 +30,7 @@ use crate::services::platform_operation_service::{
 use crate::services::{audit_service, feature_flag_service, platform_operation_service};
 
 pub const CREDENTIAL_SOURCE_HEADER: &str = "x-nyxid-credential-source";
+pub const CREDENTIAL_INTENT_HEADER: &str = "x-nyxid-credential-intent";
 
 #[derive(Clone)]
 pub(crate) struct PlatformOperationCaller {
@@ -44,7 +45,10 @@ pub(crate) struct PlatformOperationCaller {
 }
 
 impl PlatformOperationCaller {
-    pub(crate) fn from_auth_user(auth_user: &AuthUser) -> Self {
+    pub(crate) fn from_auth_user(
+        auth_user: &AuthUser,
+        credential_intent: CredentialIntent,
+    ) -> Self {
         Self {
             actor_user_id: auth_user.user_id.to_string(),
             resolution_user_id: auth_user.proxy_resolution_user_id(),
@@ -53,7 +57,7 @@ impl PlatformOperationCaller {
             acting_client_id: auth_user.acting_client_id.clone(),
             allow_all_services: auth_user.allow_all_services,
             allowed_service_ids: auth_user.allowed_service_ids.clone(),
-            credential_intent: CredentialIntent::Auto,
+            credential_intent,
         }
     }
 
@@ -86,6 +90,101 @@ impl PlatformOperationCaller {
             .as_deref()
             .unwrap_or(&self.actor_user_id)
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SpeakTransportRequest {
+    text: String,
+    voice_id: String,
+    #[serde(default)]
+    credential_intent: CredentialIntent,
+}
+
+impl SpeakTransportRequest {
+    pub(crate) fn into_parts(self) -> (SpeakRequest, CredentialIntent) {
+        (
+            SpeakRequest {
+                text: self.text,
+                voice_id: self.voice_id,
+            },
+            self.credential_intent,
+        )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CallAndSayTransportRequest {
+    to: String,
+    message: String,
+    from: Option<String>,
+    #[serde(default)]
+    credential_intent: CredentialIntent,
+}
+
+impl CallAndSayTransportRequest {
+    pub(crate) fn into_parts(self) -> (CallAndSayRequest, CredentialIntent) {
+        (
+            CallAndSayRequest {
+                to: self.to,
+                message: self.message,
+                from: self.from,
+            },
+            self.credential_intent,
+        )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FlightSearchTransportRequest {
+    origin: String,
+    destination: String,
+    departure_date: String,
+    return_date: Option<String>,
+    adults: Option<u32>,
+    cabin_class: Option<String>,
+    max_offers: Option<u32>,
+    #[serde(default)]
+    credential_intent: CredentialIntent,
+}
+
+impl FlightSearchTransportRequest {
+    pub(crate) fn into_parts(self) -> (FlightSearchRequest, CredentialIntent) {
+        (
+            FlightSearchRequest {
+                origin: self.origin,
+                destination: self.destination,
+                departure_date: self.departure_date,
+                return_date: self.return_date,
+                adults: self.adults,
+                cabin_class: self.cabin_class,
+                max_offers: self.max_offers,
+            },
+            self.credential_intent,
+        )
+    }
+}
+
+pub(crate) fn credential_intent_from_headers(headers: &HeaderMap) -> AppResult<CredentialIntent> {
+    let mut values = headers.get_all(CREDENTIAL_INTENT_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(CredentialIntent::Auto);
+    };
+    if values.next().is_some() {
+        return Err(AppError::BadRequest(format!(
+            "{CREDENTIAL_INTENT_HEADER} must be supplied exactly once"
+        )));
+    }
+    let value = value.to_str().map_err(|_| {
+        AppError::BadRequest(format!(
+            "{CREDENTIAL_INTENT_HEADER} must be valid ASCII text"
+        ))
+    })?;
+    value.parse().map_err(|reason| {
+        AppError::BadRequest(format!("Invalid {CREDENTIAL_INTENT_HEADER}: {reason}"))
+    })
 }
 
 pub(crate) struct PlatformOperationExecution<T> {
@@ -281,12 +380,13 @@ pub async fn speak(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Extension(billing_route_policy): Extension<BillingRoutePolicy>,
-    Json(request): Json<SpeakRequest>,
+    Json(request): Json<SpeakTransportRequest>,
 ) -> AppResult<Response> {
     require_platform_ops_enabled(&state, &auth_user).await?;
     ensure_platform_spend_authority(&state, &auth_user).await?;
     enforce_agent_rate_limit(&state, &auth_user)?;
 
+    let (request, credential_intent) = request.into_parts();
     let started = Instant::now();
     let text_chars = request.text.chars().count();
     let voice_id = request.voice_id.clone();
@@ -294,7 +394,7 @@ pub async fn speak(
     let billing_egress_permit = enforce_platform_billing_classification(billing_route_policy)?;
     let result = execute_speak_for_caller(
         &state,
-        &PlatformOperationCaller::from_auth_user(&auth_user),
+        &PlatformOperationCaller::from_auth_user(&auth_user, credential_intent),
         &yyyymmdd,
         request,
         BillingIngress::PlatformOperation,
@@ -333,12 +433,13 @@ pub async fn call_and_say(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Extension(billing_route_policy): Extension<BillingRoutePolicy>,
-    Json(request): Json<CallAndSayRequest>,
+    Json(request): Json<CallAndSayTransportRequest>,
 ) -> AppResult<Response> {
     require_platform_ops_enabled(&state, &auth_user).await?;
     ensure_platform_spend_authority(&state, &auth_user).await?;
     enforce_agent_rate_limit(&state, &auth_user)?;
 
+    let (request, credential_intent) = request.into_parts();
     let started = Instant::now();
     let message_chars = request.message.chars().count();
     let destination_suffix = if platform_operation_service::is_e164_number(&request.to) {
@@ -353,7 +454,7 @@ pub async fn call_and_say(
     let billing_egress_permit = enforce_platform_billing_classification(billing_route_policy)?;
     let result = execute_call_and_say_for_caller(
         &state,
-        &PlatformOperationCaller::from_auth_user(&auth_user),
+        &PlatformOperationCaller::from_auth_user(&auth_user, credential_intent),
         &yyyymmdd,
         request,
         BillingIngress::PlatformOperation,
@@ -380,19 +481,20 @@ pub async fn flight_search(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Extension(billing_route_policy): Extension<BillingRoutePolicy>,
-    Json(request): Json<FlightSearchRequest>,
+    Json(request): Json<FlightSearchTransportRequest>,
 ) -> AppResult<Response> {
     require_platform_ops_enabled(&state, &auth_user).await?;
     ensure_platform_spend_authority(&state, &auth_user).await?;
     enforce_agent_rate_limit(&state, &auth_user)?;
 
+    let (request, credential_intent) = request.into_parts();
     let started = Instant::now();
     let requested_max_offers = request.max_offers;
     let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
     let billing_egress_permit = enforce_platform_billing_classification(billing_route_policy)?;
     let result = execute_flight_search_for_caller(
         &state,
-        &PlatformOperationCaller::from_auth_user(&auth_user),
+        &PlatformOperationCaller::from_auth_user(&auth_user, credential_intent),
         &yyyymmdd,
         request,
         BillingIngress::PlatformOperation,
@@ -554,7 +656,7 @@ pub async fn list_operations(
         &operations,
     )
     .await?;
-    let caller = PlatformOperationCaller::from_auth_user(&auth_user);
+    let caller = PlatformOperationCaller::from_auth_user(&auth_user, CredentialIntent::Auto);
     let mut response = Vec::with_capacity(operations.len());
     for operation in operations {
         let descriptor = platform_operation_discovery_descriptor(operation.op);
@@ -2461,6 +2563,80 @@ mod tests {
 
     const USER_ID: &str = "65de27dc-8cf8-44b6-b8d2-5304e4a90aa4";
 
+    #[test]
+    fn typed_transport_requests_default_to_auto_and_reject_unknown_fields() {
+        let speak: SpeakTransportRequest = serde_json::from_value(serde_json::json!({
+            "text": "Hello",
+            "voice_id": "voice-a"
+        }))
+        .expect("typed REST request without an intent");
+        let (speak, intent) = speak.into_parts();
+        assert_eq!(speak.text, "Hello");
+        assert_eq!(intent, CredentialIntent::Auto);
+
+        let call: CallAndSayTransportRequest = serde_json::from_value(serde_json::json!({
+            "to": "+6512345678",
+            "message": "Hello",
+            "from": null,
+            "credential_intent": "platform_only"
+        }))
+        .expect("typed REST request with explicit platform intent");
+        let (_, intent) = call.into_parts();
+        assert_eq!(intent, CredentialIntent::PlatformOnly);
+
+        let flight: FlightSearchTransportRequest = serde_json::from_value(serde_json::json!({
+            "origin": "SIN",
+            "destination": "NRT",
+            "departure_date": "2026-09-10",
+            "credential_intent": "own_only"
+        }))
+        .expect("typed flight request with explicit own intent");
+        let (_, intent) = flight.into_parts();
+        assert_eq!(intent, CredentialIntent::OwnOnly);
+
+        assert!(
+            serde_json::from_value::<SpeakTransportRequest>(serde_json::json!({
+                "text": "Hello",
+                "voice_id": "voice-a",
+                "credential_intent": "auto",
+                "provider_payload_control": true
+            }))
+            .is_err(),
+            "transport envelopes must retain strict unknown-field rejection"
+        );
+    }
+
+    #[test]
+    fn generic_rest_credential_intent_header_is_single_and_strict() {
+        let empty = HeaderMap::new();
+        assert_eq!(
+            credential_intent_from_headers(&empty).expect("missing header defaults to auto"),
+            CredentialIntent::Auto
+        );
+
+        let mut explicit = HeaderMap::new();
+        explicit.insert(CREDENTIAL_INTENT_HEADER, "platform_only".parse().unwrap());
+        assert_eq!(
+            credential_intent_from_headers(&explicit).expect("valid explicit intent"),
+            CredentialIntent::PlatformOnly
+        );
+
+        let mut duplicate = HeaderMap::new();
+        duplicate.append(CREDENTIAL_INTENT_HEADER, "auto".parse().unwrap());
+        duplicate.append(CREDENTIAL_INTENT_HEADER, "own_only".parse().unwrap());
+        assert!(matches!(
+            credential_intent_from_headers(&duplicate),
+            Err(AppError::BadRequest(message)) if message.contains("exactly once")
+        ));
+
+        let mut invalid = HeaderMap::new();
+        invalid.insert(CREDENTIAL_INTENT_HEADER, "prefer_platform".parse().unwrap());
+        assert!(matches!(
+            credential_intent_from_headers(&invalid),
+            Err(AppError::BadRequest(message)) if message.contains("Invalid")
+        ));
+    }
+
     fn operation(
         op: PlatformOperationName,
         enabled: bool,
@@ -3236,7 +3412,7 @@ mod tests {
             .service_by_slug(&operation.vendor_service_slug)
             .cloned();
         let descriptor = platform_operation_discovery_descriptor(operation.op);
-        let caller = PlatformOperationCaller::from_auth_user(auth);
+        let caller = PlatformOperationCaller::from_auth_user(auth, CredentialIntent::Auto);
         let source = platform_operation_service::resolve_operation_credential_source(
             &state.db,
             &state.encryption_keys,
@@ -3269,9 +3445,10 @@ mod tests {
             State(state.clone()),
             auth_user.clone(),
             billing_extension(),
-            Json(SpeakRequest {
+            Json(SpeakTransportRequest {
                 text: "Hello".to_string(),
                 voice_id: "voice".to_string(),
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -3281,10 +3458,11 @@ mod tests {
             State(state),
             auth_user,
             billing_extension(),
-            Json(CallAndSayRequest {
+            Json(CallAndSayTransportRequest {
                 to: "+6512345678".to_string(),
                 message: "Hello".to_string(),
                 from: None,
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -3316,9 +3494,10 @@ mod tests {
             State(crate::test_utils::test_app_state(db)),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(SpeakRequest {
+            Json(SpeakTransportRequest {
                 text: "Hello".to_string(),
                 voice_id: "voice".to_string(),
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -3367,9 +3546,10 @@ mod tests {
             State(crate::test_utils::test_app_state(db)),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(SpeakRequest {
+            Json(SpeakTransportRequest {
                 text: "Hello".to_string(),
                 voice_id: "voice".to_string(),
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -3405,10 +3585,11 @@ mod tests {
                 State(state.clone()),
                 crate::test_utils::test_auth_user(USER_ID),
                 billing_extension(),
-                Json(CallAndSayRequest {
+                Json(CallAndSayTransportRequest {
                     to: "+6512345678".to_string(),
                     message: "Hello".to_string(),
                     from: None,
+                    credential_intent: CredentialIntent::Auto,
                 }),
             )
             .await;
@@ -3418,10 +3599,11 @@ mod tests {
             State(state),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(CallAndSayRequest {
+            Json(CallAndSayTransportRequest {
                 to: "+6512345678".to_string(),
                 message: "Hello again".to_string(),
                 from: None,
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -3456,10 +3638,11 @@ mod tests {
             State(state),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(CallAndSayRequest {
+            Json(CallAndSayTransportRequest {
                 to: "+6512345678".to_string(),
                 message: "Hello".to_string(),
                 from: None,
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -3506,10 +3689,11 @@ mod tests {
             State(state),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(CallAndSayRequest {
+            Json(CallAndSayTransportRequest {
                 to: "+6512345678".to_string(),
                 message: "Hello".to_string(),
                 from: None,
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -3558,9 +3742,10 @@ mod tests {
             State(state),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(SpeakRequest {
+            Json(SpeakTransportRequest {
                 text: "Hello".to_string(),
                 voice_id: "voice".to_string(),
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -3710,10 +3895,11 @@ mod tests {
             State(state),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(CallAndSayRequest {
+            Json(CallAndSayTransportRequest {
                 to: "+6512345678".to_string(),
                 message: "Hello".to_string(),
                 from: None,
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -3827,10 +4013,11 @@ mod tests {
             State(state),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(CallAndSayRequest {
+            Json(CallAndSayTransportRequest {
                 to: "+6512345678".to_string(),
                 message: "Hello".to_string(),
                 from: None,
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -3949,9 +4136,10 @@ mod tests {
             State(state.clone()),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(SpeakRequest {
+            Json(SpeakTransportRequest {
                 text: "Hello from an own connection".to_string(),
                 voice_id: "voice-own".to_string(),
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await
@@ -3965,10 +4153,11 @@ mod tests {
             State(state),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(CallAndSayRequest {
+            Json(CallAndSayTransportRequest {
                 to: "+6512345678".to_string(),
                 message: "Own Twilio call".to_string(),
                 from: Some("+14155550123".to_string()),
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await

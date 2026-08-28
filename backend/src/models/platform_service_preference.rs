@@ -22,6 +22,19 @@ impl CredentialIntent {
     }
 }
 
+impl std::str::FromStr for CredentialIntent {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "auto" => Ok(Self::Auto),
+            "own_only" => Ok(Self::OwnOnly),
+            "platform_only" => Ok(Self::PlatformOnly),
+            _ => Err("expected auto, own_only, or platform_only"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlatformOperationPreferenceOverride {
@@ -94,5 +107,10 @@ mod tests {
             serde_json::json!("platform_only")
         );
         assert_eq!(CredentialIntent::OwnOnly.as_str(), "own_only");
+        assert_eq!(
+            "platform_only".parse::<CredentialIntent>(),
+            Ok(CredentialIntent::PlatformOnly)
+        );
+        assert!("prefer_platform".parse::<CredentialIntent>().is_err());
     }
 }
