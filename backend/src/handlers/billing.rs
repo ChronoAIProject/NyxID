@@ -839,6 +839,8 @@ fn parse_metric(value: &str) -> Option<BillingMetric> {
         "tokens" => Some(BillingMetric::Tokens),
         "requests" => Some(BillingMetric::Requests),
         "bytes" => Some(BillingMetric::Bytes),
+        "input_tokens" => Some(BillingMetric::InputTokens),
+        "output_tokens" => Some(BillingMetric::OutputTokens),
         _ => None,
     }
 }

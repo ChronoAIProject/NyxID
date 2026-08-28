@@ -48,6 +48,8 @@ export const billingMetricSchema = z.enum([
   "bytes",
   "characters",
   "seconds",
+  "input_tokens",
+  "output_tokens",
 ]);
 
 export const pricingSyncStatusSchema = z.enum([
@@ -63,6 +65,13 @@ const pricingResponseSchema = z
     billable: z.boolean(),
     metric: billingMetricSchema,
     price_per_unit: z.string().min(1),
+    secondary: z
+      .object({
+        metric: billingMetricSchema,
+        price_per_unit: z.string().min(1),
+      })
+      .strict()
+      .nullable(),
     base_fee_per_call: z.string().min(1).nullable(),
     display: z.string().min(1),
   })
@@ -73,6 +82,14 @@ const adminPricingResponseSchema = z
     billable: z.boolean(),
     metric: billingMetricSchema,
     price_per_unit: z.string().min(1),
+    secondary: z
+      .object({
+        metric: billingMetricSchema,
+        price_per_unit: z.string().min(1),
+        lago_metric_code: z.string(),
+      })
+      .strict()
+      .nullable(),
     base_fee_per_call: z.string().min(1).nullable(),
     display: z.string().min(1),
     // Empty until the operation price has been synchronized to Lago.

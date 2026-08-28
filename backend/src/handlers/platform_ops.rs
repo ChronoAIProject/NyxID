@@ -355,11 +355,18 @@ pub struct PlatformOperationPricingResponse {
     billable: bool,
     metric: &'static str,
     price_per_unit: String,
+    secondary: Option<PlatformOperationPricingComponentResponse>,
     base_fee_per_call: Option<String>,
     /// Server-rendered price sentence, already gated on the billing rollout
     /// flag. A caller with the rollout off sees "Free" because that is what
     /// the call will actually cost them.
     display: String,
+}
+
+#[derive(Serialize)]
+pub struct PlatformOperationPricingComponentResponse {
+    metric: &'static str,
+    price_per_unit: String,
 }
 
 /// Pure projection from a stored operation to its discovery row.
@@ -378,8 +385,16 @@ pub(crate) fn platform_operation_discovery_response(
 ) -> PlatformOperationDiscoveryResponse {
     let contract = platform_operation_service::catalog_contract_for_operation(operation.op);
     let price = operation.billing.price_per_unit.clone();
-    let billable =
-        rollout_enabled && (price != "0" || operation.billing.base_fee_per_call.is_some());
+    let billable = rollout_enabled
+        && (price != "0"
+            || operation.billing.secondary.is_some()
+            || operation.billing.base_fee_per_call.is_some());
+    let secondary = operation.billing.secondary.as_ref().map(|component| {
+        PlatformOperationPricingComponentResponse {
+            metric: component.metric.as_str(),
+            price_per_unit: component.price_per_unit.clone(),
+        }
+    });
     PlatformOperationDiscoveryResponse {
         op: platform_operation_service::operation_name(operation.op).to_string(),
         display_name: contract.display_name.to_string(),
@@ -399,6 +414,7 @@ pub(crate) fn platform_operation_discovery_response(
                 billable,
             ),
             price_per_unit: price,
+            secondary,
             base_fee_per_call: operation.billing.base_fee_per_call.clone(),
         },
         mcp_tool: contract.mcp_tool.to_string(),
@@ -523,23 +539,16 @@ pub(crate) fn platform_tool_credential_sentence(
 
     let billing = &operation.billing;
     let mut sentence = if !rollout_enabled
-        || (billing.price_per_unit == "0" && billing.base_fee_per_call.is_none())
+        || (billing.price_per_unit == "0"
+            && billing.secondary.is_none()
+            && billing.base_fee_per_call.is_none())
     {
         "Uses the platform credential (free).".to_string()
     } else {
-        // Shared with the admin table and /keys so one operation cannot be
-        // described in three different units across three surfaces.
-        let unit = billing.metric.unit_noun();
-        match billing.base_fee_per_call.as_deref() {
-            Some(base) => format!(
-                "Uses the platform credential ({base} credits plus {} credits per {unit}).",
-                billing.price_per_unit
-            ),
-            None => format!(
-                "Uses the platform credential ({} credits per {unit}).",
-                billing.price_per_unit
-            ),
-        }
+        format!(
+            "Uses the platform credential ({}).",
+            crate::services::billing::pricing::format_operation_price(billing, true)
+        )
     };
     if let crate::models::platform_operation::PlatformOperationConfig::Speak(config) =
         &operation.config
@@ -804,7 +813,7 @@ async fn forward_metered_operation(
     caller: &PlatformOperationCaller,
     ingress: BillingIngress,
     operation: &crate::models::platform_operation::PlatformOperation,
-    platform_estimated_quantity: i64,
+    platform_estimated_usage: PlatformUsage,
     resolved: ResolvedExecutionTarget,
     method: reqwest::Method,
     path: &str,
@@ -874,10 +883,10 @@ async fn forward_metered_operation(
     // Bound one tenant's call rate against the shared vendor credential, before
     // any quota row or wallet reservation is taken.
     //
-    // This matters more here than on a BYOK path: a vendor rejection releases
-    // both the reservation and the quota slot, so failed attempts are free and
-    // quota-neutral, and without a limiter one tenant could burn the shared
-    // vendor's rate allowance for every other tenant at no cost to themselves.
+    // This matters more here than on a BYOK path: an explicit vendor rejection
+    // releases both the reservation and quota slot. Without a limiter, one
+    // tenant could burn the shared vendor's rate allowance at no cost. A 5xx
+    // is handled differently because the vendor may already have performed.
     //
     // Off by default (`PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND=0`), matching the
     // limiter's existing use on the master-credential proxy path.
@@ -899,6 +908,17 @@ async fn forward_metered_operation(
             &operation.billing.price_per_unit,
         )
         .ok_or(AppError::PlatformOperationUnavailable)?;
+        let secondary_rate_micros = operation
+            .billing
+            .secondary
+            .as_ref()
+            .map(|component| {
+                crate::services::billing::lago_client::decimal_credits_to_micros(
+                    &component.price_per_unit,
+                )
+                .ok_or(AppError::PlatformOperationUnavailable)
+            })
+            .transpose()?;
         let base_fee_micros = match operation.billing.base_fee_per_call.as_deref() {
             Some(base_fee) => {
                 crate::services::billing::lago_client::decimal_credits_to_micros(base_fee)
@@ -909,9 +929,14 @@ async fn forward_metered_operation(
         let estimated_charge_micros =
             crate::services::platform_preference_service::estimated_charge_micros(
                 &operation.billing,
-                platform_estimated_quantity,
+                &platform_estimated_usage,
             )?;
-        Some((rate_micros, base_fee_micros, estimated_charge_micros))
+        Some((
+            rate_micros,
+            secondary_rate_micros,
+            base_fee_micros,
+            estimated_charge_micros,
+        ))
     } else {
         None
     };
@@ -921,7 +946,7 @@ async fn forward_metered_operation(
                 "Platform operation is missing its mandatory daily limit".to_string(),
             )
         })?;
-        let (_, _, estimated_charge_micros) =
+        let (_, _, _, estimated_charge_micros) =
             platform_billing.expect("platform billing values were computed");
         Some(
             crate::services::platform_preference_service::reserve_daily_spend(
@@ -972,7 +997,7 @@ async fn forward_metered_operation(
                 return Err(error);
             }
         };
-        let (rate_micros, base_fee_micros, _) =
+        let (rate_micros, secondary_rate_micros, base_fee_micros, _) =
             platform_billing.expect("platform billing values were computed");
         let billing_ctx = crate::services::billing::BillingRouteContext::new(
             ingress,
@@ -991,11 +1016,11 @@ async fn forward_metered_operation(
             false,
         )
         .with_platform_operation_billing(
-            operation.billing.metric,
-            operation.billing.lago_metric_code.clone(),
+            &operation.billing,
             rate_micros,
+            secondary_rate_micros,
             base_fee_micros,
-            platform_estimated_quantity,
+            &platform_estimated_usage,
         );
         match state.billing.open(&billing_ctx).await {
             Ok(metered) => metered,
@@ -1094,16 +1119,20 @@ async fn forward_metered_operation(
         }
     };
     if let Err(error) = platform_operation_service::ensure_vendor_success(op, &response) {
-        fail_platform_attempt(
-            state,
-            &metered,
-            "vendor_non_success",
-            op,
-            &execution_owner_id,
-            daily_limit.as_ref(),
-            platform_spend_reservation.as_ref(),
-        )
-        .await;
+        if is_platform && response.status().is_server_error() {
+            settle_meter_async(state.billing.clone(), metered, platform_estimated_usage).await;
+        } else {
+            fail_platform_attempt(
+                state,
+                &metered,
+                "vendor_non_success",
+                op,
+                &execution_owner_id,
+                daily_limit.as_ref(),
+                platform_spend_reservation.as_ref(),
+            )
+            .await;
+        }
         return Err(error);
     }
     Ok(ForwardedOperation {
@@ -1250,7 +1279,7 @@ pub(crate) async fn execute_speak_for_caller(
         caller,
         ingress,
         &operation,
-        text_characters,
+        PlatformUsage::single_request(0).with_characters(text_characters),
         resolved,
         reqwest::Method::POST,
         &upstream.path,
@@ -1340,11 +1369,11 @@ pub(crate) async fn execute_call_and_say_for_caller(
         caller,
         ingress,
         &operation,
-        i64::from(
+        PlatformUsage::single_request(0).with_seconds(i64::from(
             config
                 .max_duration_seconds
                 .min(platform_operation_service::CALL_AND_SAY_HARD_MAX_DURATION_SECONDS),
-        ),
+        )),
         resolved,
         reqwest::Method::POST,
         &upstream.path,
@@ -1373,16 +1402,29 @@ pub(crate) async fn execute_call_and_say_for_caller(
     let value = match value {
         Ok(value) => value,
         Err(error) => {
-            fail_platform_attempt(
-                state,
-                &metered,
-                "vendor_response_invalid",
-                PlatformOperationName::CallAndSay,
-                &owner_id,
-                daily_limit.as_ref(),
-                spend_reservation.as_ref(),
-            )
-            .await;
+            if credential_source == PlatformCredentialSource::Platform {
+                settle_meter_async(
+                    state.billing.clone(),
+                    metered,
+                    PlatformUsage::single_request(0).with_seconds(i64::from(
+                        config.max_duration_seconds.min(
+                            platform_operation_service::CALL_AND_SAY_HARD_MAX_DURATION_SECONDS,
+                        ),
+                    )),
+                )
+                .await;
+            } else {
+                fail_platform_attempt(
+                    state,
+                    &metered,
+                    "vendor_response_invalid",
+                    PlatformOperationName::CallAndSay,
+                    &owner_id,
+                    daily_limit.as_ref(),
+                    spend_reservation.as_ref(),
+                )
+                .await;
+            }
             return Err(error);
         }
     };
@@ -1392,14 +1434,14 @@ pub(crate) async fn execute_call_and_say_for_caller(
             .and_then(serde_json::Value::as_str)
             .filter(|sid| platform_operation_service::is_twilio_call_sid(sid));
         let Some(call_sid) = call_sid else {
-            fail_platform_attempt(
-                state,
-                &metered,
-                "vendor_call_sid_invalid",
-                PlatformOperationName::CallAndSay,
-                &owner_id,
-                daily_limit.as_ref(),
-                spend_reservation.as_ref(),
+            settle_meter_async(
+                state.billing.clone(),
+                metered,
+                PlatformUsage::single_request(0).with_seconds(i64::from(
+                    config
+                        .max_duration_seconds
+                        .min(platform_operation_service::CALL_AND_SAY_HARD_MAX_DURATION_SECONDS),
+                )),
             )
             .await;
             return Err(AppError::PlatformOperationUnavailable);
@@ -1455,7 +1497,7 @@ pub(crate) async fn execute_flight_search_for_caller(
         caller,
         ingress,
         &operation,
-        1,
+        PlatformUsage::single_request(0),
         resolved,
         reqwest::Method::POST,
         upstream.path,
@@ -1494,16 +1536,25 @@ pub(crate) async fn execute_flight_search_for_caller(
     let value = match value {
         Ok(value) => value,
         Err(error) => {
-            fail_platform_attempt(
-                state,
-                &metered,
-                "vendor_response_invalid",
-                PlatformOperationName::FlightSearch,
-                &owner_id,
-                daily_limit.as_ref(),
-                spend_reservation.as_ref(),
-            )
-            .await;
+            if credential_source == PlatformCredentialSource::Platform {
+                settle_meter_async(
+                    state.billing.clone(),
+                    metered,
+                    PlatformUsage::single_request(0),
+                )
+                .await;
+            } else {
+                fail_platform_attempt(
+                    state,
+                    &metered,
+                    "vendor_response_invalid",
+                    PlatformOperationName::FlightSearch,
+                    &owner_id,
+                    daily_limit.as_ref(),
+                    spend_reservation.as_ref(),
+                )
+                .await;
+            }
             return Err(error);
         }
     };
@@ -1954,6 +2005,20 @@ mod tests {
         (format!("http://{address}"), server)
     }
 
+    async fn spawn_vendor_status(status: StatusCode) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(any(move || async move { (status, "vendor status") }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind status vendor test server");
+        let address = listener.local_addr().expect("status vendor address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve status vendor test server");
+        });
+        (format!("http://{address}"), server)
+    }
+
     async fn spawn_counted_twilio() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         let forwarded = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
@@ -2396,7 +2461,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vendor_failure_releases_daily_call_reservation() {
+    async fn vendor_5xx_retains_daily_call_reservation() {
         let Some(db) = crate::test_utils::connect_test_database("platform_ops_failed_call").await
         else {
             eprintln!("skipping platform operation handler test: no local MongoDB available");
@@ -2439,7 +2504,107 @@ mod tests {
             })
             .await
             .expect("read usage row");
-        assert!(usage.is_none(), "failed calls must remove their quota row");
+        assert!(
+            usage.is_some(),
+            "an ambiguous provider 5xx must retain the quota reservation"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn vendor_4xx_releases_daily_call_reservation() {
+        let Some(db) = crate::test_utils::connect_test_database("platform_ops_rejected_call").await
+        else {
+            return;
+        };
+        enable_platform_services_for_tests(&db).await;
+        ensure_usage_index(&db).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let (base_url, server) = spawn_twilio(StatusCode::BAD_REQUEST).await;
+        insert_twilio_vendor(&state, base_url).await;
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(operation(
+                PlatformOperationName::CallAndSay,
+                true,
+                PlatformOperationConfig::CallAndSay(call_config(2)),
+            ))
+            .await
+            .expect("insert rejected call operation");
+
+        let result = call_and_say(
+            State(state),
+            crate::test_utils::test_auth_user(USER_ID),
+            billing_extension(),
+            Json(CallAndSayRequest {
+                to: "+6512345678".to_string(),
+                message: "Hello".to_string(),
+                from: None,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(AppError::PlatformOperationUnavailable)
+        ));
+        assert_eq!(
+            db.collection::<PlatformOpUsage>(PLATFORM_OP_USAGE)
+                .count_documents(mongodb::bson::doc! { "user_id": USER_ID })
+                .await
+                .expect("count rejected call quota rows"),
+            0
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn elevenlabs_5xx_retains_daily_speak_reservation() {
+        let Some(db) = crate::test_utils::connect_test_database("platform_ops_speak_5xx").await
+        else {
+            return;
+        };
+        enable_platform_services_for_tests(&db).await;
+        ensure_usage_index(&db).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let (base_url, server) = spawn_vendor_status(StatusCode::INTERNAL_SERVER_ERROR).await;
+        insert_speak_vendor(&state, base_url, "elevenlabs-key").await;
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(operation(
+                PlatformOperationName::Speak,
+                true,
+                PlatformOperationConfig::Speak(SpeakConfig {
+                    allowed_voice_ids: vec!["voice".to_string()],
+                    max_chars: 1_000,
+                    model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 2,
+                }),
+            ))
+            .await
+            .expect("insert speak operation");
+
+        let result = speak(
+            State(state),
+            crate::test_utils::test_auth_user(USER_ID),
+            billing_extension(),
+            Json(SpeakRequest {
+                text: "Hello".to_string(),
+                voice_id: "voice".to_string(),
+            }),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(AppError::PlatformOperationUnavailable)
+        ));
+        assert_eq!(
+            db.collection::<PlatformOpUsage>(PLATFORM_OP_USAGE)
+                .count_documents(mongodb::bson::doc! {
+                    "op": "speak",
+                    "user_id": USER_ID,
+                })
+                .await
+                .expect("count speak quota rows"),
+            1
+        );
         server.abort();
     }
 
@@ -2508,6 +2673,7 @@ mod tests {
         call_operation.billing = OperationBilling {
             metric: BillingMetric::Seconds,
             price_per_unit: "1".to_string(),
+            secondary: None,
             base_fee_per_call: None,
             lago_metric_code: crate::services::billing::pricing::metric_code_for_operation(
                 &vendor.slug,
@@ -2611,7 +2777,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_success_payload_fails_meter_and_releases_wallet_and_daily_quota() {
+    async fn invalid_success_payload_settles_estimate_and_retains_daily_quota() {
         let Some(db) =
             crate::test_utils::connect_test_database("platform_ops_invalid_success_payload").await
         else {
@@ -2704,7 +2870,7 @@ mod tests {
                 .count_documents(mongodb::bson::doc! { "user_id": USER_ID })
                 .await
                 .expect("count quota rows"),
-            0
+            1
         );
         let meter = db
             .collection::<crate::models::usage_meter::UsageMeterRow>(
@@ -2716,11 +2882,12 @@ mod tests {
             .expect("usage meter exists");
         assert_eq!(
             meter.status,
-            crate::models::usage_meter::UsageStatus::Failed
+            crate::models::usage_meter::UsageStatus::Finalized
         );
         assert!(meter.forwarded);
-        assert!(meter.released);
-        assert_eq!(meter.last_error.as_deref(), Some("vendor_response_invalid"));
+        assert!(!meter.released);
+        assert_eq!(meter.quantity, Some(1));
+        assert!(meter.last_error.is_none());
         let wallet = db
             .collection::<crate::models::billing_wallet::BillingWallet>(
                 crate::models::billing_wallet::COLLECTION_NAME,
@@ -3293,6 +3460,7 @@ mod tests {
         speak_operation.billing = OperationBilling {
             metric: BillingMetric::Characters,
             price_per_unit: "0.25".to_string(),
+            secondary: None,
             base_fee_per_call: None,
             lago_metric_code: crate::services::billing::pricing::metric_code_for_operation(
                 &vendor.slug,

@@ -10,8 +10,8 @@ use crate::AppState;
 use crate::errors::AppResult;
 use crate::handlers::admin_helpers::require_admin;
 use crate::models::platform_operation::{
-    CallAndSayConfig, FlightSearchConfig, OperationBilling, PlatformOperation,
-    PlatformOperationConfig, PlatformOperationName, SpeakConfig,
+    CallAndSayConfig, FlightSearchConfig, OperationBilling, OperationBillingComponent,
+    PlatformOperation, PlatformOperationConfig, PlatformOperationName, SpeakConfig,
 };
 use crate::models::service_billing::{BillingMetric, PricingSyncStatus};
 use crate::mw::auth::AuthUser;
@@ -39,6 +39,7 @@ pub struct AdminPlatformOperationPricingResponse {
     pub billable: bool,
     pub metric: &'static str,
     pub price_per_unit: String,
+    pub secondary: Option<AdminPlatformOperationPricingComponentResponse>,
     pub base_fee_per_call: Option<String>,
     /// Server-rendered price sentence. The admin table shows this verbatim so
     /// every metric formats identically across surfaces.
@@ -46,6 +47,13 @@ pub struct AdminPlatformOperationPricingResponse {
     pub lago_metric_code: String,
     pub sync_status: PricingSyncStatus,
     pub sync_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AdminPlatformOperationPricingComponentResponse {
+    pub metric: &'static str,
+    pub price_per_unit: String,
+    pub lago_metric_code: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,7 +105,16 @@ pub struct UpdatePlatformOperationBillingRequest {
     pub metric: BillingMetric,
     pub price_per_unit: String,
     #[serde(default)]
+    pub secondary: Option<UpdatePlatformOperationBillingComponentRequest>,
+    #[serde(default)]
     pub base_fee_per_call: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdatePlatformOperationBillingComponentRequest {
+    pub metric: BillingMetric,
+    pub price_per_unit: String,
 }
 
 impl From<UpdatePlatformOperationBillingRequest> for OperationBilling {
@@ -105,6 +122,11 @@ impl From<UpdatePlatformOperationBillingRequest> for OperationBilling {
         Self {
             metric: value.metric,
             price_per_unit: value.price_per_unit,
+            secondary: value.secondary.map(|component| OperationBillingComponent {
+                metric: component.metric,
+                price_per_unit: component.price_per_unit,
+                lago_metric_code: String::new(),
+            }),
             base_fee_per_call: value.base_fee_per_call,
             lago_metric_code: String::new(),
             sync_status: PricingSyncStatus::Pending,
@@ -219,12 +241,22 @@ pub(crate) fn platform_operation_response(
         .as_ref()
         .map(|operation| operation.billing.clone())
         .unwrap_or_else(|| platform_operation_service::default_operation_billing(op));
-    let billable = billing.price_per_unit != "0" || billing.base_fee_per_call.is_some();
+    let billable = billing.price_per_unit != "0"
+        || billing.secondary.is_some()
+        || billing.base_fee_per_call.is_some();
+    let secondary = billing.secondary.as_ref().map(|component| {
+        AdminPlatformOperationPricingComponentResponse {
+            metric: component.metric.as_str(),
+            price_per_unit: component.price_per_unit.clone(),
+            lago_metric_code: component.lago_metric_code.clone(),
+        }
+    });
     let pricing = AdminPlatformOperationPricingResponse {
         billable,
         metric: billing.metric.as_str(),
         display: crate::services::billing::pricing::format_operation_price(&billing, billable),
         price_per_unit: billing.price_per_unit,
+        secondary,
         base_fee_per_call: billing.base_fee_per_call,
         lago_metric_code: billing.lago_metric_code,
         sync_status: billing.sync_status,

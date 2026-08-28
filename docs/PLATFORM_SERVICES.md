@@ -190,6 +190,21 @@ before forwarding. `seconds` is supported by `call_and_say` and comes from Twili
 completed-call duration. Invalid metric/operation combinations are rejected at admin
 write rather than silently producing a zero quantity.
 
+An operation has a primary variable component and at most one secondary variable
+component, plus an optional base fee. `input_tokens` measures provider-reported
+prompt tokens and `output_tokens` measures provider-reported completion tokens.
+Allowances are metric-specific: input and output allowances fund only their matching
+component, while a `tokens` allowance funds only an explicitly combined-token
+component. The primary usage transaction retains the legacy transaction ID and the
+secondary transaction uses `flush_seq = 1`; a durable marker on the primary row lets
+reconciliation finish the secondary settlement after a crash.
+
+After dispatch, an explicit provider 4xx releases billing, spend, and daily quota
+reservations. A provider 5xx or malformed 2xx success may follow billable provider
+work, so NyxID settles the full pre-dispatch estimate and retains the quota
+reservations. It does not retry through another credential or infer a partial refund
+without authoritative provider evidence.
+
 `UsageMeterRow` gains `base_fee_micros: Option<i64>` and a tagged deferred descriptor:
 
 ```rust

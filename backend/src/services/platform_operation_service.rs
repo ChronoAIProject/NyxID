@@ -1795,17 +1795,31 @@ pub async fn upsert_operation_with_billing(
         current.as_ref().map(|row| &row.billing),
         &mut billing,
     )?;
-    let cleanup_metric_code = current
-        .as_ref()
-        .and_then(|row| {
-            let old = row.billing.lago_metric_code.trim();
-            (!old.is_empty() && old != billing.lago_metric_code).then(|| old.to_string())
-        })
-        .or_else(|| {
-            current
+    let active_metric_codes = std::iter::once(billing.lago_metric_code.as_str())
+        .chain(
+            billing
+                .secondary
                 .as_ref()
-                .and_then(|row| row.billing_cleanup_metric_code.clone())
-        });
+                .map(|component| component.lago_metric_code.as_str()),
+        )
+        .collect::<std::collections::HashSet<_>>();
+    let cleanup_metric_code = current.as_ref().and_then(|row| {
+        std::iter::once(row.billing.lago_metric_code.as_str())
+            .chain(
+                row.billing
+                    .secondary
+                    .as_ref()
+                    .map(|component| component.lago_metric_code.as_str()),
+            )
+            .find(|code| !code.is_empty() && !active_metric_codes.contains(code))
+            .map(str::to_string)
+            .or_else(|| {
+                row.billing_cleanup_metric_code
+                    .as_ref()
+                    .filter(|code| !active_metric_codes.contains(code.as_str()))
+                    .cloned()
+            })
+    });
     let kind = bson::to_bson(&kind).map_err(|error| {
         AppError::Internal(format!(
             "Failed to serialize platform operation kind: {error}"

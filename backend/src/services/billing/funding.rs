@@ -62,7 +62,7 @@ async fn reserve_layer(
                 .as_deref()
                 .or(ctx.user_service_id.as_deref()),
             ctx.service_slug.as_deref(),
-            ctx.platform_metric,
+            layer.metric,
             uncovered_quantity,
         )
         .await?;
@@ -1427,6 +1427,17 @@ mod tests {
             })
             .await
             .expect("insert grant");
+        let operation_billing = crate::models::platform_operation::OperationBilling {
+            metric: BillingMetric::Seconds,
+            price_per_unit: "0.01".to_string(),
+            secondary: None,
+            base_fee_per_call: Some("1.5".to_string()),
+            lago_metric_code: "platform_op_api_twilio_constrained_call_and_say".to_string(),
+            sync_status: crate::models::service_billing::PricingSyncStatus::Synced,
+            sync_error: None,
+        };
+        let estimated_usage =
+            crate::models::service_billing::PlatformUsage::single_request(0).with_seconds(600);
         let ctx = BillingRouteContext::new(
             BillingIngress::PlatformOperation,
             "base-funding-request".to_string(),
@@ -1444,14 +1455,16 @@ mod tests {
             false,
         )
         .with_platform_operation_billing(
-            BillingMetric::Seconds,
-            "platform_op_api_twilio_constrained_call_and_say".to_string(),
+            &operation_billing,
             10_000,
+            None,
             1_500_000,
-            600,
+            &estimated_usage,
         );
         let mut layer = LayerReservation {
             layer: BillingLayer::Platform,
+            flush_seq: None,
+            metric: BillingMetric::Seconds,
             estimated_quantity: 600,
             credits_per_unit_micros: 10_000,
             base_fee_micros: 1_500_000,
@@ -1490,6 +1503,128 @@ mod tests {
             500_000
         );
         assert_eq!(layer.reserved_credits, 3);
+    }
+
+    #[tokio::test]
+    async fn split_token_allowances_fund_only_the_matching_component() {
+        let Some(db) = connect_test_database("billing_split_token_allowances").await else {
+            return;
+        };
+        let now = Utc::now();
+        let owner_id = "split-token-owner";
+        let service_id = "split-token-service";
+        for (id, metric, quantity) in [
+            ("input-allowance", BillingMetric::InputTokens, 10),
+            ("output-allowance", BillingMetric::OutputTokens, 20),
+            ("combined-allowance", BillingMetric::Tokens, 100),
+        ] {
+            db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
+                .insert_one(UsageAllowance {
+                    id: id.to_string(),
+                    service_id: service_id.to_string(),
+                    service_slug: "llm-test".to_string(),
+                    metric,
+                    quantity,
+                    recurrence: AllowanceRecurrence::Daily,
+                    target_kind: BillingTargetKind::AllUsers,
+                    target_user_ids: Vec::new(),
+                    is_active: true,
+                    created_by: "admin".to_string(),
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .expect("insert split token allowance");
+        }
+        let billing = crate::models::platform_operation::OperationBilling {
+            metric: BillingMetric::InputTokens,
+            price_per_unit: "1".to_string(),
+            secondary: Some(
+                crate::models::platform_operation::OperationBillingComponent {
+                    metric: BillingMetric::OutputTokens,
+                    price_per_unit: "1".to_string(),
+                    lago_metric_code: "split-output".to_string(),
+                },
+            ),
+            base_fee_per_call: None,
+            lago_metric_code: "split-input".to_string(),
+            sync_status: crate::models::service_billing::PricingSyncStatus::Synced,
+            sync_error: None,
+        };
+        let usage = crate::models::service_billing::PlatformUsage::llm_completion(10, 18)
+            .with_token_breakdown(Some(crate::models::service_billing::TokenBreakdown {
+                prompt_tokens: 7,
+                completion_tokens: 11,
+                ..Default::default()
+            }));
+        let ctx = BillingRouteContext::new(
+            BillingIngress::PlatformOperation,
+            "split-token-request".to_string(),
+            owner_id.to_string(),
+            owner_id.to_string(),
+            None,
+            None,
+            Some(service_id.to_string()),
+            Some("llm-test".to_string()),
+            NodeIntent::Direct,
+            "bearer".to_string(),
+            CredentialClass::NyxidManagedMaster,
+            BillingMetric::Requests,
+            None,
+            false,
+        )
+        .with_platform_operation_billing(&billing, 1_000_000, Some(1_000_000), 0, &usage);
+        let mut layers = vec![
+            LayerReservation {
+                layer: BillingLayer::Platform,
+                flush_seq: None,
+                metric: BillingMetric::InputTokens,
+                estimated_quantity: 7,
+                credits_per_unit_micros: 1_000_000,
+                base_fee_micros: 0,
+                reserved_credits: 7,
+                allowance_reservations: Vec::new(),
+                grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
+            },
+            LayerReservation {
+                layer: BillingLayer::Platform,
+                flush_seq: Some(1),
+                metric: BillingMetric::OutputTokens,
+                estimated_quantity: 11,
+                credits_per_unit_micros: 1_000_000,
+                base_fee_micros: 0,
+                reserved_credits: 11,
+                allowance_reservations: Vec::new(),
+                grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
+            },
+        ];
+
+        reserve_estimated_funding(&db, &ctx, &mut layers)
+            .await
+            .expect("reserve split token funding");
+        assert_eq!(layers[0].reserved_credits, 0);
+        assert_eq!(layers[0].allowance_reservations.len(), 1);
+        assert_eq!(
+            layers[0].allowance_reservations[0].allowance_id,
+            "input-allowance"
+        );
+        assert_eq!(layers[0].allowance_reservations[0].quantity, 7);
+        assert_eq!(layers[1].reserved_credits, 0);
+        assert_eq!(layers[1].allowance_reservations.len(), 1);
+        assert_eq!(
+            layers[1].allowance_reservations[0].allowance_id,
+            "output-allowance"
+        );
+        assert_eq!(layers[1].allowance_reservations[0].quantity, 11);
+        assert_eq!(
+            db.collection::<UsageAllowancePeriod>(USAGE_ALLOWANCE_PERIODS)
+                .count_documents(doc! { "allowance_id": "combined-allowance" })
+                .await
+                .expect("count combined allowance periods"),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1546,6 +1681,7 @@ mod tests {
             deferred_attempts: 0,
             deferred_next_retry_at: Some(now),
             pending_resale_quantity: None,
+            pending_platform_secondary_quantity: None,
             status: UsageStatus::Forwarded,
             forwarded: true,
             released: false,
@@ -1785,6 +1921,7 @@ mod tests {
             deferred_attempts: 0,
             deferred_next_retry_at: None,
             pending_resale_quantity: None,
+            pending_platform_secondary_quantity: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: false,

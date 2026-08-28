@@ -78,6 +78,8 @@ pub struct OperationLimits {
 pub struct OperationBilling {
     pub metric: BillingMetric,
     pub price_per_unit: String,
+    #[serde(default)]
+    pub secondary: Option<OperationBillingComponent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_fee_per_call: Option<String>,
     pub lago_metric_code: String,
@@ -87,11 +89,20 @@ pub struct OperationBilling {
     pub sync_error: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationBillingComponent {
+    pub metric: BillingMetric,
+    pub price_per_unit: String,
+    pub lago_metric_code: String,
+}
+
 impl OperationBilling {
     pub fn free(metric: BillingMetric) -> Self {
         Self {
             metric,
             price_per_unit: "0".to_string(),
+            secondary: None,
             base_fee_per_call: None,
             lago_metric_code: String::new(),
             sync_status: PricingSyncStatus::Pending,

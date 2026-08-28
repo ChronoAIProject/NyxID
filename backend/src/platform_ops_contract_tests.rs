@@ -78,6 +78,7 @@ fn contract_operations() -> Vec<PlatformOperation> {
             OperationBilling {
                 metric: BillingMetric::Characters,
                 price_per_unit: "0.002".to_string(),
+                secondary: None,
                 base_fee_per_call: None,
                 lago_metric_code: "platform_op_api_elevenlabs_speak".to_string(),
                 sync_status: PricingSyncStatus::Synced,
@@ -98,6 +99,7 @@ fn contract_operations() -> Vec<PlatformOperation> {
             OperationBilling {
                 metric: BillingMetric::Seconds,
                 price_per_unit: "0.05".to_string(),
+                secondary: None,
                 base_fee_per_call: Some("1.5".to_string()),
                 lago_metric_code: "platform_op_api_twilio_call_and_say".to_string(),
                 sync_status: PricingSyncStatus::Failed,
@@ -236,11 +238,13 @@ Regenerate with UPDATE_PLATFORM_OPS_CONTRACT=1 and update frontend/src/schemas/p
 
 #[test]
 fn price_display_covers_every_metric_shape() {
+    use crate::models::platform_operation::OperationBillingComponent;
     use crate::services::billing::pricing::format_operation_price;
 
     let variable_only = OperationBilling {
         metric: BillingMetric::Characters,
         price_per_unit: "0.002".to_string(),
+        secondary: None,
         base_fee_per_call: None,
         lago_metric_code: String::new(),
         sync_status: PricingSyncStatus::Synced,
@@ -259,7 +263,7 @@ fn price_display_covers_every_metric_shape() {
     };
     assert_eq!(
         format_operation_price(&with_base_fee, true),
-        "1.5 credits per call + 0.05 per second"
+        "1.5 credits per call + 0.05 credits per second"
     );
 
     let per_call = OperationBilling {
@@ -278,4 +282,20 @@ fn price_display_covers_every_metric_shape() {
     let unpriced = OperationBilling::free(BillingMetric::Requests);
     assert_eq!(format_operation_price(&unpriced, true), "Price not set");
     assert_eq!(format_operation_price(&per_call, false), "Free");
+
+    let split_tokens = OperationBilling {
+        metric: BillingMetric::InputTokens,
+        price_per_unit: "0.01".to_string(),
+        secondary: Some(OperationBillingComponent {
+            metric: BillingMetric::OutputTokens,
+            price_per_unit: "0.03".to_string(),
+            lago_metric_code: "output".to_string(),
+        }),
+        base_fee_per_call: Some("0.5".to_string()),
+        ..variable_only
+    };
+    assert_eq!(
+        format_operation_price(&split_tokens, true),
+        "0.5 credits per call + 0.01 credits per input token + 0.03 credits per output token"
+    );
 }

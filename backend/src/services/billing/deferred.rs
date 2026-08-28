@@ -460,6 +460,7 @@ mod tests {
             OperationBilling {
                 metric: BillingMetric::Seconds,
                 price_per_unit: "0.01".to_string(),
+                secondary: None,
                 base_fee_per_call: Some("1.5".to_string()),
                 lago_metric_code: "platform_op_api_twilio_constrained_call_and_say".to_string(),
                 sync_status: PricingSyncStatus::Synced,
@@ -506,6 +507,7 @@ mod tests {
             deferred_attempts: 0,
             deferred_next_retry_at: Some(created_at),
             pending_resale_quantity: None,
+            pending_platform_secondary_quantity: None,
             status: UsageStatus::Forwarded,
             forwarded: true,
             released: false,

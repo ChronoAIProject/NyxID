@@ -227,7 +227,7 @@ fn effective_preference(
 
 pub fn estimated_charge_micros(
     billing: &OperationBilling,
-    estimated_quantity: i64,
+    estimated_usage: &crate::models::service_billing::PlatformUsage,
 ) -> AppResult<i64> {
     let rate =
         crate::services::billing::lago_client::decimal_credits_to_micros(&billing.price_per_unit)
@@ -237,8 +237,26 @@ pub fn estimated_charge_micros(
             .ok_or(AppError::PlatformOperationUnavailable)?,
         None => 0,
     };
+    let primary_quantity =
+        crate::services::billing::meter::platform_quantity(billing.metric, estimated_usage);
+    let secondary_micros = match &billing.secondary {
+        Some(component) => {
+            let rate = crate::services::billing::lago_client::decimal_credits_to_micros(
+                &component.price_per_unit,
+            )
+            .ok_or(AppError::PlatformOperationUnavailable)?;
+            i128::from(rate).saturating_mul(i128::from(
+                crate::services::billing::meter::platform_quantity(
+                    component.metric,
+                    estimated_usage,
+                ),
+            ))
+        }
+        None => 0,
+    };
     Ok(i128::from(rate)
-        .saturating_mul(i128::from(estimated_quantity.max(0)))
+        .saturating_mul(i128::from(primary_quantity))
+        .saturating_add(secondary_micros)
         .saturating_add(i128::from(base))
         .min(i128::from(i64::MAX)) as i64)
 }
@@ -584,13 +602,19 @@ mod tests {
         let billing = OperationBilling {
             metric: crate::models::service_billing::BillingMetric::Characters,
             price_per_unit: "0.002".to_string(),
+            secondary: None,
             base_fee_per_call: Some("1.5".to_string()),
             lago_metric_code: "metric".to_string(),
             sync_status: crate::models::service_billing::PricingSyncStatus::Synced,
             sync_error: None,
         };
 
-        assert_eq!(estimated_charge_micros(&billing, 250).unwrap(), 2_000_000);
+        let usage =
+            crate::models::service_billing::PlatformUsage::single_request(0).with_characters(250);
+        assert_eq!(
+            estimated_charge_micros(&billing, &usage).unwrap(),
+            2_000_000
+        );
     }
 
     #[test]

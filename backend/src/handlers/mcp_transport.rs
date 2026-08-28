@@ -3726,12 +3726,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_tools_list_publishes_platform_operations_when_flag_is_on() {
+    async fn mcp_tools_list_describes_unconsented_and_consented_platform_access() {
         let Some(db) = connect_test_database("mcp_platform_ops_flag_on").await else {
             eprintln!("skipping MCP platform operation flag test: no local MongoDB available");
             return;
         };
         enable_platform_services_for_mcp_tests(&db).await;
+        db.collection::<User>(USERS)
+            .insert_one(test_user("user-1", UserType::Person))
+            .await
+            .expect("insert MCP platform operation owner");
         let catalog_service_id = insert_platform_speak_vendor_for_mcp_tests(&db).await;
         db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_one(enabled_speak_operation(&catalog_service_id))
@@ -3752,9 +3756,45 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "nyx__speak")
             .expect("tools/list publishes enabled speak operation");
-        assert!(speak["description"].as_str().is_some_and(|description| {
-            description.contains("Uses the platform credential (free).")
-        }));
+        let description = speak["description"]
+            .as_str()
+            .expect("speak tool has a description");
+        assert!(
+            description
+                .contains("Platform access to ElevenLabs requires the owner's spending opt-in.")
+        );
+        assert!(!description.contains("Uses the platform credential"));
+
+        crate::services::platform_preference_service::upsert_preference(
+            &state.db,
+            "user-1",
+            "user-1",
+            &catalog_service_id,
+            crate::services::platform_preference_service::PreferenceWrite {
+                platform_enabled: true,
+                max_credits_per_call: "1000".to_string(),
+                max_credits_per_day: "10000".to_string(),
+                operation_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("opt MCP owner into platform vendor");
+
+        let response = handle_tools_list(&state, &auth, None, &tools_list_request()).await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read consented MCP tools/list response");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("decode consented MCP tools/list response");
+        let description = payload["result"]["tools"]
+            .as_array()
+            .expect("consented tools/list result contains tools")
+            .iter()
+            .find(|tool| tool["name"] == "nyx__speak")
+            .and_then(|tool| tool["description"].as_str())
+            .expect("consented tools/list publishes speak description");
+        assert!(description.contains("Uses the platform credential (free)."));
+        assert!(!description.contains("requires the owner's spending opt-in"));
     }
 
     #[tokio::test]

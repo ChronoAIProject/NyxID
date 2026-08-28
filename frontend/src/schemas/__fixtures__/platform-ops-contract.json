@@ -22,6 +22,7 @@
           "billable": true,
           "metric": "characters",
           "price_per_unit": "0.002",
+          "secondary": null,
           "base_fee_per_call": null,
           "display": "0.002 credits per character",
           "lago_metric_code": "platform_op_api_elevenlabs_speak",
@@ -52,8 +53,9 @@
           "billable": true,
           "metric": "seconds",
           "price_per_unit": "0.05",
+          "secondary": null,
           "base_fee_per_call": "1.5",
-          "display": "1.5 credits per call + 0.05 per second",
+          "display": "1.5 credits per call + 0.05 credits per second",
           "lago_metric_code": "platform_op_api_twilio_call_and_say",
           "sync_status": "failed",
           "sync_error": "lago rejected the charge payload"
@@ -75,6 +77,7 @@
           "billable": false,
           "metric": "requests",
           "price_per_unit": "0",
+          "secondary": null,
           "base_fee_per_call": null,
           "display": "Free",
           "lago_metric_code": "",
@@ -101,6 +104,7 @@
           "billable": true,
           "metric": "characters",
           "price_per_unit": "0.002",
+          "secondary": null,
           "base_fee_per_call": null,
           "display": "0.002 credits per character"
         },
@@ -128,8 +132,9 @@
           "billable": true,
           "metric": "seconds",
           "price_per_unit": "0.05",
+          "secondary": null,
           "base_fee_per_call": "1.5",
-          "display": "1.5 credits per call + 0.05 per second"
+          "display": "1.5 credits per call + 0.05 credits per second"
         },
         "mcp_tool": "nyx__call_and_say"
       },
@@ -155,6 +160,7 @@
           "billable": false,
           "metric": "requests",
           "price_per_unit": "0",
+          "secondary": null,
           "base_fee_per_call": null,
           "display": "Free"
         },

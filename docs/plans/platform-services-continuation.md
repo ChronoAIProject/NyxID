@@ -105,9 +105,11 @@ It is not. The measurement side already exists.
 
 Two components deliver the case that matters: input tokens and output tokens at different rates.
 
-Open product question to settle before implementing funding: whether a quantity allowance covers the
-input component, the output component, or their sum. Allowance precedence is per metric in
-`funding::reserve_allowances`.
+Quantity allowances are component-specific. An `input_tokens` allowance covers only the input-token
+component, an `output_tokens` allowance covers only the output-token component, and a `tokens`
+allowance covers a deliberately combined-token component. One allowance is never independently
+applied to both split components. `funding::reserve_allowances` therefore receives the metric stored
+on each reservation component, not the route's primary metric.
 
 ### Apply authority before spending or decryption
 
@@ -132,6 +134,14 @@ quota slot and a wallet reservation.
 Reselling vendor access on a shared credential is a per-provider go/no-go gate that precedes enabling
 any provider in production. It is a business decision, not an engineering one, and no provider may be
 enabled until it is answered.
+
+Provider failure settlement is conservative after dispatch. An explicit 4xx rejection releases the
+billing reservation, owner spend reservation, and daily quota slot. A provider 5xx may arrive after
+Twilio or ElevenLabs performed and billed the work, so NyxID settles the full pre-dispatch estimate
+and retains both quota reservations. A malformed 2xx success payload follows the same rule. NyxID
+does not retry through another credential after dispatch and does not issue an automatic partial
+refund because it has no authoritative performed-quantity evidence; later provider credits are
+handled by operational reconciliation.
 
 | Provider | Exposure |
 | --- | --- |

@@ -138,8 +138,8 @@ pub struct UsageMeterRow {
     pub credential_class: CredentialClass,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Provider-reported token classes (LLM traffic only; observability,
-    /// not priced separately). Follows each provider's own accounting.
+    /// Provider-reported token classes. Platform operations may price prompt
+    /// and completion tokens separately; other billing paths use total tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_breakdown: Option<crate::models::service_billing::TokenBreakdown>,
     #[serde(default)]
@@ -164,6 +164,10 @@ pub struct UsageMeterRow {
     pub deferred_next_retry_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_resale_quantity: Option<i64>,
+    /// Durable coordinator marker for a two-component platform settlement.
+    /// The primary row keeps this value until the secondary row is finalized.
+    #[serde(default)]
+    pub pending_platform_secondary_quantity: Option<i64>,
     pub status: UsageStatus,
     pub forwarded: bool,
     pub released: bool,
