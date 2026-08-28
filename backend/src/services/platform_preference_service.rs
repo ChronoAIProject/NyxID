@@ -172,8 +172,10 @@ pub fn resolve_credential_intent(
         });
     }
 
-    let effective =
-        preference.and_then(|preference| effective_preference(preference, operation_id));
+    let effective = match preference {
+        Some(preference) => effective_preference(preference, operation_id)?,
+        None => None,
+    };
     match (requested, effective) {
         (CredentialIntent::Auto, Some(platform_preference)) => Ok(ResolvedCredentialIntent {
             intent: CredentialIntent::Auto,
@@ -197,7 +199,7 @@ pub fn resolve_credential_intent(
 fn effective_preference(
     preference: &PlatformServicePreference,
     operation_id: &str,
-) -> Option<EffectivePlatformPreference> {
+) -> AppResult<Option<EffectivePlatformPreference>> {
     let (enabled, max_call, max_day) = preference
         .operation_overrides
         .iter()
@@ -215,12 +217,12 @@ fn effective_preference(
             preference.max_credits_per_day.as_str(),
         ));
     if !enabled {
-        return None;
+        return Ok(None);
     }
-    Some(EffectivePlatformPreference {
-        max_credits_per_call_micros: parse_normalized_credits(max_call),
-        max_credits_per_day_micros: parse_normalized_credits(max_day),
-    })
+    Ok(Some(EffectivePlatformPreference {
+        max_credits_per_call_micros: parse_stored_credits(max_call)?,
+        max_credits_per_day_micros: parse_stored_credits(max_day)?,
+    }))
 }
 
 pub fn estimated_charge_micros(
@@ -376,8 +378,8 @@ async fn normalize_preference(
         normalize_ceiling("max_credits_per_call", &requested.max_credits_per_call)?;
     requested.max_credits_per_day =
         normalize_ceiling("max_credits_per_day", &requested.max_credits_per_day)?;
-    if parse_normalized_credits(&requested.max_credits_per_day)
-        < parse_normalized_credits(&requested.max_credits_per_call)
+    if parse_stored_credits(&requested.max_credits_per_day)?
+        < parse_stored_credits(&requested.max_credits_per_call)?
     {
         return Err(AppError::ValidationError(
             "max_credits_per_day must be at least max_credits_per_call".to_string(),
@@ -409,8 +411,8 @@ async fn normalize_preference(
             "operation_overrides.max_credits_per_day",
             &entry.max_credits_per_day,
         )?;
-        if parse_normalized_credits(&entry.max_credits_per_day)
-            < parse_normalized_credits(&entry.max_credits_per_call)
+        if parse_stored_credits(&entry.max_credits_per_day)?
+            < parse_stored_credits(&entry.max_credits_per_call)?
         {
             return Err(AppError::ValidationError(
                 "each operation override max_credits_per_day must be at least max_credits_per_call"
@@ -468,9 +470,9 @@ fn normalize_ceiling(field: &str, raw: &str) -> AppResult<String> {
     Ok(format_micros(micros))
 }
 
-fn parse_normalized_credits(value: &str) -> i64 {
+fn parse_stored_credits(value: &str) -> AppResult<i64> {
     crate::services::billing::lago_client::decimal_credits_to_micros(value)
-        .expect("normalized platform preference credit amount")
+        .ok_or(AppError::PlatformOperationUnavailable)
 }
 
 fn format_micros(micros: i64) -> String {
@@ -686,6 +688,40 @@ mod tests {
                 .await,
             Err(AppError::ValidationError(message))
                 if message.contains("owned by the catalog service")
+        ));
+    }
+
+    #[tokio::test]
+    async fn malformed_stored_ceiling_fails_closed_without_panicking() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_preference_malformed_ceiling").await
+        else {
+            eprintln!("skipping malformed preference test: no local MongoDB available");
+            return;
+        };
+        let catalog = insert_catalog_service(&db).await;
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let mut stored = preference(true);
+        stored.id = uuid::Uuid::new_v4().to_string();
+        stored.owner_id = owner_id.clone();
+        stored.catalog_service_id = catalog.id.clone();
+        stored.max_credits_per_day = "not-a-credit-amount".to_string();
+        db.collection::<PlatformServicePreference>(PLATFORM_SERVICE_PREFERENCES)
+            .insert_one(stored)
+            .await
+            .expect("store malformed preference outside the API write path");
+
+        let loaded = load_preferences_for_owners(
+            &db,
+            std::slice::from_ref(&owner_id),
+            std::slice::from_ref(&catalog.id),
+        )
+        .await
+        .expect("load malformed stored preference");
+        assert_eq!(loaded.len(), 1);
+        assert!(matches!(
+            resolve_credential_intent(CredentialIntent::Auto, loaded.first(), "operation-id"),
+            Err(AppError::PlatformOperationUnavailable)
         ));
     }
 
