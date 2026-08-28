@@ -110,6 +110,9 @@ describe("platform operation schemas", () => {
           vendor: "duffel",
           catalog_service_slug: "duffel",
           credential_source: "platform",
+          credential_intent: "auto",
+          availability_reason: null,
+          fallback_reason: "own_credential_absent",
           own_connection: null,
           pricing: discoveryPricing({
             billable: true,
@@ -128,6 +131,7 @@ describe("platform operation schemas", () => {
           {
             ...result.operations[0],
             credential_source: "own_connection",
+            fallback_reason: null,
             own_connection: {
               user_service_id: "duffel-key",
               slug: "duffel",
@@ -135,6 +139,28 @@ describe("platform operation schemas", () => {
               is_active: true,
               usable: false,
               reason: "approval_required",
+            },
+          },
+        ],
+      }).success,
+    ).toBe(true);
+
+    expect(
+      platformOperationDiscoveryListSchema.safeParse({
+        operations: [
+          {
+            ...result.operations[0],
+            credential_source: "unavailable",
+            credential_intent: "own_only",
+            availability_reason: "own_connection_disabled",
+            fallback_reason: null,
+            own_connection: {
+              user_service_id: "duffel-key",
+              slug: "duffel",
+              label: "My Duffel",
+              is_active: false,
+              usable: false,
+              reason: "disabled",
             },
           },
         ],

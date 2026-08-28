@@ -24,6 +24,7 @@ use crate::models::platform_operation::{
     default_flight_search_max_offers_cap, default_flight_search_max_per_user_per_day,
     default_speak_max_chars, default_speak_max_per_user_per_day, default_speak_model_id,
 };
+use crate::models::platform_service_preference::{CredentialIntent, PlatformServicePreference};
 use crate::models::service_approval_config::ApprovalEffect;
 use crate::models::service_billing::BillingMetric;
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
@@ -32,7 +33,7 @@ use crate::services::connection_expiry_service::ConnectionExpiryNotifier;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{
     approval_service, operation_descriptor::OperationDescriptor, platform_credential_service,
-    proxy_service, user_service_service,
+    platform_preference_service, proxy_service, user_service_service,
 };
 
 pub const SPEAK_HARD_MAX_CHARS: u32 = 5_000;
@@ -213,6 +214,7 @@ pub struct VendorTarget {
 pub enum PlatformCredentialSource {
     Platform,
     OwnConnection,
+    Unavailable,
 }
 
 impl PlatformCredentialSource {
@@ -220,6 +222,41 @@ impl PlatformCredentialSource {
         match self {
             Self::Platform => "platform",
             Self::OwnConnection => "own_connection",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformFallbackReason {
+    OwnCredentialAbsent,
+    OwnCredentialUnusable,
+    ExplicitPlatformOnly,
+}
+
+impl PlatformFallbackReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OwnCredentialAbsent => "own_credential_absent",
+            Self::OwnCredentialUnusable => "own_credential_unusable",
+            Self::ExplicitPlatformOnly => "explicit_platform_only",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformUnavailableReason {
+    OwnerOptInRequired,
+    OwnConnectionDisabled,
+}
+
+impl PlatformUnavailableReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::OwnerOptInRequired => "owner_opt_in_required",
+            Self::OwnConnectionDisabled => "own_connection_disabled",
         }
     }
 }
@@ -235,17 +272,23 @@ pub struct OwnConnectionMetadata {
 pub enum PlatformCredentialResolution {
     Platform {
         vendor: Box<DownstreamService>,
-        disabled_connection: Option<OwnConnectionMetadata>,
+        owner_id: String,
+        intent: CredentialIntent,
+        preference: platform_preference_service::EffectivePlatformPreference,
+        fallback_reason: PlatformFallbackReason,
     },
     OwnConnection {
         resolution: Box<proxy_service::UserServiceResolution>,
         connection: OwnConnectionMetadata,
+        intent: CredentialIntent,
     },
     NodeRouted {
         connection: OwnConnectionMetadata,
+        intent: CredentialIntent,
     },
     ApprovalRequired {
         connection: OwnConnectionMetadata,
+        intent: CredentialIntent,
     },
     /// The owner has a usable connection but this API key is not scoped to it.
     ///
@@ -254,10 +297,17 @@ pub enum PlatformCredentialResolution {
     /// to spend the owner's credits, turning deny-by-scope into pay-by-scope.
     OutOfScope {
         connection: OwnConnectionMetadata,
+        intent: CredentialIntent,
     },
     Unusable {
         connection: OwnConnectionMetadata,
         error: Option<AppError>,
+        intent: CredentialIntent,
+    },
+    Unavailable {
+        connection: Option<OwnConnectionMetadata>,
+        reason: PlatformUnavailableReason,
+        intent: CredentialIntent,
     },
 }
 
@@ -267,11 +317,13 @@ pub struct PlatformCredentialCaller<'a> {
     pub allow_all_services: bool,
     pub allowed_service_ids: &'a [String],
     pub bypass_approval_flow: bool,
+    pub credential_intent: CredentialIntent,
 }
 
 pub struct PlatformCredentialResolutionContext {
     visible_connections: Vec<user_service_service::UserServiceWithSource>,
     services_by_slug: HashMap<String, DownstreamService>,
+    preferences: HashMap<(String, String), PlatformServicePreference>,
 }
 
 #[derive(Clone, Copy)]
@@ -1155,18 +1207,55 @@ pub async fn load_credential_resolution_context(
         .await?
         .try_collect()
         .await?;
+    let mut owner_ids = visible_connections
+        .iter()
+        .map(|entry| entry.service.user_id.clone())
+        .collect::<HashSet<_>>();
+    owner_ids.insert(resolution_user_id.to_string());
+    let catalog_service_ids = services
+        .iter()
+        .map(|service| service.id.clone())
+        .collect::<Vec<_>>();
+    let owner_ids = owner_ids.into_iter().collect::<Vec<_>>();
+    let preferences = platform_preference_service::load_preferences_for_owners(
+        db,
+        &owner_ids,
+        &catalog_service_ids,
+    )
+    .await?
+    .into_iter()
+    .map(|preference| {
+        (
+            (
+                preference.owner_id.clone(),
+                preference.catalog_service_id.clone(),
+            ),
+            preference,
+        )
+    })
+    .collect();
     Ok(PlatformCredentialResolutionContext {
         visible_connections,
         services_by_slug: services
             .into_iter()
             .map(|service| (service.slug.clone(), service))
             .collect(),
+        preferences,
     })
 }
 
 impl PlatformCredentialResolutionContext {
     pub fn service_by_slug(&self, slug: &str) -> Option<&DownstreamService> {
         self.services_by_slug.get(slug)
+    }
+
+    fn preference(
+        &self,
+        owner_id: &str,
+        catalog_service_id: &str,
+    ) -> Option<&PlatformServicePreference> {
+        self.preferences
+            .get(&(owner_id.to_string(), catalog_service_id.to_string()))
     }
 }
 
@@ -1186,15 +1275,9 @@ pub async fn resolve_operation_credential_source(
     context: &PlatformCredentialResolutionContext,
 ) -> AppResult<PlatformCredentialResolution> {
     let contract = catalog_contract_for_operation(operation.op);
-    let catalog_service = context.service_by_slug(contract.catalog_service_slug);
-
-    let Some(catalog_service) = catalog_service else {
-        let vendor = resolve_platform_vendor_from_context(db, context, operation).await?;
-        return Ok(PlatformCredentialResolution::Platform {
-            vendor: Box::new(vendor),
-            disabled_connection: None,
-        });
-    };
+    let catalog_service = context
+        .service_by_slug(contract.catalog_service_slug)
+        .ok_or(AppError::PlatformOperationUnavailable)?;
 
     let matching = context
         .visible_connections
@@ -1203,31 +1286,99 @@ pub async fn resolve_operation_credential_source(
             entry.service.catalog_service_id.as_deref() == Some(catalog_service.id.as_str())
         })
         .collect::<Vec<_>>();
-    let active_candidate = matching
-        .iter()
-        .find(|entry| entry.service.is_active)
-        .map(|entry| entry.service.clone());
-    let disabled_connection = if active_candidate.is_none() {
-        match matching.iter().find(|entry| !entry.service.is_active) {
-            Some(entry) => Some(connection_metadata(db, &entry.service).await?),
-            None => None,
-        }
-    } else {
-        None
-    };
+    let authority_hint = proxy_service::find_approval_resolution_hint(
+        db,
+        resolution_user_id,
+        None,
+        Some(&catalog_service.id),
+    )
+    .await?;
+    let active_candidate = authority_hint.as_ref().and_then(|hint| {
+        matching
+            .iter()
+            .find(|entry| entry.service.is_active && entry.service.user_id == hint.service_owner_id)
+            .map(|entry| entry.service.clone())
+    });
+    if active_candidate.is_none()
+        && let Some(blocked) = matching.iter().find(|entry| entry.service.is_active)
+    {
+        return Ok(PlatformCredentialResolution::Unusable {
+            connection: connection_metadata(db, &blocked.service).await?,
+            error: execution_mode_error(
+                mode,
+                AppError::OrgRoleInsufficient(
+                    "The visible connection is not authorized for this caller".to_string(),
+                ),
+            ),
+            intent: caller.credential_intent,
+        });
+    }
+    let disabled_candidate = active_candidate
+        .is_none()
+        .then(|| {
+            matching
+                .iter()
+                .find(|entry| !entry.service.is_active)
+                .map(|entry| entry.service.clone())
+        })
+        .flatten();
+
+    if let Some(disabled_candidate) = disabled_candidate {
+        let resolved_intent = platform_preference_service::resolve_credential_intent(
+            caller.credential_intent,
+            context.preference(&disabled_candidate.user_id, &catalog_service.id),
+            &operation.id,
+        )?;
+        return Ok(PlatformCredentialResolution::Unavailable {
+            connection: Some(connection_metadata(db, &disabled_candidate).await?),
+            reason: PlatformUnavailableReason::OwnConnectionDisabled,
+            intent: resolved_intent.intent,
+        });
+    }
 
     let Some(active_candidate) = active_candidate else {
-        let vendor = resolve_platform_vendor_from_context(db, context, operation).await?;
-        return Ok(PlatformCredentialResolution::Platform {
-            vendor: Box::new(vendor),
-            disabled_connection,
-        });
+        let resolved_intent = platform_preference_service::resolve_credential_intent(
+            caller.credential_intent,
+            context.preference(resolution_user_id, &catalog_service.id),
+            &operation.id,
+        )?;
+        return match resolved_intent.platform_preference {
+            Some(preference) => {
+                platform_resolution(
+                    db,
+                    context,
+                    operation,
+                    resolution_user_id,
+                    resolved_intent.intent,
+                    preference,
+                    fallback_reason(
+                        resolved_intent.intent,
+                        PlatformFallbackReason::OwnCredentialAbsent,
+                    ),
+                )
+                .await
+            }
+            None => Ok(PlatformCredentialResolution::Unavailable {
+                connection: None,
+                reason: PlatformUnavailableReason::OwnerOptInRequired,
+                intent: resolved_intent.intent,
+            }),
+        };
     };
 
     let connection = connection_metadata(db, &active_candidate).await?;
     if !caller.allow_all_services && !caller.allowed_service_ids.contains(&active_candidate.id) {
-        return Ok(PlatformCredentialResolution::OutOfScope { connection });
+        return Ok(PlatformCredentialResolution::OutOfScope {
+            connection,
+            intent: caller.credential_intent,
+        });
     }
+    let preference_owner_id = active_candidate.user_id.clone();
+    let resolved_intent = platform_preference_service::resolve_credential_intent(
+        caller.credential_intent,
+        context.preference(&preference_owner_id, &catalog_service.id),
+        &operation.id,
+    )?;
 
     let resolved = match mode {
         CredentialResolutionMode::Execute {
@@ -1259,23 +1410,60 @@ pub async fn resolve_operation_credential_source(
     let resolution = match resolved {
         Ok(Some(resolution)) => resolution,
         Ok(None) => {
+            if let Some(preference) = resolved_intent.platform_preference {
+                return platform_resolution(
+                    db,
+                    context,
+                    operation,
+                    &preference_owner_id,
+                    resolved_intent.intent,
+                    preference,
+                    fallback_reason(
+                        resolved_intent.intent,
+                        PlatformFallbackReason::OwnCredentialUnusable,
+                    ),
+                )
+                .await;
+            }
             return Ok(PlatformCredentialResolution::Unusable {
                 connection,
                 error: execution_mode_error(
                     mode,
                     AppError::PlatformOperationOwnConnectionUnusable {
                         vendor: vendor_display_name(contract.vendor),
-                        detail: "The connection could not be resolved; reconnect or disable it."
-                            .to_string(),
+                        detail:
+                            "The connection could not be resolved; reconnect it before retrying."
+                                .to_string(),
                     },
                 ),
+                intent: resolved_intent.intent,
             });
         }
         Err(error) => {
+            if resolved_intent.platform_preference.is_some()
+                && own_error_allows_platform_fallback(&error)
+            {
+                return platform_resolution(
+                    db,
+                    context,
+                    operation,
+                    &preference_owner_id,
+                    resolved_intent.intent,
+                    resolved_intent
+                        .platform_preference
+                        .expect("checked platform preference"),
+                    fallback_reason(
+                        resolved_intent.intent,
+                        PlatformFallbackReason::OwnCredentialUnusable,
+                    ),
+                )
+                .await;
+            }
             let error = normalize_own_connection_error(contract.vendor, error);
             return Ok(PlatformCredentialResolution::Unusable {
                 connection,
                 error: execution_mode_error(mode, error),
+                intent: resolved_intent.intent,
             });
         }
     };
@@ -1285,13 +1473,9 @@ pub async fn resolve_operation_credential_source(
             .allowed_service_ids
             .contains(&resolution.user_service_id)
     {
-        return Ok(PlatformCredentialResolution::OutOfScope { connection });
-    }
-    if resolution.master_credential || resolution.api_key_id.is_none() {
-        let vendor = resolve_platform_vendor_from_context(db, context, operation).await?;
-        return Ok(PlatformCredentialResolution::Platform {
-            vendor: Box::new(vendor),
-            disabled_connection: None,
+        return Ok(PlatformCredentialResolution::OutOfScope {
+            connection,
+            intent: resolved_intent.intent,
         });
     }
     if resolution
@@ -1300,7 +1484,52 @@ pub async fn resolve_operation_credential_source(
         .is_some_and(|id| !id.is_empty())
         || !resolution.has_server_credential
     {
-        return Ok(PlatformCredentialResolution::NodeRouted { connection });
+        return Ok(PlatformCredentialResolution::NodeRouted {
+            connection,
+            intent: resolved_intent.intent,
+        });
+    }
+    if resolution.master_credential || resolution.api_key_id.is_none() {
+        if let Some(preference) = resolved_intent.platform_preference {
+            return platform_resolution(
+                db,
+                context,
+                operation,
+                &preference_owner_id,
+                resolved_intent.intent,
+                preference,
+                fallback_reason(
+                    resolved_intent.intent,
+                    PlatformFallbackReason::OwnCredentialUnusable,
+                ),
+            )
+            .await;
+        }
+        return Ok(PlatformCredentialResolution::Unusable {
+            connection,
+            error: execution_mode_error(
+                mode,
+                AppError::PlatformOperationOwnConnectionUnusable {
+                    vendor: vendor_display_name(contract.vendor),
+                    detail: "The active connection has no usable owner credential.".to_string(),
+                },
+            ),
+            intent: resolved_intent.intent,
+        });
+    }
+    if resolved_intent.intent == CredentialIntent::PlatformOnly {
+        return platform_resolution(
+            db,
+            context,
+            operation,
+            &preference_owner_id,
+            resolved_intent.intent,
+            resolved_intent
+                .platform_preference
+                .expect("platform_only requires stored consent"),
+            PlatformFallbackReason::ExplicitPlatformOnly,
+        )
+        .await;
     }
 
     let mut resolution = resolution;
@@ -1334,12 +1563,29 @@ pub async fn resolve_operation_credential_source(
             }
         };
         if let Err(error) = override_result {
+            if resolved_intent.platform_preference.is_some()
+                && own_error_allows_platform_fallback(&error)
+            {
+                return platform_resolution(
+                    db,
+                    context,
+                    operation,
+                    &preference_owner_id,
+                    resolved_intent.intent,
+                    resolved_intent
+                        .platform_preference
+                        .expect("checked platform preference"),
+                    PlatformFallbackReason::OwnCredentialUnusable,
+                )
+                .await;
+            }
             return Ok(PlatformCredentialResolution::Unusable {
                 connection,
                 error: execution_mode_error(
                     mode,
                     normalize_own_connection_error(contract.vendor, error),
                 ),
+                intent: resolved_intent.intent,
             });
         }
     }
@@ -1363,17 +1609,74 @@ pub async fn resolve_operation_credential_source(
             return Ok(PlatformCredentialResolution::Unusable {
                 connection,
                 error: None,
+                intent: resolved_intent.intent,
             });
         }
         if approval.required && !caller.bypass_approval_flow {
-            return Ok(PlatformCredentialResolution::ApprovalRequired { connection });
+            return Ok(PlatformCredentialResolution::ApprovalRequired {
+                connection,
+                intent: resolved_intent.intent,
+            });
         }
     }
 
     Ok(PlatformCredentialResolution::OwnConnection {
         resolution: Box::new(resolution),
         connection,
+        intent: resolved_intent.intent,
     })
+}
+
+async fn platform_resolution(
+    db: &mongodb::Database,
+    context: &PlatformCredentialResolutionContext,
+    operation: &PlatformOperation,
+    owner_id: &str,
+    intent: CredentialIntent,
+    preference: platform_preference_service::EffectivePlatformPreference,
+    fallback_reason: PlatformFallbackReason,
+) -> AppResult<PlatformCredentialResolution> {
+    let vendor = resolve_platform_vendor_from_context(db, context, operation).await?;
+    Ok(PlatformCredentialResolution::Platform {
+        vendor: Box::new(vendor),
+        owner_id: owner_id.to_string(),
+        intent,
+        preference,
+        fallback_reason,
+    })
+}
+
+fn fallback_reason(
+    intent: CredentialIntent,
+    automatic_reason: PlatformFallbackReason,
+) -> PlatformFallbackReason {
+    if intent == CredentialIntent::PlatformOnly {
+        PlatformFallbackReason::ExplicitPlatformOnly
+    } else {
+        automatic_reason
+    }
+}
+
+fn own_error_allows_platform_fallback(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::TokenExpired | AppError::BadRequest(_) | AppError::Conflict(_)
+    ) || matches!(error, AppError::Internal(detail) if credential_read_failed(detail))
+}
+
+fn credential_read_failed(detail: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "AES decryption failed",
+        "AWS KMS decrypt failed",
+        "GCP KMS decrypt failed",
+        "Ciphertext too short",
+        "DEK unwrap failed",
+        "Failed to create AES cipher",
+        "Failed to create KEK cipher",
+        "Failed to decode credential",
+        "Unwrapped DEK is not",
+    ];
+    PREFIXES.iter().any(|prefix| detail.starts_with(prefix))
 }
 
 fn execution_mode_error(mode: CredentialResolutionMode<'_>, error: AppError) -> Option<AppError> {
@@ -1965,6 +2268,19 @@ mod tests {
         message
     }
 
+    #[test]
+    fn platform_fallback_accepts_credential_read_errors_but_not_generic_internal_failures() {
+        assert!(own_error_allows_platform_fallback(&AppError::Internal(
+            "AES decryption failed: no key could decrypt the data".to_string(),
+        )));
+        assert!(!own_error_allows_platform_fallback(&AppError::Internal(
+            "Data integrity error: endpoint not found".to_string(),
+        )));
+        assert!(!own_error_allows_platform_fallback(
+            &AppError::DatabaseError(mongodb::error::Error::custom("database unavailable"))
+        ));
+    }
+
     fn test_user_key(id: &str, user_id: &str, credential_encrypted: Option<Vec<u8>>) -> UserApiKey {
         UserApiKey {
             id: id.to_string(),
@@ -2067,6 +2383,7 @@ mod tests {
                         allow_all_services: true,
                         allowed_service_ids: &[],
                         bypass_approval_flow: true,
+                        credential_intent: CredentialIntent::Auto,
                     },
                     operation_ref,
                     mode,
@@ -2082,8 +2399,34 @@ mod tests {
             })
             .await
             .expect("resolve no connection"),
+            PlatformCredentialResolution::Unavailable {
+                connection: None,
+                reason: PlatformUnavailableReason::OwnerOptInRequired,
+                intent: CredentialIntent::OwnOnly,
+            }
+        ));
+        platform_preference_service::upsert_preference(
+            &db,
+            &user_id,
+            &user_id,
+            &catalog.id,
+            platform_preference_service::PreferenceWrite {
+                platform_enabled: true,
+                max_credits_per_call: "1000".to_string(),
+                max_credits_per_day: "10000".to_string(),
+                operation_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("opt in to platform credential");
+        assert!(matches!(
+            resolve(CredentialResolutionMode::Discover {
+                descriptor: &descriptor,
+            })
+            .await
+            .expect("resolve opted-in connection absence"),
             PlatformCredentialResolution::Platform {
-                disabled_connection: None,
+                fallback_reason: PlatformFallbackReason::OwnCredentialAbsent,
                 ..
             }
         ));
@@ -2122,14 +2465,15 @@ mod tests {
         .await
         .expect("resolve disabled connection")
         {
-            PlatformCredentialResolution::Platform {
-                disabled_connection: Some(connection),
+            PlatformCredentialResolution::Unavailable {
+                connection: Some(connection),
+                reason: PlatformUnavailableReason::OwnConnectionDisabled,
                 ..
             } => {
                 assert_eq!(connection.user_service_id, user_service_id);
                 assert!(!connection.is_active);
             }
-            _ => panic!("disabled connection must select platform credentials"),
+            _ => panic!("disabled connection must fail closed"),
         }
 
         let encrypted = encryption_keys
@@ -2137,7 +2481,11 @@ mod tests {
             .await
             .expect("encrypt own credential");
         db.collection::<UserApiKey>(USER_API_KEYS)
-            .insert_one(test_user_key(&api_key_id, &user_id, Some(encrypted)))
+            .insert_one(test_user_key(
+                &api_key_id,
+                &user_id,
+                Some(encrypted.clone()),
+            ))
             .await
             .expect("insert own key");
         db.collection::<UserService>(USER_SERVICES)
@@ -2172,24 +2520,55 @@ mod tests {
         db.collection::<UserApiKey>(USER_API_KEYS)
             .update_one(
                 doc! { "_id": &api_key_id },
-                doc! { "$set": { "status": "revoked" } },
+                doc! {
+                    "$set": {
+                        "credential_encrypted": bson::Binary {
+                            subtype: bson::spec::BinarySubtype::Generic,
+                            bytes: vec![0x01, 0x02, 0x03],
+                        }
+                    }
+                },
+            )
+            .await
+            .expect("corrupt own credential ciphertext");
+        assert!(matches!(
+            resolve(CredentialResolutionMode::Execute {
+                connection_expiry_notifier: None,
+            })
+            .await
+            .expect("classify unreadable connection"),
+            PlatformCredentialResolution::Platform {
+                fallback_reason: PlatformFallbackReason::OwnCredentialUnusable,
+                ..
+            }
+        ));
+
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &api_key_id },
+                doc! {
+                    "$set": {
+                        "status": "revoked",
+                        "credential_encrypted": bson::Binary {
+                            subtype: bson::spec::BinarySubtype::Generic,
+                            bytes: encrypted,
+                        },
+                    }
+                },
             )
             .await
             .expect("revoke own key");
-        match resolve(CredentialResolutionMode::Execute {
-            connection_expiry_notifier: None,
-        })
-        .await
-        .expect("classify unusable connection")
-        {
-            PlatformCredentialResolution::Unusable {
-                error: Some(AppError::BadRequest(message)),
+        assert!(matches!(
+            resolve(CredentialResolutionMode::Execute {
+                connection_expiry_notifier: None,
+            })
+            .await
+            .expect("classify unusable connection"),
+            PlatformCredentialResolution::Platform {
+                fallback_reason: PlatformFallbackReason::OwnCredentialUnusable,
                 ..
-            } => {
-                assert!(message.contains("revoked"));
             }
-            _ => panic!("revoked active key must be unusable without platform fallback"),
-        }
+        ));
 
         db.collection::<UserApiKey>(USER_API_KEYS)
             .update_one(
@@ -2234,7 +2613,7 @@ mod tests {
             .await
             .expect("resolve credentialless connection"),
             PlatformCredentialResolution::Platform {
-                disabled_connection: None,
+                fallback_reason: PlatformFallbackReason::OwnCredentialUnusable,
                 ..
             }
         ));
@@ -2345,7 +2724,7 @@ mod tests {
             Some(&catalog_id),
             None,
         );
-        primary_service.api_key_id = Some(primary_key_id);
+        primary_service.api_key_id = Some(primary_key_id.clone());
         primary_service.auth_method = "header".to_string();
         primary_service.auth_key_name = "xi-api-key".to_string();
         let mut secondary_service = crate::test_utils::test_user_service(
@@ -2388,10 +2767,24 @@ mod tests {
         .expect("resolve primary org service");
         assert_eq!(resolved.user_service_id, primary_service_id);
 
+        platform_preference_service::upsert_preference(
+            &db,
+            &primary_org_id,
+            &primary_org_id,
+            &catalog_id,
+            platform_preference_service::PreferenceWrite {
+                platform_enabled: true,
+                max_credits_per_call: "1000".to_string(),
+                max_credits_per_day: "10000".to_string(),
+                operation_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("store primary organization preference");
         let mut context =
             load_credential_resolution_context(&db, &actor_id, std::slice::from_ref(&operation))
                 .await
-                .expect("load credential context");
+                .expect("reload credential context with preference");
         context.visible_connections.sort_by_key(|entry| {
             if entry.service.id == secondary_service_id {
                 0
@@ -2415,6 +2808,7 @@ mod tests {
                 allow_all_services: false,
                 allowed_service_ids: std::slice::from_ref(&secondary_service_id),
                 bypass_approval_flow: false,
+                credential_intent: CredentialIntent::Auto,
             },
             &operation,
             CredentialResolutionMode::Discover {
@@ -2429,6 +2823,47 @@ mod tests {
         assert!(matches!(
             source,
             PlatformCredentialResolution::OutOfScope { .. }
+        ));
+
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &primary_key_id },
+                doc! { "$set": { "status": "revoked" } },
+            )
+            .await
+            .expect("lapse primary organization credential");
+        let context =
+            load_credential_resolution_context(&db, &actor_id, std::slice::from_ref(&operation))
+                .await
+                .expect("reload lapsed organization credential");
+        let source = resolve_operation_credential_source(
+            &db,
+            &encryption_keys,
+            &node_ws_manager,
+            &actor_id,
+            PlatformCredentialCaller {
+                actor_user_id: &actor_id,
+                api_key_id: None,
+                allow_all_services: true,
+                allowed_service_ids: &[],
+                bypass_approval_flow: false,
+                credential_intent: CredentialIntent::Auto,
+            },
+            &operation,
+            CredentialResolutionMode::Discover {
+                descriptor: &descriptor,
+            },
+            &context,
+        )
+        .await
+        .expect("resolve lapsed organization credential");
+        assert!(matches!(
+            source,
+            PlatformCredentialResolution::Platform {
+                owner_id,
+                fallback_reason: PlatformFallbackReason::OwnCredentialUnusable,
+                ..
+            } if owner_id == primary_org_id
         ));
     }
 
@@ -2461,6 +2896,22 @@ mod tests {
             .insert_many(catalog_services.clone())
             .await
             .expect("insert all platform catalog services");
+        for service in &catalog_services {
+            platform_preference_service::upsert_preference(
+                &db,
+                &user_id,
+                &user_id,
+                &service.id,
+                platform_preference_service::PreferenceWrite {
+                    platform_enabled: true,
+                    max_credits_per_call: "1000".to_string(),
+                    max_credits_per_day: "10000".to_string(),
+                    operation_overrides: Vec::new(),
+                },
+            )
+            .await
+            .expect("opt in to shared inventory provider");
+        }
         let encryption_keys = crate::test_utils::test_encryption_keys();
         for service in catalog_services {
             platform_credential_service::set_credential(
@@ -2499,6 +2950,7 @@ mod tests {
                     allow_all_services: true,
                     allowed_service_ids: &[],
                     bypass_approval_flow: true,
+                    credential_intent: CredentialIntent::Auto,
                 },
                 operation,
                 CredentialResolutionMode::Discover {

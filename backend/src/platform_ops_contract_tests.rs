@@ -27,8 +27,11 @@ use crate::models::platform_operation::{
     CallAndSayConfig, FlightSearchConfig, OperationBilling, PlatformOperation,
     PlatformOperationConfig, PlatformOperationName, SpeakConfig,
 };
+use crate::models::platform_service_preference::CredentialIntent;
 use crate::models::service_billing::{BillingMetric, PricingSyncStatus};
-use crate::services::platform_operation_service::PlatformCredentialSource;
+use crate::services::platform_operation_service::{
+    PlatformCredentialSource, PlatformFallbackReason,
+};
 
 /// Path of the fixture, relative to the backend crate root. It lives in the
 /// frontend tree because vitest cannot import JSON from outside its own root.
@@ -144,13 +147,25 @@ fn contract_document() -> serde_json::Value {
         reason: Some("approval_required"),
     };
     let sources = [
-        (PlatformCredentialSource::Platform, None),
         (
-            PlatformCredentialSource::OwnConnection,
-            Some(own_connection),
+            PlatformCredentialSource::Platform,
+            CredentialIntent::Auto,
+            None,
+            Some(PlatformFallbackReason::OwnCredentialAbsent),
+            None,
         ),
         (
             PlatformCredentialSource::OwnConnection,
+            CredentialIntent::Auto,
+            None,
+            None,
+            Some(own_connection),
+        ),
+        (
+            PlatformCredentialSource::Unavailable,
+            CredentialIntent::OwnOnly,
+            Some("own_connection_disabled"),
+            None,
             Some(blocked_connection),
         ),
     ];
@@ -159,9 +174,19 @@ fn contract_document() -> serde_json::Value {
         operations: operations
             .iter()
             .zip(sources)
-            .map(|(operation, (source, connection))| {
-                platform_operation_discovery_response(operation, source, connection, true)
-            })
+            .map(
+                |(operation, (source, intent, availability, fallback, connection))| {
+                    platform_operation_discovery_response(
+                        operation,
+                        source,
+                        intent,
+                        availability,
+                        fallback,
+                        connection,
+                        true,
+                    )
+                },
+            )
             .collect(),
     };
 

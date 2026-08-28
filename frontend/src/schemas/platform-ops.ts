@@ -249,7 +249,22 @@ export const platformOperationDiscoverySchema = z
     description: z.string().min(1),
     vendor: z.string().min(1),
     catalog_service_slug: z.string().min(1),
-    credential_source: z.enum(["platform", "own_connection"]),
+    credential_source: z.enum([
+      "platform",
+      "own_connection",
+      "unavailable",
+    ]),
+    credential_intent: z.enum(["auto", "own_only", "platform_only"]),
+    availability_reason: z
+      .enum(["owner_opt_in_required", "own_connection_disabled"])
+      .nullable(),
+    fallback_reason: z
+      .enum([
+        "own_credential_absent",
+        "own_credential_unusable",
+        "explicit_platform_only",
+      ])
+      .nullable(),
     own_connection: z
       .object({
         user_service_id: z.string().min(1),

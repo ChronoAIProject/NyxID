@@ -1857,6 +1857,7 @@ fn platform_operation_caller(
         acting_client_id: auth.acting_client_id.clone(),
         allow_all_services: auth.allow_all_services,
         allowed_service_ids: auth.allowed_service_ids.clone(),
+        credential_intent: crate::models::platform_service_preference::CredentialIntent::Auto,
     }
 }
 
@@ -1947,7 +1948,8 @@ async fn handle_platform_speak(
         Ok(super::platform_ops::PlatformOperationExecution {
             value: audio,
             credential_source: execution.credential_source,
-            own_connection_disabled: execution.own_connection_disabled,
+            credential_intent: execution.credential_intent,
+            fallback_reason: execution.fallback_reason,
             attribution: execution.attribution,
         })
     }

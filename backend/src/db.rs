@@ -31,6 +31,8 @@ use crate::models::oauth_broker_binding::{
 use crate::models::platform_credential::COLLECTION_NAME as PLATFORM_CREDENTIALS;
 use crate::models::platform_op_usage::COLLECTION_NAME as PLATFORM_OP_USAGE;
 use crate::models::platform_operation::COLLECTION_NAME as PLATFORM_OPERATIONS;
+use crate::models::platform_service_preference::COLLECTION_NAME as PLATFORM_SERVICE_PREFERENCES;
+use crate::models::platform_spend_usage::COLLECTION_NAME as PLATFORM_SPEND_USAGE;
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::pushed_authorization_request::COLLECTION_NAME as PAR_COLLECTION;
 use crate::models::ssh_auth_mode::SshAuthMode;
@@ -369,6 +371,60 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                     IndexOptions::builder()
                         .name("platform_op_usage_user_day_unique".to_string())
                         .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    let platform_preferences =
+        db.collection::<mongodb::bson::Document>(PLATFORM_SERVICE_PREFERENCES);
+    platform_preferences
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_id": 1, "catalog_service_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("platform_service_preferences_owner_catalog_unique".to_string())
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    platform_preferences
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "catalog_service_id": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("platform_service_preferences_catalog".to_string())
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    let platform_spend_usage = db.collection::<mongodb::bson::Document>(PLATFORM_SPEND_USAGE);
+    platform_spend_usage
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "owner_id": 1, "catalog_service_id": 1, "yyyymmdd": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("platform_spend_usage_owner_catalog_day_unique".to_string())
+                        .unique(true)
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    platform_spend_usage
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("platform_spend_usage_expiry".to_string())
+                        .expire_after(Duration::ZERO)
                         .build(),
                 )
                 .build(),

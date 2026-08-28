@@ -226,6 +226,25 @@ macro_rules! platform_operation_billing_routes {
                 )
             ),
             (
+                "/preferences",
+                "/api/v1/platform-ops/preferences",
+                "handlers::platform_preferences::list_preferences",
+                get(handlers::platform_preferences::list_preferences),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "owner spending preference control plane; no downstream request"
+                )
+            ),
+            (
+                "/preferences/{catalog_service_id}",
+                "/api/v1/platform-ops/preferences/{catalog_service_id}",
+                "handlers::platform_preferences::update_or_delete_preference",
+                put(handlers::platform_preferences::update_preference)
+                    .delete(handlers::platform_preferences::delete_preference),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "owner spending preference control plane; no downstream request"
+                )
+            ),
+            (
                 "/speak",
                 "/api/v1/platform-ops/speak",
                 "handlers::platform_ops::speak",

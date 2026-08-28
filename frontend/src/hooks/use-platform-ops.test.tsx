@@ -83,6 +83,9 @@ describe("platform operation hooks", () => {
           vendor: "elevenlabs",
           catalog_service_slug: "api-elevenlabs",
           credential_source: "platform",
+          credential_intent: "auto",
+          availability_reason: null,
+          fallback_reason: "own_credential_absent",
           own_connection: null,
           pricing: discoveryPricing({
             billable: true,

@@ -70,6 +70,7 @@ pub mod oracle_worker;
 pub mod org_role_scopes;
 pub mod orgs;
 pub mod platform_ops;
+pub mod platform_preferences;
 pub mod providers;
 pub mod proxy;
 pub mod public_mcp;
