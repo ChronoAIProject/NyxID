@@ -1116,9 +1116,7 @@ async fn proxy_request_inner(
         )
         .await;
     }
-    if let Err(error) = own_resolution {
-        return Err(error);
-    }
+    own_resolution?;
 
     // Fall back to old path. Before we do, block org viewers whose org
     // has any presence for this catalog service from slipping into the
@@ -1372,9 +1370,7 @@ async fn proxy_request_by_slug_inner(
         )
         .await;
     }
-    if let Err(error) = own_resolution {
-        return Err(error);
-    }
+    own_resolution?;
 
     // Fall back to old path. Before we do, block org viewers whose org
     // has any presence for this slug from slipping into the legacy

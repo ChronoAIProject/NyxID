@@ -1614,8 +1614,9 @@ async fn forward_metered_operation(
     } else {
         None
     };
-    if is_platform && let Some(limit) = &daily_limit {
-        if let Err(error) = platform_operation_service::reserve_daily_operation(
+    if is_platform
+        && let Some(limit) = &daily_limit
+        && let Err(error) = platform_operation_service::reserve_daily_operation(
             &state.db,
             &operation.id,
             &execution_owner_id,
@@ -1623,10 +1624,9 @@ async fn forward_metered_operation(
             limit.cap,
         )
         .await
-        {
-            release_platform_spend(state, platform_spend_reservation.as_ref()).await;
-            return Err(error);
-        }
+    {
+        release_platform_spend(state, platform_spend_reservation.as_ref()).await;
+        return Err(error);
     }
 
     let metered = if let ExecutionTarget::Platform(platform) = &resolved.target {
@@ -1714,13 +1714,15 @@ async fn forward_metered_operation(
                 Err(error) => {
                     fail_platform_attempt(
                         state,
-                        &metered,
-                        "credential_unavailable",
-                        op,
-                        &operation.id,
-                        &execution_owner_id,
-                        daily_limit.as_ref(),
-                        platform_spend_reservation.as_ref(),
+                        PlatformAttemptFailure {
+                            metered: &metered,
+                            reason: "credential_unavailable",
+                            op,
+                            operation_id: &operation.id,
+                            owner_id: &execution_owner_id,
+                            daily_limit: daily_limit.as_ref(),
+                            spend_reservation: platform_spend_reservation.as_ref(),
+                        },
                     )
                     .await;
                     return Err(error);
@@ -1733,13 +1735,15 @@ async fn forward_metered_operation(
     if let Err(error) = state.billing.mark_forwarded(&metered).await {
         fail_platform_attempt(
             state,
-            &metered,
-            "mark_forwarded_failed",
-            op,
-            &operation.id,
-            &execution_owner_id,
-            daily_limit.as_ref(),
-            platform_spend_reservation.as_ref(),
+            PlatformAttemptFailure {
+                metered: &metered,
+                reason: "mark_forwarded_failed",
+                op,
+                operation_id: &operation.id,
+                owner_id: &execution_owner_id,
+                daily_limit: daily_limit.as_ref(),
+                spend_reservation: platform_spend_reservation.as_ref(),
+            },
         )
         .await;
         return Err(error);
@@ -1763,13 +1767,15 @@ async fn forward_metered_operation(
         Err(error) => {
             fail_platform_attempt(
                 state,
-                &metered,
-                "vendor_request_failed",
-                op,
-                &operation.id,
-                &execution_owner_id,
-                daily_limit.as_ref(),
-                platform_spend_reservation.as_ref(),
+                PlatformAttemptFailure {
+                    metered: &metered,
+                    reason: "vendor_request_failed",
+                    op,
+                    operation_id: &operation.id,
+                    owner_id: &execution_owner_id,
+                    daily_limit: daily_limit.as_ref(),
+                    spend_reservation: platform_spend_reservation.as_ref(),
+                },
             )
             .await;
             return Err(error);
@@ -1781,13 +1787,15 @@ async fn forward_metered_operation(
         } else {
             fail_platform_attempt(
                 state,
-                &metered,
-                "vendor_non_success",
-                op,
-                &operation.id,
-                &execution_owner_id,
-                daily_limit.as_ref(),
-                platform_spend_reservation.as_ref(),
+                PlatformAttemptFailure {
+                    metered: &metered,
+                    reason: "vendor_non_success",
+                    op,
+                    operation_id: &operation.id,
+                    owner_id: &execution_owner_id,
+                    daily_limit: daily_limit.as_ref(),
+                    spend_reservation: platform_spend_reservation.as_ref(),
+                },
             )
             .await;
         }
@@ -1835,32 +1843,32 @@ async fn settle_meter_async(
     }
 }
 
-async fn fail_platform_attempt(
-    state: &AppState,
-    metered: &crate::services::billing::MeteredProxyContext,
-    reason: &str,
+struct PlatformAttemptFailure<'a> {
+    metered: &'a crate::services::billing::MeteredProxyContext,
+    reason: &'a str,
     op: crate::models::platform_operation::PlatformOperationName,
-    operation_id: &str,
-    owner_id: &str,
-    daily_limit: Option<&DailyLimit>,
-    spend_reservation: Option<
-        &crate::services::platform_preference_service::PlatformSpendReservation,
-    >,
-) {
-    if let Err(error) = state.billing.fail(metered, reason).await {
+    operation_id: &'a str,
+    owner_id: &'a str,
+    daily_limit: Option<&'a DailyLimit>,
+    spend_reservation:
+        Option<&'a crate::services::platform_preference_service::PlatformSpendReservation>,
+}
+
+async fn fail_platform_attempt(state: &AppState, failure: PlatformAttemptFailure<'_>) {
+    if let Err(error) = state.billing.fail(failure.metered, failure.reason).await {
         tracing::error!(
-            op = platform_operation_service::operation_name(op),
+            op = platform_operation_service::operation_name(failure.op),
             error = %error,
             "Failed to release platform operation billing reservation"
         );
     }
     release_platform_limits(
         state,
-        op,
-        operation_id,
-        owner_id,
-        daily_limit,
-        spend_reservation,
+        failure.op,
+        failure.operation_id,
+        failure.owner_id,
+        failure.daily_limit,
+        failure.spend_reservation,
     )
     .await;
 }
@@ -2084,13 +2092,15 @@ pub(crate) async fn execute_call_and_say_for_caller(
             } else {
                 fail_platform_attempt(
                     state,
-                    &metered,
-                    "vendor_response_invalid",
-                    PlatformOperationName::CallAndSay,
-                    &attribution.operation_id,
-                    &owner_id,
-                    daily_limit.as_ref(),
-                    spend_reservation.as_ref(),
+                    PlatformAttemptFailure {
+                        metered: &metered,
+                        reason: "vendor_response_invalid",
+                        op: PlatformOperationName::CallAndSay,
+                        operation_id: &attribution.operation_id,
+                        owner_id: &owner_id,
+                        daily_limit: daily_limit.as_ref(),
+                        spend_reservation: spend_reservation.as_ref(),
+                    },
                 )
                 .await;
             }
@@ -2215,13 +2225,15 @@ pub(crate) async fn execute_flight_search_for_caller(
             } else {
                 fail_platform_attempt(
                     state,
-                    &metered,
-                    "vendor_response_invalid",
-                    PlatformOperationName::FlightSearch,
-                    &attribution.operation_id,
-                    &owner_id,
-                    daily_limit.as_ref(),
-                    spend_reservation.as_ref(),
+                    PlatformAttemptFailure {
+                        metered: &metered,
+                        reason: "vendor_response_invalid",
+                        op: PlatformOperationName::FlightSearch,
+                        operation_id: &attribution.operation_id,
+                        owner_id: &owner_id,
+                        daily_limit: daily_limit.as_ref(),
+                        spend_reservation: spend_reservation.as_ref(),
+                    },
                 )
                 .await;
             }

@@ -3288,6 +3288,14 @@ pub struct PreparedProxyCall {
     is_generic_proxy_endpoint: bool,
 }
 
+pub struct PreparedPlatformCall {
+    pub method: reqwest::Method,
+    pub path: String,
+    pub query: Option<String>,
+    pub headers: reqwest::header::HeaderMap,
+    pub body: Option<bytes::Bytes>,
+}
+
 impl PreparedProxyCall {
     pub fn operation_descriptor(&self) -> operation_descriptor::OperationDescriptor {
         operation_descriptor::build_mcp_descriptor(
@@ -3310,13 +3318,7 @@ impl PreparedProxyCall {
     pub fn into_platform_parts(
         self,
         endpoint: &McpToolEndpoint,
-    ) -> AppResult<(
-        reqwest::Method,
-        String,
-        Option<String>,
-        reqwest::header::HeaderMap,
-        Option<bytes::Bytes>,
-    )> {
+    ) -> AppResult<PreparedPlatformCall> {
         let mut headers = if self.is_generic_proxy_endpoint {
             let mut headers = reqwest::header::HeaderMap::new();
             if self.body.is_some() {
@@ -3343,7 +3345,13 @@ impl PreparedProxyCall {
             })?;
             headers.append(name, value);
         }
-        Ok((self.method, self.path, self.query, headers, self.body))
+        Ok(PreparedPlatformCall {
+            method: self.method,
+            path: self.path,
+            query: self.query,
+            headers,
+            body: self.body,
+        })
     }
 }
 

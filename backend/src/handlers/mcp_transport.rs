@@ -2017,7 +2017,13 @@ async fn execute_paid_platform_endpoint_mcp(
     )
     .await?
     .ok_or(AppError::PlatformOperationUnavailable)?;
-    let (method, path, query, headers, body) = prepared.into_platform_parts(endpoint)?;
+    let mcp_service::PreparedPlatformCall {
+        method,
+        path,
+        query,
+        headers,
+        body,
+    } = prepared.into_platform_parts(endpoint)?;
     let result = super::platform_ops::execute_platform_endpoint(
         state,
         &caller,

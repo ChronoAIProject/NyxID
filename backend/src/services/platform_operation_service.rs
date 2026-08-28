@@ -1514,8 +1514,8 @@ async fn resolve_credential_source(
             });
         }
         Err(error) => {
-            if resolved_intent.platform_preference.is_some()
-                && own_error_allows_platform_fallback(&error)
+            if own_error_allows_platform_fallback(&error)
+                && let Some(preference) = resolved_intent.platform_preference
             {
                 return platform_resolution(
                     db,
@@ -1523,9 +1523,7 @@ async fn resolve_credential_source(
                     operation,
                     &preference_owner_id,
                     resolved_intent.intent,
-                    resolved_intent
-                        .platform_preference
-                        .expect("checked platform preference"),
+                    preference,
                     fallback_reason(
                         resolved_intent.intent,
                         PlatformFallbackReason::OwnCredentialUnusable,
@@ -1637,8 +1635,8 @@ async fn resolve_credential_source(
             }
         };
         if let Err(error) = override_result {
-            if resolved_intent.platform_preference.is_some()
-                && own_error_allows_platform_fallback(&error)
+            if own_error_allows_platform_fallback(&error)
+                && let Some(preference) = resolved_intent.platform_preference
             {
                 return platform_resolution(
                     db,
@@ -1646,9 +1644,7 @@ async fn resolve_credential_source(
                     operation,
                     &preference_owner_id,
                     resolved_intent.intent,
-                    resolved_intent
-                        .platform_preference
-                        .expect("checked platform preference"),
+                    preference,
                     PlatformFallbackReason::OwnCredentialUnusable,
                 )
                 .await;

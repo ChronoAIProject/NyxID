@@ -906,14 +906,13 @@ mod tests {
                 .expect("count provider promotions"),
             1
         );
-        assert_eq!(
-            db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        assert!(
+            !db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
                 .find_one(doc! { "_id": &operation.id })
                 .await
                 .expect("read operation")
                 .expect("operation exists")
                 .enabled,
-            false,
             "promotion must not grant operation authority"
         );
     }
