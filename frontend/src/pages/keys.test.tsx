@@ -167,6 +167,36 @@ describe("KeysPage", () => {
     expect(screen.getByText("/proxy/s/openai")).toBeInTheDocument();
   });
 
+  it("omits oauth2 and api_key credential pills from service cards", () => {
+    state.keys = [
+      makeKey({
+        id: "oauth-service",
+        label: "OAuth Service",
+        slug: "oauth-service",
+        credential_type: "oauth2",
+      }),
+      makeKey({
+        id: "api-key-service",
+        label: "API Key Service",
+        slug: "api-key-service",
+        credential_type: "api_key",
+      }),
+      makeKey({
+        id: "bearer-service",
+        label: "Bearer Service",
+        slug: "bearer-service",
+        credential_type: "bearer",
+      }),
+    ];
+
+    render(<KeysPage />);
+
+    expect(screen.queryByText("oauth2")).not.toBeInTheDocument();
+    expect(screen.queryByText("api_key")).not.toBeInTheDocument();
+    expect(screen.getByText("bearer")).toBeInTheDocument();
+    expect(screen.getAllByText("Direct")).toHaveLength(3);
+  });
+
   it("shows the empty state with an Add Your First Service CTA when there are no services", async () => {
     state.keys = [];
 

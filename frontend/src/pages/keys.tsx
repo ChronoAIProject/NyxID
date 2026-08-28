@@ -211,16 +211,20 @@ function KeyCardContent({
             <Badge variant="warning">Credential Missing</Badge>
           )}
           {isSsh && <Badge variant="secondary">SSH</Badge>}
-          {/* Auth-method pill — moved to top so it aligns across cards */}
-          <Badge variant="secondary">
-            {keyInfo.auto_connected
-              ? autoAuthLabel
-              : isSsh
-                ? hasSshCertificateAuth
-                  ? "certificate"
-                  : "ssh tunnel"
-                : keyInfo.credential_type}
-          </Badge>
+          {(keyInfo.auto_connected ||
+            isSsh ||
+            (keyInfo.credential_type !== "oauth2" &&
+              keyInfo.credential_type !== "api_key")) && (
+            <Badge variant="secondary">
+              {keyInfo.auto_connected
+                ? autoAuthLabel
+                : isSsh
+                  ? hasSshCertificateAuth
+                    ? "certificate"
+                    : "ssh tunnel"
+                  : keyInfo.credential_type}
+            </Badge>
+          )}
           {/* Routing pill — moved to top so it aligns across cards.
               When routed via a node, the badge becomes a real Link so the
               user can jump straight to the node detail page (deferred Wave B
