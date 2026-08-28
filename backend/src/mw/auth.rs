@@ -316,6 +316,12 @@ fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool 
         return false;
     }
 
+    // Execution-shaped routes. A management `write` scope is the wrong control
+    // for them: it authorizes changing configuration, not running a request.
+    //
+    // `/api/v1/platform-ops` is exempt here for that reason, not because it is
+    // ungated. It spends the owner's credits, so it carries its own
+    // `platform:spend` scope check in the handler.
     ![
         "/api/v1/channel-events",
         "/api/v1/channel-relay",

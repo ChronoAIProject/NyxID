@@ -24,7 +24,8 @@ use crate::mw::auth::{AuthUser, SERVICE_DELEGATION_SCOPES};
 use crate::services::url_validation::{validate_base_url, validate_optional_spec_url};
 use crate::services::{
     anonymous_endpoint_service, api_docs_service, audit_service, catalog_identity_service,
-    catalog_spec_sync, oauth_client_service, ssh_service, user_service_service,
+    catalog_spec_sync, oauth_client_service, platform_credential_service, ssh_service,
+    user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -1314,14 +1315,41 @@ pub async fn delete_service(
         );
     }
 
-    tracing::info!(service_id = %service_id, deactivated_by = %auth_user.user_id, "Service deactivated");
+    let platform_operations = platform_credential_service::prepare_catalog_provider_deletion(
+        &state.db,
+        &service_id,
+        &auth_user.user_id.to_string(),
+    )
+    .await?;
+    for operation in &platform_operations {
+        state.billing.remove_operation_price(operation).await?;
+    }
+    let platform_deletion =
+        platform_credential_service::delete_catalog_provider_artifacts(&state.db, &service_id)
+            .await?;
+
+    tracing::info!(
+        service_id = %service_id,
+        deactivated_by = %auth_user.user_id,
+        platform_operations_deleted = platform_deletion.operations,
+        platform_credentials_deleted = platform_deletion.credentials,
+        platform_promotions_deleted = platform_deletion.promotions,
+        platform_preferences_deleted = platform_deletion.preferences,
+        "Service deactivated"
+    );
 
     // CR-1: Audit log for service deletion
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
         "service_deleted",
-        Some(serde_json::json!({ "service_id": &service_id })),
+        Some(serde_json::json!({
+            "service_id": &service_id,
+            "platform_operations_deleted": platform_deletion.operations,
+            "platform_credentials_deleted": platform_deletion.credentials,
+            "platform_promotions_deleted": platform_deletion.promotions,
+            "platform_preferences_deleted": platform_deletion.preferences,
+        })),
     );
 
     // CR-16: Use typed response struct
@@ -2478,10 +2506,10 @@ pub async fn regenerate_oidc_secret(
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateServiceRequest, UpdateServiceRequest, create_service, derive_http_service_category,
-        derive_ssh_service_category, derive_visibility, identity_update_fields,
-        normalize_service_type, resolve_spec_url_update, resync_service_identity, update_service,
-        validate_master_credential_shape,
+        CreateServiceRequest, UpdateServiceRequest, create_service, delete_service,
+        derive_http_service_category, derive_ssh_service_category, derive_visibility,
+        identity_update_fields, normalize_service_type, resolve_spec_url_update,
+        resync_service_identity, update_service, validate_master_credential_shape,
     };
     use crate::errors::{AppError, AppResult};
     use crate::models::audit_log::COLLECTION_NAME as AUDIT_LOGS;
@@ -2493,6 +2521,20 @@ mod tests {
     use crate::models::downstream_service::test_helpers::dummy_service;
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
+    use crate::models::platform_credential::{
+        COLLECTION_NAME as PLATFORM_CREDENTIALS, PlatformCredential,
+    };
+    use crate::models::platform_operation::{
+        COLLECTION_NAME as PLATFORM_OPERATIONS, OperationBilling, OperationLimits, PerRequestCaps,
+        PlatformOperationRow,
+    };
+    use crate::models::platform_provider_promotion::{
+        COLLECTION_NAME as PLATFORM_PROVIDER_PROMOTIONS, PlatformProviderPromotion,
+    };
+    use crate::models::platform_service_preference::{
+        COLLECTION_NAME as PLATFORM_SERVICE_PREFERENCES, PlatformOperationPreferenceOverride,
+        PlatformServicePreference,
     };
     use crate::models::service_billing::{
         BillingMetric, PricingSyncStatus, ServiceBilling, ServicePlatformPricing,
@@ -2511,6 +2553,7 @@ mod tests {
     use async_trait::async_trait;
     use axum::Json;
     use axum::extract::{Path, State};
+    use chrono::Utc;
     use futures::TryStreamExt;
     use mongodb::bson::{self, doc};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2726,6 +2769,164 @@ mod tests {
             .await
             .expect("count created downstream service");
         assert_eq!(service_count, 1);
+    }
+
+    #[tokio::test]
+    async fn delete_service_cascades_platform_provider_artifacts_and_rate_cache() {
+        let Some(db) = connect_test_database("h_services_delete_platform_cascade").await else {
+            return;
+        };
+        let admin_id = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let service_id = Uuid::new_v4().to_string();
+        let mut service = dummy_service();
+        service.id = service_id.clone();
+        service.slug = "delete-platform-cascade".to_string();
+        service.created_by = admin_id.clone();
+        service.is_active = true;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert catalog service");
+
+        let metric_code = "platform_op_delete_platform_cascade";
+        let mut operation = PlatformOperationRow::new_endpoint(
+            service_id.clone(),
+            "GET".to_string(),
+            "/v1/items".to_string(),
+            "List items".to_string(),
+            None,
+            OperationLimits {
+                per_request: PerRequestCaps::Endpoint,
+                per_user_per_day: Some(10),
+            },
+            OperationBilling {
+                metric: BillingMetric::Requests,
+                price_per_unit: "0.25".to_string(),
+                secondary: None,
+                base_fee_per_call: None,
+                lago_metric_code: metric_code.to_string(),
+                sync_status: PricingSyncStatus::Synced,
+                sync_error: None,
+            },
+            admin_id.clone(),
+        );
+        operation.enabled = true;
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(&operation)
+            .await
+            .expect("insert platform operation");
+        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .insert_one(BillingRateCache {
+                id: BillingRateCache::cache_id(metric_code, None),
+                lago_metric_code: metric_code.to_string(),
+                model: None,
+                credits_per_unit_micros: 250_000,
+                synced_at: Utc::now(),
+            })
+            .await
+            .expect("insert operation rate cache");
+
+        let now = Utc::now();
+        db.collection::<PlatformCredential>(PLATFORM_CREDENTIALS)
+            .insert_one(PlatformCredential {
+                id: Uuid::new_v4().to_string(),
+                catalog_service_id: service_id.clone(),
+                credential_encrypted: vec![1, 2, 3],
+                auth_method: "bearer".to_string(),
+                auth_key_name: "Authorization".to_string(),
+                created_by: admin_id.clone(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert platform credential");
+        db.collection::<PlatformProviderPromotion>(PLATFORM_PROVIDER_PROMOTIONS)
+            .insert_one(PlatformProviderPromotion {
+                id: Uuid::new_v4().to_string(),
+                catalog_service_id: service_id.clone(),
+                vendor_terms_accepted_by: admin_id.clone(),
+                vendor_terms_accepted_at: now,
+                promoted_by: admin_id.clone(),
+                promoted_at: now,
+                updated_by: admin_id.clone(),
+                updated_at: now,
+            })
+            .await
+            .expect("insert platform promotion");
+        db.collection::<PlatformServicePreference>(PLATFORM_SERVICE_PREFERENCES)
+            .insert_one(PlatformServicePreference {
+                id: Uuid::new_v4().to_string(),
+                owner_id: admin_id.clone(),
+                catalog_service_id: service_id.clone(),
+                platform_enabled: true,
+                max_credits_per_call: "1".to_string(),
+                max_credits_per_day: "10".to_string(),
+                operation_overrides: vec![PlatformOperationPreferenceOverride {
+                    operation_id: operation.id.clone(),
+                    platform_enabled: true,
+                    max_credits_per_call: "1".to_string(),
+                    max_credits_per_day: "10".to_string(),
+                }],
+                created_by: admin_id.clone(),
+                updated_by: admin_id.clone(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert platform preference");
+
+        let Json(response) = delete_service(
+            State(state),
+            test_auth_user(&admin_id),
+            Path(service_id.clone()),
+        )
+        .await
+        .expect("delete catalog service");
+
+        assert_eq!(response.message, "Service deactivated");
+        let deactivated = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": &service_id })
+            .await
+            .expect("load deactivated service")
+            .expect("catalog service remains as inactive row");
+        assert!(!deactivated.is_active);
+        assert_eq!(
+            db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+                .count_documents(doc! { "catalog_service_id": &service_id })
+                .await
+                .expect("count platform operations"),
+            0
+        );
+        assert_eq!(
+            db.collection::<PlatformCredential>(PLATFORM_CREDENTIALS)
+                .count_documents(doc! { "catalog_service_id": &service_id })
+                .await
+                .expect("count platform credentials"),
+            0
+        );
+        assert_eq!(
+            db.collection::<PlatformProviderPromotion>(PLATFORM_PROVIDER_PROMOTIONS)
+                .count_documents(doc! { "catalog_service_id": &service_id })
+                .await
+                .expect("count platform promotions"),
+            0
+        );
+        assert_eq!(
+            db.collection::<PlatformServicePreference>(PLATFORM_SERVICE_PREFERENCES)
+                .count_documents(doc! { "catalog_service_id": &service_id })
+                .await
+                .expect("count platform preferences"),
+            0
+        );
+        assert_eq!(
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME,)
+                .count_documents(doc! { "lago_metric_code": metric_code })
+                .await
+                .expect("count operation rate cache"),
+            0
+        );
     }
 
     #[tokio::test]

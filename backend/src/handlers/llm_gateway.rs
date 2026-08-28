@@ -59,7 +59,10 @@ fn resale_usage_from_optional_reported(
             metric,
             quantity: fallback_bytes.max(0),
         }),
-        BillingMetric::Characters | BillingMetric::Seconds => Some(ResaleUsage {
+        BillingMetric::Characters
+        | BillingMetric::Seconds
+        | BillingMetric::InputTokens
+        | BillingMetric::OutputTokens => Some(ResaleUsage {
             metric,
             quantity: 0,
         }),

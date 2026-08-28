@@ -31,13 +31,22 @@ pub fn normalize_platform_pricing(
     if requested
         .platform_metric
         .is_some_and(|metric| matches!(metric, BillingMetric::Characters | BillingMetric::Seconds))
+        || requested.platform_metric.is_some_and(|metric| {
+            matches!(
+                metric,
+                BillingMetric::InputTokens | BillingMetric::OutputTokens
+            )
+        })
         || matches!(
             requested.resale_metric,
-            BillingMetric::Characters | BillingMetric::Seconds
+            BillingMetric::Characters
+                | BillingMetric::Seconds
+                | BillingMetric::InputTokens
+                | BillingMetric::OutputTokens
         )
     {
         return Err(AppError::ValidationError(
-            "characters and seconds billing metrics are reserved for platform operations"
+            "characters, seconds, input_tokens, and output_tokens billing metrics are reserved for platform operations"
                 .to_string(),
         ));
     }
@@ -123,15 +132,13 @@ pub fn metric_code_for_operation(catalog_slug: &str, kind_key: &str) -> String {
     if slug.is_empty() {
         slug.push_str("operation");
     }
-    let mut code = format!("platform_op_{slug}");
-    if code.len() <= MAX_OPERATION_METRIC_CODE_LEN {
-        return code;
-    }
-
     let digest = hex::encode(Sha256::digest(identity.as_bytes()));
     let suffix = &digest[..16];
+    let mut code = format!("platform_op_{slug}");
     let prefix_len = MAX_OPERATION_METRIC_CODE_LEN - suffix.len() - 1;
-    code.truncate(prefix_len);
+    if code.len() > prefix_len {
+        code.truncate(prefix_len);
+    }
     while code.ends_with('_') {
         code.pop();
     }
@@ -152,27 +159,90 @@ pub fn normalize_operation_billing(
         )));
     }
     requested.price_per_unit = normalize_price(&requested.price_per_unit)?;
+    if let Some(secondary) = requested.secondary.as_mut() {
+        if secondary.metric == requested.metric {
+            return Err(AppError::ValidationError(
+                "platform operation billing components must use distinct metrics".to_string(),
+            ));
+        }
+        if !operation_supports_metric(kind, secondary.metric) {
+            return Err(AppError::ValidationError(format!(
+                "billing metric '{}' cannot be measured for this platform operation",
+                secondary.metric.as_str()
+            )));
+        }
+        secondary.price_per_unit = normalize_price(&secondary.price_per_unit)?;
+        if secondary.price_per_unit == "0" {
+            return Err(AppError::ValidationError(
+                "the secondary billing component must have a non-zero per-unit price".to_string(),
+            ));
+        }
+        secondary.lago_metric_code =
+            metric_code_for_operation(catalog_slug, &format!("{kind_key}:component:2"));
+    }
     requested.base_fee_per_call = requested
         .base_fee_per_call
         .as_deref()
         .map(normalize_price)
         .transpose()?;
-    if requested.base_fee_per_call.is_some() && requested.price_per_unit == "0" {
-        return Err(AppError::ValidationError(
-            "billing base_fee_per_call requires a non-zero per-unit price".to_string(),
-        ));
-    }
     requested.lago_metric_code = metric_code_for_operation(catalog_slug, kind_key);
     requested.sync_status = PricingSyncStatus::Pending;
     requested.sync_error = None;
     Ok(())
 }
 
+/// Renders an operation price as one human-readable sentence fragment.
+///
+/// Every surface that shows a platform price -- the admin table, `/keys`, and
+/// MCP tool descriptions -- formats through here so a `characters` or
+/// `seconds` operation cannot be rendered as if it were priced per call. The
+/// caller passes the `billable` decision it already made, because the
+/// user-facing surfaces also gate on the billing rollout flag while the admin
+/// surface reports the configured price regardless.
+pub fn format_operation_price(billing: &OperationBilling, billable: bool) -> String {
+    if !billable {
+        return "Free".to_string();
+    }
+    let mut parts = Vec::with_capacity(3);
+    if let Some(base) = &billing.base_fee_per_call {
+        parts.push(format!("{base} credits per call"));
+    }
+    if billing.price_per_unit != "0" {
+        parts.push(format!(
+            "{} credits per {}",
+            billing.price_per_unit,
+            billing.metric.unit_noun()
+        ));
+    }
+    if let Some(secondary) = &billing.secondary {
+        parts.push(format!(
+            "{} credits per {}",
+            secondary.price_per_unit,
+            secondary.metric.unit_noun()
+        ));
+    }
+    if parts.is_empty() {
+        "Price not set".to_string()
+    } else {
+        parts.join(" + ")
+    }
+}
+
 pub fn operation_supports_metric(kind: &PlatformOperationKind, metric: BillingMetric) -> bool {
     match kind {
-        PlatformOperationKind::Endpoint { .. } => {
-            matches!(metric, BillingMetric::Requests | BillingMetric::Bytes)
-        }
+        // Endpoint bytes are the response-body bytes only. Request bytes are
+        // caller-controlled and would let a client amplify its own spend
+        // before the provider has returned any value.
+        PlatformOperationKind::Endpoint { .. } => matches!(
+            metric,
+            BillingMetric::Requests
+                | BillingMetric::Bytes
+                | BillingMetric::Tokens
+                | BillingMetric::Characters
+                | BillingMetric::Seconds
+                | BillingMetric::InputTokens
+                | BillingMetric::OutputTokens
+        ),
         PlatformOperationKind::Constrained {
             op: ConstrainedOp::Speak,
             ..
@@ -378,83 +448,100 @@ pub async fn sync_operation_price(
                 "The platform operation catalog service is missing or inactive.".to_string(),
             )
         })?;
-    let input = ServicePriceSync {
-        metric_code: row.billing.lago_metric_code.clone(),
-        metric_name: format!("{} platform operation", service.name),
-        metric_description: format!(
-            "NyxID-managed platform operation {} for catalog service {}",
-            row.kind_key, service.slug
-        ),
-        credits_per_unit: row.billing.price_per_unit.clone(),
-    };
-
-    match lago.sync_standard_charge(plan_code, &input).await {
-        Ok(()) => {
-            let micros = super::lago_client::decimal_credits_to_micros(&row.billing.price_per_unit)
-                .ok_or_else(|| {
-                    AppError::Internal("stored operation price is invalid".to_string())
-                })?;
-            if !set_operation_sync_state(db, row, PricingSyncStatus::Synced, None).await? {
-                db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
-                    .update_one(
-                        doc! { "_id": &row.id },
-                        doc! { "$set": {
-                            "billing.sync_status": "pending",
-                            "billing.sync_error": Bson::Null,
-                        } },
-                    )
-                    .await?;
-                return Ok(false);
-            }
-            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-                .replace_one(
-                    doc! { "_id": BillingRateCache::cache_id(&row.billing.lago_metric_code, None) },
-                    BillingRateCache {
-                        id: BillingRateCache::cache_id(&row.billing.lago_metric_code, None),
-                        lago_metric_code: row.billing.lago_metric_code.clone(),
-                        model: None,
-                        credits_per_unit_micros: micros,
-                        synced_at: Utc::now(),
-                    },
-                )
-                .upsert(true)
-                .await?;
-            if let Some(cleanup_code) = row
-                .billing_cleanup_metric_code
-                .as_deref()
-                .filter(|code| !code.trim().is_empty())
-            {
-                if cleanup_code != row.billing.lago_metric_code {
-                    if let Err(error) = lago.remove_standard_charge(plan_code, cleanup_code).await {
-                        tracing::warn!(
-                            operation_id = %row.id,
-                            metric_code = cleanup_code,
-                            error = %error,
-                            "Platform operation price cleanup failed; reconciliation will retry"
-                        );
-                        return Ok(false);
-                    }
-                    complete_operation_price_removal(db, &row.id, cleanup_code).await?;
-                } else {
-                    clear_operation_cleanup_marker(db, &row.id, cleanup_code).await?;
-                }
-            }
-            Ok(true)
-        }
-        Err(error) => {
+    let mut components = vec![(
+        row.billing.metric,
+        row.billing.price_per_unit.as_str(),
+        row.billing.lago_metric_code.as_str(),
+    )];
+    if let Some(secondary) = &row.billing.secondary {
+        components.push((
+            secondary.metric,
+            secondary.price_per_unit.as_str(),
+            secondary.lago_metric_code.as_str(),
+        ));
+    }
+    for (metric, price, metric_code) in components {
+        let input = ServicePriceSync {
+            metric_code: metric_code.to_string(),
+            metric_name: format!("{} platform operation ({})", service.name, metric.as_str()),
+            metric_description: format!(
+                "NyxID-managed platform operation {} {} component for catalog service {}",
+                row.kind_key,
+                metric.as_str(),
+                service.slug
+            ),
+            credits_per_unit: price.to_string(),
+        };
+        if let Err(error) = lago.sync_standard_charge(plan_code, &input).await {
             let public_error =
                 "Lago operation-price synchronization failed; the reconcile sweep will retry";
             set_operation_sync_state(db, row, PricingSyncStatus::Failed, Some(public_error))
                 .await?;
             tracing::warn!(
                 operation_id = %row.id,
-                metric_code = %row.billing.lago_metric_code,
+                metric_code,
                 error = %error,
                 "Platform operation price synchronization failed"
             );
-            Ok(false)
+            return Ok(false);
+        }
+        let micros = super::lago_client::decimal_credits_to_micros(price)
+            .ok_or_else(|| AppError::Internal("stored operation price is invalid".to_string()))?;
+        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .replace_one(
+                doc! { "_id": BillingRateCache::cache_id(metric_code, None) },
+                BillingRateCache {
+                    id: BillingRateCache::cache_id(metric_code, None),
+                    lago_metric_code: metric_code.to_string(),
+                    model: None,
+                    credits_per_unit_micros: micros,
+                    synced_at: Utc::now(),
+                },
+            )
+            .upsert(true)
+            .await?;
+    }
+
+    if !set_operation_sync_state(db, row, PricingSyncStatus::Synced, None).await? {
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .update_one(
+                doc! { "_id": &row.id },
+                doc! { "$set": {
+                    "billing.sync_status": "pending",
+                    "billing.sync_error": Bson::Null,
+                } },
+            )
+            .await?;
+        return Ok(false);
+    }
+    for cleanup_code in row
+        .billing_cleanup_metric_codes
+        .iter()
+        .map(String::as_str)
+        .filter(|code| !code.trim().is_empty())
+    {
+        let active = cleanup_code == row.billing.lago_metric_code
+            || row
+                .billing
+                .secondary
+                .as_ref()
+                .is_some_and(|secondary| secondary.lago_metric_code == cleanup_code);
+        if !active {
+            if let Err(error) = lago.remove_standard_charge(plan_code, cleanup_code).await {
+                tracing::warn!(
+                    operation_id = %row.id,
+                    metric_code = cleanup_code,
+                    error = %error,
+                    "Platform operation price cleanup failed; reconciliation will retry"
+                );
+                return Ok(false);
+            }
+            complete_operation_price_removal(db, &row.id, cleanup_code).await?;
+        } else {
+            clear_operation_cleanup_marker(db, &row.id, cleanup_code).await?;
         }
     }
+    Ok(true)
 }
 
 pub async fn retry_pending_operation_prices(
@@ -468,10 +555,7 @@ pub async fn retry_pending_operation_prices(
             "$or": [
                 { "billing.sync_status": { "$in": ["pending", "failed"] } },
                 {
-                    "billing_cleanup_metric_code": {
-                        "$type": "string",
-                        "$ne": "",
-                    },
+                    "billing_cleanup_metric_codes.0": { "$exists": true },
                 },
             ],
         })
@@ -486,6 +570,24 @@ pub async fn retry_pending_operation_prices(
         }
     }
     Ok(synced)
+}
+
+pub async fn remove_operation_rate_cache(
+    db: &mongodb::Database,
+    row: &PlatformOperationRow,
+) -> AppResult<()> {
+    let mut metric_codes = vec![row.billing.lago_metric_code.as_str()];
+    if let Some(secondary) = &row.billing.secondary {
+        metric_codes.push(secondary.lago_metric_code.as_str());
+    }
+    metric_codes.extend(row.billing_cleanup_metric_codes.iter().map(String::as_str));
+    metric_codes.retain(|code| !code.is_empty());
+    metric_codes.sort_unstable();
+    metric_codes.dedup();
+    db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+        .delete_many(doc! { "lago_metric_code": { "$in": metric_codes } })
+        .await?;
+    Ok(())
 }
 
 pub(crate) async fn set_operation_sync_state(
@@ -503,12 +605,22 @@ pub(crate) async fn set_operation_sync_state(
         "billing.price_per_unit": &row.billing.price_per_unit,
         "billing.lago_metric_code": &row.billing.lago_metric_code,
     };
+    filter.insert(
+        "billing.secondary",
+        bson::to_bson(&row.billing.secondary).map_err(|error| {
+            AppError::Internal(format!(
+                "failed to encode secondary operation billing component: {error}"
+            ))
+        })?,
+    );
     match row.billing.base_fee_per_call.as_deref() {
         Some(base_fee) => {
             filter.insert("billing.base_fee_per_call", base_fee);
         }
         None => {
-            filter.insert("billing.base_fee_per_call", doc! { "$exists": false });
+            // Equality to BSON null also matches legacy rows where the field
+            // was absent before model serialization became explicit.
+            filter.insert("billing.base_fee_per_call", Bson::Null);
         }
     }
     let result = db
@@ -547,9 +659,9 @@ async fn clear_operation_cleanup_marker(
         .update_one(
             doc! {
                 "_id": operation_id,
-                "billing_cleanup_metric_code": metric_code,
+                "billing_cleanup_metric_codes": metric_code,
             },
-            doc! { "$unset": { "billing_cleanup_metric_code": "" } },
+            doc! { "$pull": { "billing_cleanup_metric_codes": metric_code } },
         )
         .await?;
     Ok(())
@@ -613,7 +725,7 @@ mod tests {
     use crate::test_utils::connect_test_database;
 
     use crate::models::service_billing::{
-        PricingSyncStatus, ServiceBilling, ServicePlatformPricing,
+        BillingMetric, PricingSyncStatus, ServiceBilling, ServicePlatformPricing,
     };
     use crate::services::billing::lago_client::{
         Entitlement, LagoAck, LagoError, LagoEvent, LagoUsage, OwnerProvisionInput,
@@ -756,6 +868,7 @@ mod tests {
             OperationBilling {
                 metric: BillingMetric::Seconds,
                 price_per_unit: "0.01".to_string(),
+                secondary: None,
                 base_fee_per_call: Some("1.5".to_string()),
                 lago_metric_code: "platform_op_api_twilio_constrained_call_and_say".to_string(),
                 sync_status: PricingSyncStatus::Pending,
@@ -773,10 +886,13 @@ mod tests {
 
     #[test]
     fn operation_metric_code_is_stable_bounded_and_collision_resistant() {
+        let stable =
+            metric_code_for_operation("api-twitter", "endpoint:GET /2/tweets/search/recent");
         assert_eq!(
-            metric_code_for_operation("api-twitter", "endpoint:GET /2/tweets/search/recent"),
-            "platform_op_api_twitter_endpoint_get_2_tweets_search_recent"
+            stable,
+            metric_code_for_operation("api-twitter", "endpoint:GET /2/tweets/search/recent")
         );
+        assert!(stable.starts_with("platform_op_api_twitter_endpoint_get_2_tweets_search_recent_"));
         let first =
             metric_code_for_operation("duffel", &format!("endpoint:GET /{}a", "x".repeat(200)));
         let second =
@@ -784,6 +900,18 @@ mod tests {
         assert!(first.len() <= 120);
         assert!(second.len() <= 120);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn short_operation_metric_codes_do_not_collide_after_path_normalization() {
+        let hyphenated =
+            metric_code_for_operation("api-elevenlabs", "endpoint:GET /v1/text-to-speech/{id}");
+        let segmented =
+            metric_code_for_operation("api-elevenlabs", "endpoint:GET /v1/text/to/speech/{id}");
+
+        assert_ne!(hyphenated, segmented);
+        assert!(hyphenated.len() <= 120);
+        assert!(segmented.len() <= 120);
     }
 
     #[test]
@@ -799,11 +927,13 @@ mod tests {
             config: ConstrainedConfig::Speak(SpeakOperationConfig {
                 allowed_voice_ids: Vec::new(),
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             }),
         };
         let mut billing = OperationBilling {
             metric: BillingMetric::Seconds,
             price_per_unit: "0.01".to_string(),
+            secondary: None,
             base_fee_per_call: None,
             lago_metric_code: String::new(),
             sync_status: PricingSyncStatus::Synced,
@@ -832,10 +962,85 @@ mod tests {
         assert_eq!(billing.price_per_unit, "0.01");
         assert_eq!(
             billing.lago_metric_code,
-            "platform_op_api_elevenlabs_constrained_speak"
+            metric_code_for_operation("api-elevenlabs", "constrained:speak")
         );
         assert_eq!(billing.sync_status, PricingSyncStatus::Pending);
         assert!(billing.sync_error.is_none());
+    }
+
+    #[test]
+    fn operation_billing_accepts_exactly_one_distinct_secondary_component() {
+        use crate::models::platform_operation::{
+            OperationBilling, OperationBillingComponent, PlatformOperationKind,
+        };
+        let kind = PlatformOperationKind::Endpoint {
+            method: "POST".to_string(),
+            path_template: "/v1/messages".to_string(),
+            name: "create_message".to_string(),
+            description: None,
+        };
+        let mut billing = OperationBilling {
+            metric: BillingMetric::Requests,
+            price_per_unit: "0.5".to_string(),
+            secondary: Some(OperationBillingComponent {
+                metric: BillingMetric::Bytes,
+                price_per_unit: "0.000001".to_string(),
+                lago_metric_code: String::new(),
+            }),
+            base_fee_per_call: Some("1".to_string()),
+            lago_metric_code: String::new(),
+            sync_status: PricingSyncStatus::Synced,
+            sync_error: Some("stale".to_string()),
+        };
+        normalize_operation_billing(
+            "example",
+            "endpoint:POST /v1/messages",
+            &kind,
+            None,
+            &mut billing,
+        )
+        .expect("two measurable components");
+        let secondary = billing.secondary.as_ref().expect("secondary component");
+        assert_eq!(secondary.metric, BillingMetric::Bytes);
+        assert_ne!(secondary.lago_metric_code, billing.lago_metric_code);
+
+        billing.secondary.as_mut().expect("secondary").metric = BillingMetric::Requests;
+        assert!(
+            normalize_operation_billing(
+                "example",
+                "endpoint:POST /v1/messages",
+                &kind,
+                None,
+                &mut billing,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn endpoint_operations_support_every_persisted_usage_measurement() {
+        use crate::models::platform_operation::PlatformOperationKind;
+        let endpoint = PlatformOperationKind::Endpoint {
+            method: "GET".to_string(),
+            path_template: "/v1/items/{id}".to_string(),
+            name: "Get item".to_string(),
+            description: None,
+        };
+        for metric in [
+            BillingMetric::Requests,
+            BillingMetric::Bytes,
+            BillingMetric::Tokens,
+            BillingMetric::Characters,
+            BillingMetric::Seconds,
+            BillingMetric::InputTokens,
+            BillingMetric::OutputTokens,
+        ] {
+            assert!(
+                super::operation_supports_metric(&endpoint, metric),
+                "endpoint metric {} must be deliverable",
+                metric.as_str()
+            );
+        }
     }
 
     #[tokio::test]
@@ -843,7 +1048,20 @@ mod tests {
         let Some(db) = connect_test_database("operation_price_stale_completion").await else {
             return;
         };
-        let row = insert_priced_operation(&db).await;
+        let mut row = insert_priced_operation(&db).await;
+        row.billing.secondary = Some(
+            crate::models::platform_operation::OperationBillingComponent {
+                metric: BillingMetric::Requests,
+                price_per_unit: "0.25".to_string(),
+                lago_metric_code: "platform_op_api_twilio_call_secondary".to_string(),
+            },
+        );
+        db.collection::<crate::models::platform_operation::PlatformOperationRow>(
+            super::PLATFORM_OPERATIONS,
+        )
+        .replace_one(doc! { "_id": &row.id }, &row)
+        .await
+        .expect("add secondary operation price");
         let newer_at = row.updated_at + chrono::Duration::seconds(1);
         db.collection::<crate::models::platform_operation::PlatformOperationRow>(
             super::PLATFORM_OPERATIONS,
@@ -881,7 +1099,20 @@ mod tests {
         let Some(db) = connect_test_database("operation_price_retry").await else {
             return;
         };
-        let row = insert_priced_operation(&db).await;
+        let mut row = insert_priced_operation(&db).await;
+        row.billing.secondary = Some(
+            crate::models::platform_operation::OperationBillingComponent {
+                metric: BillingMetric::Requests,
+                price_per_unit: "0.25".to_string(),
+                lago_metric_code: "platform_op_api_twilio_call_secondary".to_string(),
+            },
+        );
+        db.collection::<crate::models::platform_operation::PlatformOperationRow>(
+            super::PLATFORM_OPERATIONS,
+        )
+        .replace_one(doc! { "_id": &row.id }, &row)
+        .await
+        .expect("add secondary operation price");
         let lago = OperationPricingLago::default();
         lago.fail_sync.store(true, Ordering::SeqCst);
 
@@ -923,6 +1154,14 @@ mod tests {
             .expect("find operation rate")
             .expect("operation rate exists");
         assert_eq!(rate.credits_per_unit_micros, 10_000);
+        let secondary = row.billing.secondary.as_ref().expect("secondary price");
+        let secondary_rate = db
+            .collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+            .find_one(doc! { "lago_metric_code": &secondary.lago_metric_code })
+            .await
+            .expect("find secondary operation rate")
+            .expect("secondary operation rate exists");
+        assert_eq!(secondary_rate.credits_per_unit_micros, 250_000);
     }
 
     #[tokio::test]
@@ -931,24 +1170,29 @@ mod tests {
             return;
         };
         let mut row = insert_priced_operation(&db).await;
-        let old_metric = "platform_op_obsolete_call_metric";
-        row.billing_cleanup_metric_code = Some(old_metric.to_string());
+        let old_metrics = [
+            "platform_op_obsolete_call_input",
+            "platform_op_obsolete_call_output",
+        ];
+        row.billing_cleanup_metric_codes = old_metrics.map(str::to_string).to_vec();
         db.collection::<crate::models::platform_operation::PlatformOperationRow>(
             super::PLATFORM_OPERATIONS,
         )
         .replace_one(doc! { "_id": &row.id }, &row)
         .await
         .expect("set operation cleanup marker");
-        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-            .insert_one(BillingRateCache {
-                id: BillingRateCache::cache_id(old_metric, None),
-                lago_metric_code: old_metric.to_string(),
-                model: None,
-                credits_per_unit_micros: 25_000,
-                synced_at: Utc::now(),
-            })
-            .await
-            .expect("insert obsolete rate");
+        for old_metric in old_metrics {
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+                .insert_one(BillingRateCache {
+                    id: BillingRateCache::cache_id(old_metric, None),
+                    lago_metric_code: old_metric.to_string(),
+                    model: None,
+                    credits_per_unit_micros: 25_000,
+                    synced_at: Utc::now(),
+                })
+                .await
+                .expect("insert obsolete rate");
+        }
         let lago = OperationPricingLago::default();
         lago.fail_remove.store(true, Ordering::SeqCst);
 
@@ -965,16 +1209,13 @@ mod tests {
             .await
             .expect("find cleanup operation")
             .expect("cleanup operation exists");
-        assert_eq!(
-            pending.billing_cleanup_metric_code.as_deref(),
-            Some(old_metric)
-        );
+        assert_eq!(pending.billing_cleanup_metric_codes, old_metrics);
         assert_eq!(
             db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-                .count_documents(doc! { "lago_metric_code": old_metric })
+                .count_documents(doc! { "lago_metric_code": { "$in": old_metrics.to_vec() } })
                 .await
                 .expect("count obsolete rates"),
-            1
+            2
         );
 
         lago.fail_remove.store(false, Ordering::SeqCst);
@@ -991,10 +1232,10 @@ mod tests {
             .await
             .expect("find cleaned operation")
             .expect("cleaned operation exists");
-        assert!(saved.billing_cleanup_metric_code.is_none());
+        assert!(saved.billing_cleanup_metric_codes.is_empty());
         assert_eq!(
             db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-                .count_documents(doc! { "lago_metric_code": old_metric })
+                .count_documents(doc! { "lago_metric_code": { "$in": old_metrics.to_vec() } })
                 .await
                 .expect("count obsolete rates"),
             0

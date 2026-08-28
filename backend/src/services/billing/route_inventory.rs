@@ -107,6 +107,20 @@ pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
         policy: BillingRoutePolicy::Exempt("control-plane discovery; no downstream request"),
     },
     BillingRouteSpec {
+        handler: "handlers::platform_preferences::list_preferences",
+        route: "/api/v1/platform-ops/preferences",
+        policy: BillingRoutePolicy::Exempt(
+            "owner spending preference control plane; no downstream request",
+        ),
+    },
+    BillingRouteSpec {
+        handler: "handlers::platform_preferences::update_or_delete_preference",
+        route: "/api/v1/platform-ops/preferences/{catalog_service_id}",
+        policy: BillingRoutePolicy::Exempt(
+            "owner spending preference control plane; no downstream request",
+        ),
+    },
+    BillingRouteSpec {
         handler: "handlers::platform_ops::speak",
         route: "/api/v1/platform-ops/speak",
         policy: BillingRoutePolicy::Metered(BillingIngress::PlatformOperation),

@@ -133,7 +133,21 @@ describe("API_KEY_SCOPES", () => {
     expect(API_KEY_SCOPES).toContain("admin");
   });
 
-  it("has 9 scopes", () => {
-    expect(API_KEY_SCOPES).toHaveLength(9);
+  // Asserting the set rather than the count so a drift from the backend's
+  // VALID_API_KEY_SCOPES names the scope that moved, instead of reporting that
+  // some number changed.
+  it("matches the backend scope set exactly", () => {
+    expect([...API_KEY_SCOPES]).toEqual([
+      "read",
+      "write",
+      "admin",
+      "openid",
+      "profile",
+      "email",
+      "services:read",
+      "services:write",
+      "proxy",
+      "platform:spend",
+    ]);
   });
 });

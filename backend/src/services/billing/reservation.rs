@@ -42,6 +42,8 @@ pub(crate) enum SettlementFailureDisposition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayerReservation {
     pub layer: BillingLayer,
+    pub flush_seq: Option<i64>,
+    pub metric: crate::models::service_billing::BillingMetric,
     pub estimated_quantity: i64,
     pub credits_per_unit_micros: i64,
     pub base_fee_micros: i64,
@@ -60,10 +62,10 @@ pub struct BillingReservation {
 }
 
 impl BillingReservation {
-    pub fn reserved_for(&self, layer: BillingLayer) -> i64 {
+    pub fn reserved_for(&self, layer: BillingLayer, flush_seq: Option<i64>) -> i64 {
         self.layers
             .iter()
-            .find(|reservation| reservation.layer == layer)
+            .find(|reservation| reservation.layer == layer && reservation.flush_seq == flush_seq)
             .map(|reservation| reservation.reserved_credits)
             .unwrap_or(0)
     }
@@ -1385,6 +1387,8 @@ async fn estimate_layer_reservations(
             .min(i128::from(i64::MAX)) as i64;
         reservations.push(LayerReservation {
             layer: BillingLayer::Platform,
+            flush_seq: None,
+            metric: ctx.platform_metric,
             estimated_quantity,
             credits_per_unit_micros,
             base_fee_micros: ctx.platform_base_fee_micros.max(0),
@@ -1393,11 +1397,30 @@ async fn estimate_layer_reservations(
             grant_reservations: Vec::new(),
             base_fee_grant_reservations: Vec::new(),
         });
+        if let Some(secondary) = &ctx.platform_secondary {
+            let estimated_micros = i128::from(secondary.rate_micros)
+                .saturating_mul(i128::from(secondary.estimated_quantity))
+                .min(i128::from(i64::MAX)) as i64;
+            reservations.push(LayerReservation {
+                layer: BillingLayer::Platform,
+                flush_seq: Some(1),
+                metric: secondary.metric,
+                estimated_quantity: secondary.estimated_quantity,
+                credits_per_unit_micros: secondary.rate_micros,
+                base_fee_micros: 0,
+                reserved_credits: whole_credits_for_micros(estimated_micros),
+                allowance_reservations: Vec::new(),
+                grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
+            });
+        }
     }
 
     if let Some(resale) = &ctx.resale {
         reservations.push(LayerReservation {
             layer: BillingLayer::Resale,
+            flush_seq: None,
+            metric: resale.metric,
             estimated_quantity: 1,
             credits_per_unit_micros: fresh_rate_micros(
                 db,
@@ -1932,12 +1955,23 @@ mod tests {
                 raw: json!({}),
             }],
         };
+        let operation_billing = crate::models::platform_operation::OperationBilling {
+            metric: BillingMetric::Seconds,
+            price_per_unit: "0.01".to_string(),
+            secondary: None,
+            base_fee_per_call: Some("1.5".to_string()),
+            lago_metric_code: "platform_op_api_twilio_constrained_call_and_say".to_string(),
+            sync_status: crate::models::service_billing::PricingSyncStatus::Synced,
+            sync_error: None,
+        };
+        let estimated_usage =
+            crate::models::service_billing::PlatformUsage::single_request(0).with_seconds(600);
         let ctx = route_context(owner_id).with_platform_operation_billing(
-            BillingMetric::Seconds,
-            "platform_op_api_twilio_constrained_call_and_say".to_string(),
+            &operation_billing,
             10_000,
+            None,
             1_500_000,
-            600,
+            &estimated_usage,
         );
 
         let reservation = gate_and_reserve(&db, Some(&lago), &ctx, false, 900)

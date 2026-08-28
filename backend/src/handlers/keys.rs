@@ -18,11 +18,12 @@ use crate::models::user_api_key::UserApiKey;
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
-use crate::mw::auth::AuthUser;
+use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
     catalog_service, cloud_credential_verify, credential_push_service, lark_permission,
-    node_service, org_service, proxy_discovery_service, unified_key_service, user_api_key_service,
-    user_endpoint_service, user_service_service,
+    node_service, org_service, platform_credential_service, platform_operation_service,
+    proxy_discovery_service, unified_key_service, user_api_key_service, user_endpoint_service,
+    user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -513,6 +514,11 @@ pub struct KeyResponse {
     /// rules at proxy resolution time.
     pub ws_frame_injections: Vec<WsFrameInjection>,
     pub auto_connected: bool,
+    /// True only for a response-only platform provider projection. No
+    /// `UserService` is persisted for this row.
+    pub platform_managed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<PlatformKeySummaryResponse>,
     /// Developer app (OAuth client) ID that triggered this auto-provision.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_app_id: Option<String>,
@@ -573,6 +579,37 @@ pub struct KeyResponse {
     /// can render the list of scopes that will be granted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_setup_scopes: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PlatformKeySummaryResponse {
+    pub operations: Vec<PlatformKeyOperationSummaryResponse>,
+    pub credential_source: PlatformKeyCredentialSourceResponse,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct PlatformKeyOperationSummaryResponse {
+    pub name: String,
+    pub kind: PlatformKeyOperationKindResponse,
+    pub price_label: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformKeyOperationKindResponse {
+    Constrained,
+    Endpoint,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformKeyCredentialSourceResponse {
+    Platform,
+    OwnConnection,
+    PlatformFallback,
+    Unusable,
 }
 
 /// Authorization evidence for one user service — the minimal projection of
@@ -1198,6 +1235,7 @@ pub async fn list_keys(
         &mut keys,
     )
     .await?;
+    append_platform_key_projection(&state, &auth_user, &mut keys).await?;
     Ok(Json(KeyListResponse { keys }))
 }
 
@@ -2420,6 +2458,8 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         ),
         ws_frame_injections: result.service.ws_frame_injections.clone(),
         auto_connected: false,
+        platform_managed: false,
+        platform: None,
         source_app_id: None,
         source_app_name: None,
         expires_at: result
@@ -2524,6 +2564,8 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         ),
         ws_frame_injections: view.ws_frame_injections,
         auto_connected: view.auto_connected,
+        platform_managed: false,
+        platform: None,
         source_app_id: view.source_app_id,
         source_app_name: view.source_app_name,
         expires_at: view.expires_at,
@@ -2541,6 +2583,330 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         openapi_spec_url: view.openapi_spec_url,
         recommended_skills: view.recommended_skills,
         credential_source: view.credential_source.into(),
+        permission_setup_url: None,
+        permission_setup_scopes: None,
+    }
+}
+
+struct PlatformProviderKeyProjection {
+    catalog_service: DownstreamService,
+    summary: PlatformKeySummaryResponse,
+}
+
+async fn append_platform_key_projection(
+    state: &AppState,
+    auth_user: &AuthUser,
+    keys: &mut Vec<KeyResponse>,
+) -> AppResult<()> {
+    let enabled = crate::services::feature_flag_service::resolve_personal_features(
+        &state.db,
+        &auth_user.user_id.to_string(),
+    )
+    .await?
+    .into_iter()
+    .any(|key| key == crate::services::feature_flag_service::PLATFORM_SERVICES_FLAG_KEY);
+    if !enabled {
+        return Ok(());
+    }
+
+    let operations =
+        platform_credential_service::list_enabled_authorized_operations(&state.db).await?;
+    if operations.is_empty() {
+        return Ok(());
+    }
+    let resolution_user_id = auth_user.proxy_resolution_user_id();
+    let actor_user_id = auth_user.user_id.to_string();
+    let billing_rollout = crate::services::feature_flag_service::billing_rollout_enabled(
+        &state.db,
+        &resolution_user_id,
+        &actor_user_id,
+    )
+    .await?;
+    let context = platform_operation_service::load_authorized_credential_resolution_context(
+        &state.db,
+        &resolution_user_id,
+        &operations,
+    )
+    .await?;
+    let mut providers: Vec<PlatformProviderKeyProjection> = Vec::new();
+
+    for authorization in &operations {
+        let row = authorization.operation();
+        let descriptor = platform_key_operation_descriptor(row);
+        let resolution = platform_operation_service::resolve_endpoint_credential_source(
+            &state.db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            &resolution_user_id,
+            platform_operation_service::PlatformCredentialCaller {
+                actor_user_id: &actor_user_id,
+                api_key_id: auth_user.api_key_id.as_deref(),
+                allow_all_services: auth_user.allow_all_services,
+                allowed_service_ids: &auth_user.allowed_service_ids,
+                bypass_approval_flow: auth_user.auth_method == AuthMethod::Session,
+                credential_intent:
+                    crate::models::platform_service_preference::CredentialIntent::Auto,
+            },
+            authorization,
+            platform_operation_service::CredentialResolutionMode::Discover {
+                descriptor: &descriptor,
+            },
+            &context,
+        )
+        .await?;
+        let source = platform_key_credential_source(&resolution);
+        let operation = platform_key_operation_summary(row, billing_rollout);
+        let catalog_service = authorization.catalog_service();
+
+        if let Some(provider) = providers
+            .iter_mut()
+            .find(|provider| provider.catalog_service.id == catalog_service.id)
+        {
+            provider.summary.operations.push(operation);
+            merge_platform_key_source(&mut provider.summary, source);
+        } else {
+            providers.push(PlatformProviderKeyProjection {
+                catalog_service: catalog_service.clone(),
+                summary: PlatformKeySummaryResponse {
+                    operations: vec![operation],
+                    credential_source: source.0,
+                    reason: source.1,
+                },
+            });
+        }
+    }
+
+    let base_url = state.config.base_url.trim_end_matches('/');
+    for provider in providers {
+        if let Some(key) = keys.iter_mut().find(|key| {
+            key.catalog_service_id.as_deref() == Some(provider.catalog_service.id.as_str())
+        }) {
+            key.platform = Some(provider.summary);
+        } else {
+            keys.push(synthetic_platform_key(
+                provider.catalog_service,
+                provider.summary,
+                base_url,
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn platform_key_operation_descriptor(
+    row: &crate::models::platform_operation::PlatformOperationRow,
+) -> crate::services::operation_descriptor::OperationDescriptor {
+    use crate::models::platform_operation::{ConstrainedOp, PlatformOperationKind};
+
+    match &row.kind {
+        PlatformOperationKind::Endpoint {
+            method,
+            path_template,
+            ..
+        } => crate::services::operation_descriptor::build_http_descriptor(
+            method,
+            path_template,
+            None,
+        ),
+        PlatformOperationKind::Constrained { op, .. } => {
+            let (method, path) = match op {
+                ConstrainedOp::Speak => ("POST", "/v1/text-to-speech/{voice_id}"),
+                ConstrainedOp::CallAndSay => {
+                    ("POST", "/2010-04-01/Accounts/{account_sid}/Calls.json")
+                }
+                ConstrainedOp::FlightSearch => ("POST", "/air/offer_requests"),
+            };
+            crate::services::operation_descriptor::build_http_descriptor(method, path, None)
+        }
+    }
+}
+
+fn platform_key_operation_summary(
+    row: &crate::models::platform_operation::PlatformOperationRow,
+    billing_rollout: bool,
+) -> PlatformKeyOperationSummaryResponse {
+    use crate::models::platform_operation::PlatformOperationKind;
+
+    let (name, kind) = match &row.kind {
+        PlatformOperationKind::Endpoint { name, .. } => {
+            (name.clone(), PlatformKeyOperationKindResponse::Endpoint)
+        }
+        PlatformOperationKind::Constrained { op, .. } => (
+            crate::models::platform_operation::constrained_op_name(*op).to_string(),
+            PlatformKeyOperationKindResponse::Constrained,
+        ),
+    };
+    let billing = &row.billing;
+    let billable = billing_rollout
+        && (billing.price_per_unit != "0"
+            || billing.secondary.is_some()
+            || billing.base_fee_per_call.is_some());
+    PlatformKeyOperationSummaryResponse {
+        name,
+        kind,
+        price_label: crate::services::billing::pricing::format_operation_price(billing, billable),
+    }
+}
+
+fn platform_key_credential_source(
+    resolution: &platform_operation_service::PlatformCredentialResolution,
+) -> (PlatformKeyCredentialSourceResponse, Option<String>) {
+    use platform_operation_service::{
+        PlatformCredentialResolution, PlatformFallbackReason, PlatformUnavailableReason,
+    };
+
+    match resolution {
+        PlatformCredentialResolution::Platform {
+            fallback_reason: PlatformFallbackReason::OwnCredentialAbsent,
+            ..
+        } => (PlatformKeyCredentialSourceResponse::Platform, None),
+        PlatformCredentialResolution::Platform { .. } => {
+            (PlatformKeyCredentialSourceResponse::PlatformFallback, None)
+        }
+        PlatformCredentialResolution::OwnConnection { .. } => {
+            (PlatformKeyCredentialSourceResponse::OwnConnection, None)
+        }
+        PlatformCredentialResolution::NodeRouted { .. } => (
+            PlatformKeyCredentialSourceResponse::Unusable,
+            Some("node_routed".to_string()),
+        ),
+        PlatformCredentialResolution::ApprovalRequired { .. } => (
+            PlatformKeyCredentialSourceResponse::Unusable,
+            Some("approval_required".to_string()),
+        ),
+        PlatformCredentialResolution::OutOfScope { .. } => (
+            PlatformKeyCredentialSourceResponse::Unusable,
+            Some("out_of_scope".to_string()),
+        ),
+        PlatformCredentialResolution::Unusable { .. } => (
+            PlatformKeyCredentialSourceResponse::Unusable,
+            Some("own_connection_unusable".to_string()),
+        ),
+        PlatformCredentialResolution::Unavailable { reason, .. } => (
+            PlatformKeyCredentialSourceResponse::Unusable,
+            Some(
+                match reason {
+                    PlatformUnavailableReason::OwnerOptInRequired => "owner_opt_in_required",
+                    PlatformUnavailableReason::OwnConnectionDisabled => "own_connection_disabled",
+                }
+                .to_string(),
+            ),
+        ),
+    }
+}
+
+fn merge_platform_key_source(
+    summary: &mut PlatformKeySummaryResponse,
+    next: (PlatformKeyCredentialSourceResponse, Option<String>),
+) {
+    if summary.credential_source == next.0 && summary.reason == next.1 {
+        return;
+    }
+    let either_unusable = summary.credential_source
+        == PlatformKeyCredentialSourceResponse::Unusable
+        || next.0 == PlatformKeyCredentialSourceResponse::Unusable;
+    if either_unusable {
+        summary.credential_source = PlatformKeyCredentialSourceResponse::Unusable;
+        summary.reason = Some("mixed_operation_availability".to_string());
+    } else if summary.credential_source == PlatformKeyCredentialSourceResponse::PlatformFallback
+        || next.0 == PlatformKeyCredentialSourceResponse::PlatformFallback
+    {
+        summary.credential_source = PlatformKeyCredentialSourceResponse::PlatformFallback;
+        summary.reason = None;
+    } else {
+        summary.credential_source = PlatformKeyCredentialSourceResponse::Unusable;
+        summary.reason = Some("mixed_credential_sources".to_string());
+    }
+}
+
+fn synthetic_platform_key(
+    catalog: DownstreamService,
+    platform: PlatformKeySummaryResponse,
+    base_url: &str,
+) -> KeyResponse {
+    let catalog_id = catalog.id.clone();
+    let catalog_slug = catalog.slug.clone();
+    let catalog_name = catalog.name.clone();
+    let websocket_supported = catalog
+        .capabilities
+        .as_ref()
+        .is_some_and(|capabilities| capabilities.supports_websocket);
+    KeyResponse {
+        id: format!("platform-provider:{catalog_id}"),
+        name: catalog_name.clone(),
+        label: catalog_name.clone(),
+        slug: catalog_slug.clone(),
+        description: catalog.description,
+        service_category: catalog.service_category,
+        endpoint_url: None,
+        endpoint_id: format!("platform-provider:{catalog_id}"),
+        api_key_id: None,
+        credential_missing: false,
+        credential_type: "platform".to_string(),
+        auth_method: catalog.auth_method,
+        auth_key_name: catalog.auth_key_name,
+        status: "active".to_string(),
+        connection_status: None,
+        catalog_service_id: Some(catalog_id.clone()),
+        catalog_service_slug: Some(catalog_slug.clone()),
+        catalog_service_name: Some(catalog_name),
+        revocation: None,
+        node_id: None,
+        node_priority: 0,
+        node_status: None,
+        node_last_heartbeat_at: None,
+        connected: platform.credential_source != PlatformKeyCredentialSourceResponse::Unusable,
+        requires_connection: false,
+        has_node_binding: false,
+        proxy_url: format!("{base_url}/api/v1/proxy/s/{catalog_slug}/{{path}}"),
+        proxy_url_slug: format!("{base_url}/api/v1/proxy/s/{catalog_slug}/{{path}}"),
+        docs_url: None,
+        openapi_url: None,
+        asyncapi_url: None,
+        streaming_supported: catalog.streaming_supported,
+        websocket_supported,
+        source: "catalog".to_string(),
+        service_type: catalog.service_type,
+        ssh_auth_mode: SshAuthMode::ProxyOnly,
+        ssh_node_keys_stale: false,
+        admin_only: false,
+        is_active: true,
+        identity_propagation_mode: "none".to_string(),
+        identity_include_user_id: false,
+        identity_include_email: false,
+        identity_include_name: false,
+        identity_jwt_audience: None,
+        forward_access_token: false,
+        inject_delegation_token: false,
+        delegation_token_scope: String::new(),
+        custom_user_agent: None,
+        connection_id: None,
+        oauth_client_id: None,
+        granted_scopes: None,
+        last_authorized_at: None,
+        default_request_headers: None,
+        ws_frame_injections: Vec::new(),
+        auto_connected: true,
+        platform_managed: true,
+        platform: Some(platform),
+        source_app_id: None,
+        source_app_name: None,
+        expires_at: None,
+        last_used_at: None,
+        error_message: None,
+        created_at: catalog.created_at.to_rfc3339(),
+        updated_at: catalog.updated_at.to_rfc3339(),
+        state_version: 0,
+        rotation_predecessor_id: None,
+        ssh_host: None,
+        ssh_port: None,
+        ssh_ca_public_key: None,
+        ssh_allowed_principals: None,
+        ssh_certificate_ttl_minutes: None,
+        openapi_spec_url: catalog.openapi_spec_url,
+        recommended_skills: catalog.recommended_skills,
+        credential_source:
+            crate::handlers::user_services_handler::CredentialSourceResponse::Personal,
         permission_setup_url: None,
         permission_setup_scopes: None,
     }
@@ -3124,6 +3490,116 @@ mod tests {
             ))
             .await
             .unwrap();
+    }
+
+    async fn insert_platform_projection_fixture(state: &crate::AppState, owner_id: &str) -> String {
+        use crate::models::platform_operation::{
+            ConstrainedConfig, OperationBilling, OperationLimits, PerRequestCaps,
+            PlatformOperationKind, PlatformOperationRow, SpeakOperationConfig,
+        };
+        use crate::models::service_billing::BillingMetric;
+
+        crate::services::feature_flag_service::set_platform_override(
+            &state.db,
+            crate::services::feature_flag_service::PLATFORM_SERVICES_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+            true,
+            owner_id,
+        )
+        .await
+        .expect("enable platform services for key projection");
+        crate::services::feature_flag_service::set_platform_override(
+            &state.db,
+            crate::services::feature_flag_service::BILLING_FLAG_KEY,
+            &crate::services::feature_flag_service::FlagTarget::Global,
+            true,
+            owner_id,
+        )
+        .await
+        .expect("enable billing for key projection");
+
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = uuid::Uuid::new_v4().to_string();
+        catalog.name = "ElevenLabs".to_string();
+        catalog.slug = "api-elevenlabs".to_string();
+        catalog.base_url = "https://api.elevenlabs.io".to_string();
+        catalog.service_category = "connection".to_string();
+        catalog.requires_user_credential = true;
+        catalog.auth_method = "header".to_string();
+        catalog.auth_key_name = "xi-api-key".to_string();
+        state
+            .db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .expect("insert projection catalog provider");
+        crate::services::platform_credential_service::set_credential_for_test(
+            &state.db,
+            &state.encryption_keys,
+            &catalog.id,
+            "platform-elevenlabs-secret",
+            owner_id,
+        )
+        .await
+        .expect("set projection platform credential");
+        crate::services::platform_preference_service::upsert_preference(
+            &state.db,
+            owner_id,
+            owner_id,
+            &catalog.id,
+            crate::services::platform_preference_service::PreferenceWrite {
+                platform_enabled: true,
+                max_credits_per_call: "100".to_string(),
+                max_credits_per_day: "1000".to_string(),
+                operation_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("opt in to projection platform provider");
+
+        let mut billing = OperationBilling::free(BillingMetric::Characters);
+        billing.price_per_unit = "0.25".to_string();
+        let mut speak = PlatformOperationRow::new_constrained(
+            catalog.id.clone(),
+            crate::models::platform_operation::ConstrainedOp::Speak,
+            ConstrainedConfig::Speak(SpeakOperationConfig {
+                allowed_voice_ids: vec!["voice-a".to_string()],
+                model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
+            }),
+            OperationLimits {
+                per_request: PerRequestCaps::Speak { max_chars: 500 },
+                per_user_per_day: Some(50),
+            },
+            billing,
+            owner_id.to_string(),
+        );
+        speak.enabled = true;
+        let mut endpoint = PlatformOperationRow::new_endpoint(
+            catalog.id.clone(),
+            "GET".to_string(),
+            "/v1/voices".to_string(),
+            "List voices".to_string(),
+            None,
+            OperationLimits {
+                per_request: PerRequestCaps::Endpoint,
+                per_user_per_day: Some(100),
+            },
+            OperationBilling::free(BillingMetric::Requests),
+            owner_id.to_string(),
+        );
+        endpoint.enabled = true;
+        assert!(matches!(
+            endpoint.kind,
+            PlatformOperationKind::Endpoint { .. }
+        ));
+        state
+            .db
+            .collection::<PlatformOperationRow>(crate::models::platform_operation::COLLECTION_NAME)
+            .insert_many([speak, endpoint])
+            .await
+            .expect("insert projection operations");
+        catalog.id
     }
 
     fn empty_update_request() -> super::UpdateKeyRequest {
@@ -4663,6 +5139,131 @@ mod tests {
         assert!(response.keys.len() >= 2);
         assert!(response.keys.iter().any(|k| k.id == svc1));
         assert!(response.keys.iter().any(|k| k.id == svc2));
+    }
+
+    #[tokio::test]
+    async fn list_keys_synthesizes_stable_read_only_platform_provider_without_decryption() {
+        let Some(db) = connect_test_database("h_keys_platform_projection_synthetic").await else {
+            eprintln!("skipping keys platform projection test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+        let catalog_id = insert_platform_projection_fixture(&state, &user_id).await;
+        let decrypts_before = state.encryption_keys.decrypt_stats();
+
+        let Json(first) = super::list_keys(State(state.clone()), test_auth_user(&user_id))
+            .await
+            .expect("list synthetic platform provider");
+        let Json(second) = super::list_keys(State(state.clone()), test_auth_user(&user_id))
+            .await
+            .expect("repeat synthetic platform provider listing");
+
+        assert_eq!(state.encryption_keys.decrypt_stats(), decrypts_before);
+        let first_provider = first
+            .keys
+            .iter()
+            .find(|key| key.catalog_service_id.as_deref() == Some(catalog_id.as_str()))
+            .expect("platform provider should be projected");
+        let second_provider = second
+            .keys
+            .iter()
+            .find(|key| key.catalog_service_id.as_deref() == Some(catalog_id.as_str()))
+            .expect("platform provider should remain projected");
+        assert_eq!(first_provider.id, second_provider.id);
+        assert_eq!(first_provider.id, format!("platform-provider:{catalog_id}"));
+        assert!(first_provider.platform_managed);
+        assert!(first_provider.auto_connected);
+        assert!(first_provider.endpoint_url.is_none());
+        let platform = first_provider
+            .platform
+            .as_ref()
+            .expect("platform summary should be attached");
+        assert_eq!(
+            platform.credential_source,
+            super::PlatformKeyCredentialSourceResponse::Platform
+        );
+        assert_eq!(platform.operations.len(), 2);
+        assert!(platform.operations.iter().any(|operation| {
+            operation.name == "speak"
+                && operation.kind == super::PlatformKeyOperationKindResponse::Constrained
+                && operation.price_label == "0.25 credits per character"
+        }));
+        assert!(platform.operations.iter().any(|operation| {
+            operation.name == "List voices"
+                && operation.kind == super::PlatformKeyOperationKindResponse::Endpoint
+                && operation.price_label == "Free"
+        }));
+
+        let error = super::get_key(
+            State(state),
+            test_auth_user(&user_id),
+            Path(first_provider.id.clone()),
+        )
+        .await
+        .expect_err("synthetic response ids must not resolve as UserService ids");
+        assert!(matches!(error, AppError::NotFound(_)));
+    }
+
+    #[tokio::test]
+    async fn list_keys_attaches_platform_summary_to_disabled_row_without_duplicate_or_fallback() {
+        let Some(db) = connect_test_database("h_keys_platform_projection_disabled").await else {
+            eprintln!("skipping disabled platform projection test: no local MongoDB available");
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4().to_string();
+        insert_user(&db, &user_id, UserType::Person).await;
+        let catalog_id = insert_platform_projection_fixture(&state, &user_id).await;
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &user_id,
+                "My ElevenLabs",
+                "https://api.elevenlabs.io",
+                None,
+                Some(&catalog_id),
+            ))
+            .await
+            .expect("insert disabled provider endpoint");
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let mut service = test_user_service(
+            &service_id,
+            &user_id,
+            "elevenlabs",
+            &endpoint_id,
+            Some(&catalog_id),
+            None,
+        );
+        service.is_active = false;
+        service.auth_method = "header".to_string();
+        service.auth_key_name = "xi-api-key".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(service)
+            .await
+            .expect("insert disabled provider service");
+
+        let Json(response) = super::list_keys(State(state), test_auth_user(&user_id))
+            .await
+            .expect("list disabled provider projection");
+
+        let provider_rows = response
+            .keys
+            .iter()
+            .filter(|key| key.catalog_service_id.as_deref() == Some(catalog_id.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(provider_rows.len(), 1, "no synthetic duplicate is allowed");
+        let key = provider_rows[0];
+        assert_eq!(key.id, service_id);
+        assert!(!key.platform_managed);
+        let platform = key.platform.as_ref().expect("platform summary is attached");
+        assert_eq!(
+            platform.credential_source,
+            super::PlatformKeyCredentialSourceResponse::Unusable
+        );
+        assert_eq!(platform.reason.as_deref(), Some("own_connection_disabled"));
     }
 
     #[tokio::test]

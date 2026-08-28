@@ -89,6 +89,11 @@ pub enum AppError {
     )]
     PlatformOperationApprovalRequired { vendor: String },
 
+    #[error(
+        "This API key is not scoped to your {vendor} connection. Grant the key access to that connection, or disable the connection to use platform credits."
+    )]
+    PlatformOperationOwnConnectionOutOfScope { vendor: String },
+
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
@@ -550,7 +555,8 @@ impl AppError {
             Self::PlatformVendorProvisioningInvalid(_) => StatusCode::BAD_REQUEST,
             Self::PlatformOperationOwnConnectionUnsupported { .. }
             | Self::PlatformOperationOwnConnectionUnusable { .. }
-            | Self::PlatformOperationApprovalRequired { .. } => StatusCode::CONFLICT,
+            | Self::PlatformOperationApprovalRequired { .. }
+            | Self::PlatformOperationOwnConnectionOutOfScope { .. } => StatusCode::CONFLICT,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
@@ -707,6 +713,7 @@ impl AppError {
             Self::PlatformOperationOwnConnectionUnsupported { .. } => 11802,
             Self::PlatformOperationOwnConnectionUnusable { .. } => 11803,
             Self::PlatformOperationApprovalRequired { .. } => 11804,
+            Self::PlatformOperationOwnConnectionOutOfScope { .. } => 11805,
             Self::Unauthorized(_) => 1001,
             Self::Forbidden(_) => 1002,
             Self::NotFound(_) => 1003,
@@ -908,6 +915,9 @@ impl AppError {
             }
             Self::PlatformOperationApprovalRequired { .. } => {
                 "platform_operation_approval_required"
+            }
+            Self::PlatformOperationOwnConnectionOutOfScope { .. } => {
+                "platform_operation_own_connection_out_of_scope"
             }
             Self::Unauthorized(_) => "unauthorized",
             Self::Forbidden(_) => "forbidden",

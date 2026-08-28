@@ -88,6 +88,7 @@ pub mod org_slug;
 pub mod par_service;
 pub mod platform_credential_service;
 pub mod platform_operation_service;
+pub mod platform_preference_service;
 pub mod platform_settings_service;
 pub mod provider_service;
 pub mod provider_token_exchange_service;

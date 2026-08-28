@@ -1,16 +1,21 @@
 import { describe, expect, it } from "vitest";
 import {
+  adminPricing,
+  discoveryPricing,
+  perCallPricing,
+} from "@/schemas/__fixtures__/platform-ops-builders";
+import {
   callAndSayUpdateSchema,
   flightSearchUpdateSchema,
+  legacyPlatformOperationListSchema,
   platformOperationDiscoveryListSchema,
-  platformOperationListSchema,
   speakUpdateSchema,
 } from "./platform-ops";
 
 describe("platform operation schemas", () => {
   it("accepts the disabled defaults returned for missing rows", () => {
     expect(
-      platformOperationListSchema.parse({
+      legacyPlatformOperationListSchema.parse({
         operations: [
           {
             op: "speak",
@@ -21,15 +26,12 @@ describe("platform operation schemas", () => {
               allowed_voice_ids: [],
               max_chars: 1000,
               model_id: "eleven_multilingual_v2",
+              max_calls_per_user_per_day: 50,
             },
             updated_at: null,
             updated_by: null,
             vendor_service_id: "platform-elevenlabs-id",
-            pricing: {
-              billable: false,
-              credits_per_call: null,
-              metric: "requests",
-            },
+            pricing: adminPricing(),
           },
           {
             op: "call_and_say",
@@ -39,6 +41,7 @@ describe("platform operation schemas", () => {
               type: "call_and_say",
               allowed_destination_prefixes: [],
               max_message_chars: 500,
+              max_duration_seconds: 60,
               voice: "alice",
               max_calls_per_user_per_day: 3,
               account_sid: "",
@@ -47,11 +50,7 @@ describe("platform operation schemas", () => {
             updated_at: null,
             updated_by: null,
             vendor_service_id: "platform-twilio-id",
-            pricing: {
-              billable: true,
-              credits_per_call: "0.25",
-              metric: "requests",
-            },
+            pricing: perCallPricing("0.25"),
           },
         ],
       }).operations,
@@ -68,6 +67,7 @@ describe("platform operation schemas", () => {
           allowed_voice_ids: ["voice-a"],
           max_chars: 5001,
           model_id: "eleven_multilingual_v2",
+          max_calls_per_user_per_day: 50,
         },
       }).success,
     ).toBe(false);
@@ -79,6 +79,7 @@ describe("platform operation schemas", () => {
           type: "call_and_say",
           allowed_destination_prefixes: ["+65"],
           max_message_chars: 1001,
+          max_duration_seconds: 60,
           voice: "alice",
           max_calls_per_user_per_day: 3,
           account_sid: `AC${"0".repeat(32)}`,
@@ -109,12 +110,15 @@ describe("platform operation schemas", () => {
           vendor: "duffel",
           catalog_service_slug: "duffel",
           credential_source: "platform",
+          credential_intent: "auto",
+          availability_reason: null,
+          fallback_reason: "own_credential_absent",
           own_connection: null,
-          pricing: {
+          pricing: discoveryPricing({
             billable: true,
-            credits_per_call: "0.5",
-            metric: "requests",
-          },
+            price_per_unit: "0.5",
+            display: "0.5 credits per call",
+          }),
           mcp_tool: "nyx__flight_search",
         },
       ],
@@ -127,6 +131,7 @@ describe("platform operation schemas", () => {
           {
             ...result.operations[0],
             credential_source: "own_connection",
+            fallback_reason: null,
             own_connection: {
               user_service_id: "duffel-key",
               slug: "duffel",
@@ -134,6 +139,28 @@ describe("platform operation schemas", () => {
               is_active: true,
               usable: false,
               reason: "approval_required",
+            },
+          },
+        ],
+      }).success,
+    ).toBe(true);
+
+    expect(
+      platformOperationDiscoveryListSchema.safeParse({
+        operations: [
+          {
+            ...result.operations[0],
+            credential_source: "unavailable",
+            credential_intent: "own_only",
+            availability_reason: "own_connection_disabled",
+            fallback_reason: null,
+            own_connection: {
+              user_service_id: "duffel-key",
+              slug: "duffel",
+              label: "My Duffel",
+              is_active: false,
+              usable: false,
+              reason: "disabled",
             },
           },
         ],
@@ -161,6 +188,7 @@ describe("platform operation schemas", () => {
         allowed_voice_ids: [],
         max_chars: 1000,
         model_id: "eleven_multilingual_v2",
+        max_calls_per_user_per_day: 50,
       },
     });
     const call = callAndSayUpdateSchema.safeParse({
@@ -170,6 +198,7 @@ describe("platform operation schemas", () => {
         type: "call_and_say",
         allowed_destination_prefixes: [],
         max_message_chars: 500,
+        max_duration_seconds: 60,
         voice: "alice",
         max_calls_per_user_per_day: 3,
         account_sid: `AC${"a".repeat(32)}`,
@@ -190,6 +219,7 @@ describe("platform operation schemas", () => {
         allowed_voice_ids: ["voice-a", "voice-a"],
         max_chars: 1000,
         model_id: "eleven_multilingual_v2",
+        max_calls_per_user_per_day: 50,
       },
     });
     const malformedPrefix = callAndSayUpdateSchema.safeParse({
@@ -199,6 +229,7 @@ describe("platform operation schemas", () => {
         type: "call_and_say",
         allowed_destination_prefixes: ["65"],
         max_message_chars: 500,
+        max_duration_seconds: 60,
         voice: "alice",
         max_calls_per_user_per_day: 3,
         account_sid: `AC${"b".repeat(32)}`,
@@ -227,6 +258,7 @@ describe("platform operation schemas", () => {
           allowed_voice_ids: ["voice-a"],
           max_chars: 1_000,
           model_id: "eleven_multilingual_v2",
+          max_calls_per_user_per_day: 50,
         },
         vendor_body: { query: "caller controlled" },
       }).success,

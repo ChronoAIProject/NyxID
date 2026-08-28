@@ -319,6 +319,22 @@ async fn billing_route_coverage_smoke() {
     .await
     .expect("enable direct assistant route for billing smoke");
     let platform_vendors = insert_platform_route_services(&db, &downstream_url).await;
+    for vendor in &platform_vendors {
+        crate::services::platform_preference_service::upsert_preference(
+            &db,
+            &owner_id,
+            &owner_id,
+            &vendor.id,
+            crate::services::platform_preference_service::PreferenceWrite {
+                platform_enabled: true,
+                max_credits_per_call: "1000".to_string(),
+                max_credits_per_day: "10000".to_string(),
+                operation_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("opt billing route owner into platform vendor");
+    }
     crate::services::feature_flag_service::set_platform_override(
         &db,
         crate::services::feature_flag_service::PLATFORM_SERVICES_FLAG_KEY,
@@ -1741,7 +1757,10 @@ fn route_access_token(state: &crate::AppState, owner_id: &str) -> String {
         &state.jwt_keys,
         &state.config,
         &Uuid::parse_str(owner_id).expect("route owner UUID"),
-        "proxy",
+        // `platform:spend` is required by the platform-ops routes this smoke
+        // test exercises; `proxy` alone reaches a service the owner already has
+        // a credential for, which is a different grant.
+        "proxy platform:spend",
         None,
         None,
         None,
@@ -1861,7 +1880,7 @@ async fn insert_platform_route_services(
             .insert_one(&vendor)
             .await
             .expect("insert platform route catalog service");
-        crate::services::platform_credential_service::set_credential(
+        crate::services::platform_credential_service::set_credential_for_test(
             db,
             &encryption_keys,
             &vendor.id,
@@ -1876,6 +1895,7 @@ async fn insert_platform_route_services(
                 allowed_voice_ids: vec!["route-voice".to_string()],
                 max_chars: 1_000,
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             }),
             PlatformOperationName::CallAndSay => {
                 PlatformOperationConfig::CallAndSay(CallAndSayConfig {
@@ -2536,6 +2556,26 @@ fn usage_for(case: &CoverageCase) -> (PlatformUsage, i64) {
         BillingMetric::Bytes => (PlatformUsage::single_request(23), 23),
         BillingMetric::Characters => (PlatformUsage::single_request(0).with_characters(17), 17),
         BillingMetric::Seconds => (PlatformUsage::single_request(0).with_seconds(19), 19),
+        BillingMetric::InputTokens => (
+            PlatformUsage::llm_completion(19, 11).with_token_breakdown(Some(
+                crate::models::service_billing::TokenBreakdown {
+                    prompt_tokens: 7,
+                    completion_tokens: 4,
+                    ..Default::default()
+                },
+            )),
+            7,
+        ),
+        BillingMetric::OutputTokens => (
+            PlatformUsage::llm_completion(19, 11).with_token_breakdown(Some(
+                crate::models::service_billing::TokenBreakdown {
+                    prompt_tokens: 7,
+                    completion_tokens: 4,
+                    ..Default::default()
+                },
+            )),
+            4,
+        ),
     }
 }
 

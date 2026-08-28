@@ -22,6 +22,8 @@ pub struct SpeakOperationConfig {
     pub allowed_voice_ids: Vec<String>,
     #[serde(default = "default_speak_model_id")]
     pub model_id: String,
+    #[serde(default = "default_speak_max_per_user_per_day")]
+    pub max_calls_per_user_per_day: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -67,7 +69,7 @@ pub enum PerRequestCaps {
 #[serde(deny_unknown_fields)]
 pub struct OperationLimits {
     pub per_request: PerRequestCaps,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub per_user_per_day: Option<u32>,
 }
 
@@ -76,13 +78,23 @@ pub struct OperationLimits {
 pub struct OperationBilling {
     pub metric: BillingMetric,
     pub price_per_unit: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
+    pub secondary: Option<OperationBillingComponent>,
+    #[serde(default)]
     pub base_fee_per_call: Option<String>,
     pub lago_metric_code: String,
     #[serde(default)]
     pub sync_status: PricingSyncStatus,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub sync_error: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperationBillingComponent {
+    pub metric: BillingMetric,
+    pub price_per_unit: String,
+    pub lago_metric_code: String,
 }
 
 impl OperationBilling {
@@ -90,6 +102,7 @@ impl OperationBilling {
         Self {
             metric,
             price_per_unit: "0".to_string(),
+            secondary: None,
             base_fee_per_call: None,
             lago_metric_code: String::new(),
             sync_status: PricingSyncStatus::Pending,
@@ -105,7 +118,7 @@ pub enum PlatformOperationKind {
         method: String,
         path_template: String,
         name: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(default)]
         description: Option<String>,
     },
     Constrained {
@@ -125,9 +138,11 @@ pub struct PlatformOperationRow {
     pub kind: PlatformOperationKind,
     pub limits: OperationLimits,
     pub billing: OperationBilling,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub billing_cleanup_metric_code: Option<String>,
+    #[serde(default)]
+    pub billing_cleanup_metric_codes: Vec<String>,
     pub created_by: String,
+    #[serde(default)]
+    pub updated_by: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -162,7 +177,8 @@ impl PlatformOperationRow {
             },
             limits,
             billing,
-            billing_cleanup_metric_code: None,
+            billing_cleanup_metric_codes: Vec::new(),
+            updated_by: created_by.clone(),
             created_by,
             created_at: now,
             updated_at: now,
@@ -186,7 +202,8 @@ impl PlatformOperationRow {
             kind: PlatformOperationKind::Constrained { op, config },
             limits,
             billing,
-            billing_cleanup_metric_code: None,
+            billing_cleanup_metric_codes: Vec::new(),
+            updated_by: created_by.clone(),
             created_by,
             created_at: now,
             updated_at: now,
@@ -224,6 +241,8 @@ pub struct SpeakConfig {
     pub max_chars: u32,
     #[serde(default = "default_speak_model_id")]
     pub model_id: String,
+    #[serde(default = "default_speak_max_per_user_per_day")]
+    pub max_calls_per_user_per_day: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -269,13 +288,17 @@ pub struct PlatformOperation {
     pub vendor_service_slug: String,
     pub config: PlatformOperationConfig,
     pub billing: OperationBilling,
-    pub billing_cleanup_metric_code: Option<String>,
-    pub updated_at: DateTime<Utc>,
-    pub updated_by: String,
 }
 
 pub const fn default_speak_max_chars() -> u32 {
     1_000
+}
+
+/// Speak is priced per character, so a per-call count is a coarse bound. It is
+/// still the difference between a looping agent spending a bounded amount and
+/// spending until the wallet stops it.
+pub const fn default_speak_max_per_user_per_day() -> u32 {
+    50
 }
 
 pub fn default_speak_model_id() -> String {
@@ -337,6 +360,7 @@ mod tests {
             ConstrainedConfig::Speak(SpeakOperationConfig {
                 allowed_voice_ids: vec!["voice-a".to_string()],
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 25,
             }),
             OperationLimits {
                 per_request: PerRequestCaps::Speak { max_chars: 500 },

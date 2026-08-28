@@ -193,13 +193,13 @@ async fn poll_twilio(
     let catalog_service_id = row.service_id.as_deref().ok_or_else(|| {
         AppError::Internal("deferred Twilio row has no catalog service id".to_string())
     })?;
-    let (authorized, operation) = platform_credential_service::authorize_constrained(
+    let authorization = platform_credential_service::authorize_constrained(
         db,
-        &runtime.encryption_keys,
         catalog_service_id,
         ConstrainedOp::CallAndSay,
     )
     .await?;
+    let operation = authorization.operation();
     let PlatformOperationKind::Constrained {
         config: ConstrainedConfig::CallAndSay(config),
         ..
@@ -211,7 +211,13 @@ async fn poll_twilio(
         return Err(AppError::PlatformOperationUnavailable);
     }
 
-    let target = authorized.into_proxy_target();
+    let target = platform_credential_service::materialize_authorized(
+        db,
+        &runtime.encryption_keys,
+        authorization,
+    )
+    .await?
+    .into_proxy_target();
     let (credential_sid, auth_token) = target
         .credential
         .split_once(':')
@@ -431,7 +437,7 @@ mod tests {
             .insert_one(&service)
             .await
             .expect("insert Twilio catalog service");
-        platform_credential_service::set_credential(
+        platform_credential_service::set_credential_for_test(
             db,
             keys,
             &service.id,
@@ -460,6 +466,7 @@ mod tests {
             OperationBilling {
                 metric: BillingMetric::Seconds,
                 price_per_unit: "0.01".to_string(),
+                secondary: None,
                 base_fee_per_call: Some("1.5".to_string()),
                 lago_metric_code: "platform_op_api_twilio_constrained_call_and_say".to_string(),
                 sync_status: PricingSyncStatus::Synced,
@@ -506,6 +513,7 @@ mod tests {
             deferred_attempts: 0,
             deferred_next_retry_at: Some(created_at),
             pending_resale_quantity: None,
+            pending_platform_secondary_quantity: None,
             status: UsageStatus::Forwarded,
             forwarded: true,
             released: false,

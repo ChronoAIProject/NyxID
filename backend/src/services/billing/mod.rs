@@ -154,6 +154,32 @@ impl BillingService {
         pricing::sync_operation_price(&self.db, lago, &self.config.lago_plan_code, operation).await
     }
 
+    pub async fn remove_operation_price(
+        &self,
+        operation: &crate::models::platform_operation::PlatformOperationRow,
+    ) -> AppResult<()> {
+        let mut metric_codes = vec![operation.billing.lago_metric_code.as_str()];
+        if let Some(secondary) = &operation.billing.secondary {
+            metric_codes.push(secondary.lago_metric_code.as_str());
+        }
+        metric_codes.extend(
+            operation
+                .billing_cleanup_metric_codes
+                .iter()
+                .map(String::as_str),
+        );
+        metric_codes.retain(|code| !code.is_empty());
+        metric_codes.sort_unstable();
+        metric_codes.dedup();
+        if let Some(lago) = self.lago.as_deref() {
+            for metric_code in metric_codes {
+                lago.remove_standard_charge(&self.config.lago_plan_code, metric_code)
+                    .await?;
+            }
+        }
+        pricing::remove_operation_rate_cache(&self.db, operation).await
+    }
+
     pub fn reconciler(&self) -> reconcile::BillingReconciler {
         reconcile::BillingReconciler::new(self.db.clone(), self.lago.clone(), self.config.clone())
             .with_platform_runtime(self.platform_runtime.clone())

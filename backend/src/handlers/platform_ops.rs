@@ -4,17 +4,19 @@ use axum::{
     Extension, Json,
     body::Body,
     extract::{Request, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
 use chrono::Utc;
-use serde::Serialize;
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+use crate::models::platform_service_preference::CredentialIntent;
 use crate::models::service_billing::{BillingMetric, PlatformUsage};
 use crate::models::usage_meter::CredentialClass;
 use crate::mw::auth::{AuthMethod, AuthUser};
@@ -28,6 +30,7 @@ use crate::services::platform_operation_service::{
 use crate::services::{audit_service, feature_flag_service, platform_operation_service};
 
 pub const CREDENTIAL_SOURCE_HEADER: &str = "x-nyxid-credential-source";
+pub const CREDENTIAL_INTENT_HEADER: &str = "x-nyxid-credential-intent";
 
 #[derive(Clone)]
 pub(crate) struct PlatformOperationCaller {
@@ -38,10 +41,14 @@ pub(crate) struct PlatformOperationCaller {
     pub acting_client_id: Option<String>,
     pub allow_all_services: bool,
     pub allowed_service_ids: Vec<String>,
+    pub credential_intent: CredentialIntent,
 }
 
 impl PlatformOperationCaller {
-    fn from_auth_user(auth_user: &AuthUser) -> Self {
+    pub(crate) fn from_auth_user(
+        auth_user: &AuthUser,
+        credential_intent: CredentialIntent,
+    ) -> Self {
         Self {
             actor_user_id: auth_user.user_id.to_string(),
             resolution_user_id: auth_user.proxy_resolution_user_id(),
@@ -50,6 +57,7 @@ impl PlatformOperationCaller {
             acting_client_id: auth_user.acting_client_id.clone(),
             allow_all_services: auth_user.allow_all_services,
             allowed_service_ids: auth_user.allowed_service_ids.clone(),
+            credential_intent,
         }
     }
 
@@ -62,6 +70,7 @@ impl PlatformOperationCaller {
             allow_all_services: self.allow_all_services,
             allowed_service_ids: &self.allowed_service_ids,
             bypass_approval_flow: self.auth_method == AuthMethod::Session,
+            credential_intent: self.credential_intent,
         }
     }
 
@@ -83,16 +92,136 @@ impl PlatformOperationCaller {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SpeakTransportRequest {
+    text: String,
+    voice_id: String,
+    #[serde(default)]
+    credential_intent: CredentialIntent,
+}
+
+impl SpeakTransportRequest {
+    pub(crate) fn into_parts(self) -> (SpeakRequest, CredentialIntent) {
+        (
+            SpeakRequest {
+                text: self.text,
+                voice_id: self.voice_id,
+            },
+            self.credential_intent,
+        )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CallAndSayTransportRequest {
+    to: String,
+    message: String,
+    from: Option<String>,
+    #[serde(default)]
+    credential_intent: CredentialIntent,
+}
+
+impl CallAndSayTransportRequest {
+    pub(crate) fn into_parts(self) -> (CallAndSayRequest, CredentialIntent) {
+        (
+            CallAndSayRequest {
+                to: self.to,
+                message: self.message,
+                from: self.from,
+            },
+            self.credential_intent,
+        )
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FlightSearchTransportRequest {
+    origin: String,
+    destination: String,
+    departure_date: String,
+    return_date: Option<String>,
+    adults: Option<u32>,
+    cabin_class: Option<String>,
+    max_offers: Option<u32>,
+    #[serde(default)]
+    credential_intent: CredentialIntent,
+}
+
+impl FlightSearchTransportRequest {
+    pub(crate) fn into_parts(self) -> (FlightSearchRequest, CredentialIntent) {
+        (
+            FlightSearchRequest {
+                origin: self.origin,
+                destination: self.destination,
+                departure_date: self.departure_date,
+                return_date: self.return_date,
+                adults: self.adults,
+                cabin_class: self.cabin_class,
+                max_offers: self.max_offers,
+            },
+            self.credential_intent,
+        )
+    }
+}
+
+pub(crate) fn credential_intent_from_headers(headers: &HeaderMap) -> AppResult<CredentialIntent> {
+    let mut values = headers.get_all(CREDENTIAL_INTENT_HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(CredentialIntent::Auto);
+    };
+    if values.next().is_some() {
+        return Err(AppError::BadRequest(format!(
+            "{CREDENTIAL_INTENT_HEADER} must be supplied exactly once"
+        )));
+    }
+    let value = value.to_str().map_err(|_| {
+        AppError::BadRequest(format!(
+            "{CREDENTIAL_INTENT_HEADER} must be valid ASCII text"
+        ))
+    })?;
+    value.parse().map_err(|reason| {
+        AppError::BadRequest(format!("Invalid {CREDENTIAL_INTENT_HEADER}: {reason}"))
+    })
+}
+
 pub(crate) struct PlatformOperationExecution<T> {
     pub value: T,
     pub credential_source: PlatformCredentialSource,
-    pub own_connection_disabled: bool,
-    pub own_connection_out_of_scope: bool,
+    pub credential_intent: CredentialIntent,
+    pub fallback_reason: Option<platform_operation_service::PlatformFallbackReason>,
+    pub attribution: PlatformOperationAttribution,
+}
+
+/// Identity of the operation a request actually ran, recorded in audit so a
+/// charge can be traced back to the call that produced it.
+///
+/// `billing_request_id` is the join key into `usage_meter` and `billing_ledger`.
+/// Audit deliberately does not carry a credit amount: settlement happens after
+/// the response returns, so any amount written here would be an estimate that
+/// later disagrees with the ledger.
+///
+/// Only successful executions carry this. A failed call creates no charge, and
+/// its `op` plus outcome already identify what was refused.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PlatformOperationAttribution {
+    pub operation_id: String,
+    pub catalog_service_id: String,
+    pub billing_request_id: Option<String>,
 }
 
 enum ExecutionTarget {
-    Platform(Box<crate::models::downstream_service::DownstreamService>),
+    Platform(Box<PlatformExecutionTarget>),
     OwnConnection(Box<OwnConnectionExecutionTarget>),
+}
+
+struct PlatformExecutionTarget {
+    vendor: crate::models::downstream_service::DownstreamService,
+    authorization: crate::services::platform_credential_service::AuthorizedPlatformOperation,
+    billing_owner_id: String,
+    preference: crate::services::platform_preference_service::EffectivePlatformPreference,
 }
 
 struct OwnConnectionExecutionTarget {
@@ -105,11 +234,43 @@ struct OwnConnectionExecutionTarget {
 struct ResolvedExecutionTarget {
     target: ExecutionTarget,
     credential_source: PlatformCredentialSource,
-    own_connection_disabled: bool,
-    own_connection_out_of_scope: bool,
+    credential_intent: CredentialIntent,
+    fallback_reason: Option<platform_operation_service::PlatformFallbackReason>,
 }
 
-async fn require_platform_ops_enabled(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
+pub(crate) struct PreparedPlatformEndpoint {
+    authorization: crate::services::platform_credential_service::AuthorizedPlatformOperation,
+    vendor: crate::models::downstream_service::DownstreamService,
+    billing_owner_id: String,
+    preference: crate::services::platform_preference_service::EffectivePlatformPreference,
+    credential_intent: CredentialIntent,
+    fallback_reason: platform_operation_service::PlatformFallbackReason,
+}
+
+#[cfg(test)]
+impl PreparedPlatformEndpoint {
+    fn operation_id(&self) -> &str {
+        &self.authorization.operation().id
+    }
+}
+
+pub(crate) struct PlatformEndpointResponse {
+    pub status: reqwest::StatusCode,
+    pub headers: reqwest::header::HeaderMap,
+    pub body: bytes::Bytes,
+    pub credential_intent: CredentialIntent,
+    pub fallback_reason: platform_operation_service::PlatformFallbackReason,
+    pub catalog_service_slug: String,
+    pub attribution: PlatformOperationAttribution,
+}
+
+const PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
+const PLATFORM_ENDPOINT_TIMEOUT_SECS: u64 = 60;
+
+pub(crate) async fn require_platform_ops_enabled(
+    state: &AppState,
+    auth_user: &AuthUser,
+) -> AppResult<()> {
     let enabled =
         feature_flag_service::resolve_personal_features(&state.db, &auth_user.user_id.to_string())
             .await?
@@ -121,6 +282,85 @@ async fn require_platform_ops_enabled(state: &AppState, auth_user: &AuthUser) ->
         ));
     }
     Ok(())
+}
+
+pub(crate) async fn resolve_platform_endpoint(
+    state: &AppState,
+    caller: &PlatformOperationCaller,
+    catalog_service_id: &str,
+    method: &str,
+    canonical_path: &crate::services::proxy_authorization::CanonicalPath,
+) -> AppResult<Option<PreparedPlatformEndpoint>> {
+    let authorization = match crate::services::platform_credential_service::authorize_endpoint(
+        &state.db,
+        catalog_service_id,
+        method,
+        canonical_path,
+    )
+    .await
+    {
+        Ok(authorization) => authorization,
+        Err(AppError::NotFound(_)) | Err(AppError::PlatformOperationUnavailable) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(error),
+    };
+    let context = platform_operation_service::load_endpoint_credential_resolution_context(
+        &state.db,
+        &caller.resolution_user_id,
+        &authorization,
+    )
+    .await?;
+    let resolution = platform_operation_service::resolve_endpoint_credential_source(
+        &state.db,
+        &state.encryption_keys,
+        &state.node_ws_manager,
+        &caller.resolution_user_id,
+        caller.credential_caller(),
+        &authorization,
+        platform_operation_service::CredentialResolutionMode::Execute {
+            connection_expiry_notifier: Some(&state.connection_expiry_notifier),
+        },
+        &context,
+    )
+    .await?;
+    match resolution {
+        PlatformCredentialResolution::Platform {
+            vendor,
+            owner_id,
+            intent,
+            preference,
+            fallback_reason,
+        } => Ok(Some(PreparedPlatformEndpoint {
+            authorization,
+            vendor: *vendor,
+            billing_owner_id: owner_id,
+            preference,
+            credential_intent: intent,
+            fallback_reason,
+        })),
+        PlatformCredentialResolution::OutOfScope { .. } => {
+            Err(AppError::PlatformOperationOwnConnectionOutOfScope {
+                vendor: authorization.catalog_service().name.clone(),
+            })
+        }
+        PlatformCredentialResolution::Unavailable {
+            reason: platform_operation_service::PlatformUnavailableReason::OwnConnectionDisabled,
+            ..
+        } => Err(AppError::PlatformOperationUnavailable),
+        PlatformCredentialResolution::Unusable {
+            error: Some(error), ..
+        } => Err(error),
+        PlatformCredentialResolution::ApprovalRequired { .. } => {
+            Err(AppError::PlatformOperationApprovalRequired {
+                vendor: authorization.catalog_service().name.clone(),
+            })
+        }
+        PlatformCredentialResolution::OwnConnection { .. }
+        | PlatformCredentialResolution::NodeRouted { .. }
+        | PlatformCredentialResolution::Unusable { error: None, .. }
+        | PlatformCredentialResolution::Unavailable { .. } => Ok(None),
+    }
 }
 
 /// Structural feature gate for every route in the `/platform-ops` nest.
@@ -140,19 +380,22 @@ pub async fn speak(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Extension(billing_route_policy): Extension<BillingRoutePolicy>,
-    Json(request): Json<SpeakRequest>,
+    Json(request): Json<SpeakTransportRequest>,
 ) -> AppResult<Response> {
     require_platform_ops_enabled(&state, &auth_user).await?;
-    ensure_platform_operation_caller(&state, &auth_user).await?;
+    ensure_platform_spend_authority(&state, &auth_user).await?;
     enforce_agent_rate_limit(&state, &auth_user)?;
 
+    let (request, credential_intent) = request.into_parts();
     let started = Instant::now();
     let text_chars = request.text.chars().count();
     let voice_id = request.voice_id.clone();
+    let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
     let billing_egress_permit = enforce_platform_billing_classification(billing_route_policy)?;
     let result = execute_speak_for_caller(
         &state,
-        &PlatformOperationCaller::from_auth_user(&auth_user),
+        &PlatformOperationCaller::from_auth_user(&auth_user, credential_intent),
+        &yyyymmdd,
         request,
         BillingIngress::PlatformOperation,
         billing_egress_permit,
@@ -190,12 +433,13 @@ pub async fn call_and_say(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Extension(billing_route_policy): Extension<BillingRoutePolicy>,
-    Json(request): Json<CallAndSayRequest>,
+    Json(request): Json<CallAndSayTransportRequest>,
 ) -> AppResult<Response> {
     require_platform_ops_enabled(&state, &auth_user).await?;
-    ensure_platform_operation_caller(&state, &auth_user).await?;
+    ensure_platform_spend_authority(&state, &auth_user).await?;
     enforce_agent_rate_limit(&state, &auth_user)?;
 
+    let (request, credential_intent) = request.into_parts();
     let started = Instant::now();
     let message_chars = request.message.chars().count();
     let destination_suffix = if platform_operation_service::is_e164_number(&request.to) {
@@ -210,7 +454,7 @@ pub async fn call_and_say(
     let billing_egress_permit = enforce_platform_billing_classification(billing_route_policy)?;
     let result = execute_call_and_say_for_caller(
         &state,
-        &PlatformOperationCaller::from_auth_user(&auth_user),
+        &PlatformOperationCaller::from_auth_user(&auth_user, credential_intent),
         &yyyymmdd,
         request,
         BillingIngress::PlatformOperation,
@@ -237,19 +481,20 @@ pub async fn flight_search(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Extension(billing_route_policy): Extension<BillingRoutePolicy>,
-    Json(request): Json<FlightSearchRequest>,
+    Json(request): Json<FlightSearchTransportRequest>,
 ) -> AppResult<Response> {
     require_platform_ops_enabled(&state, &auth_user).await?;
-    ensure_platform_operation_caller(&state, &auth_user).await?;
+    ensure_platform_spend_authority(&state, &auth_user).await?;
     enforce_agent_rate_limit(&state, &auth_user)?;
 
+    let (request, credential_intent) = request.into_parts();
     let started = Instant::now();
     let requested_max_offers = request.max_offers;
     let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
     let billing_egress_permit = enforce_platform_billing_classification(billing_route_policy)?;
     let result = execute_flight_search_for_caller(
         &state,
-        &PlatformOperationCaller::from_auth_user(&auth_user),
+        &PlatformOperationCaller::from_auth_user(&auth_user, credential_intent),
         &yyyymmdd,
         request,
         BillingIngress::PlatformOperation,
@@ -291,7 +536,7 @@ fn response_with_credential_source(
 
 #[derive(Serialize)]
 pub struct PlatformOperationsResponse {
-    operations: Vec<PlatformOperationDiscoveryResponse>,
+    pub(crate) operations: Vec<PlatformOperationDiscoveryResponse>,
 }
 
 #[derive(Serialize)]
@@ -302,6 +547,9 @@ pub struct PlatformOperationDiscoveryResponse {
     vendor: String,
     catalog_service_slug: String,
     credential_source: PlatformCredentialSource,
+    credential_intent: CredentialIntent,
+    availability_reason: Option<&'static str>,
+    fallback_reason: Option<platform_operation_service::PlatformFallbackReason>,
     own_connection: Option<OwnConnectionDiscoveryResponse>,
     pricing: PlatformOperationPricingResponse,
     mcp_tool: String,
@@ -309,19 +557,83 @@ pub struct PlatformOperationDiscoveryResponse {
 
 #[derive(Serialize)]
 pub struct OwnConnectionDiscoveryResponse {
-    user_service_id: String,
-    slug: String,
-    label: String,
-    is_active: bool,
-    usable: bool,
-    reason: Option<&'static str>,
+    pub(crate) user_service_id: String,
+    pub(crate) slug: String,
+    pub(crate) label: String,
+    pub(crate) is_active: bool,
+    pub(crate) usable: bool,
+    pub(crate) reason: Option<&'static str>,
 }
 
 #[derive(Serialize)]
 pub struct PlatformOperationPricingResponse {
     billable: bool,
-    credits_per_call: Option<String>,
     metric: &'static str,
+    price_per_unit: String,
+    secondary: Option<PlatformOperationPricingComponentResponse>,
+    base_fee_per_call: Option<String>,
+    /// Server-rendered price sentence, already gated on the billing rollout
+    /// flag. A caller with the rollout off sees "Free" because that is what
+    /// the call will actually cost them.
+    display: String,
+}
+
+#[derive(Serialize)]
+pub struct PlatformOperationPricingComponentResponse {
+    metric: &'static str,
+    price_per_unit: String,
+}
+
+/// Pure projection from a stored operation to its discovery row.
+///
+/// Kept separate from `list_operations` so the cross-language contract test can
+/// serialize the exact shape the handler returns rather than a hand-written
+/// copy of it.
+pub(crate) fn platform_operation_discovery_response(
+    operation: &crate::models::platform_operation::PlatformOperation,
+    credential_source: PlatformCredentialSource,
+    credential_intent: CredentialIntent,
+    availability_reason: Option<&'static str>,
+    fallback_reason: Option<platform_operation_service::PlatformFallbackReason>,
+    own_connection: Option<OwnConnectionDiscoveryResponse>,
+    rollout_enabled: bool,
+) -> PlatformOperationDiscoveryResponse {
+    let contract = platform_operation_service::catalog_contract_for_operation(operation.op);
+    let price = operation.billing.price_per_unit.clone();
+    let billable = rollout_enabled
+        && (price != "0"
+            || operation.billing.secondary.is_some()
+            || operation.billing.base_fee_per_call.is_some());
+    let secondary = operation.billing.secondary.as_ref().map(|component| {
+        PlatformOperationPricingComponentResponse {
+            metric: component.metric.as_str(),
+            price_per_unit: component.price_per_unit.clone(),
+        }
+    });
+    PlatformOperationDiscoveryResponse {
+        op: platform_operation_service::operation_name(operation.op).to_string(),
+        display_name: contract.display_name.to_string(),
+        description: contract.description.to_string(),
+        vendor: contract.vendor.to_string(),
+        catalog_service_slug: contract.catalog_service_slug.to_string(),
+        credential_source,
+        credential_intent,
+        availability_reason,
+        fallback_reason,
+        own_connection,
+        pricing: PlatformOperationPricingResponse {
+            billable,
+            metric: operation.billing.metric.as_str(),
+            display: crate::services::billing::pricing::format_operation_price(
+                &operation.billing,
+                billable,
+            ),
+            price_per_unit: price,
+            secondary,
+            base_fee_per_call: operation.billing.base_fee_per_call.clone(),
+        },
+        mcp_tool: contract.mcp_tool.to_string(),
+    }
 }
 
 pub async fn list_operations(
@@ -344,10 +656,9 @@ pub async fn list_operations(
         &operations,
     )
     .await?;
-    let caller = PlatformOperationCaller::from_auth_user(&auth_user);
+    let caller = PlatformOperationCaller::from_auth_user(&auth_user, CredentialIntent::Auto);
     let mut response = Vec::with_capacity(operations.len());
     for operation in operations {
-        let contract = platform_operation_service::catalog_contract_for_operation(operation.op);
         let descriptor = platform_operation_discovery_descriptor(operation.op);
         let source = platform_operation_service::resolve_operation_credential_source(
             &state.db,
@@ -362,25 +673,22 @@ pub async fn list_operations(
             &context,
         )
         .await?;
-        let (credential_source, own_connection) = discovery_source(source);
-        let price = operation.billing.price_per_unit.clone();
-        response.push(PlatformOperationDiscoveryResponse {
-            op: platform_operation_service::operation_name(operation.op).to_string(),
-            display_name: contract.display_name.to_string(),
-            description: contract.description.to_string(),
-            vendor: contract.vendor.to_string(),
-            catalog_service_slug: contract.catalog_service_slug.to_string(),
+        let (
             credential_source,
+            credential_intent,
+            availability_reason,
+            fallback_reason,
             own_connection,
-            pricing: PlatformOperationPricingResponse {
-                billable: rollout_enabled
-                    && (price != "0" || operation.billing.base_fee_per_call.is_some()),
-                credits_per_call: (operation.billing.metric == BillingMetric::Requests)
-                    .then_some(price),
-                metric: operation.billing.metric.as_str(),
-            },
-            mcp_tool: contract.mcp_tool.to_string(),
-        });
+        ) = discovery_source(source);
+        response.push(platform_operation_discovery_response(
+            &operation,
+            credential_source,
+            credential_intent,
+            availability_reason,
+            fallback_reason,
+            own_connection,
+            rollout_enabled,
+        ));
     }
     Ok(Json(PlatformOperationsResponse {
         operations: response,
@@ -419,32 +727,43 @@ pub(crate) fn platform_tool_credential_sentence(
                 vendor_display_name(contract.vendor)
             );
         }
+        PlatformCredentialResolution::OutOfScope { .. } => {
+            return format!(
+                "This API key is not scoped to your {} connection; calls fail until you grant it access or disable the connection.",
+                vendor_display_name(contract.vendor)
+            );
+        }
+        PlatformCredentialResolution::Unavailable { reason, .. } => {
+            return match reason {
+                platform_operation_service::PlatformUnavailableReason::OwnerOptInRequired => {
+                    format!(
+                        "Platform access to {} requires the owner's spending opt-in.",
+                        vendor_display_name(contract.vendor)
+                    )
+                }
+                platform_operation_service::PlatformUnavailableReason::OwnConnectionDisabled => {
+                    format!(
+                        "Your {} connection is disabled; enable or replace it before calling this operation.",
+                        vendor_display_name(contract.vendor)
+                    )
+                }
+            };
+        }
         PlatformCredentialResolution::Platform { .. } => {}
     }
 
     let billing = &operation.billing;
     let mut sentence = if !rollout_enabled
-        || (billing.price_per_unit == "0" && billing.base_fee_per_call.is_none())
+        || (billing.price_per_unit == "0"
+            && billing.secondary.is_none()
+            && billing.base_fee_per_call.is_none())
     {
         "Uses the platform credential (free).".to_string()
     } else {
-        let unit = match billing.metric {
-            BillingMetric::Requests => "request",
-            BillingMetric::Bytes => "byte",
-            BillingMetric::Tokens => "token",
-            BillingMetric::Characters => "character",
-            BillingMetric::Seconds => "second",
-        };
-        match billing.base_fee_per_call.as_deref() {
-            Some(base) => format!(
-                "Uses the platform credential ({base} credits plus {} credits per {unit}).",
-                billing.price_per_unit
-            ),
-            None => format!(
-                "Uses the platform credential ({} credits per {unit}).",
-                billing.price_per_unit
-            ),
-        }
+        format!(
+            "Uses the platform credential ({}).",
+            crate::services::billing::pricing::format_operation_price(billing, true)
+        )
     };
     if let crate::models::platform_operation::PlatformOperationConfig::Speak(config) =
         &operation.config
@@ -461,40 +780,100 @@ fn discovery_source(
     source: PlatformCredentialResolution,
 ) -> (
     PlatformCredentialSource,
+    CredentialIntent,
+    Option<&'static str>,
+    Option<platform_operation_service::PlatformFallbackReason>,
     Option<OwnConnectionDiscoveryResponse>,
 ) {
     match source {
         PlatformCredentialResolution::Platform {
-            disabled_connection,
+            intent,
+            fallback_reason,
             ..
         } => (
             PlatformCredentialSource::Platform,
-            disabled_connection
-                .map(|connection| own_connection_response(connection, false, Some("disabled"))),
+            intent,
+            None,
+            Some(fallback_reason),
+            None,
         ),
-        PlatformCredentialResolution::OwnConnection { connection, .. } => (
+        PlatformCredentialResolution::OwnConnection {
+            connection, intent, ..
+        } => (
             PlatformCredentialSource::OwnConnection,
+            intent,
+            None,
+            None,
             Some(own_connection_response(connection, true, None)),
         ),
-        PlatformCredentialResolution::NodeRouted { connection } => (
+        PlatformCredentialResolution::NodeRouted { connection, intent } => (
             PlatformCredentialSource::OwnConnection,
+            intent,
+            None,
+            None,
             Some(own_connection_response(
                 connection,
                 false,
                 Some("node_routed"),
             )),
         ),
-        PlatformCredentialResolution::ApprovalRequired { connection } => (
+        PlatformCredentialResolution::ApprovalRequired { connection, intent } => (
             PlatformCredentialSource::OwnConnection,
+            intent,
+            None,
+            None,
             Some(own_connection_response(
                 connection,
                 false,
                 Some("approval_required"),
             )),
         ),
-        PlatformCredentialResolution::Unusable { connection, .. } => (
+        PlatformCredentialResolution::Unusable {
+            connection, intent, ..
+        } => (
             PlatformCredentialSource::OwnConnection,
+            intent,
+            None,
+            None,
             Some(own_connection_response(connection, false, Some("unusable"))),
+        ),
+        // Reported as the owner's own connection, unusable. Reporting it as the
+        // platform source would tell the caller their next call is billed, when
+        // in fact it will be refused.
+        PlatformCredentialResolution::OutOfScope { connection, intent } => (
+            PlatformCredentialSource::OwnConnection,
+            intent,
+            None,
+            None,
+            Some(own_connection_response(
+                connection,
+                false,
+                Some("out_of_scope"),
+            )),
+        ),
+        PlatformCredentialResolution::Unavailable {
+            connection,
+            reason,
+            intent,
+        } => (
+            PlatformCredentialSource::Unavailable,
+            intent,
+            Some(reason.as_str()),
+            None,
+            connection.map(|connection| {
+                own_connection_response(
+                    connection,
+                    false,
+                    Some(match reason {
+                        platform_operation_service::PlatformUnavailableReason::OwnerOptInRequired => {
+                            "unusable"
+                        }
+                        platform_operation_service::PlatformUnavailableReason::OwnConnectionDisabled => {
+                            "disabled"
+                        }
+                    }),
+                )
+            }),
         ),
     }
 }
@@ -537,10 +916,14 @@ struct DailyLimit {
 struct ForwardedOperation {
     response: reqwest::Response,
     credential_source: PlatformCredentialSource,
-    own_connection_disabled: bool,
-    own_connection_out_of_scope: bool,
+    credential_intent: CredentialIntent,
+    fallback_reason: Option<platform_operation_service::PlatformFallbackReason>,
+    attribution: PlatformOperationAttribution,
     metered: crate::services::billing::MeteredProxyContext,
     daily_limit: Option<DailyLimit>,
+    owner_id: String,
+    spend_reservation:
+        Option<crate::services::platform_preference_service::PlatformSpendReservation>,
 }
 
 async fn resolve_execution_target(
@@ -571,15 +954,29 @@ async fn resolve_execution_target(
     {
         PlatformCredentialResolution::Platform {
             vendor,
-            disabled_connection,
-            own_connection_out_of_scope,
+            owner_id,
+            intent,
+            preference,
+            fallback_reason,
         } => Ok(ResolvedExecutionTarget {
-            target: ExecutionTarget::Platform(vendor),
+            target: ExecutionTarget::Platform(Box::new(PlatformExecutionTarget {
+                authorization: crate::services::platform_credential_service::authorize_constrained(
+                    &state.db,
+                    &vendor.id,
+                    operation.op,
+                )
+                .await?,
+                vendor: *vendor,
+                billing_owner_id: owner_id,
+                preference,
+            })),
             credential_source: PlatformCredentialSource::Platform,
-            own_connection_disabled: disabled_connection.is_some(),
-            own_connection_out_of_scope,
+            credential_intent: intent,
+            fallback_reason: Some(fallback_reason),
         }),
-        PlatformCredentialResolution::OwnConnection { resolution, .. } => {
+        PlatformCredentialResolution::OwnConnection {
+            resolution, intent, ..
+        } => {
             let resolution = *resolution;
             let service_owner_id = resolution
                 .org_routing
@@ -594,8 +991,8 @@ async fn resolve_execution_target(
                     is_auto_connected: resolution.is_auto_connected,
                 })),
                 credential_source: PlatformCredentialSource::OwnConnection,
-                own_connection_disabled: false,
-                own_connection_out_of_scope: false,
+                credential_intent: intent,
+                fallback_reason: None,
             })
         }
         PlatformCredentialResolution::NodeRouted { .. } => {
@@ -608,13 +1005,21 @@ async fn resolve_execution_target(
                 vendor: vendor_display_name(contract.vendor),
             })
         }
+        PlatformCredentialResolution::OutOfScope { .. } => {
+            Err(AppError::PlatformOperationOwnConnectionOutOfScope {
+                vendor: vendor_display_name(contract.vendor),
+            })
+        }
         PlatformCredentialResolution::Unusable { error, .. } => {
             Err(
                 error.unwrap_or_else(|| AppError::PlatformOperationOwnConnectionUnusable {
                     vendor: vendor_display_name(contract.vendor),
-                    detail: "Reconnect or disable it before retrying.".to_string(),
+                    detail: "Reconnect it before retrying.".to_string(),
                 }),
             )
+        }
+        PlatformCredentialResolution::Unavailable { .. } => {
+            Err(AppError::PlatformOperationUnavailable)
         }
     }
 }
@@ -624,12 +1029,545 @@ fn vendor_display_name(vendor: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+pub(crate) async fn execute_platform_endpoint(
+    state: &AppState,
+    caller: &PlatformOperationCaller,
+    prepared: PreparedPlatformEndpoint,
+    method: reqwest::Method,
+    path: &str,
+    query: Option<&str>,
+    headers: reqwest::header::HeaderMap,
+    body: Option<bytes::Bytes>,
+    ingress: BillingIngress,
+    billing_egress_permit: BillingEgressPermit,
+) -> AppResult<PlatformEndpointResponse> {
+    use crate::models::platform_operation::{PerRequestCaps, PlatformOperationKind};
+    use crate::models::service_billing::TokenBreakdown;
+
+    let operation = prepared.authorization.operation().clone();
+    if !matches!(operation.kind, PlatformOperationKind::Endpoint { .. })
+        || !matches!(operation.limits.per_request, PerRequestCaps::Endpoint)
+    {
+        return Err(AppError::PlatformOperationUnavailable);
+    }
+    let daily_cap = operation
+        .limits
+        .per_user_per_day
+        .filter(|cap| *cap > 0)
+        .ok_or(AppError::PlatformOperationUnavailable)?;
+    let request_len = body
+        .as_ref()
+        .map_or(0_i64, |body| i64::try_from(body.len()).unwrap_or(i64::MAX));
+    let estimated_usage = PlatformUsage {
+        requests: 1,
+        bytes: PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES as i64,
+        tokens: request_len.saturating_add(PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES as i64),
+        characters: PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES as i64,
+        seconds: PLATFORM_ENDPOINT_TIMEOUT_SECS as i64,
+        token_breakdown: Some(TokenBreakdown {
+            prompt_tokens: request_len,
+            completion_tokens: PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES as i64,
+            cached_tokens: 0,
+            cache_creation_tokens: 0,
+        }),
+    };
+
+    let descriptor = crate::services::operation_descriptor::build_http_descriptor(
+        method.as_str(),
+        path,
+        body.as_deref(),
+    );
+    match crate::services::approval_service::evaluate_and_check(
+        &state.db,
+        &caller.actor_user_id,
+        &prepared.billing_owner_id,
+        &operation.catalog_service_id,
+        &descriptor,
+        caller.approval_requester_type(),
+        caller.approval_requester_id(),
+        caller.auth_method == AuthMethod::Session,
+        false,
+    )
+    .await?
+    {
+        crate::services::approval_service::ApprovalOutcome::Allowed { .. } => {}
+        crate::services::approval_service::ApprovalOutcome::Denied => {
+            return Err(AppError::Forbidden(
+                "Operation denied by approval policy".to_string(),
+            ));
+        }
+        crate::services::approval_service::ApprovalOutcome::NeedsApproval(_) => {
+            return Err(AppError::PlatformOperationApprovalRequired {
+                vendor: prepared.vendor.name.clone(),
+            });
+        }
+    }
+
+    crate::mw::rate_limit::enforce_platform_user_limit(
+        crate::mw::rate_limit::platform_user_rate_limiter(),
+        &operation.catalog_service_id,
+        &prepared.billing_owner_id,
+    )?;
+
+    let estimated_charge_micros =
+        crate::services::platform_preference_service::estimated_charge_micros(
+            &operation.billing,
+            &estimated_usage,
+        )?;
+    let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
+    let spend = crate::services::platform_preference_service::reserve_daily_spend(
+        &state.db,
+        &prepared.billing_owner_id,
+        &operation.catalog_service_id,
+        &yyyymmdd,
+        estimated_charge_micros,
+        prepared.preference,
+    )
+    .await?;
+    if let Err(error) = platform_operation_service::reserve_daily_operation(
+        &state.db,
+        &operation.id,
+        &prepared.billing_owner_id,
+        &yyyymmdd,
+        daily_cap,
+    )
+    .await
+    {
+        release_endpoint_spend(state, &spend).await;
+        return Err(error);
+    }
+
+    let billing_owner = match state
+        .billing
+        .owner_resolver()
+        .resolve_for_resource(&caller.resolution_user_id, &prepared.billing_owner_id)
+        .await
+    {
+        Ok(owner) => owner,
+        Err(error) => {
+            release_endpoint_limits(
+                state,
+                &operation.id,
+                &prepared.billing_owner_id,
+                &yyyymmdd,
+                &spend,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let primary_rate = crate::services::billing::lago_client::decimal_credits_to_micros(
+        &operation.billing.price_per_unit,
+    )
+    .ok_or(AppError::PlatformOperationUnavailable)?;
+    let secondary_rate = operation
+        .billing
+        .secondary
+        .as_ref()
+        .map(|component| {
+            crate::services::billing::lago_client::decimal_credits_to_micros(
+                &component.price_per_unit,
+            )
+            .ok_or(AppError::PlatformOperationUnavailable)
+        })
+        .transpose()?;
+    let base_fee = match operation.billing.base_fee_per_call.as_deref() {
+        Some(value) => crate::services::billing::lago_client::decimal_credits_to_micros(value)
+            .ok_or(AppError::PlatformOperationUnavailable)?,
+        None => 0,
+    };
+    let billing_context = crate::services::billing::BillingRouteContext::new(
+        ingress,
+        uuid::Uuid::new_v4().to_string(),
+        billing_owner.owner_id,
+        caller.actor_user_id.clone(),
+        caller.api_key_id.clone(),
+        None,
+        Some(operation.catalog_service_id.clone()),
+        Some(prepared.vendor.slug.clone()),
+        crate::services::billing::NodeIntent::Direct,
+        prepared.vendor.auth_method.clone(),
+        CredentialClass::NyxidManagedMaster,
+        BillingMetric::Requests,
+        None,
+        false,
+    )
+    .with_platform_operation_billing(
+        &operation.billing,
+        primary_rate,
+        secondary_rate,
+        base_fee,
+        &estimated_usage,
+    );
+    let metered = match state.billing.open(&billing_context).await {
+        Ok(metered) => metered,
+        Err(error) => {
+            release_endpoint_limits(
+                state,
+                &operation.id,
+                &prepared.billing_owner_id,
+                &yyyymmdd,
+                &spend,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let target = match crate::services::platform_credential_service::materialize_authorized(
+        &state.db,
+        &state.encryption_keys,
+        prepared.authorization,
+    )
+    .await
+    {
+        Ok(credential) => credential.into_proxy_target(),
+        Err(error) => {
+            fail_endpoint_attempt(
+                state,
+                &metered,
+                "credential_unavailable",
+                &operation.id,
+                &prepared.billing_owner_id,
+                &yyyymmdd,
+                &spend,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    if let Err(error) = state.billing.mark_forwarded(&metered).await {
+        fail_endpoint_attempt(
+            state,
+            &metered,
+            "mark_forwarded_failed",
+            &operation.id,
+            &prepared.billing_owner_id,
+            &yyyymmdd,
+            &spend,
+        )
+        .await;
+        return Err(error);
+    }
+
+    let dispatched_at = Instant::now();
+    let forwarded = tokio::time::timeout(
+        std::time::Duration::from_secs(PLATFORM_ENDPOINT_TIMEOUT_SECS),
+        async {
+            let response =
+                crate::services::proxy_service::forward_request_with_extra_outbound_headers(
+                    &state.http_client,
+                    &target,
+                    method,
+                    path,
+                    query,
+                    headers,
+                    crate::services::proxy_service::ProxyBody::Buffered(body),
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    &state.token_exchange_cache,
+                    &state.cloud_response_cache,
+                    Vec::new(),
+                    billing_egress_permit,
+                )
+                .await
+                .map_err(PlatformEndpointDispatchError::BeforeResponse)?;
+            let status = response.status();
+            collect_platform_endpoint_response(response)
+                .await
+                .map_err(|error| PlatformEndpointDispatchError::AfterResponse { status, error })
+        },
+    )
+    .await;
+
+    let collected = match forwarded {
+        Ok(Ok(collected)) => collected,
+        Ok(Err(PlatformEndpointDispatchError::BeforeResponse(
+            crate::services::proxy_service::ForwardRequestError::Application(error),
+        ))) => {
+            fail_endpoint_attempt(
+                state,
+                &metered,
+                "request_build_failed",
+                &operation.id,
+                &prepared.billing_owner_id,
+                &yyyymmdd,
+                &spend,
+            )
+            .await;
+            return Err(error);
+        }
+        Ok(Err(PlatformEndpointDispatchError::BeforeResponse(
+            crate::services::proxy_service::ForwardRequestError::Transport(error),
+        ))) if error.is_connect() || error.is_builder() => {
+            fail_endpoint_attempt(
+                state,
+                &metered,
+                "provider_unreachable",
+                &operation.id,
+                &prepared.billing_owner_id,
+                &yyyymmdd,
+                &spend,
+            )
+            .await;
+            return Err(AppError::PlatformOperationUnavailable);
+        }
+        Ok(Err(PlatformEndpointDispatchError::BeforeResponse(
+            crate::services::proxy_service::ForwardRequestError::Transport(_),
+        )))
+        | Err(_) => {
+            settle_endpoint_usage(state, &metered, &spend, &operation.billing, estimated_usage)
+                .await;
+            return Err(AppError::PlatformOperationUnavailable);
+        }
+        Ok(Err(PlatformEndpointDispatchError::AfterResponse { status, error })) => {
+            if status.is_client_error() {
+                fail_endpoint_attempt(
+                    state,
+                    &metered,
+                    "vendor_client_error",
+                    &operation.id,
+                    &prepared.billing_owner_id,
+                    &yyyymmdd,
+                    &spend,
+                )
+                .await;
+            } else {
+                settle_endpoint_usage(state, &metered, &spend, &operation.billing, estimated_usage)
+                    .await;
+            }
+            return Err(error);
+        }
+    };
+
+    if collected.status.is_client_error() {
+        fail_endpoint_attempt(
+            state,
+            &metered,
+            "vendor_client_error",
+            &operation.id,
+            &prepared.billing_owner_id,
+            &yyyymmdd,
+            &spend,
+        )
+        .await;
+    } else if collected.status.is_server_error() {
+        settle_endpoint_usage(state, &metered, &spend, &operation.billing, estimated_usage).await;
+    } else {
+        let elapsed = dispatched_at.elapsed();
+        let seconds = elapsed
+            .as_secs()
+            .saturating_add(u64::from(elapsed.subsec_nanos() > 0));
+        let reported = serde_json::from_slice::<serde_json::Value>(&collected.body)
+            .ok()
+            .and_then(|value| crate::services::llm_usage_service::extract_reported_usage(&value));
+        let requires_reported_tokens = [
+            operation.billing.metric,
+            operation
+                .billing
+                .secondary
+                .as_ref()
+                .map(|component| component.metric)
+                .unwrap_or(BillingMetric::Requests),
+        ]
+        .into_iter()
+        .any(|metric| {
+            matches!(
+                metric,
+                BillingMetric::Tokens | BillingMetric::InputTokens | BillingMetric::OutputTokens
+            )
+        });
+        let actual_usage = if requires_reported_tokens && reported.is_none() {
+            estimated_usage
+        } else {
+            clamp_endpoint_usage(
+                measure_endpoint_response(&collected.body, seconds, reported.as_ref()),
+                &estimated_usage,
+            )
+        };
+        settle_endpoint_usage(state, &metered, &spend, &operation.billing, actual_usage).await;
+    }
+
+    Ok(PlatformEndpointResponse {
+        status: collected.status,
+        headers: collected.headers,
+        body: collected.body,
+        credential_intent: prepared.credential_intent,
+        fallback_reason: prepared.fallback_reason,
+        catalog_service_slug: prepared.vendor.slug,
+        attribution: PlatformOperationAttribution {
+            operation_id: operation.id,
+            catalog_service_id: operation.catalog_service_id,
+            billing_request_id: metered.billing_request_id().map(str::to_string),
+        },
+    })
+}
+
+struct CollectedPlatformEndpointResponse {
+    status: reqwest::StatusCode,
+    headers: reqwest::header::HeaderMap,
+    body: bytes::Bytes,
+}
+
+enum PlatformEndpointDispatchError {
+    BeforeResponse(crate::services::proxy_service::ForwardRequestError),
+    AfterResponse {
+        status: reqwest::StatusCode,
+        error: AppError,
+    },
+}
+
+async fn collect_platform_endpoint_response(
+    response: reqwest::Response,
+) -> AppResult<CollectedPlatformEndpointResponse> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES as u64)
+    {
+        return Err(AppError::RequestBodyTooLarge {
+            max_bytes: PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES,
+            context: "Platform endpoint response".to_string(),
+        });
+    }
+    let status = response.status();
+    let headers = response.headers().clone();
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| AppError::PlatformOperationUnavailable)?;
+        if body.len().saturating_add(chunk.len()) > PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES {
+            return Err(AppError::RequestBodyTooLarge {
+                max_bytes: PLATFORM_ENDPOINT_MAX_RESPONSE_BYTES,
+                context: "Platform endpoint response".to_string(),
+            });
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(CollectedPlatformEndpointResponse {
+        status,
+        headers,
+        body: bytes::Bytes::from(body),
+    })
+}
+
+fn clamp_endpoint_usage(mut actual: PlatformUsage, estimate: &PlatformUsage) -> PlatformUsage {
+    actual.requests = actual.requests.min(estimate.requests);
+    actual.bytes = actual.bytes.min(estimate.bytes);
+    actual.tokens = actual.tokens.min(estimate.tokens);
+    actual.characters = actual.characters.min(estimate.characters);
+    actual.seconds = actual.seconds.min(estimate.seconds);
+    actual.token_breakdown = actual.token_breakdown.map(|mut breakdown| {
+        if let Some(estimated) = estimate.token_breakdown {
+            breakdown.prompt_tokens = breakdown.prompt_tokens.min(estimated.prompt_tokens);
+            breakdown.completion_tokens =
+                breakdown.completion_tokens.min(estimated.completion_tokens);
+        }
+        breakdown
+    });
+    actual
+}
+
+fn measure_endpoint_response(
+    body: &[u8],
+    elapsed_seconds: u64,
+    reported: Option<&crate::services::llm_usage_service::ReportedLlmUsage>,
+) -> PlatformUsage {
+    let text_characters = std::str::from_utf8(body)
+        .map(|text| i64::try_from(text.chars().count()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    PlatformUsage {
+        requests: 1,
+        bytes: i64::try_from(body.len()).unwrap_or(i64::MAX),
+        tokens: reported
+            .map(|usage| usage.total_tokens.min(i64::MAX as u64) as i64)
+            .unwrap_or(0),
+        characters: text_characters,
+        seconds: elapsed_seconds.min(i64::MAX as u64) as i64,
+        token_breakdown: reported.map(|usage| usage.token_breakdown()),
+    }
+}
+
+async fn settle_endpoint_usage(
+    state: &AppState,
+    metered: &crate::services::billing::MeteredProxyContext,
+    spend: &crate::services::platform_preference_service::PlatformSpendReservation,
+    billing: &crate::models::platform_operation::OperationBilling,
+    usage: PlatformUsage,
+) {
+    let actual_charge =
+        crate::services::platform_preference_service::estimated_charge_micros(billing, &usage)
+            .unwrap_or(spend.reserved_micros);
+    if let Err(error) = crate::services::platform_preference_service::settle_daily_spend(
+        &state.db,
+        spend,
+        actual_charge,
+    )
+    .await
+    {
+        tracing::error!(error = %error, "Failed to settle platform endpoint spend reservation");
+    }
+    if let Err(error) = state
+        .billing
+        .settle_deferred(metered, usage, None, None)
+        .await
+    {
+        tracing::error!(error = %error, "Failed to persist platform endpoint settlement");
+    }
+}
+
+async fn fail_endpoint_attempt(
+    state: &AppState,
+    metered: &crate::services::billing::MeteredProxyContext,
+    reason: &str,
+    operation_id: &str,
+    owner_id: &str,
+    yyyymmdd: &str,
+    spend: &crate::services::platform_preference_service::PlatformSpendReservation,
+) {
+    if let Err(error) = state.billing.fail(metered, reason).await {
+        tracing::error!(error = %error, "Failed to release platform endpoint billing reservation");
+    }
+    release_endpoint_limits(state, operation_id, owner_id, yyyymmdd, spend).await;
+}
+
+async fn release_endpoint_limits(
+    state: &AppState,
+    operation_id: &str,
+    owner_id: &str,
+    yyyymmdd: &str,
+    spend: &crate::services::platform_preference_service::PlatformSpendReservation,
+) {
+    if let Err(error) = platform_operation_service::release_daily_operation(
+        &state.db,
+        operation_id,
+        owner_id,
+        yyyymmdd,
+    )
+    .await
+    {
+        tracing::error!(operation_id, error = %error, "Failed to release platform endpoint quota");
+    }
+    release_endpoint_spend(state, spend).await;
+}
+
+async fn release_endpoint_spend(
+    state: &AppState,
+    spend: &crate::services::platform_preference_service::PlatformSpendReservation,
+) {
+    if let Err(error) =
+        crate::services::platform_preference_service::release_daily_spend(&state.db, spend).await
+    {
+        tracing::error!(error = %error, "Failed to release platform endpoint spend reservation");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn forward_metered_operation(
     state: &AppState,
     caller: &PlatformOperationCaller,
     ingress: BillingIngress,
     operation: &crate::models::platform_operation::PlatformOperation,
-    platform_estimated_quantity: i64,
+    platform_estimated_usage: PlatformUsage,
     resolved: ResolvedExecutionTarget,
     method: reqwest::Method,
     path: &str,
@@ -641,22 +1579,43 @@ async fn forward_metered_operation(
     billing_egress_permit: BillingEgressPermit,
 ) -> AppResult<ForwardedOperation> {
     let op = operation.op;
-    if let ExecutionTarget::OwnConnection(own) = &resolved.target {
+    {
         let descriptor = crate::services::operation_descriptor::build_http_descriptor(
             method.as_str(),
             path,
             body.as_deref(),
         );
+        // Platform-funded execution spends the owner's credits, so it clears the
+        // same approval policy as a call on the owner's own credential. It has no
+        // `UserService` row, so the policy is keyed on the catalog provider.
+        let (approval_owner_id, approval_service_id, is_auto_connected) = match &resolved.target {
+            ExecutionTarget::OwnConnection(own) => (
+                own.service_owner_id.as_str(),
+                own.user_service_id.as_str(),
+                own.is_auto_connected,
+            ),
+            // `is_auto_connected` must stay false here. It suppresses the owner's
+            // global "require approval for everything" flag, which would leave the
+            // one path that spends their money as the only unprompted one.
+            ExecutionTarget::Platform(_) => (
+                match &resolved.target {
+                    ExecutionTarget::Platform(platform) => platform.billing_owner_id.as_str(),
+                    ExecutionTarget::OwnConnection(_) => unreachable!("matched platform target"),
+                },
+                operation.catalog_service_id.as_str(),
+                false,
+            ),
+        };
         let approval = crate::services::approval_service::evaluate_and_check(
             &state.db,
             &caller.actor_user_id,
-            &own.service_owner_id,
-            &own.user_service_id,
+            approval_owner_id,
+            approval_service_id,
             &descriptor,
             caller.approval_requester_type(),
             caller.approval_requester_id(),
             caller.auth_method == AuthMethod::Session,
-            own.is_auto_connected,
+            is_auto_connected,
         )
         .await?;
         match approval {
@@ -675,31 +1634,45 @@ async fn forward_metered_operation(
         }
     }
 
-    let is_platform = matches!(&resolved.target, ExecutionTarget::Platform(_));
-    if is_platform && let Some(limit) = &daily_limit {
-        platform_operation_service::reserve_daily_operation(
-            &state.db,
-            op,
-            &caller.resolution_user_id,
-            &limit.yyyymmdd,
-            limit.cap,
-        )
-        .await?;
+    // Bound one tenant's call rate against the shared vendor credential, before
+    // any quota row or wallet reservation is taken.
+    //
+    // This matters more here than on a BYOK path: an explicit vendor rejection
+    // releases both the reservation and quota slot. Without a limiter, one
+    // tenant could burn the shared vendor's rate allowance at no cost. A 5xx
+    // is handled differently because the vendor may already have performed.
+    //
+    // Off by default (`PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND=0`), matching the
+    // limiter's existing use on the master-credential proxy path.
+    if let ExecutionTarget::Platform(platform) = &resolved.target {
+        crate::mw::rate_limit::enforce_platform_user_limit(
+            crate::mw::rate_limit::platform_user_rate_limiter(),
+            &platform.vendor.id,
+            &platform.billing_owner_id,
+        )?;
     }
 
-    let metered = if let ExecutionTarget::Platform(vendor) = &resolved.target {
-        let billing_owner = state
+    let is_platform = matches!(&resolved.target, ExecutionTarget::Platform(_));
+    let execution_owner_id = match &resolved.target {
+        ExecutionTarget::Platform(platform) => platform.billing_owner_id.clone(),
+        ExecutionTarget::OwnConnection(_) => caller.resolution_user_id.clone(),
+    };
+    let platform_billing = if is_platform {
+        let rate_micros = crate::services::billing::lago_client::decimal_credits_to_micros(
+            &operation.billing.price_per_unit,
+        )
+        .ok_or(AppError::PlatformOperationUnavailable)?;
+        let secondary_rate_micros = operation
             .billing
-            .owner_resolver()
-            .resolve_for_resource(&caller.resolution_user_id, &caller.resolution_user_id)
-            .await;
-        let billing_owner = match billing_owner {
-            Ok(owner) => owner,
-            Err(error) => {
-                release_daily_limit(state, op, caller, daily_limit.as_ref()).await;
-                return Err(error);
-            }
-        };
+            .secondary
+            .as_ref()
+            .map(|component| {
+                crate::services::billing::lago_client::decimal_credits_to_micros(
+                    &component.price_per_unit,
+                )
+                .ok_or(AppError::PlatformOperationUnavailable)
+            })
+            .transpose()?;
         let base_fee_micros = match operation.billing.base_fee_per_call.as_deref() {
             Some(base_fee) => {
                 crate::services::billing::lago_client::decimal_credits_to_micros(base_fee)
@@ -707,6 +1680,80 @@ async fn forward_metered_operation(
             }
             None => 0,
         };
+        let estimated_charge_micros =
+            crate::services::platform_preference_service::estimated_charge_micros(
+                &operation.billing,
+                &platform_estimated_usage,
+            )?;
+        Some((
+            rate_micros,
+            secondary_rate_micros,
+            base_fee_micros,
+            estimated_charge_micros,
+        ))
+    } else {
+        None
+    };
+    let platform_spend_reservation = if let ExecutionTarget::Platform(platform) = &resolved.target {
+        let limit = daily_limit.as_ref().ok_or_else(|| {
+            AppError::Internal(
+                "Platform operation is missing its mandatory daily limit".to_string(),
+            )
+        })?;
+        let (_, _, _, estimated_charge_micros) =
+            platform_billing.expect("platform billing values were computed");
+        Some(
+            crate::services::platform_preference_service::reserve_daily_spend(
+                &state.db,
+                &platform.billing_owner_id,
+                &operation.catalog_service_id,
+                &limit.yyyymmdd,
+                estimated_charge_micros,
+                platform.preference,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    if is_platform
+        && let Some(limit) = &daily_limit
+        && let Err(error) = platform_operation_service::reserve_daily_operation(
+            &state.db,
+            &operation.id,
+            &execution_owner_id,
+            &limit.yyyymmdd,
+            limit.cap,
+        )
+        .await
+    {
+        release_platform_spend(state, platform_spend_reservation.as_ref()).await;
+        return Err(error);
+    }
+
+    let metered = if let ExecutionTarget::Platform(platform) = &resolved.target {
+        let billing_owner = state
+            .billing
+            .owner_resolver()
+            .resolve_for_resource(&caller.resolution_user_id, &platform.billing_owner_id)
+            .await;
+        let billing_owner = match billing_owner {
+            Ok(owner) => owner,
+            Err(error) => {
+                release_platform_limits(
+                    state,
+                    op,
+                    &operation.id,
+                    &platform.billing_owner_id,
+                    daily_limit.as_ref(),
+                    platform_spend_reservation.as_ref(),
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        let (rate_micros, secondary_rate_micros, base_fee_micros, _) =
+            platform_billing.expect("platform billing values were computed");
         let billing_ctx = crate::services::billing::BillingRouteContext::new(
             ingress,
             uuid::Uuid::new_v4().to_string(),
@@ -714,29 +1761,34 @@ async fn forward_metered_operation(
             caller.actor_user_id.clone(),
             caller.api_key_id.clone(),
             None,
-            Some(vendor.id.clone()),
-            Some(vendor.slug.clone()),
+            Some(platform.vendor.id.clone()),
+            Some(platform.vendor.slug.clone()),
             crate::services::billing::NodeIntent::Direct,
-            vendor.auth_method.clone(),
+            platform.vendor.auth_method.clone(),
             CredentialClass::NyxidManagedMaster,
             BillingMetric::Requests,
             None,
             false,
         )
         .with_platform_operation_billing(
-            operation.billing.metric,
-            operation.billing.lago_metric_code.clone(),
-            crate::services::billing::lago_client::decimal_credits_to_micros(
-                &operation.billing.price_per_unit,
-            )
-            .ok_or_else(|| AppError::PlatformOperationUnavailable)?,
+            &operation.billing,
+            rate_micros,
+            secondary_rate_micros,
             base_fee_micros,
-            platform_estimated_quantity,
+            &platform_estimated_usage,
         );
         match state.billing.open(&billing_ctx).await {
             Ok(metered) => metered,
             Err(error) => {
-                release_daily_limit(state, op, caller, daily_limit.as_ref()).await;
+                release_platform_limits(
+                    state,
+                    op,
+                    &operation.id,
+                    &platform.billing_owner_id,
+                    daily_limit.as_ref(),
+                    platform_spend_reservation.as_ref(),
+                )
+                .await;
                 return Err(error);
             }
         }
@@ -745,12 +1797,12 @@ async fn forward_metered_operation(
     };
 
     let target = match resolved.target {
-        ExecutionTarget::Platform(vendor) => {
+        ExecutionTarget::Platform(platform) => {
             match platform_operation_service::materialize_platform_vendor_target(
                 &state.db,
                 &state.encryption_keys,
                 op,
-                *vendor,
+                platform.authorization,
             )
             .await
             {
@@ -764,11 +1816,15 @@ async fn forward_metered_operation(
                 Err(error) => {
                     fail_platform_attempt(
                         state,
-                        &metered,
-                        "credential_unavailable",
-                        op,
-                        caller,
-                        daily_limit.as_ref(),
+                        PlatformAttemptFailure {
+                            metered: &metered,
+                            reason: "credential_unavailable",
+                            op,
+                            operation_id: &operation.id,
+                            owner_id: &execution_owner_id,
+                            daily_limit: daily_limit.as_ref(),
+                            spend_reservation: platform_spend_reservation.as_ref(),
+                        },
                     )
                     .await;
                     return Err(error);
@@ -781,11 +1837,15 @@ async fn forward_metered_operation(
     if let Err(error) = state.billing.mark_forwarded(&metered).await {
         fail_platform_attempt(
             state,
-            &metered,
-            "mark_forwarded_failed",
-            op,
-            caller,
-            daily_limit.as_ref(),
+            PlatformAttemptFailure {
+                metered: &metered,
+                reason: "mark_forwarded_failed",
+                op,
+                operation_id: &operation.id,
+                owner_id: &execution_owner_id,
+                daily_limit: daily_limit.as_ref(),
+                spend_reservation: platform_spend_reservation.as_ref(),
+            },
         )
         .await;
         return Err(error);
@@ -809,35 +1869,54 @@ async fn forward_metered_operation(
         Err(error) => {
             fail_platform_attempt(
                 state,
-                &metered,
-                "vendor_request_failed",
-                op,
-                caller,
-                daily_limit.as_ref(),
+                PlatformAttemptFailure {
+                    metered: &metered,
+                    reason: "vendor_request_failed",
+                    op,
+                    operation_id: &operation.id,
+                    owner_id: &execution_owner_id,
+                    daily_limit: daily_limit.as_ref(),
+                    spend_reservation: platform_spend_reservation.as_ref(),
+                },
             )
             .await;
             return Err(error);
         }
     };
     if let Err(error) = platform_operation_service::ensure_vendor_success(op, &response) {
-        fail_platform_attempt(
-            state,
-            &metered,
-            "vendor_non_success",
-            op,
-            caller,
-            daily_limit.as_ref(),
-        )
-        .await;
+        if is_platform && response.status().is_server_error() {
+            settle_meter_async(state.billing.clone(), metered, platform_estimated_usage).await;
+        } else {
+            fail_platform_attempt(
+                state,
+                PlatformAttemptFailure {
+                    metered: &metered,
+                    reason: "vendor_non_success",
+                    op,
+                    operation_id: &operation.id,
+                    owner_id: &execution_owner_id,
+                    daily_limit: daily_limit.as_ref(),
+                    spend_reservation: platform_spend_reservation.as_ref(),
+                },
+            )
+            .await;
+        }
         return Err(error);
     }
     Ok(ForwardedOperation {
         response,
         credential_source: resolved.credential_source,
-        own_connection_disabled: resolved.own_connection_disabled,
-        own_connection_out_of_scope: resolved.own_connection_out_of_scope,
+        credential_intent: resolved.credential_intent,
+        fallback_reason: resolved.fallback_reason,
+        attribution: PlatformOperationAttribution {
+            operation_id: operation.id.clone(),
+            catalog_service_id: operation.catalog_service_id.clone(),
+            billing_request_id: metered.billing_request_id().map(str::to_string),
+        },
         metered,
         daily_limit,
+        owner_id: execution_owner_id,
+        spend_reservation: platform_spend_reservation,
     })
 }
 
@@ -866,40 +1945,54 @@ async fn settle_meter_async(
     }
 }
 
-async fn fail_platform_attempt(
-    state: &AppState,
-    metered: &crate::services::billing::MeteredProxyContext,
-    reason: &str,
+struct PlatformAttemptFailure<'a> {
+    metered: &'a crate::services::billing::MeteredProxyContext,
+    reason: &'a str,
     op: crate::models::platform_operation::PlatformOperationName,
-    caller: &PlatformOperationCaller,
-    daily_limit: Option<&DailyLimit>,
-) {
-    if let Err(error) = state.billing.fail(metered, reason).await {
+    operation_id: &'a str,
+    owner_id: &'a str,
+    daily_limit: Option<&'a DailyLimit>,
+    spend_reservation:
+        Option<&'a crate::services::platform_preference_service::PlatformSpendReservation>,
+}
+
+async fn fail_platform_attempt(state: &AppState, failure: PlatformAttemptFailure<'_>) {
+    if let Err(error) = state.billing.fail(failure.metered, failure.reason).await {
         tracing::error!(
-            op = platform_operation_service::operation_name(op),
+            op = platform_operation_service::operation_name(failure.op),
             error = %error,
             "Failed to release platform operation billing reservation"
         );
     }
-    release_daily_limit(state, op, caller, daily_limit).await;
+    release_platform_limits(
+        state,
+        failure.op,
+        failure.operation_id,
+        failure.owner_id,
+        failure.daily_limit,
+        failure.spend_reservation,
+    )
+    .await;
 }
 
-async fn release_daily_limit(
+async fn release_platform_limits(
     state: &AppState,
     op: crate::models::platform_operation::PlatformOperationName,
-    caller: &PlatformOperationCaller,
+    operation_id: &str,
+    owner_id: &str,
     daily_limit: Option<&DailyLimit>,
+    spend_reservation: Option<
+        &crate::services::platform_preference_service::PlatformSpendReservation,
+    >,
 ) {
-    let Some(limit) = daily_limit else {
-        return;
-    };
-    if let Err(error) = platform_operation_service::release_daily_operation(
-        &state.db,
-        op,
-        &caller.resolution_user_id,
-        &limit.yyyymmdd,
-    )
-    .await
+    if let Some(limit) = daily_limit
+        && let Err(error) = platform_operation_service::release_daily_operation(
+            &state.db,
+            operation_id,
+            owner_id,
+            &limit.yyyymmdd,
+        )
+        .await
     {
         tracing::error!(
             op = platform_operation_service::operation_name(op),
@@ -907,11 +2000,33 @@ async fn release_daily_limit(
             "Failed to release platform operation daily reservation"
         );
     }
+    release_platform_spend(state, spend_reservation).await;
+}
+
+async fn release_platform_spend(
+    state: &AppState,
+    reservation: Option<&crate::services::platform_preference_service::PlatformSpendReservation>,
+) {
+    let Some(reservation) = reservation else {
+        return;
+    };
+    if let Err(error) =
+        crate::services::platform_preference_service::release_daily_spend(&state.db, reservation)
+            .await
+    {
+        tracing::error!(
+            owner_id = %reservation.owner_id,
+            catalog_service_id = %reservation.catalog_service_id,
+            error = %error,
+            "Failed to release platform owner spend reservation"
+        );
+    }
 }
 
 pub(crate) async fn execute_speak_for_caller(
     state: &AppState,
     caller: &PlatformOperationCaller,
+    yyyymmdd: &str,
     request: SpeakRequest,
     ingress: BillingIngress,
     billing_egress_permit: BillingEgressPermit,
@@ -932,12 +2047,17 @@ pub(crate) async fn execute_speak_for_caller(
         &request,
         enforce_allowlist,
     )?;
+    let daily_limit =
+        (resolved.credential_source == PlatformCredentialSource::Platform).then_some(DailyLimit {
+            yyyymmdd: yyyymmdd.to_string(),
+            cap: config.max_calls_per_user_per_day,
+        });
     let result = forward_metered_operation(
         state,
         caller,
         ingress,
         &operation,
-        text_characters,
+        PlatformUsage::single_request(0).with_characters(text_characters),
         resolved,
         reqwest::Method::POST,
         &upstream.path,
@@ -949,15 +2069,16 @@ pub(crate) async fn execute_speak_for_caller(
             })?,
         )),
         None,
-        None,
+        daily_limit,
         billing_egress_permit,
     )
     .await?;
     let ForwardedOperation {
         response,
         credential_source,
-        own_connection_disabled,
-        own_connection_out_of_scope,
+        credential_intent,
+        fallback_reason,
+        attribution,
         metered,
         ..
     } = result;
@@ -970,8 +2091,9 @@ pub(crate) async fn execute_speak_for_caller(
     Ok(PlatformOperationExecution {
         value: platform_operation_service::SpeakVendorResponse { response },
         credential_source,
-        own_connection_disabled,
-        own_connection_out_of_scope,
+        credential_intent,
+        fallback_reason,
+        attribution,
     })
 }
 
@@ -1025,11 +2147,11 @@ pub(crate) async fn execute_call_and_say_for_caller(
         caller,
         ingress,
         &operation,
-        i64::from(
+        PlatformUsage::single_request(0).with_seconds(i64::from(
             config
                 .max_duration_seconds
                 .min(platform_operation_service::CALL_AND_SAY_HARD_MAX_DURATION_SECONDS),
-        ),
+        )),
         resolved,
         reqwest::Method::POST,
         &upstream.path,
@@ -1044,10 +2166,13 @@ pub(crate) async fn execute_call_and_say_for_caller(
     let ForwardedOperation {
         response,
         credential_source,
-        own_connection_disabled,
-        own_connection_out_of_scope,
+        credential_intent,
+        fallback_reason,
+        attribution,
         metered,
         daily_limit,
+        owner_id,
+        spend_reservation,
     } = result;
     let value =
         platform_operation_service::read_vendor_json(PlatformOperationName::CallAndSay, response)
@@ -1055,15 +2180,32 @@ pub(crate) async fn execute_call_and_say_for_caller(
     let value = match value {
         Ok(value) => value,
         Err(error) => {
-            fail_platform_attempt(
-                state,
-                &metered,
-                "vendor_response_invalid",
-                PlatformOperationName::CallAndSay,
-                caller,
-                daily_limit.as_ref(),
-            )
-            .await;
+            if credential_source == PlatformCredentialSource::Platform {
+                settle_meter_async(
+                    state.billing.clone(),
+                    metered,
+                    PlatformUsage::single_request(0).with_seconds(i64::from(
+                        config.max_duration_seconds.min(
+                            platform_operation_service::CALL_AND_SAY_HARD_MAX_DURATION_SECONDS,
+                        ),
+                    )),
+                )
+                .await;
+            } else {
+                fail_platform_attempt(
+                    state,
+                    PlatformAttemptFailure {
+                        metered: &metered,
+                        reason: "vendor_response_invalid",
+                        op: PlatformOperationName::CallAndSay,
+                        operation_id: &attribution.operation_id,
+                        owner_id: &owner_id,
+                        daily_limit: daily_limit.as_ref(),
+                        spend_reservation: spend_reservation.as_ref(),
+                    },
+                )
+                .await;
+            }
             return Err(error);
         }
     };
@@ -1073,13 +2215,14 @@ pub(crate) async fn execute_call_and_say_for_caller(
             .and_then(serde_json::Value::as_str)
             .filter(|sid| platform_operation_service::is_twilio_call_sid(sid));
         let Some(call_sid) = call_sid else {
-            fail_platform_attempt(
-                state,
-                &metered,
-                "vendor_call_sid_invalid",
-                PlatformOperationName::CallAndSay,
-                caller,
-                daily_limit.as_ref(),
+            settle_meter_async(
+                state.billing.clone(),
+                metered,
+                PlatformUsage::single_request(0).with_seconds(i64::from(
+                    config
+                        .max_duration_seconds
+                        .min(platform_operation_service::CALL_AND_SAY_HARD_MAX_DURATION_SECONDS),
+                )),
             )
             .await;
             return Err(AppError::PlatformOperationUnavailable);
@@ -1099,8 +2242,9 @@ pub(crate) async fn execute_call_and_say_for_caller(
     Ok(PlatformOperationExecution {
         value,
         credential_source,
-        own_connection_disabled,
-        own_connection_out_of_scope,
+        credential_intent,
+        fallback_reason,
+        attribution,
     })
 }
 
@@ -1134,7 +2278,7 @@ pub(crate) async fn execute_flight_search_for_caller(
         caller,
         ingress,
         &operation,
-        1,
+        PlatformUsage::single_request(0),
         resolved,
         reqwest::Method::POST,
         upstream.path,
@@ -1153,10 +2297,13 @@ pub(crate) async fn execute_flight_search_for_caller(
     let ForwardedOperation {
         response,
         credential_source,
-        own_connection_disabled,
-        own_connection_out_of_scope,
+        credential_intent,
+        fallback_reason,
+        attribution,
         metered,
         daily_limit,
+        owner_id,
+        spend_reservation,
     } = result;
     let value = async {
         let value = platform_operation_service::read_vendor_json(
@@ -1170,15 +2317,28 @@ pub(crate) async fn execute_flight_search_for_caller(
     let value = match value {
         Ok(value) => value,
         Err(error) => {
-            fail_platform_attempt(
-                state,
-                &metered,
-                "vendor_response_invalid",
-                PlatformOperationName::FlightSearch,
-                caller,
-                daily_limit.as_ref(),
-            )
-            .await;
+            if credential_source == PlatformCredentialSource::Platform {
+                settle_meter_async(
+                    state.billing.clone(),
+                    metered,
+                    PlatformUsage::single_request(0),
+                )
+                .await;
+            } else {
+                fail_platform_attempt(
+                    state,
+                    PlatformAttemptFailure {
+                        metered: &metered,
+                        reason: "vendor_response_invalid",
+                        op: PlatformOperationName::FlightSearch,
+                        operation_id: &attribution.operation_id,
+                        owner_id: &owner_id,
+                        daily_limit: daily_limit.as_ref(),
+                        spend_reservation: spend_reservation.as_ref(),
+                    },
+                )
+                .await;
+            }
             return Err(error);
         }
     };
@@ -1191,11 +2351,19 @@ pub(crate) async fn execute_flight_search_for_caller(
     Ok(PlatformOperationExecution {
         value,
         credential_source,
-        own_connection_disabled,
-        own_connection_out_of_scope,
+        credential_intent,
+        fallback_reason,
+        attribution,
     })
 }
 
+/// Scope a non-human caller must hold to spend the owner's credits through a
+/// platform credential.
+pub(crate) const PLATFORM_SPEND_SCOPE: &str = "platform:spend";
+
+/// Caller *class* check: which authentication methods may see platform
+/// operations at all. Discovery stops here; an agent is allowed to learn a
+/// service exists without being allowed to pay for it.
 async fn ensure_platform_operation_caller(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
     match auth_user.auth_method {
         AuthMethod::Session | AuthMethod::AccessToken => Ok(()),
@@ -1227,7 +2395,39 @@ async fn ensure_platform_operation_caller(state: &AppState, auth_user: &AuthUser
     }
 }
 
-fn enforce_agent_rate_limit(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
+/// Authority to spend the owner's credits. Required by every executing
+/// operation, and deliberately not by discovery.
+///
+/// Without this, any principal that clears the class check could spend: an app
+/// holding a token granted for `profile email`, or an agent key issued with
+/// only `read`. Nothing else on the execution path inspects scope.
+pub(crate) async fn ensure_platform_spend_authority(
+    state: &AppState,
+    auth_user: &AuthUser,
+) -> AppResult<()> {
+    // Scope is checked before the caller class so an unscoped caller is refused
+    // without a database round trip. Classes that can never spend fall through
+    // to `ensure_platform_operation_caller`, which explains why by name.
+    match auth_user.auth_method {
+        // A browser session is the owner acting directly and knowingly. The
+        // approval flow exists so a human can authorize an agent, not authorize
+        // themselves.
+        AuthMethod::Session
+        | AuthMethod::Delegated
+        | AuthMethod::Relay
+        | AuthMethod::ServiceAccount => {}
+        AuthMethod::AccessToken | AuthMethod::ApiKey => {
+            if !auth_user.has_scope(PLATFORM_SPEND_SCOPE) {
+                return Err(AppError::Forbidden(format!(
+                    "The '{PLATFORM_SPEND_SCOPE}' scope is required to spend credits on platform operations."
+                )));
+            }
+        }
+    }
+    ensure_platform_operation_caller(state, auth_user).await
+}
+
+pub(crate) fn enforce_agent_rate_limit(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
     crate::mw::rate_limit::check_agent_rate_limit_raw(
         &state.per_agent_limiter,
         auth_user.api_key_id.as_deref(),
@@ -1277,11 +2477,31 @@ pub(crate) fn platform_operation_audit_metadata<T>(
             "credential_source".to_string(),
             Value::String(execution.credential_source.as_str().to_string()),
         );
-        if execution.own_connection_disabled {
-            data.insert("own_connection_disabled".to_string(), Value::Bool(true));
+        data.insert(
+            "credential_intent".to_string(),
+            Value::String(execution.credential_intent.as_str().to_string()),
+        );
+        if let Some(reason) = execution.fallback_reason {
+            data.insert(
+                "fallback_reason".to_string(),
+                Value::String(reason.as_str().to_string()),
+            );
         }
-        if execution.own_connection_out_of_scope {
-            data.insert("own_connection_out_of_scope".to_string(), Value::Bool(true));
+        data.insert(
+            "operation_id".to_string(),
+            Value::String(execution.attribution.operation_id.clone()),
+        );
+        data.insert(
+            "catalog_service_id".to_string(),
+            Value::String(execution.attribution.catalog_service_id.clone()),
+        );
+        // Present only for platform-funded calls; an own-connection call is
+        // not metered and so has no ledger row to join to.
+        if let Some(billing_request_id) = &execution.attribution.billing_request_id {
+            data.insert(
+                "billing_request_id".to_string(),
+                Value::String(billing_request_id.clone()),
+            );
         }
     }
     data
@@ -1299,6 +2519,11 @@ fn audit_outcome<T>(result: &AppResult<T>) -> &'static str {
             | AppError::PlatformOperationOwnConnectionUnusable { .. },
         ) => "own_connection_unusable",
         Err(AppError::PlatformOperationApprovalRequired { .. }) => "approval_required",
+        // Distinct from "own_connection_unusable": the connection is fine, the
+        // calling key is not scoped to it.
+        Err(AppError::PlatformOperationOwnConnectionOutOfScope { .. }) => {
+            "own_connection_out_of_scope"
+        }
         Err(AppError::BadRequest(_) | AppError::ValidationError(_)) => "rejected",
         Err(AppError::PlatformOperationUnavailable) => "vendor_unavailable",
         Err(_) => "failed",
@@ -1338,6 +2563,80 @@ mod tests {
 
     const USER_ID: &str = "65de27dc-8cf8-44b6-b8d2-5304e4a90aa4";
 
+    #[test]
+    fn typed_transport_requests_default_to_auto_and_reject_unknown_fields() {
+        let speak: SpeakTransportRequest = serde_json::from_value(serde_json::json!({
+            "text": "Hello",
+            "voice_id": "voice-a"
+        }))
+        .expect("typed REST request without an intent");
+        let (speak, intent) = speak.into_parts();
+        assert_eq!(speak.text, "Hello");
+        assert_eq!(intent, CredentialIntent::Auto);
+
+        let call: CallAndSayTransportRequest = serde_json::from_value(serde_json::json!({
+            "to": "+6512345678",
+            "message": "Hello",
+            "from": null,
+            "credential_intent": "platform_only"
+        }))
+        .expect("typed REST request with explicit platform intent");
+        let (_, intent) = call.into_parts();
+        assert_eq!(intent, CredentialIntent::PlatformOnly);
+
+        let flight: FlightSearchTransportRequest = serde_json::from_value(serde_json::json!({
+            "origin": "SIN",
+            "destination": "NRT",
+            "departure_date": "2026-09-10",
+            "credential_intent": "own_only"
+        }))
+        .expect("typed flight request with explicit own intent");
+        let (_, intent) = flight.into_parts();
+        assert_eq!(intent, CredentialIntent::OwnOnly);
+
+        assert!(
+            serde_json::from_value::<SpeakTransportRequest>(serde_json::json!({
+                "text": "Hello",
+                "voice_id": "voice-a",
+                "credential_intent": "auto",
+                "provider_payload_control": true
+            }))
+            .is_err(),
+            "transport envelopes must retain strict unknown-field rejection"
+        );
+    }
+
+    #[test]
+    fn generic_rest_credential_intent_header_is_single_and_strict() {
+        let empty = HeaderMap::new();
+        assert_eq!(
+            credential_intent_from_headers(&empty).expect("missing header defaults to auto"),
+            CredentialIntent::Auto
+        );
+
+        let mut explicit = HeaderMap::new();
+        explicit.insert(CREDENTIAL_INTENT_HEADER, "platform_only".parse().unwrap());
+        assert_eq!(
+            credential_intent_from_headers(&explicit).expect("valid explicit intent"),
+            CredentialIntent::PlatformOnly
+        );
+
+        let mut duplicate = HeaderMap::new();
+        duplicate.append(CREDENTIAL_INTENT_HEADER, "auto".parse().unwrap());
+        duplicate.append(CREDENTIAL_INTENT_HEADER, "own_only".parse().unwrap());
+        assert!(matches!(
+            credential_intent_from_headers(&duplicate),
+            Err(AppError::BadRequest(message)) if message.contains("exactly once")
+        ));
+
+        let mut invalid = HeaderMap::new();
+        invalid.insert(CREDENTIAL_INTENT_HEADER, "prefer_platform".parse().unwrap());
+        assert!(matches!(
+            credential_intent_from_headers(&invalid),
+            Err(AppError::BadRequest(message)) if message.contains("Invalid")
+        ));
+    }
+
     fn operation(
         op: PlatformOperationName,
         enabled: bool,
@@ -1350,13 +2649,14 @@ mod tests {
                     config: ConstrainedConfig::Speak(SpeakOperationConfig {
                         allowed_voice_ids: config.allowed_voice_ids,
                         model_id: config.model_id,
+                        max_calls_per_user_per_day: config.max_calls_per_user_per_day,
                     }),
                 },
                 OperationLimits {
                     per_request: PerRequestCaps::Speak {
                         max_chars: config.max_chars,
                     },
-                    per_user_per_day: None,
+                    per_user_per_day: Some(config.max_calls_per_user_per_day),
                 },
             ),
             PlatformOperationConfig::CallAndSay(config) => (
@@ -1427,6 +2727,27 @@ mod tests {
         ))
     }
 
+    async fn opt_in_platform_service(
+        db: &mongodb::Database,
+        owner_id: &str,
+        catalog_service_id: &str,
+    ) {
+        crate::services::platform_preference_service::upsert_preference(
+            db,
+            owner_id,
+            owner_id,
+            catalog_service_id,
+            crate::services::platform_preference_service::PreferenceWrite {
+                platform_enabled: true,
+                max_credits_per_call: "1000000".to_string(),
+                max_credits_per_day: "10000000".to_string(),
+                operation_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("opt in to platform service");
+    }
+
     async fn insert_twilio_vendor(state: &AppState, base_url: String) -> DownstreamService {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
         service.id = catalog_service_id(platform_operation_service::CALL_AND_SAY_VENDOR_SLUG);
@@ -1444,7 +2765,7 @@ mod tests {
             .insert_one(&service)
             .await
             .expect("insert Twilio vendor row");
-        crate::services::platform_credential_service::set_credential(
+        crate::services::platform_credential_service::set_credential_for_test(
             &state.db,
             &state.encryption_keys,
             &service.id,
@@ -1453,6 +2774,7 @@ mod tests {
         )
         .await
         .expect("set Twilio platform credential");
+        opt_in_platform_service(&state.db, USER_ID, &service.id).await;
         service
     }
 
@@ -1478,7 +2800,7 @@ mod tests {
             .insert_one(&service)
             .await
             .expect("insert ElevenLabs vendor row");
-        crate::services::platform_credential_service::set_credential(
+        crate::services::platform_credential_service::set_credential_for_test(
             &state.db,
             &state.encryption_keys,
             &service.id,
@@ -1487,6 +2809,7 @@ mod tests {
         )
         .await
         .expect("set ElevenLabs platform credential");
+        opt_in_platform_service(&state.db, USER_ID, &service.id).await;
         service
     }
 
@@ -1495,7 +2818,7 @@ mod tests {
             .create_index(
                 IndexModel::builder()
                     .keys(mongodb::bson::doc! {
-                        "op": 1,
+                        "operation_id": 1,
                         "user_id": 1,
                         "yyyymmdd": 1,
                     })
@@ -1504,6 +2827,24 @@ mod tests {
             )
             .await
             .expect("create platform operation usage index");
+    }
+
+    fn endpoint_operation(catalog_service_id: &str, path: &str) -> PlatformOperationRow {
+        let mut row = PlatformOperationRow::new_endpoint(
+            catalog_service_id.to_string(),
+            "GET".to_string(),
+            path.to_string(),
+            "Read test resource".to_string(),
+            Some("Endpoint authorization parity test".to_string()),
+            OperationLimits {
+                per_request: PerRequestCaps::Endpoint,
+                per_user_per_day: Some(10),
+            },
+            OperationBilling::free(BillingMetric::Requests),
+            USER_ID.to_string(),
+        );
+        row.enabled = true;
+        row
     }
 
     async fn enable_platform_services_for_tests(db: &mongodb::Database) {
@@ -1539,6 +2880,20 @@ mod tests {
             axum::serve(listener, app)
                 .await
                 .expect("serve Twilio test server");
+        });
+        (format!("http://{address}"), server)
+    }
+
+    async fn spawn_vendor_status(status: StatusCode) -> (String, tokio::task::JoinHandle<()>) {
+        let app = Router::new().fallback(any(move || async move { (status, "vendor status") }));
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind status vendor test server");
+        let address = listener.local_addr().expect("status vendor address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve status vendor test server");
         });
         (format!("http://{address}"), server)
     }
@@ -1654,6 +3009,271 @@ mod tests {
                 .expect("serve credential capture server");
         });
         (format!("http://{address}"), captured, server)
+    }
+
+    #[tokio::test]
+    async fn endpoint_authorization_is_transport_equivalent_and_decrypts_only_at_execution() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_endpoint_transport_parity").await
+        else {
+            return;
+        };
+        crate::db::ensure_indexes(&db)
+            .await
+            .expect("create endpoint execution indexes");
+        let state = crate::test_utils::test_app_state(db.clone());
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                USER_ID,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert endpoint execution owner");
+        let (base_url, captured, server) = spawn_capturing_vendor().await;
+        let service = insert_speak_vendor(&state, base_url, "platform-endpoint-secret").await;
+        let row = endpoint_operation(&service.id, "/v1/resources/{resource_id}");
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(&row)
+            .await
+            .expect("insert endpoint operation");
+        let caller = PlatformOperationCaller {
+            actor_user_id: USER_ID.to_string(),
+            resolution_user_id: USER_ID.to_string(),
+            api_key_id: None,
+            auth_method: AuthMethod::Session,
+            acting_client_id: None,
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
+            credential_intent: CredentialIntent::Auto,
+        };
+        let rest_path = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
+            "/v1/resources/resource-1",
+        )
+        .expect("REST canonical path");
+        let mcp_path = crate::services::proxy_authorization::CanonicalPath::from_mcp_built(
+            "/v1/resources/resource-1",
+        )
+        .expect("MCP canonical path");
+        assert_eq!(
+            db.collection::<crate::models::platform_service_preference::PlatformServicePreference>(
+                crate::models::platform_service_preference::COLLECTION_NAME,
+            )
+            .count_documents(mongodb::bson::doc! {
+                "owner_id": USER_ID,
+                "catalog_service_id": &service.id,
+            })
+            .await
+            .expect("count endpoint preference rows"),
+            1
+        );
+        assert!(
+            crate::services::platform_credential_service::credential_is_configured(
+                &db,
+                &service.id,
+            )
+            .await
+            .expect("read endpoint credential status")
+        );
+        let diagnostic_authorization =
+            crate::services::platform_credential_service::authorize_endpoint(
+                &db,
+                &service.id,
+                "GET",
+                &rest_path,
+            )
+            .await
+            .expect("authorize endpoint for resolution diagnostic");
+        let diagnostic_context =
+            platform_operation_service::load_endpoint_credential_resolution_context(
+                &db,
+                USER_ID,
+                &diagnostic_authorization,
+            )
+            .await
+            .expect("load endpoint resolution context");
+        let diagnostic_resolution = platform_operation_service::resolve_endpoint_credential_source(
+            &db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            USER_ID,
+            caller.credential_caller(),
+            &diagnostic_authorization,
+            platform_operation_service::CredentialResolutionMode::Execute {
+                connection_expiry_notifier: Some(&state.connection_expiry_notifier),
+            },
+            &diagnostic_context,
+        )
+        .await
+        .expect("resolve endpoint credential source");
+        match diagnostic_resolution {
+            PlatformCredentialResolution::Platform { .. } => {}
+            PlatformCredentialResolution::OwnConnection { .. } => {
+                panic!("unexpected own connection")
+            }
+            PlatformCredentialResolution::NodeRouted { .. } => panic!("unexpected node route"),
+            PlatformCredentialResolution::ApprovalRequired { .. } => {
+                panic!("unexpected approval requirement")
+            }
+            PlatformCredentialResolution::OutOfScope { .. } => panic!("unexpected scope denial"),
+            PlatformCredentialResolution::Unusable { .. } => {
+                panic!("unexpected unusable own connection")
+            }
+            PlatformCredentialResolution::Unavailable { reason, .. } => {
+                panic!("unexpected unavailable resolution: {}", reason.as_str())
+            }
+        }
+        let decrypts_before = state.encryption_keys.decrypt_stats();
+        let rest = resolve_platform_endpoint(&state, &caller, &service.id, "GET", &rest_path)
+            .await
+            .expect("resolve REST platform endpoint")
+            .expect("REST endpoint is platform-funded");
+        let mcp = resolve_platform_endpoint(&state, &caller, &service.id, "GET", &mcp_path)
+            .await
+            .expect("resolve MCP platform endpoint")
+            .expect("MCP endpoint is platform-funded");
+        assert_eq!(rest.operation_id(), row.id);
+        assert_eq!(mcp.operation_id(), row.id);
+        assert_eq!(state.encryption_keys.decrypt_stats(), decrypts_before);
+
+        let result = execute_platform_endpoint(
+            &state,
+            &caller,
+            rest,
+            reqwest::Method::GET,
+            "/v1/resources/resource-1",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            BillingIngress::Proxy,
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(BillingRoutePolicy::Metered(BillingIngress::Proxy)),
+                BillingIngress::Proxy,
+            )
+            .expect("proxy billing classification"),
+        )
+        .await
+        .expect("execute authorized platform endpoint");
+
+        assert_eq!(result.status, reqwest::StatusCode::OK);
+        assert_eq!(result.attribution.operation_id, row.id);
+        assert_eq!(result.catalog_service_slug, service.slug);
+        assert_ne!(state.encryption_keys.decrypt_stats(), decrypts_before);
+        let requests = captured.lock().await;
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].uri, "/v1/resources/resource-1");
+        assert_eq!(
+            requests[0].elevenlabs_key.as_deref(),
+            Some("platform-endpoint-secret")
+        );
+        drop(requests);
+        server.abort();
+
+        let quota_count = || async {
+            db.collection::<PlatformOpUsage>(PLATFORM_OP_USAGE)
+                .find_one(mongodb::bson::doc! {
+                    "operation_id": &row.id,
+                    "user_id": USER_ID,
+                })
+                .await
+                .expect("read endpoint quota")
+                .expect("endpoint quota exists")
+                .count
+        };
+        assert_eq!(quota_count().await, 1);
+
+        let (client_error_url, client_error_server) =
+            spawn_vendor_status(StatusCode::BAD_REQUEST).await;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                mongodb::bson::doc! { "_id": &service.id },
+                mongodb::bson::doc! { "$set": { "base_url": client_error_url } },
+            )
+            .await
+            .expect("point endpoint provider at 4xx server");
+        let prepared = resolve_platform_endpoint(&state, &caller, &service.id, "GET", &rest_path)
+            .await
+            .expect("resolve 4xx endpoint")
+            .expect("4xx endpoint is platform-funded");
+        let client_error = execute_platform_endpoint(
+            &state,
+            &caller,
+            prepared,
+            reqwest::Method::GET,
+            "/v1/resources/resource-1",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            BillingIngress::Proxy,
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(BillingRoutePolicy::Metered(BillingIngress::Proxy)),
+                BillingIngress::Proxy,
+            )
+            .expect("4xx proxy billing classification"),
+        )
+        .await
+        .expect("return provider 4xx response");
+        assert_eq!(client_error.status, reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(quota_count().await, 1, "provider 4xx must release quota");
+        client_error_server.abort();
+
+        let (server_error_url, server_error_server) =
+            spawn_vendor_status(StatusCode::INTERNAL_SERVER_ERROR).await;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                mongodb::bson::doc! { "_id": &service.id },
+                mongodb::bson::doc! { "$set": { "base_url": server_error_url } },
+            )
+            .await
+            .expect("point endpoint provider at 5xx server");
+        let prepared = resolve_platform_endpoint(&state, &caller, &service.id, "GET", &rest_path)
+            .await
+            .expect("resolve 5xx endpoint")
+            .expect("5xx endpoint is platform-funded");
+        let server_error = execute_platform_endpoint(
+            &state,
+            &caller,
+            prepared,
+            reqwest::Method::GET,
+            "/v1/resources/resource-1",
+            None,
+            reqwest::header::HeaderMap::new(),
+            None,
+            BillingIngress::Proxy,
+            crate::services::billing::route_inventory::enforce_billing_egress_classification(
+                Some(BillingRoutePolicy::Metered(BillingIngress::Proxy)),
+                BillingIngress::Proxy,
+            )
+            .expect("5xx proxy billing classification"),
+        )
+        .await
+        .expect("return provider 5xx response");
+        assert_eq!(
+            server_error.status,
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(quota_count().await, 2, "provider 5xx must retain quota");
+        server_error_server.abort();
+    }
+
+    #[test]
+    fn endpoint_measurement_prices_response_bytes_and_reported_token_components() {
+        let reported = crate::services::llm_usage_service::extract_reported_usage(&json!({
+            "usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 7,
+                "total_tokens": 10
+            }
+        }))
+        .expect("parse reported token split");
+        let usage = measure_endpoint_response("NyxID".as_bytes(), 2, Some(&reported));
+
+        assert_eq!(usage.bytes, 5, "bytes are the response body only");
+        assert_eq!(usage.characters, 5);
+        assert_eq!(usage.seconds, 2);
+        assert_eq!(usage.tokens, 10);
+        let split = usage.token_breakdown.expect("reported token breakdown");
+        assert_eq!(split.prompt_tokens, 3);
+        assert_eq!(split.completion_tokens, 7);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1792,7 +3412,7 @@ mod tests {
             .service_by_slug(&operation.vendor_service_slug)
             .cloned();
         let descriptor = platform_operation_discovery_descriptor(operation.op);
-        let caller = PlatformOperationCaller::from_auth_user(auth);
+        let caller = PlatformOperationCaller::from_auth_user(auth, CredentialIntent::Auto);
         let source = platform_operation_service::resolve_operation_credential_source(
             &state.db,
             &state.encryption_keys,
@@ -1825,9 +3445,10 @@ mod tests {
             State(state.clone()),
             auth_user.clone(),
             billing_extension(),
-            Json(SpeakRequest {
+            Json(SpeakTransportRequest {
                 text: "Hello".to_string(),
                 voice_id: "voice".to_string(),
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -1837,10 +3458,11 @@ mod tests {
             State(state),
             auth_user,
             billing_extension(),
-            Json(CallAndSayRequest {
+            Json(CallAndSayTransportRequest {
                 to: "+6512345678".to_string(),
                 message: "Hello".to_string(),
                 from: None,
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -1863,6 +3485,7 @@ mod tests {
                     allowed_voice_ids: vec!["voice".to_string()],
                     max_chars: 1_000,
                     model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
                 }),
             ))
             .await
@@ -1871,9 +3494,10 @@ mod tests {
             State(crate::test_utils::test_app_state(db)),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(SpeakRequest {
+            Json(SpeakTransportRequest {
                 text: "Hello".to_string(),
                 voice_id: "voice".to_string(),
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -1899,6 +3523,12 @@ mod tests {
             .insert_one(catalog)
             .await
             .expect("insert catalog service without platform credential");
+        opt_in_platform_service(
+            &db,
+            USER_ID,
+            &catalog_service_id(platform_operation_service::SPEAK_VENDOR_SLUG),
+        )
+        .await;
         db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_one(operation(
                 PlatformOperationName::Speak,
@@ -1907,6 +3537,7 @@ mod tests {
                     allowed_voice_ids: vec!["voice".to_string()],
                     max_chars: 1_000,
                     model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
                 }),
             ))
             .await
@@ -1915,9 +3546,10 @@ mod tests {
             State(crate::test_utils::test_app_state(db)),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(SpeakRequest {
+            Json(SpeakTransportRequest {
                 text: "Hello".to_string(),
                 voice_id: "voice".to_string(),
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -1938,12 +3570,13 @@ mod tests {
         let state = crate::test_utils::test_app_state(db.clone());
         let (base_url, server) = spawn_twilio(StatusCode::CREATED).await;
         insert_twilio_vendor(&state, base_url).await;
+        let operation = operation(
+            PlatformOperationName::CallAndSay,
+            true,
+            PlatformOperationConfig::CallAndSay(call_config(2)),
+        );
         db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
-            .insert_one(operation(
-                PlatformOperationName::CallAndSay,
-                true,
-                PlatformOperationConfig::CallAndSay(call_config(2)),
-            ))
+            .insert_one(operation)
             .await
             .expect("insert call operation");
 
@@ -1952,10 +3585,11 @@ mod tests {
                 State(state.clone()),
                 crate::test_utils::test_auth_user(USER_ID),
                 billing_extension(),
-                Json(CallAndSayRequest {
+                Json(CallAndSayTransportRequest {
                     to: "+6512345678".to_string(),
                     message: "Hello".to_string(),
                     from: None,
+                    credential_intent: CredentialIntent::Auto,
                 }),
             )
             .await;
@@ -1965,10 +3599,11 @@ mod tests {
             State(state),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(CallAndSayRequest {
+            Json(CallAndSayTransportRequest {
                 to: "+6512345678".to_string(),
                 message: "Hello again".to_string(),
                 from: None,
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -1977,7 +3612,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn vendor_failure_releases_daily_call_reservation() {
+    async fn vendor_5xx_retains_daily_call_reservation() {
         let Some(db) = crate::test_utils::connect_test_database("platform_ops_failed_call").await
         else {
             eprintln!("skipping platform operation handler test: no local MongoDB available");
@@ -1988,12 +3623,14 @@ mod tests {
         let state = crate::test_utils::test_app_state(db.clone());
         let (base_url, server) = spawn_twilio(StatusCode::INTERNAL_SERVER_ERROR).await;
         insert_twilio_vendor(&state, base_url).await;
+        let operation = operation(
+            PlatformOperationName::CallAndSay,
+            true,
+            PlatformOperationConfig::CallAndSay(call_config(2)),
+        );
+        let operation_id = operation.id.clone();
         db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
-            .insert_one(operation(
-                PlatformOperationName::CallAndSay,
-                true,
-                PlatformOperationConfig::CallAndSay(call_config(2)),
-            ))
+            .insert_one(operation)
             .await
             .expect("insert call operation");
 
@@ -2001,10 +3638,11 @@ mod tests {
             State(state),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(CallAndSayRequest {
+            Json(CallAndSayTransportRequest {
                 to: "+6512345678".to_string(),
                 message: "Hello".to_string(),
                 from: None,
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -2015,12 +3653,116 @@ mod tests {
         let usage = db
             .collection::<PlatformOpUsage>(PLATFORM_OP_USAGE)
             .find_one(mongodb::bson::doc! {
-                "op": "call_and_say",
+                "operation_id": &operation_id,
                 "user_id": USER_ID,
             })
             .await
             .expect("read usage row");
-        assert!(usage.is_none(), "failed calls must remove their quota row");
+        assert!(
+            usage.is_some(),
+            "an ambiguous provider 5xx must retain the quota reservation"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn vendor_4xx_releases_daily_call_reservation() {
+        let Some(db) = crate::test_utils::connect_test_database("platform_ops_rejected_call").await
+        else {
+            return;
+        };
+        enable_platform_services_for_tests(&db).await;
+        ensure_usage_index(&db).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let (base_url, server) = spawn_twilio(StatusCode::BAD_REQUEST).await;
+        insert_twilio_vendor(&state, base_url).await;
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(operation(
+                PlatformOperationName::CallAndSay,
+                true,
+                PlatformOperationConfig::CallAndSay(call_config(2)),
+            ))
+            .await
+            .expect("insert rejected call operation");
+
+        let result = call_and_say(
+            State(state),
+            crate::test_utils::test_auth_user(USER_ID),
+            billing_extension(),
+            Json(CallAndSayTransportRequest {
+                to: "+6512345678".to_string(),
+                message: "Hello".to_string(),
+                from: None,
+                credential_intent: CredentialIntent::Auto,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(AppError::PlatformOperationUnavailable)
+        ));
+        assert_eq!(
+            db.collection::<PlatformOpUsage>(PLATFORM_OP_USAGE)
+                .count_documents(mongodb::bson::doc! { "user_id": USER_ID })
+                .await
+                .expect("count rejected call quota rows"),
+            0
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn elevenlabs_5xx_retains_daily_speak_reservation() {
+        let Some(db) = crate::test_utils::connect_test_database("platform_ops_speak_5xx").await
+        else {
+            return;
+        };
+        enable_platform_services_for_tests(&db).await;
+        ensure_usage_index(&db).await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let (base_url, server) = spawn_vendor_status(StatusCode::INTERNAL_SERVER_ERROR).await;
+        insert_speak_vendor(&state, base_url, "elevenlabs-key").await;
+        let operation = operation(
+            PlatformOperationName::Speak,
+            true,
+            PlatformOperationConfig::Speak(SpeakConfig {
+                allowed_voice_ids: vec!["voice".to_string()],
+                max_chars: 1_000,
+                model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 2,
+            }),
+        );
+        let operation_id = operation.id.clone();
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(operation)
+            .await
+            .expect("insert speak operation");
+
+        let result = speak(
+            State(state),
+            crate::test_utils::test_auth_user(USER_ID),
+            billing_extension(),
+            Json(SpeakTransportRequest {
+                text: "Hello".to_string(),
+                voice_id: "voice".to_string(),
+                credential_intent: CredentialIntent::Auto,
+            }),
+        )
+        .await;
+        assert!(matches!(
+            result,
+            Err(AppError::PlatformOperationUnavailable)
+        ));
+        assert_eq!(
+            db.collection::<PlatformOpUsage>(PLATFORM_OP_USAGE)
+                .count_documents(mongodb::bson::doc! {
+                    "operation_id": &operation_id,
+                    "user_id": USER_ID,
+                })
+                .await
+                .expect("count speak quota rows"),
+            1
+        );
         server.abort();
     }
 
@@ -2089,6 +3831,7 @@ mod tests {
         call_operation.billing = OperationBilling {
             metric: BillingMetric::Seconds,
             price_per_unit: "1".to_string(),
+            secondary: None,
             base_fee_per_call: None,
             lago_metric_code: crate::services::billing::pricing::metric_code_for_operation(
                 &vendor.slug,
@@ -2152,10 +3895,11 @@ mod tests {
             State(state),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(CallAndSayRequest {
+            Json(CallAndSayTransportRequest {
                 to: "+6512345678".to_string(),
                 message: "Hello".to_string(),
                 from: None,
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -2192,7 +3936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_success_payload_fails_meter_and_releases_wallet_and_daily_quota() {
+    async fn invalid_success_payload_settles_estimate_and_retains_daily_quota() {
         let Some(db) =
             crate::test_utils::connect_test_database("platform_ops_invalid_success_payload").await
         else {
@@ -2269,10 +4013,11 @@ mod tests {
             State(state),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(CallAndSayRequest {
+            Json(CallAndSayTransportRequest {
                 to: "+6512345678".to_string(),
                 message: "Hello".to_string(),
                 from: None,
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await;
@@ -2285,7 +4030,7 @@ mod tests {
                 .count_documents(mongodb::bson::doc! { "user_id": USER_ID })
                 .await
                 .expect("count quota rows"),
-            0
+            1
         );
         let meter = db
             .collection::<crate::models::usage_meter::UsageMeterRow>(
@@ -2297,11 +4042,12 @@ mod tests {
             .expect("usage meter exists");
         assert_eq!(
             meter.status,
-            crate::models::usage_meter::UsageStatus::Failed
+            crate::models::usage_meter::UsageStatus::Finalized
         );
         assert!(meter.forwarded);
-        assert!(meter.released);
-        assert_eq!(meter.last_error.as_deref(), Some("vendor_response_invalid"));
+        assert!(!meter.released);
+        assert_eq!(meter.quantity, Some(1));
+        assert!(meter.last_error.is_none());
         let wallet = db
             .collection::<crate::models::billing_wallet::BillingWallet>(
                 crate::models::billing_wallet::COLLECTION_NAME,
@@ -2371,6 +4117,7 @@ mod tests {
                         allowed_voice_ids: vec!["platform-voice".to_string()],
                         max_chars: 100,
                         model_id: "eleven_multilingual_v2".to_string(),
+                        max_calls_per_user_per_day: 50,
                     }),
                 ),
                 operation(
@@ -2389,9 +4136,10 @@ mod tests {
             State(state.clone()),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(SpeakRequest {
+            Json(SpeakTransportRequest {
                 text: "Hello from an own connection".to_string(),
                 voice_id: "voice-own".to_string(),
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await
@@ -2405,10 +4153,11 @@ mod tests {
             State(state),
             crate::test_utils::test_auth_user(USER_ID),
             billing_extension(),
-            Json(CallAndSayRequest {
+            Json(CallAndSayTransportRequest {
                 to: "+6512345678".to_string(),
                 message: "Own Twilio call".to_string(),
                 from: Some("+14155550123".to_string()),
+                credential_intent: CredentialIntent::Auto,
             }),
         )
         .await
@@ -2481,7 +4230,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_agent_treats_out_of_scope_connection_as_platform_and_audits_decision() {
+    async fn scoped_agent_is_denied_rather_than_charged_for_an_out_of_scope_connection() {
         let Some(db) =
             crate::test_utils::connect_test_database("platform_ops_agent_scope_fallback").await
         else {
@@ -2509,6 +4258,7 @@ mod tests {
                 allowed_voice_ids: vec!["voice-a".to_string()],
                 max_chars: 1_000,
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             }),
         );
         db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
@@ -2523,10 +4273,12 @@ mod tests {
             acting_client_id: None,
             allow_all_services: false,
             allowed_service_ids: Vec::new(),
+            credential_intent: CredentialIntent::Auto,
         };
         let result = execute_speak_for_caller(
             &state,
             &caller,
+            "20260101",
             SpeakRequest {
                 text: "nyxid".to_string(),
                 voice_id: "voice-a".to_string(),
@@ -2538,30 +4290,26 @@ mod tests {
             .expect("platform billing classification"),
         )
         .await;
-        let execution = result.as_ref().expect("execute platform fallback");
-        assert_eq!(
-            execution.credential_source,
-            PlatformCredentialSource::Platform
+        // The owner has a usable connection; this key simply is not scoped to
+        // it. Previously that routed to the shared credential and charged the
+        // owner, which meant narrowing a key's scope increased its ability to
+        // spend. It must fail closed instead.
+        assert!(
+            matches!(
+                result,
+                Err(AppError::PlatformOperationOwnConnectionOutOfScope { .. })
+            ),
+            "an out-of-scope connection must be denied, not charged"
         );
-        assert!(execution.own_connection_out_of_scope);
         let audit = platform_operation_audit_metadata("speak", &result, Instant::now(), json!({}));
-        assert_eq!(audit["own_connection_out_of_scope"], Value::Bool(true));
         assert_eq!(
-            audit["credential_source"],
-            Value::String("platform".to_string())
+            audit["outcome"],
+            Value::String("own_connection_out_of_scope".to_string())
         );
 
-        let requests = captured.lock().await.clone();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].uri, "/v1/text-to-speech/voice-a");
-        assert_eq!(
-            requests[0].elevenlabs_key.as_deref(),
-            Some("platform-speak-secret")
-        );
-        assert_ne!(
-            requests[0].elevenlabs_key.as_deref(),
-            Some("own-speak-secret")
-        );
+        // No vendor call, so neither the owner's credential nor the platform's
+        // was used, and nothing was billed.
+        assert!(captured.lock().await.is_empty());
         assert!(!caller.allowed_service_ids.contains(&user_service_id));
         server.abort();
     }
@@ -2635,6 +4383,7 @@ mod tests {
                     allowed_voice_ids: vec!["voice-a".to_string()],
                     max_chars: 1_000,
                     model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
                 }),
             ))
             .await
@@ -2647,10 +4396,12 @@ mod tests {
             acting_client_id: None,
             allow_all_services: false,
             allowed_service_ids: vec![user_service_id],
+            credential_intent: CredentialIntent::Auto,
         };
         let execution = execute_speak_for_caller(
             &state,
             &caller,
+            "20260101",
             SpeakRequest {
                 text: "binding".to_string(),
                 voice_id: "voice-a".to_string(),
@@ -2704,6 +4455,7 @@ mod tests {
                     allowed_voice_ids: vec!["voice-a".to_string()],
                     max_chars: 1_000,
                     model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
                 }),
             ))
             .await
@@ -2736,6 +4488,7 @@ mod tests {
             acting_client_id: None,
             allow_all_services: false,
             allowed_service_ids: vec![user_service_id],
+            credential_intent: CredentialIntent::Auto,
         };
         let permit = || {
             enforce_platform_billing_classification(BillingRoutePolicy::Metered(
@@ -2746,6 +4499,7 @@ mod tests {
         let error = match execute_speak_for_caller(
             &state,
             &agent,
+            "20260101",
             SpeakRequest {
                 text: "approval".to_string(),
                 voice_id: "voice-a".to_string(),
@@ -2782,10 +4536,12 @@ mod tests {
             acting_client_id: None,
             allow_all_services: true,
             allowed_service_ids: Vec::new(),
+            credential_intent: CredentialIntent::Auto,
         };
         execute_speak_for_caller(
             &state,
             &session,
+            "20260101",
             SpeakRequest {
                 text: "session".to_string(),
                 voice_id: "voice-a".to_string(),
@@ -2844,7 +4600,7 @@ mod tests {
             .insert_one(&vendor)
             .await
             .expect("insert priced discovery vendor");
-        crate::services::platform_credential_service::set_credential(
+        crate::services::platform_credential_service::set_credential_for_test(
             &db,
             &state.encryption_keys,
             &vendor.id,
@@ -2860,11 +4616,13 @@ mod tests {
                 allowed_voice_ids: vec!["platform-voice".to_string()],
                 max_chars: 100,
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             }),
         );
         speak_operation.billing = OperationBilling {
             metric: BillingMetric::Characters,
             price_per_unit: "0.25".to_string(),
+            secondary: None,
             base_fee_per_call: None,
             lago_metric_code: crate::services::billing::pricing::metric_code_for_operation(
                 &vendor.slug,
@@ -2885,21 +4643,49 @@ mod tests {
 
         let no_connection = list_operations(State(state.clone()), auth.clone())
             .await
-            .expect("discover platform source");
+            .expect("discover default source");
         assert_eq!(no_connection.operations.len(), 1);
         assert_eq!(
             no_connection.operations[0].credential_source,
-            PlatformCredentialSource::Platform
+            PlatformCredentialSource::Unavailable
         );
         assert!(no_connection.operations[0].own_connection.is_none());
-        assert!(no_connection.operations[0].pricing.billable);
-        assert!(
-            no_connection.operations[0]
-                .pricing
-                .credits_per_call
-                .is_none()
+        assert_eq!(
+            no_connection.operations[0].availability_reason,
+            Some("owner_opt_in_required")
         );
+        assert!(no_connection.operations[0].pricing.billable);
         assert_eq!(no_connection.operations[0].pricing.metric, "characters");
+        // A per-character price must render as such. Before the contract fix
+        // this surface could only express a per-call price.
+        assert_eq!(
+            no_connection.operations[0].pricing.display,
+            "0.25 credits per character"
+        );
+        let (unavailable_source, unavailable_vendor) =
+            resolve_discovery_source_for_test(&state, &auth, &operation_row).await;
+        assert_eq!(
+            platform_tool_credential_sentence(
+                &operation_row,
+                &unavailable_source,
+                unavailable_vendor.as_ref(),
+                true,
+            ),
+            "Platform access to ElevenLabs requires the owner's spending opt-in."
+        );
+
+        opt_in_platform_service(&db, USER_ID, &vendor.id).await;
+        let opted_in = list_operations(State(state.clone()), auth.clone())
+            .await
+            .expect("discover opted-in platform source");
+        assert_eq!(
+            opted_in.operations[0].credential_source,
+            PlatformCredentialSource::Platform
+        );
+        assert_eq!(
+            opted_in.operations[0].fallback_reason,
+            Some(platform_operation_service::PlatformFallbackReason::OwnCredentialAbsent)
+        );
         let (platform_source, platform_vendor) =
             resolve_discovery_source_for_test(&state, &auth, &operation_row).await;
         assert_eq!(
@@ -2985,12 +4771,22 @@ mod tests {
         scoped_agent_auth.allowed_service_ids.clear();
         let out_of_scope = list_operations(State(state.clone()), scoped_agent_auth.clone())
             .await
-            .expect("discover out-of-scope own connection as platform source");
+            .expect("discover out-of-scope own connection");
+        // Reported as the owner's own connection, unusable by this key. Showing
+        // it as the platform source would promise a billed call that will in
+        // fact be refused.
         assert_eq!(
             out_of_scope.operations[0].credential_source,
-            PlatformCredentialSource::Platform
+            PlatformCredentialSource::OwnConnection
         );
-        assert!(out_of_scope.operations[0].own_connection.is_none());
+        assert!(
+            out_of_scope.operations[0]
+                .own_connection
+                .as_ref()
+                .is_some_and(
+                    |connection| !connection.usable && connection.reason == Some("out_of_scope")
+                )
+        );
         let (out_of_scope_source, out_of_scope_vendor) =
             resolve_discovery_source_for_test(&state, &scoped_agent_auth, &operation_row).await;
         assert_eq!(
@@ -3000,7 +4796,7 @@ mod tests {
                 out_of_scope_vendor.as_ref(),
                 true,
             ),
-            "Uses the platform credential (0.25 credits per call). Allowed voice ids: platform-voice."
+            "This API key is not scoped to your ElevenLabs connection; calls fail until you grant it access or disable the connection."
         );
 
         let now = Utc::now();
@@ -3065,7 +4861,11 @@ mod tests {
             .expect("discover disabled source");
         assert_eq!(
             disabled.operations[0].credential_source,
-            PlatformCredentialSource::Platform
+            PlatformCredentialSource::Unavailable
+        );
+        assert_eq!(
+            disabled.operations[0].availability_reason,
+            Some("own_connection_disabled")
         );
         assert!(
             disabled.operations[0]
@@ -3132,14 +4932,15 @@ mod tests {
         let unusable = list_operations(State(state.clone()), auth.clone())
             .await
             .expect("discover unusable source");
-        assert!(
-            unusable.operations[0]
-                .own_connection
-                .as_ref()
-                .is_some_and(
-                    |connection| !connection.usable && connection.reason == Some("unusable")
-                )
+        assert_eq!(
+            unusable.operations[0].credential_source,
+            PlatformCredentialSource::Platform
         );
+        assert_eq!(
+            unusable.operations[0].fallback_reason,
+            Some(platform_operation_service::PlatformFallbackReason::OwnCredentialUnusable)
+        );
+        assert!(unusable.operations[0].own_connection.is_none());
         let (unusable_source, unusable_vendor) =
             resolve_discovery_source_for_test(&state, &auth, &operation_row).await;
         assert_eq!(
@@ -3149,7 +4950,413 @@ mod tests {
                 unusable_vendor.as_ref(),
                 true,
             ),
-            "Your ElevenLabs connection is unusable; reconnect or disable it."
+            "Uses the platform credential (0.25 credits per character). Allowed voice ids: platform-voice."
+        );
+    }
+
+    #[tokio::test]
+    async fn spending_credits_requires_an_explicit_scope() {
+        let state = Arc::new(crate::test_utils::test_app_state_no_db().await);
+
+        // An app token granted only profile/email must not be able to spend the
+        // owner's credits, and an agent key issued as read-only must not either.
+        for method in [AuthMethod::AccessToken, AuthMethod::ApiKey] {
+            let mut unscoped = crate::test_utils::test_auth_user(USER_ID);
+            unscoped.auth_method = method.clone();
+            unscoped.scope = "openid profile email read proxy".to_string();
+            assert!(
+                matches!(
+                    ensure_platform_spend_authority(&state, &unscoped).await,
+                    Err(AppError::Forbidden(_))
+                ),
+                "{method:?} without the spend scope must be refused"
+            );
+        }
+
+        // The owner acting in a browser session is spending their own credits
+        // knowingly; the approval flow authorizes agents, not the owner.
+        let mut session = crate::test_utils::test_auth_user(USER_ID);
+        session.auth_method = AuthMethod::Session;
+        session.scope = String::new();
+        assert!(
+            ensure_platform_spend_authority(&state, &session)
+                .await
+                .is_ok()
+        );
+
+        let mut scoped = crate::test_utils::test_auth_user(USER_ID);
+        scoped.auth_method = AuthMethod::AccessToken;
+        scoped.scope = format!("openid profile {PLATFORM_SPEND_SCOPE}");
+        assert!(
+            ensure_platform_spend_authority(&state, &scoped)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_does_not_require_spend_authority() {
+        let state = Arc::new(crate::test_utils::test_app_state_no_db().await);
+        let mut unscoped = crate::test_utils::test_auth_user(USER_ID);
+        unscoped.auth_method = AuthMethod::AccessToken;
+        unscoped.scope = "openid profile".to_string();
+
+        // Learning that a service exists is not permission to pay for it, and
+        // refusing discovery would hide the catalog from agents that can still
+        // use their owner's own credential for free.
+        assert!(
+            ensure_platform_operation_caller(&state, &unscoped)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            ensure_platform_spend_authority(&state, &unscoped).await,
+            Err(AppError::Forbidden(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn speak_enforces_a_daily_cap_on_platform_funded_calls() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_ops_speak_daily_cap").await
+        else {
+            eprintln!("skipping speak daily cap test: no local MongoDB available");
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        // The quota is enforced by a conditional upsert, so the unique index is
+        // what makes a second reservation fail rather than insert a second row.
+        ensure_usage_index(&db).await;
+        let (base_url, captured, server) = spawn_capturing_vendor().await;
+        insert_speak_vendor(&state, base_url.clone(), "platform-speak-secret").await;
+
+        let row = operation(
+            PlatformOperationName::Speak,
+            true,
+            PlatformOperationConfig::Speak(SpeakConfig {
+                allowed_voice_ids: vec!["voice-a".to_string()],
+                max_chars: 1_000,
+                model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 1,
+            }),
+        );
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(row)
+            .await
+            .expect("insert capped speak operation");
+
+        let caller = PlatformOperationCaller {
+            actor_user_id: USER_ID.to_string(),
+            resolution_user_id: USER_ID.to_string(),
+            api_key_id: Some("agent-key".to_string()),
+            auth_method: AuthMethod::ApiKey,
+            acting_client_id: None,
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
+            credential_intent: CredentialIntent::Auto,
+        };
+        let call = || async {
+            execute_speak_for_caller(
+                &state,
+                &caller,
+                "20260101",
+                SpeakRequest {
+                    text: "nyxid".to_string(),
+                    voice_id: "voice-a".to_string(),
+                },
+                BillingIngress::PlatformOperation,
+                enforce_platform_billing_classification(BillingRoutePolicy::Metered(
+                    BillingIngress::PlatformOperation,
+                ))
+                .expect("platform billing classification"),
+            )
+            .await
+        };
+
+        call().await.expect("first call is within the cap");
+        // Speak previously had no daily cap at all, so a looping agent was
+        // bounded only by the wallet. Per-character pricing makes a per-call
+        // count coarse, but unbounded is the failure mode that matters.
+        assert!(
+            call().await.is_err(),
+            "the second call must be refused by the daily cap"
+        );
+        assert_eq!(
+            captured.lock().await.len(),
+            1,
+            "a capped call must not reach the vendor"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn audit_can_join_a_platform_charge_back_to_the_call_that_made_it() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_ops_audit_attribution").await
+        else {
+            eprintln!("skipping platform audit attribution test: no local MongoDB available");
+            return;
+        };
+        // Billing must be on for a meter row, and therefore a ledger join key,
+        // to exist at all. Charging still does not apply: the owner is outside
+        // the billing rollout, so the request is metered for observability.
+        let mut config = crate::test_utils::test_app_config();
+        config.billing_enabled = true;
+        config.billing_fail_closed = false;
+        let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
+        let (base_url, _captured, server) = spawn_capturing_vendor().await;
+        insert_speak_vendor(&state, base_url.clone(), "platform-speak-secret").await;
+        let row = operation(
+            PlatformOperationName::Speak,
+            true,
+            PlatformOperationConfig::Speak(SpeakConfig {
+                allowed_voice_ids: vec!["voice-a".to_string()],
+                max_chars: 1_000,
+                model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
+            }),
+        );
+        let operation_id = row.id.clone();
+        let catalog_service_id = row.catalog_service_id.clone();
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(row)
+            .await
+            .expect("insert speak operation");
+
+        let caller = PlatformOperationCaller {
+            actor_user_id: USER_ID.to_string(),
+            resolution_user_id: USER_ID.to_string(),
+            api_key_id: Some("agent-key".to_string()),
+            auth_method: AuthMethod::ApiKey,
+            acting_client_id: None,
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
+            credential_intent: CredentialIntent::Auto,
+        };
+        let result = execute_speak_for_caller(
+            &state,
+            &caller,
+            "20260101",
+            SpeakRequest {
+                text: "nyxid".to_string(),
+                voice_id: "voice-a".to_string(),
+            },
+            BillingIngress::PlatformOperation,
+            enforce_platform_billing_classification(BillingRoutePolicy::Metered(
+                BillingIngress::PlatformOperation,
+            ))
+            .expect("platform billing classification"),
+        )
+        .await;
+        let audit = platform_operation_audit_metadata("speak", &result, Instant::now(), json!({}));
+
+        // "Which call produced this charge" is the first question asked about a
+        // disputed invoice, and it was unanswerable: audit recorded only a
+        // static op name.
+        assert_eq!(audit["operation_id"], Value::String(operation_id));
+        assert_eq!(
+            audit["catalog_service_id"],
+            Value::String(catalog_service_id)
+        );
+        assert!(
+            audit["billing_request_id"].is_string(),
+            "a platform-funded call must record its ledger join key"
+        );
+
+        // Metadata only: no prompt text, no vendor body, no credential.
+        let rendered = Value::Object(audit).to_string();
+        for secret in ["platform-speak-secret", "nyxid"] {
+            assert!(!rendered.contains(secret), "audit leaked {secret}");
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn org_owned_key_bills_the_org_wallet_not_a_member_pocket() {
+        let Some(db) = crate::test_utils::connect_test_database("platform_ops_org_payer").await
+        else {
+            eprintln!("skipping platform org payer test: no local MongoDB available");
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let (base_url, _captured, server) = spawn_capturing_vendor().await;
+        insert_speak_vendor(&state, base_url.clone(), "platform-speak-secret").await;
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(operation(
+                PlatformOperationName::Speak,
+                true,
+                PlatformOperationConfig::Speak(SpeakConfig {
+                    allowed_voice_ids: vec!["voice-a".to_string()],
+                    max_chars: 1_000,
+                    model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
+                }),
+            ))
+            .await
+            .expect("insert speak operation");
+
+        let org_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &org_id,
+                crate::models::user::UserType::Org,
+            ))
+            .await
+            .expect("insert org user");
+
+        // An org-owned agent key authenticates as the org, so the org is the
+        // resolution identity and therefore the payer. A member must never be
+        // billed personally for work done under an org key.
+        let caller = PlatformOperationCaller {
+            actor_user_id: org_id.clone(),
+            resolution_user_id: org_id.clone(),
+            api_key_id: Some("org-agent-key".to_string()),
+            auth_method: AuthMethod::ApiKey,
+            acting_client_id: None,
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
+            credential_intent: CredentialIntent::Auto,
+        };
+        opt_in_platform_service(
+            &db,
+            &org_id,
+            &catalog_service_id(platform_operation_service::SPEAK_VENDOR_SLUG),
+        )
+        .await;
+        let execution = execute_speak_for_caller(
+            &state,
+            &caller,
+            "20260101",
+            SpeakRequest {
+                text: "nyxid".to_string(),
+                voice_id: "voice-a".to_string(),
+            },
+            BillingIngress::PlatformOperation,
+            enforce_platform_billing_classification(BillingRoutePolicy::Metered(
+                BillingIngress::PlatformOperation,
+            ))
+            .expect("platform billing classification"),
+        )
+        .await
+        .expect("execute platform operation under an org key");
+        assert_eq!(
+            execution.credential_source,
+            PlatformCredentialSource::Platform
+        );
+
+        let owner = state
+            .billing
+            .owner_resolver()
+            .resolve_for_resource(&org_id, &org_id)
+            .await
+            .expect("resolve org billing owner");
+        assert_eq!(owner.owner_id, org_id);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn platform_funded_execution_honours_the_owner_approval_policy() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_ops_approval_parity").await
+        else {
+            eprintln!("skipping platform approval parity test: no local MongoDB available");
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let (base_url, _captured, _server) = spawn_capturing_vendor().await;
+        insert_speak_vendor(&state, base_url.clone(), "platform-speak-secret").await;
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(operation(
+                PlatformOperationName::Speak,
+                true,
+                PlatformOperationConfig::Speak(SpeakConfig {
+                    allowed_voice_ids: vec!["voice-a".to_string()],
+                    max_chars: 1_000,
+                    model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
+                }),
+            ))
+            .await
+            .expect("insert speak operation");
+
+        // The caller has no own connection, so this resolves to the platform
+        // credential and spends credits.
+        let caller = PlatformOperationCaller {
+            actor_user_id: USER_ID.to_string(),
+            resolution_user_id: USER_ID.to_string(),
+            api_key_id: Some("agent-key".to_string()),
+            auth_method: AuthMethod::ApiKey,
+            acting_client_id: None,
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
+            credential_intent: CredentialIntent::Auto,
+        };
+        let speak = || SpeakRequest {
+            text: "nyxid".to_string(),
+            voice_id: "voice-a".to_string(),
+        };
+        let permit = || {
+            enforce_platform_billing_classification(BillingRoutePolicy::Metered(
+                BillingIngress::PlatformOperation,
+            ))
+            .expect("platform billing classification")
+        };
+
+        let allowed = execute_speak_for_caller(
+            &state,
+            &caller,
+            "20260101",
+            speak(),
+            BillingIngress::PlatformOperation,
+            permit(),
+        )
+        .await
+        .expect("execute platform operation with no approval policy");
+        assert_eq!(
+            allowed.credential_source,
+            PlatformCredentialSource::Platform
+        );
+
+        // Platform execution has no UserService row, so the policy is keyed on
+        // the catalog provider.
+        let now = Utc::now();
+        db.collection::<crate::models::service_approval_config::ServiceApprovalConfig>(
+            crate::models::service_approval_config::COLLECTION_NAME,
+        )
+        .insert_one(
+            crate::models::service_approval_config::ServiceApprovalConfig {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: USER_ID.to_string(),
+                service_id: catalog_service_id(platform_operation_service::SPEAK_VENDOR_SLUG),
+                service_name: "ElevenLabs".to_string(),
+                approval_required: true,
+                approval_mode: crate::models::service_approval_config::ApprovalMode::PerRequest,
+                rules: Vec::new(),
+                default_effect: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .expect("insert platform approval policy");
+
+        // Before this gate existed, the branch that spends the owner's money was
+        // the only one that never consulted their approval policy.
+        let blocked = execute_speak_for_caller(
+            &state,
+            &caller,
+            "20260101",
+            speak(),
+            BillingIngress::PlatformOperation,
+            permit(),
+        )
+        .await;
+        assert!(
+            matches!(
+                blocked,
+                Err(AppError::PlatformOperationApprovalRequired { .. })
+            ),
+            "platform-funded execution must not bypass the approval policy"
         );
     }
 

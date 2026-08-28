@@ -716,6 +716,7 @@ mod tests {
             deferred_attempts: 0,
             deferred_next_retry_at: None,
             pending_resale_quantity: None,
+            pending_platform_secondary_quantity: None,
             status: UsageStatus::Finalized,
             forwarded: true,
             released: true,

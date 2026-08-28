@@ -15,6 +15,7 @@ export const API_KEY_SCOPES = [
   "services:read",
   "services:write",
   "proxy",
+  "platform:spend",
 ] as const;
 
 export type ApiKeyScope = (typeof API_KEY_SCOPES)[number];

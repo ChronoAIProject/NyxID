@@ -10,6 +10,8 @@ pub enum BillingMetric {
     Bytes,
     Characters,
     Seconds,
+    InputTokens,
+    OutputTokens,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -45,6 +47,23 @@ impl BillingMetric {
             Self::Bytes => "bytes",
             Self::Characters => "characters",
             Self::Seconds => "seconds",
+            Self::InputTokens => "input_tokens",
+            Self::OutputTokens => "output_tokens",
+        }
+    }
+
+    /// Singular noun for the billed unit, used only to render prices for
+    /// humans. Unlike `as_str` this is presentation text and is safe to
+    /// reword.
+    pub fn unit_noun(self) -> &'static str {
+        match self {
+            Self::Tokens => "token",
+            Self::Requests => "call",
+            Self::Bytes => "byte",
+            Self::Characters => "character",
+            Self::Seconds => "second",
+            Self::InputTokens => "input token",
+            Self::OutputTokens => "output token",
         }
     }
 }
@@ -120,8 +139,9 @@ impl ServiceBilling {
 /// Provider-reported token classes for one LLM exchange. `prompt_tokens`
 /// follows each provider's own accounting: OpenAI includes cached tokens
 /// inside `prompt_tokens`, Anthropic reports cache reads and writes
-/// outside `input_tokens`. Observability only for now; billing still
-/// charges the single total-token quantity.
+/// outside `input_tokens`. Platform operations may price the prompt and
+/// completion quantities independently; generic proxy billing still uses the
+/// combined `tokens` quantity.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct TokenBreakdown {
     pub prompt_tokens: i64,

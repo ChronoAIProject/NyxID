@@ -15,13 +15,12 @@ use tokio_stream::StreamExt;
 
 use crate::AppState;
 use crate::crypto::jwt;
+use crate::errors::AppResult;
 use crate::models::mcp_session::{MCP_SESSION_COLLECTION, McpSessionRecord};
+use crate::models::platform_service_preference::CredentialIntent;
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::mw::auth::{self, AuthMethod};
-use crate::services::platform_operation_service::{
-    CallAndSayRequest, FlightSearchRequest, SpeakRequest,
-};
 use crate::services::{
     approval_service, audit_service, connect_link_service, feature_flag_service, mcp_service,
     notification_service, operation_descriptor, oracle_pool_service, oracle_session_service,
@@ -325,6 +324,7 @@ struct McpAuthContext {
     is_api_key: bool,
     /// True only for the scoped `nyxid_ag_` API-key class.
     is_agent_api_key: bool,
+    platform_spend_authorized: bool,
     api_key_id: Option<String>,
     api_key_name: Option<String>,
     /// If false, `allowed_service_ids` constrains which UserServices this request may call.
@@ -341,6 +341,7 @@ struct McpAuthContext {
 
 impl McpAuthContext {
     fn user(user_id: String, auth_method: AuthMethod) -> Self {
+        let platform_spend_authorized = auth_method == AuthMethod::Session;
         Self {
             user_id,
             auth_method,
@@ -348,6 +349,7 @@ impl McpAuthContext {
             approval_owner_user_id: None,
             is_api_key: false,
             is_agent_api_key: false,
+            platform_spend_authorized,
             api_key_id: None,
             api_key_name: None,
             allow_all_services: true,
@@ -485,6 +487,10 @@ async fn authenticate_mcp(
                     approval_owner_user_id: None,
                     is_api_key: true,
                     is_agent_api_key: api_key.key_prefix.starts_with("nyxid_ag_"),
+                    platform_spend_authorized: api_key
+                        .scopes
+                        .split_ascii_whitespace()
+                        .any(|scope| scope == super::platform_ops::PLATFORM_SPEND_SCOPE),
                     api_key_id: Some(api_key.id.clone()),
                     api_key_name: Some(api_key.name.clone()),
                     allow_all_services: api_key.allow_all_services,
@@ -569,6 +575,10 @@ async fn authenticate_mcp(
                 };
 
                 let mut ctx = McpAuthContext::user(user_id, auth_method);
+                ctx.platform_spend_authorized = claims
+                    .scope
+                    .split_ascii_whitespace()
+                    .any(|scope| scope == super::platform_ops::PLATFORM_SPEND_SCOPE);
                 if matches!(
                     ctx.auth_method,
                     AuthMethod::AccessToken | AuthMethod::Delegated
@@ -728,6 +738,52 @@ async fn platform_services_flag_enabled(state: &AppState, auth: &McpAuthContext)
             false
         }
     }
+}
+
+async fn augment_platform_endpoint_catalog(
+    state: &AppState,
+    auth: &McpAuthContext,
+    catalog: &mut mcp_service::McpOperationCatalog,
+) -> AppResult<()> {
+    if !platform_operations_allowed(auth)
+        || !auth.platform_spend_authorized
+        || !auth.allow_all_services
+        || !platform_services_flag_enabled(state, auth).await
+    {
+        return Ok(());
+    }
+    let user_managed_catalog_ids = catalog
+        .services
+        .iter()
+        .filter_map(|service| match &service.source {
+            mcp_service::McpToolSource::UserManaged {
+                catalog_service_id, ..
+            } => catalog_service_id.clone(),
+            mcp_service::McpToolSource::Platform { .. } => None,
+        })
+        .collect::<std::collections::HashSet<_>>();
+    let mut paid = mcp_service::load_platform_endpoint_tools(&state.db).await?;
+    paid.retain(|service| !user_managed_catalog_ids.contains(&service.service_id));
+    if !paid.is_empty() {
+        let paid_catalog_ids = paid
+            .iter()
+            .map(|service| service.service_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        catalog.services.retain(|service| {
+            !matches!(
+                &service.source,
+                mcp_service::McpToolSource::Platform {
+                    downstream_service_id,
+                } if paid_catalog_ids.contains(downstream_service_id)
+            )
+        });
+        catalog.diagnostics.no_visible_connections = false;
+        catalog.services.extend(paid);
+        catalog
+            .services
+            .sort_by(|left, right| left.service_id.cmp(&right.service_id));
+    }
+    Ok(())
 }
 
 fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
@@ -1247,7 +1303,7 @@ async fn handle_tools_list(
     // Thread API-key node scope into the discovery chain so scoped
     // keys don't see tools whose only dispatchable routes are all out of
     // scope (seventeenth-round Codex review P2).
-    let catalog = match mcp_service::load_operation_catalog(
+    let mut catalog = match mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
@@ -1262,6 +1318,10 @@ async fn handle_tools_list(
             return rpc_error(request.id.clone(), -32603, "Failed to load tools");
         }
     };
+    if let Err(error) = augment_platform_endpoint_catalog(state, auth, &mut catalog).await {
+        tracing::error!(error = %error, "Failed to load platform endpoint tools");
+        return rpc_error(request.id.clone(), -32603, "Failed to load tools");
+    }
 
     let services = catalog.services;
     let platform_operations =
@@ -1295,7 +1355,7 @@ async fn handle_tools_list(
         .await;
         match (context, rollout) {
             (Ok(context), Ok(rollout_enabled)) => {
-                let caller = platform_operation_caller(auth);
+                let caller = platform_operation_caller(auth, CredentialIntent::Auto);
                 for operation in &platform_operations {
                     let contract =
                         platform_operation_service::catalog_contract_for_operation(operation.op);
@@ -1543,7 +1603,7 @@ async fn handle_tools_call(
     // Scoped discovery so resolve_tool_call can't match tools whose
     // only dispatchable routes fall outside the caller's API-key node scope
     // (twentieth-round Codex P2).
-    let catalog = match mcp_service::load_operation_catalog(
+    let mut catalog = match mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
@@ -1558,6 +1618,10 @@ async fn handle_tools_call(
             return tool_result(request.id.clone(), "Failed to load tools", true);
         }
     };
+    if let Err(error) = augment_platform_endpoint_catalog(state, auth, &mut catalog).await {
+        tracing::error!(error = %error, "Failed to load platform endpoint tools for execution");
+        return tool_result(request.id.clone(), "Failed to load tools", true);
+    }
 
     let services = catalog.services;
     let (service, endpoint) = match mcp_service::resolve_tool_call(tool_name, &services) {
@@ -1595,46 +1659,75 @@ async fn handle_tools_call(
         );
     }
 
-    let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &arguments) {
-        Ok(prepared) => prepared,
-        Err(e) => {
-            return tool_result(
-                request.id.clone(),
-                &format!("Invalid tool arguments: {e}"),
-                true,
-            );
+    let is_paid_platform_endpoint =
+        service.service_category == mcp_service::PLATFORM_CREDENTIAL_SERVICE_CATEGORY;
+    let (credential_intent, dispatch_arguments) = if is_paid_platform_endpoint {
+        match platform_endpoint_arguments(&arguments) {
+            Ok(parts) => parts,
+            Err(error) => return tool_result(request.id.clone(), &error, true),
         }
+    } else {
+        (CredentialIntent::Auto, arguments.clone())
     };
-    let operation = prepared.operation_descriptor();
-    if let Err(resp) =
-        authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone()).await
-    {
-        return resp;
+    let prepared =
+        match mcp_service::prepare_proxy_tool_call(service, endpoint, &dispatch_arguments) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                return tool_result(
+                    request.id.clone(),
+                    &format!("Invalid tool arguments: {e}"),
+                    true,
+                );
+            }
+        };
+    if !is_paid_platform_endpoint {
+        let operation = prepared.operation_descriptor();
+        if let Err(resp) =
+            authorize_mcp_tool_operation(state, auth, service, &operation, request.id.clone()).await
+        {
+            return resp;
+        }
     }
 
-    let exec_ctx = mcp_exec_context(auth);
-    let (status, body) = match mcp_service::execute_tool(
-        &state.http_client,
-        &state.db,
-        &state.encryption_keys,
-        &state.node_ws_manager,
-        &state.billing,
-        &auth.user_id,
-        auth.billing_principal_user_id(),
-        service,
-        endpoint,
-        prepared,
-        &state.jwt_keys,
-        &state.config,
-        &state.connection_expiry_notifier,
-        &state.token_exchange_cache,
-        &state.cloud_response_cache,
-        &exec_ctx,
-        billing_egress_permit,
-    )
-    .await
-    {
+    let execution = if is_paid_platform_endpoint {
+        execute_paid_platform_endpoint_mcp(
+            state,
+            auth,
+            service,
+            endpoint,
+            prepared,
+            credential_intent,
+            billing_egress_permit,
+        )
+        .await
+    } else {
+        let exec_ctx = mcp_exec_context(auth);
+        mcp_service::execute_tool(
+            &state.http_client,
+            &state.db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            &state.billing,
+            &auth.user_id,
+            auth.billing_principal_user_id(),
+            service,
+            endpoint,
+            prepared,
+            &state.jwt_keys,
+            &state.config,
+            &state.connection_expiry_notifier,
+            &state.token_exchange_cache,
+            &state.cloud_response_cache,
+            &exec_ctx,
+            billing_egress_permit,
+        )
+        .await
+    };
+    let (status, body) = match execution {
         Ok(r) => r,
+        Err(error) if is_paid_platform_endpoint => {
+            return platform_operation_error_result(request.id.clone(), &error);
+        }
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request.id.clone(), &msg, true);
         }
@@ -1848,6 +1941,7 @@ async fn authorize_mcp_operation(
 
 fn platform_operation_caller(
     auth: &McpAuthContext,
+    credential_intent: CredentialIntent,
 ) -> super::platform_ops::PlatformOperationCaller {
     super::platform_ops::PlatformOperationCaller {
         actor_user_id: auth.user_id.clone(),
@@ -1857,6 +1951,7 @@ fn platform_operation_caller(
         acting_client_id: auth.acting_client_id.clone(),
         allow_all_services: auth.allow_all_services,
         allowed_service_ids: auth.allowed_service_ids.clone(),
+        credential_intent,
     }
 }
 
@@ -1865,6 +1960,21 @@ fn parse_platform_operation_arguments<T: DeserializeOwned>(
 ) -> Result<T, String> {
     serde_json::from_value(arguments.clone())
         .map_err(|error| format!("Invalid platform operation arguments: {error}"))
+}
+
+fn platform_endpoint_arguments(
+    arguments: &serde_json::Value,
+) -> Result<(CredentialIntent, serde_json::Value), String> {
+    let mut downstream_arguments = arguments.clone();
+    let Some(object) = downstream_arguments.as_object_mut() else {
+        return Err("Platform endpoint arguments must be a JSON object".to_string());
+    };
+    let credential_intent = match object.remove(mcp_service::PLATFORM_CREDENTIAL_INTENT_ARGUMENT) {
+        Some(value) => serde_json::from_value(value)
+            .map_err(|error| format!("Invalid platform credential_intent: {error}"))?,
+        None => CredentialIntent::Auto,
+    };
+    Ok((credential_intent, downstream_arguments))
 }
 
 fn platform_operation_error_result(
@@ -1890,6 +2000,91 @@ fn platform_operation_error_result(
         }
     };
     tool_result(request_id, &message, true)
+}
+
+async fn execute_paid_platform_endpoint_mcp(
+    state: &AppState,
+    auth: &McpAuthContext,
+    service: &mcp_service::McpToolService,
+    endpoint: &mcp_service::McpToolEndpoint,
+    prepared: mcp_service::PreparedProxyCall,
+    credential_intent: CredentialIntent,
+    billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> AppResult<(u16, String)> {
+    use crate::errors::AppError;
+
+    if service.service_category != mcp_service::PLATFORM_CREDENTIAL_SERVICE_CATEGORY {
+        return Err(AppError::PlatformOperationUnavailable);
+    }
+    if !platform_operations_allowed(auth)
+        || !auth.platform_spend_authorized
+        || !auth.allow_all_services
+        || !platform_services_flag_enabled(state, auth).await
+    {
+        return Err(AppError::Forbidden(
+            "Platform endpoint spending is not authorized for this MCP caller".to_string(),
+        ));
+    }
+
+    let canonical_path = prepared.platform_canonical_path()?;
+    let operation = prepared.operation_descriptor();
+    let method = operation
+        .method
+        .as_deref()
+        .ok_or(AppError::PlatformOperationUnavailable)?;
+    let caller = platform_operation_caller(auth, credential_intent);
+    let platform = super::platform_ops::resolve_platform_endpoint(
+        state,
+        &caller,
+        &service.service_id,
+        method,
+        &canonical_path,
+    )
+    .await?
+    .ok_or(AppError::PlatformOperationUnavailable)?;
+    let mcp_service::PreparedPlatformCall {
+        method,
+        path,
+        query,
+        headers,
+        body,
+    } = prepared.into_platform_parts(endpoint)?;
+    let result = super::platform_ops::execute_platform_endpoint(
+        state,
+        &caller,
+        platform,
+        method,
+        &path,
+        query.as_deref(),
+        headers,
+        body,
+        crate::services::billing::BillingIngress::Mcp,
+        billing_egress_permit,
+    )
+    .await?;
+    audit_service::log_async(
+        state.db.clone(),
+        Some(auth.user_id.clone()),
+        "platform_endpoint_call".to_string(),
+        Some(serde_json::json!({
+            "operation_id": result.attribution.operation_id,
+            "catalog_service_id": result.attribution.catalog_service_id,
+            "billing_request_id": result.attribution.billing_request_id,
+            "credential_source": "platform",
+            "credential_intent": result.credential_intent,
+            "fallback_reason": result.fallback_reason,
+            "response_status": result.status.as_u16(),
+            "ingress": "mcp",
+        })),
+        auth.ip_address.clone(),
+        auth.user_agent.clone(),
+        auth.api_key_id.clone(),
+        auth.api_key_name.clone(),
+    );
+    Ok((
+        result.status.as_u16(),
+        String::from_utf8_lossy(&result.body).into_owned(),
+    ))
 }
 
 fn audit_mcp_platform_operation<T>(
@@ -1924,18 +2119,24 @@ async fn handle_platform_speak(
     if !platform_operations_allowed(auth) || !platform_services_flag_enabled(state, auth).await {
         return tool_result(request_id, "Platform operation is not available", true);
     }
-    let request = match parse_platform_operation_arguments::<SpeakRequest>(arguments) {
+    let request = match parse_platform_operation_arguments::<
+        super::platform_ops::SpeakTransportRequest,
+    >(arguments)
+    {
         Ok(request) => request,
         Err(error) => return tool_result(request_id, &error, true),
     };
+    let (request, credential_intent) = request.into_parts();
     let started = Instant::now();
     let text_chars = request.text.chars().count();
     let voice_id = request.voice_id.clone();
+    let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
     let result = async {
-        let caller = platform_operation_caller(auth);
+        let caller = platform_operation_caller(auth, credential_intent);
         let execution = super::platform_ops::execute_speak_for_caller(
             state,
             &caller,
+            &yyyymmdd,
             request,
             crate::services::billing::BillingIngress::Mcp,
             billing_egress_permit,
@@ -1945,8 +2146,9 @@ async fn handle_platform_speak(
         Ok(super::platform_ops::PlatformOperationExecution {
             value: audio,
             credential_source: execution.credential_source,
-            own_connection_disabled: execution.own_connection_disabled,
-            own_connection_out_of_scope: execution.own_connection_out_of_scope,
+            credential_intent: execution.credential_intent,
+            fallback_reason: execution.fallback_reason,
+            attribution: execution.attribution,
         })
     }
     .await;
@@ -1980,10 +2182,14 @@ async fn handle_platform_call_and_say(
     if !platform_operations_allowed(auth) || !platform_services_flag_enabled(state, auth).await {
         return tool_result(request_id, "Platform operation is not available", true);
     }
-    let request = match parse_platform_operation_arguments::<CallAndSayRequest>(arguments) {
+    let request = match parse_platform_operation_arguments::<
+        super::platform_ops::CallAndSayTransportRequest,
+    >(arguments)
+    {
         Ok(request) => request,
         Err(error) => return tool_result(request_id, &error, true),
     };
+    let (request, credential_intent) = request.into_parts();
     let started = Instant::now();
     let message_chars = request.message.chars().count();
     let destination_suffix = if platform_operation_service::is_e164_number(&request.to) {
@@ -1993,7 +2199,7 @@ async fn handle_platform_call_and_say(
     };
     // The transport edge owns the UTC date; quota logic receives it explicitly.
     let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
-    let caller = platform_operation_caller(auth);
+    let caller = platform_operation_caller(auth, credential_intent);
     let result = super::platform_ops::execute_call_and_say_for_caller(
         state,
         &caller,
@@ -2033,14 +2239,18 @@ async fn handle_platform_flight_search(
     if !platform_operations_allowed(auth) || !platform_services_flag_enabled(state, auth).await {
         return tool_result(request_id, "Platform operation is not available", true);
     }
-    let request = match parse_platform_operation_arguments::<FlightSearchRequest>(arguments) {
+    let request = match parse_platform_operation_arguments::<
+        super::platform_ops::FlightSearchTransportRequest,
+    >(arguments)
+    {
         Ok(request) => request,
         Err(error) => return tool_result(request_id, &error, true),
     };
+    let (request, credential_intent) = request.into_parts();
     let started = Instant::now();
     let requested_max_offers = request.max_offers;
     let yyyymmdd = Utc::now().format("%Y%m%d").to_string();
-    let caller = platform_operation_caller(auth);
+    let caller = platform_operation_caller(auth, credential_intent);
     let result = super::platform_ops::execute_flight_search_for_caller(
         state,
         &caller,
@@ -2132,7 +2342,7 @@ async fn handle_meta_call_tool(
     // `nyx__call_tool` can't auto-invoke a tool whose only dispatchable
     // routes are outside the caller's allow-list (twentieth-round
     // Codex P2). Service scope is still applied downstream below.
-    let catalog = match mcp_service::load_operation_catalog(
+    let mut catalog = match mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
@@ -2147,6 +2357,10 @@ async fn handle_meta_call_tool(
             return tool_result(request_id, "Failed to load tools", true);
         }
     };
+    if let Err(error) = augment_platform_endpoint_catalog(state, auth, &mut catalog).await {
+        tracing::error!(error = %error, "Failed to load platform endpoint tools for call_tool");
+        return tool_result(request_id, "Failed to load tools", true);
+    }
     let services = catalog.services;
 
     // Resolve tool (no activation gate -- that's the whole point)
@@ -2163,17 +2377,30 @@ async fn handle_meta_call_tool(
         }
     };
 
-    let prepared = match mcp_service::prepare_proxy_tool_call(service, endpoint, &inner_args) {
-        Ok(prepared) => prepared,
-        Err(e) => {
-            return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
+    let is_paid_platform_endpoint =
+        service.service_category == mcp_service::PLATFORM_CREDENTIAL_SERVICE_CATEGORY;
+    let (credential_intent, dispatch_arguments) = if is_paid_platform_endpoint {
+        match platform_endpoint_arguments(&inner_args) {
+            Ok(parts) => parts,
+            Err(error) => return tool_result(request_id, &error, true),
         }
+    } else {
+        (CredentialIntent::Auto, inner_args)
     };
-    let operation = prepared.operation_descriptor();
-    if let Err(resp) =
-        authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone()).await
-    {
-        return resp;
+    let prepared =
+        match mcp_service::prepare_proxy_tool_call(service, endpoint, &dispatch_arguments) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                return tool_result(request_id, &format!("Invalid tool arguments: {e}"), true);
+            }
+        };
+    if !is_paid_platform_endpoint {
+        let operation = prepared.operation_descriptor();
+        if let Err(resp) =
+            authorize_mcp_tool_operation(state, auth, service, &operation, request_id.clone()).await
+        {
+            return resp;
+        }
     }
 
     // Auto-activate so future tools/list responses include this service.
@@ -2191,29 +2418,45 @@ async fn handle_meta_call_tool(
         None => false,
     };
 
-    let exec_ctx = mcp_exec_context(auth);
-    let (status, body) = match mcp_service::execute_tool(
-        &state.http_client,
-        &state.db,
-        &state.encryption_keys,
-        &state.node_ws_manager,
-        &state.billing,
-        &auth.user_id,
-        auth.billing_principal_user_id(),
-        service,
-        endpoint,
-        prepared,
-        &state.jwt_keys,
-        &state.config,
-        &state.connection_expiry_notifier,
-        &state.token_exchange_cache,
-        &state.cloud_response_cache,
-        &exec_ctx,
-        billing_egress_permit,
-    )
-    .await
-    {
+    let execution = if is_paid_platform_endpoint {
+        execute_paid_platform_endpoint_mcp(
+            state,
+            auth,
+            service,
+            endpoint,
+            prepared,
+            credential_intent,
+            billing_egress_permit,
+        )
+        .await
+    } else {
+        let exec_ctx = mcp_exec_context(auth);
+        mcp_service::execute_tool(
+            &state.http_client,
+            &state.db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            &state.billing,
+            &auth.user_id,
+            auth.billing_principal_user_id(),
+            service,
+            endpoint,
+            prepared,
+            &state.jwt_keys,
+            &state.config,
+            &state.connection_expiry_notifier,
+            &state.token_exchange_cache,
+            &state.cloud_response_cache,
+            &exec_ctx,
+            billing_egress_permit,
+        )
+        .await
+    };
+    let (status, body) = match execution {
         Ok(r) => r,
+        Err(error) if is_paid_platform_endpoint => {
+            return platform_operation_error_result(request_id, &error);
+        }
         Err(crate::errors::AppError::ApiKeyScopeForbidden(msg)) => {
             return tool_result(request_id, &msg, true);
         }
@@ -3493,6 +3736,39 @@ mod tests {
         )
         .expect("MCP billing route classification")
     }
+
+    #[test]
+    fn direct_and_meta_platform_tools_consume_the_reserved_credential_intent() {
+        let arguments = serde_json::json!({
+            "resource_id": "resource-1",
+            "credential_intent": "platform_only"
+        });
+        let (intent, downstream) =
+            platform_endpoint_arguments(&arguments).expect("valid platform endpoint arguments");
+        assert_eq!(intent, CredentialIntent::PlatformOnly);
+        assert_eq!(
+            downstream,
+            serde_json::json!({ "resource_id": "resource-1" })
+        );
+        assert_eq!(
+            arguments["credential_intent"], "platform_only",
+            "the direct and nyx__call_tool paths must not mutate their shared input"
+        );
+
+        let (intent, downstream) = platform_endpoint_arguments(&serde_json::json!({
+            "resource_id": "resource-2"
+        }))
+        .expect("missing intent defaults to auto");
+        assert_eq!(intent, CredentialIntent::Auto);
+        assert!(downstream.get("credential_intent").is_none());
+
+        assert!(
+            platform_endpoint_arguments(&serde_json::json!({
+                "credential_intent": "prefer_platform"
+            }))
+            .is_err()
+        );
+    }
     use crate::models::approval_grant::{ApprovalGrant, COLLECTION_NAME as APPROVAL_GRANTS};
     use crate::models::approval_request::{ApprovalRequest, COLLECTION_NAME as APPROVAL_REQUESTS};
     use crate::models::notification_channel::{
@@ -3581,6 +3857,7 @@ mod tests {
             approval_owner_user_id: None,
             is_api_key: true,
             is_agent_api_key: true,
+            platform_spend_authorized: true,
             api_key_id: Some("key-1".into()),
             api_key_name: Some("agent".into()),
             allow_all_services: false,
@@ -3650,7 +3927,7 @@ mod tests {
         .insert_one(&vendor)
         .await
         .expect("insert ElevenLabs catalog service");
-        crate::services::platform_credential_service::set_credential(
+        crate::services::platform_credential_service::set_credential_for_test(
             db,
             &crate::test_utils::test_encryption_keys(),
             &vendor.id,
@@ -3669,6 +3946,7 @@ mod tests {
             ConstrainedConfig::Speak(SpeakOperationConfig {
                 allowed_voice_ids: vec!["voice-a".to_string()],
                 model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
             }),
             OperationLimits {
                 per_request: PerRequestCaps::Speak { max_chars: 1_000 },
@@ -3721,12 +3999,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_tools_list_publishes_platform_operations_when_flag_is_on() {
+    async fn mcp_tools_list_describes_unconsented_and_consented_platform_access() {
         let Some(db) = connect_test_database("mcp_platform_ops_flag_on").await else {
             eprintln!("skipping MCP platform operation flag test: no local MongoDB available");
             return;
         };
         enable_platform_services_for_mcp_tests(&db).await;
+        db.collection::<User>(USERS)
+            .insert_one(test_user("user-1", UserType::Person))
+            .await
+            .expect("insert MCP platform operation owner");
         let catalog_service_id = insert_platform_speak_vendor_for_mcp_tests(&db).await;
         db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
             .insert_one(enabled_speak_operation(&catalog_service_id))
@@ -3747,9 +4029,45 @@ mod tests {
             .iter()
             .find(|tool| tool["name"] == "nyx__speak")
             .expect("tools/list publishes enabled speak operation");
-        assert!(speak["description"].as_str().is_some_and(|description| {
-            description.contains("Uses the platform credential (free).")
-        }));
+        let description = speak["description"]
+            .as_str()
+            .expect("speak tool has a description");
+        assert!(
+            description
+                .contains("Platform access to ElevenLabs requires the owner's spending opt-in.")
+        );
+        assert!(!description.contains("Uses the platform credential"));
+
+        crate::services::platform_preference_service::upsert_preference(
+            &state.db,
+            "user-1",
+            "user-1",
+            &catalog_service_id,
+            crate::services::platform_preference_service::PreferenceWrite {
+                platform_enabled: true,
+                max_credits_per_call: "1000".to_string(),
+                max_credits_per_day: "10000".to_string(),
+                operation_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("opt MCP owner into platform vendor");
+
+        let response = handle_tools_list(&state, &auth, None, &tools_list_request()).await;
+        let body = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("read consented MCP tools/list response");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("decode consented MCP tools/list response");
+        let description = payload["result"]["tools"]
+            .as_array()
+            .expect("consented tools/list result contains tools")
+            .iter()
+            .find(|tool| tool["name"] == "nyx__speak")
+            .and_then(|tool| tool["description"].as_str())
+            .expect("consented tools/list publishes speak description");
+        assert!(description.contains("Uses the platform credential (free)."));
+        assert!(!description.contains("requires the owner's spending opt-in"));
     }
 
     #[tokio::test]
@@ -3775,7 +4093,7 @@ mod tests {
         .insert_one(&catalog)
         .await
         .expect("insert MCP ElevenLabs catalog row");
-        crate::services::platform_credential_service::set_credential(
+        crate::services::platform_credential_service::set_credential_for_test(
             &db,
             &crate::test_utils::test_encryption_keys(),
             &catalog_id,
@@ -3883,8 +4201,10 @@ mod tests {
         let scoped_payload: serde_json::Value =
             serde_json::from_slice(&scoped_body).expect("decode scoped MCP tools/list response");
         let scoped_description = description_for(&scoped_payload);
-        assert!(scoped_description.contains("Uses the platform credential (free)."));
-        assert!(scoped_description.contains("Allowed voice ids: voice-a, voice-b."));
+        // A key not scoped to the owner's connection is told so, rather than
+        // being advertised the platform credential it would be billed for.
+        assert!(scoped_description.contains("not scoped to your ElevenLabs connection"));
+        assert!(!scoped_description.contains("Uses the platform credential"));
 
         let own_response = handle_tools_list(
             &state,

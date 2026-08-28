@@ -45,7 +45,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 11500 `GrantCascadeConfirmationRequired` (HTTP 409)
 - 11600-11606 triggers: 11600 `TriggerNotFound`, 11601 `TriggerSecretInvalid`, 11602 `TriggerRateLimited`, 11603 `TriggerPayloadTooLarge`, 11604 `TriggerDeliveryUnsupported`, 11605 `TriggerDeliveryFailed`, 11606 `TriggerDeliveryRecordNotFound`
 - 11700 `RequestBodyTooLarge` (HTTP 413): a bounded proxy or forwarding ingress exceeded its configured byte limit
-- 11800-11804 platform services: 11800 `PlatformOperationUnavailable`, 11801 `PlatformVendorProvisioningInvalid`, 11802 `PlatformOperationOwnConnectionUnsupported`, 11803 `PlatformOperationOwnConnectionUnusable`, 11804 `PlatformOperationApprovalRequired`
+- 11800-11805 platform services: 11800 `PlatformOperationUnavailable`, 11801 `PlatformVendorProvisioningInvalid`, 11802 `PlatformOperationOwnConnectionUnsupported`, 11803 `PlatformOperationOwnConnectionUnusable`, 11804 `PlatformOperationApprovalRequired`, 11805 `PlatformOperationOwnConnectionOutOfScope`
 
 ### 4. Frontend Patterns
 
@@ -199,8 +199,9 @@ Single-use hosted credential setup for agents and CLI callers. An authenticated 
 ### 15. Platform Services
 
 - Platform capabilities are code-owned, named operations with `deny_unknown_fields` requests and server-composed vendor paths, headers, and bodies. The `experimental:platform-services` flag gates caller-facing routes, then each operation's `enabled` switch and typed config apply. See `docs/PLATFORM_SERVICES.md`.
-- Resolve the acting user's connection through the normal proxy cascade before selecting a shared credential. A usable server-held user credential wins and skips billing. A disabled connection selects platform credits. An unusable or node-routed active connection returns an error and must not fall back to a chargeable platform credential. Scoped agent keys treat an out-of-scope connection as invisible and use platform credits; record that decision in audit metadata.
-- Honor `AgentServiceBinding` credential overrides for own-connection execution. Evaluate the normal approval policy against the server-composed operation: denials stay denied, per-request approval requirements fail closed without creating approval requests, and session callers retain the `/proxy` bypass. Discovery and MCP tool listing are read-only.
+- Resolve the acting user's connection through the normal proxy cascade before selecting a shared credential. A usable server-held user credential wins and skips billing. A disabled connection selects platform credits. An unusable or node-routed active connection returns an error and must not fall back to a chargeable platform credential. A scoped agent key whose connection is out of scope is denied with `PlatformOperationOwnConnectionOutOfScope` (11805), never moved onto platform credits: otherwise narrowing a key's scope would increase its ability to spend.
+- Honor `AgentServiceBinding` credential overrides for own-connection execution. Evaluate the normal approval policy against the server-composed operation **for the platform credential as well as an own connection**: denials stay denied, per-request approval requirements fail closed without creating approval requests, and session callers retain the `/proxy` bypass. Platform execution has no `UserService` row, so its policy is keyed on the catalog provider's service ID, and `is_auto_connected` stays false there because it suppresses the owner's global approval flag. Discovery and MCP tool listing are read-only.
+- Executing an operation requires the `platform:spend` API-key or access-token scope, checked before any database round trip; discovery deliberately does not. The scope is distinct from `proxy`: reaching a service the owner already has a credential for, and directing NyxID to pay a vendor on their behalf, are different grants. Browser sessions are exempt as the owner acting directly. `/api/v1/platform-ops` is exempt from the `mw/auth.rs` management write-scope gate because it is execution-shaped, not because it is ungated.
 - Platform vendor rows carry an explicit empty `proxy_operation_policy`. They are unreachable through every caller-addressed proxy, catalog, generic MCP, LLM, and auto-provision path by construction. Only bounded platform operations may use the server-chosen credential path. Price remains on the vendor row's `ServiceBilling` configuration.
 
 ## File Structure
@@ -344,7 +345,9 @@ SA_TOKEN_TTL_SECS=3600              # Service account tokens
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
 RATE_LIMIT_BURST=30
-PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND=0  # Sustained per-user rate for platform-credentialed services; 0 (default) disables
+PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND=0  # Sustained per-(service, owner) rate for the shared platform
+                                          # credential: master-credential proxy AND platform operations.
+                                          # 0 (default) disables. Per tenant, not aggregate.
 PLATFORM_SERVICE_RATE_LIMIT_BURST=10      # Per-user burst capacity for platform-credentialed services
 TRUSTED_PROXY_IPS=                  # Reverse-proxy IPs whose X-Forwarded-For/X-Real-IP are trusted for
                                     # per-IP rate-limit keying. Empty = trust only the TCP peer. Only list
@@ -444,6 +447,15 @@ nyxid login --device                    # Headless browser-assisted login;
 cargo build [--features aws-kms,gcp-kms]   # Feature-gated KMS providers
 cargo test [--all-features]
 cargo run                               # Start backend (port 3001)
+
+# ~85 backend tests need MongoDB transactions, so they need a REPLICA SET, not
+# the standalone mongod that `docker compose up -d` provides. Against a
+# standalone they fail in test_utils with a topology panic, which looks like a
+# code regression and is not one. One-time local setup:
+mongod --replSet nyxidrs --port 27019 --dbpath /tmp/nyxid-rs-data \
+       --bind_ip 127.0.0.1 --fork --logpath /tmp/nyxid-rs-data/mongod.log
+mongosh --port 27019 --eval 'rs.initiate()'
+NYXID_TEST_DATABASE_URL="mongodb://127.0.0.1:27019/?directConnection=true" cargo test
 
 # Node agent
 nyxid node register --token nyx_nreg_... --url ws://localhost:3001/api/v1/nodes/ws
