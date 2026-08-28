@@ -143,7 +143,7 @@ pub async fn speak(
     Json(request): Json<SpeakRequest>,
 ) -> AppResult<Response> {
     require_platform_ops_enabled(&state, &auth_user).await?;
-    ensure_platform_operation_caller(&state, &auth_user).await?;
+    ensure_platform_spend_authority(&state, &auth_user).await?;
     enforce_agent_rate_limit(&state, &auth_user)?;
 
     let started = Instant::now();
@@ -193,7 +193,7 @@ pub async fn call_and_say(
     Json(request): Json<CallAndSayRequest>,
 ) -> AppResult<Response> {
     require_platform_ops_enabled(&state, &auth_user).await?;
-    ensure_platform_operation_caller(&state, &auth_user).await?;
+    ensure_platform_spend_authority(&state, &auth_user).await?;
     enforce_agent_rate_limit(&state, &auth_user)?;
 
     let started = Instant::now();
@@ -240,7 +240,7 @@ pub async fn flight_search(
     Json(request): Json<FlightSearchRequest>,
 ) -> AppResult<Response> {
     require_platform_ops_enabled(&state, &auth_user).await?;
-    ensure_platform_operation_caller(&state, &auth_user).await?;
+    ensure_platform_spend_authority(&state, &auth_user).await?;
     enforce_agent_rate_limit(&state, &auth_user)?;
 
     let started = Instant::now();
@@ -666,22 +666,40 @@ async fn forward_metered_operation(
     billing_egress_permit: BillingEgressPermit,
 ) -> AppResult<ForwardedOperation> {
     let op = operation.op;
-    if let ExecutionTarget::OwnConnection(own) = &resolved.target {
+    {
         let descriptor = crate::services::operation_descriptor::build_http_descriptor(
             method.as_str(),
             path,
             body.as_deref(),
         );
+        // Platform-funded execution spends the owner's credits, so it clears the
+        // same approval policy as a call on the owner's own credential. It has no
+        // `UserService` row, so the policy is keyed on the catalog provider.
+        let (approval_owner_id, approval_service_id, is_auto_connected) = match &resolved.target {
+            ExecutionTarget::OwnConnection(own) => (
+                own.service_owner_id.as_str(),
+                own.user_service_id.as_str(),
+                own.is_auto_connected,
+            ),
+            // `is_auto_connected` must stay false here. It suppresses the owner's
+            // global "require approval for everything" flag, which would leave the
+            // one path that spends their money as the only unprompted one.
+            ExecutionTarget::Platform(_) => (
+                caller.resolution_user_id.as_str(),
+                operation.catalog_service_id.as_str(),
+                false,
+            ),
+        };
         let approval = crate::services::approval_service::evaluate_and_check(
             &state.db,
             &caller.actor_user_id,
-            &own.service_owner_id,
-            &own.user_service_id,
+            approval_owner_id,
+            approval_service_id,
             &descriptor,
             caller.approval_requester_type(),
             caller.approval_requester_id(),
             caller.auth_method == AuthMethod::Session,
-            own.is_auto_connected,
+            is_auto_connected,
         )
         .await?;
         match approval {
@@ -1221,6 +1239,13 @@ pub(crate) async fn execute_flight_search_for_caller(
     })
 }
 
+/// Scope a non-human caller must hold to spend the owner's credits through a
+/// platform credential.
+pub(crate) const PLATFORM_SPEND_SCOPE: &str = "platform:spend";
+
+/// Caller *class* check: which authentication methods may see platform
+/// operations at all. Discovery stops here; an agent is allowed to learn a
+/// service exists without being allowed to pay for it.
 async fn ensure_platform_operation_caller(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
     match auth_user.auth_method {
         AuthMethod::Session | AuthMethod::AccessToken => Ok(()),
@@ -1250,6 +1275,35 @@ async fn ensure_platform_operation_caller(state: &AppState, auth_user: &AuthUser
             AppError::Forbidden("This token type cannot access platform operations.".to_string()),
         ),
     }
+}
+
+/// Authority to spend the owner's credits. Required by every executing
+/// operation, and deliberately not by discovery.
+///
+/// Without this, any principal that clears the class check could spend: an app
+/// holding a token granted for `profile email`, or an agent key issued with
+/// only `read`. Nothing else on the execution path inspects scope.
+async fn ensure_platform_spend_authority(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
+    // Scope is checked before the caller class so an unscoped caller is refused
+    // without a database round trip. Classes that can never spend fall through
+    // to `ensure_platform_operation_caller`, which explains why by name.
+    match auth_user.auth_method {
+        // A browser session is the owner acting directly and knowingly. The
+        // approval flow exists so a human can authorize an agent, not authorize
+        // themselves.
+        AuthMethod::Session
+        | AuthMethod::Delegated
+        | AuthMethod::Relay
+        | AuthMethod::ServiceAccount => {}
+        AuthMethod::AccessToken | AuthMethod::ApiKey => {
+            if !auth_user.has_scope(PLATFORM_SPEND_SCOPE) {
+                return Err(AppError::Forbidden(format!(
+                    "The '{PLATFORM_SPEND_SCOPE}' scope is required to spend credits on platform operations."
+                )));
+            }
+        }
+    }
+    ensure_platform_operation_caller(state, auth_user).await
 }
 
 fn enforce_agent_rate_limit(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
@@ -3175,6 +3229,169 @@ mod tests {
                 true,
             ),
             "Your ElevenLabs connection is unusable; reconnect or disable it."
+        );
+    }
+
+    #[tokio::test]
+    async fn spending_credits_requires_an_explicit_scope() {
+        let state = Arc::new(crate::test_utils::test_app_state_no_db().await);
+
+        // An app token granted only profile/email must not be able to spend the
+        // owner's credits, and an agent key issued as read-only must not either.
+        for method in [AuthMethod::AccessToken, AuthMethod::ApiKey] {
+            let mut unscoped = crate::test_utils::test_auth_user(USER_ID);
+            unscoped.auth_method = method.clone();
+            unscoped.scope = "openid profile email read proxy".to_string();
+            assert!(
+                matches!(
+                    ensure_platform_spend_authority(&state, &unscoped).await,
+                    Err(AppError::Forbidden(_))
+                ),
+                "{method:?} without the spend scope must be refused"
+            );
+        }
+
+        // The owner acting in a browser session is spending their own credits
+        // knowingly; the approval flow authorizes agents, not the owner.
+        let mut session = crate::test_utils::test_auth_user(USER_ID);
+        session.auth_method = AuthMethod::Session;
+        session.scope = String::new();
+        assert!(
+            ensure_platform_spend_authority(&state, &session)
+                .await
+                .is_ok()
+        );
+
+        let mut scoped = crate::test_utils::test_auth_user(USER_ID);
+        scoped.auth_method = AuthMethod::AccessToken;
+        scoped.scope = format!("openid profile {PLATFORM_SPEND_SCOPE}");
+        assert!(
+            ensure_platform_spend_authority(&state, &scoped)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn discovery_does_not_require_spend_authority() {
+        let state = Arc::new(crate::test_utils::test_app_state_no_db().await);
+        let mut unscoped = crate::test_utils::test_auth_user(USER_ID);
+        unscoped.auth_method = AuthMethod::AccessToken;
+        unscoped.scope = "openid profile".to_string();
+
+        // Learning that a service exists is not permission to pay for it, and
+        // refusing discovery would hide the catalog from agents that can still
+        // use their owner's own credential for free.
+        assert!(
+            ensure_platform_operation_caller(&state, &unscoped)
+                .await
+                .is_ok()
+        );
+        assert!(matches!(
+            ensure_platform_spend_authority(&state, &unscoped).await,
+            Err(AppError::Forbidden(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn platform_funded_execution_honours_the_owner_approval_policy() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_ops_approval_parity").await
+        else {
+            eprintln!("skipping platform approval parity test: no local MongoDB available");
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let (base_url, _captured, _server) = spawn_capturing_vendor().await;
+        insert_speak_vendor(&state, base_url.clone(), "platform-speak-secret").await;
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(operation(
+                PlatformOperationName::Speak,
+                true,
+                PlatformOperationConfig::Speak(SpeakConfig {
+                    allowed_voice_ids: vec!["voice-a".to_string()],
+                    max_chars: 1_000,
+                    model_id: "eleven_multilingual_v2".to_string(),
+                }),
+            ))
+            .await
+            .expect("insert speak operation");
+
+        // The caller has no own connection, so this resolves to the platform
+        // credential and spends credits.
+        let caller = PlatformOperationCaller {
+            actor_user_id: USER_ID.to_string(),
+            resolution_user_id: USER_ID.to_string(),
+            api_key_id: Some("agent-key".to_string()),
+            auth_method: AuthMethod::ApiKey,
+            acting_client_id: None,
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
+        };
+        let speak = || SpeakRequest {
+            text: "nyxid".to_string(),
+            voice_id: "voice-a".to_string(),
+        };
+        let permit = || {
+            enforce_platform_billing_classification(BillingRoutePolicy::Metered(
+                BillingIngress::PlatformOperation,
+            ))
+            .expect("platform billing classification")
+        };
+
+        let allowed = execute_speak_for_caller(
+            &state,
+            &caller,
+            speak(),
+            BillingIngress::PlatformOperation,
+            permit(),
+        )
+        .await
+        .expect("execute platform operation with no approval policy");
+        assert_eq!(
+            allowed.credential_source,
+            PlatformCredentialSource::Platform
+        );
+
+        // Platform execution has no UserService row, so the policy is keyed on
+        // the catalog provider.
+        let now = Utc::now();
+        db.collection::<crate::models::service_approval_config::ServiceApprovalConfig>(
+            crate::models::service_approval_config::COLLECTION_NAME,
+        )
+        .insert_one(
+            crate::models::service_approval_config::ServiceApprovalConfig {
+                id: uuid::Uuid::new_v4().to_string(),
+                user_id: USER_ID.to_string(),
+                service_id: catalog_service_id(platform_operation_service::SPEAK_VENDOR_SLUG),
+                service_name: "ElevenLabs".to_string(),
+                approval_required: true,
+                approval_mode: crate::models::service_approval_config::ApprovalMode::PerRequest,
+                rules: Vec::new(),
+                default_effect: None,
+                created_at: now,
+                updated_at: now,
+            },
+        )
+        .await
+        .expect("insert platform approval policy");
+
+        // Before this gate existed, the branch that spends the owner's money was
+        // the only one that never consulted their approval policy.
+        let blocked = execute_speak_for_caller(
+            &state,
+            &caller,
+            speak(),
+            BillingIngress::PlatformOperation,
+            permit(),
+        )
+        .await;
+        assert!(
+            matches!(
+                blocked,
+                Err(AppError::PlatformOperationApprovalRequired { .. })
+            ),
+            "platform-funded execution must not bypass the approval policy"
         );
     }
 

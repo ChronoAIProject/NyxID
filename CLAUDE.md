@@ -200,7 +200,8 @@ Single-use hosted credential setup for agents and CLI callers. An authenticated 
 
 - Platform capabilities are code-owned, named operations with `deny_unknown_fields` requests and server-composed vendor paths, headers, and bodies. The `experimental:platform-services` flag gates caller-facing routes, then each operation's `enabled` switch and typed config apply. See `docs/PLATFORM_SERVICES.md`.
 - Resolve the acting user's connection through the normal proxy cascade before selecting a shared credential. A usable server-held user credential wins and skips billing. A disabled connection selects platform credits. An unusable or node-routed active connection returns an error and must not fall back to a chargeable platform credential. Scoped agent keys treat an out-of-scope connection as invisible and use platform credits; record that decision in audit metadata.
-- Honor `AgentServiceBinding` credential overrides for own-connection execution. Evaluate the normal approval policy against the server-composed operation: denials stay denied, per-request approval requirements fail closed without creating approval requests, and session callers retain the `/proxy` bypass. Discovery and MCP tool listing are read-only.
+- Honor `AgentServiceBinding` credential overrides for own-connection execution. Evaluate the normal approval policy against the server-composed operation **for the platform credential as well as an own connection**: denials stay denied, per-request approval requirements fail closed without creating approval requests, and session callers retain the `/proxy` bypass. Platform execution has no `UserService` row, so its policy is keyed on the catalog provider's service ID, and `is_auto_connected` stays false there because it suppresses the owner's global approval flag. Discovery and MCP tool listing are read-only.
+- Executing an operation requires the `platform:spend` API-key or access-token scope, checked before any database round trip; discovery deliberately does not. The scope is distinct from `proxy`: reaching a service the owner already has a credential for, and directing NyxID to pay a vendor on their behalf, are different grants. Browser sessions are exempt as the owner acting directly. `/api/v1/platform-ops` is exempt from the `mw/auth.rs` management write-scope gate because it is execution-shaped, not because it is ungated.
 - Platform vendor rows carry an explicit empty `proxy_operation_policy`. They are unreachable through every caller-addressed proxy, catalog, generic MCP, LLM, and auto-provision path by construction. Only bounded platform operations may use the server-chosen credential path. Price remains on the vendor row's `ServiceBilling` configuration.
 
 ## File Structure
@@ -444,6 +445,15 @@ nyxid login --device                    # Headless browser-assisted login;
 cargo build [--features aws-kms,gcp-kms]   # Feature-gated KMS providers
 cargo test [--all-features]
 cargo run                               # Start backend (port 3001)
+
+# ~85 backend tests need MongoDB transactions, so they need a REPLICA SET, not
+# the standalone mongod that `docker compose up -d` provides. Against a
+# standalone they fail in test_utils with a topology panic, which looks like a
+# code regression and is not one. One-time local setup:
+mongod --replSet nyxidrs --port 27019 --dbpath /tmp/nyxid-rs-data \
+       --bind_ip 127.0.0.1 --fork --logpath /tmp/nyxid-rs-data/mongod.log
+mongosh --port 27019 --eval 'rs.initiate()'
+NYXID_TEST_DATABASE_URL="mongodb://127.0.0.1:27019/?directConnection=true" cargo test
 
 # Node agent
 nyxid node register --token nyx_nreg_... --url ws://localhost:3001/api/v1/nodes/ws

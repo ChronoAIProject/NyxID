@@ -429,16 +429,39 @@ existing catalog row. If a platform credential exists, the row gains a
 A platform-credential request follows this side-effect order:
 
 1. Rollout flag and caller class.
-2. Agent-key rate and service scope.
+2. `platform:spend` scope, then agent-key rate and service scope.
 3. Existing own-connection cascade and binding resolution.
 4. Canonical operation construction.
 5. Enabled exact endpoint or constrained-row authorization.
-6. Existing approval evaluation.
+6. Approval evaluation, for the platform credential as well as an own connection.
 7. Typed limits, allowlists, and daily-quota reservation.
 8. Billing reservation using the operation price snapshot.
 9. Platform credential decryption through the authorized wrapper.
 10. Meter `mark_forwarded` immediately before provider dispatch.
 11. Immediate settlement for known quantities, or persisted deferred Twilio state.
+
+### Spend authority
+
+Executing a platform operation requires the `platform:spend` API-key or access-token
+scope. Discovery does not: an agent may learn that a service exists without being
+allowed to pay for it.
+
+The scope is separate from `proxy` on purpose. Reaching a service with a credential the
+owner already holds, and directing NyxID to pay a vendor on the owner's behalf, are
+different grants. A browser session is exempt because it is the owner acting directly.
+
+`/api/v1/platform-ops` is exempt from the management write-scope gate in `mw/auth.rs`
+because it is execution-shaped, not because it is ungated. The spend scope is its gate.
+
+### Approval parity
+
+Platform-funded execution evaluates the owner's approval policy exactly as an
+own-credential call does. Because platform execution has no `UserService` row, the
+policy is keyed on the catalog provider's service ID.
+
+`is_auto_connected` is deliberately false on this path. It suppresses the owner's global
+"require approval for everything" flag, which would otherwise leave the one path that
+spends their money as the only unprompted one.
 
 Any failure before `mark_forwarded` releases the reservation and quota without a
 provider effect. A provider failure uses the existing forwarded-failure cleanup and

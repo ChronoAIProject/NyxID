@@ -1741,7 +1741,10 @@ fn route_access_token(state: &crate::AppState, owner_id: &str) -> String {
         &state.jwt_keys,
         &state.config,
         &Uuid::parse_str(owner_id).expect("route owner UUID"),
-        "proxy",
+        // `platform:spend` is required by the platform-ops routes this smoke
+        // test exercises; `proxy` alone reaches a service the owner already has
+        // a credential for, which is a different grant.
+        "proxy platform:spend",
         None,
         None,
         None,

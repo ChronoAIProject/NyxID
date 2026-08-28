@@ -127,6 +127,10 @@ const VALID_API_KEY_SCOPES: &[&str] = &[
     "services:read",
     "services:write",
     "proxy",
+    // Authorizes spending the owner's credits through a platform credential.
+    // Deliberately separate from "proxy": reaching a service and paying NyxID
+    // to reach it on your behalf are different grants.
+    "platform:spend",
 ];
 
 /// Valid platform identifiers for API keys.
