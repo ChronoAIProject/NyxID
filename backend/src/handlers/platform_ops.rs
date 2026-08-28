@@ -755,6 +755,24 @@ async fn forward_metered_operation(
         }
     }
 
+    // Bound one tenant's call rate against the shared vendor credential, before
+    // any quota row or wallet reservation is taken.
+    //
+    // This matters more here than on a BYOK path: a vendor rejection releases
+    // both the reservation and the quota slot, so failed attempts are free and
+    // quota-neutral, and without a limiter one tenant could burn the shared
+    // vendor's rate allowance for every other tenant at no cost to themselves.
+    //
+    // Off by default (`PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND=0`), matching the
+    // limiter's existing use on the master-credential proxy path.
+    if let ExecutionTarget::Platform(vendor) = &resolved.target {
+        crate::mw::rate_limit::enforce_platform_user_limit(
+            crate::mw::rate_limit::platform_user_rate_limiter(),
+            &vendor.id,
+            &caller.resolution_user_id,
+        )?;
+    }
+
     let is_platform = matches!(&resolved.target, ExecutionTarget::Platform(_));
     if is_platform && let Some(limit) = &daily_limit {
         platform_operation_service::reserve_daily_operation(

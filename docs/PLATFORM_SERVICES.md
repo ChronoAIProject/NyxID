@@ -460,6 +460,26 @@ The cap is enforced by a conditional upsert against `platform_op_usage`. The uni
 `(op, user_id, yyyymmdd)` index is load-bearing: without it a second reservation inserts
 a second row instead of failing, and the cap silently does nothing.
 
+### Shared-credential rate limiting
+
+Platform execution applies `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND` per `(catalog
+service, owner)` before any quota row or wallet reservation is taken. It is off by
+default, matching the limiter's existing use on the master-credential proxy path.
+
+This matters more here than on a BYOK path. A vendor rejection releases both the billing
+reservation and the daily quota slot, so failed attempts are free and quota-neutral.
+Without a limiter, one tenant could burn the shared vendor's rate allowance for every
+other tenant at no cost to themselves.
+
+The limit is per tenant, not aggregate across tenants. A ceiling on total platform
+throughput against one vendor does not exist yet.
+
+Known gap: the call site itself is not unit-tested, because the limiter is a
+process-wide `OnceLock` and initializing it in one test would leak into every other
+test in the process. `enforce_platform_user_limit` is unit-tested through its explicit
+limiter seam. Making the call site testable means moving the limiter onto `AppState`,
+which would also have to move the proxy path to avoid two mechanisms for one limit.
+
 ### Spend authority
 
 Executing a platform operation requires the `platform:spend` API-key or access-token
