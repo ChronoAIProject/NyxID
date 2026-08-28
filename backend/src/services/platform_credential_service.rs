@@ -19,6 +19,9 @@ use crate::models::platform_operation::{
 use crate::models::platform_provider_promotion::{
     COLLECTION_NAME as PLATFORM_PROVIDER_PROMOTIONS, PlatformProviderPromotion,
 };
+use crate::models::platform_service_preference::{
+    COLLECTION_NAME as PLATFORM_SERVICE_PREFERENCES, PlatformServicePreference,
+};
 use crate::services::{proxy_authorization, proxy_service};
 
 pub const MAX_PLATFORM_CREDENTIAL_BYTES: usize = 64 * 1024;
@@ -72,6 +75,14 @@ pub struct PlatformProviderLifecycleStatus {
     pub promotion: Option<PlatformProviderPromotion>,
     pub credential: Option<PlatformCredentialStatus>,
     pub enabled_operation_count: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PlatformProviderDeletionCounts {
+    pub operations: u64,
+    pub credentials: u64,
+    pub promotions: u64,
+    pub preferences: u64,
 }
 
 impl From<PlatformCredential> for PlatformCredentialStatus {
@@ -381,6 +392,64 @@ pub async fn demote_provider(
         .delete_one(doc! { "catalog_service_id": catalog_service_id })
         .await?;
     provider_lifecycle_status(db, catalog_service_id).await
+}
+
+pub async fn prepare_catalog_provider_deletion(
+    db: &mongodb::Database,
+    catalog_service_id: &str,
+    actor_id: &str,
+) -> AppResult<Vec<PlatformOperationRow>> {
+    db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .update_many(
+            doc! { "catalog_service_id": catalog_service_id },
+            doc! {
+                "$set": {
+                    "enabled": false,
+                    "updated_by": actor_id,
+                    "updated_at": bson::DateTime::from_chrono(chrono::Utc::now()),
+                },
+            },
+        )
+        .await?;
+    db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .find(doc! { "catalog_service_id": catalog_service_id })
+        .sort(doc! { "kind_key": 1, "_id": 1 })
+        .await?
+        .try_collect()
+        .await
+        .map_err(AppError::DatabaseError)
+}
+
+pub async fn delete_catalog_provider_artifacts(
+    db: &mongodb::Database,
+    catalog_service_id: &str,
+) -> AppResult<PlatformProviderDeletionCounts> {
+    let operations = db
+        .collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .delete_many(doc! { "catalog_service_id": catalog_service_id })
+        .await?
+        .deleted_count;
+    let credentials = db
+        .collection::<PlatformCredential>(PLATFORM_CREDENTIALS)
+        .delete_many(doc! { "catalog_service_id": catalog_service_id })
+        .await?
+        .deleted_count;
+    let promotions = db
+        .collection::<PlatformProviderPromotion>(PLATFORM_PROVIDER_PROMOTIONS)
+        .delete_many(doc! { "catalog_service_id": catalog_service_id })
+        .await?
+        .deleted_count;
+    let preferences = db
+        .collection::<PlatformServicePreference>(PLATFORM_SERVICE_PREFERENCES)
+        .delete_many(doc! { "catalog_service_id": catalog_service_id })
+        .await?
+        .deleted_count;
+    Ok(PlatformProviderDeletionCounts {
+        operations,
+        credentials,
+        promotions,
+        preferences,
+    })
 }
 
 pub async fn set_credential(
