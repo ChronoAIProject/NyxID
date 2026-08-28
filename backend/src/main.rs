@@ -681,10 +681,10 @@ async fn main() {
     );
 
     // Create shared state
-    let billing = Arc::new(services::billing::BillingService::new(
-        db.clone(),
-        Arc::new(config.clone()),
-    ));
+    let billing = Arc::new(
+        services::billing::BillingService::new(db.clone(), Arc::new(config.clone()))
+            .with_platform_runtime(encryption_keys.clone(), http_client.clone()),
+    );
     if config.billing_enabled {
         if billing.lago_configured() {
             match billing.backfill_existing_owner_wallets().await {

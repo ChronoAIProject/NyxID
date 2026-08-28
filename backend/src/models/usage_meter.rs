@@ -44,6 +44,15 @@ pub enum CredentialClass {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DeferredQuantity {
+    TwilioCall {
+        account_sid: String,
+        call_sid: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct AllowanceReservationAllocation {
     pub allowance_id: String,
     pub period_id: String,
@@ -82,9 +91,13 @@ pub struct UsageFunding {
     #[serde(default)]
     pub grant_reservations: Vec<GrantReservationAllocation>,
     #[serde(default)]
+    pub base_fee_grant_reservations: Vec<GrantReservationAllocation>,
+    #[serde(default)]
     pub allowance_consumptions: Vec<AllowanceConsumptionAllocation>,
     #[serde(default)]
     pub grant_consumptions: Vec<GrantConsumptionAllocation>,
+    #[serde(default)]
+    pub base_fee_grant_consumptions: Vec<GrantConsumptionAllocation>,
     #[serde(default)]
     pub settled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -135,6 +148,20 @@ pub struct UsageMeterRow {
     pub funding: Option<UsageFunding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub quantity: Option<i64>,
+    /// Credit-denominated fee snapshotted at reservation time. It is not an
+    /// allowance quantity and is therefore funded only by grants and wallet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_fee_micros: Option<i64>,
+    #[serde(default)]
+    pub base_fee_applied: bool,
+    #[serde(default)]
+    pub base_fee_applied_credits: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_quantity: Option<DeferredQuantity>,
+    #[serde(default)]
+    pub deferred_attempts: i32,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub deferred_next_retry_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_resale_quantity: Option<i64>,
     pub status: UsageStatus,
@@ -156,4 +183,23 @@ pub struct UsageMeterRow {
     pub expires_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DeferredQuantity;
+
+    #[test]
+    fn deferred_twilio_descriptor_is_tagged_and_contains_only_poll_identity() {
+        let value = serde_json::to_value(DeferredQuantity::TwilioCall {
+            account_sid: "AC11111111111111111111111111111111".to_string(),
+            call_sid: "CA22222222222222222222222222222222".to_string(),
+        })
+        .expect("serialize deferred quantity");
+
+        assert_eq!(value["type"], "twilio_call");
+        assert_eq!(value["account_sid"], "AC11111111111111111111111111111111");
+        assert_eq!(value["call_sid"], "CA22222222222222222222222222222222");
+        assert_eq!(value.as_object().expect("object").len(), 3);
+    }
 }

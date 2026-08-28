@@ -6203,6 +6203,7 @@ mod tests {
     fn generate_tool_definitions_publishes_only_enabled_platform_operation_rows() {
         let enabled_operation = PlatformOperation {
             id: "platform-speak".to_string(),
+            catalog_service_id: "catalog-elevenlabs".to_string(),
             op: crate::models::platform_operation::PlatformOperationName::Speak,
             enabled: true,
             vendor_service_slug: "api-elevenlabs".to_string(),
@@ -6213,11 +6214,16 @@ mod tests {
                     model_id: "eleven_multilingual_v2".to_string(),
                 },
             ),
+            billing: crate::services::platform_operation_service::default_operation_billing(
+                crate::models::platform_operation::PlatformOperationName::Speak,
+            ),
+            billing_cleanup_metric_code: None,
             updated_at: chrono::Utc::now(),
             updated_by: "admin-user".to_string(),
         };
         let disabled_operation = PlatformOperation {
             id: "platform-call-and-say".to_string(),
+            catalog_service_id: "catalog-twilio".to_string(),
             op: crate::models::platform_operation::PlatformOperationName::CallAndSay,
             enabled: false,
             vendor_service_slug: "api-twilio".to_string(),
@@ -6232,11 +6238,16 @@ mod tests {
                     call_from: "+6512345678".to_string(),
                 },
             ),
+            billing: crate::services::platform_operation_service::default_operation_billing(
+                crate::models::platform_operation::PlatformOperationName::CallAndSay,
+            ),
+            billing_cleanup_metric_code: None,
             updated_at: chrono::Utc::now(),
             updated_by: "admin-user".to_string(),
         };
         let flight_operation = PlatformOperation {
             id: "platform-flight-search".to_string(),
+            catalog_service_id: "catalog-duffel".to_string(),
             op: crate::models::platform_operation::PlatformOperationName::FlightSearch,
             enabled: true,
             vendor_service_slug: "duffel".to_string(),
@@ -6246,6 +6257,10 @@ mod tests {
                     max_searches_per_user_per_day: 20,
                 },
             ),
+            billing: crate::services::platform_operation_service::default_operation_billing(
+                crate::models::platform_operation::PlatformOperationName::FlightSearch,
+            ),
+            billing_cleanup_metric_code: None,
             updated_at: chrono::Utc::now(),
             updated_by: "admin-user".to_string(),
         };

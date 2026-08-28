@@ -1,4 +1,5 @@
 pub mod allowances;
+pub mod deferred;
 pub mod funding;
 pub mod grants;
 pub mod lago_client;
@@ -37,6 +38,7 @@ pub struct BillingService {
     config: Arc<AppConfig>,
     owner_resolver: BillingOwnerResolver,
     lago: Option<Arc<dyn LagoApi>>,
+    platform_runtime: Option<deferred::PlatformBillingRuntime>,
 }
 
 impl BillingService {
@@ -59,6 +61,7 @@ impl BillingService {
             config,
             owner_resolver: BillingOwnerResolver::new(db),
             lago,
+            platform_runtime: None,
         }
     }
 
@@ -73,7 +76,20 @@ impl BillingService {
             config,
             owner_resolver: BillingOwnerResolver::new(db),
             lago: Some(lago),
+            platform_runtime: None,
         }
+    }
+
+    pub fn with_platform_runtime(
+        mut self,
+        encryption_keys: Arc<crate::crypto::aes::EncryptionKeys>,
+        http_client: reqwest::Client,
+    ) -> Self {
+        self.platform_runtime = Some(deferred::PlatformBillingRuntime::new(
+            encryption_keys,
+            http_client,
+        ));
+        self
     }
 
     pub fn owner_resolver(&self) -> &BillingOwnerResolver {
@@ -121,8 +137,26 @@ impl BillingService {
         pricing::sync_service_price(&self.db, lago, &self.config.lago_plan_code, service).await
     }
 
+    pub async fn sync_operation_price(
+        &self,
+        operation: &crate::models::platform_operation::PlatformOperationRow,
+    ) -> AppResult<bool> {
+        let Some(lago) = self.lago.as_deref() else {
+            pricing::set_operation_sync_state(
+                &self.db,
+                operation,
+                crate::models::service_billing::PricingSyncStatus::Failed,
+                Some("Lago is not configured; the reconcile sweep will retry"),
+            )
+            .await?;
+            return Ok(false);
+        };
+        pricing::sync_operation_price(&self.db, lago, &self.config.lago_plan_code, operation).await
+    }
+
     pub fn reconciler(&self) -> reconcile::BillingReconciler {
         reconcile::BillingReconciler::new(self.db.clone(), self.lago.clone(), self.config.clone())
+            .with_platform_runtime(self.platform_runtime.clone())
     }
 
     pub async fn get_wallet(&self, owner_id: &str) -> AppResult<Option<BillingWallet>> {
@@ -298,6 +332,30 @@ impl BillingService {
         model: Option<String>,
     ) -> AppResult<()> {
         meter::settle(&self.db, metered, platform, resale, model).await
+    }
+
+    pub async fn defer_twilio_call(
+        &self,
+        metered: &MeteredProxyContext,
+        account_sid: String,
+        call_sid: String,
+    ) -> AppResult<()> {
+        let descriptor = crate::models::usage_meter::DeferredQuantity::TwilioCall {
+            account_sid,
+            call_sid,
+        };
+        let Some(row) = meter::persist_deferred_quantity(&self.db, metered, &descriptor).await?
+        else {
+            return Ok(());
+        };
+        if let Err(error) = funding::apply_deferred_base_fee(&self.db, &row, &descriptor).await {
+            tracing::warn!(
+                usage_row_id = %row.id,
+                error = %error,
+                "deferred Twilio base fee will be applied by reconciliation"
+            );
+        }
+        Ok(())
     }
 
     pub(crate) async fn settle_deferred(

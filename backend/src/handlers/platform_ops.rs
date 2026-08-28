@@ -363,11 +363,7 @@ pub async fn list_operations(
         )
         .await?;
         let (credential_source, own_connection) = discovery_source(source);
-        let vendor = context.service_by_slug(&operation.vendor_service_slug);
-        let billing = vendor.and_then(|service| service.billing.as_ref());
-        let price = billing
-            .and_then(|billing| billing.platform_pricing.as_ref())
-            .map(|pricing| pricing.credits_per_unit.clone());
+        let price = operation.billing.price_per_unit.clone();
         response.push(PlatformOperationDiscoveryResponse {
             op: platform_operation_service::operation_name(operation.op).to_string(),
             display_name: contract.display_name.to_string(),
@@ -378,9 +374,10 @@ pub async fn list_operations(
             own_connection,
             pricing: PlatformOperationPricingResponse {
                 billable: rollout_enabled
-                    && billing.is_some_and(|billing| billing.platform_billable),
-                credits_per_call: price,
-                metric: "requests",
+                    && (price != "0" || operation.billing.base_fee_per_call.is_some()),
+                credits_per_call: (operation.billing.metric == BillingMetric::Requests)
+                    .then_some(price),
+                metric: operation.billing.metric.as_str(),
             },
             mcp_tool: contract.mcp_tool.to_string(),
         });
@@ -393,7 +390,7 @@ pub async fn list_operations(
 pub(crate) fn platform_tool_credential_sentence(
     operation: &crate::models::platform_operation::PlatformOperation,
     source: &PlatformCredentialResolution,
-    vendor: Option<&crate::models::downstream_service::DownstreamService>,
+    _vendor: Option<&crate::models::downstream_service::DownstreamService>,
     rollout_enabled: bool,
 ) -> String {
     let contract = platform_operation_service::catalog_contract_for_operation(operation.op);
@@ -425,21 +422,30 @@ pub(crate) fn platform_tool_credential_sentence(
         PlatformCredentialResolution::Platform { .. } => {}
     }
 
-    let billing = vendor.and_then(|vendor| vendor.billing.as_ref());
-    let mut sentence =
-        if !rollout_enabled || !billing.is_some_and(|billing| billing.platform_billable) {
-            "Uses the platform credential (free).".to_string()
-        } else {
-            match billing
-                .and_then(|billing| billing.platform_pricing.as_ref())
-                .map(|pricing| pricing.credits_per_unit.as_str())
-            {
-                Some(price) => {
-                    format!("Uses the platform credential ({price} credits per call).")
-                }
-                None => "Uses the platform credential (price not set).".to_string(),
-            }
+    let billing = &operation.billing;
+    let mut sentence = if !rollout_enabled
+        || (billing.price_per_unit == "0" && billing.base_fee_per_call.is_none())
+    {
+        "Uses the platform credential (free).".to_string()
+    } else {
+        let unit = match billing.metric {
+            BillingMetric::Requests => "request",
+            BillingMetric::Bytes => "byte",
+            BillingMetric::Tokens => "token",
+            BillingMetric::Characters => "character",
+            BillingMetric::Seconds => "second",
         };
+        match billing.base_fee_per_call.as_deref() {
+            Some(base) => format!(
+                "Uses the platform credential ({base} credits plus {} credits per {unit}).",
+                billing.price_per_unit
+            ),
+            None => format!(
+                "Uses the platform credential ({} credits per {unit}).",
+                billing.price_per_unit
+            ),
+        }
+    };
     if let crate::models::platform_operation::PlatformOperationConfig::Speak(config) =
         &operation.config
         && !config.allowed_voice_ids.is_empty()
@@ -622,7 +628,8 @@ async fn forward_metered_operation(
     state: &AppState,
     caller: &PlatformOperationCaller,
     ingress: BillingIngress,
-    op: crate::models::platform_operation::PlatformOperationName,
+    operation: &crate::models::platform_operation::PlatformOperation,
+    platform_estimated_quantity: i64,
     resolved: ResolvedExecutionTarget,
     method: reqwest::Method,
     path: &str,
@@ -633,6 +640,7 @@ async fn forward_metered_operation(
     daily_limit: Option<DailyLimit>,
     billing_egress_permit: BillingEgressPermit,
 ) -> AppResult<ForwardedOperation> {
+    let op = operation.op;
     if let ExecutionTarget::OwnConnection(own) = &resolved.target {
         let descriptor = crate::services::operation_descriptor::build_http_descriptor(
             method.as_str(),
@@ -692,6 +700,13 @@ async fn forward_metered_operation(
                 return Err(error);
             }
         };
+        let base_fee_micros = match operation.billing.base_fee_per_call.as_deref() {
+            Some(base_fee) => {
+                crate::services::billing::lago_client::decimal_credits_to_micros(base_fee)
+                    .ok_or(AppError::PlatformOperationUnavailable)?
+            }
+            None => 0,
+        };
         let billing_ctx = crate::services::billing::BillingRouteContext::new(
             ingress,
             uuid::Uuid::new_v4().to_string(),
@@ -705,8 +720,18 @@ async fn forward_metered_operation(
             vendor.auth_method.clone(),
             CredentialClass::NyxidManagedMaster,
             BillingMetric::Requests,
-            vendor.billing.as_ref(),
-            state.billing.resale_enabled(),
+            None,
+            false,
+        )
+        .with_platform_operation_billing(
+            operation.billing.metric,
+            operation.billing.lago_metric_code.clone(),
+            crate::services::billing::lago_client::decimal_credits_to_micros(
+                &operation.billing.price_per_unit,
+            )
+            .ok_or_else(|| AppError::PlatformOperationUnavailable)?,
+            base_fee_micros,
+            platform_estimated_quantity,
         );
         match state.billing.open(&billing_ctx).await {
             Ok(metered) => metered,
@@ -819,12 +844,13 @@ async fn forward_metered_operation(
 async fn settle_meter_async(
     billing: std::sync::Arc<crate::services::billing::BillingService>,
     metered: crate::services::billing::MeteredProxyContext,
+    usage: PlatformUsage,
 ) {
     if !metered.is_enabled() {
         return;
     }
     if billing
-        .settle_deferred(&metered, PlatformUsage::single_request(0), None, None)
+        .settle_deferred(&metered, usage, None, None)
         .await
         .is_err()
     {
@@ -898,6 +924,7 @@ pub(crate) async fn execute_speak_for_caller(
     let PlatformOperationConfig::Speak(config) = &operation.config else {
         return Err(AppError::PlatformOperationUnavailable);
     };
+    let text_characters = request.text.chars().count() as i64;
     let resolved = resolve_execution_target(state, caller, &operation).await?;
     let enforce_allowlist = resolved.credential_source == PlatformCredentialSource::Platform;
     let upstream = platform_operation_service::build_speak_request_for_source(
@@ -909,7 +936,8 @@ pub(crate) async fn execute_speak_for_caller(
         state,
         caller,
         ingress,
-        PlatformOperationName::Speak,
+        &operation,
+        text_characters,
         resolved,
         reqwest::Method::POST,
         &upstream.path,
@@ -933,7 +961,12 @@ pub(crate) async fn execute_speak_for_caller(
         metered,
         ..
     } = result;
-    settle_meter_async(state.billing.clone(), metered).await;
+    settle_meter_async(
+        state.billing.clone(),
+        metered,
+        PlatformUsage::single_request(0).with_characters(text_characters),
+    )
+    .await;
     Ok(PlatformOperationExecution {
         value: platform_operation_service::SpeakVendorResponse { response },
         credential_source,
@@ -991,7 +1024,12 @@ pub(crate) async fn execute_call_and_say_for_caller(
         state,
         caller,
         ingress,
-        PlatformOperationName::CallAndSay,
+        &operation,
+        i64::from(
+            config
+                .max_duration_seconds
+                .min(platform_operation_service::CALL_AND_SAY_HARD_MAX_DURATION_SECONDS),
+        ),
         resolved,
         reqwest::Method::POST,
         &upstream.path,
@@ -1029,7 +1067,35 @@ pub(crate) async fn execute_call_and_say_for_caller(
             return Err(error);
         }
     };
-    settle_meter_async(state.billing.clone(), metered).await;
+    if credential_source == PlatformCredentialSource::Platform {
+        let call_sid = value
+            .get("sid")
+            .and_then(serde_json::Value::as_str)
+            .filter(|sid| platform_operation_service::is_twilio_call_sid(sid));
+        let Some(call_sid) = call_sid else {
+            fail_platform_attempt(
+                state,
+                &metered,
+                "vendor_call_sid_invalid",
+                PlatformOperationName::CallAndSay,
+                caller,
+                daily_limit.as_ref(),
+            )
+            .await;
+            return Err(AppError::PlatformOperationUnavailable);
+        };
+        state
+            .billing
+            .defer_twilio_call(&metered, config.account_sid.clone(), call_sid.to_string())
+            .await?;
+    } else {
+        settle_meter_async(
+            state.billing.clone(),
+            metered,
+            PlatformUsage::single_request(0).with_seconds(0),
+        )
+        .await;
+    }
     Ok(PlatformOperationExecution {
         value,
         credential_source,
@@ -1067,7 +1133,8 @@ pub(crate) async fn execute_flight_search_for_caller(
         state,
         caller,
         ingress,
-        PlatformOperationName::FlightSearch,
+        &operation,
+        1,
         resolved,
         reqwest::Method::POST,
         upstream.path,
@@ -1115,7 +1182,12 @@ pub(crate) async fn execute_flight_search_for_caller(
             return Err(error);
         }
     };
-    settle_meter_async(state.billing.clone(), metered).await;
+    settle_meter_async(
+        state.billing.clone(),
+        metered,
+        PlatformUsage::single_request(0),
+    )
+    .await;
     Ok(PlatformOperationExecution {
         value,
         credential_source,
@@ -1452,7 +1524,10 @@ mod tests {
             post(move || async move {
                 (
                     status,
-                    Json(json!({ "sid": "CA-test", "status": "queued" })),
+                    Json(json!({
+                        "sid": "CA22222222222222222222222222222222",
+                        "status": "queued"
+                    })),
                 )
             }),
         );
@@ -1477,7 +1552,10 @@ mod tests {
                     counter.fetch_add(1, Ordering::SeqCst);
                     (
                         StatusCode::CREATED,
-                        Json(json!({ "sid": "CA-test", "status": "queued" })),
+                        Json(json!({
+                            "sid": "CA22222222222222222222222222222222",
+                            "status": "queued"
+                        })),
                     )
                 }),
             )
@@ -1984,16 +2062,7 @@ mod tests {
         ));
 
         let (base_url, forwarded, server) = spawn_counted_twilio().await;
-        let mut vendor = insert_twilio_vendor(&state, base_url).await;
-        vendor.billing = Some(crate::models::service_billing::ServiceBilling {
-            platform_billable: true,
-            platform_metric: Some(crate::models::service_billing::BillingMetric::Requests),
-            ..Default::default()
-        });
-        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .replace_one(mongodb::bson::doc! { "_id": &vendor.id }, &vendor)
-            .await
-            .expect("make Twilio vendor billable");
+        let vendor = insert_twilio_vendor(&state, base_url).await;
         // Deliberately invalid ciphertext proves billing rejects before the
         // v2 platform credential is materialized.
         db.collection::<mongodb::bson::Document>(
@@ -2012,12 +2081,25 @@ mod tests {
         )
         .await
         .expect("corrupt Twilio platform credential");
+        let mut call_operation = operation(
+            PlatformOperationName::CallAndSay,
+            true,
+            PlatformOperationConfig::CallAndSay(call_config(2)),
+        );
+        call_operation.billing = OperationBilling {
+            metric: BillingMetric::Seconds,
+            price_per_unit: "1".to_string(),
+            base_fee_per_call: None,
+            lago_metric_code: crate::services::billing::pricing::metric_code_for_operation(
+                &vendor.slug,
+                &call_operation.kind_key,
+            ),
+            sync_status: crate::models::service_billing::PricingSyncStatus::Synced,
+            sync_error: None,
+        };
+        let operation_metric_code = call_operation.billing.lago_metric_code.clone();
         db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
-            .insert_one(operation(
-                PlatformOperationName::CallAndSay,
-                true,
-                PlatformOperationConfig::CallAndSay(call_config(2)),
-            ))
+            .insert_one(call_operation)
             .await
             .expect("insert call operation");
 
@@ -2053,10 +2135,10 @@ mod tests {
         )
         .insert_one(crate::models::billing_rate_cache::BillingRateCache {
             id: crate::models::billing_rate_cache::BillingRateCache::cache_id(
-                "platform_requests",
+                &operation_metric_code,
                 None,
             ),
-            lago_metric_code: "platform_requests".to_string(),
+            lago_metric_code: operation_metric_code,
             model: None,
             credits_per_unit_micros: 1_000_000,
             synced_at: now,
@@ -2718,7 +2800,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_reports_shared_resolver_states_and_vendor_price() {
+    async fn discovery_reports_shared_resolver_states_and_operation_price() {
         let Some(db) =
             crate::test_utils::connect_test_database("platform_ops_discovery_states").await
         else {
@@ -2751,7 +2833,7 @@ mod tests {
             platform_billable: true,
             platform_metric: Some(crate::models::service_billing::BillingMetric::Requests),
             platform_pricing: Some(crate::models::service_billing::ServicePlatformPricing {
-                credits_per_unit: "0.25".to_string(),
+                credits_per_unit: "9.99".to_string(),
                 lago_metric_code: "platform_svc_platform-elevenlabs".to_string(),
                 sync_status: crate::models::service_billing::PricingSyncStatus::Synced,
                 sync_error: None,
@@ -2771,16 +2853,28 @@ mod tests {
         )
         .await
         .expect("set discovery platform credential");
+        let mut speak_operation = operation(
+            PlatformOperationName::Speak,
+            true,
+            PlatformOperationConfig::Speak(SpeakConfig {
+                allowed_voice_ids: vec!["platform-voice".to_string()],
+                max_chars: 100,
+                model_id: "eleven_multilingual_v2".to_string(),
+            }),
+        );
+        speak_operation.billing = OperationBilling {
+            metric: BillingMetric::Characters,
+            price_per_unit: "0.25".to_string(),
+            base_fee_per_call: None,
+            lago_metric_code: crate::services::billing::pricing::metric_code_for_operation(
+                &vendor.slug,
+                &speak_operation.kind_key,
+            ),
+            sync_status: crate::models::service_billing::PricingSyncStatus::Synced,
+            sync_error: None,
+        };
         db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
-            .insert_one(operation(
-                PlatformOperationName::Speak,
-                true,
-                PlatformOperationConfig::Speak(SpeakConfig {
-                    allowed_voice_ids: vec!["platform-voice".to_string()],
-                    max_chars: 100,
-                    model_id: "eleven_multilingual_v2".to_string(),
-                }),
-            ))
+            .insert_one(speak_operation)
             .await
             .expect("insert discovery operation");
         let operation_row =
@@ -2799,13 +2893,13 @@ mod tests {
         );
         assert!(no_connection.operations[0].own_connection.is_none());
         assert!(no_connection.operations[0].pricing.billable);
-        assert_eq!(
+        assert!(
             no_connection.operations[0]
                 .pricing
                 .credits_per_call
-                .as_deref(),
-            Some("0.25")
+                .is_none()
         );
+        assert_eq!(no_connection.operations[0].pricing.metric, "characters");
         let (platform_source, platform_vendor) =
             resolve_discovery_source_for_test(&state, &auth, &operation_row).await;
         assert_eq!(
@@ -2815,7 +2909,7 @@ mod tests {
                 platform_vendor.as_ref(),
                 true,
             ),
-            "Uses the platform credential (0.25 credits per call). Allowed voice ids: platform-voice."
+            "Uses the platform credential (0.25 credits per character). Allowed voice ids: platform-voice."
         );
 
         let user_service_id = insert_own_connection(

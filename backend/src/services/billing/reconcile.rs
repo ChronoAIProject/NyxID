@@ -26,6 +26,7 @@ pub struct BillingReconciler {
     db: mongodb::Database,
     lago: Option<Arc<dyn LagoApi>>,
     config: Arc<AppConfig>,
+    platform_runtime: Option<super::deferred::PlatformBillingRuntime>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -49,6 +50,9 @@ pub struct ReconcileStats {
     pub schedule_budget_exhausted: bool,
     pub grant_ledger_recoveries: u64,
     pub topups_expired: u64,
+    pub deferred_platform_completed: u64,
+    pub deferred_platform_retried: u64,
+    pub deferred_platform_timed_out: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,7 +68,20 @@ impl BillingReconciler {
         lago: Option<Arc<dyn LagoApi>>,
         config: Arc<AppConfig>,
     ) -> Self {
-        Self { db, lago, config }
+        Self {
+            db,
+            lago,
+            config,
+            platform_runtime: None,
+        }
+    }
+
+    pub fn with_platform_runtime(
+        mut self,
+        runtime: Option<super::deferred::PlatformBillingRuntime>,
+    ) -> Self {
+        self.platform_runtime = runtime;
+        self
     }
 
     pub async fn run_once(&self) -> AppResult<ReconcileStats> {
@@ -95,6 +112,12 @@ impl BillingReconciler {
         if !self.config.billing_enabled {
             return Ok(stats);
         }
+        if let Some(runtime) = &self.platform_runtime {
+            let deferred = super::deferred::reconcile_due(&self.db, runtime, Utc::now()).await?;
+            stats.deferred_platform_completed += deferred.completed;
+            stats.deferred_platform_retried += deferred.retried;
+            stats.deferred_platform_timed_out += deferred.timed_out;
+        }
         let settlement = reservation::recover_retryable_settlements(&self.db).await?;
         stats.recovered_settlements += settlement.recovered;
         stats.retried += settlement.retried;
@@ -109,6 +132,12 @@ impl BillingReconciler {
                 .await?;
 
         stats.service_price_syncs += super::pricing::retry_pending_service_prices(
+            &self.db,
+            lago.as_ref(),
+            &self.config.lago_plan_code,
+        )
+        .await?;
+        stats.service_price_syncs += super::pricing::retry_pending_operation_prices(
             &self.db,
             lago.as_ref(),
             &self.config.lago_plan_code,
@@ -162,6 +191,8 @@ impl BillingReconciler {
             super::meter::PLATFORM_REQUESTS_METRIC_CODE,
             super::meter::PLATFORM_BYTES_METRIC_CODE,
             super::meter::PLATFORM_TOKENS_METRIC_CODE,
+            super::meter::PLATFORM_CHARACTERS_METRIC_CODE,
+            super::meter::PLATFORM_SECONDS_METRIC_CODE,
         ] {
             by_code.entry(metric_code.to_string()).or_insert(0);
         }
@@ -678,6 +709,12 @@ mod tests {
             reserved_credits: 0,
             funding: None,
             quantity: Some(1),
+            base_fee_micros: None,
+            base_fee_applied: false,
+            base_fee_applied_credits: 0,
+            deferred_quantity: None,
+            deferred_attempts: 0,
+            deferred_next_retry_at: None,
             pending_resale_quantity: None,
             status: UsageStatus::Finalized,
             forwarded: true,
@@ -1165,10 +1202,22 @@ mod tests {
             .await
             .expect("query requests rate")
             .expect("unpriced platform metric zero-fills");
+        let characters = collection
+            .find_one(doc! { "_id": "platform_characters:*" })
+            .await
+            .expect("query characters rate")
+            .expect("unpriced character metric zero-fills");
+        let seconds = collection
+            .find_one(doc! { "_id": "platform_seconds:*" })
+            .await
+            .expect("query seconds rate")
+            .expect("unpriced seconds metric zero-fills");
 
-        assert_eq!(stats.rate_cache_refreshes, 3);
+        assert_eq!(stats.rate_cache_refreshes, 5);
         assert_eq!(tokens.credits_per_unit_micros, 5);
         assert_eq!(requests.credits_per_unit_micros, 0);
+        assert_eq!(characters.credits_per_unit_micros, 0);
+        assert_eq!(seconds.credits_per_unit_micros, 0);
     }
 
     #[tokio::test]

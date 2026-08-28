@@ -16,8 +16,8 @@ use crate::models::usage_allowance_period::{
 };
 use crate::models::usage_meter::{
     AllowanceConsumptionAllocation, AllowanceReservationAllocation, BillingLayer,
-    COLLECTION_NAME as USAGE_METER, GrantConsumptionAllocation, GrantReservationAllocation,
-    UsageFunding, UsageMeterRow,
+    COLLECTION_NAME as USAGE_METER, DeferredQuantity, GrantConsumptionAllocation,
+    GrantReservationAllocation, UsageFunding, UsageMeterRow,
 };
 
 use super::grants::CREDIT_MICROS;
@@ -74,8 +74,23 @@ async fn reserve_layer(
         uncovered_quantity = uncovered_quantity.saturating_sub(reserved_units);
     }
 
-    let estimated_micros =
-        saturating_cost_micros(layer.credits_per_unit_micros, uncovered_quantity);
+    let base_fee_micros = layer.base_fee_micros.max(0);
+    layer.base_fee_grant_reservations = reserve_grants(
+        db,
+        &ctx.billing_owner_id,
+        ctx.catalog_service_id
+            .as_deref()
+            .or(ctx.user_service_id.as_deref()),
+        ctx.service_slug.as_deref(),
+        base_fee_micros,
+    )
+    .await?;
+    let base_fee_grant_micros: i64 = layer
+        .base_fee_grant_reservations
+        .iter()
+        .map(|allocation| allocation.amount_micros.max(0))
+        .sum();
+    let quantity_micros = saturating_cost_micros(layer.credits_per_unit_micros, uncovered_quantity);
     layer.grant_reservations = reserve_grants(
         db,
         &ctx.billing_owner_id,
@@ -83,7 +98,7 @@ async fn reserve_layer(
             .as_deref()
             .or(ctx.user_service_id.as_deref()),
         ctx.service_slug.as_deref(),
-        estimated_micros,
+        quantity_micros,
     )
     .await?;
     let grant_micros: i64 = layer
@@ -91,8 +106,10 @@ async fn reserve_layer(
         .iter()
         .map(|allocation| allocation.amount_micros)
         .sum();
-    layer.reserved_credits =
-        whole_credits_for_micros(estimated_micros.saturating_sub(grant_micros));
+    let wallet_micros = base_fee_micros
+        .saturating_sub(base_fee_grant_micros)
+        .saturating_add(quantity_micros.saturating_sub(grant_micros));
+    layer.reserved_credits = whole_credits_for_micros(wallet_micros);
     Ok(())
 }
 
@@ -227,6 +244,9 @@ pub async fn release_layer_reservations(
         for reservation in &layer.grant_reservations {
             release_grant_reservation(db, reservation).await?;
         }
+        for reservation in &layer.base_fee_grant_reservations {
+            release_grant_reservation(db, reservation).await?;
+        }
     }
     Ok(())
 }
@@ -259,6 +279,23 @@ pub async fn release_usage_reservations(
     for reservation in &funding.grant_reservations {
         let operation_id = format!("{}:grant-release:{}", row.id, reservation.grant_id);
         if has_grant_operation(row, &operation_id) {
+            finish_grant_operation_if_locked(db, &reservation.grant_id, &operation_id).await?;
+        } else {
+            settle_grant_resource(
+                db,
+                row,
+                &reservation.grant_id,
+                &operation_id,
+                reservation.amount_micros.max(0),
+                0,
+                true,
+            )
+            .await?;
+        }
+    }
+    for reservation in &funding.base_fee_grant_reservations {
+        let operation_id = format!("{}:base-fee-grant-release:{}", row.id, reservation.grant_id);
+        if has_base_fee_grant_operation(row, &operation_id) {
             finish_grant_operation_if_locked(db, &reservation.grant_id, &operation_id).await?;
         } else {
             settle_grant_resource(
@@ -429,6 +466,62 @@ fn expiry_order(left: Option<DateTime<Utc>>, right: Option<DateTime<Utc>>) -> Or
 
 fn saturating_cost_micros(rate_micros: i64, quantity: i64) -> i64 {
     (i128::from(rate_micros.max(0)) * i128::from(quantity.max(0))).min(i128::from(i64::MAX)) as i64
+}
+
+pub async fn apply_deferred_base_fee(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+    descriptor: &DeferredQuantity,
+) -> AppResult<bool> {
+    let mut claimed = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find_one(doc! { "_id": &row.id })
+        .await?
+        .ok_or_else(|| AppError::Internal("deferred usage row disappeared".to_string()))?;
+    if claimed.base_fee_applied {
+        return Ok(false);
+    }
+
+    let base_fee_micros = claimed.base_fee_micros.unwrap_or(0).max(0);
+    let reservations = claimed
+        .funding
+        .as_ref()
+        .map(|funding| funding.base_fee_grant_reservations.clone())
+        .unwrap_or_default();
+    for reservation in reservations {
+        let operation_id = format!("{}:base-fee-grant:{}", claimed.id, reservation.grant_id);
+        if has_base_fee_grant_operation(&claimed, &operation_id) {
+            finish_grant_operation_if_locked(db, &reservation.grant_id, &operation_id).await?;
+            continue;
+        }
+        if settle_grant_resource(
+            db,
+            &claimed,
+            &reservation.grant_id,
+            &operation_id,
+            reservation.amount_micros.max(0),
+            reservation.amount_micros.max(0),
+            true,
+        )
+        .await?
+        {
+            refresh_claimed_funding(db, &mut claimed).await?;
+        }
+    }
+    let grant_micros = claimed
+        .funding
+        .as_ref()
+        .map(|funding| {
+            funding
+                .base_fee_grant_consumptions
+                .iter()
+                .map(|allocation| allocation.amount_micros.max(0))
+                .sum::<i64>()
+        })
+        .unwrap_or(0)
+        .min(base_fee_micros);
+    let wallet_credits = whole_credits_for_micros(base_fee_micros.saturating_sub(grant_micros));
+    super::reservation::apply_deferred_base_fee(db, &claimed, descriptor, wallet_credits).await
 }
 
 /// Convert a finalized usage row's funding reservations into actual
@@ -604,7 +697,8 @@ pub async fn settle_usage_funding(
     }
 
     let chargeable_quantity = quantity.saturating_sub(allowance_covered);
-    let total_charge_micros = saturating_cost_micros(rate_micros, chargeable_quantity);
+    let total_charge_micros = saturating_cost_micros(rate_micros, chargeable_quantity)
+        .saturating_add(claimed.base_fee_micros.unwrap_or(0).max(0));
     let mut grant_covered_micros = claimed
         .funding
         .as_ref()
@@ -613,10 +707,49 @@ pub async fn settle_usage_funding(
                 .grant_consumptions
                 .iter()
                 .map(|allocation| allocation.amount_micros.max(0))
+                .chain(
+                    value
+                        .base_fee_grant_consumptions
+                        .iter()
+                        .map(|allocation| allocation.amount_micros.max(0)),
+                )
                 .sum::<i64>()
         })
         .unwrap_or(0)
         .min(total_charge_micros);
+    let base_fee_grant_reservations = claimed
+        .funding
+        .as_ref()
+        .map(|value| value.base_fee_grant_reservations.clone())
+        .unwrap_or_default();
+    for reservation in base_fee_grant_reservations {
+        let operation_id = format!("{}:base-fee-grant:{}", claimed.id, reservation.grant_id);
+        if has_base_fee_grant_operation(&claimed, &operation_id) {
+            finish_grant_operation_if_locked(db, &reservation.grant_id, &operation_id).await?;
+            continue;
+        }
+        let consume = reservation
+            .amount_micros
+            .max(0)
+            .min(total_charge_micros.saturating_sub(grant_covered_micros));
+        if settle_grant_resource(
+            db,
+            &claimed,
+            &reservation.grant_id,
+            &operation_id,
+            reservation.amount_micros.max(0),
+            consume,
+            true,
+        )
+        .await?
+        {
+            grant_covered_micros = grant_covered_micros
+                .saturating_add(consume)
+                .min(total_charge_micros);
+            refresh_claimed_funding(db, &mut claimed).await?;
+        }
+    }
+
     let grant_reservations = claimed
         .funding
         .as_ref()
@@ -691,13 +824,14 @@ pub async fn settle_usage_funding(
     }
 
     let wallet_micros = total_charge_micros.saturating_sub(grant_covered_micros);
-    let wallet_charge_credits = whole_credits_for_micros(wallet_micros);
+    let total_wallet_charge_credits = whole_credits_for_micros(wallet_micros);
+    let wallet_charge_credits =
+        total_wallet_charge_credits.saturating_sub(claimed.base_fee_applied_credits.max(0));
     // Grant- and allowance-funded usage is deliberately absent from Lago's
     // charging stream. Only the wallet-funded fraction is emitted, so Lago's
     // invoice, NyxID's pending debit, wallet refresh, and drift comparison all
     // describe the same chargeable usage.
-    let lago_billable_quantity_micros =
-        billable_quantity_micros(wallet_micros, rate_micros, chargeable_quantity);
+    let lago_billable_quantity_micros = billable_quantity_micros(wallet_micros, rate_micros);
     let settled_at = Utc::now();
     let result = db
         .collection::<UsageMeterRow>(USAGE_METER)
@@ -782,6 +916,15 @@ fn has_grant_operation(row: &UsageMeterRow, operation_id: &str) -> bool {
     row.funding.as_ref().is_some_and(|funding| {
         funding
             .grant_consumptions
+            .iter()
+            .any(|allocation| allocation.operation_id == operation_id)
+    })
+}
+
+fn has_base_fee_grant_operation(row: &UsageMeterRow, operation_id: &str) -> bool {
+    row.funding.as_ref().is_some_and(|funding| {
+        funding
+            .base_fee_grant_consumptions
             .iter()
             .any(|allocation| allocation.operation_id == operation_id)
     })
@@ -1114,14 +1257,22 @@ async fn complete_grant_lock(
     let allocation_bson = bson::to_bson(&allocation).map_err(|error| {
         AppError::Internal(format!("failed to encode grant consumption: {error}"))
     })?;
+    let allocation_field = if lock.operation_id.contains(":base-fee-grant:")
+        || lock.operation_id.contains(":base-fee-grant-release:")
+    {
+        "funding.base_fee_grant_consumptions"
+    } else {
+        "funding.grant_consumptions"
+    };
+    let mut allocation_filter = doc! { "_id": &lock.usage_row_id };
+    allocation_filter.insert(
+        format!("{allocation_field}.operation_id"),
+        doc! { "$ne": &lock.operation_id },
+    );
+    let mut push = Document::new();
+    push.insert(allocation_field, allocation_bson);
     db.collection::<UsageMeterRow>(USAGE_METER)
-        .update_one(
-            doc! {
-                "_id": &lock.usage_row_id,
-                "funding.grant_consumptions.operation_id": { "$ne": &lock.operation_id },
-            },
-            doc! { "$push": { "funding.grant_consumptions": allocation_bson } },
-        )
+        .update_one(allocation_filter, doc! { "$push": push })
         .await?;
     if lock.consume_micros > 0 {
         if let (Some(grant), Some(usage_row)) = (
@@ -1175,15 +1326,13 @@ fn quantity_to_micros(quantity: i64) -> i64 {
     (i128::from(quantity.max(0)) * i128::from(CREDIT_MICROS)).min(i128::from(i64::MAX)) as i64
 }
 
-fn billable_quantity_micros(wallet_micros: i64, rate_micros: i64, chargeable_quantity: i64) -> i64 {
-    if wallet_micros <= 0 || rate_micros <= 0 || chargeable_quantity <= 0 {
+fn billable_quantity_micros(wallet_micros: i64, rate_micros: i64) -> i64 {
+    if wallet_micros <= 0 || rate_micros <= 0 {
         return 0;
     }
     let numerator = i128::from(wallet_micros) * i128::from(CREDIT_MICROS);
     let units = (numerator + i128::from(rate_micros - 1)) / i128::from(rate_micros);
-    units
-        .min(i128::from(quantity_to_micros(chargeable_quantity)))
-        .min(i128::from(i64::MAX)) as i64
+    units.min(i128::from(i64::MAX)) as i64
 }
 
 #[cfg(test)]
@@ -1201,6 +1350,7 @@ mod tests {
         AllowanceRecurrence, COLLECTION_NAME as USAGE_ALLOWANCES, UsageAllowance,
     };
     use crate::models::usage_meter::{CredentialClass, UsageStatus};
+    use crate::services::billing::{BillingIngress, NodeIntent};
     use crate::test_utils::connect_test_database;
 
     use super::*;
@@ -1218,6 +1368,287 @@ mod tests {
     fn cost_multiplication_saturates() {
         assert_eq!(saturating_cost_micros(125_000, 8), CREDIT_MICROS);
         assert_eq!(saturating_cost_micros(i64::MAX, 2), i64::MAX);
+    }
+
+    #[tokio::test]
+    async fn allowances_cover_quantity_while_grants_then_wallet_cover_base_and_remainder() {
+        let Some(db) = connect_test_database("billing_base_funding_precedence").await else {
+            return;
+        };
+        let now = Utc::now();
+        let owner_id = "base-funding-owner";
+        let service_id = "base-funding-service";
+        db.collection::<UsageAllowance>(USAGE_ALLOWANCES)
+            .insert_one(UsageAllowance {
+                id: "base-funding-allowance".to_string(),
+                service_id: service_id.to_string(),
+                service_slug: "api-twilio".to_string(),
+                metric: BillingMetric::Seconds,
+                quantity: 300,
+                recurrence: AllowanceRecurrence::Daily,
+                target_kind: BillingTargetKind::AllUsers,
+                target_user_ids: Vec::new(),
+                is_active: true,
+                created_by: "admin".to_string(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await
+            .expect("insert allowance");
+        db.collection::<CreditGrant>(CREDIT_GRANTS)
+            .insert_one(CreditGrant {
+                id: "base-funding-grant".to_string(),
+                batch_id: "base-funding-batch".to_string(),
+                schedule_origin: None,
+                recipient_user_id: owner_id.to_string(),
+                target_kind: BillingTargetKind::SelectedUsers,
+                amount_credits: 2,
+                amount_micros: 2_000_000,
+                remaining_micros: 2_000_000,
+                reserved_micros: 0,
+                scope: BillingServiceScope {
+                    all_services: true,
+                    service_ids: Vec::new(),
+                    service_slugs: Vec::new(),
+                },
+                expires_at: Some(now + Duration::days(1)),
+                reason: None,
+                granted_by: "admin".to_string(),
+                status: CreditGrantStatus::Active,
+                issued_ledgered_at: Some(now),
+                terminal_ledgered_at: None,
+                terminal_amount_micros: 0,
+                active_settlement: None,
+                created_at: now,
+                updated_at: now,
+                consumed_at: None,
+                expired_at: None,
+                revoked_at: None,
+            })
+            .await
+            .expect("insert grant");
+        let ctx = BillingRouteContext::new(
+            BillingIngress::PlatformOperation,
+            "base-funding-request".to_string(),
+            owner_id.to_string(),
+            owner_id.to_string(),
+            None,
+            None,
+            Some(service_id.to_string()),
+            Some("api-twilio".to_string()),
+            NodeIntent::Direct,
+            "basic".to_string(),
+            CredentialClass::NyxidManagedMaster,
+            BillingMetric::Seconds,
+            None,
+            false,
+        )
+        .with_platform_operation_billing(
+            BillingMetric::Seconds,
+            "platform_op_api_twilio_constrained_call_and_say".to_string(),
+            10_000,
+            1_500_000,
+            600,
+        );
+        let mut layer = LayerReservation {
+            layer: BillingLayer::Platform,
+            estimated_quantity: 600,
+            credits_per_unit_micros: 10_000,
+            base_fee_micros: 1_500_000,
+            reserved_credits: 8,
+            allowance_reservations: Vec::new(),
+            grant_reservations: Vec::new(),
+            base_fee_grant_reservations: Vec::new(),
+        };
+
+        reserve_layer(&db, &ctx, &mut layer)
+            .await
+            .expect("reserve funding layers");
+
+        assert_eq!(
+            layer
+                .allowance_reservations
+                .iter()
+                .map(|allocation| allocation.quantity)
+                .sum::<i64>(),
+            300
+        );
+        assert_eq!(
+            layer
+                .base_fee_grant_reservations
+                .iter()
+                .map(|allocation| allocation.amount_micros)
+                .sum::<i64>(),
+            1_500_000
+        );
+        assert_eq!(
+            layer
+                .grant_reservations
+                .iter()
+                .map(|allocation| allocation.amount_micros)
+                .sum::<i64>(),
+            500_000
+        );
+        assert_eq!(layer.reserved_credits, 3);
+    }
+
+    #[tokio::test]
+    async fn deferred_base_applies_once_then_final_settlement_releases_same_hold() {
+        let Some(db) = connect_test_database("billing_deferred_base_once").await else {
+            return;
+        };
+        super::super::ledger::init_billing_ledger_hmac_key(zeroize::Zeroizing::new(
+            super::super::ledger::TEST_BILLING_LEDGER_HMAC_KEY,
+        ));
+        let now = Utc::now();
+        let row_id = "deferred-base-row";
+        db.collection::<mongodb::bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": "wallet-deferred-base",
+                "owner_id": "owner-deferred-base",
+                "reserved_credits": 8_i64,
+                "pending_lago_debits": 0_i64,
+                "updated_at": bson::DateTime::from_chrono(now),
+            })
+            .await
+            .expect("insert wallet");
+        let descriptor = DeferredQuantity::TwilioCall {
+            account_sid: "AC11111111111111111111111111111111".to_string(),
+            call_sid: "CA22222222222222222222222222222222".to_string(),
+        };
+        let row = UsageMeterRow {
+            id: row_id.to_string(),
+            transaction_id: "deferred-base-tx".to_string(),
+            billing_request_id: "deferred-base-request".to_string(),
+            layer: BillingLayer::Platform,
+            flush_seq: None,
+            billing_owner_id: "owner-deferred-base".to_string(),
+            wallet_id: Some("wallet-deferred-base".to_string()),
+            actor_user_id: "owner-deferred-base".to_string(),
+            api_key_id: None,
+            service_id: Some("catalog-twilio".to_string()),
+            service_slug: Some("api-twilio".to_string()),
+            metric: BillingMetric::Seconds,
+            lago_metric_code: "platform_op_api_twilio_constrained_call_and_say".to_string(),
+            credential_class: CredentialClass::NyxidManagedMaster,
+            model: None,
+            token_breakdown: None,
+            reserved_credits: 8,
+            funding: Some(UsageFunding {
+                credits_per_unit_micros: 10_000,
+                ..Default::default()
+            }),
+            quantity: None,
+            base_fee_micros: Some(1_500_000),
+            base_fee_applied: false,
+            base_fee_applied_credits: 0,
+            deferred_quantity: Some(descriptor.clone()),
+            deferred_attempts: 0,
+            deferred_next_retry_at: Some(now),
+            pending_resale_quantity: None,
+            status: UsageStatus::Forwarded,
+            forwarded: true,
+            released: false,
+            lago_acked: false,
+            attempt: 0,
+            settlement_attempts: 0,
+            settlement_next_retry_at: None,
+            created_at: now,
+            updated_at: now,
+            finalized_at: None,
+            expires_at: None,
+            last_error: None,
+        };
+        db.collection::<UsageMeterRow>(USAGE_METER)
+            .insert_one(&row)
+            .await
+            .expect("insert usage row");
+
+        assert!(
+            apply_deferred_base_fee(&db, &row, &descriptor)
+                .await
+                .expect("apply base fee")
+        );
+        let after_base = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .find_one(doc! { "_id": row_id })
+            .await
+            .expect("find row after base")
+            .expect("row exists");
+        assert!(
+            !apply_deferred_base_fee(&db, &after_base, &descriptor)
+                .await
+                .expect("replay base fee")
+        );
+        assert!(after_base.base_fee_applied);
+        assert_eq!(after_base.base_fee_applied_credits, 2);
+        assert_eq!(after_base.reserved_credits, 6);
+
+        let finalized = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .find_one_and_update(
+                doc! { "_id": row_id, "status": "forwarded" },
+                doc! {
+                    "$set": {
+                        "status": "finalized",
+                        "quantity": 37_i64,
+                        "finalized_at": bson::DateTime::from_chrono(now),
+                    },
+                    "$unset": { "deferred_quantity": "", "deferred_next_retry_at": "" },
+                },
+            )
+            .return_document(mongodb::options::ReturnDocument::After)
+            .await
+            .expect("finalize row")
+            .expect("finalized row");
+        super::super::reservation::claim_released_and_settle(&db, &finalized)
+            .await
+            .expect("settle final quantity");
+
+        let wallet = db
+            .collection::<mongodb::bson::Document>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "_id": "wallet-deferred-base" })
+            .await
+            .expect("find wallet")
+            .expect("wallet exists");
+        assert_eq!(wallet.get_i64("reserved_credits").expect("reserved"), 0);
+        assert_eq!(wallet.get_i64("pending_lago_debits").expect("pending"), 2);
+        let saved = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .find_one(doc! { "_id": row_id })
+            .await
+            .expect("find settled row")
+            .expect("settled row exists");
+        assert!(saved.released);
+        let funding = saved.funding.expect("funding");
+        assert!(funding.settled);
+        assert_eq!(funding.wallet_charge_credits, Some(0));
+        assert_eq!(funding.lago_billable_quantity_micros, Some(187_000_000));
+
+        let ledger = db.collection::<BillingLedgerEntry>(BILLING_LEDGER);
+        let entry = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if let Some(entry) = ledger
+                    .find_one(doc! { "reference_id": row_id, "event_type": "usage_settled" })
+                    .await
+                    .expect("find usage ledger")
+                {
+                    break entry;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("usage ledger append timed out");
+        assert_eq!(entry.amount_credits, Some(2));
+        assert_eq!(entry.base_fee_micros, Some(1_500_000));
+        assert_eq!(
+            ledger
+                .count_documents(doc! { "reference_id": row_id, "event_type": "usage_settled" })
+                .await
+                .expect("count usage ledger"),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1347,6 +1778,12 @@ mod tests {
                 ..Default::default()
             }),
             quantity: Some(10),
+            base_fee_micros: None,
+            base_fee_applied: false,
+            base_fee_applied_credits: 0,
+            deferred_quantity: None,
+            deferred_attempts: 0,
+            deferred_next_retry_at: None,
             pending_resale_quantity: None,
             status: UsageStatus::Finalized,
             forwarded: true,

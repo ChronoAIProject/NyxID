@@ -10,9 +10,10 @@ use crate::AppState;
 use crate::errors::AppResult;
 use crate::handlers::admin_helpers::require_admin;
 use crate::models::platform_operation::{
-    CallAndSayConfig, FlightSearchConfig, PlatformOperation, PlatformOperationConfig,
-    PlatformOperationName, SpeakConfig,
+    CallAndSayConfig, FlightSearchConfig, OperationBilling, PlatformOperation,
+    PlatformOperationConfig, PlatformOperationName, SpeakConfig,
 };
+use crate::models::service_billing::{BillingMetric, PricingSyncStatus};
 use crate::mw::auth::AuthUser;
 use crate::services::{audit_service, platform_operation_service};
 
@@ -38,6 +39,11 @@ pub struct AdminPlatformOperationPricingResponse {
     pub billable: bool,
     pub credits_per_call: Option<String>,
     pub metric: &'static str,
+    pub price_per_unit: String,
+    pub base_fee_per_call: Option<String>,
+    pub lago_metric_code: String,
+    pub sync_status: PricingSyncStatus,
+    pub sync_error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,6 +84,30 @@ pub struct UpdatePlatformOperationRequest {
     pub enabled: bool,
     pub vendor_service_slug: String,
     pub config: PlatformOperationConfig,
+    #[serde(default)]
+    pub billing: Option<UpdatePlatformOperationBillingRequest>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdatePlatformOperationBillingRequest {
+    pub metric: BillingMetric,
+    pub price_per_unit: String,
+    #[serde(default)]
+    pub base_fee_per_call: Option<String>,
+}
+
+impl From<UpdatePlatformOperationBillingRequest> for OperationBilling {
+    fn from(value: UpdatePlatformOperationBillingRequest) -> Self {
+        Self {
+            metric: value.metric,
+            price_per_unit: value.price_per_unit,
+            base_fee_per_call: value.base_fee_per_call,
+            lago_metric_code: String::new(),
+            sync_status: PricingSyncStatus::Pending,
+            sync_error: None,
+        }
+    }
 }
 
 /// GET /api/v1/admin/platform-ops
@@ -129,13 +159,13 @@ pub async fn update_platform_operation(
     // while the caller-facing platform-services feature flag remains disabled.
     require_admin(&state, &auth_user).await?;
     let op = platform_operation_service::parse_operation_name(&op)?;
-    let operation = platform_operation_service::upsert_operation(
+    let operation = platform_operation_service::upsert_operation_with_billing(
         &state.db,
-        &state.encryption_keys,
         op,
         body.enabled,
         body.vendor_service_slug,
         body.config,
+        body.billing.map(Into::into),
         &auth_user.user_id.to_string(),
     )
     .await?;
@@ -151,6 +181,18 @@ pub async fn update_platform_operation(
         })),
     );
 
+    let operation_row =
+        platform_operation_service::load_operation_row(&state.db, &operation.id).await?;
+    state.billing.sync_operation_price(&operation_row).await?;
+    let operation = platform_operation_service::list_configured_operations(&state.db)
+        .await?
+        .into_iter()
+        .find(|row| row.op == op)
+        .ok_or_else(|| {
+            crate::errors::AppError::Internal(
+                "Platform operation disappeared after price synchronization".to_string(),
+            )
+        })?;
     let vendor = state
         .db
         .collection::<crate::models::downstream_service::DownstreamService>(
@@ -170,15 +212,21 @@ fn platform_operation_response(
     operation: Option<PlatformOperation>,
     vendor: Option<&crate::models::downstream_service::DownstreamService>,
 ) -> AdminPlatformOperationResponse {
+    let billing = operation
+        .as_ref()
+        .map(|operation| operation.billing.clone())
+        .unwrap_or_else(|| platform_operation_service::default_operation_billing(op));
+    let billable = billing.price_per_unit != "0" || billing.base_fee_per_call.is_some();
     let pricing = AdminPlatformOperationPricingResponse {
-        billable: vendor
-            .and_then(|service| service.billing.as_ref())
-            .is_some_and(|billing| billing.platform_billable),
-        credits_per_call: vendor
-            .and_then(|service| service.billing.as_ref())
-            .and_then(|billing| billing.platform_pricing.as_ref())
-            .map(|pricing| pricing.credits_per_unit.clone()),
-        metric: "requests",
+        billable,
+        credits_per_call: (billing.metric == BillingMetric::Requests)
+            .then(|| billing.price_per_unit.clone()),
+        metric: billing.metric.as_str(),
+        price_per_unit: billing.price_per_unit,
+        base_fee_per_call: billing.base_fee_per_call,
+        lago_metric_code: billing.lago_metric_code,
+        sync_status: billing.sync_status,
+        sync_error: billing.sync_error,
     };
     let vendor_service_id = vendor.map(|service| service.id.clone());
     match operation {

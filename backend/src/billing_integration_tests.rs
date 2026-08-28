@@ -371,9 +371,30 @@ async fn billing_route_coverage_smoke() {
         .await;
         exercised_routes.insert(mounted_route);
     }
-    for vendor in &platform_vendors {
-        assert_route_settled(&db, &vendor.slug, BillingMetric::Requests).await;
-    }
+    let platform_vendor = |slug: &str| {
+        platform_vendors
+            .iter()
+            .find(|vendor| vendor.slug == slug)
+            .expect("platform route vendor exists")
+    };
+    assert_route_settled(
+        &db,
+        &platform_vendor("api-elevenlabs").slug,
+        BillingMetric::Characters,
+    )
+    .await;
+    assert_route_deferred(
+        &db,
+        &platform_vendor("api-twilio").slug,
+        BillingMetric::Seconds,
+    )
+    .await;
+    assert_route_settled(
+        &db,
+        &platform_vendor("duffel").slug,
+        BillingMetric::Requests,
+    )
+    .await;
 
     let direct_body = serde_json::json!({
         "messages": [{"role": "user", "content": "route boundary"}],
@@ -1426,6 +1447,14 @@ async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
                 .into_response();
         }
 
+        if path.ends_with("/Calls.json") {
+            return Json(serde_json::json!({
+                "sid": "CA22222222222222222222222222222222",
+                "status": "queued",
+            }))
+            .into_response();
+        }
+
         if path.contains("stream") {
             return (
                 [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
@@ -2290,6 +2319,24 @@ async fn assert_route_settled(db: &mongodb::Database, service_slug: &str, metric
     assert_route_settled_count(db, service_slug, metric, 1).await;
 }
 
+async fn assert_route_deferred(db: &mongodb::Database, service_slug: &str, metric: BillingMetric) {
+    let row = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find_one(doc! {
+            "service_slug": service_slug,
+            "metric": bson::to_bson(&metric).expect("serialize billing metric"),
+            "status": "forwarded",
+            "forwarded": true,
+            "released": false,
+            "deferred_quantity.type": "twilio_call",
+        })
+        .await
+        .expect("query deferred route usage")
+        .expect("deferred route usage exists");
+    assert!(row.base_fee_applied);
+    assert!(row.quantity.is_none());
+}
+
 async fn assert_route_settled_count(
     db: &mongodb::Database,
     service_slug: &str,
@@ -2487,6 +2534,8 @@ fn usage_for(case: &CoverageCase) -> (PlatformUsage, i64) {
         }
         BillingMetric::Requests => (PlatformUsage::single_request(9), 1),
         BillingMetric::Bytes => (PlatformUsage::single_request(23), 23),
+        BillingMetric::Characters => (PlatformUsage::single_request(0).with_characters(17), 17),
+        BillingMetric::Seconds => (PlatformUsage::single_request(0).with_seconds(19), 19),
     }
 }
 

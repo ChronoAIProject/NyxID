@@ -25,6 +25,9 @@ pub struct BillingRouteContext {
     pub credential_class: CredentialClass,
     pub platform_metric: BillingMetric,
     pub platform_lago_metric_code: String,
+    pub platform_estimated_quantity: i64,
+    pub platform_rate_micros: Option<i64>,
+    pub platform_base_fee_micros: i64,
     pub resale: Option<ResaleSpec>,
     /// Admin opt-in from the service's billing config: only services
     /// explicitly marked platform_billable charge the platform layer.
@@ -80,6 +83,9 @@ impl BillingRouteContext {
             credential_class,
             platform_metric,
             platform_lago_metric_code,
+            platform_estimated_quantity: 1,
+            platform_rate_micros: None,
+            platform_base_fee_micros: 0,
             resale,
             service_platform_billable,
             platform_metered: false,
@@ -90,6 +96,23 @@ impl BillingRouteContext {
     pub(crate) fn with_platform_metering(mut self, platform_billable: bool) -> Self {
         self.platform_metered = true;
         self.platform_billable = platform_billable;
+        self
+    }
+
+    pub fn with_platform_operation_billing(
+        mut self,
+        metric: BillingMetric,
+        lago_metric_code: String,
+        rate_micros: i64,
+        base_fee_micros: i64,
+        estimated_quantity: i64,
+    ) -> Self {
+        self.platform_metric = metric;
+        self.platform_lago_metric_code = lago_metric_code;
+        self.platform_rate_micros = Some(rate_micros.max(0));
+        self.platform_base_fee_micros = base_fee_micros.max(0);
+        self.platform_estimated_quantity = estimated_quantity.max(0);
+        self.service_platform_billable = true;
         self
     }
 

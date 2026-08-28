@@ -263,10 +263,13 @@ pub enum PlatformOperationConfig {
 #[derive(Clone, Debug)]
 pub struct PlatformOperation {
     pub id: String,
+    pub catalog_service_id: String,
     pub op: PlatformOperationName,
     pub enabled: bool,
     pub vendor_service_slug: String,
     pub config: PlatformOperationConfig,
+    pub billing: OperationBilling,
+    pub billing_cleanup_metric_code: Option<String>,
     pub updated_at: DateTime<Utc>,
     pub updated_by: String,
 }

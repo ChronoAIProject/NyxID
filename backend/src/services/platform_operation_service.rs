@@ -486,6 +486,12 @@ pub fn is_twilio_account_sid(value: &str) -> bool {
         && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+pub fn is_twilio_call_sid(value: &str) -> bool {
+    value.len() == 34
+        && value.starts_with("CA")
+        && value[2..].bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn is_e164_prefix(value: &str) -> bool {
     let Some(digits) = value.strip_prefix('+') else {
         return false;
@@ -1031,6 +1037,9 @@ fn project_constrained_row(
     row: PlatformOperationRow,
     catalog_service_slug: &str,
 ) -> AppResult<PlatformOperation> {
+    let catalog_service_id = row.catalog_service_id.clone();
+    let billing = row.billing.clone();
+    let billing_cleanup_metric_code = row.billing_cleanup_metric_code.clone();
     let (op, config) = match (row.kind, row.limits.per_request) {
         (
             PlatformOperationKind::Constrained {
@@ -1094,10 +1103,13 @@ fn project_constrained_row(
     validate_operation_config(op, catalog_service_slug, &config)?;
     Ok(PlatformOperation {
         id: row.id,
+        catalog_service_id,
         op,
         enabled: row.enabled,
         vendor_service_slug: catalog_service_slug.to_string(),
         config,
+        billing,
+        billing_cleanup_metric_code,
         updated_at: row.updated_at,
         updated_by: row.created_by,
     })
@@ -1430,6 +1442,27 @@ pub async fn upsert_operation(
     config: PlatformOperationConfig,
     updated_by: &str,
 ) -> AppResult<PlatformOperation> {
+    upsert_operation_with_billing(
+        db,
+        op,
+        enabled,
+        vendor_service_slug,
+        config,
+        None,
+        updated_by,
+    )
+    .await
+}
+
+pub async fn upsert_operation_with_billing(
+    db: &mongodb::Database,
+    op: PlatformOperationName,
+    enabled: bool,
+    vendor_service_slug: String,
+    config: PlatformOperationConfig,
+    requested_billing: Option<OperationBilling>,
+    updated_by: &str,
+) -> AppResult<PlatformOperation> {
     validate_operation_config(op, &vendor_service_slug, &config)?;
     let catalog_service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -1442,6 +1475,38 @@ pub async fn upsert_operation(
         })?;
     platform_credential_service::validate_catalog_provider(db, &catalog_service.id).await?;
     let (kind, limits) = split_constrained_config(op, config)?;
+    let kind_key = constrained_kind_key(op);
+    let current = db
+        .collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .find_one(doc! {
+            "catalog_service_id": &catalog_service.id,
+            "kind_key": &kind_key,
+        })
+        .await?;
+    let mut billing = requested_billing.unwrap_or_else(|| {
+        current
+            .as_ref()
+            .map(|row| row.billing.clone())
+            .unwrap_or_else(|| default_operation_billing(op))
+    });
+    crate::services::billing::pricing::normalize_operation_billing(
+        &catalog_service.slug,
+        &kind_key,
+        &kind,
+        current.as_ref().map(|row| &row.billing),
+        &mut billing,
+    )?;
+    let cleanup_metric_code = current
+        .as_ref()
+        .and_then(|row| {
+            let old = row.billing.lago_metric_code.trim();
+            (!old.is_empty() && old != billing.lago_metric_code).then(|| old.to_string())
+        })
+        .or_else(|| {
+            current
+                .as_ref()
+                .and_then(|row| row.billing_cleanup_metric_code.clone())
+        });
     let kind = bson::to_bson(&kind).map_err(|error| {
         AppError::Internal(format!(
             "Failed to serialize platform operation kind: {error}"
@@ -1452,32 +1517,32 @@ pub async fn upsert_operation(
             "Failed to serialize platform operation limits: {error}"
         ))
     })?;
-    let default_billing =
-        bson::to_bson(&OperationBilling::free(BillingMetric::Requests)).map_err(|error| {
-            AppError::Internal(format!(
-                "Failed to serialize platform operation billing: {error}"
-            ))
-        })?;
+    let billing = bson::to_bson(&billing).map_err(|error| {
+        AppError::Internal(format!(
+            "Failed to serialize platform operation billing: {error}"
+        ))
+    })?;
     let updated_at = Utc::now();
     let row = db
         .collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
         .find_one_and_update(
             doc! {
                 "catalog_service_id": &catalog_service.id,
-                "kind_key": constrained_kind_key(op),
+                "kind_key": &kind_key,
             },
             doc! {
                 "$set": {
                     "enabled": enabled,
                     "kind": kind,
                     "limits": limits,
+                    "billing": billing,
+                    "billing_cleanup_metric_code": cleanup_metric_code,
                     "updated_at": bson::DateTime::from_chrono(updated_at),
                 },
                 "$setOnInsert": {
                     "_id": uuid::Uuid::new_v4().to_string(),
                     "catalog_service_id": &catalog_service.id,
-                    "kind_key": constrained_kind_key(op),
-                    "billing": default_billing,
+                    "kind_key": &kind_key,
                     "created_by": updated_by,
                     "created_at": bson::DateTime::from_chrono(updated_at),
                 },
@@ -1490,6 +1555,24 @@ pub async fn upsert_operation(
             AppError::Internal("Platform operation upsert returned no document".to_string())
         })?;
     project_constrained_row(row, &catalog_service.slug)
+}
+
+pub fn default_operation_billing(op: PlatformOperationName) -> OperationBilling {
+    OperationBilling::free(match op {
+        PlatformOperationName::Speak => BillingMetric::Characters,
+        PlatformOperationName::CallAndSay => BillingMetric::Seconds,
+        PlatformOperationName::FlightSearch => BillingMetric::Requests,
+    })
+}
+
+pub async fn load_operation_row(
+    db: &mongodb::Database,
+    operation_id: &str,
+) -> AppResult<PlatformOperationRow> {
+    db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .find_one(doc! { "_id": operation_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Platform operation not found".to_string()))
 }
 
 fn split_constrained_config(
@@ -1947,10 +2030,13 @@ mod tests {
 
         let operation = PlatformOperation {
             id: uuid::Uuid::new_v4().to_string(),
+            catalog_service_id: catalog.id.clone(),
             op: PlatformOperationName::Speak,
             enabled: true,
             vendor_service_slug: SPEAK_VENDOR_SLUG.to_string(),
             config: PlatformOperationConfig::Speak(speak_config()),
+            billing: default_operation_billing(PlatformOperationName::Speak),
+            billing_cleanup_metric_code: None,
             updated_at: Utc::now(),
             updated_by: "admin".to_string(),
         };
@@ -2282,10 +2368,13 @@ mod tests {
 
         let operation = PlatformOperation {
             id: uuid::Uuid::new_v4().to_string(),
+            catalog_service_id: catalog_id.clone(),
             op: PlatformOperationName::Speak,
             enabled: true,
             vendor_service_slug: SPEAK_VENDOR_SLUG.to_string(),
             config: PlatformOperationConfig::Speak(speak_config()),
+            billing: default_operation_billing(PlatformOperationName::Speak),
+            billing_cleanup_metric_code: None,
             updated_at: Utc::now(),
             updated_by: "admin".to_string(),
         };
@@ -2359,10 +2448,13 @@ mod tests {
             .into_iter()
             .map(|op| PlatformOperation {
                 id: uuid::Uuid::new_v4().to_string(),
+                catalog_service_id: format!("catalog-{}", default_vendor_service_slug(op)),
                 op,
                 enabled: true,
                 vendor_service_slug: default_vendor_service_slug(op).to_string(),
                 config: default_operation_config(op),
+                billing: default_operation_billing(op),
+                billing_cleanup_metric_code: None,
                 updated_at: Utc::now(),
                 updated_by: "admin".to_string(),
             })
@@ -2837,6 +2929,14 @@ mod tests {
             "TimeLimit",
             CALL_AND_SAY_HARD_MAX_DURATION_SECONDS.to_string(),
         )));
+    }
+
+    #[test]
+    fn twilio_call_sid_requires_ca_plus_32_hex_characters() {
+        assert!(is_twilio_call_sid("CA22222222222222222222222222222222"));
+        assert!(!is_twilio_call_sid("CA-test"));
+        assert!(!is_twilio_call_sid("AC22222222222222222222222222222222"));
+        assert!(!is_twilio_call_sid("CA2222222222222222222222222222222z"));
     }
 
     #[test]

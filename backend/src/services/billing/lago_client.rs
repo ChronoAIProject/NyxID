@@ -3034,6 +3034,12 @@ mod tests {
                 ..Default::default()
             }),
             quantity: Some(1),
+            base_fee_micros: None,
+            base_fee_applied: false,
+            base_fee_applied_credits: 0,
+            deferred_quantity: None,
+            deferred_attempts: 0,
+            deferred_next_retry_at: None,
             pending_resale_quantity: None,
             status: crate::models::usage_meter::UsageStatus::Finalized,
             forwarded: true,

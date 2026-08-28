@@ -2284,6 +2284,20 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     usage_meter
         .create_index(
             IndexModel::builder()
+                .keys(doc! {
+                    "status": 1,
+                    "released": 1,
+                    "deferred_quantity.type": 1,
+                    "deferred_next_retry_at": 1,
+                    "created_at": 1,
+                })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+    usage_meter
+        .create_index(
+            IndexModel::builder()
                 .keys(doc! { "status": 1, "lago_acked": 1, "updated_at": 1 })
                 .build(),
         )

@@ -4178,6 +4178,10 @@ fn resale_usage_from_optional_reported(
             metric,
             quantity: fallback_bytes.max(0),
         }),
+        BillingMetric::Characters | BillingMetric::Seconds => Some(ResaleUsage {
+            metric,
+            quantity: 0,
+        }),
     }
 }
 
@@ -4264,6 +4268,7 @@ fn websocket_resale_usage(
         BillingMetric::Tokens => llm_usage_service::estimate_tokens_from_bytes(stats.total_bytes()),
         BillingMetric::Requests => 1,
         BillingMetric::Bytes => stats.total_bytes().max(0),
+        BillingMetric::Characters | BillingMetric::Seconds => 0,
     };
 
     Some(ResaleUsage { metric, quantity })

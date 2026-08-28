@@ -6,7 +6,8 @@ use uuid::Uuid;
 use crate::errors::{AppError, AppResult};
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
 use crate::models::usage_meter::{
-    BillingLayer, COLLECTION_NAME as USAGE_METER, UsageFunding, UsageMeterRow, UsageStatus,
+    BillingLayer, COLLECTION_NAME as USAGE_METER, DeferredQuantity, UsageFunding, UsageMeterRow,
+    UsageStatus,
 };
 
 use super::reservation::{self, BillingReservation};
@@ -15,6 +16,8 @@ use super::route_context::BillingRouteContext;
 pub const PLATFORM_REQUESTS_METRIC_CODE: &str = "platform_requests";
 pub const PLATFORM_BYTES_METRIC_CODE: &str = "platform_bytes";
 pub const PLATFORM_TOKENS_METRIC_CODE: &str = "platform_tokens";
+pub const PLATFORM_CHARACTERS_METRIC_CODE: &str = "platform_characters";
+pub const PLATFORM_SECONDS_METRIC_CODE: &str = "platform_seconds";
 const SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE: i64 = 100;
 
 #[derive(Clone, Debug, Default)]
@@ -195,6 +198,78 @@ pub async fn mark_forwarded(
         )
         .await?;
     Ok(())
+}
+
+pub async fn persist_deferred_quantity(
+    db: &mongodb::Database,
+    metered: &MeteredProxyContext,
+    descriptor: &DeferredQuantity,
+) -> AppResult<Option<UsageMeterRow>> {
+    let Some(ctx) = &metered.route else {
+        return Ok(None);
+    };
+    let descriptor_bson = bson::to_bson(descriptor).map_err(|error| {
+        AppError::Internal(format!("failed to encode deferred quantity: {error}"))
+    })?;
+    let now = Utc::now();
+    let row = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find_one_and_update(
+            doc! {
+                "billing_request_id": &ctx.billing_request_id,
+                "layer": "platform",
+                "status": "forwarded",
+                "released": false,
+                "$or": [
+                    { "deferred_quantity": null },
+                    { "deferred_quantity": { "$exists": false } },
+                ],
+            },
+            doc! {
+                "$set": {
+                    "deferred_quantity": descriptor_bson,
+                    "deferred_attempts": 0_i32,
+                    "deferred_next_retry_at": bson::DateTime::from_chrono(now),
+                    "updated_at": bson::DateTime::from_chrono(now),
+                },
+            },
+        )
+        .return_document(mongodb::options::ReturnDocument::After)
+        .await?;
+    if row.is_none()
+        && db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .count_documents(doc! {
+                "billing_request_id": &ctx.billing_request_id,
+                "layer": "platform",
+                "status": "forwarded",
+                "released": false,
+                "deferred_quantity": bson::to_bson(descriptor).map_err(|error| {
+                    AppError::Internal(format!("failed to encode deferred quantity: {error}"))
+                })?,
+            })
+            .await?
+            == 0
+    {
+        return Err(AppError::Internal(
+            "forwarded platform meter row could not persist deferred quantity".to_string(),
+        ));
+    }
+    if row.is_some() {
+        return Ok(row);
+    }
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .find_one(doc! {
+            "billing_request_id": &ctx.billing_request_id,
+            "layer": "platform",
+            "status": "forwarded",
+            "released": false,
+            "deferred_quantity": bson::to_bson(descriptor).map_err(|error| {
+                AppError::Internal(format!("failed to encode deferred quantity: {error}"))
+            })?,
+        })
+        .await
+        .map_err(Into::into)
 }
 
 pub async fn settle(
@@ -389,9 +464,26 @@ async fn insert_reserved_row(
             grant_reservations: layer
                 .map(|item| item.grant_reservations.clone())
                 .unwrap_or_default(),
+            base_fee_grant_reservations: layer
+                .map(|item| item.base_fee_grant_reservations.clone())
+                .unwrap_or_default(),
             ..Default::default()
         }
     });
+    let base_fee_micros = if layer == BillingLayer::Platform {
+        reservation
+            .and_then(|reservation| {
+                reservation
+                    .layers
+                    .iter()
+                    .find(|item| item.layer == layer)
+                    .map(|item| item.base_fee_micros)
+            })
+            .unwrap_or(ctx.platform_base_fee_micros)
+            .max(0)
+    } else {
+        0
+    };
     let row = UsageMeterRow {
         id: Uuid::new_v4().to_string(),
         transaction_id,
@@ -415,6 +507,12 @@ async fn insert_reserved_row(
         reserved_credits,
         funding,
         quantity: None,
+        base_fee_micros: (base_fee_micros > 0).then_some(base_fee_micros),
+        base_fee_applied: false,
+        base_fee_applied_credits: 0,
+        deferred_quantity: None,
+        deferred_attempts: 0,
+        deferred_next_retry_at: None,
         pending_resale_quantity: None,
         status: UsageStatus::Reserved,
         forwarded: false,
@@ -590,6 +688,8 @@ pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
         BillingMetric::Requests => PLATFORM_REQUESTS_METRIC_CODE,
         BillingMetric::Bytes => PLATFORM_BYTES_METRIC_CODE,
         BillingMetric::Tokens => PLATFORM_TOKENS_METRIC_CODE,
+        BillingMetric::Characters => PLATFORM_CHARACTERS_METRIC_CODE,
+        BillingMetric::Seconds => PLATFORM_SECONDS_METRIC_CODE,
     }
 }
 
@@ -598,6 +698,8 @@ fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
         BillingMetric::Bytes => usage.bytes.max(0),
         BillingMetric::Requests => usage.requests.max(0),
         BillingMetric::Tokens => usage.tokens.max(0),
+        BillingMetric::Characters => usage.characters.max(0),
+        BillingMetric::Seconds => usage.seconds.max(0),
     }
 }
 
@@ -799,9 +901,11 @@ mod tests {
                 layer: BillingLayer::Platform,
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
+                base_fee_micros: 0,
                 reserved_credits: 5,
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
@@ -860,9 +964,11 @@ mod tests {
                 layer: BillingLayer::Platform,
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
+                base_fee_micros: 0,
                 reserved_credits: 5,
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
             }],
         };
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
@@ -1022,9 +1128,11 @@ mod tests {
                 layer: BillingLayer::Platform,
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
+                base_fee_micros: 0,
                 reserved_credits: 5,
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
@@ -1131,9 +1239,11 @@ mod tests {
                     layer: BillingLayer::Platform,
                     estimated_quantity: 1,
                     credits_per_unit_micros: 4_000_000,
+                    base_fee_micros: 0,
                     reserved_credits: 4,
                     allowance_reservations: Vec::new(),
                     grant_reservations: Vec::new(),
+                    base_fee_grant_reservations: Vec::new(),
                 }],
             };
             crate::services::billing::reservation::try_reserve_prepaid(&db, &owner_id, 4)
@@ -1233,9 +1343,11 @@ mod tests {
                 layer: BillingLayer::Platform,
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
+                base_fee_micros: 0,
                 reserved_credits: 5,
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
@@ -1378,9 +1490,11 @@ mod tests {
                 layer: BillingLayer::Platform,
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
+                base_fee_micros: 0,
                 reserved_credits: 5,
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
             }],
         };
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
@@ -1495,9 +1609,11 @@ mod tests {
                 layer: BillingLayer::Platform,
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
+                base_fee_micros: 0,
                 reserved_credits: 5,
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
             }],
         };
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
