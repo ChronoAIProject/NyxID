@@ -34,6 +34,17 @@ impl MeteredProxyContext {
         self.route.is_some()
     }
 
+    /// Join key from an audit row to the usage meter and billing ledger.
+    ///
+    /// Audit deliberately records this rather than a credit amount: settlement
+    /// happens after the response returns, so any amount written here would be
+    /// an estimate that later disagrees with the ledger.
+    pub fn billing_request_id(&self) -> Option<&str> {
+        self.route
+            .as_ref()
+            .map(|route| route.billing_request_id.as_str())
+    }
+
     pub(crate) fn from_route(route: &BillingRouteContext) -> Self {
         Self {
             route: Some(route.clone()),

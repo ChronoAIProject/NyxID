@@ -87,6 +87,24 @@ pub(crate) struct PlatformOperationExecution<T> {
     pub value: T,
     pub credential_source: PlatformCredentialSource,
     pub own_connection_disabled: bool,
+    pub attribution: PlatformOperationAttribution,
+}
+
+/// Identity of the operation a request actually ran, recorded in audit so a
+/// charge can be traced back to the call that produced it.
+///
+/// `billing_request_id` is the join key into `usage_meter` and `billing_ledger`.
+/// Audit deliberately does not carry a credit amount: settlement happens after
+/// the response returns, so any amount written here would be an estimate that
+/// later disagrees with the ledger.
+///
+/// Only successful executions carry this. A failed call creates no charge, and
+/// its `op` plus outcome already identify what was refused.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct PlatformOperationAttribution {
+    pub operation_id: String,
+    pub catalog_service_id: String,
+    pub billing_request_id: Option<String>,
 }
 
 enum ExecutionTarget {
@@ -578,6 +596,7 @@ struct ForwardedOperation {
     response: reqwest::Response,
     credential_source: PlatformCredentialSource,
     own_connection_disabled: bool,
+    attribution: PlatformOperationAttribution,
     metered: crate::services::billing::MeteredProxyContext,
     daily_limit: Option<DailyLimit>,
 }
@@ -894,6 +913,11 @@ async fn forward_metered_operation(
         response,
         credential_source: resolved.credential_source,
         own_connection_disabled: resolved.own_connection_disabled,
+        attribution: PlatformOperationAttribution {
+            operation_id: operation.id.clone(),
+            catalog_service_id: operation.catalog_service_id.clone(),
+            billing_request_id: metered.billing_request_id().map(str::to_string),
+        },
         metered,
         daily_limit,
     })
@@ -1015,6 +1039,7 @@ pub(crate) async fn execute_speak_for_caller(
         response,
         credential_source,
         own_connection_disabled,
+        attribution,
         metered,
         ..
     } = result;
@@ -1028,6 +1053,7 @@ pub(crate) async fn execute_speak_for_caller(
         value: platform_operation_service::SpeakVendorResponse { response },
         credential_source,
         own_connection_disabled,
+        attribution,
     })
 }
 
@@ -1101,6 +1127,7 @@ pub(crate) async fn execute_call_and_say_for_caller(
         response,
         credential_source,
         own_connection_disabled,
+        attribution,
         metered,
         daily_limit,
     } = result;
@@ -1155,6 +1182,7 @@ pub(crate) async fn execute_call_and_say_for_caller(
         value,
         credential_source,
         own_connection_disabled,
+        attribution,
     })
 }
 
@@ -1208,6 +1236,7 @@ pub(crate) async fn execute_flight_search_for_caller(
         response,
         credential_source,
         own_connection_disabled,
+        attribution,
         metered,
         daily_limit,
     } = result;
@@ -1245,6 +1274,7 @@ pub(crate) async fn execute_flight_search_for_caller(
         value,
         credential_source,
         own_connection_disabled,
+        attribution,
     })
 }
 
@@ -1367,6 +1397,22 @@ pub(crate) fn platform_operation_audit_metadata<T>(
         );
         if execution.own_connection_disabled {
             data.insert("own_connection_disabled".to_string(), Value::Bool(true));
+        }
+        data.insert(
+            "operation_id".to_string(),
+            Value::String(execution.attribution.operation_id.clone()),
+        );
+        data.insert(
+            "catalog_service_id".to_string(),
+            Value::String(execution.attribution.catalog_service_id.clone()),
+        );
+        // Present only for platform-funded calls; an own-connection call is
+        // not metered and so has no ledger row to join to.
+        if let Some(billing_request_id) = &execution.attribution.billing_request_id {
+            data.insert(
+                "billing_request_id".to_string(),
+                Value::String(billing_request_id.clone()),
+            );
         }
     }
     data
@@ -3308,6 +3354,85 @@ mod tests {
             ensure_platform_spend_authority(&state, &unscoped).await,
             Err(AppError::Forbidden(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn audit_can_join_a_platform_charge_back_to_the_call_that_made_it() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_ops_audit_attribution").await
+        else {
+            eprintln!("skipping platform audit attribution test: no local MongoDB available");
+            return;
+        };
+        // Billing must be on for a meter row, and therefore a ledger join key,
+        // to exist at all. Charging still does not apply: the owner is outside
+        // the billing rollout, so the request is metered for observability.
+        let mut config = crate::test_utils::test_app_config();
+        config.billing_enabled = true;
+        config.billing_fail_closed = false;
+        let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
+        let (base_url, _captured, server) = spawn_capturing_vendor().await;
+        insert_speak_vendor(&state, base_url.clone(), "platform-speak-secret").await;
+        let row = operation(
+            PlatformOperationName::Speak,
+            true,
+            PlatformOperationConfig::Speak(SpeakConfig {
+                allowed_voice_ids: vec!["voice-a".to_string()],
+                max_chars: 1_000,
+                model_id: "eleven_multilingual_v2".to_string(),
+            }),
+        );
+        let operation_id = row.id.clone();
+        let catalog_service_id = row.catalog_service_id.clone();
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(row)
+            .await
+            .expect("insert speak operation");
+
+        let caller = PlatformOperationCaller {
+            actor_user_id: USER_ID.to_string(),
+            resolution_user_id: USER_ID.to_string(),
+            api_key_id: Some("agent-key".to_string()),
+            auth_method: AuthMethod::ApiKey,
+            acting_client_id: None,
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
+        };
+        let result = execute_speak_for_caller(
+            &state,
+            &caller,
+            SpeakRequest {
+                text: "nyxid".to_string(),
+                voice_id: "voice-a".to_string(),
+            },
+            BillingIngress::PlatformOperation,
+            enforce_platform_billing_classification(BillingRoutePolicy::Metered(
+                BillingIngress::PlatformOperation,
+            ))
+            .expect("platform billing classification"),
+        )
+        .await;
+        let audit = platform_operation_audit_metadata("speak", &result, Instant::now(), json!({}));
+
+        // "Which call produced this charge" is the first question asked about a
+        // disputed invoice, and it was unanswerable: audit recorded only a
+        // static op name.
+        assert_eq!(audit["operation_id"], Value::String(operation_id));
+        assert_eq!(
+            audit["catalog_service_id"],
+            Value::String(catalog_service_id)
+        );
+        assert!(
+            audit["billing_request_id"].is_string(),
+            "a platform-funded call must record its ledger join key"
+        );
+
+        // Metadata only: no prompt text, no vendor body, no credential.
+        let rendered = Value::Object(audit).to_string();
+        for secret in ["platform-speak-secret", "nyxid"] {
+            assert!(!rendered.contains(secret), "audit leaked {secret}");
+        }
+        server.abort();
     }
 
     #[tokio::test]

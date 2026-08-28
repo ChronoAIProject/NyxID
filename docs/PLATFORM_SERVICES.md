@@ -478,6 +478,18 @@ does not become a reconcile replay. Audit is metadata-only: catalog and operatio
 source, bounded sizes/counts, duration, status, and normalized reason. It never contains
 text, speech, phone numbers, account SIDs, call SIDs, credentials, or provider bodies.
 
+A successful call records `operation_id`, `catalog_service_id`, and, when the call was
+platform-funded, `billing_request_id`. That last field is the join key into `usage_meter`
+and `billing_ledger`, and it is what makes "which call produced this charge" answerable.
+
+Audit deliberately records no credit amount. Settlement happens after the response
+returns -- for Twilio, after the call ends -- so any amount written at audit time would
+be an estimate that later disagrees with the ledger. Actor and API-key identity are
+already carried by every `AuditLog` row.
+
+A failed call records no attribution beyond `op` and outcome. It produced no charge, so
+there is nothing to join to.
+
 ## Migration
 
 Startup migration is idempotent and runs after indexes are available. For every old

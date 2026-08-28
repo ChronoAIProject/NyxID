@@ -1946,6 +1946,7 @@ async fn handle_platform_speak(
             value: audio,
             credential_source: execution.credential_source,
             own_connection_disabled: execution.own_connection_disabled,
+            attribution: execution.attribution,
         })
     }
     .await;
