@@ -37,10 +37,12 @@ pub struct AdminPlatformOperationResponse {
 #[derive(Debug, Serialize)]
 pub struct AdminPlatformOperationPricingResponse {
     pub billable: bool,
-    pub credits_per_call: Option<String>,
     pub metric: &'static str,
     pub price_per_unit: String,
     pub base_fee_per_call: Option<String>,
+    /// Server-rendered price sentence. The admin table shows this verbatim so
+    /// every metric formats identically across surfaces.
+    pub display: String,
     pub lago_metric_code: String,
     pub sync_status: PricingSyncStatus,
     pub sync_error: Option<String>,
@@ -207,7 +209,7 @@ pub async fn update_platform_operation(
     )))
 }
 
-fn platform_operation_response(
+pub(crate) fn platform_operation_response(
     op: PlatformOperationName,
     operation: Option<PlatformOperation>,
     vendor: Option<&crate::models::downstream_service::DownstreamService>,
@@ -219,9 +221,8 @@ fn platform_operation_response(
     let billable = billing.price_per_unit != "0" || billing.base_fee_per_call.is_some();
     let pricing = AdminPlatformOperationPricingResponse {
         billable,
-        credits_per_call: (billing.metric == BillingMetric::Requests)
-            .then(|| billing.price_per_unit.clone()),
         metric: billing.metric.as_str(),
+        display: crate::services::billing::pricing::format_operation_price(&billing, billable),
         price_per_unit: billing.price_per_unit,
         base_fee_per_call: billing.base_fee_per_call,
         lago_metric_code: billing.lago_metric_code,

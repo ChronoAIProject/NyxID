@@ -39,19 +39,56 @@ const uniqueStrings = <T extends z.ZodType<string>>(item: T, max: number) =>
       "Duplicate values are not allowed",
     );
 
+/// Mirrors `BillingMetric` in backend/src/models/service_billing.rs. The
+/// admin surface previously accepted only "requests", which rejected the
+/// default `speak` (characters) and `call_and_say` (seconds) rows.
+export const billingMetricSchema = z.enum([
+  "tokens",
+  "requests",
+  "bytes",
+  "characters",
+  "seconds",
+]);
+
+export const pricingSyncStatusSchema = z.enum([
+  "pending",
+  "synced",
+  "failed",
+]);
+
+/// `display` is rendered by the backend so a per-second or per-character
+/// price cannot be relabelled as a per-call price by a client.
+const pricingResponseSchema = z
+  .object({
+    billable: z.boolean(),
+    metric: billingMetricSchema,
+    price_per_unit: z.string().min(1),
+    base_fee_per_call: z.string().min(1).nullable(),
+    display: z.string().min(1),
+  })
+  .strict();
+
+const adminPricingResponseSchema = z
+  .object({
+    billable: z.boolean(),
+    metric: billingMetricSchema,
+    price_per_unit: z.string().min(1),
+    base_fee_per_call: z.string().min(1).nullable(),
+    display: z.string().min(1),
+    // Empty until the operation price has been synchronized to Lago.
+    lago_metric_code: z.string(),
+    sync_status: pricingSyncStatusSchema,
+    sync_error: z.string().nullable(),
+  })
+  .strict();
+
 const operationMetadataSchema = {
   enabled: z.boolean(),
   vendor_service_slug: vendorServiceSlugSchema,
   updated_at: z.string().nullable(),
   updated_by: z.string().nullable(),
   vendor_service_id: z.string().min(1).nullable(),
-  pricing: z
-    .object({
-      billable: z.boolean(),
-      credits_per_call: z.string().min(1).nullable(),
-      metric: z.literal("requests"),
-    })
-    .strict(),
+  pricing: adminPricingResponseSchema,
 };
 
 export const speakConfigResponseSchema = z
@@ -83,6 +120,13 @@ export const callAndSayConfigResponseSchema = z
       .int("Maximum message characters must be an integer")
       .min(1, "Maximum message characters must be at least 1")
       .max(1_000, "Maximum message characters cannot exceed 1000"),
+    // Bounds a per-second-billed call. Omitting it from an update lets the
+    // backend serde default silently reset the cap, so it must round-trip.
+    max_duration_seconds: z
+      .number()
+      .int("Maximum call duration must be an integer")
+      .min(1, "Maximum call duration must be at least 1 second")
+      .max(3_600, "Maximum call duration cannot exceed 3600 seconds"),
     voice: safeIdentifierSchema("Voice"),
     max_calls_per_user_per_day: z
       .number()
@@ -211,13 +255,7 @@ export const platformOperationDiscoverySchema = z
       })
       .strict()
       .nullable(),
-    pricing: z
-      .object({
-        billable: z.boolean(),
-        credits_per_call: z.string().min(1).nullable(),
-        metric: z.literal("requests"),
-      })
-      .strict(),
+    pricing: pricingResponseSchema,
     mcp_tool: z.string().min(1),
   })
   .strict();
@@ -228,6 +266,14 @@ export const platformOperationDiscoveryListSchema = z
   })
   .strict();
 
+export type BillingMetric = z.infer<typeof billingMetricSchema>;
+export type PricingSyncStatus = z.infer<typeof pricingSyncStatusSchema>;
+export type PlatformOperationPricing = z.infer<
+  typeof adminPricingResponseSchema
+>;
+export type PlatformOperationDiscoveryPricing = z.infer<
+  typeof pricingResponseSchema
+>;
 export type PlatformOperation = z.infer<typeof platformOperationSchema>;
 export type PlatformOperationList = z.infer<
   typeof platformOperationListSchema

@@ -7,6 +7,10 @@ import {
   type PlatformOperationList,
 } from "@/schemas/platform-ops";
 import {
+  discoveryPricing,
+  perCallPricing,
+} from "@/schemas/__fixtures__/platform-ops-builders";
+import {
   usePlatformOperationDiscovery,
   usePlatformOperations,
   useUpdatePlatformOperation,
@@ -34,11 +38,7 @@ const speakOperation = {
   updated_at: null,
   updated_by: null,
   vendor_service_id: "platform-elevenlabs-id",
-  pricing: {
-    billable: true,
-    credits_per_call: "0.25",
-    metric: "requests" as const,
-  },
+  pricing: perCallPricing("0.25"),
 };
 
 function createHarness() {
@@ -83,11 +83,11 @@ describe("platform operation hooks", () => {
           catalog_service_slug: "api-elevenlabs",
           credential_source: "platform",
           own_connection: null,
-          pricing: {
+          pricing: discoveryPricing({
             billable: true,
-            credits_per_call: "0.25",
-            metric: "requests",
-          },
+            price_per_unit: "0.25",
+            display: "0.25 credits per call",
+          }),
           mcp_tool: "nyx__speak",
         },
       ],

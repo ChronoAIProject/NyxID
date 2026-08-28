@@ -291,7 +291,7 @@ fn response_with_credential_source(
 
 #[derive(Serialize)]
 pub struct PlatformOperationsResponse {
-    operations: Vec<PlatformOperationDiscoveryResponse>,
+    pub(crate) operations: Vec<PlatformOperationDiscoveryResponse>,
 }
 
 #[derive(Serialize)]
@@ -309,19 +309,61 @@ pub struct PlatformOperationDiscoveryResponse {
 
 #[derive(Serialize)]
 pub struct OwnConnectionDiscoveryResponse {
-    user_service_id: String,
-    slug: String,
-    label: String,
-    is_active: bool,
-    usable: bool,
-    reason: Option<&'static str>,
+    pub(crate) user_service_id: String,
+    pub(crate) slug: String,
+    pub(crate) label: String,
+    pub(crate) is_active: bool,
+    pub(crate) usable: bool,
+    pub(crate) reason: Option<&'static str>,
 }
 
 #[derive(Serialize)]
 pub struct PlatformOperationPricingResponse {
     billable: bool,
-    credits_per_call: Option<String>,
     metric: &'static str,
+    price_per_unit: String,
+    base_fee_per_call: Option<String>,
+    /// Server-rendered price sentence, already gated on the billing rollout
+    /// flag. A caller with the rollout off sees "Free" because that is what
+    /// the call will actually cost them.
+    display: String,
+}
+
+/// Pure projection from a stored operation to its discovery row.
+///
+/// Kept separate from `list_operations` so the cross-language contract test can
+/// serialize the exact shape the handler returns rather than a hand-written
+/// copy of it.
+pub(crate) fn platform_operation_discovery_response(
+    operation: &crate::models::platform_operation::PlatformOperation,
+    credential_source: PlatformCredentialSource,
+    own_connection: Option<OwnConnectionDiscoveryResponse>,
+    rollout_enabled: bool,
+) -> PlatformOperationDiscoveryResponse {
+    let contract = platform_operation_service::catalog_contract_for_operation(operation.op);
+    let price = operation.billing.price_per_unit.clone();
+    let billable =
+        rollout_enabled && (price != "0" || operation.billing.base_fee_per_call.is_some());
+    PlatformOperationDiscoveryResponse {
+        op: platform_operation_service::operation_name(operation.op).to_string(),
+        display_name: contract.display_name.to_string(),
+        description: contract.description.to_string(),
+        vendor: contract.vendor.to_string(),
+        catalog_service_slug: contract.catalog_service_slug.to_string(),
+        credential_source,
+        own_connection,
+        pricing: PlatformOperationPricingResponse {
+            billable,
+            metric: operation.billing.metric.as_str(),
+            display: crate::services::billing::pricing::format_operation_price(
+                &operation.billing,
+                billable,
+            ),
+            price_per_unit: price,
+            base_fee_per_call: operation.billing.base_fee_per_call.clone(),
+        },
+        mcp_tool: contract.mcp_tool.to_string(),
+    }
 }
 
 pub async fn list_operations(
@@ -347,7 +389,6 @@ pub async fn list_operations(
     let caller = PlatformOperationCaller::from_auth_user(&auth_user);
     let mut response = Vec::with_capacity(operations.len());
     for operation in operations {
-        let contract = platform_operation_service::catalog_contract_for_operation(operation.op);
         let descriptor = platform_operation_discovery_descriptor(operation.op);
         let source = platform_operation_service::resolve_operation_credential_source(
             &state.db,
@@ -363,24 +404,12 @@ pub async fn list_operations(
         )
         .await?;
         let (credential_source, own_connection) = discovery_source(source);
-        let price = operation.billing.price_per_unit.clone();
-        response.push(PlatformOperationDiscoveryResponse {
-            op: platform_operation_service::operation_name(operation.op).to_string(),
-            display_name: contract.display_name.to_string(),
-            description: contract.description.to_string(),
-            vendor: contract.vendor.to_string(),
-            catalog_service_slug: contract.catalog_service_slug.to_string(),
+        response.push(platform_operation_discovery_response(
+            &operation,
             credential_source,
             own_connection,
-            pricing: PlatformOperationPricingResponse {
-                billable: rollout_enabled
-                    && (price != "0" || operation.billing.base_fee_per_call.is_some()),
-                credits_per_call: (operation.billing.metric == BillingMetric::Requests)
-                    .then_some(price),
-                metric: operation.billing.metric.as_str(),
-            },
-            mcp_tool: contract.mcp_tool.to_string(),
-        });
+            rollout_enabled,
+        ));
     }
     Ok(Json(PlatformOperationsResponse {
         operations: response,
@@ -428,13 +457,9 @@ pub(crate) fn platform_tool_credential_sentence(
     {
         "Uses the platform credential (free).".to_string()
     } else {
-        let unit = match billing.metric {
-            BillingMetric::Requests => "request",
-            BillingMetric::Bytes => "byte",
-            BillingMetric::Tokens => "token",
-            BillingMetric::Characters => "character",
-            BillingMetric::Seconds => "second",
-        };
+        // Shared with the admin table and /keys so one operation cannot be
+        // described in three different units across three surfaces.
+        let unit = billing.metric.unit_noun();
         match billing.base_fee_per_call.as_deref() {
             Some(base) => format!(
                 "Uses the platform credential ({base} credits plus {} credits per {unit}).",
@@ -2893,13 +2918,13 @@ mod tests {
         );
         assert!(no_connection.operations[0].own_connection.is_none());
         assert!(no_connection.operations[0].pricing.billable);
-        assert!(
-            no_connection.operations[0]
-                .pricing
-                .credits_per_call
-                .is_none()
-        );
         assert_eq!(no_connection.operations[0].pricing.metric, "characters");
+        // A per-character price must render as such. Before the contract fix
+        // this surface could only express a per-call price.
+        assert_eq!(
+            no_connection.operations[0].pricing.display,
+            "0.25 credits per character"
+        );
         let (platform_source, platform_vendor) =
             resolve_discovery_source_for_test(&state, &auth, &operation_row).await;
         assert_eq!(
@@ -3000,7 +3025,7 @@ mod tests {
                 out_of_scope_vendor.as_ref(),
                 true,
             ),
-            "Uses the platform credential (0.25 credits per call). Allowed voice ids: platform-voice."
+            "Uses the platform credential (0.25 credits per character). Allowed voice ids: platform-voice."
         );
 
         let now = Utc::now();

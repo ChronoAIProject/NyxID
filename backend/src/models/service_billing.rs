@@ -47,6 +47,19 @@ impl BillingMetric {
             Self::Seconds => "seconds",
         }
     }
+
+    /// Singular noun for the billed unit, used only to render prices for
+    /// humans. Unlike `as_str` this is presentation text and is safe to
+    /// reword.
+    pub fn unit_noun(self) -> &'static str {
+        match self {
+            Self::Tokens => "token",
+            Self::Requests => "call",
+            Self::Bytes => "byte",
+            Self::Characters => "character",
+            Self::Seconds => "second",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]

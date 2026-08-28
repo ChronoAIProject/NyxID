@@ -168,6 +168,28 @@ pub fn normalize_operation_billing(
     Ok(())
 }
 
+/// Renders an operation price as one human-readable sentence fragment.
+///
+/// Every surface that shows a platform price -- the admin table, `/keys`, and
+/// MCP tool descriptions -- formats through here so a `characters` or
+/// `seconds` operation cannot be rendered as if it were priced per call. The
+/// caller passes the `billable` decision it already made, because the
+/// user-facing surfaces also gate on the billing rollout flag while the admin
+/// surface reports the configured price regardless.
+pub fn format_operation_price(billing: &OperationBilling, billable: bool) -> String {
+    if !billable {
+        return "Free".to_string();
+    }
+    let unit = billing.metric.unit_noun();
+    match (&billing.base_fee_per_call, billing.price_per_unit.as_str()) {
+        (_, "0") => "Price not set".to_string(),
+        (Some(base), price) => {
+            format!("{base} credits per call + {price} per {unit}")
+        }
+        (None, price) => format!("{price} credits per {unit}"),
+    }
+}
+
 pub fn operation_supports_metric(kind: &PlatformOperationKind, metric: BillingMetric) -> bool {
     match kind {
         PlatformOperationKind::Endpoint { .. } => {

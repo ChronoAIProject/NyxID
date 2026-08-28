@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  adminPricing,
+  discoveryPricing,
+  perCallPricing,
+} from "@/schemas/__fixtures__/platform-ops-builders";
+import {
   callAndSayUpdateSchema,
   flightSearchUpdateSchema,
   platformOperationDiscoveryListSchema,
@@ -25,11 +30,7 @@ describe("platform operation schemas", () => {
             updated_at: null,
             updated_by: null,
             vendor_service_id: "platform-elevenlabs-id",
-            pricing: {
-              billable: false,
-              credits_per_call: null,
-              metric: "requests",
-            },
+            pricing: adminPricing(),
           },
           {
             op: "call_and_say",
@@ -39,6 +40,7 @@ describe("platform operation schemas", () => {
               type: "call_and_say",
               allowed_destination_prefixes: [],
               max_message_chars: 500,
+              max_duration_seconds: 60,
               voice: "alice",
               max_calls_per_user_per_day: 3,
               account_sid: "",
@@ -47,11 +49,7 @@ describe("platform operation schemas", () => {
             updated_at: null,
             updated_by: null,
             vendor_service_id: "platform-twilio-id",
-            pricing: {
-              billable: true,
-              credits_per_call: "0.25",
-              metric: "requests",
-            },
+            pricing: perCallPricing("0.25"),
           },
         ],
       }).operations,
@@ -79,6 +77,7 @@ describe("platform operation schemas", () => {
           type: "call_and_say",
           allowed_destination_prefixes: ["+65"],
           max_message_chars: 1001,
+          max_duration_seconds: 60,
           voice: "alice",
           max_calls_per_user_per_day: 3,
           account_sid: `AC${"0".repeat(32)}`,
@@ -110,11 +109,11 @@ describe("platform operation schemas", () => {
           catalog_service_slug: "duffel",
           credential_source: "platform",
           own_connection: null,
-          pricing: {
+          pricing: discoveryPricing({
             billable: true,
-            credits_per_call: "0.5",
-            metric: "requests",
-          },
+            price_per_unit: "0.5",
+            display: "0.5 credits per call",
+          }),
           mcp_tool: "nyx__flight_search",
         },
       ],
@@ -170,6 +169,7 @@ describe("platform operation schemas", () => {
         type: "call_and_say",
         allowed_destination_prefixes: [],
         max_message_chars: 500,
+        max_duration_seconds: 60,
         voice: "alice",
         max_calls_per_user_per_day: 3,
         account_sid: `AC${"a".repeat(32)}`,
@@ -199,6 +199,7 @@ describe("platform operation schemas", () => {
         type: "call_and_say",
         allowed_destination_prefixes: ["65"],
         max_message_chars: 500,
+        max_duration_seconds: 60,
         voice: "alice",
         max_calls_per_user_per_day: 3,
         account_sid: `AC${"b".repeat(32)}`,

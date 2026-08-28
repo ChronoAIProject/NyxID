@@ -205,11 +205,9 @@ function OperationPricing({
 }: {
   readonly operation: PlatformOperation;
 }) {
-  const price = !operation.pricing.billable
-    ? "Free"
-    : operation.pricing.credits_per_call
-      ? `${operation.pricing.credits_per_call} credits per call`
-      : "Price not set";
+  // Rendered by the backend so every metric formats identically here, in
+  // /keys, and in MCP tool descriptions.
+  const price = operation.pricing.display;
 
   return (
     <div className="flex min-h-9 items-center justify-between gap-3 rounded-md border border-border/60 bg-muted/30 px-3 py-2 text-xs">
@@ -503,6 +501,24 @@ function CallAndSayOperationCard({
                         onChange={field.onChange}
                         min={1}
                         max={1000}
+                      />
+                    </FormControl>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
+              <FormField
+                control={form.control}
+                name="config.max_duration_seconds"
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>Maximum Call Duration (seconds)</FormLabel>
+                    <FormControl>
+                      <NumberInput
+                        value={field.value}
+                        onChange={field.onChange}
+                        min={1}
+                        max={3_600}
                       />
                     </FormControl>
                     <FormMessage />

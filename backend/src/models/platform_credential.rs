@@ -39,14 +39,18 @@ impl std::fmt::Debug for PlatformCredential {
 mod tests {
     use super::*;
 
+    // Deterministic IDs. With random UUIDs, `debug_redacts_ciphertext` failed
+    // whenever a generated id happened to contain "66" or "153" -- the very
+    // byte values it searches for -- so the redaction assertion was flaky and
+    // would have passed even if redaction broke.
     fn fixture() -> PlatformCredential {
         PlatformCredential {
-            id: uuid::Uuid::new_v4().to_string(),
-            catalog_service_id: uuid::Uuid::new_v4().to_string(),
+            id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
+            catalog_service_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_string(),
             credential_encrypted: vec![0x02, 0x99, 0x42],
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
-            created_by: uuid::Uuid::new_v4().to_string(),
+            created_by: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".to_string(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

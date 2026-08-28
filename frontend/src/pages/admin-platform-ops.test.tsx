@@ -2,6 +2,10 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  adminPricing,
+  perCallPricing,
+} from "@/schemas/__fixtures__/platform-ops-builders";
 import type { PlatformOperationList } from "@/schemas/platform-ops";
 import { AdminPlatformOpsPage } from "./admin-platform-ops";
 
@@ -28,11 +32,7 @@ const operations: PlatformOperationList = {
       updated_at: null,
       updated_by: null,
       vendor_service_id: "platform-elevenlabs-id",
-      pricing: {
-        billable: false,
-        credits_per_call: null,
-        metric: "requests",
-      },
+      pricing: adminPricing(),
     },
     {
       op: "call_and_say",
@@ -42,6 +42,7 @@ const operations: PlatformOperationList = {
         type: "call_and_say",
         allowed_destination_prefixes: ["+65"],
         max_message_chars: 500,
+        max_duration_seconds: 60,
         voice: "alice",
         max_calls_per_user_per_day: 3,
         account_sid: `AC${"a".repeat(32)}`,
@@ -50,11 +51,7 @@ const operations: PlatformOperationList = {
       updated_at: null,
       updated_by: null,
       vendor_service_id: "platform-twilio-id",
-      pricing: {
-        billable: true,
-        credits_per_call: null,
-        metric: "requests",
-      },
+      pricing: adminPricing({ billable: true, display: "Price not set" }),
     },
     {
       op: "flight_search",
@@ -68,11 +65,7 @@ const operations: PlatformOperationList = {
       updated_at: null,
       updated_by: null,
       vendor_service_id: "platform-duffel-id",
-      pricing: {
-        billable: true,
-        credits_per_call: "0.5",
-        metric: "requests",
-      },
+      pricing: perCallPricing("0.5"),
     },
   ],
 };
