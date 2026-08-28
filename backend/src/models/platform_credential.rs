@@ -39,11 +39,16 @@ impl std::fmt::Debug for PlatformCredential {
 mod tests {
     use super::*;
 
-    // Deterministic IDs. With random UUIDs, `debug_redacts_ciphertext` failed
-    // whenever a generated id happened to contain "66" or "153" -- the very
-    // byte values it searches for -- so the redaction assertion was flaky and
-    // would have passed even if redaction broke.
+    // Every field is deterministic, including the timestamps.
+    //
+    // `debug_redacts_ciphertext` proves the ciphertext is absent by searching
+    // the Debug output for the decimal bytes it would render as. With random
+    // UUIDs and `Utc::now()` those digits could appear by coincidence -- a
+    // fractional second of `.153` was enough -- so the test failed at random
+    // and, worse, could have passed while redaction was broken.
     fn fixture() -> PlatformCredential {
+        // 2023-11-14T22:13:20Z: contains neither "153" nor "66".
+        let fixed = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("fixed timestamp");
         PlatformCredential {
             id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".to_string(),
             catalog_service_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_string(),
@@ -51,8 +56,8 @@ mod tests {
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             created_by: "cccccccc-cccc-4ccc-8ccc-cccccccccccc".to_string(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+            created_at: fixed,
+            updated_at: fixed,
         }
     }
 
@@ -84,7 +89,8 @@ mod tests {
         let debug = format!("{credential:?}");
 
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("153"));
-        assert!(!debug.contains("66"));
+        // 0x99 and 0x42 render as 153 and 66 in a byte-slice Debug.
+        assert!(!debug.contains("153"), "ciphertext byte leaked: {debug}");
+        assert!(!debug.contains("66"), "ciphertext byte leaked: {debug}");
     }
 }

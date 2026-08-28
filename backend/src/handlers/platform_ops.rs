@@ -87,7 +87,6 @@ pub(crate) struct PlatformOperationExecution<T> {
     pub value: T,
     pub credential_source: PlatformCredentialSource,
     pub own_connection_disabled: bool,
-    pub own_connection_out_of_scope: bool,
 }
 
 enum ExecutionTarget {
@@ -106,7 +105,6 @@ struct ResolvedExecutionTarget {
     target: ExecutionTarget,
     credential_source: PlatformCredentialSource,
     own_connection_disabled: bool,
-    own_connection_out_of_scope: bool,
 }
 
 async fn require_platform_ops_enabled(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
@@ -448,6 +446,12 @@ pub(crate) fn platform_tool_credential_sentence(
                 vendor_display_name(contract.vendor)
             );
         }
+        PlatformCredentialResolution::OutOfScope { .. } => {
+            return format!(
+                "This API key is not scoped to your {} connection; calls fail until you grant it access or disable the connection.",
+                vendor_display_name(contract.vendor)
+            );
+        }
         PlatformCredentialResolution::Platform { .. } => {}
     }
 
@@ -521,6 +525,17 @@ fn discovery_source(
             PlatformCredentialSource::OwnConnection,
             Some(own_connection_response(connection, false, Some("unusable"))),
         ),
+        // Reported as the owner's own connection, unusable. Reporting it as the
+        // platform source would tell the caller their next call is billed, when
+        // in fact it will be refused.
+        PlatformCredentialResolution::OutOfScope { connection } => (
+            PlatformCredentialSource::OwnConnection,
+            Some(own_connection_response(
+                connection,
+                false,
+                Some("out_of_scope"),
+            )),
+        ),
     }
 }
 
@@ -563,7 +578,6 @@ struct ForwardedOperation {
     response: reqwest::Response,
     credential_source: PlatformCredentialSource,
     own_connection_disabled: bool,
-    own_connection_out_of_scope: bool,
     metered: crate::services::billing::MeteredProxyContext,
     daily_limit: Option<DailyLimit>,
 }
@@ -597,12 +611,10 @@ async fn resolve_execution_target(
         PlatformCredentialResolution::Platform {
             vendor,
             disabled_connection,
-            own_connection_out_of_scope,
         } => Ok(ResolvedExecutionTarget {
             target: ExecutionTarget::Platform(vendor),
             credential_source: PlatformCredentialSource::Platform,
             own_connection_disabled: disabled_connection.is_some(),
-            own_connection_out_of_scope,
         }),
         PlatformCredentialResolution::OwnConnection { resolution, .. } => {
             let resolution = *resolution;
@@ -620,7 +632,6 @@ async fn resolve_execution_target(
                 })),
                 credential_source: PlatformCredentialSource::OwnConnection,
                 own_connection_disabled: false,
-                own_connection_out_of_scope: false,
             })
         }
         PlatformCredentialResolution::NodeRouted { .. } => {
@@ -630,6 +641,11 @@ async fn resolve_execution_target(
         }
         PlatformCredentialResolution::ApprovalRequired { .. } => {
             Err(AppError::PlatformOperationApprovalRequired {
+                vendor: vendor_display_name(contract.vendor),
+            })
+        }
+        PlatformCredentialResolution::OutOfScope { .. } => {
+            Err(AppError::PlatformOperationOwnConnectionOutOfScope {
                 vendor: vendor_display_name(contract.vendor),
             })
         }
@@ -878,7 +894,6 @@ async fn forward_metered_operation(
         response,
         credential_source: resolved.credential_source,
         own_connection_disabled: resolved.own_connection_disabled,
-        own_connection_out_of_scope: resolved.own_connection_out_of_scope,
         metered,
         daily_limit,
     })
@@ -1000,7 +1015,6 @@ pub(crate) async fn execute_speak_for_caller(
         response,
         credential_source,
         own_connection_disabled,
-        own_connection_out_of_scope,
         metered,
         ..
     } = result;
@@ -1014,7 +1028,6 @@ pub(crate) async fn execute_speak_for_caller(
         value: platform_operation_service::SpeakVendorResponse { response },
         credential_source,
         own_connection_disabled,
-        own_connection_out_of_scope,
     })
 }
 
@@ -1088,7 +1101,6 @@ pub(crate) async fn execute_call_and_say_for_caller(
         response,
         credential_source,
         own_connection_disabled,
-        own_connection_out_of_scope,
         metered,
         daily_limit,
     } = result;
@@ -1143,7 +1155,6 @@ pub(crate) async fn execute_call_and_say_for_caller(
         value,
         credential_source,
         own_connection_disabled,
-        own_connection_out_of_scope,
     })
 }
 
@@ -1197,7 +1208,6 @@ pub(crate) async fn execute_flight_search_for_caller(
         response,
         credential_source,
         own_connection_disabled,
-        own_connection_out_of_scope,
         metered,
         daily_limit,
     } = result;
@@ -1235,7 +1245,6 @@ pub(crate) async fn execute_flight_search_for_caller(
         value,
         credential_source,
         own_connection_disabled,
-        own_connection_out_of_scope,
     })
 }
 
@@ -1359,9 +1368,6 @@ pub(crate) fn platform_operation_audit_metadata<T>(
         if execution.own_connection_disabled {
             data.insert("own_connection_disabled".to_string(), Value::Bool(true));
         }
-        if execution.own_connection_out_of_scope {
-            data.insert("own_connection_out_of_scope".to_string(), Value::Bool(true));
-        }
     }
     data
 }
@@ -1378,6 +1384,11 @@ fn audit_outcome<T>(result: &AppResult<T>) -> &'static str {
             | AppError::PlatformOperationOwnConnectionUnusable { .. },
         ) => "own_connection_unusable",
         Err(AppError::PlatformOperationApprovalRequired { .. }) => "approval_required",
+        // Distinct from "own_connection_unusable": the connection is fine, the
+        // calling key is not scoped to it.
+        Err(AppError::PlatformOperationOwnConnectionOutOfScope { .. }) => {
+            "own_connection_out_of_scope"
+        }
         Err(AppError::BadRequest(_) | AppError::ValidationError(_)) => "rejected",
         Err(AppError::PlatformOperationUnavailable) => "vendor_unavailable",
         Err(_) => "failed",
@@ -2560,7 +2571,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn scoped_agent_treats_out_of_scope_connection_as_platform_and_audits_decision() {
+    async fn scoped_agent_is_denied_rather_than_charged_for_an_out_of_scope_connection() {
         let Some(db) =
             crate::test_utils::connect_test_database("platform_ops_agent_scope_fallback").await
         else {
@@ -2617,30 +2628,26 @@ mod tests {
             .expect("platform billing classification"),
         )
         .await;
-        let execution = result.as_ref().expect("execute platform fallback");
-        assert_eq!(
-            execution.credential_source,
-            PlatformCredentialSource::Platform
+        // The owner has a usable connection; this key simply is not scoped to
+        // it. Previously that routed to the shared credential and charged the
+        // owner, which meant narrowing a key's scope increased its ability to
+        // spend. It must fail closed instead.
+        assert!(
+            matches!(
+                result,
+                Err(AppError::PlatformOperationOwnConnectionOutOfScope { .. })
+            ),
+            "an out-of-scope connection must be denied, not charged"
         );
-        assert!(execution.own_connection_out_of_scope);
         let audit = platform_operation_audit_metadata("speak", &result, Instant::now(), json!({}));
-        assert_eq!(audit["own_connection_out_of_scope"], Value::Bool(true));
         assert_eq!(
-            audit["credential_source"],
-            Value::String("platform".to_string())
+            audit["outcome"],
+            Value::String("own_connection_out_of_scope".to_string())
         );
 
-        let requests = captured.lock().await.clone();
-        assert_eq!(requests.len(), 1);
-        assert_eq!(requests[0].uri, "/v1/text-to-speech/voice-a");
-        assert_eq!(
-            requests[0].elevenlabs_key.as_deref(),
-            Some("platform-speak-secret")
-        );
-        assert_ne!(
-            requests[0].elevenlabs_key.as_deref(),
-            Some("own-speak-secret")
-        );
+        // No vendor call, so neither the owner's credential nor the platform's
+        // was used, and nothing was billed.
+        assert!(captured.lock().await.is_empty());
         assert!(!caller.allowed_service_ids.contains(&user_service_id));
         server.abort();
     }
@@ -3064,12 +3071,22 @@ mod tests {
         scoped_agent_auth.allowed_service_ids.clear();
         let out_of_scope = list_operations(State(state.clone()), scoped_agent_auth.clone())
             .await
-            .expect("discover out-of-scope own connection as platform source");
+            .expect("discover out-of-scope own connection");
+        // Reported as the owner's own connection, unusable by this key. Showing
+        // it as the platform source would promise a billed call that will in
+        // fact be refused.
         assert_eq!(
             out_of_scope.operations[0].credential_source,
-            PlatformCredentialSource::Platform
+            PlatformCredentialSource::OwnConnection
         );
-        assert!(out_of_scope.operations[0].own_connection.is_none());
+        assert!(
+            out_of_scope.operations[0]
+                .own_connection
+                .as_ref()
+                .is_some_and(
+                    |connection| !connection.usable && connection.reason == Some("out_of_scope")
+                )
+        );
         let (out_of_scope_source, out_of_scope_vendor) =
             resolve_discovery_source_for_test(&state, &scoped_agent_auth, &operation_row).await;
         assert_eq!(
@@ -3079,7 +3096,7 @@ mod tests {
                 out_of_scope_vendor.as_ref(),
                 true,
             ),
-            "Uses the platform credential (0.25 credits per character). Allowed voice ids: platform-voice."
+            "This API key is not scoped to your ElevenLabs connection; calls fail until you grant it access or disable the connection."
         );
 
         let now = Utc::now();
@@ -3291,6 +3308,80 @@ mod tests {
             ensure_platform_spend_authority(&state, &unscoped).await,
             Err(AppError::Forbidden(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn org_owned_key_bills_the_org_wallet_not_a_member_pocket() {
+        let Some(db) = crate::test_utils::connect_test_database("platform_ops_org_payer").await
+        else {
+            eprintln!("skipping platform org payer test: no local MongoDB available");
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let (base_url, _captured, server) = spawn_capturing_vendor().await;
+        insert_speak_vendor(&state, base_url.clone(), "platform-speak-secret").await;
+        db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+            .insert_one(operation(
+                PlatformOperationName::Speak,
+                true,
+                PlatformOperationConfig::Speak(SpeakConfig {
+                    allowed_voice_ids: vec!["voice-a".to_string()],
+                    max_chars: 1_000,
+                    model_id: "eleven_multilingual_v2".to_string(),
+                }),
+            ))
+            .await
+            .expect("insert speak operation");
+
+        let org_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &org_id,
+                crate::models::user::UserType::Org,
+            ))
+            .await
+            .expect("insert org user");
+
+        // An org-owned agent key authenticates as the org, so the org is the
+        // resolution identity and therefore the payer. A member must never be
+        // billed personally for work done under an org key.
+        let caller = PlatformOperationCaller {
+            actor_user_id: org_id.clone(),
+            resolution_user_id: org_id.clone(),
+            api_key_id: Some("org-agent-key".to_string()),
+            auth_method: AuthMethod::ApiKey,
+            acting_client_id: None,
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
+        };
+        let execution = execute_speak_for_caller(
+            &state,
+            &caller,
+            SpeakRequest {
+                text: "nyxid".to_string(),
+                voice_id: "voice-a".to_string(),
+            },
+            BillingIngress::PlatformOperation,
+            enforce_platform_billing_classification(BillingRoutePolicy::Metered(
+                BillingIngress::PlatformOperation,
+            ))
+            .expect("platform billing classification"),
+        )
+        .await
+        .expect("execute platform operation under an org key");
+        assert_eq!(
+            execution.credential_source,
+            PlatformCredentialSource::Platform
+        );
+
+        let owner = state
+            .billing
+            .owner_resolver()
+            .resolve_for_resource(&org_id, &org_id)
+            .await
+            .expect("resolve org billing owner");
+        assert_eq!(owner.owner_id, org_id);
+        server.abort();
     }
 
     #[tokio::test]

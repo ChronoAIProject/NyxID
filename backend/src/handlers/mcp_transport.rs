@@ -1946,7 +1946,6 @@ async fn handle_platform_speak(
             value: audio,
             credential_source: execution.credential_source,
             own_connection_disabled: execution.own_connection_disabled,
-            own_connection_out_of_scope: execution.own_connection_out_of_scope,
         })
     }
     .await;
@@ -3883,8 +3882,10 @@ mod tests {
         let scoped_payload: serde_json::Value =
             serde_json::from_slice(&scoped_body).expect("decode scoped MCP tools/list response");
         let scoped_description = description_for(&scoped_payload);
-        assert!(scoped_description.contains("Uses the platform credential (free)."));
-        assert!(scoped_description.contains("Allowed voice ids: voice-a, voice-b."));
+        // A key not scoped to the owner's connection is told so, rather than
+        // being advertised the platform credential it would be billed for.
+        assert!(scoped_description.contains("not scoped to your ElevenLabs connection"));
+        assert!(!scoped_description.contains("Uses the platform credential"));
 
         let own_response = handle_tools_list(
             &state,

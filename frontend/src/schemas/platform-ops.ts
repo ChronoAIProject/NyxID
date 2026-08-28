@@ -250,7 +250,15 @@ export const platformOperationDiscoverySchema = z
         is_active: z.boolean(),
         usable: z.boolean(),
         reason: z
-          .enum(["disabled", "node_routed", "unusable", "approval_required"])
+          .enum([
+            "disabled",
+            "node_routed",
+            "unusable",
+            "approval_required",
+            // The connection is fine; this API key is not scoped to it. Calls
+            // fail closed rather than falling back to platform credits.
+            "out_of_scope",
+          ])
           .nullable(),
       })
       .strict()

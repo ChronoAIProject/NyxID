@@ -321,11 +321,20 @@ known. The order is:
 8. Only after authority succeeds, reserve billing and obtain the authorized platform
    credential.
 
-A scoped agent key's out-of-scope connection is invisible, preserving the current
-platform-fallback behavior and metadata-only audit attribution. An active revoked,
-expired, missing, or unreadable user credential is visible but unusable and blocks
-fallback. A disabled row deliberately permits fallback. Platform responses set
-`X-NyxID-Credential-Source`; MCP results carry the same source in structured metadata.
+A scoped agent key's out-of-scope connection is **denied**, not routed to the platform
+credential. Falling back would mean narrowing a key's scope increased its ability to
+spend the owner's credits, turning deny-by-scope into pay-by-scope. Execution returns
+`PlatformOperationOwnConnectionOutOfScope` (11805, HTTP 409); discovery reports the row
+as the owner's own connection with reason `out_of_scope`, because reporting it as the
+platform source would promise a billed call that will in fact be refused.
+
+An active revoked, expired, missing, or unreadable user credential is visible but
+unusable and blocks fallback. Platform responses set `X-NyxID-Credential-Source`; MCP
+results carry the same source in structured metadata.
+
+An org-owned agent key authenticates as the org, so the org is both the resolution
+identity and the payer. A member is never billed personally for work done under an org
+key.
 
 | Door | Own connection | Platform fallback |
 | --- | --- | --- |

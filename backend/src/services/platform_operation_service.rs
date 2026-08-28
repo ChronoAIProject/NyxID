@@ -236,7 +236,6 @@ pub enum PlatformCredentialResolution {
     Platform {
         vendor: Box<DownstreamService>,
         disabled_connection: Option<OwnConnectionMetadata>,
-        own_connection_out_of_scope: bool,
     },
     OwnConnection {
         resolution: Box<proxy_service::UserServiceResolution>,
@@ -246,6 +245,14 @@ pub enum PlatformCredentialResolution {
         connection: OwnConnectionMetadata,
     },
     ApprovalRequired {
+        connection: OwnConnectionMetadata,
+    },
+    /// The owner has a usable connection but this API key is not scoped to it.
+    ///
+    /// This fails closed rather than falling back to the platform credential.
+    /// Falling back would mean narrowing a key's scope *increased* its ability
+    /// to spend the owner's credits, turning deny-by-scope into pay-by-scope.
+    OutOfScope {
         connection: OwnConnectionMetadata,
     },
     Unusable {
@@ -1184,7 +1191,6 @@ pub async fn resolve_operation_credential_source(
         return Ok(PlatformCredentialResolution::Platform {
             vendor: Box::new(vendor),
             disabled_connection: None,
-            own_connection_out_of_scope: false,
         });
     };
 
@@ -1213,19 +1219,13 @@ pub async fn resolve_operation_credential_source(
         return Ok(PlatformCredentialResolution::Platform {
             vendor: Box::new(vendor),
             disabled_connection,
-            own_connection_out_of_scope: false,
         });
     };
 
-    if !caller.allow_all_services && !caller.allowed_service_ids.contains(&active_candidate.id) {
-        let vendor = resolve_platform_vendor_from_context(db, context, operation).await?;
-        return Ok(PlatformCredentialResolution::Platform {
-            vendor: Box::new(vendor),
-            disabled_connection: None,
-            own_connection_out_of_scope: true,
-        });
-    }
     let connection = connection_metadata(db, &active_candidate).await?;
+    if !caller.allow_all_services && !caller.allowed_service_ids.contains(&active_candidate.id) {
+        return Ok(PlatformCredentialResolution::OutOfScope { connection });
+    }
 
     let resolved = match mode {
         CredentialResolutionMode::Execute {
@@ -1283,19 +1283,13 @@ pub async fn resolve_operation_credential_source(
             .allowed_service_ids
             .contains(&resolution.user_service_id)
     {
-        let vendor = resolve_platform_vendor_from_context(db, context, operation).await?;
-        return Ok(PlatformCredentialResolution::Platform {
-            vendor: Box::new(vendor),
-            disabled_connection: None,
-            own_connection_out_of_scope: true,
-        });
+        return Ok(PlatformCredentialResolution::OutOfScope { connection });
     }
     if resolution.master_credential || resolution.api_key_id.is_none() {
         let vendor = resolve_platform_vendor_from_context(db, context, operation).await?;
         return Ok(PlatformCredentialResolution::Platform {
             vendor: Box::new(vendor),
             disabled_connection: None,
-            own_connection_out_of_scope: false,
         });
     }
     if resolution
@@ -2426,12 +2420,11 @@ mod tests {
         )
         .await
         .expect("classify resolved org connection");
+        // A key not scoped to the connection is denied, not silently moved onto
+        // the paid platform credential.
         assert!(matches!(
             source,
-            PlatformCredentialResolution::Platform {
-                own_connection_out_of_scope: true,
-                ..
-            }
+            PlatformCredentialResolution::OutOfScope { .. }
         ));
     }
 
@@ -2513,10 +2506,7 @@ mod tests {
             .expect("resolve operation from shared inventory");
             assert!(matches!(
                 source,
-                PlatformCredentialResolution::Platform {
-                    own_connection_out_of_scope: false,
-                    ..
-                }
+                PlatformCredentialResolution::Platform { .. }
             ));
         }
     }
