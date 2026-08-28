@@ -24,8 +24,10 @@ use crate::handlers::platform_ops::{
     OwnConnectionDiscoveryResponse, platform_operation_discovery_response,
 };
 use crate::models::platform_operation::{
-    CallAndSayConfig, FlightSearchConfig, OperationBilling, OperationBillingComponent,
-    PlatformOperation, PlatformOperationConfig, PlatformOperationName, SpeakConfig,
+    CallAndSayConfig, CallAndSayOperationConfig, ConstrainedConfig, FlightSearchConfig,
+    FlightSearchOperationConfig, OperationBilling, OperationBillingComponent, OperationLimits,
+    PerRequestCaps, PlatformOperation, PlatformOperationConfig, PlatformOperationKind,
+    PlatformOperationName, PlatformOperationRow, SpeakConfig, SpeakOperationConfig,
 };
 use crate::models::platform_service_preference::CredentialIntent;
 use crate::models::service_billing::{BillingMetric, PricingSyncStatus};
@@ -53,12 +55,77 @@ fn operation(
         op,
         enabled: true,
         vendor_service_slug:
-            crate::services::platform_operation_service::default_vendor_service_slug(op).to_string(),
+            crate::services::platform_operation_service::catalog_contract_for_operation(op)
+                .catalog_service_slug
+                .to_string(),
         config,
         billing,
-        billing_cleanup_metric_code: None,
-        updated_at: chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("fixed timestamp"),
+    }
+}
+
+fn admin_row(index: usize, operation: &PlatformOperation) -> PlatformOperationRow {
+    let (kind, limits) = match &operation.config {
+        PlatformOperationConfig::Speak(config) => (
+            PlatformOperationKind::Constrained {
+                op: PlatformOperationName::Speak,
+                config: ConstrainedConfig::Speak(SpeakOperationConfig {
+                    allowed_voice_ids: config.allowed_voice_ids.clone(),
+                    model_id: config.model_id.clone(),
+                    max_calls_per_user_per_day: config.max_calls_per_user_per_day,
+                }),
+            },
+            OperationLimits {
+                per_request: PerRequestCaps::Speak {
+                    max_chars: config.max_chars,
+                },
+                per_user_per_day: Some(config.max_calls_per_user_per_day),
+            },
+        ),
+        PlatformOperationConfig::CallAndSay(config) => (
+            PlatformOperationKind::Constrained {
+                op: PlatformOperationName::CallAndSay,
+                config: ConstrainedConfig::CallAndSay(CallAndSayOperationConfig {
+                    allowed_destination_prefixes: config.allowed_destination_prefixes.clone(),
+                    voice: config.voice.clone(),
+                    account_sid: config.account_sid.clone(),
+                    call_from: config.call_from.clone(),
+                }),
+            },
+            OperationLimits {
+                per_request: PerRequestCaps::CallAndSay {
+                    max_message_chars: config.max_message_chars,
+                    max_duration_seconds: config.max_duration_seconds,
+                },
+                per_user_per_day: Some(config.max_calls_per_user_per_day),
+            },
+        ),
+        PlatformOperationConfig::FlightSearch(config) => (
+            PlatformOperationKind::Constrained {
+                op: PlatformOperationName::FlightSearch,
+                config: ConstrainedConfig::FlightSearch(FlightSearchOperationConfig {}),
+            },
+            OperationLimits {
+                per_request: PerRequestCaps::FlightSearch {
+                    max_offers: config.max_offers_cap,
+                },
+                per_user_per_day: Some(config.max_searches_per_user_per_day),
+            },
+        ),
+    };
+    let fixed = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("fixed timestamp");
+    PlatformOperationRow {
+        id: format!("00000000-0000-4000-8000-{index:012}"),
+        catalog_service_id: operation.catalog_service_id.clone(),
+        kind_key: crate::models::platform_operation::constrained_kind_key(operation.op),
+        enabled: operation.enabled,
+        kind,
+        limits,
+        billing: operation.billing.clone(),
+        billing_cleanup_metric_codes: Vec::new(),
+        created_by: "admin-user-id".to_string(),
         updated_by: "admin-user-id".to_string(),
+        created_at: fixed,
+        updated_at: fixed,
     }
 }
 
@@ -143,8 +210,9 @@ fn contract_document() -> serde_json::Value {
     let admin = crate::handlers::admin_platform_ops::AdminPlatformOperationListResponse {
         operations: operations
             .iter()
-            .map(|operation| {
-                platform_operation_response(operation.op, Some(operation.clone()), None)
+            .enumerate()
+            .map(|(index, operation)| {
+                platform_operation_response(admin_row(index, operation), None)
             })
             .collect(),
     };

@@ -26,6 +26,7 @@ vi.mock("@/lib/api-client", () => ({
 }));
 
 const speakOperation = {
+  operation_id: "00000000-0000-4000-8000-000000000001",
   op: "speak" as const,
   enabled: false,
   vendor_service_slug: "platform-elevenlabs",
@@ -36,10 +37,38 @@ const speakOperation = {
     model_id: "eleven_multilingual_v2",
     max_calls_per_user_per_day: 50,
   },
-  updated_at: null,
-  updated_by: null,
+  updated_at: "2026-08-25T09:00:00Z",
+  updated_by: "admin-1",
   vendor_service_id: "platform-elevenlabs-id",
   pricing: perCallPricing("0.25"),
+};
+
+const speakAdminOperation = {
+  operation_id: speakOperation.operation_id,
+  catalog_service_id: "platform-elevenlabs-id",
+  provider_slug: "platform-elevenlabs",
+  provider_name: "ElevenLabs",
+  operation_name: "Speak",
+  enabled: false,
+  kind: {
+    type: "constrained",
+    op: "speak",
+    config: {
+      type: "speak",
+      allowed_voice_ids: ["voice-a"],
+      model_id: "eleven_multilingual_v2",
+      max_calls_per_user_per_day: 50,
+    },
+  },
+  limits: {
+    per_request: { type: "speak", max_chars: 1_000 },
+    per_user_per_day: 50,
+  },
+  pricing: speakOperation.pricing,
+  created_at: "2026-08-25T09:00:00Z",
+  created_by: "admin-1",
+  updated_at: "2026-08-25T09:00:00Z",
+  updated_by: "admin-1",
 };
 
 function createHarness() {
@@ -61,7 +90,7 @@ describe("platform operation hooks", () => {
   });
 
   it("loads and parses the admin operation list", async () => {
-    mockGet.mockResolvedValue({ operations: [speakOperation] });
+    mockGet.mockResolvedValue({ operations: [speakAdminOperation] });
     const { Wrapper } = createHarness();
     const { result } = renderHook(() => usePlatformOperations(), {
       wrapper: Wrapper,
@@ -127,7 +156,16 @@ describe("platform operation hooks", () => {
       updated_at: "2026-08-25T10:00:00Z",
       updated_by: "admin-1",
     };
-    mockPut.mockResolvedValue(updated);
+    mockPut.mockResolvedValue({
+      ...speakAdminOperation,
+      enabled: true,
+      limits: {
+        ...speakAdminOperation.limits,
+        per_request: { type: "speak", max_chars: 2_000 },
+      },
+      updated_at: updated.updated_at,
+      updated_by: updated.updated_by,
+    });
     const { queryClient, Wrapper } = createHarness();
     queryClient.setQueryData<PlatformOperationList>(
       PLATFORM_OPERATION_QUERY_KEY,
@@ -148,11 +186,32 @@ describe("platform operation hooks", () => {
       });
     });
 
-    expect(mockPut).toHaveBeenCalledWith("/admin/platform-ops/speak", {
-      enabled: true,
-      vendor_service_slug: "platform-elevenlabs",
-      config: { ...speakOperation.config, max_chars: 2_000 },
-    });
+    expect(mockPut).toHaveBeenCalledWith(
+      `/admin/platform-ops/${speakOperation.operation_id}`,
+      {
+        enabled: true,
+        kind: {
+          kind: "constrained",
+          op: "speak",
+          config: {
+            type: "speak",
+            allowed_voice_ids: ["voice-a"],
+            model_id: "eleven_multilingual_v2",
+            max_calls_per_user_per_day: 50,
+          },
+        },
+        limits: {
+          per_request: { type: "speak", max_chars: 2_000 },
+          per_user_per_day: 50,
+        },
+        billing: {
+          metric: "requests",
+          price_per_unit: "0.25",
+          secondary: null,
+          base_fee_per_call: null,
+        },
+      },
+    );
     expect(
       queryClient.getQueryData<PlatformOperationList>(
         PLATFORM_OPERATION_QUERY_KEY,

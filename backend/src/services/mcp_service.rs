@@ -6218,9 +6218,6 @@ mod tests {
             billing: crate::services::platform_operation_service::default_operation_billing(
                 crate::models::platform_operation::PlatformOperationName::Speak,
             ),
-            billing_cleanup_metric_code: None,
-            updated_at: chrono::Utc::now(),
-            updated_by: "admin-user".to_string(),
         };
         let disabled_operation = PlatformOperation {
             id: "platform-call-and-say".to_string(),
@@ -6242,9 +6239,6 @@ mod tests {
             billing: crate::services::platform_operation_service::default_operation_billing(
                 crate::models::platform_operation::PlatformOperationName::CallAndSay,
             ),
-            billing_cleanup_metric_code: None,
-            updated_at: chrono::Utc::now(),
-            updated_by: "admin-user".to_string(),
         };
         let flight_operation = PlatformOperation {
             id: "platform-flight-search".to_string(),
@@ -6261,9 +6255,6 @@ mod tests {
             billing: crate::services::platform_operation_service::default_operation_billing(
                 crate::models::platform_operation::PlatformOperationName::FlightSearch,
             ),
-            billing_cleanup_metric_code: None,
-            updated_at: chrono::Utc::now(),
-            updated_by: "admin-user".to_string(),
         };
 
         let tools = generate_tool_definitions(

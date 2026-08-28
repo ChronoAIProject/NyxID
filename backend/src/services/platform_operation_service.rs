@@ -23,6 +23,7 @@ use crate::models::platform_operation::{
     default_call_max_message_chars, default_call_max_per_user_per_day, default_call_voice,
     default_flight_search_max_offers_cap, default_flight_search_max_per_user_per_day,
     default_speak_max_chars, default_speak_max_per_user_per_day, default_speak_model_id,
+    endpoint_kind_key,
 };
 use crate::models::platform_service_preference::{CredentialIntent, PlatformServicePreference};
 use crate::models::service_approval_config::ApprovalEffect;
@@ -341,17 +342,6 @@ pub fn operation_name(op: PlatformOperationName) -> &'static str {
         PlatformOperationName::Speak => "speak",
         PlatformOperationName::CallAndSay => "call_and_say",
         PlatformOperationName::FlightSearch => "flight_search",
-    }
-}
-
-pub fn parse_operation_name(value: &str) -> AppResult<PlatformOperationName> {
-    match value {
-        "speak" => Ok(PlatformOperationName::Speak),
-        "call_and_say" => Ok(PlatformOperationName::CallAndSay),
-        "flight_search" => Ok(PlatformOperationName::FlightSearch),
-        _ => Err(AppError::NotFound(
-            "Platform operation not found".to_string(),
-        )),
     }
 }
 
@@ -1024,18 +1014,6 @@ pub async fn load_enabled_operation(
         .ok_or_else(|| AppError::NotFound("Platform operation not found".to_string()))
 }
 
-pub async fn list_configured_operations(
-    db: &mongodb::Database,
-) -> AppResult<Vec<PlatformOperation>> {
-    let mut operations = Vec::new();
-    for op in PLATFORM_OPERATION_NAMES {
-        if let Some(operation) = load_constrained_operation(db, op, false).await? {
-            operations.push(operation);
-        }
-    }
-    Ok(operations)
-}
-
 pub async fn list_enabled_operations(db: &mongodb::Database) -> AppResult<Vec<PlatformOperation>> {
     let mut operations = Vec::new();
     for op in PLATFORM_OPERATION_NAMES {
@@ -1099,7 +1077,6 @@ fn project_constrained_row(
 ) -> AppResult<PlatformOperation> {
     let catalog_service_id = row.catalog_service_id.clone();
     let billing = row.billing.clone();
-    let billing_cleanup_metric_code = row.billing_cleanup_metric_code.clone();
     let (op, config) = match (row.kind, row.limits.per_request) {
         (
             PlatformOperationKind::Constrained {
@@ -1170,9 +1147,6 @@ fn project_constrained_row(
         vendor_service_slug: catalog_service_slug.to_string(),
         config,
         billing,
-        billing_cleanup_metric_code,
-        updated_at: row.updated_at,
-        updated_by: row.created_by,
     })
 }
 
@@ -1811,23 +1785,24 @@ pub async fn upsert_operation_with_billing(
                 .map(|component| component.lago_metric_code.as_str()),
         )
         .collect::<std::collections::HashSet<_>>();
-    let cleanup_metric_code = current.as_ref().and_then(|row| {
-        std::iter::once(row.billing.lago_metric_code.as_str())
-            .chain(
-                row.billing
-                    .secondary
-                    .as_ref()
-                    .map(|component| component.lago_metric_code.as_str()),
-            )
-            .find(|code| !code.is_empty() && !active_metric_codes.contains(code))
-            .map(str::to_string)
-            .or_else(|| {
-                row.billing_cleanup_metric_code
-                    .as_ref()
-                    .filter(|code| !active_metric_codes.contains(code.as_str()))
-                    .cloned()
-            })
-    });
+    let mut cleanup_metric_codes = current
+        .as_ref()
+        .into_iter()
+        .flat_map(|row| {
+            std::iter::once(row.billing.lago_metric_code.as_str())
+                .chain(
+                    row.billing
+                        .secondary
+                        .as_ref()
+                        .map(|component| component.lago_metric_code.as_str()),
+                )
+                .chain(row.billing_cleanup_metric_codes.iter().map(String::as_str))
+        })
+        .filter(|code| !code.is_empty() && !active_metric_codes.contains(code))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    cleanup_metric_codes.sort_unstable();
+    cleanup_metric_codes.dedup();
     let kind = bson::to_bson(&kind).map_err(|error| {
         AppError::Internal(format!(
             "Failed to serialize platform operation kind: {error}"
@@ -1857,7 +1832,8 @@ pub async fn upsert_operation_with_billing(
                     "kind": kind,
                     "limits": limits,
                     "billing": billing,
-                    "billing_cleanup_metric_code": cleanup_metric_code,
+                    "billing_cleanup_metric_codes": cleanup_metric_codes,
+                    "updated_by": updated_by,
                     "updated_at": bson::DateTime::from_chrono(updated_at),
                 },
                 "$setOnInsert": {
@@ -1890,10 +1866,274 @@ pub async fn load_operation_row(
     db: &mongodb::Database,
     operation_id: &str,
 ) -> AppResult<PlatformOperationRow> {
+    let operation_id = canonical_operation_id(operation_id)?;
     db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
-        .find_one(doc! { "_id": operation_id })
+        .find_one(doc! { "_id": &operation_id })
         .await?
         .ok_or_else(|| AppError::NotFound("Platform operation not found".to_string()))
+}
+
+pub async fn list_operation_rows(db: &mongodb::Database) -> AppResult<Vec<PlatformOperationRow>> {
+    db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .find(doc! {})
+        .sort(doc! { "catalog_service_id": 1, "kind_key": 1, "_id": 1 })
+        .await?
+        .try_collect()
+        .await
+        .map_err(AppError::DatabaseError)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn create_operation_row(
+    db: &mongodb::Database,
+    catalog_service_id: &str,
+    enabled: bool,
+    kind: PlatformOperationKind,
+    limits: OperationLimits,
+    billing: OperationBilling,
+    actor_id: &str,
+) -> AppResult<PlatformOperationRow> {
+    let catalog_service =
+        platform_credential_service::validate_catalog_provider(db, catalog_service_id).await?;
+    ensure_operation_can_be_enabled(db, catalog_service_id, enabled).await?;
+    let now = Utc::now();
+    let mut row = PlatformOperationRow {
+        id: uuid::Uuid::new_v4().to_string(),
+        catalog_service_id: catalog_service_id.to_string(),
+        kind_key: String::new(),
+        enabled,
+        kind,
+        limits,
+        billing,
+        billing_cleanup_metric_codes: Vec::new(),
+        created_by: actor_id.to_string(),
+        updated_by: actor_id.to_string(),
+        created_at: now,
+        updated_at: now,
+    };
+    normalize_and_validate_operation_row(&mut row, &catalog_service.slug, None)?;
+    match db
+        .collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .insert_one(&row)
+        .await
+    {
+        Ok(_) => Ok(row),
+        Err(error) if is_duplicate_key_error(&error) => Err(AppError::Conflict(
+            "A platform operation with this provider and operation identity already exists."
+                .to_string(),
+        )),
+        Err(error) => Err(AppError::DatabaseError(error)),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn update_operation_row(
+    db: &mongodb::Database,
+    operation_id: &str,
+    enabled: bool,
+    kind: PlatformOperationKind,
+    limits: OperationLimits,
+    billing: OperationBilling,
+    actor_id: &str,
+) -> AppResult<PlatformOperationRow> {
+    let operation_id = canonical_operation_id(operation_id)?;
+    let current = load_operation_row(db, &operation_id).await?;
+    let catalog_service =
+        platform_credential_service::validate_catalog_provider(db, &current.catalog_service_id)
+            .await?;
+    ensure_operation_can_be_enabled(db, &current.catalog_service_id, enabled).await?;
+    let mut replacement = current.clone();
+    replacement.enabled = enabled;
+    replacement.kind = kind;
+    replacement.limits = limits;
+    replacement.billing = billing;
+    replacement.updated_by = actor_id.to_string();
+    replacement.updated_at = Utc::now();
+    normalize_and_validate_operation_row(&mut replacement, &catalog_service.slug, Some(&current))?;
+    match db
+        .collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .replace_one(
+            doc! {
+                "_id": &operation_id,
+                "updated_at": bson::DateTime::from_chrono(current.updated_at),
+            },
+            &replacement,
+        )
+        .await
+    {
+        Ok(result) if result.matched_count == 1 => Ok(replacement),
+        Ok(_) => Err(AppError::Conflict(
+            "The platform operation changed while it was being updated.".to_string(),
+        )),
+        Err(error) if is_duplicate_key_error(&error) => Err(AppError::Conflict(
+            "A platform operation with this provider and operation identity already exists."
+                .to_string(),
+        )),
+        Err(error) => Err(AppError::DatabaseError(error)),
+    }
+}
+
+pub async fn delete_operation_row(
+    db: &mongodb::Database,
+    operation_id: &str,
+) -> AppResult<PlatformOperationRow> {
+    let operation_id = canonical_operation_id(operation_id)?;
+    db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .find_one_and_delete(doc! { "_id": &operation_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Platform operation not found".to_string()))
+}
+
+pub async fn prepare_operation_deletion(
+    db: &mongodb::Database,
+    operation_id: &str,
+    actor_id: &str,
+) -> AppResult<PlatformOperationRow> {
+    let operation_id = canonical_operation_id(operation_id)?;
+    db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .find_one_and_update(
+            doc! { "_id": &operation_id },
+            doc! {
+                "$set": {
+                    "enabled": false,
+                    "updated_by": actor_id,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                },
+            },
+        )
+        .return_document(ReturnDocument::After)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Platform operation not found".to_string()))
+}
+
+fn canonical_operation_id(operation_id: &str) -> AppResult<String> {
+    uuid::Uuid::parse_str(operation_id)
+        .map(|value| value.to_string())
+        .map_err(|_| AppError::NotFound("Platform operation not found".to_string()))
+}
+
+async fn ensure_operation_can_be_enabled(
+    db: &mongodb::Database,
+    catalog_service_id: &str,
+    enabled: bool,
+) -> AppResult<()> {
+    if enabled
+        && !platform_credential_service::credential_is_configured(db, catalog_service_id).await?
+    {
+        return Err(AppError::PlatformVendorProvisioningInvalid(
+            "Promote the provider, accept its vendor terms, and configure its platform credential before enabling an operation."
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn normalize_and_validate_operation_row(
+    row: &mut PlatformOperationRow,
+    catalog_slug: &str,
+    current: Option<&PlatformOperationRow>,
+) -> AppResult<()> {
+    let Some(per_user_per_day) = row.limits.per_user_per_day.filter(|cap| *cap > 0) else {
+        return Err(AppError::ValidationError(
+            "Every platform operation must have a positive per-user daily quota.".to_string(),
+        ));
+    };
+    match (&mut row.kind, &row.limits.per_request) {
+        (
+            PlatformOperationKind::Endpoint {
+                method,
+                path_template,
+                name,
+                description,
+            },
+            PerRequestCaps::Endpoint,
+        ) => {
+            let normalized_name = name.trim();
+            if normalized_name.is_empty() || normalized_name.len() > 160 {
+                return Err(AppError::ValidationError(
+                    "Endpoint operation names must contain between 1 and 160 bytes.".to_string(),
+                ));
+            }
+            *name = normalized_name.to_string();
+            *description = description
+                .take()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            if description
+                .as_ref()
+                .is_some_and(|value| value.len() > 4_096)
+            {
+                return Err(AppError::ValidationError(
+                    "Endpoint operation descriptions must not exceed 4096 bytes.".to_string(),
+                ));
+            }
+            let (normalized_method, normalized_path) =
+                platform_credential_service::normalize_endpoint_definition(
+                    catalog_slug,
+                    method,
+                    path_template,
+                )?;
+            *method = normalized_method;
+            *path_template = normalized_path;
+            row.kind_key = endpoint_kind_key(method, path_template);
+        }
+        (PlatformOperationKind::Constrained { op, config }, _) => {
+            row.kind_key = constrained_kind_key(*op);
+            if let ConstrainedConfig::Speak(config) = config
+                && config.max_calls_per_user_per_day != per_user_per_day
+            {
+                return Err(AppError::ValidationError(
+                    "Speak's configured daily limit must match limits.per_user_per_day."
+                        .to_string(),
+                ));
+            }
+            project_constrained_row(row.clone(), catalog_slug)?;
+        }
+        _ => {
+            return Err(AppError::ValidationError(
+                "The per-request limits do not match the platform operation kind.".to_string(),
+            ));
+        }
+    }
+    let old_codes = current
+        .into_iter()
+        .flat_map(operation_metric_codes)
+        .collect::<HashSet<_>>();
+    crate::services::billing::pricing::normalize_operation_billing(
+        catalog_slug,
+        &row.kind_key,
+        &row.kind,
+        current.map(|value| &value.billing),
+        &mut row.billing,
+    )?;
+    let active_codes = operation_metric_codes(row).collect::<HashSet<_>>();
+    let mut cleanup_metric_codes = old_codes
+        .into_iter()
+        .filter(|code| !code.is_empty() && !active_codes.contains(code))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if let Some(current) = current {
+        cleanup_metric_codes.extend(
+            current
+                .billing_cleanup_metric_codes
+                .iter()
+                .filter(|code| !active_codes.contains(code.as_str()))
+                .cloned(),
+        );
+    }
+    cleanup_metric_codes.sort_unstable();
+    cleanup_metric_codes.dedup();
+    row.billing_cleanup_metric_codes = cleanup_metric_codes;
+    Ok(())
+}
+
+fn operation_metric_codes(row: &PlatformOperationRow) -> impl Iterator<Item = &str> {
+    std::iter::once(row.billing.lago_metric_code.as_str()).chain(
+        row.billing
+            .secondary
+            .as_ref()
+            .map(|component| component.lago_metric_code.as_str()),
+    )
 }
 
 fn split_constrained_config(
@@ -2127,14 +2367,14 @@ pub async fn read_vendor_json(
 
 pub async fn reserve_daily_operation(
     db: &mongodb::Database,
-    op: PlatformOperationName,
+    operation_id: &str,
     user_id: &str,
     yyyymmdd: &str,
     cap: u32,
 ) -> AppResult<()> {
     let collection = db.collection::<PlatformOpUsage>(PLATFORM_OP_USAGE);
     let filter = doc! {
-        "op": operation_name(op),
+        "operation_id": operation_id,
         "user_id": user_id,
         "yyyymmdd": yyyymmdd,
         "count": { "$lt": i64::from(cap) },
@@ -2142,7 +2382,7 @@ pub async fn reserve_daily_operation(
     let update = doc! {
         "$setOnInsert": {
             "_id": uuid::Uuid::new_v4().to_string(),
-            "op": operation_name(op),
+            "operation_id": operation_id,
             "user_id": user_id,
             "yyyymmdd": yyyymmdd,
         },
@@ -2164,7 +2404,7 @@ pub async fn reserve_daily_operation(
 
 pub async fn release_daily_operation(
     db: &mongodb::Database,
-    op: PlatformOperationName,
+    operation_id: &str,
     user_id: &str,
     yyyymmdd: &str,
 ) -> AppResult<()> {
@@ -2172,7 +2412,7 @@ pub async fn release_daily_operation(
     collection
         .update_one(
             doc! {
-                "op": operation_name(op),
+                "operation_id": operation_id,
                 "user_id": user_id,
                 "yyyymmdd": yyyymmdd,
                 "count": { "$gt": 0_i64 },
@@ -2185,7 +2425,7 @@ pub async fn release_daily_operation(
         .await?;
     collection
         .delete_one(doc! {
-            "op": operation_name(op),
+            "operation_id": operation_id,
             "user_id": user_id,
             "yyyymmdd": yyyymmdd,
             "count": { "$lte": 0_i64 },
@@ -2290,6 +2530,38 @@ mod tests {
         message
     }
 
+    async fn ensure_operation_identity_index(db: &mongodb::Database) {
+        db.collection::<mongodb::bson::Document>(PLATFORM_OPERATIONS)
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! { "catalog_service_id": 1, "kind_key": 1 })
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .unique(true)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .expect("create platform operation identity index");
+    }
+
+    async fn ensure_operation_usage_index(db: &mongodb::Database) {
+        db.collection::<mongodb::bson::Document>(PLATFORM_OP_USAGE)
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! { "operation_id": 1, "user_id": 1, "yyyymmdd": 1 })
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .unique(true)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .expect("create platform operation usage index");
+    }
+
     #[test]
     fn platform_fallback_accepts_credential_read_errors_but_not_generic_internal_failures() {
         assert!(own_error_allows_platform_fallback(&AppError::Internal(
@@ -2372,9 +2644,6 @@ mod tests {
             vendor_service_slug: SPEAK_VENDOR_SLUG.to_string(),
             config: PlatformOperationConfig::Speak(speak_config()),
             billing: default_operation_billing(PlatformOperationName::Speak),
-            billing_cleanup_metric_code: None,
-            updated_at: Utc::now(),
-            updated_by: "admin".to_string(),
         };
         let descriptor = crate::services::operation_descriptor::build_http_descriptor(
             "POST",
@@ -2773,9 +3042,6 @@ mod tests {
             vendor_service_slug: SPEAK_VENDOR_SLUG.to_string(),
             config: PlatformOperationConfig::Speak(speak_config()),
             billing: default_operation_billing(PlatformOperationName::Speak),
-            billing_cleanup_metric_code: None,
-            updated_at: Utc::now(),
-            updated_by: "admin".to_string(),
         };
         let resolved = proxy_service::read_proxy_authority_snapshot_from_user_service(
             &db,
@@ -2908,9 +3174,6 @@ mod tests {
                 vendor_service_slug: default_vendor_service_slug(op).to_string(),
                 config: default_operation_config(op),
                 billing: default_operation_billing(op),
-                billing_cleanup_metric_code: None,
-                updated_at: Utc::now(),
-                updated_by: "admin".to_string(),
             })
             .collect::<Vec<_>>();
         let catalog_services = PLATFORM_OPERATION_NAMES.map(valid_catalog_service);
@@ -3550,6 +3813,160 @@ mod tests {
                 "create_order": true,
             }))
             .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn endpoint_crud_uses_uuid_identity_and_normalizes_every_write() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_endpoint_uuid_crud").await
+        else {
+            return;
+        };
+        ensure_operation_identity_index(&db).await;
+        let service = valid_speak_catalog_service();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert eligible endpoint provider");
+        let split_billing = OperationBilling {
+            metric: BillingMetric::InputTokens,
+            price_per_unit: "0.01".to_string(),
+            secondary: Some(
+                crate::models::platform_operation::OperationBillingComponent {
+                    metric: BillingMetric::OutputTokens,
+                    price_per_unit: "0.03".to_string(),
+                    lago_metric_code: String::new(),
+                },
+            ),
+            base_fee_per_call: Some("0.5".to_string()),
+            lago_metric_code: String::new(),
+            sync_status: crate::models::service_billing::PricingSyncStatus::Synced,
+            sync_error: Some("stale".to_string()),
+        };
+        let row = create_operation_row(
+            &db,
+            &service.id,
+            false,
+            PlatformOperationKind::Endpoint {
+                method: " get ".to_string(),
+                path_template: "/v1/models/{model_id}".to_string(),
+                name: "  Get model  ".to_string(),
+                description: Some("  Model metadata  ".to_string()),
+            },
+            OperationLimits {
+                per_request: PerRequestCaps::Endpoint,
+                per_user_per_day: Some(25),
+            },
+            split_billing.clone(),
+            "creator",
+        )
+        .await
+        .expect("create endpoint operation");
+
+        uuid::Uuid::parse_str(&row.id).expect("operation ID is a UUID");
+        assert_eq!(row.kind_key, "endpoint:GET /v1/models/{model_id}");
+        assert_eq!(row.updated_by, "creator");
+        assert_eq!(
+            row.billing
+                .secondary
+                .as_ref()
+                .map(|component| component.metric),
+            Some(BillingMetric::OutputTokens)
+        );
+        assert_ne!(
+            row.billing.lago_metric_code,
+            row.billing
+                .secondary
+                .as_ref()
+                .expect("secondary component")
+                .lago_metric_code
+        );
+        let duplicate = create_operation_row(
+            &db,
+            &service.id,
+            false,
+            row.kind.clone(),
+            row.limits.clone(),
+            split_billing,
+            "creator",
+        )
+        .await
+        .expect_err("provider and canonical endpoint identity are unique");
+        assert!(matches!(duplicate, AppError::Conflict(_)));
+
+        let updated = update_operation_row(
+            &db,
+            &row.id,
+            false,
+            PlatformOperationKind::Endpoint {
+                method: "HEAD".to_string(),
+                path_template: "/v1/models/{model_id}".to_string(),
+                name: "Inspect model".to_string(),
+                description: None,
+            },
+            OperationLimits {
+                per_request: PerRequestCaps::Endpoint,
+                per_user_per_day: Some(10),
+            },
+            OperationBilling::free(BillingMetric::Characters),
+            "editor",
+        )
+        .await
+        .expect("update endpoint by UUID");
+        assert_eq!(updated.id, row.id);
+        assert_eq!(updated.kind_key, "endpoint:HEAD /v1/models/{model_id}");
+        assert_eq!(updated.updated_by, "editor");
+        assert_eq!(updated.billing.metric, BillingMetric::Characters);
+        assert_eq!(updated.billing_cleanup_metric_codes.len(), 2);
+
+        let prepared = prepare_operation_deletion(&db, &row.id, "deleter")
+            .await
+            .expect("disable before delete");
+        assert!(!prepared.enabled);
+        assert_eq!(prepared.updated_by, "deleter");
+        let deleted = delete_operation_row(&db, &row.id)
+            .await
+            .expect("delete operation by UUID");
+        assert_eq!(deleted.id, row.id);
+        assert!(matches!(
+            load_operation_row(&db, &row.id).await,
+            Err(AppError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn daily_quota_isolated_by_operation_id_not_constrained_name() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("platform_quota_operation_id").await
+        else {
+            return;
+        };
+        ensure_operation_usage_index(&db).await;
+        let first = uuid::Uuid::new_v4().to_string();
+        let second = uuid::Uuid::new_v4().to_string();
+        reserve_daily_operation(&db, &first, "owner", "20260828", 1)
+            .await
+            .expect("reserve first operation");
+        assert!(matches!(
+            reserve_daily_operation(&db, &first, "owner", "20260828", 1).await,
+            Err(AppError::RateLimited)
+        ));
+        reserve_daily_operation(&db, &second, "owner", "20260828", 1)
+            .await
+            .expect("a different operation ID has an independent quota");
+        release_daily_operation(&db, &first, "owner", "20260828")
+            .await
+            .expect("release first operation");
+        reserve_daily_operation(&db, &first, "owner", "20260828", 1)
+            .await
+            .expect("released UUID quota can be reserved again");
+        assert_eq!(
+            db.collection::<PlatformOpUsage>(PLATFORM_OP_USAGE)
+                .count_documents(doc! { "user_id": "owner", "yyyymmdd": "20260828" })
+                .await
+                .expect("count per-operation rows"),
+            2
         );
     }
 }

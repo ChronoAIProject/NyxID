@@ -965,7 +965,7 @@ async fn forward_metered_operation(
     if is_platform && let Some(limit) = &daily_limit {
         if let Err(error) = platform_operation_service::reserve_daily_operation(
             &state.db,
-            op,
+            &operation.id,
             &execution_owner_id,
             &limit.yyyymmdd,
             limit.cap,
@@ -989,6 +989,7 @@ async fn forward_metered_operation(
                 release_platform_limits(
                     state,
                     op,
+                    &operation.id,
                     &platform.billing_owner_id,
                     daily_limit.as_ref(),
                     platform_spend_reservation.as_ref(),
@@ -1028,6 +1029,7 @@ async fn forward_metered_operation(
                 release_platform_limits(
                     state,
                     op,
+                    &operation.id,
                     &platform.billing_owner_id,
                     daily_limit.as_ref(),
                     platform_spend_reservation.as_ref(),
@@ -1063,6 +1065,7 @@ async fn forward_metered_operation(
                         &metered,
                         "credential_unavailable",
                         op,
+                        &operation.id,
                         &execution_owner_id,
                         daily_limit.as_ref(),
                         platform_spend_reservation.as_ref(),
@@ -1081,6 +1084,7 @@ async fn forward_metered_operation(
             &metered,
             "mark_forwarded_failed",
             op,
+            &operation.id,
             &execution_owner_id,
             daily_limit.as_ref(),
             platform_spend_reservation.as_ref(),
@@ -1110,6 +1114,7 @@ async fn forward_metered_operation(
                 &metered,
                 "vendor_request_failed",
                 op,
+                &operation.id,
                 &execution_owner_id,
                 daily_limit.as_ref(),
                 platform_spend_reservation.as_ref(),
@@ -1127,6 +1132,7 @@ async fn forward_metered_operation(
                 &metered,
                 "vendor_non_success",
                 op,
+                &operation.id,
                 &execution_owner_id,
                 daily_limit.as_ref(),
                 platform_spend_reservation.as_ref(),
@@ -1182,6 +1188,7 @@ async fn fail_platform_attempt(
     metered: &crate::services::billing::MeteredProxyContext,
     reason: &str,
     op: crate::models::platform_operation::PlatformOperationName,
+    operation_id: &str,
     owner_id: &str,
     daily_limit: Option<&DailyLimit>,
     spend_reservation: Option<
@@ -1195,12 +1202,21 @@ async fn fail_platform_attempt(
             "Failed to release platform operation billing reservation"
         );
     }
-    release_platform_limits(state, op, owner_id, daily_limit, spend_reservation).await;
+    release_platform_limits(
+        state,
+        op,
+        operation_id,
+        owner_id,
+        daily_limit,
+        spend_reservation,
+    )
+    .await;
 }
 
 async fn release_platform_limits(
     state: &AppState,
     op: crate::models::platform_operation::PlatformOperationName,
+    operation_id: &str,
     owner_id: &str,
     daily_limit: Option<&DailyLimit>,
     spend_reservation: Option<
@@ -1210,7 +1226,7 @@ async fn release_platform_limits(
     if let Some(limit) = daily_limit
         && let Err(error) = platform_operation_service::release_daily_operation(
             &state.db,
-            op,
+            operation_id,
             owner_id,
             &limit.yyyymmdd,
         )
@@ -1419,6 +1435,7 @@ pub(crate) async fn execute_call_and_say_for_caller(
                     &metered,
                     "vendor_response_invalid",
                     PlatformOperationName::CallAndSay,
+                    &attribution.operation_id,
                     &owner_id,
                     daily_limit.as_ref(),
                     spend_reservation.as_ref(),
@@ -1549,6 +1566,7 @@ pub(crate) async fn execute_flight_search_for_caller(
                     &metered,
                     "vendor_response_invalid",
                     PlatformOperationName::FlightSearch,
+                    &attribution.operation_id,
                     &owner_id,
                     daily_limit.as_ref(),
                     spend_reservation.as_ref(),
@@ -1957,7 +1975,7 @@ mod tests {
             .create_index(
                 IndexModel::builder()
                     .keys(mongodb::bson::doc! {
-                        "op": 1,
+                        "operation_id": 1,
                         "user_id": 1,
                         "yyyymmdd": 1,
                     })
@@ -2422,12 +2440,13 @@ mod tests {
         let state = crate::test_utils::test_app_state(db.clone());
         let (base_url, server) = spawn_twilio(StatusCode::CREATED).await;
         insert_twilio_vendor(&state, base_url).await;
+        let operation = operation(
+            PlatformOperationName::CallAndSay,
+            true,
+            PlatformOperationConfig::CallAndSay(call_config(2)),
+        );
         db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
-            .insert_one(operation(
-                PlatformOperationName::CallAndSay,
-                true,
-                PlatformOperationConfig::CallAndSay(call_config(2)),
-            ))
+            .insert_one(operation)
             .await
             .expect("insert call operation");
 
@@ -2472,12 +2491,14 @@ mod tests {
         let state = crate::test_utils::test_app_state(db.clone());
         let (base_url, server) = spawn_twilio(StatusCode::INTERNAL_SERVER_ERROR).await;
         insert_twilio_vendor(&state, base_url).await;
+        let operation = operation(
+            PlatformOperationName::CallAndSay,
+            true,
+            PlatformOperationConfig::CallAndSay(call_config(2)),
+        );
+        let operation_id = operation.id.clone();
         db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
-            .insert_one(operation(
-                PlatformOperationName::CallAndSay,
-                true,
-                PlatformOperationConfig::CallAndSay(call_config(2)),
-            ))
+            .insert_one(operation)
             .await
             .expect("insert call operation");
 
@@ -2499,7 +2520,7 @@ mod tests {
         let usage = db
             .collection::<PlatformOpUsage>(PLATFORM_OP_USAGE)
             .find_one(mongodb::bson::doc! {
-                "op": "call_and_say",
+                "operation_id": &operation_id,
                 "user_id": USER_ID,
             })
             .await
@@ -2567,17 +2588,19 @@ mod tests {
         let state = crate::test_utils::test_app_state(db.clone());
         let (base_url, server) = spawn_vendor_status(StatusCode::INTERNAL_SERVER_ERROR).await;
         insert_speak_vendor(&state, base_url, "elevenlabs-key").await;
+        let operation = operation(
+            PlatformOperationName::Speak,
+            true,
+            PlatformOperationConfig::Speak(SpeakConfig {
+                allowed_voice_ids: vec!["voice".to_string()],
+                max_chars: 1_000,
+                model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 2,
+            }),
+        );
+        let operation_id = operation.id.clone();
         db.collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
-            .insert_one(operation(
-                PlatformOperationName::Speak,
-                true,
-                PlatformOperationConfig::Speak(SpeakConfig {
-                    allowed_voice_ids: vec!["voice".to_string()],
-                    max_chars: 1_000,
-                    model_id: "eleven_multilingual_v2".to_string(),
-                    max_calls_per_user_per_day: 2,
-                }),
-            ))
+            .insert_one(operation)
             .await
             .expect("insert speak operation");
 
@@ -2598,7 +2621,7 @@ mod tests {
         assert_eq!(
             db.collection::<PlatformOpUsage>(PLATFORM_OP_USAGE)
                 .count_documents(mongodb::bson::doc! {
-                    "op": "speak",
+                    "operation_id": &operation_id,
                     "user_id": USER_ID,
                 })
                 .await

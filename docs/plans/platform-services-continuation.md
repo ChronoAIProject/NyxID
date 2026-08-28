@@ -111,6 +111,12 @@ allowance covers a deliberately combined-token component. One allowance is never
 applied to both split components. `funding::reserve_allowances` therefore receives the metric stored
 on each reservation component, not the route's primary metric.
 
+For endpoint operations, `bytes` means response-body bytes only. Request bytes are excluded because
+they are caller-controlled; charging their size would let a caller amplify its own spend before the
+provider returned any value. Token quantities use the provider-reported response usage, characters
+count the decoded response body, and seconds are elapsed provider-request time rounded up to a whole
+second. Step 10 applies these definitions at the common REST/MCP settlement boundary.
+
 ### Apply authority before spending or decryption
 
 1. Rollout flag and caller class.

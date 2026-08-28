@@ -7,15 +7,15 @@ import {
 import {
   callAndSayUpdateSchema,
   flightSearchUpdateSchema,
+  legacyPlatformOperationListSchema,
   platformOperationDiscoveryListSchema,
-  platformOperationListSchema,
   speakUpdateSchema,
 } from "./platform-ops";
 
 describe("platform operation schemas", () => {
   it("accepts the disabled defaults returned for missing rows", () => {
     expect(
-      platformOperationListSchema.parse({
+      legacyPlatformOperationListSchema.parse({
         operations: [
           {
             op: "speak",

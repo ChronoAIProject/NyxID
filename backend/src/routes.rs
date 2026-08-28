@@ -870,11 +870,13 @@ fn build_router_internal(
         )
         .route(
             "/platform-ops",
-            get(handlers::admin_platform_ops::list_platform_operations),
+            get(handlers::admin_platform_ops::list_platform_operations)
+                .post(handlers::admin_platform_ops::create_platform_operation),
         )
         .route(
-            "/platform-ops/{op}",
-            put(handlers::admin_platform_ops::update_platform_operation),
+            "/platform-ops/{operation_id}",
+            put(handlers::admin_platform_ops::update_platform_operation)
+                .delete(handlers::admin_platform_ops::delete_platform_operation),
         )
         .route(
             "/feature-flags",

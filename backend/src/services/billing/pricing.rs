@@ -132,15 +132,13 @@ pub fn metric_code_for_operation(catalog_slug: &str, kind_key: &str) -> String {
     if slug.is_empty() {
         slug.push_str("operation");
     }
-    let mut code = format!("platform_op_{slug}");
-    if code.len() <= MAX_OPERATION_METRIC_CODE_LEN {
-        return code;
-    }
-
     let digest = hex::encode(Sha256::digest(identity.as_bytes()));
     let suffix = &digest[..16];
+    let mut code = format!("platform_op_{slug}");
     let prefix_len = MAX_OPERATION_METRIC_CODE_LEN - suffix.len() - 1;
-    code.truncate(prefix_len);
+    if code.len() > prefix_len {
+        code.truncate(prefix_len);
+    }
     while code.ends_with('_') {
         code.pop();
     }
@@ -232,9 +230,19 @@ pub fn format_operation_price(billing: &OperationBilling, billable: bool) -> Str
 
 pub fn operation_supports_metric(kind: &PlatformOperationKind, metric: BillingMetric) -> bool {
     match kind {
-        PlatformOperationKind::Endpoint { .. } => {
-            matches!(metric, BillingMetric::Requests | BillingMetric::Bytes)
-        }
+        // Endpoint bytes are the response-body bytes only. Request bytes are
+        // caller-controlled and would let a client amplify its own spend
+        // before the provider has returned any value.
+        PlatformOperationKind::Endpoint { .. } => matches!(
+            metric,
+            BillingMetric::Requests
+                | BillingMetric::Bytes
+                | BillingMetric::Tokens
+                | BillingMetric::Characters
+                | BillingMetric::Seconds
+                | BillingMetric::InputTokens
+                | BillingMetric::OutputTokens
+        ),
         PlatformOperationKind::Constrained {
             op: ConstrainedOp::Speak,
             ..
@@ -506,9 +514,10 @@ pub async fn sync_operation_price(
             .await?;
         return Ok(false);
     }
-    if let Some(cleanup_code) = row
-        .billing_cleanup_metric_code
-        .as_deref()
+    for cleanup_code in row
+        .billing_cleanup_metric_codes
+        .iter()
+        .map(String::as_str)
         .filter(|code| !code.trim().is_empty())
     {
         let active = cleanup_code == row.billing.lago_metric_code
@@ -546,10 +555,7 @@ pub async fn retry_pending_operation_prices(
             "$or": [
                 { "billing.sync_status": { "$in": ["pending", "failed"] } },
                 {
-                    "billing_cleanup_metric_code": {
-                        "$type": "string",
-                        "$ne": "",
-                    },
+                    "billing_cleanup_metric_codes.0": { "$exists": true },
                 },
             ],
         })
@@ -564,6 +570,24 @@ pub async fn retry_pending_operation_prices(
         }
     }
     Ok(synced)
+}
+
+pub async fn remove_operation_rate_cache(
+    db: &mongodb::Database,
+    row: &PlatformOperationRow,
+) -> AppResult<()> {
+    let mut metric_codes = vec![row.billing.lago_metric_code.as_str()];
+    if let Some(secondary) = &row.billing.secondary {
+        metric_codes.push(secondary.lago_metric_code.as_str());
+    }
+    metric_codes.extend(row.billing_cleanup_metric_codes.iter().map(String::as_str));
+    metric_codes.retain(|code| !code.is_empty());
+    metric_codes.sort_unstable();
+    metric_codes.dedup();
+    db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+        .delete_many(doc! { "lago_metric_code": { "$in": metric_codes } })
+        .await?;
+    Ok(())
 }
 
 pub(crate) async fn set_operation_sync_state(
@@ -594,7 +618,9 @@ pub(crate) async fn set_operation_sync_state(
             filter.insert("billing.base_fee_per_call", base_fee);
         }
         None => {
-            filter.insert("billing.base_fee_per_call", doc! { "$exists": false });
+            // Equality to BSON null also matches legacy rows where the field
+            // was absent before model serialization became explicit.
+            filter.insert("billing.base_fee_per_call", Bson::Null);
         }
     }
     let result = db
@@ -633,9 +659,9 @@ async fn clear_operation_cleanup_marker(
         .update_one(
             doc! {
                 "_id": operation_id,
-                "billing_cleanup_metric_code": metric_code,
+                "billing_cleanup_metric_codes": metric_code,
             },
-            doc! { "$unset": { "billing_cleanup_metric_code": "" } },
+            doc! { "$pull": { "billing_cleanup_metric_codes": metric_code } },
         )
         .await?;
     Ok(())
@@ -860,10 +886,13 @@ mod tests {
 
     #[test]
     fn operation_metric_code_is_stable_bounded_and_collision_resistant() {
+        let stable =
+            metric_code_for_operation("api-twitter", "endpoint:GET /2/tweets/search/recent");
         assert_eq!(
-            metric_code_for_operation("api-twitter", "endpoint:GET /2/tweets/search/recent"),
-            "platform_op_api_twitter_endpoint_get_2_tweets_search_recent"
+            stable,
+            metric_code_for_operation("api-twitter", "endpoint:GET /2/tweets/search/recent")
         );
+        assert!(stable.starts_with("platform_op_api_twitter_endpoint_get_2_tweets_search_recent_"));
         let first =
             metric_code_for_operation("duffel", &format!("endpoint:GET /{}a", "x".repeat(200)));
         let second =
@@ -871,6 +900,18 @@ mod tests {
         assert!(first.len() <= 120);
         assert!(second.len() <= 120);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn short_operation_metric_codes_do_not_collide_after_path_normalization() {
+        let hyphenated =
+            metric_code_for_operation("api-elevenlabs", "endpoint:GET /v1/text-to-speech/{id}");
+        let segmented =
+            metric_code_for_operation("api-elevenlabs", "endpoint:GET /v1/text/to/speech/{id}");
+
+        assert_ne!(hyphenated, segmented);
+        assert!(hyphenated.len() <= 120);
+        assert!(segmented.len() <= 120);
     }
 
     #[test]
@@ -921,7 +962,7 @@ mod tests {
         assert_eq!(billing.price_per_unit, "0.01");
         assert_eq!(
             billing.lago_metric_code,
-            "platform_op_api_elevenlabs_constrained_speak"
+            metric_code_for_operation("api-elevenlabs", "constrained:speak")
         );
         assert_eq!(billing.sync_status, PricingSyncStatus::Pending);
         assert!(billing.sync_error.is_none());
@@ -974,6 +1015,32 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn endpoint_operations_support_every_persisted_usage_measurement() {
+        use crate::models::platform_operation::PlatformOperationKind;
+        let endpoint = PlatformOperationKind::Endpoint {
+            method: "GET".to_string(),
+            path_template: "/v1/items/{id}".to_string(),
+            name: "Get item".to_string(),
+            description: None,
+        };
+        for metric in [
+            BillingMetric::Requests,
+            BillingMetric::Bytes,
+            BillingMetric::Tokens,
+            BillingMetric::Characters,
+            BillingMetric::Seconds,
+            BillingMetric::InputTokens,
+            BillingMetric::OutputTokens,
+        ] {
+            assert!(
+                super::operation_supports_metric(&endpoint, metric),
+                "endpoint metric {} must be deliverable",
+                metric.as_str()
+            );
+        }
     }
 
     #[tokio::test]
@@ -1103,24 +1170,29 @@ mod tests {
             return;
         };
         let mut row = insert_priced_operation(&db).await;
-        let old_metric = "platform_op_obsolete_call_metric";
-        row.billing_cleanup_metric_code = Some(old_metric.to_string());
+        let old_metrics = [
+            "platform_op_obsolete_call_input",
+            "platform_op_obsolete_call_output",
+        ];
+        row.billing_cleanup_metric_codes = old_metrics.map(str::to_string).to_vec();
         db.collection::<crate::models::platform_operation::PlatformOperationRow>(
             super::PLATFORM_OPERATIONS,
         )
         .replace_one(doc! { "_id": &row.id }, &row)
         .await
         .expect("set operation cleanup marker");
-        db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-            .insert_one(BillingRateCache {
-                id: BillingRateCache::cache_id(old_metric, None),
-                lago_metric_code: old_metric.to_string(),
-                model: None,
-                credits_per_unit_micros: 25_000,
-                synced_at: Utc::now(),
-            })
-            .await
-            .expect("insert obsolete rate");
+        for old_metric in old_metrics {
+            db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
+                .insert_one(BillingRateCache {
+                    id: BillingRateCache::cache_id(old_metric, None),
+                    lago_metric_code: old_metric.to_string(),
+                    model: None,
+                    credits_per_unit_micros: 25_000,
+                    synced_at: Utc::now(),
+                })
+                .await
+                .expect("insert obsolete rate");
+        }
         let lago = OperationPricingLago::default();
         lago.fail_remove.store(true, Ordering::SeqCst);
 
@@ -1137,16 +1209,13 @@ mod tests {
             .await
             .expect("find cleanup operation")
             .expect("cleanup operation exists");
-        assert_eq!(
-            pending.billing_cleanup_metric_code.as_deref(),
-            Some(old_metric)
-        );
+        assert_eq!(pending.billing_cleanup_metric_codes, old_metrics);
         assert_eq!(
             db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-                .count_documents(doc! { "lago_metric_code": old_metric })
+                .count_documents(doc! { "lago_metric_code": { "$in": old_metrics.to_vec() } })
                 .await
                 .expect("count obsolete rates"),
-            1
+            2
         );
 
         lago.fail_remove.store(false, Ordering::SeqCst);
@@ -1163,10 +1232,10 @@ mod tests {
             .await
             .expect("find cleaned operation")
             .expect("cleaned operation exists");
-        assert!(saved.billing_cleanup_metric_code.is_none());
+        assert!(saved.billing_cleanup_metric_codes.is_empty());
         assert_eq!(
             db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
-                .count_documents(doc! { "lago_metric_code": old_metric })
+                .count_documents(doc! { "lago_metric_code": { "$in": old_metrics.to_vec() } })
                 .await
                 .expect("count obsolete rates"),
             0

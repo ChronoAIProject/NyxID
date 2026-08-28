@@ -20,11 +20,11 @@ describe("platform operations backend contract", () => {
   it("parses the admin list response the backend actually serializes", () => {
     const parsed = platformOperationListSchema.parse(contract.admin);
 
-    expect(parsed.operations.map((operation) => operation.op)).toEqual([
-      "speak",
-      "call_and_say",
-      "flight_search",
-      "flight_search",
+    expect(parsed.operations.map((operation) => operation.operation_id)).toEqual([
+      "00000000-0000-4000-8000-000000000000",
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000002",
+      "00000000-0000-4000-8000-000000000003",
     ]);
   });
 

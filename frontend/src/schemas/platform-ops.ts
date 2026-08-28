@@ -100,6 +100,7 @@ const adminPricingResponseSchema = z
   .strict();
 
 const operationMetadataSchema = {
+  operation_id: z.string().uuid().optional(),
   enabled: z.boolean(),
   vendor_service_slug: vendorServiceSlugSchema,
   updated_at: z.string().nullable(),
@@ -227,9 +228,100 @@ export const platformOperationSchema = z.discriminatedUnion("op", [
   flightSearchOperationSchema,
 ]);
 
-export const platformOperationListSchema = z
+export const legacyPlatformOperationListSchema = z
   .object({
     operations: z.array(platformOperationSchema),
+  })
+  .strict();
+
+const adminEndpointKindSchema = z
+  .object({
+    type: z.literal("endpoint"),
+    method: z.string().min(1),
+    path_template: z.string().min(1),
+    name: z.string().min(1).max(160),
+    description: z.string().max(4_096).nullable(),
+  })
+  .strict();
+
+const adminConstrainedConfigSchema = z.discriminatedUnion("type", [
+  z
+    .object({
+      type: z.literal("speak"),
+      allowed_voice_ids: z.array(z.string()),
+      model_id: z.string().min(1),
+      max_calls_per_user_per_day: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("call_and_say"),
+      allowed_destination_prefixes: z.array(z.string()),
+      voice: z.string().min(1),
+      account_sid: z.string(),
+      call_from: z.string(),
+    })
+    .strict(),
+  z.object({ type: z.literal("flight_search") }).strict(),
+]);
+
+const adminConstrainedKindSchema = z
+  .object({
+    type: z.literal("constrained"),
+    op: z.enum(["speak", "call_and_say", "flight_search"]),
+    config: adminConstrainedConfigSchema,
+  })
+  .strict();
+
+const adminPerRequestCapsSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("endpoint") }).strict(),
+  z
+    .object({
+      type: z.literal("speak"),
+      max_chars: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("call_and_say"),
+      max_message_chars: z.number().int().positive(),
+      max_duration_seconds: z.number().int().positive(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("flight_search"),
+      max_offers: z.number().int().positive(),
+    })
+    .strict(),
+]);
+
+export const adminPlatformOperationSchema = z
+  .object({
+    operation_id: z.string().uuid(),
+    catalog_service_id: z.string().min(1),
+    provider_slug: vendorServiceSlugSchema.nullable(),
+    provider_name: z.string().min(1).nullable(),
+    operation_name: z.string().min(1),
+    enabled: z.boolean(),
+    kind: z.union([adminEndpointKindSchema, adminConstrainedKindSchema]),
+    limits: z
+      .object({
+        per_request: adminPerRequestCapsSchema,
+        per_user_per_day: z.number().int().positive().nullable(),
+      })
+      .strict(),
+    pricing: adminPricingResponseSchema,
+    created_at: z.string().min(1),
+    created_by: z.string().min(1),
+    updated_at: z.string().min(1),
+    updated_by: z.string().min(1),
+  })
+  .strict();
+
+export const platformOperationListSchema = z
+  .object({
+    operations: z.array(adminPlatformOperationSchema),
   })
   .strict();
 
@@ -324,6 +416,12 @@ export type PlatformOperationDiscoveryPricing = z.infer<
 >;
 export type PlatformOperation = z.infer<typeof platformOperationSchema>;
 export type PlatformOperationList = z.infer<
+  typeof legacyPlatformOperationListSchema
+>;
+export type AdminPlatformOperation = z.infer<
+  typeof adminPlatformOperationSchema
+>;
+export type AdminPlatformOperationList = z.infer<
   typeof platformOperationListSchema
 >;
 export type SpeakOperation = z.infer<typeof speakOperationSchema>;

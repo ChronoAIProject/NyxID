@@ -334,6 +334,22 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .drop_index("platform_operations_op_unique")
         .await;
     platform_operations
+        .update_many(
+            doc! {
+                "billing_cleanup_metric_code": { "$type": "string", "$ne": "" },
+            },
+            vec![
+                doc! { "$set": {
+                    "billing_cleanup_metric_codes": { "$setUnion": [
+                        { "$ifNull": ["$billing_cleanup_metric_codes", []] },
+                        ["$billing_cleanup_metric_code"],
+                    ] },
+                } },
+                doc! { "$unset": "billing_cleanup_metric_code" },
+            ],
+        )
+        .await?;
+    platform_operations
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "catalog_service_id": 1, "kind_key": 1 })
@@ -367,7 +383,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
             IndexModel::builder()
                 .keys(doc! {
                     "billing.sync_status": 1,
-                    "billing_cleanup_metric_code": 1,
+                    "billing_cleanup_metric_codes": 1,
                 })
                 .options(
                     IndexOptions::builder()
@@ -377,14 +393,25 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
-    db.collection::<mongodb::bson::Document>(PLATFORM_OP_USAGE)
+    let platform_op_usage = db.collection::<mongodb::bson::Document>(PLATFORM_OP_USAGE);
+    // The pre-catalog counter used the constrained operation name. Keep old
+    // rows inert and replace its index so quotas follow the immutable row ID.
+    let _ = platform_op_usage
+        .drop_index("platform_op_usage_user_day_unique")
+        .await;
+    platform_op_usage
         .create_index(
             IndexModel::builder()
-                .keys(doc! { "op": 1, "user_id": 1, "yyyymmdd": 1 })
+                .keys(doc! { "operation_id": 1, "user_id": 1, "yyyymmdd": 1 })
                 .options(
                     IndexOptions::builder()
-                        .name("platform_op_usage_user_day_unique".to_string())
+                        .name("platform_op_usage_operation_user_day_unique".to_string())
                         .unique(true)
+                        .partial_filter_expression(doc! {
+                            "operation_id": { "$type": "string" },
+                            "user_id": { "$type": "string" },
+                            "yyyymmdd": { "$type": "string" },
+                        })
                         .build(),
                 )
                 .build(),

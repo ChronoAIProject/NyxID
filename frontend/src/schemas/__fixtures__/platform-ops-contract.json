@@ -3,21 +3,31 @@
   "admin": {
     "operations": [
       {
-        "op": "speak",
+        "operation_id": "00000000-0000-4000-8000-000000000000",
+        "catalog_service_id": "catalog-service-id",
+        "provider_slug": null,
+        "provider_name": null,
+        "operation_name": "Speak",
         "enabled": true,
-        "vendor_service_slug": "api-elevenlabs",
-        "config": {
-          "type": "speak",
-          "allowed_voice_ids": [
-            "voice-a"
-          ],
-          "max_chars": 1000,
-          "model_id": "eleven_multilingual_v2",
-          "max_calls_per_user_per_day": 50
+        "kind": {
+          "type": "constrained",
+          "op": "speak",
+          "config": {
+            "type": "speak",
+            "allowed_voice_ids": [
+              "voice-a"
+            ],
+            "model_id": "eleven_multilingual_v2",
+            "max_calls_per_user_per_day": 50
+          }
         },
-        "updated_at": "2023-11-14T22:13:20+00:00",
-        "updated_by": "admin-user-id",
-        "vendor_service_id": null,
+        "limits": {
+          "per_request": {
+            "type": "speak",
+            "max_chars": 1000
+          },
+          "per_user_per_day": 50
+        },
         "pricing": {
           "billable": true,
           "metric": "characters",
@@ -28,27 +38,40 @@
           "lago_metric_code": "platform_op_api_elevenlabs_speak",
           "sync_status": "synced",
           "sync_error": null
-        }
+        },
+        "created_at": "2023-11-14T22:13:20+00:00",
+        "created_by": "admin-user-id",
+        "updated_at": "2023-11-14T22:13:20+00:00",
+        "updated_by": "admin-user-id"
       },
       {
-        "op": "call_and_say",
+        "operation_id": "00000000-0000-4000-8000-000000000001",
+        "catalog_service_id": "catalog-service-id",
+        "provider_slug": null,
+        "provider_name": null,
+        "operation_name": "Call and Say",
         "enabled": true,
-        "vendor_service_slug": "api-twilio",
-        "config": {
-          "type": "call_and_say",
-          "allowed_destination_prefixes": [
-            "+1"
-          ],
-          "max_message_chars": 500,
-          "max_duration_seconds": 60,
-          "voice": "alice",
-          "max_calls_per_user_per_day": 10,
-          "account_sid": "AC00000000000000000000000000000000",
-          "call_from": "+15550000000"
+        "kind": {
+          "type": "constrained",
+          "op": "call_and_say",
+          "config": {
+            "type": "call_and_say",
+            "allowed_destination_prefixes": [
+              "+1"
+            ],
+            "voice": "alice",
+            "account_sid": "AC00000000000000000000000000000000",
+            "call_from": "+15550000000"
+          }
         },
-        "updated_at": "2023-11-14T22:13:20+00:00",
-        "updated_by": "admin-user-id",
-        "vendor_service_id": null,
+        "limits": {
+          "per_request": {
+            "type": "call_and_say",
+            "max_message_chars": 500,
+            "max_duration_seconds": 60
+          },
+          "per_user_per_day": 10
+        },
         "pricing": {
           "billable": true,
           "metric": "seconds",
@@ -59,20 +82,33 @@
           "lago_metric_code": "platform_op_api_twilio_call_and_say",
           "sync_status": "failed",
           "sync_error": "lago rejected the charge payload"
-        }
+        },
+        "created_at": "2023-11-14T22:13:20+00:00",
+        "created_by": "admin-user-id",
+        "updated_at": "2023-11-14T22:13:20+00:00",
+        "updated_by": "admin-user-id"
       },
       {
-        "op": "flight_search",
+        "operation_id": "00000000-0000-4000-8000-000000000002",
+        "catalog_service_id": "catalog-service-id",
+        "provider_slug": null,
+        "provider_name": null,
+        "operation_name": "Flight Search",
         "enabled": true,
-        "vendor_service_slug": "duffel",
-        "config": {
-          "type": "flight_search",
-          "max_offers_cap": 20,
-          "max_searches_per_user_per_day": 25
+        "kind": {
+          "type": "constrained",
+          "op": "flight_search",
+          "config": {
+            "type": "flight_search"
+          }
         },
-        "updated_at": "2023-11-14T22:13:20+00:00",
-        "updated_by": "admin-user-id",
-        "vendor_service_id": null,
+        "limits": {
+          "per_request": {
+            "type": "flight_search",
+            "max_offers": 20
+          },
+          "per_user_per_day": 25
+        },
         "pricing": {
           "billable": false,
           "metric": "requests",
@@ -83,20 +119,33 @@
           "lago_metric_code": "",
           "sync_status": "pending",
           "sync_error": null
-        }
+        },
+        "created_at": "2023-11-14T22:13:20+00:00",
+        "created_by": "admin-user-id",
+        "updated_at": "2023-11-14T22:13:20+00:00",
+        "updated_by": "admin-user-id"
       },
       {
-        "op": "flight_search",
+        "operation_id": "00000000-0000-4000-8000-000000000003",
+        "catalog_service_id": "catalog-service-id",
+        "provider_slug": null,
+        "provider_name": null,
+        "operation_name": "Flight Search",
         "enabled": true,
-        "vendor_service_slug": "duffel",
-        "config": {
-          "type": "flight_search",
-          "max_offers_cap": 10,
-          "max_searches_per_user_per_day": 5
+        "kind": {
+          "type": "constrained",
+          "op": "flight_search",
+          "config": {
+            "type": "flight_search"
+          }
         },
-        "updated_at": "2023-11-14T22:13:20+00:00",
-        "updated_by": "admin-user-id",
-        "vendor_service_id": null,
+        "limits": {
+          "per_request": {
+            "type": "flight_search",
+            "max_offers": 10
+          },
+          "per_user_per_day": 5
+        },
         "pricing": {
           "billable": true,
           "metric": "input_tokens",
@@ -111,7 +160,11 @@
           "lago_metric_code": "platform_op_duffel_split_input",
           "sync_status": "synced",
           "sync_error": null
-        }
+        },
+        "created_at": "2023-11-14T22:13:20+00:00",
+        "created_by": "admin-user-id",
+        "updated_at": "2023-11-14T22:13:20+00:00",
+        "updated_by": "admin-user-id"
       }
     ]
   },
