@@ -634,6 +634,62 @@ pub async fn authorize_constrained(
     })
 }
 
+/// Return every enabled operation that still passes the complete provider and
+/// stored-row authorization contract. This is the read-only inventory used by
+/// provider discovery surfaces; it never materializes the platform credential.
+pub async fn list_enabled_authorized_operations(
+    db: &mongodb::Database,
+) -> AppResult<Vec<AuthorizedPlatformOperation>> {
+    let rows: Vec<PlatformOperationRow> = db
+        .collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .find(doc! { "enabled": true })
+        .sort(doc! { "catalog_service_id": 1, "kind_key": 1, "_id": 1 })
+        .await?
+        .try_collect()
+        .await?;
+    let mut authorized = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        let service =
+            match validate_catalog_provider_for_authorization(db, &row.catalog_service_id).await {
+                Ok(service) => service,
+                Err(AppError::PlatformOperationUnavailable) => continue,
+                Err(error) => return Err(error),
+            };
+        let valid = match &row.kind {
+            PlatformOperationKind::Endpoint {
+                method,
+                path_template,
+                ..
+            } => {
+                matches!(row.limits.per_request, PerRequestCaps::Endpoint)
+                    && normalize_endpoint_definition(&service.slug, method, path_template)
+                        .is_ok_and(|(normalized_method, normalized_path)| {
+                            row.kind_key == endpoint_kind_key(&normalized_method, &normalized_path)
+                        })
+            }
+            PlatformOperationKind::Constrained { op, .. } => {
+                validate_constrained_row(&row, *op).is_ok()
+                    && service.slug == catalog_slug_for_constrained(*op)
+            }
+        };
+        if !valid {
+            tracing::error!(
+                operation_id = %row.id,
+                catalog_service_id = %row.catalog_service_id,
+                "Omitting invalid enabled platform operation from discovery"
+            );
+            continue;
+        }
+        authorized.push(AuthorizedPlatformOperation {
+            catalog_service: service,
+            operation: row,
+        });
+    }
+
+    Ok(authorized)
+}
+
 fn validate_constrained_row(
     row: &PlatformOperationRow,
     expected_op: ConstrainedOp,

@@ -4,6 +4,22 @@ import type { WsFrameInjection } from "@/schemas/services";
 
 export type { DefaultRequestHeader } from "@/schemas/default-request-headers";
 
+export interface PlatformKeyOperationSummary {
+  readonly name: string;
+  readonly kind: "constrained" | "endpoint";
+  readonly price_label: string;
+}
+
+export interface PlatformKeySummary {
+  readonly operations: readonly PlatformKeyOperationSummary[];
+  readonly credential_source:
+    | "platform"
+    | "own_connection"
+    | "platform_fallback"
+    | "unusable";
+  readonly reason?: string;
+}
+
 export interface KeyInfo {
   readonly id: string;
   readonly name?: string;
@@ -59,6 +75,9 @@ export interface KeyInfo {
   readonly default_request_headers?: readonly DefaultRequestHeader[] | null;
   readonly ws_frame_injections: readonly WsFrameInjection[];
   readonly auto_connected: boolean;
+  /** Response-only provider inventory row; never a mutable UserService ID. */
+  readonly platform_managed?: boolean;
+  readonly platform?: PlatformKeySummary | null;
   readonly source_app_id?: string | null;
   readonly source_app_name?: string | null;
   readonly expires_at: string | null;

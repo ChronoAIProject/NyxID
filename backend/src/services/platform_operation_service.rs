@@ -1191,6 +1191,18 @@ pub async fn load_endpoint_credential_resolution_context(
     .await
 }
 
+pub async fn load_authorized_credential_resolution_context(
+    db: &mongodb::Database,
+    resolution_user_id: &str,
+    operations: &[platform_credential_service::AuthorizedPlatformOperation],
+) -> AppResult<PlatformCredentialResolutionContext> {
+    let slugs = operations
+        .iter()
+        .map(|authorization| authorization.catalog_service().slug.clone())
+        .collect::<HashSet<_>>();
+    load_credential_resolution_context_for_slugs(db, resolution_user_id, slugs).await
+}
+
 async fn load_credential_resolution_context_for_slugs(
     db: &mongodb::Database,
     resolution_user_id: &str,
