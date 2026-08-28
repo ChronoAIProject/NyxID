@@ -1,20 +1,12 @@
 import { z } from "zod";
 
-export const PLATFORM_OPERATION_QUERY_KEY = [
-  "admin",
-  "platform-ops",
-] as const;
-export const PLATFORM_OPERATION_DISCOVERY_QUERY_KEY = [
-  "platform-ops",
-] as const;
+export const PLATFORM_OPERATION_QUERY_KEY = ["admin", "platform-ops"] as const;
+export const PLATFORM_OPERATION_DISCOVERY_QUERY_KEY = ["platform-ops"] as const;
 const vendorServiceSlugSchema = z
   .string()
   .min(1, "Vendor service slug is required")
   .max(128, "Vendor service slug must be at most 128 characters")
-  .regex(
-    /^[a-z0-9-]+$/,
-    "Use only lowercase letters, digits, and hyphens",
-  );
+  .regex(/^[a-z0-9-]+$/, "Use only lowercase letters, digits, and hyphens");
 
 const safeIdentifierSchema = (label: string) =>
   z
@@ -52,11 +44,7 @@ export const billingMetricSchema = z.enum([
   "output_tokens",
 ]);
 
-export const pricingSyncStatusSchema = z.enum([
-  "pending",
-  "synced",
-  "failed",
-]);
+export const pricingSyncStatusSchema = z.enum(["pending", "synced", "failed"]);
 
 /// `display` is rendered by the backend so a per-second or per-character
 /// price cannot be relabelled as a per-call price by a client.
@@ -131,10 +119,10 @@ export const speakConfigResponseSchema = z
   .strict();
 
 export const speakConfigSchema = speakConfigResponseSchema.extend({
-  allowed_voice_ids: uniqueStrings(
-    safeIdentifierSchema("Voice ID"),
-    100,
-  ).min(1, "Add at least one allowed voice ID"),
+  allowed_voice_ids: uniqueStrings(safeIdentifierSchema("Voice ID"), 100).min(
+    1,
+    "Add at least one allowed voice ID",
+  ),
 });
 
 export const callAndSayConfigResponseSchema = z
@@ -325,6 +313,116 @@ export const platformOperationListSchema = z
   })
   .strict();
 
+const normalizedCreditAmountSchema = z
+  .string()
+  .trim()
+  .regex(
+    /^\d+(?:\.\d{1,6})?$/,
+    "Use a non-negative credit amount with at most 6 decimal places",
+  );
+
+const updatePlatformOperationBillingComponentSchema = z
+  .object({
+    metric: billingMetricSchema,
+    price_per_unit: normalizedCreditAmountSchema.refine(
+      (value) => Number(value) > 0,
+      "Secondary component price must be greater than zero",
+    ),
+  })
+  .strict();
+
+export const updatePlatformOperationBillingSchema = z
+  .object({
+    metric: billingMetricSchema,
+    price_per_unit: normalizedCreditAmountSchema,
+    secondary: updatePlatformOperationBillingComponentSchema.nullable(),
+    base_fee_per_call: normalizedCreditAmountSchema.nullable(),
+  })
+  .strict()
+  .superRefine((billing, context) => {
+    if (billing.secondary?.metric === billing.metric) {
+      context.addIssue({
+        code: "custom",
+        message: "Billing components must use different metrics",
+        path: ["secondary", "metric"],
+      });
+    }
+  });
+
+const updateEndpointKindSchema = z
+  .object({
+    kind: z.literal("endpoint"),
+    method: z.string().trim().min(1).max(16),
+    path_template: z.string().trim().startsWith("/").max(2_048),
+    name: z.string().trim().min(1).max(160),
+    description: z.string().trim().max(4_096).nullable(),
+  })
+  .strict();
+
+const updateConstrainedKindSchema = z
+  .object({
+    kind: z.literal("constrained"),
+    op: z.enum(["speak", "call_and_say", "flight_search"]),
+    config: adminConstrainedConfigSchema,
+  })
+  .strict();
+
+export const updatePlatformOperationSchema = z
+  .object({
+    enabled: z.boolean(),
+    kind: z.union([updateEndpointKindSchema, updateConstrainedKindSchema]),
+    limits: z
+      .object({
+        per_request: adminPerRequestCapsSchema,
+        per_user_per_day: z.number().int().positive(),
+      })
+      .strict(),
+    billing: updatePlatformOperationBillingSchema,
+  })
+  .strict();
+
+export const adminPlatformCredentialStatusSchema = z
+  .object({
+    configured: z.boolean(),
+    id: z.string().uuid().nullable(),
+    auth_method: z.string().min(1).nullable(),
+    auth_key_name: z.string().min(1).nullable(),
+    created_at: z.string().min(1).nullable(),
+    updated_at: z.string().min(1).nullable(),
+  })
+  .strict();
+
+export const adminPlatformProviderSchema = z
+  .object({
+    catalog_service_id: z.string().min(1),
+    catalog_service_slug: vendorServiceSlugSchema,
+    catalog_service_name: z.string().min(1),
+    catalog_service_active: z.boolean(),
+    eligible: z.boolean(),
+    eligibility_reason: z.string().min(1).nullable(),
+    promoted: z.boolean(),
+    promoted_at: z.string().min(1).nullable(),
+    promoted_by: z.string().min(1).nullable(),
+    vendor_terms_accepted_at: z.string().min(1).nullable(),
+    vendor_terms_accepted_by: z.string().min(1).nullable(),
+    credential: adminPlatformCredentialStatusSchema,
+    enabled_operation_count: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const adminPlatformProviderListSchema = z
+  .object({ providers: z.array(adminPlatformProviderSchema) })
+  .strict();
+
+export const platformCredentialWriteSchema = z
+  .object({
+    credential: z
+      .string()
+      .min(1, "Credential is required")
+      .max(65_536, "Credential is too large"),
+  })
+  .strict();
+
 const updateMetadataSchema = {
   enabled: z.boolean(),
   vendor_service_slug: vendorServiceSlugSchema,
@@ -358,11 +456,7 @@ export const platformOperationDiscoverySchema = z
     description: z.string().min(1),
     vendor: z.string().min(1),
     catalog_service_slug: z.string().min(1),
-    credential_source: z.enum([
-      "platform",
-      "own_connection",
-      "unavailable",
-    ]),
+    credential_source: z.enum(["platform", "own_connection", "unavailable"]),
     credential_intent: z.enum(["auto", "own_only", "platform_only"]),
     availability_reason: z
       .enum(["owner_opt_in_required", "own_connection_disabled"])
@@ -423,6 +517,16 @@ export type AdminPlatformOperation = z.infer<
 >;
 export type AdminPlatformOperationList = z.infer<
   typeof platformOperationListSchema
+>;
+export type UpdateAdminPlatformOperation = z.infer<
+  typeof updatePlatformOperationSchema
+>;
+export type AdminPlatformProvider = z.infer<typeof adminPlatformProviderSchema>;
+export type AdminPlatformProviderList = z.infer<
+  typeof adminPlatformProviderListSchema
+>;
+export type PlatformCredentialWrite = z.infer<
+  typeof platformCredentialWriteSchema
 >;
 export type SpeakOperation = z.infer<typeof speakOperationSchema>;
 export type CallAndSayOperation = z.infer<typeof callAndSayOperationSchema>;
