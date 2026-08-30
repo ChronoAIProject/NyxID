@@ -1847,9 +1847,8 @@ function AccessPolicySection({
               Admin-only execution
             </Label>
             <p className="text-[11px] text-muted-foreground">
-              {adminOnly
-                ? "Only org admins can proxy this service."
-                : "Org members with service scope can proxy this service."}
+              When enabled, regular organization members cannot proxy this
+              service. Organization admins retain access.
             </p>
           </div>
           <Switch
@@ -2592,13 +2591,15 @@ export function KeyDetailPage() {
               readOnly={readOnly}
             />
 
-            <div className="grid gap-4 lg:grid-cols-2">
-              <AccessPolicySection
-                serviceId={keyInfo.id}
-                adminOnly={keyInfo.admin_only ?? false}
-                readOnly={readOnly}
-              />
-            </div>
+            {isOrgSource && (
+              <div className="grid gap-4 lg:grid-cols-2">
+                <AccessPolicySection
+                  serviceId={keyInfo.id}
+                  adminOnly={keyInfo.admin_only ?? false}
+                  readOnly={readOnly}
+                />
+              </div>
+            )}
 
             {!isSsh && (
               <>

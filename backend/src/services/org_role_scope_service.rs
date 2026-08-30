@@ -154,6 +154,37 @@ pub fn scope_allows(effective: &Option<Vec<String>>, svc_id: &str) -> bool {
     }
 }
 
+/// Add a service to an explicitly restricted role scope.
+///
+/// Missing scope rows and rows whose `allowed_service_ids` is null already
+/// grant full access, so this deliberately leaves them unchanged. Membership
+/// overrides are stored separately and are never expanded here.
+pub async fn add_service_to_configured_role_scope(
+    db: &mongodb::Database,
+    org_user_id: &str,
+    role: OrgRole,
+    service_id: &str,
+    actor_id: &str,
+) -> AppResult<()> {
+    db.collection::<OrgRoleScope>(COLLECTION_NAME)
+        .update_one(
+            doc! {
+                "org_user_id": org_user_id,
+                "role": role.as_str(),
+                "allowed_service_ids": { "$type": "array" },
+            },
+            doc! {
+                "$addToSet": { "allowed_service_ids": service_id },
+                "$set": {
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    "updated_by": actor_id,
+                },
+            },
+        )
+        .await?;
+    Ok(())
+}
+
 pub async fn delete_all_for_org(db: &mongodb::Database, org_user_id: &str) -> AppResult<()> {
     db.collection::<OrgRoleScope>(COLLECTION_NAME)
         .delete_many(doc! { "org_user_id": org_user_id })
@@ -361,5 +392,99 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(remaining, 0);
+    }
+
+    #[tokio::test]
+    async fn add_service_only_expands_the_matching_configured_array_scope() {
+        let Some(db) = connect_test_database("org_role_scope_add_service").await else {
+            eprintln!("skipping org role scope service test: no local MongoDB available");
+            return;
+        };
+        let org_id = Uuid::new_v4().to_string();
+        let other_org_id = Uuid::new_v4().to_string();
+        let missing_scope_org_id = Uuid::new_v4().to_string();
+        let actor_id = Uuid::new_v4().to_string();
+        let new_actor_id = Uuid::new_v4().to_string();
+
+        set_scope(
+            &db,
+            &org_id,
+            OrgRole::Member,
+            Some(vec!["existing-service".to_string()]),
+            &actor_id,
+        )
+        .await
+        .expect("set member scope");
+        set_scope(&db, &org_id, OrgRole::Admin, Some(Vec::new()), &actor_id)
+            .await
+            .expect("set admin scope");
+        set_scope(&db, &other_org_id, OrgRole::Member, None, &actor_id)
+            .await
+            .expect("set unrestricted member scope");
+
+        for _ in 0..2 {
+            add_service_to_configured_role_scope(
+                &db,
+                &org_id,
+                OrgRole::Member,
+                "new-service",
+                &new_actor_id,
+            )
+            .await
+            .expect("add service to configured member scope");
+        }
+        add_service_to_configured_role_scope(
+            &db,
+            &missing_scope_org_id,
+            OrgRole::Member,
+            "new-service",
+            &new_actor_id,
+        )
+        .await
+        .expect("missing scope should be a no-op");
+        add_service_to_configured_role_scope(
+            &db,
+            &other_org_id,
+            OrgRole::Member,
+            "new-service",
+            &new_actor_id,
+        )
+        .await
+        .expect("unrestricted scope should be a no-op");
+
+        let member = get_scope(&db, &org_id, OrgRole::Member)
+            .await
+            .expect("get member scope")
+            .expect("stored member scope");
+        assert_eq!(
+            member.allowed_service_ids,
+            Some(vec![
+                "existing-service".to_string(),
+                "new-service".to_string(),
+            ])
+        );
+        assert_eq!(member.updated_by, new_actor_id);
+
+        let admin = get_scope(&db, &org_id, OrgRole::Admin)
+            .await
+            .expect("get admin scope")
+            .expect("stored admin scope");
+        assert_eq!(admin.allowed_service_ids, Some(Vec::new()));
+        assert_eq!(admin.updated_by, actor_id);
+
+        let unrestricted = get_scope(&db, &other_org_id, OrgRole::Member)
+            .await
+            .expect("get unrestricted scope")
+            .expect("stored unrestricted scope");
+        assert_eq!(unrestricted.allowed_service_ids, None);
+        assert_eq!(unrestricted.updated_by, actor_id);
+
+        assert!(
+            get_scope(&db, &missing_scope_org_id, OrgRole::Member)
+                .await
+                .expect("get missing member scope")
+                .is_none(),
+            "adding a service must not create a role-scope row"
+        );
     }
 }

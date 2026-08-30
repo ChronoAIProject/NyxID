@@ -1097,15 +1097,18 @@ async fn load_user_tools_inner(
             let org_pinned: Vec<UserService> = db
                 .collection::<UserService>(USER_SERVICES)
                 .find(doc! {
-                    "user_id": &m.org_user_id,
-                    "is_active": true,
-                    "service_type": "http",
-                    "node_id": { "$type": "string", "$ne": "" },
+                        "user_id": &m.org_user_id,
+                        "is_active": true,
+                        "service_type": "http",
+                        "node_id": { "$type": "string", "$ne": "" },
                 })
                 .await?
                 .try_collect()
                 .await?;
             for svc in org_pinned {
+                if !crate::services::user_service_service::role_can_proxy_service(m.role, &svc) {
+                    continue;
+                }
                 if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &svc.id)
                 {
                     continue;
@@ -1563,6 +1566,9 @@ async fn load_callable_user_services(
             .await?;
 
         for svc in org_svcs {
+            if !crate::services::user_service_service::role_can_proxy_service(m.role, &svc) {
+                continue;
+            }
             if !crate::services::org_role_scope_service::scope_allows(&effective_scope, &svc.id) {
                 continue;
             }
@@ -5479,6 +5485,97 @@ mod tests {
         assert_eq!(unavailable["executable"], false);
         assert_eq!(unavailable["source"], "user_service");
         assert_eq!(unavailable["is_generic_proxy"], true);
+    }
+
+    #[tokio::test]
+    async fn callable_service_loader_tracks_admin_only_toggle_for_member() {
+        use crate::models::org_membership::{COLLECTION_NAME as ORG_MEMBERSHIPS, OrgRole};
+
+        let Some(db) = connect_test_database("mcp_admin_only_member_discovery").await else {
+            eprintln!("skipping MCP admin-only discovery test: no local MongoDB available");
+            return;
+        };
+
+        let member_id = uuid::Uuid::new_v4().to_string();
+        let org_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let service = test_user_service(
+            &service_id,
+            &org_id,
+            "admin-only-org-service",
+            &endpoint_id,
+            None,
+            None,
+        );
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(service)
+            .await
+            .expect("insert admin-only org service");
+        db.collection::<crate::models::org_membership::OrgMembership>(ORG_MEMBERSHIPS)
+            .insert_one(crate::test_utils::test_membership(
+                &org_id,
+                &member_id,
+                OrgRole::Member,
+                None,
+            ))
+            .await
+            .expect("insert member membership");
+
+        let visible_while_disabled = load_callable_user_services(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &member_id,
+            false,
+            NodeScope::Unrestricted,
+        )
+        .await
+        .expect("load member-callable services");
+        assert_eq!(visible_while_disabled.len(), 1);
+        assert_eq!(visible_while_disabled[0].service.id, service_id);
+
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service_id },
+                doc! { "$set": { "admin_only": true } },
+            )
+            .await
+            .expect("enable admin-only policy");
+
+        let hidden_while_enabled = load_callable_user_services(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &member_id,
+            false,
+            NodeScope::Unrestricted,
+        )
+        .await
+        .expect("reload member-callable services after enabling policy");
+
+        assert!(
+            hidden_while_enabled.is_empty(),
+            "admin-only org services must not be advertised as callable to regular members"
+        );
+
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service_id },
+                doc! { "$set": { "admin_only": false } },
+            )
+            .await
+            .expect("disable admin-only policy");
+
+        let visible_again = load_callable_user_services(
+            &db,
+            &NodeWsManager::new(30, 100),
+            &member_id,
+            false,
+            NodeScope::Unrestricted,
+        )
+        .await
+        .expect("reload member-callable services after disabling policy");
+        assert_eq!(visible_again.len(), 1);
+        assert_eq!(visible_again[0].service.id, service_id);
     }
 
     #[tokio::test]

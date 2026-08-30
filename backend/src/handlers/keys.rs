@@ -265,7 +265,8 @@ async fn resolve_key_read_owner(
             // Members can proxy/use unless the service is admin-only; viewers
             // cannot. Scope has already been enforced above via
             // allows_resource, so if we got here this key is within scope.
-            let allowed = role.can_proxy() && (!svc.admin_only || role.can_admin());
+            let allowed =
+                crate::services::user_service_service::role_can_proxy_service(*role, &svc);
             CredentialSource::Org {
                 org_user_id: org_user_id.clone(),
                 org_name,
@@ -4120,7 +4121,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_key_for_org_requires_admin() {
+    async fn create_org_key_grants_inherited_member_scope_and_requires_admin() {
         let Some(db) = connect_test_database("h_keys_create_org_admin").await else {
             eprintln!("skipping: no local MongoDB");
             return;
@@ -4128,12 +4129,47 @@ mod tests {
         let state = test_app_state(db.clone());
         let admin_id = uuid::Uuid::new_v4().to_string();
         let member_id = uuid::Uuid::new_v4().to_string();
+        let override_member_id = uuid::Uuid::new_v4().to_string();
         let org_id = uuid::Uuid::new_v4().to_string();
         insert_user(&db, &admin_id, UserType::Person).await;
         insert_user(&db, &member_id, UserType::Person).await;
+        insert_user(&db, &override_member_id, UserType::Person).await;
         insert_user(&db, &org_id, UserType::Org).await;
         insert_membership(&db, &org_id, &admin_id, OrgRole::Admin).await;
         insert_membership(&db, &org_id, &member_id, OrgRole::Member).await;
+        insert_membership(&db, &org_id, &override_member_id, OrgRole::Member).await;
+        db.collection::<crate::models::org_membership::OrgMembership>(
+            crate::models::org_membership::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! { "org_user_id": &org_id, "member_user_id": &member_id },
+            doc! { "$set": { "scope_source": "inherit" } },
+        )
+        .await
+        .expect("make member inherit the configured role scope");
+        db.collection::<crate::models::org_membership::OrgMembership>(
+            crate::models::org_membership::COLLECTION_NAME,
+        )
+        .update_one(
+            doc! { "org_user_id": &org_id, "member_user_id": &override_member_id },
+            doc! {
+                "$set": {
+                    "scope_source": "override",
+                    "allowed_service_ids": [],
+                },
+            },
+        )
+        .await
+        .expect("configure an explicit empty member override");
+        crate::services::org_role_scope_service::set_scope(
+            &db,
+            &org_id,
+            OrgRole::Member,
+            Some(Vec::new()),
+            &admin_id,
+        )
+        .await
+        .expect("start with an explicitly configured member role scope");
 
         // Admin should succeed
         let mut body = make_create_key_request(
@@ -4145,14 +4181,74 @@ mod tests {
         );
         body.target_org_id = Some(org_id.clone());
 
-        let result = super::create_key(
+        let Json(created) = super::create_key(
             State(state.clone()),
             test_auth_user(&admin_id),
             TelemetryContext::default(),
             Json(body),
         )
-        .await;
-        assert!(result.is_ok(), "admin should create org key");
+        .await
+        .expect("admin should create org key");
+        assert!(!created.admin_only);
+
+        let Json(member_keys) = super::list_keys(State(state.clone()), test_auth_user(&member_id))
+            .await
+            .expect("member should list newly created org services");
+        let member_service = member_keys
+            .keys
+            .iter()
+            .find(|key| key.id == created.id)
+            .expect("new org service should be visible to an inheriting member");
+        assert!(matches!(
+            &member_service.credential_source,
+            crate::handlers::user_services_handler::CredentialSourceResponse::Org {
+                role: crate::handlers::user_services_handler::OrgRoleResponse::Member,
+                allowed: true,
+                ..
+            }
+        ));
+
+        let member_target = crate::services::proxy_service::resolve_proxy_target_from_user_service(
+            &state.db,
+            &state.encryption_keys,
+            &state.node_ws_manager,
+            &member_id,
+            Some(&created.slug),
+            created.catalog_service_id.as_deref(),
+            None,
+        )
+        .await
+        .expect("member proxy resolution should not fail")
+        .expect("new org service should resolve for an inheriting member");
+        assert_eq!(member_target.user_service_id, created.id);
+
+        let Json(override_member_keys) =
+            super::list_keys(State(state.clone()), test_auth_user(&override_member_id))
+                .await
+                .expect("override member should still be able to list keys");
+        assert!(
+            override_member_keys
+                .keys
+                .iter()
+                .all(|key| key.id != created.id),
+            "automatic role-scope expansion must not rewrite a per-member override"
+        );
+        let override_proxy_result =
+            crate::services::proxy_service::resolve_proxy_target_from_user_service(
+                &state.db,
+                &state.encryption_keys,
+                &state.node_ws_manager,
+                &override_member_id,
+                Some(&created.slug),
+                created.catalog_service_id.as_deref(),
+                None,
+            )
+            .await;
+        match override_proxy_result {
+            Err(AppError::OrgRoleInsufficient(_)) => {}
+            Err(other) => panic!("expected scoped denial, got {other:?}"),
+            Ok(_) => panic!("explicitly scoped-out member resolved the org service"),
+        }
 
         // Member should be rejected
         let mut body2 = make_create_key_request(
@@ -4594,7 +4690,7 @@ mod tests {
     // ---- list_keys integration tests ----
 
     #[tokio::test]
-    async fn list_keys_includes_org_keys() {
+    async fn list_keys_keeps_admin_only_org_keys_visible_to_members() {
         let Some(db) = connect_test_database("h_keys_list_org_keys").await else {
             eprintln!("skipping: no local MongoDB");
             return;
@@ -4607,15 +4703,58 @@ mod tests {
         insert_user(&db, &org_id, UserType::Org).await;
         insert_membership(&db, &org_id, &user_id, OrgRole::Member).await;
         insert_key_fixture(&db, &org_id, &service_id, "org-svc", "Org Service").await;
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service_id },
+                doc! { "$set": { "admin_only": true } },
+            )
+            .await
+            .expect("enable admin-only policy");
+
+        let Json(response) = super::list_keys(State(state.clone()), test_auth_user(&user_id))
+            .await
+            .unwrap();
+
+        let restricted = response
+            .keys
+            .iter()
+            .find(|key| key.id == service_id)
+            .expect("admin-only org keys should remain visible to members");
+        assert!(restricted.admin_only);
+        assert!(matches!(
+            &restricted.credential_source,
+            crate::handlers::user_services_handler::CredentialSourceResponse::Org {
+                role: crate::handlers::user_services_handler::OrgRoleResponse::Member,
+                allowed: false,
+                ..
+            }
+        ));
+
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service_id },
+                doc! { "$set": { "admin_only": false } },
+            )
+            .await
+            .expect("disable admin-only policy");
 
         let Json(response) = super::list_keys(State(state), test_auth_user(&user_id))
             .await
             .unwrap();
-
-        assert!(
-            response.keys.iter().any(|k| k.id == service_id),
-            "org keys should be visible to members"
-        );
+        let unrestricted = response
+            .keys
+            .iter()
+            .find(|key| key.id == service_id)
+            .expect("org key should remain visible after disabling the policy");
+        assert!(!unrestricted.admin_only);
+        assert!(matches!(
+            &unrestricted.credential_source,
+            crate::handlers::user_services_handler::CredentialSourceResponse::Org {
+                role: crate::handlers::user_services_handler::OrgRoleResponse::Member,
+                allowed: true,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
