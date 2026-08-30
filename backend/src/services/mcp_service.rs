@@ -11,7 +11,10 @@ use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService, ProxyOperationPolicy,
     legacy_http_service_type_filter,
 };
-use crate::models::platform_operation::{PlatformOperation, PlatformOperationConfig};
+use crate::models::platform_operation::{
+    COLLECTION_NAME as PLATFORM_OPERATIONS, PlatformOperation, PlatformOperationConfig,
+    PlatformOperationKind, PlatformOperationRow,
+};
 use crate::models::service_billing::{BillingMetric, PlatformUsage};
 use crate::models::service_endpoint::{
     COLLECTION_NAME as SERVICE_ENDPOINTS, EndpointRisk, OperationResponseContract, ServiceEndpoint,
@@ -29,8 +32,8 @@ use crate::services::content_type::{
 };
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::{
-    api_docs_service, catalog_spec_sync, connect_link_service, connection_service,
-    node_routing_service, openapi_parser, operation_descriptor, proxy_service,
+    api_docs_service, connect_link_service, connection_service, node_routing_service,
+    openapi_parser, operation_descriptor, proxy_service,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,6 +59,8 @@ pub enum McpToolSource {
         has_server_credential: bool,
     },
 }
+
+pub const PLATFORM_CREDENTIAL_SERVICE_CATEGORY: &str = "platform_credential";
 
 impl McpToolSource {
     pub fn is_user_service(&self) -> bool {
@@ -785,6 +790,168 @@ pub async fn load_operation_catalog(
     })
 }
 
+pub async fn load_platform_endpoint_tools(
+    db: &mongodb::Database,
+) -> AppResult<Vec<McpToolService>> {
+    let rows: Vec<PlatformOperationRow> = db
+        .collection::<PlatformOperationRow>(PLATFORM_OPERATIONS)
+        .find(doc! { "enabled": true, "kind.kind": "endpoint" })
+        .await?
+        .try_collect()
+        .await?;
+    let service_ids = rows
+        .iter()
+        .map(|row| row.catalog_service_id.as_str())
+        .collect::<HashSet<_>>();
+    if service_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let services: Vec<DownstreamService> = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find(doc! {
+            "_id": { "$in": service_ids.into_iter().collect::<Vec<_>>() },
+            "is_active": true,
+        })
+        .await?
+        .try_collect()
+        .await?;
+    let endpoints: Vec<ServiceEndpoint> = db
+        .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+        .find(doc! {
+            "service_id": { "$in": services.iter().map(|service| service.id.as_str()).collect::<Vec<_>>() },
+            "is_active": true,
+        })
+        .await?
+        .try_collect()
+        .await?;
+    let endpoints_by_service = endpoints.iter().fold(
+        HashMap::<&str, Vec<&ServiceEndpoint>>::new(),
+        |mut grouped, endpoint| {
+            grouped
+                .entry(endpoint.service_id.as_str())
+                .or_default()
+                .push(endpoint);
+            grouped
+        },
+    );
+    let mut result = Vec::new();
+    for service in services {
+        if crate::services::platform_credential_service::provider_contract_for_slug(&service.slug)
+            .is_none()
+        {
+            continue;
+        }
+        let mut published = Vec::new();
+        for row in rows
+            .iter()
+            .filter(|row| row.catalog_service_id == service.id)
+        {
+            let PlatformOperationKind::Endpoint {
+                method,
+                path_template,
+                name,
+                description,
+            } = &row.kind
+            else {
+                continue;
+            };
+            let endpoint = endpoints_by_service
+                .get(service.id.as_str())
+                .into_iter()
+                .flatten()
+                .find(|endpoint| {
+                    crate::services::platform_credential_service::normalize_endpoint_definition(
+                        &service.slug,
+                        &endpoint.method,
+                        &endpoint.path,
+                    )
+                    .is_ok_and(|(endpoint_method, endpoint_path)| {
+                        endpoint_method == *method && endpoint_path == *path_template
+                    })
+                })
+                .map(|endpoint| McpToolEndpoint {
+                    endpoint_id: row.id.clone(),
+                    name: endpoint.name.clone(),
+                    description: endpoint.description.clone(),
+                    method: endpoint.method.clone(),
+                    path: endpoint.path.clone(),
+                    parameters: endpoint.parameters.clone(),
+                    request_body_schema: endpoint.request_body_schema.clone(),
+                    request_content_type: endpoint.request_content_type.clone(),
+                    request_body_required: endpoint.effective_request_body_required(),
+                    response_description: endpoint.response_description.clone(),
+                    response: endpoint.response.clone(),
+                })
+                .unwrap_or_else(|| {
+                    platform_row_to_mcp_endpoint(
+                        row,
+                        method,
+                        path_template,
+                        name,
+                        description.as_deref(),
+                    )
+                });
+            published.push(endpoint);
+        }
+        if published.is_empty() {
+            continue;
+        }
+        result.push(McpToolService {
+            service_id: service.id.clone(),
+            service_name: service.name.clone(),
+            service_slug: service.slug.clone(),
+            description: service.description.clone(),
+            service_category: PLATFORM_CREDENTIAL_SERVICE_CATEGORY.to_string(),
+            endpoints: published,
+            durable_endpoint_metadata: HashMap::new(),
+            source: McpToolSource::Platform {
+                downstream_service_id: service.id.clone(),
+            },
+            executable: true,
+            is_generic_proxy: false,
+            invalid_openapi_contract: false,
+            recommended_skills: service.recommended_skills.unwrap_or_default(),
+            proxy_operation_policy: None,
+        });
+    }
+    Ok(result)
+}
+
+fn platform_row_to_mcp_endpoint(
+    row: &PlatformOperationRow,
+    method: &str,
+    path_template: &str,
+    name: &str,
+    description: Option<&str>,
+) -> McpToolEndpoint {
+    let parameters = path_template
+        .split('/')
+        .filter_map(|segment| segment.strip_prefix('{')?.strip_suffix('}'))
+        .map(|name| {
+            serde_json::json!({
+                "name": name,
+                "in": "path",
+                "required": true,
+                "schema": { "type": "string" },
+            })
+        })
+        .collect::<Vec<_>>();
+    let has_body = method == "POST";
+    McpToolEndpoint {
+        endpoint_id: row.id.clone(),
+        name: name.to_string(),
+        description: description.map(str::to_string),
+        method: method.to_string(),
+        path: path_template.to_string(),
+        parameters: (!parameters.is_empty()).then(|| serde_json::Value::Array(parameters)),
+        request_body_schema: has_body.then(|| serde_json::json!({ "type": "object" })),
+        request_content_type: has_body.then(|| "application/json".to_string()),
+        request_body_required: has_body,
+        response_description: None,
+        response: OperationResponseContract::default(),
+    }
+}
+
 fn operation_set_is_publishable(service: &McpToolService) -> bool {
     if service.endpoints.is_empty() {
         return false;
@@ -806,7 +973,7 @@ fn operation_descriptor_is_publishable(endpoint: &McpToolEndpoint) -> bool {
         || !endpoint.path.starts_with('/')
         || !matches!(
             endpoint.method.as_str(),
-            "GET" | "POST" | "PUT" | "PATCH" | "DELETE"
+            "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE"
         )
         || endpoint.parameters.as_ref().is_some_and(|parameters| {
             !parameters.as_array().is_some_and(|parameters| {
@@ -977,10 +1144,7 @@ async fn load_user_tools_inner(
     let mut valid_platform_services: Vec<(&DownstreamService, bool)> = Vec::new();
 
     for svc in &connected_services {
-        if svc.service_type != "http"
-            || svc.service_category == "provider"
-            || catalog_spec_sync::is_platform_vendor_service(svc)
-        {
+        if svc.service_type != "http" || svc.service_category == "provider" {
             continue;
         }
         let mut executable = true;
@@ -1222,24 +1386,15 @@ async fn load_user_tools_inner(
             .catalog_service_id
             .as_deref()
             .and_then(|id| catalog_policy_by_id.get(id).copied());
-        let platform_vendor_catalog =
-            catalog_policy.is_some_and(catalog_spec_sync::is_platform_vendor_service);
         let user_endpoint = endpoints_by_id.get(us.endpoint_id.as_str()).copied();
         let endpoint_label = user_endpoint
             .map(|ep| ep.label.as_str())
             .unwrap_or(&us.slug);
 
         let user_spec_url = user_endpoint.and_then(|ep| ep.openapi_spec_url.as_deref());
-        let (published, is_generic, invalid_openapi_contract) = if platform_vendor_catalog {
-            (
-                ParsedMcpEndpoints {
-                    endpoints: Vec::new(),
-                    durable_metadata: HashMap::new(),
-                },
-                false,
-                false,
-            )
-        } else if let Some(catalog_id) = us.catalog_service_id.as_deref() {
+        let (published, is_generic, invalid_openapi_contract) = if let Some(catalog_id) =
+            us.catalog_service_id.as_deref()
+        {
             // Catalog-backed: the instance's user-mounted spec is a
             // deliberate per-instance override and takes precedence over
             // the template's registered ServiceEndpoint rows. A broken or
@@ -1877,6 +2032,7 @@ fn build_generic_proxy_endpoint(service_label: &str) -> McpToolEndpoint {
 
 pub(crate) const GENERIC_PROXY_ENDPOINT_ID: &str = "nyx_generic_proxy_v1";
 pub(crate) const GENERIC_PROXY_OPERATION_GENERATION: i64 = 1;
+pub(crate) const PLATFORM_CREDENTIAL_INTENT_ARGUMENT: &str = "credential_intent";
 
 fn opaque_operation_id(source_operation_id: Option<&str>, method: &str, path: &str) -> String {
     let canonical = match source_operation_id {
@@ -1916,6 +2072,23 @@ fn build_generic_proxy_input_schema() -> serde_json::Value {
         },
         "required": ["path"]
     })
+}
+
+fn add_platform_credential_intent_argument(schema: &mut serde_json::Value) {
+    let Some(properties) = schema
+        .get_mut("properties")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    properties.insert(
+        PLATFORM_CREDENTIAL_INTENT_ARGUMENT.to_string(),
+        serde_json::json!({
+            "type": "string",
+            "enum": ["auto", "own_only", "platform_only"],
+            "description": "Credential selection policy for this call. Defaults to auto; platform_only still requires the owner's stored platform-spend preference."
+        }),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2257,36 +2430,7 @@ pub fn generate_tool_definitions(
         if !operation.enabled {
             continue;
         }
-        let definition = match &operation.config {
-            PlatformOperationConfig::XSearch(config)
-                if operation.op
-                    == crate::models::platform_operation::PlatformOperationName::XSearch =>
-            {
-                McpToolDefinition {
-                    name: "nyx__x_search".to_string(),
-                    description: "Search recent posts on X through NyxID's constrained platform operation."
-                        .to_string(),
-                    input_schema: serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "query": {
-                                "type": "string",
-                                "minLength": 1,
-                                "maxLength": 512,
-                                "description": "Search query"
-                            },
-                            "max_results": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": config.max_results_cap,
-                                "description": "Maximum results to return"
-                            }
-                        },
-                        "required": ["query"],
-                        "additionalProperties": false
-                    }),
-                }
-            }
+        let mut definition = match &operation.config {
             PlatformOperationConfig::Speak(config)
                 if operation.op
                     == crate::models::platform_operation::PlatformOperationName::Speak =>
@@ -2306,8 +2450,9 @@ pub fn generate_tool_definitions(
                             },
                             "voice_id": {
                                 "type": "string",
-                                "enum": config.allowed_voice_ids,
-                                "description": "Allowlisted ElevenLabs voice ID"
+                                "pattern": "^[A-Za-z0-9._-]+$",
+                                "maxLength": 128,
+                                "description": "ElevenLabs voice ID"
                             }
                         },
                         "required": ["text", "voice_id"],
@@ -2336,6 +2481,11 @@ pub fn generate_tool_definitions(
                                 "minLength": 1,
                                 "maxLength": config.max_message_chars,
                                 "description": "Message to speak"
+                            },
+                            "from": {
+                                "type": "string",
+                                "pattern": "^\\+[1-9][0-9]{0,14}$",
+                                "description": "Caller identity required only when using your own Twilio connection"
                             }
                         },
                         "required": ["to", "message"],
@@ -2343,8 +2493,60 @@ pub fn generate_tool_definitions(
                     }),
                 }
             }
+            PlatformOperationConfig::FlightSearch(config)
+                if operation.op
+                    == crate::models::platform_operation::PlatformOperationName::FlightSearch =>
+            {
+                McpToolDefinition {
+                    name: "nyx__flight_search".to_string(),
+                    description: "Search bounded Duffel flight offers without creating a booking."
+                        .to_string(),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "origin": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z]{3}$",
+                                "description": "Origin IATA airport or city code"
+                            },
+                            "destination": {
+                                "type": "string",
+                                "pattern": "^[A-Za-z]{3}$",
+                                "description": "Destination IATA airport or city code"
+                            },
+                            "departure_date": {
+                                "type": "string",
+                                "format": "date",
+                                "description": "Departure date in YYYY-MM-DD format"
+                            },
+                            "return_date": {
+                                "type": "string",
+                                "format": "date",
+                                "description": "Optional return date in YYYY-MM-DD format"
+                            },
+                            "adults": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 9
+                            },
+                            "cabin_class": {
+                                "type": "string",
+                                "enum": ["economy", "premium_economy", "business", "first"]
+                            },
+                            "max_offers": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": config.max_offers_cap
+                            }
+                        },
+                        "required": ["origin", "destination", "departure_date"],
+                        "additionalProperties": false
+                    }),
+                }
+            }
             _ => continue,
         };
+        add_platform_credential_intent_argument(&mut definition.input_schema);
         tools.push(definition);
     }
 
@@ -2364,11 +2566,14 @@ pub fn generate_tool_definitions(
                 service.service_name,
                 endpoint.description.as_deref().unwrap_or(&endpoint.name)
             );
-            let input_schema = if service.is_generic_proxy {
+            let mut input_schema = if service.is_generic_proxy {
                 build_generic_proxy_input_schema()
             } else {
                 build_input_schema(endpoint)
             };
+            if service.service_category == PLATFORM_CREDENTIAL_SERVICE_CATEGORY {
+                add_platform_credential_intent_argument(&mut input_schema);
+            }
             tools.push(McpToolDefinition {
                 name,
                 description,
@@ -3111,6 +3316,14 @@ pub struct PreparedProxyCall {
     is_generic_proxy_endpoint: bool,
 }
 
+pub struct PreparedPlatformCall {
+    pub method: reqwest::Method,
+    pub path: String,
+    pub query: Option<String>,
+    pub headers: reqwest::header::HeaderMap,
+    pub body: Option<bytes::Bytes>,
+}
+
 impl PreparedProxyCall {
     pub fn operation_descriptor(&self) -> operation_descriptor::OperationDescriptor {
         operation_descriptor::build_mcp_descriptor(
@@ -3118,6 +3331,55 @@ impl PreparedProxyCall {
             &self.path,
             self.body.as_ref().map(|bytes| bytes.as_ref()),
         )
+    }
+
+    pub fn platform_canonical_path(
+        &self,
+    ) -> AppResult<crate::services::proxy_authorization::CanonicalPath> {
+        if self.is_generic_proxy_endpoint {
+            crate::services::proxy_authorization::CanonicalPath::from_mcp_literal(&self.path)
+        } else {
+            crate::services::proxy_authorization::CanonicalPath::from_mcp_built(&self.path)
+        }
+    }
+
+    pub fn into_platform_parts(
+        self,
+        endpoint: &McpToolEndpoint,
+    ) -> AppResult<PreparedPlatformCall> {
+        let mut headers = if self.is_generic_proxy_endpoint {
+            let mut headers = reqwest::header::HeaderMap::new();
+            if self.body.is_some() {
+                headers.insert(
+                    reqwest::header::CONTENT_TYPE,
+                    reqwest::header::HeaderValue::from_static("application/json"),
+                );
+            }
+            headers
+        } else {
+            build_downstream_request_headers(endpoint, self.body.is_some())?
+        };
+        for (name, value) in self
+            .parameter_headers
+            .iter()
+            .chain(self.server_owned_headers.iter())
+        {
+            let name =
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                    AppError::BadRequest(format!("Invalid endpoint header name `{name}`: {error}"))
+                })?;
+            let value = reqwest::header::HeaderValue::from_str(value).map_err(|error| {
+                AppError::BadRequest(format!("Invalid endpoint header value: {error}"))
+            })?;
+            headers.append(name, value);
+        }
+        Ok(PreparedPlatformCall {
+            method: self.method,
+            path: self.path,
+            query: self.query,
+            headers,
+            body: self.body,
+        })
     }
 }
 
@@ -6284,47 +6546,143 @@ mod tests {
     fn generate_tool_definitions_publishes_only_enabled_platform_operation_rows() {
         let enabled_operation = PlatformOperation {
             id: "platform-speak".to_string(),
+            catalog_service_id: "catalog-elevenlabs".to_string(),
             op: crate::models::platform_operation::PlatformOperationName::Speak,
             enabled: true,
-            vendor_service_slug: "platform-elevenlabs".to_string(),
+            vendor_service_slug: "api-elevenlabs".to_string(),
             config: PlatformOperationConfig::Speak(
                 crate::models::platform_operation::SpeakConfig {
                     allowed_voice_ids: vec!["voice-a".to_string(), "voice-b".to_string()],
                     max_chars: 321,
                     model_id: "eleven_multilingual_v2".to_string(),
+                    max_calls_per_user_per_day: 50,
                 },
             ),
-            updated_at: chrono::Utc::now(),
-            updated_by: "admin-user".to_string(),
+            billing: crate::services::platform_operation_service::default_operation_billing(
+                crate::models::platform_operation::PlatformOperationName::Speak,
+            ),
         };
         let disabled_operation = PlatformOperation {
-            id: "platform-x-search".to_string(),
-            op: crate::models::platform_operation::PlatformOperationName::XSearch,
+            id: "platform-call-and-say".to_string(),
+            catalog_service_id: "catalog-twilio".to_string(),
+            op: crate::models::platform_operation::PlatformOperationName::CallAndSay,
             enabled: false,
-            vendor_service_slug: "platform-x".to_string(),
-            config: PlatformOperationConfig::XSearch(
-                crate::models::platform_operation::XSearchConfig {
-                    max_results_cap: 10,
+            vendor_service_slug: "api-twilio".to_string(),
+            config: PlatformOperationConfig::CallAndSay(
+                crate::models::platform_operation::CallAndSayConfig {
+                    allowed_destination_prefixes: vec!["+65".to_string()],
+                    max_message_chars: 500,
+                    max_duration_seconds: 600,
+                    voice: "alice".to_string(),
+                    max_calls_per_user_per_day: 3,
+                    account_sid: format!("AC{}", "1".repeat(32)),
+                    call_from: "+6512345678".to_string(),
                 },
             ),
-            updated_at: chrono::Utc::now(),
-            updated_by: "admin-user".to_string(),
+            billing: crate::services::platform_operation_service::default_operation_billing(
+                crate::models::platform_operation::PlatformOperationName::CallAndSay,
+            ),
+        };
+        let flight_operation = PlatformOperation {
+            id: "platform-flight-search".to_string(),
+            catalog_service_id: "catalog-duffel".to_string(),
+            op: crate::models::platform_operation::PlatformOperationName::FlightSearch,
+            enabled: true,
+            vendor_service_slug: "duffel".to_string(),
+            config: PlatformOperationConfig::FlightSearch(
+                crate::models::platform_operation::FlightSearchConfig {
+                    max_offers_cap: 12,
+                    max_searches_per_user_per_day: 20,
+                },
+            ),
+            billing: crate::services::platform_operation_service::default_operation_billing(
+                crate::models::platform_operation::PlatformOperationName::FlightSearch,
+            ),
         };
 
-        let tools = generate_tool_definitions(&[], None, &[enabled_operation, disabled_operation]);
+        let tools = generate_tool_definitions(
+            &[],
+            None,
+            &[enabled_operation, disabled_operation, flight_operation],
+        );
         let speak = tools
             .iter()
             .find(|tool| tool.name == "nyx__speak")
             .expect("enabled speak tool");
 
-        assert!(!tools.iter().any(|tool| tool.name == "nyx__x_search"));
         assert!(!tools.iter().any(|tool| tool.name == "nyx__call_and_say"));
+        let flight = tools
+            .iter()
+            .find(|tool| tool.name == "nyx__flight_search")
+            .expect("enabled flight search tool");
         assert_eq!(speak.input_schema["properties"]["text"]["maxLength"], 321);
         assert_eq!(
-            speak.input_schema["properties"]["voice_id"]["enum"],
-            serde_json::json!(["voice-a", "voice-b"])
+            speak.input_schema["properties"]["voice_id"]["pattern"],
+            "^[A-Za-z0-9._-]+$"
         );
         assert_eq!(speak.input_schema["additionalProperties"], false);
+        assert_eq!(
+            speak.input_schema["properties"]["credential_intent"]["enum"],
+            serde_json::json!(["auto", "own_only", "platform_only"])
+        );
+        assert_eq!(
+            flight.input_schema["properties"]["max_offers"]["maximum"],
+            12
+        );
+        assert_eq!(flight.input_schema["additionalProperties"], false);
+    }
+
+    #[test]
+    fn platform_endpoint_tool_schemas_expose_credential_intent_only_as_transport_control() {
+        let mut direct = make_service(
+            "platform-direct",
+            "Platform Direct",
+            "platform-direct",
+            vec![make_endpoint("read_resource", "Read a resource")],
+        );
+        direct.service_category = PLATFORM_CREDENTIAL_SERVICE_CATEGORY.to_string();
+
+        let mut generic = make_service(
+            "platform-generic",
+            "Platform Generic",
+            "platform-generic",
+            vec![build_generic_proxy_endpoint("Platform Generic")],
+        );
+        generic.service_category = PLATFORM_CREDENTIAL_SERVICE_CATEGORY.to_string();
+        generic.is_generic_proxy = true;
+
+        let ordinary = make_service(
+            "ordinary",
+            "Ordinary",
+            "ordinary",
+            vec![make_endpoint("read_resource", "Read a resource")],
+        );
+
+        let tools = generate_tool_definitions(&[direct, generic, ordinary], None, &[]);
+        for name in [
+            "platform-direct__read_resource",
+            "platform-generic__request",
+        ] {
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("missing platform endpoint tool {name}"));
+            assert_eq!(
+                tool.input_schema["properties"]["credential_intent"]["enum"],
+                serde_json::json!(["auto", "own_only", "platform_only"])
+            );
+        }
+
+        let ordinary = tools
+            .iter()
+            .find(|tool| tool.name == "ordinary__read_resource")
+            .expect("ordinary endpoint tool");
+        assert!(
+            ordinary.input_schema["properties"]
+                .get("credential_intent")
+                .is_none(),
+            "credential_intent is a NyxID platform transport control, not a provider argument"
+        );
     }
 
     #[test]

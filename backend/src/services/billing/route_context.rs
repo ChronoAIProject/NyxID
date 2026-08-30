@@ -1,4 +1,5 @@
-use crate::models::service_billing::{BillingMetric, ResaleSpec, ServiceBilling};
+use crate::models::platform_operation::OperationBilling;
+use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleSpec, ServiceBilling};
 use crate::models::usage_meter::CredentialClass;
 
 use super::route_inventory::BillingIngress;
@@ -8,6 +9,14 @@ pub enum NodeIntent {
     Direct,
     Node,
     NodeWithFallback,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlatformBillingComponent {
+    pub metric: BillingMetric,
+    pub lago_metric_code: String,
+    pub estimated_quantity: i64,
+    pub rate_micros: i64,
 }
 
 #[derive(Clone, Debug)]
@@ -25,6 +34,10 @@ pub struct BillingRouteContext {
     pub credential_class: CredentialClass,
     pub platform_metric: BillingMetric,
     pub platform_lago_metric_code: String,
+    pub platform_estimated_quantity: i64,
+    pub platform_rate_micros: Option<i64>,
+    pub platform_base_fee_micros: i64,
+    pub platform_secondary: Option<PlatformBillingComponent>,
     pub resale: Option<ResaleSpec>,
     /// Admin opt-in from the service's billing config: only services
     /// explicitly marked platform_billable charge the platform layer.
@@ -80,6 +93,10 @@ impl BillingRouteContext {
             credential_class,
             platform_metric,
             platform_lago_metric_code,
+            platform_estimated_quantity: 1,
+            platform_rate_micros: None,
+            platform_base_fee_micros: 0,
+            platform_secondary: None,
             resale,
             service_platform_billable,
             platform_metered: false,
@@ -90,6 +107,37 @@ impl BillingRouteContext {
     pub(crate) fn with_platform_metering(mut self, platform_billable: bool) -> Self {
         self.platform_metered = true;
         self.platform_billable = platform_billable;
+        self
+    }
+
+    pub fn with_platform_operation_billing(
+        mut self,
+        billing: &OperationBilling,
+        primary_rate_micros: i64,
+        secondary_rate_micros: Option<i64>,
+        base_fee_micros: i64,
+        estimated_usage: &PlatformUsage,
+    ) -> Self {
+        self.platform_metric = billing.metric;
+        self.platform_lago_metric_code = billing.lago_metric_code.clone();
+        self.platform_rate_micros = Some(primary_rate_micros.max(0));
+        self.platform_base_fee_micros = base_fee_micros.max(0);
+        self.platform_estimated_quantity =
+            super::meter::platform_quantity(billing.metric, estimated_usage);
+        self.platform_secondary =
+            billing
+                .secondary
+                .as_ref()
+                .map(|component| PlatformBillingComponent {
+                    metric: component.metric,
+                    lago_metric_code: component.lago_metric_code.clone(),
+                    estimated_quantity: super::meter::platform_quantity(
+                        component.metric,
+                        estimated_usage,
+                    ),
+                    rate_micros: secondary_rate_micros.unwrap_or_default().max(0),
+                });
+        self.service_platform_billable = true;
         self
     }
 

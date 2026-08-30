@@ -42,10 +42,6 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
         else {
             continue; // Service not seeded on this deployment
         };
-        if is_platform_vendor_service(&service) {
-            continue;
-        }
-
         let inputs = match seeded_endpoint_inputs(slug) {
             Ok(inputs) => inputs,
             Err(error) => {
@@ -209,14 +205,6 @@ pub fn should_auto_sync_service_endpoints(service: &DownstreamService) -> bool {
             .is_some_and(|url| !url.is_empty())
 }
 
-/// Platform vendor rows are credential stores, not catalog surfaces. Their
-/// reserved slug namespace lets hosted catalog overlays continue to hydrate
-/// intentional internal services such as LLM catalogs without publishing
-/// tools for operator-managed vendor credentials.
-pub fn is_platform_vendor_service(service: &DownstreamService) -> bool {
-    service.service_category == "internal" && service.slug.starts_with("platform-")
-}
-
 /// Parse and validate the hosted overlay for a slug into endpoint inputs.
 fn seeded_endpoint_inputs(slug: &str) -> AppResult<Vec<EndpointInput>> {
     let spec = catalog_spec_registry::spec_for_slug(slug).ok_or_else(|| {
@@ -261,12 +249,11 @@ mod tests {
     #[test]
     fn internal_services_are_never_auto_materialized_as_tools() {
         let mut service = crate::models::downstream_service::test_helpers::dummy_service();
-        service.slug = "platform-elevenlabs".to_string();
+        service.slug = "internal-control-plane".to_string();
         service.service_category = "internal".to_string();
         service.openapi_spec_url = Some("https://api.elevenlabs.io/openapi.json".to_string());
 
         assert!(!should_auto_sync_service_endpoints(&service));
-        assert!(is_platform_vendor_service(&service));
     }
 
     #[test]

@@ -231,9 +231,7 @@ describe("KeysPage", () => {
 
     render(<KeysPage />);
 
-    expect(
-      screen.getByText(/failed to load services/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/failed to load services/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /retry/i })).toBeInTheDocument();
   });
 
@@ -297,12 +295,91 @@ describe("KeysPage", () => {
       render(<KeysPage />);
       await user.click(screen.getByRole("switch"));
 
-      expect(screen.getByText("https://manual-table.example/v1")).toBeInTheDocument();
-      expect(screen.queryByText("https://platform-table.internal/v1")).not.toBeInTheDocument();
+      expect(
+        screen.getByText("https://manual-table.example/v1"),
+      ).toBeInTheDocument();
+      expect(
+        screen.queryByText("https://platform-table.internal/v1"),
+      ).not.toBeInTheDocument();
       expect(screen.getAllByText("Platform managed").length).toBeGreaterThan(0);
     } finally {
       localStorage.removeItem("nyxid-view-mode:keys-services");
     }
+  });
+
+  it("keeps synthetic platform providers visible and connects without navigating their response id", async () => {
+    const user = userEvent.setup();
+    state.keys = [
+      makeKey({
+        id: "platform-provider:catalog-elevenlabs",
+        label: "ElevenLabs",
+        catalog_service_id: "catalog-elevenlabs",
+        catalog_service_slug: "api-elevenlabs",
+        catalog_service_name: "ElevenLabs",
+        endpoint_url: undefined,
+        credential_type: "platform",
+        auto_connected: true,
+        platform_managed: true,
+        platform: {
+          operations: [
+            {
+              name: "speak",
+              kind: "constrained",
+              price_label: "0.25 credits per character",
+            },
+          ],
+          credential_source: "platform",
+        },
+      }),
+    ];
+
+    render(<KeysPage />);
+
+    expect(screen.getByText(/1 platform operation/)).toBeInTheDocument();
+    expect(screen.getByText("0.25 credits per character")).toBeInTheDocument();
+    expect(screen.getAllByText("Platform managed").length).toBeGreaterThan(0);
+    expect(
+      screen
+        .getAllByText("ElevenLabs")
+        .every((element) => element.closest("a") === null),
+    ).toBe(true);
+
+    await user.click(screen.getByRole("button", { name: /connect your own/i }));
+
+    expect(screen.getByTestId("add-key-dialog")).toHaveAttribute(
+      "data-prefill",
+      "api-elevenlabs",
+    );
+    expect(mockNavigate).not.toHaveBeenCalledWith({
+      to: "/keys/$keyId",
+      params: { keyId: "platform-provider:catalog-elevenlabs" },
+    });
+  });
+
+  it("reports a disabled own connection as unusable instead of platform fallback", () => {
+    state.keys = [
+      makeKey({
+        id: "disabled-elevenlabs",
+        label: "My ElevenLabs",
+        is_active: false,
+        platform: {
+          operations: [
+            {
+              name: "speak",
+              kind: "constrained",
+              price_label: "0.25 credits per character",
+            },
+          ],
+          credential_source: "unusable",
+          reason: "own_connection_disabled",
+        },
+      }),
+    ];
+
+    render(<KeysPage />);
+
+    expect(screen.getByText(/Own connection disabled/)).toBeInTheDocument();
+    expect(screen.queryByText(/Platform fallback/)).not.toBeInTheDocument();
   });
 
   it("groups org-inherited services into a labelled section with a role badge", () => {
@@ -414,7 +491,9 @@ describe("KeysPage", () => {
     render(<KeysPage />);
 
     expect(screen.getByText("Expired")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /reconnect/i })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /reconnect/i }),
+    ).toBeInTheDocument();
   });
 
   it("labels pending OAuth service cards as continue authentication", async () => {
@@ -583,9 +662,10 @@ describe("KeysPage", () => {
     render(<KeysPage />);
 
     await waitFor(() => {
-      expect(
-        screen.getByTestId("api-key-create-dialog"),
-      ).toHaveAttribute("data-open", "true");
+      expect(screen.getByTestId("api-key-create-dialog")).toHaveAttribute(
+        "data-open",
+        "true",
+      );
     });
   });
 });

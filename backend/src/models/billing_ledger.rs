@@ -67,6 +67,10 @@ pub struct BillingLedgerEntry {
     /// partial usage charge may consume less than one whole credit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub amount_micros: Option<i64>,
+    /// Snapshotted operation base fee. Present only on the versioned usage
+    /// encoding introduced for character/second platform operations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_fee_micros: Option<i64>,
     /// Post-event wallet balance snapshot (`wallet_credited` only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub balance_credits: Option<i64>,

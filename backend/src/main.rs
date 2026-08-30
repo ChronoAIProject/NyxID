@@ -39,6 +39,9 @@ mod grant_visibility_tests;
 #[cfg(test)]
 mod credit_schedule_tests;
 
+#[cfg(test)]
+mod platform_ops_contract_tests;
+
 use std::sync::Arc;
 
 /// Install `aws_lc_rs` as the rustls process-wide crypto provider.
@@ -529,12 +532,6 @@ async fn main() {
         .await
         .expect("Failed to seed default services");
 
-    // Seed the admin-managed platform vendor provisioning templates. Existing
-    // rows are never overwritten so operators can edit or disable templates.
-    services::platform_vendor_template_service::seed_default_templates(&db, "system")
-        .await
-        .expect("Failed to seed platform vendor templates");
-
     // Materialize ServiceEndpoint rows for seeded catalog services from the
     // hosted overlay specs so /api/v1/mcp/config publishes concrete
     // service_id + endpoint_id operations for workflow consumers (#1290).
@@ -687,10 +684,10 @@ async fn main() {
     );
 
     // Create shared state
-    let billing = Arc::new(services::billing::BillingService::new(
-        db.clone(),
-        Arc::new(config.clone()),
-    ));
+    let billing = Arc::new(
+        services::billing::BillingService::new(db.clone(), Arc::new(config.clone()))
+            .with_platform_runtime(encryption_keys.clone(), http_client.clone()),
+    );
     if config.billing_enabled {
         if billing.lago_configured() {
             match billing.backfill_existing_owner_wallets().await {

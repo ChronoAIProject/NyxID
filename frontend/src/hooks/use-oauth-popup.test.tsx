@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PLATFORM_OPERATION_DISCOVERY_QUERY_KEY } from "@/schemas/platform-ops";
 import { useOAuthPopupStore } from "@/stores/oauth-popup-store";
 import { useOAuthPopupReceiver } from "./use-oauth-popup";
 
@@ -77,6 +78,9 @@ describe("useOAuthPopupReceiver", () => {
     await waitFor(() =>
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ["keys"] }),
     );
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: PLATFORM_OPERATION_DISCOVERY_QUERY_KEY,
+    });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ["keys", "key-a"] });
     expect(onViewResult).not.toHaveBeenCalled();
     expect(useOAuthPopupStore.getState().attempt).toMatchObject({

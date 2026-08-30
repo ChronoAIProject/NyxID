@@ -24,9 +24,8 @@ use crate::models::user_service::{AUTO_PROVISION_SOURCE, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::services::{
     audit_service::{self, AuditActor},
-    catalog_spec_sync, node_service, oauth_revocation, ssh_service, user_api_key_service,
-    user_credentials_service, user_endpoint_service, user_service_service, user_token_service,
-    ws_frame_injector,
+    node_service, oauth_revocation, ssh_service, user_api_key_service, user_credentials_service,
+    user_endpoint_service, user_service_service, user_token_service, ws_frame_injector,
 };
 
 const MAX_SERVICE_SLUG_LEN: usize = 80;
@@ -821,12 +820,6 @@ async fn create_key_inner(
             .find_one(doc! { "slug": slug, "is_active": true })
             .await?
             .ok_or_else(|| AppError::NotFound(format!("Catalog service '{slug}' not found")))?;
-
-        if catalog_spec_sync::is_platform_vendor_service(&svc) {
-            return Err(AppError::NotFound(format!(
-                "Catalog service '{slug}' not found"
-            )));
-        }
 
         let is_ssh = svc.service_type == "ssh";
         let provider = if let Some(ref pid) = svc.provider_config_id {
@@ -8871,7 +8864,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auto_provision_creates_services_for_public_internal_master_credential_catalog() {
+    async fn chrono_llm_public_still_auto_provisions_as_internal_master_credential_catalog() {
         let Some(db) = connect_test_database("uks_auto_provision_master_credential").await else {
             eprintln!("skipping: no MongoDB");
             return;
@@ -8880,7 +8873,7 @@ mod tests {
 
         let mut catalog = sample_catalog_service();
         catalog.id = uuid::Uuid::new_v4().to_string();
-        catalog.slug = format!("public-internal-master-{}", uuid::Uuid::new_v4());
+        catalog.slug = "chrono-llm-public".to_string();
         catalog.auth_method = "bearer".to_string();
         catalog.auth_key_name = "Authorization".to_string();
         catalog.requires_user_credential = false;

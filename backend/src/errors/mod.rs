@@ -76,6 +76,24 @@ pub enum AppError {
     #[error("{0}")]
     PlatformVendorProvisioningInvalid(String),
 
+    #[error(
+        "Your {vendor} connection is node-routed; platform operations need a server-held credential. Disable that connection to use platform credits, or connect a server-held key."
+    )]
+    PlatformOperationOwnConnectionUnsupported { vendor: String },
+
+    #[error("Your {vendor} connection is unusable. {detail}")]
+    PlatformOperationOwnConnectionUnusable { vendor: String, detail: String },
+
+    #[error(
+        "Your {vendor} connection requires approval for each request; platform operations cannot request approvals. Approve-free the connection or disable it to use platform credits."
+    )]
+    PlatformOperationApprovalRequired { vendor: String },
+
+    #[error(
+        "This API key is not scoped to your {vendor} connection. Grant the key access to that connection, or disable the connection to use platform credits."
+    )]
+    PlatformOperationOwnConnectionOutOfScope { vendor: String },
+
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
 
@@ -535,6 +553,10 @@ impl AppError {
             Self::RequestBodyTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::PlatformOperationUnavailable => StatusCode::BAD_GATEWAY,
             Self::PlatformVendorProvisioningInvalid(_) => StatusCode::BAD_REQUEST,
+            Self::PlatformOperationOwnConnectionUnsupported { .. }
+            | Self::PlatformOperationOwnConnectionUnusable { .. }
+            | Self::PlatformOperationApprovalRequired { .. }
+            | Self::PlatformOperationOwnConnectionOutOfScope { .. } => StatusCode::CONFLICT,
             Self::Unauthorized(_) | Self::AuthenticationFailed(_) | Self::TokenExpired => {
                 StatusCode::UNAUTHORIZED
             }
@@ -688,6 +710,10 @@ impl AppError {
             Self::RequestBodyTooLarge { .. } => 11700,
             Self::PlatformOperationUnavailable => 11800,
             Self::PlatformVendorProvisioningInvalid(_) => 11801,
+            Self::PlatformOperationOwnConnectionUnsupported { .. } => 11802,
+            Self::PlatformOperationOwnConnectionUnusable { .. } => 11803,
+            Self::PlatformOperationApprovalRequired { .. } => 11804,
+            Self::PlatformOperationOwnConnectionOutOfScope { .. } => 11805,
             Self::Unauthorized(_) => 1001,
             Self::Forbidden(_) => 1002,
             Self::NotFound(_) => 1003,
@@ -881,6 +907,18 @@ impl AppError {
             Self::RequestBodyTooLarge { .. } => "request_body_too_large",
             Self::PlatformOperationUnavailable => "platform_operation_unavailable",
             Self::PlatformVendorProvisioningInvalid(_) => "platform_vendor_provisioning_invalid",
+            Self::PlatformOperationOwnConnectionUnsupported { .. } => {
+                "platform_operation_own_connection_unsupported"
+            }
+            Self::PlatformOperationOwnConnectionUnusable { .. } => {
+                "platform_operation_own_connection_unusable"
+            }
+            Self::PlatformOperationApprovalRequired { .. } => {
+                "platform_operation_approval_required"
+            }
+            Self::PlatformOperationOwnConnectionOutOfScope { .. } => {
+                "platform_operation_own_connection_out_of_scope"
+            }
             Self::Unauthorized(_) => "unauthorized",
             Self::Forbidden(_) => "forbidden",
             Self::NotFound(_) => "not_found",
@@ -1415,12 +1453,56 @@ mod tests {
     }
 
     #[test]
+    fn platform_operation_connection_error_contracts() {
+        let unusable = AppError::PlatformOperationOwnConnectionUnusable {
+            vendor: "X".to_string(),
+            detail: "Reconnect the credential.".to_string(),
+        };
+        assert_eq!(unusable.status_code(), StatusCode::CONFLICT);
+        assert_eq!(unusable.error_code(), 11803);
+        assert_eq!(
+            unusable.error_key(),
+            "platform_operation_own_connection_unusable"
+        );
+        assert_eq!(
+            unusable.to_string(),
+            "Your X connection is unusable. Reconnect the credential."
+        );
+
+        let approval = AppError::PlatformOperationApprovalRequired {
+            vendor: "Twilio".to_string(),
+        };
+        assert_eq!(approval.status_code(), StatusCode::CONFLICT);
+        assert_eq!(approval.error_code(), 11804);
+        assert_eq!(approval.error_key(), "platform_operation_approval_required");
+        assert_eq!(
+            approval.to_string(),
+            "Your Twilio connection requires approval for each request; platform operations cannot request approvals. Approve-free the connection or disable it to use platform credits."
+        );
+    }
+
+    #[test]
     fn error_codes_unique() {
         let codes = vec![
             AppError::BadRequest("".into()).error_code(),
             AppError::RequestBodyTooLarge {
                 max_bytes: 0,
                 context: String::new(),
+            }
+            .error_code(),
+            AppError::PlatformOperationUnavailable.error_code(),
+            AppError::PlatformVendorProvisioningInvalid(String::new()).error_code(),
+            AppError::PlatformOperationOwnConnectionUnsupported {
+                vendor: String::new(),
+            }
+            .error_code(),
+            AppError::PlatformOperationOwnConnectionUnusable {
+                vendor: String::new(),
+                detail: String::new(),
+            }
+            .error_code(),
+            AppError::PlatformOperationApprovalRequired {
+                vendor: String::new(),
             }
             .error_code(),
             AppError::Unauthorized("".into()).error_code(),

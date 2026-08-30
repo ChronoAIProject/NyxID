@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PLATFORM_OPERATION_DISCOVERY_QUERY_KEY } from "@/schemas/platform-ops";
 import {
   useCatalog,
   useCatalogEntry,
@@ -27,16 +28,27 @@ vi.mock("@/lib/api-client", () => ({
   api: { get: mockGet, post: mockPost, put: mockPut, delete: mockDelete },
 }));
 
-function wrapperFactory() {
-  const queryClient = new QueryClient({
+function createQueryClient() {
+  return new QueryClient({
     defaultOptions: {
       mutations: { retry: false },
       queries: { retry: false },
     },
   });
+}
+
+function wrapperFactory(queryClient = createQueryClient()) {
   return ({ children }: PropsWithChildren) => (
     <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
   );
+}
+
+function mutationHarness() {
+  const queryClient = createQueryClient();
+  return {
+    invalidateQueries: vi.spyOn(queryClient, "invalidateQueries"),
+    Wrapper: wrapperFactory(queryClient),
+  };
 }
 
 beforeEach(() => {
@@ -134,8 +146,9 @@ describe("useCatalogEntry", () => {
 describe("mutation hooks pin their request contracts", () => {
   it("useCreateKey posts the params to /keys", async () => {
     mockPost.mockResolvedValue({ id: "k1" });
+    const { Wrapper, invalidateQueries } = mutationHarness();
     const { result } = renderHook(() => useCreateKey(), {
-      wrapper: wrapperFactory(),
+      wrapper: Wrapper,
     });
 
     const params = {
@@ -146,17 +159,24 @@ describe("mutation hooks pin their request contracts", () => {
     await result.current.mutateAsync(params);
 
     expect(mockPost).toHaveBeenCalledWith("/keys", params);
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: PLATFORM_OPERATION_DISCOVERY_QUERY_KEY,
+    });
   });
 
   it("useDeleteKey deletes /keys/{id}", async () => {
     mockDelete.mockResolvedValue(undefined);
+    const { Wrapper, invalidateQueries } = mutationHarness();
     const { result } = renderHook(() => useDeleteKey(), {
-      wrapper: wrapperFactory(),
+      wrapper: Wrapper,
     });
 
     await result.current.mutateAsync("k1");
 
     expect(mockDelete).toHaveBeenCalledWith("/keys/k1");
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: PLATFORM_OPERATION_DISCOVERY_QUERY_KEY,
+    });
   });
 
   it("useDeleteKey encodes grant cascade retry options", async () => {
@@ -177,19 +197,24 @@ describe("mutation hooks pin their request contracts", () => {
 
   it("useUpdateKey strips keyId from the body and PUTs to /keys/{id}", async () => {
     mockPut.mockResolvedValue({ id: "k1" });
+    const { Wrapper, invalidateQueries } = mutationHarness();
     const { result } = renderHook(() => useUpdateKey(), {
-      wrapper: wrapperFactory(),
+      wrapper: Wrapper,
     });
 
     await result.current.mutateAsync({ keyId: "k1", label: "Renamed" });
 
     expect(mockPut).toHaveBeenCalledWith("/keys/k1", { label: "Renamed" });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: PLATFORM_OPERATION_DISCOVERY_QUERY_KEY,
+    });
   });
 
   it("useUpdateEndpoint PUTs the url/label/spec triple to /endpoints/{id}", async () => {
     mockPut.mockResolvedValue(undefined);
+    const { Wrapper, invalidateQueries } = mutationHarness();
     const { result } = renderHook(() => useUpdateEndpoint(), {
-      wrapper: wrapperFactory(),
+      wrapper: Wrapper,
     });
 
     await result.current.mutateAsync({
@@ -204,12 +229,16 @@ describe("mutation hooks pin their request contracts", () => {
       label: "Example",
       openapi_spec_url: "",
     });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: PLATFORM_OPERATION_DISCOVERY_QUERY_KEY,
+    });
   });
 
   it("useUpdateUserService strips serviceId from the body and PUTs to /user-services/{id}", async () => {
     mockPut.mockResolvedValue(undefined);
+    const { Wrapper, invalidateQueries } = mutationHarness();
     const { result } = renderHook(() => useUpdateUserService(), {
-      wrapper: wrapperFactory(),
+      wrapper: Wrapper,
     });
 
     await result.current.mutateAsync({
@@ -222,18 +251,25 @@ describe("mutation hooks pin their request contracts", () => {
       auth_method: "bearer",
       is_active: false,
     });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: PLATFORM_OPERATION_DISCOVERY_QUERY_KEY,
+    });
   });
 
   it("useUpdateExternalApiKey strips keyId and PUTs to /api-keys/external/{id}", async () => {
     mockPut.mockResolvedValue(undefined);
+    const { Wrapper, invalidateQueries } = mutationHarness();
     const { result } = renderHook(() => useUpdateExternalApiKey(), {
-      wrapper: wrapperFactory(),
+      wrapper: Wrapper,
     });
 
     await result.current.mutateAsync({ keyId: "ext1", credential: "sk-new" });
 
     expect(mockPut).toHaveBeenCalledWith("/api-keys/external/ext1", {
       credential: "sk-new",
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: PLATFORM_OPERATION_DISCOVERY_QUERY_KEY,
     });
   });
 });

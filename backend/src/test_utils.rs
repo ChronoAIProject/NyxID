@@ -1838,11 +1838,11 @@ pub(crate) fn test_app_state(db: mongodb::Database) -> AppState {
 pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfig) -> AppState {
     let http_client = reqwest::Client::new();
     let jwt_keys = cached_test_jwt_keys();
-    let billing = Arc::new(crate::services::billing::BillingService::new(
-        db.clone(),
-        Arc::new(config.clone()),
-    ));
     let encryption_keys = Arc::new(test_encryption_keys());
+    let billing = Arc::new(
+        crate::services::billing::BillingService::new(db.clone(), Arc::new(config.clone()))
+            .with_platform_runtime(encryption_keys.clone(), http_client.clone()),
+    );
     let developer_webhook_dispatcher = Arc::new(
         crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
             http_client.clone(),

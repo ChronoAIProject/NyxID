@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
+import { invalidateConnectionDependents } from "@/lib/connection-query-invalidation";
 
 export interface AssistantKeyResource {
   readonly keyId: string;
@@ -50,6 +51,7 @@ function invalidateKeyQueries(
   void queryClient.invalidateQueries({
     queryKey: ["agent-bindings", keyId],
   });
+  invalidateConnectionDependents(queryClient);
 }
 
 export function useAssistantKeyUpdate() {

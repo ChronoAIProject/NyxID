@@ -213,6 +213,68 @@ macro_rules! mcp_billing_routes {
     };
 }
 
+macro_rules! platform_operation_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            (
+                "/",
+                "/api/v1/platform-ops",
+                "handlers::platform_ops::list_operations",
+                get(handlers::platform_ops::list_operations),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "control-plane discovery; no downstream request"
+                )
+            ),
+            (
+                "/preferences",
+                "/api/v1/platform-ops/preferences",
+                "handlers::platform_preferences::list_preferences",
+                get(handlers::platform_preferences::list_preferences),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "owner spending preference control plane; no downstream request"
+                )
+            ),
+            (
+                "/preferences/{catalog_service_id}",
+                "/api/v1/platform-ops/preferences/{catalog_service_id}",
+                "handlers::platform_preferences::update_or_delete_preference",
+                put(handlers::platform_preferences::update_preference)
+                    .delete(handlers::platform_preferences::delete_preference),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Exempt(
+                    "owner spending preference control plane; no downstream request"
+                )
+            ),
+            (
+                "/speak",
+                "/api/v1/platform-ops/speak",
+                "handlers::platform_ops::speak",
+                post(handlers::platform_ops::speak),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::PlatformOperation
+                )
+            ),
+            (
+                "/call-and-say",
+                "/api/v1/platform-ops/call-and-say",
+                "handlers::platform_ops::call_and_say",
+                post(handlers::platform_ops::call_and_say),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::PlatformOperation
+                )
+            ),
+            (
+                "/flight-search",
+                "/api/v1/platform-ops/flight-search",
+                "handlers::platform_ops::flight_search",
+                post(handlers::platform_ops::flight_search),
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::PlatformOperation
+                )
+            ),
+        )
+    };
+}
+
 macro_rules! exact_service_approval_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -387,6 +449,10 @@ pub(crate) fn mounted_billing_route_inventory()
     ));
     routes.extend(ssh_billing_routes!(collect_billing_route_specs, ()));
     routes.extend(mcp_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(platform_operation_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes.extend(exact_service_approval_billing_routes!(
         collect_billing_route_specs,
         ()
@@ -788,26 +854,29 @@ fn build_router_internal(
 
     let admin_routes = Router::new()
         .route(
+            "/platform-providers",
+            get(handlers::admin_platform_providers::list_platform_providers),
+        )
+        .route(
+            "/platform-providers/{catalog_service_id}",
+            get(handlers::admin_platform_providers::get_platform_provider)
+                .put(handlers::admin_platform_providers::promote_platform_provider)
+                .delete(handlers::admin_platform_providers::demote_platform_provider),
+        )
+        .route(
+            "/platform-providers/{catalog_service_id}/credential",
+            put(handlers::admin_platform_providers::set_platform_credential)
+                .delete(handlers::admin_platform_providers::delete_platform_credential),
+        )
+        .route(
             "/platform-ops",
-            get(handlers::admin_platform_ops::list_platform_operations),
+            get(handlers::admin_platform_ops::list_platform_operations)
+                .post(handlers::admin_platform_ops::create_platform_operation),
         )
         .route(
-            "/platform-ops/vendor-requirements",
-            get(handlers::admin_platform_ops::get_vendor_requirements),
-        )
-        .route(
-            "/platform-ops/vendor-templates",
-            get(handlers::admin_platform_ops::list_vendor_templates)
-                .post(handlers::admin_platform_ops::create_vendor_template),
-        )
-        .route(
-            "/platform-ops/vendor-templates/{template_id}",
-            put(handlers::admin_platform_ops::update_vendor_template)
-                .delete(handlers::admin_platform_ops::disable_vendor_template),
-        )
-        .route(
-            "/platform-ops/{op}",
-            put(handlers::admin_platform_ops::update_platform_operation),
+            "/platform-ops/{operation_id}",
+            put(handlers::admin_platform_ops::update_platform_operation)
+                .delete(handlers::admin_platform_ops::delete_platform_operation),
         )
         .route(
             "/feature-flags",
@@ -1595,10 +1664,8 @@ fn build_router_internal(
     )
     .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
 
-    let platform_operation_routes = Router::new()
-        .route("/x-search", post(handlers::platform_ops::x_search))
-        .route("/speak", post(handlers::platform_ops::speak))
-        .route("/call-and-say", post(handlers::platform_ops::call_and_say));
+    let platform_operation_routes =
+        platform_operation_billing_routes!(register_billing_routes, Router::new());
     let platform_operation_routes = match platform_gate_state {
         Some(state) => platform_operation_routes.layer(middleware::from_fn_with_state(
             state,

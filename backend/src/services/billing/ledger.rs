@@ -132,6 +132,7 @@ pub fn record_usage_settled_async(db: mongodb::Database, row: UsageMeterRow, cre
             quantity: row.quantity,
             amount_credits: Some(credits),
             amount_micros: None,
+            base_fee_micros: row.base_fee_micros,
             balance_credits: None,
             dedupe_key: None,
             wallet_id: row.wallet_id.clone(),
@@ -151,7 +152,10 @@ pub fn record_usage_settled_by_row_id_async(db: mongodb::Database, row_id: Strin
             .await
         {
             Ok(Some(row)) => {
-                record_usage_settled_async(db, row, credits);
+                let total_credits = credits.saturating_add(row.base_fee_applied_credits.max(0));
+                if total_credits > 0 {
+                    record_usage_settled_async(db, row, total_credits);
+                }
             }
             Ok(None) => {
                 tracing::warn!(row_id = %row_id, "settled usage row missing for ledger entry");
@@ -189,6 +193,7 @@ pub async fn record_topup_created(
         quantity: None,
         amount_credits: Some(amount_credits),
         amount_micros: None,
+        base_fee_micros: None,
         balance_credits: None,
         dedupe_key: None,
         wallet_id: Some(lago_wallet_id.to_string()),
@@ -239,6 +244,7 @@ pub async fn record_wallet_credited(
         quantity: None,
         amount_credits: None,
         amount_micros: None,
+        base_fee_micros: None,
         balance_credits: Some(balance_credits),
         dedupe_key,
         wallet_id: None,
@@ -294,6 +300,7 @@ pub async fn record_grant_event(
         quantity: None,
         amount_credits: (amount_micros % 1_000_000 == 0).then_some(amount_micros / 1_000_000),
         amount_micros: Some(amount_micros),
+        base_fee_micros: None,
         balance_credits: None,
         dedupe_key: Some(dedupe_key),
         wallet_id: usage_row.and_then(|row| row.wallet_id.clone()),
@@ -335,6 +342,7 @@ pub async fn record_topup_expired(
         quantity: None,
         amount_credits: (amount_micros % 1_000_000 == 0).then_some(amount_micros / 1_000_000),
         amount_micros: Some(amount_micros),
+        base_fee_micros: None,
         balance_credits: None,
         dedupe_key: Some(dedupe_key),
         wallet_id: Some(wallet_id.to_string()),
@@ -471,10 +479,26 @@ fn canonical_entry_bytes(entry: &BillingLedgerEntry) -> Vec<u8> {
     // Existing event hashes predate exact microcredit movements. Append the
     // extension only for newly introduced event types so every historical
     // usage/top-up/wallet entry retains its original canonical bytes.
-    if entry.event_type.uses_extended_encoding() {
+    let versioned_usage = entry.event_type == BillingLedgerEventType::UsageSettled
+        && (matches!(
+            entry.metric,
+            Some(
+                crate::models::service_billing::BillingMetric::Characters
+                    | crate::models::service_billing::BillingMetric::Seconds
+            )
+        ) || entry.base_fee_micros.is_some());
+    if entry.event_type.uses_extended_encoding() || versioned_usage {
         fields.push(
             entry
                 .amount_micros
+                .map(|micros| micros.to_string())
+                .unwrap_or_default(),
+        );
+    }
+    if versioned_usage {
+        fields.push(
+            entry
+                .base_fee_micros
                 .map(|micros| micros.to_string())
                 .unwrap_or_default(),
         );
@@ -934,6 +958,7 @@ mod tests {
             quantity: Some(100),
             amount_credits: Some(5),
             amount_micros: None,
+            base_fee_micros: None,
             balance_credits: None,
             dedupe_key: None,
             wallet_id: Some("wallet-1".to_string()),
@@ -978,6 +1003,31 @@ mod tests {
         let exact = compute_entry_hash(&grant, TEST_KEY);
         grant.amount_micros = Some(123_457);
         assert_ne!(exact, compute_entry_hash(&grant, TEST_KEY));
+    }
+
+    #[test]
+    fn versioned_usage_encoding_binds_new_metrics_and_base_fee() {
+        let mut legacy = entry("versioned-usage");
+        legacy.created_at = truncate_to_bson_millis(legacy.created_at);
+        legacy.seq = 1;
+        legacy.prev_hash = GENESIS_PREV_HASH.to_string();
+        let historical = compute_entry_hash(&legacy, TEST_KEY);
+
+        let mut characters = legacy.clone();
+        characters.metric = Some(crate::models::service_billing::BillingMetric::Characters);
+        let character_hash = compute_entry_hash(&characters, TEST_KEY);
+        assert_ne!(historical, character_hash);
+
+        characters.base_fee_micros = Some(1_500_000);
+        let with_base = compute_entry_hash(&characters, TEST_KEY);
+        assert_ne!(character_hash, with_base);
+
+        characters.base_fee_micros = Some(1_500_001);
+        assert_ne!(with_base, compute_entry_hash(&characters, TEST_KEY));
+
+        let mut seconds = legacy;
+        seconds.metric = Some(crate::models::service_billing::BillingMetric::Seconds);
+        assert_ne!(historical, compute_entry_hash(&seconds, TEST_KEY));
     }
 
     #[test]

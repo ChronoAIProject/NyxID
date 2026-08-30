@@ -8,6 +8,10 @@ pub enum BillingMetric {
     Tokens,
     Requests,
     Bytes,
+    Characters,
+    Seconds,
+    InputTokens,
+    OutputTokens,
 }
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
@@ -41,6 +45,25 @@ impl BillingMetric {
             Self::Tokens => "tokens",
             Self::Requests => "requests",
             Self::Bytes => "bytes",
+            Self::Characters => "characters",
+            Self::Seconds => "seconds",
+            Self::InputTokens => "input_tokens",
+            Self::OutputTokens => "output_tokens",
+        }
+    }
+
+    /// Singular noun for the billed unit, used only to render prices for
+    /// humans. Unlike `as_str` this is presentation text and is safe to
+    /// reword.
+    pub fn unit_noun(self) -> &'static str {
+        match self {
+            Self::Tokens => "token",
+            Self::Requests => "call",
+            Self::Bytes => "byte",
+            Self::Characters => "character",
+            Self::Seconds => "second",
+            Self::InputTokens => "input token",
+            Self::OutputTokens => "output token",
         }
     }
 }
@@ -116,8 +139,9 @@ impl ServiceBilling {
 /// Provider-reported token classes for one LLM exchange. `prompt_tokens`
 /// follows each provider's own accounting: OpenAI includes cached tokens
 /// inside `prompt_tokens`, Anthropic reports cache reads and writes
-/// outside `input_tokens`. Observability only for now; billing still
-/// charges the single total-token quantity.
+/// outside `input_tokens`. Platform operations may price the prompt and
+/// completion quantities independently; generic proxy billing still uses the
+/// combined `tokens` quantity.
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct TokenBreakdown {
     pub prompt_tokens: i64,
@@ -146,6 +170,10 @@ pub struct PlatformUsage {
     pub bytes: i64,
     #[serde(default)]
     pub tokens: i64,
+    #[serde(default)]
+    pub characters: i64,
+    #[serde(default)]
+    pub seconds: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_breakdown: Option<TokenBreakdown>,
 }
@@ -156,6 +184,8 @@ impl PlatformUsage {
             requests: 1,
             bytes,
             tokens: 0,
+            characters: 0,
+            seconds: 0,
             token_breakdown: None,
         }
     }
@@ -165,12 +195,24 @@ impl PlatformUsage {
             requests: 1,
             bytes,
             tokens,
+            characters: 0,
+            seconds: 0,
             token_breakdown: None,
         }
     }
 
     pub fn with_token_breakdown(mut self, breakdown: Option<TokenBreakdown>) -> Self {
         self.token_breakdown = breakdown.filter(|breakdown| !breakdown.is_empty());
+        self
+    }
+
+    pub fn with_characters(mut self, characters: i64) -> Self {
+        self.characters = characters.max(0);
+        self
+    }
+
+    pub fn with_seconds(mut self, seconds: i64) -> Self {
+        self.seconds = seconds.max(0);
         self
     }
 }
@@ -189,7 +231,24 @@ pub struct ResaleSpec {
 
 #[cfg(test)]
 mod tests {
-    use super::{BillingMetric, ServiceBilling};
+    use super::{BillingMetric, PlatformUsage, ServiceBilling};
+
+    #[test]
+    fn character_and_second_metrics_have_stable_names_and_quantities() {
+        assert_eq!(BillingMetric::Characters.as_str(), "characters");
+        assert_eq!(BillingMetric::Seconds.as_str(), "seconds");
+
+        let usage = PlatformUsage {
+            requests: 1,
+            bytes: 42,
+            tokens: 7,
+            characters: 11,
+            seconds: 13,
+            token_breakdown: None,
+        };
+        assert_eq!(usage.characters, 11);
+        assert_eq!(usage.seconds, 13);
+    }
 
     #[test]
     fn service_billing_defaults_to_not_resale_billable() {

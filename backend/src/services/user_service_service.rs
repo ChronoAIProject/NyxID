@@ -444,15 +444,18 @@ pub async fn list_user_services_with_sources(
 
 /// Source-tagged listing that also returns disabled services.
 ///
-/// Backs the `/keys` management surface via `unified_key_service::list_keys`
-/// and nothing else. A disabled service must stay listed there or the pause
-/// becomes unreversible in the product: the row would vanish from the only
-/// screen carrying an Enable control. Every row still carries `is_active`, so
-/// the UI badges the disabled ones instead of presenting them as working.
+/// Backs the `/keys` management surface via `unified_key_service::list_keys`.
+/// The platform-operation credential-source resolver also uses this list in a
+/// read-only classification pass so it can report an explicit Disable and use
+/// platform credits. A disabled service must stay listed on `/keys` or the
+/// pause becomes unreversible in the product: the row would vanish from the
+/// only screen carrying an Enable control. Every row still carries
+/// `is_active`, so consumers can distinguish it from a working connection.
 ///
-/// Never use this for anything that resolves credentials or grants access — a
-/// disabled service must stay invisible to the proxy and to every catalog an
-/// agent can act from. Those callers use [`list_user_services_with_sources`].
+/// Never use a disabled row to resolve credentials or grant access. The
+/// platform-operation resolver selects only active candidates for normal proxy
+/// resolution; disabled rows contribute metadata only. Every other proxy or
+/// agent catalog caller uses [`list_user_services_with_sources`].
 pub async fn list_user_services_with_sources_including_disabled(
     db: &mongodb::Database,
     user_id: &str,

@@ -316,6 +316,12 @@ fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool 
         return false;
     }
 
+    // Execution-shaped routes. A management `write` scope is the wrong control
+    // for them: it authorizes changing configuration, not running a request.
+    //
+    // `/api/v1/platform-ops` is exempt here for that reason, not because it is
+    // ungated. It spends the owner's credits, so it carries its own
+    // `platform:spend` scope check in the handler.
     ![
         "/api/v1/channel-events",
         "/api/v1/channel-relay",
@@ -1540,7 +1546,7 @@ mod tests {
             "/api/v1/oracle/pools",
             "/api/v1/channel-bots",
             "/api/v1/channel-conversations/conversation-id",
-            "/api/v1/platform-ops/x-search",
+            "/api/v1/platform-ops/speak",
             "/api/v1/nodes/ws",
             "/api/v1/nodes/node-id/credentials",
             "/api/v1/nodes/node-id/credentials/pending",
@@ -3047,7 +3053,7 @@ mod tests {
             (Method::POST, "/api/v1/llm/gateway/v1/chat/completions"),
             (Method::POST, "/api/v1/channel-relay/reply"),
             (Method::POST, "/api/v1/channel-events/conversation-1"),
-            (Method::POST, "/api/v1/platform-ops/x-search"),
+            (Method::POST, "/api/v1/platform-ops/speak"),
             (Method::POST, "/api/v1/ssh/service-1/exec"),
             (Method::POST, "/oauth/token"),
         ];

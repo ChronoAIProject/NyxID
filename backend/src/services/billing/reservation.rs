@@ -9,7 +9,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::billing_rate_cache::{BillingRateCache, COLLECTION_NAME as BILLING_RATE_CACHE};
 use crate::models::billing_wallet::{BillingWallet, COLLECTION_NAME as BILLING_WALLET, PlanKind};
 use crate::models::usage_meter::{
-    AllowanceReservationAllocation, BillingLayer, COLLECTION_NAME as USAGE_METER,
+    AllowanceReservationAllocation, BillingLayer, COLLECTION_NAME as USAGE_METER, DeferredQuantity,
     GrantReservationAllocation, UsageMeterRow, UsageStatus,
 };
 
@@ -42,11 +42,15 @@ pub(crate) enum SettlementFailureDisposition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LayerReservation {
     pub layer: BillingLayer,
+    pub flush_seq: Option<i64>,
+    pub metric: crate::models::service_billing::BillingMetric,
     pub estimated_quantity: i64,
     pub credits_per_unit_micros: i64,
+    pub base_fee_micros: i64,
     pub reserved_credits: i64,
     pub allowance_reservations: Vec<AllowanceReservationAllocation>,
     pub grant_reservations: Vec<GrantReservationAllocation>,
+    pub base_fee_grant_reservations: Vec<GrantReservationAllocation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,10 +62,10 @@ pub struct BillingReservation {
 }
 
 impl BillingReservation {
-    pub fn reserved_for(&self, layer: BillingLayer) -> i64 {
+    pub fn reserved_for(&self, layer: BillingLayer, flush_seq: Option<i64>) -> i64 {
         self.layers
             .iter()
-            .find(|reservation| reservation.layer == layer)
+            .find(|reservation| reservation.layer == layer && reservation.flush_seq == flush_seq)
             .map(|reservation| reservation.reserved_credits)
             .unwrap_or(0)
     }
@@ -452,10 +456,276 @@ pub async fn apply_settlement_for_row(
     // other is `complete_wallet_settlement_lock`), so the tamper-evident
     // ledger hook lives here. Only actual charges are ledgered: free
     // metered traffic (no wallet) and zero-credit settlements move no money.
-    if update.modified_count > 0 && row.wallet_id.is_some() && actual_credits > 0 {
-        super::ledger::record_usage_settled_async(db.clone(), row.clone(), actual_credits);
+    let total_credits = actual_credits.saturating_add(row.base_fee_applied_credits.max(0));
+    if update.modified_count > 0 && row.wallet_id.is_some() && total_credits > 0 {
+        super::ledger::record_usage_settled_async(db.clone(), row.clone(), total_credits);
     }
     Ok(update.modified_count > 0)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BaseFeeWalletLock {
+    row_id: String,
+    descriptor: DeferredQuantity,
+    credits: i64,
+    applied: bool,
+}
+
+impl BaseFeeWalletLock {
+    fn document(&self, applied: bool) -> AppResult<Document> {
+        Ok(doc! {
+            "row_id": &self.row_id,
+            "descriptor": bson::to_bson(&self.descriptor).map_err(|error| {
+                AppError::Internal(format!("failed to encode deferred quantity: {error}"))
+            })?,
+            "credits": self.credits,
+            "applied": applied,
+            "updated_at": bson::DateTime::from_chrono(Utc::now()),
+        })
+    }
+}
+
+/// Apply the wallet-funded part of a deferred call's base fee while keeping
+/// the same usage row forwarded and retaining its remaining quantity hold.
+pub async fn apply_deferred_base_fee(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+    descriptor: &DeferredQuantity,
+    credits: i64,
+) -> AppResult<bool> {
+    let credits = credits.max(0).min(row.reserved_credits.max(0));
+    let descriptor_bson = bson::to_bson(descriptor).map_err(|error| {
+        AppError::Internal(format!("failed to encode deferred quantity: {error}"))
+    })?;
+    let usage_rows = db.collection::<UsageMeterRow>(USAGE_METER);
+    if usage_rows
+        .count_documents(doc! {
+            "_id": &row.id,
+            "status": "forwarded",
+            "released": false,
+            "deferred_quantity": &descriptor_bson,
+            "base_fee_applied": { "$ne": true },
+        })
+        .await?
+        == 0
+    {
+        return Ok(false);
+    }
+
+    let Some(wallet_id) = row.wallet_id.as_deref() else {
+        let update = usage_rows
+            .update_one(
+                doc! {
+                    "_id": &row.id,
+                    "status": "forwarded",
+                    "released": false,
+                    "deferred_quantity": descriptor_bson,
+                    "base_fee_applied": { "$ne": true },
+                },
+                doc! { "$set": {
+                    "base_fee_applied": true,
+                    "base_fee_applied_credits": 0_i64,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                } },
+            )
+            .await?;
+        return Ok(update.modified_count == 1);
+    };
+
+    let lock = BaseFeeWalletLock {
+        row_id: row.id.clone(),
+        descriptor: descriptor.clone(),
+        credits,
+        applied: false,
+    };
+    ensure_base_fee_wallet_lock(db, wallet_id, &row.billing_owner_id, &lock).await?;
+    complete_base_fee_wallet_lock(db, wallet_id, &row.billing_owner_id, &lock).await?;
+    Ok(true)
+}
+
+async fn ensure_base_fee_wallet_lock(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    owner_id: &str,
+    lock: &BaseFeeWalletLock,
+) -> AppResult<()> {
+    let wallets = db.collection::<Document>(BILLING_WALLET);
+    for _ in 0..SETTLEMENT_LOCK_RETRIES {
+        let update = wallets
+            .update_one(
+                doc! {
+                    "_id": wallet_id,
+                    "owner_id": owner_id,
+                    "$or": [
+                        { "active_base_fee_settlement": { "$exists": false } },
+                        { "active_base_fee_settlement": null },
+                    ],
+                },
+                doc! { "$set": {
+                    "active_base_fee_settlement": lock.document(false)?,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                } },
+            )
+            .await?;
+        if update.matched_count == 1 {
+            return Ok(());
+        }
+        let Some(active) = load_base_fee_wallet_lock(db, wallet_id, owner_id).await? else {
+            continue;
+        };
+        if active.row_id == lock.row_id && active.descriptor == lock.descriptor {
+            return Ok(());
+        }
+        complete_base_fee_wallet_lock(db, wallet_id, owner_id, &active).await?;
+    }
+    Err(AppError::Internal(format!(
+        "billing base-fee wallet lock busy for wallet {wallet_id}"
+    )))
+}
+
+async fn complete_base_fee_wallet_lock(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    owner_id: &str,
+    lock: &BaseFeeWalletLock,
+) -> AppResult<()> {
+    let wallets = db.collection::<Document>(BILLING_WALLET);
+    if !lock.applied {
+        let update = wallets
+            .update_one(
+                doc! {
+                    "_id": wallet_id,
+                    "owner_id": owner_id,
+                    "reserved_credits": { "$gte": lock.credits },
+                    "active_base_fee_settlement.row_id": &lock.row_id,
+                    "active_base_fee_settlement.applied": false,
+                },
+                doc! {
+                    "$inc": {
+                        "reserved_credits": -lock.credits,
+                        "pending_lago_debits": lock.credits,
+                    },
+                    "$set": {
+                        "active_base_fee_settlement.applied": true,
+                        "active_base_fee_settlement.updated_at": bson::DateTime::from_chrono(Utc::now()),
+                        "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                    },
+                },
+            )
+            .await?;
+        if update.matched_count == 0 {
+            let active = load_base_fee_wallet_lock(db, wallet_id, owner_id).await?;
+            if !active.is_some_and(|active| {
+                active.row_id == lock.row_id
+                    && active.descriptor == lock.descriptor
+                    && active.applied
+            }) {
+                return Err(AppError::Internal(format!(
+                    "billing base-fee wallet lock could not be applied for row {}",
+                    lock.row_id
+                )));
+            }
+        }
+    }
+
+    let descriptor_bson = bson::to_bson(&lock.descriptor).map_err(|error| {
+        AppError::Internal(format!("failed to encode deferred quantity: {error}"))
+    })?;
+    let update = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .update_one(
+            doc! {
+                "_id": &lock.row_id,
+                "status": "forwarded",
+                "released": false,
+                "deferred_quantity": descriptor_bson,
+                "base_fee_applied": { "$ne": true },
+                "reserved_credits": { "$gte": lock.credits },
+            },
+            doc! {
+                "$inc": { "reserved_credits": -lock.credits },
+                "$set": {
+                    "base_fee_applied": true,
+                    "base_fee_applied_credits": lock.credits,
+                    "updated_at": bson::DateTime::from_chrono(Utc::now()),
+                },
+            },
+        )
+        .await?;
+    if update.matched_count == 0 {
+        let already_applied = db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .count_documents(doc! {
+                "_id": &lock.row_id,
+                "deferred_quantity": bson::to_bson(&lock.descriptor).map_err(|error| {
+                    AppError::Internal(format!("failed to encode deferred quantity: {error}"))
+                })?,
+                "base_fee_applied": true,
+                "base_fee_applied_credits": lock.credits,
+            })
+            .await?
+            > 0;
+        if !already_applied {
+            return Err(AppError::Internal(format!(
+                "billing base-fee marker could not be applied for row {}",
+                lock.row_id
+            )));
+        }
+    }
+    wallets
+        .update_one(
+            doc! {
+                "_id": wallet_id,
+                "owner_id": owner_id,
+                "active_base_fee_settlement.row_id": &lock.row_id,
+                "active_base_fee_settlement.applied": true,
+            },
+            doc! {
+                "$unset": { "active_base_fee_settlement": "" },
+                "$set": { "updated_at": bson::DateTime::from_chrono(Utc::now()) },
+            },
+        )
+        .await?;
+    Ok(())
+}
+
+async fn load_base_fee_wallet_lock(
+    db: &mongodb::Database,
+    wallet_id: &str,
+    owner_id: &str,
+) -> AppResult<Option<BaseFeeWalletLock>> {
+    let wallet = db
+        .collection::<Document>(BILLING_WALLET)
+        .find_one(doc! { "_id": wallet_id, "owner_id": owner_id })
+        .await?
+        .ok_or_else(|| AppError::Internal(format!("billing wallet {wallet_id} is missing")))?;
+    let Some(value) = wallet.get("active_base_fee_settlement") else {
+        return Ok(None);
+    };
+    if matches!(value, Bson::Null) {
+        return Ok(None);
+    }
+    let document = value.as_document().ok_or_else(|| {
+        AppError::Internal("billing base-fee wallet lock is malformed".to_string())
+    })?;
+    let descriptor = document.get("descriptor").ok_or_else(|| {
+        AppError::Internal("billing base-fee wallet lock has no descriptor".to_string())
+    })?;
+    Ok(Some(BaseFeeWalletLock {
+        row_id: document
+            .get_str("row_id")
+            .map_err(|_| {
+                AppError::Internal("billing base-fee wallet lock has no row_id".to_string())
+            })?
+            .to_string(),
+        descriptor: bson::from_bson(descriptor.clone()).map_err(|error| {
+            AppError::Internal(format!(
+                "billing base-fee wallet lock descriptor is invalid: {error}"
+            ))
+        })?,
+        credits: document_i64(document, "credits").unwrap_or(0).max(0),
+        applied: document.get_bool("applied").unwrap_or(false),
+    }))
 }
 
 // Bounded crash bridge for one in-flight wallet settlement. Settled history
@@ -570,7 +840,7 @@ async fn complete_wallet_settlement_lock(
     // Crash-bridge counterpart of the ledger hook in
     // `apply_settlement_for_row`: this path also commits a `released`
     // transition for a charge, so it must be ledgered too.
-    if update.matched_count == 1 && lock.actual_credits > 0 {
+    if update.matched_count == 1 {
         super::ledger::record_usage_settled_by_row_id_async(
             db.clone(),
             lock.row_id.clone(),
@@ -886,7 +1156,11 @@ async fn finish_applied_lock_before_dead_letter(
     Ok(false)
 }
 
-pub async fn release_unforwarded_rows(
+/// Release funding for active reserved or forwarded rows and mark them with
+/// the requested terminal failure status. The active-state and `released`
+/// filters make retries idempotent; finalized, settled, and already released
+/// rows are never touched.
+pub async fn release_failed_rows(
     db: &mongodb::Database,
     billing_request_id: &str,
     terminal_status: UsageStatus,
@@ -896,14 +1170,13 @@ pub async fn release_unforwarded_rows(
         .collection::<UsageMeterRow>(USAGE_METER)
         .find(doc! {
             "billing_request_id": billing_request_id,
-            "forwarded": false,
-            "status": "reserved",
+            "status": { "$in": ["reserved", "forwarded"] },
             "released": false,
         })
         .await?;
     let mut released_count = 0;
     while let Some(row) = cursor.try_next().await? {
-        if release_one_unforwarded_row(db, &row, terminal_status, reason).await? {
+        if release_one_failed_row(db, &row, terminal_status, reason).await? {
             released_count += 1;
         }
     }
@@ -1095,32 +1368,59 @@ async fn estimate_layer_reservations(
     let mut reservations = Vec::new();
 
     if ctx.platform_billable {
+        let credits_per_unit_micros = match ctx.platform_rate_micros {
+            Some(rate) => rate.max(0),
+            None => {
+                fresh_rate_micros(
+                    db,
+                    &ctx.platform_lago_metric_code,
+                    None,
+                    rate_cache_ttl_secs,
+                )
+                .await?
+            }
+        };
+        let estimated_quantity = ctx.platform_estimated_quantity.max(0);
+        let estimated_micros = i128::from(credits_per_unit_micros)
+            .saturating_mul(i128::from(estimated_quantity))
+            .saturating_add(i128::from(ctx.platform_base_fee_micros.max(0)))
+            .min(i128::from(i64::MAX)) as i64;
         reservations.push(LayerReservation {
             layer: BillingLayer::Platform,
-            estimated_quantity: 1,
-            credits_per_unit_micros: fresh_rate_micros(
-                db,
-                &ctx.platform_lago_metric_code,
-                None,
-                rate_cache_ttl_secs,
-            )
-            .await?,
-            reserved_credits: estimate_fresh_credits(
-                db,
-                &ctx.platform_lago_metric_code,
-                None,
-                1,
-                rate_cache_ttl_secs,
-            )
-            .await?,
+            flush_seq: None,
+            metric: ctx.platform_metric,
+            estimated_quantity,
+            credits_per_unit_micros,
+            base_fee_micros: ctx.platform_base_fee_micros.max(0),
+            reserved_credits: whole_credits_for_micros(estimated_micros),
             allowance_reservations: Vec::new(),
             grant_reservations: Vec::new(),
+            base_fee_grant_reservations: Vec::new(),
         });
+        if let Some(secondary) = &ctx.platform_secondary {
+            let estimated_micros = i128::from(secondary.rate_micros)
+                .saturating_mul(i128::from(secondary.estimated_quantity))
+                .min(i128::from(i64::MAX)) as i64;
+            reservations.push(LayerReservation {
+                layer: BillingLayer::Platform,
+                flush_seq: Some(1),
+                metric: secondary.metric,
+                estimated_quantity: secondary.estimated_quantity,
+                credits_per_unit_micros: secondary.rate_micros,
+                base_fee_micros: 0,
+                reserved_credits: whole_credits_for_micros(estimated_micros),
+                allowance_reservations: Vec::new(),
+                grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
+            });
+        }
     }
 
     if let Some(resale) = &ctx.resale {
         reservations.push(LayerReservation {
             layer: BillingLayer::Resale,
+            flush_seq: None,
+            metric: resale.metric,
             estimated_quantity: 1,
             credits_per_unit_micros: fresh_rate_micros(
                 db,
@@ -1129,6 +1429,7 @@ async fn estimate_layer_reservations(
                 rate_cache_ttl_secs,
             )
             .await?,
+            base_fee_micros: 0,
             reserved_credits: estimate_fresh_credits(
                 db,
                 &resale.lago_metric_code,
@@ -1139,6 +1440,7 @@ async fn estimate_layer_reservations(
             .await?,
             allowance_reservations: Vec::new(),
             grant_reservations: Vec::new(),
+            base_fee_grant_reservations: Vec::new(),
         });
     }
 
@@ -1277,6 +1579,50 @@ async fn release_one_unforwarded_row(
                 "_id": &row.id,
                 "forwarded": false,
                 "status": "reserved",
+                "released": false,
+            },
+            doc! { "$set": set_doc },
+        )
+        .with_options(
+            FindOneAndUpdateOptions::builder()
+                .return_document(ReturnDocument::Before)
+                .build(),
+        )
+        .await?;
+
+    let Some(claimed) = claimed else {
+        return Ok(false);
+    };
+
+    release_wallet_hold(db, &claimed.billing_owner_id, claimed.reserved_credits).await?;
+    super::funding::release_usage_reservations(db, &claimed).await?;
+    Ok(true)
+}
+
+async fn release_one_failed_row(
+    db: &mongodb::Database,
+    row: &UsageMeterRow,
+    terminal_status: UsageStatus,
+    reason: Option<&str>,
+) -> AppResult<bool> {
+    let now = Utc::now();
+    let mut set_doc = doc! {
+        "status": bson::to_bson(&terminal_status)
+            .unwrap_or_else(|_| bson::Bson::String("failed".to_string())),
+        "released": true,
+        "updated_at": bson::DateTime::from_chrono(now),
+        "finalized_at": bson::DateTime::from_chrono(now),
+    };
+    if let Some(reason) = reason {
+        set_doc.insert("last_error", reason);
+    }
+
+    let claimed = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find_one_and_update(
+            doc! {
+                "_id": &row.id,
+                "status": { "$in": ["reserved", "forwarded"] },
                 "released": false,
             },
             doc! { "$set": set_doc },
@@ -1590,5 +1936,59 @@ mod tests {
         assert_eq!(reservation.total_reserved_credits, 3);
         assert_eq!(saved.reserved_credits, 3);
         assert_eq!(saved.available_credits(), 7);
+    }
+
+    #[tokio::test]
+    async fn base_fee_plus_max_duration_reserves_exact_combined_ceiling() {
+        let Some(db) = connect_test_database("billing_operation_base_duration_reserve").await
+        else {
+            return;
+        };
+        let owner_id = "owner-operation-reserve";
+        db.collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .insert_one(wallet(owner_id, 20))
+            .await
+            .expect("insert wallet");
+        let lago = EntitledLago {
+            entitlements: vec![Entitlement {
+                code: "service-one".to_string(),
+                raw: json!({}),
+            }],
+        };
+        let operation_billing = crate::models::platform_operation::OperationBilling {
+            metric: BillingMetric::Seconds,
+            price_per_unit: "0.01".to_string(),
+            secondary: None,
+            base_fee_per_call: Some("1.5".to_string()),
+            lago_metric_code: "platform_op_api_twilio_constrained_call_and_say".to_string(),
+            sync_status: crate::models::service_billing::PricingSyncStatus::Synced,
+            sync_error: None,
+        };
+        let estimated_usage =
+            crate::models::service_billing::PlatformUsage::single_request(0).with_seconds(600);
+        let ctx = route_context(owner_id).with_platform_operation_billing(
+            &operation_billing,
+            10_000,
+            None,
+            1_500_000,
+            &estimated_usage,
+        );
+
+        let reservation = gate_and_reserve(&db, Some(&lago), &ctx, false, 900)
+            .await
+            .expect("gate operation")
+            .expect("operation reservation");
+        let platform = reservation.layers.first().expect("platform layer");
+        assert_eq!(platform.estimated_quantity, 600);
+        assert_eq!(platform.base_fee_micros, 1_500_000);
+        assert_eq!(platform.reserved_credits, 8);
+        assert_eq!(reservation.total_reserved_credits, 8);
+        let saved = db
+            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+            .find_one(doc! { "owner_id": owner_id })
+            .await
+            .expect("find wallet")
+            .expect("wallet exists");
+        assert_eq!(saved.reserved_credits, 8);
     }
 }

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
+import { invalidateConnectionDependents } from "@/lib/connection-query-invalidation";
 import type {
   AgentServiceBinding,
   AgentServiceBindingListResponse,
@@ -45,6 +46,7 @@ export function useCreateBinding() {
       void queryClient.invalidateQueries({
         queryKey: ["api-keys", variables.keyId],
       });
+      invalidateConnectionDependents(queryClient);
     },
   });
 }
@@ -70,6 +72,7 @@ export function useDeleteBinding() {
       void queryClient.invalidateQueries({
         queryKey: ["api-keys", variables.keyId],
       });
+      invalidateConnectionDependents(queryClient);
     },
   });
 }

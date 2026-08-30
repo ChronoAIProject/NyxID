@@ -1,140 +1,177 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { adminPricing } from "@/schemas/__fixtures__/platform-ops-builders";
 import type {
-  PlatformOperationList,
-  PlatformVendorRequirementList,
+  AdminPlatformOperationList,
+  AdminPlatformProvider,
 } from "@/schemas/platform-ops";
 import { AdminPlatformOpsPage } from "./admin-platform-ops";
 
 const {
-  mockMutateAsync,
-  mockProvisionAsync,
-  mockRefetch,
+  mockDeleteCredential,
+  mockDemote,
+  mockPromote,
+  mockRefetchOperations,
+  mockRefetchProviders,
+  mockSetCredential,
   mockToastError,
   mockToastSuccess,
-} =
-  vi.hoisted(() => ({
-    mockMutateAsync: vi.fn(),
-    mockProvisionAsync: vi.fn(),
-    mockRefetch: vi.fn(),
-    mockToastError: vi.fn(),
-    mockToastSuccess: vi.fn(),
-  }));
+  mockUpdate,
+} = vi.hoisted(() => ({
+  mockDeleteCredential: vi.fn(),
+  mockDemote: vi.fn(),
+  mockPromote: vi.fn(),
+  mockRefetchOperations: vi.fn(),
+  mockRefetchProviders: vi.fn(),
+  mockSetCredential: vi.fn(),
+  mockToastError: vi.fn(),
+  mockToastSuccess: vi.fn(),
+  mockUpdate: vi.fn(),
+}));
 
-const vendorRequirements: PlatformVendorRequirementList = {
-  vendors: [
-    {
-      id: "template-twilio",
-      vendor: "twilio",
-      display_name: "Twilio",
-      operation: "call_and_say",
-      slug: "platform-twilio",
-      base_url: "https://api.twilio.com",
-      auth_method: "basic",
-      auth_key_name: null,
-      service_category: "internal",
-      visibility: "public",
-      credential_label: "Auth token",
-      credential_note: "Use the Twilio Auth Token.",
-      capability_summary: "Serves call_and_say.",
-      restriction_summary: "Does not expose general Twilio tools.",
-      is_active: true,
-      is_seeded: true,
-      existing_service: null,
-    },
-    {
-      id: "template-elevenlabs",
-      vendor: "elevenlabs",
-      display_name: "ElevenLabs",
-      operation: "speak",
-      slug: "platform-elevenlabs",
-      base_url: "https://api.elevenlabs.io",
-      auth_method: "header",
-      auth_key_name: "xi-api-key",
-      service_category: "internal",
-      visibility: "public",
-      credential_label: "API key",
-      credential_note: "Use a restricted ElevenLabs API key.",
-      capability_summary: "Serves speak.",
-      restriction_summary: "Does not expose voice cloning or vendor tools.",
-      is_active: true,
-      is_seeded: true,
-      existing_service: {
-        id: "existing-elevenlabs-id",
-        name: "Broken ElevenLabs",
-        auth_method: "header",
-        auth_key_name: "X-API-Key",
-        service_category: "internal",
-        visibility: "public",
-        is_active: true,
-      },
-    },
-  ],
-};
+const providerId = "00000000-0000-4000-8000-000000000010";
 
-const operations: PlatformOperationList = {
+const operations: AdminPlatformOperationList = {
   operations: [
     {
-      op: "x_search",
-      enabled: false,
-      vendor_service_slug: "platform-x",
-      config: { type: "x_search", max_results_cap: 10 },
-      updated_at: null,
-      updated_by: null,
+      operation_id: "00000000-0000-4000-8000-000000000001",
+      catalog_service_id: providerId,
+      provider_slug: "platform-openai",
+      provider_name: "OpenAI",
+      operation_name: "Create response",
+      enabled: true,
+      kind: {
+        type: "endpoint",
+        method: "POST",
+        path_template: "/v1/responses",
+        name: "Create response",
+        description: "Create a model response.",
+      },
+      limits: {
+        per_request: { type: "endpoint" },
+        per_user_per_day: 100,
+      },
+      pricing: adminPricing({
+        billable: true,
+        metric: "input_tokens",
+        price_per_unit: "0.000002",
+        secondary: {
+          metric: "output_tokens",
+          price_per_unit: "0.000008",
+          lago_metric_code: "platform_op_openai_output",
+        },
+        display:
+          "0.000002 credits per input token + 0.000008 credits per output token",
+        lago_metric_code: "platform_op_openai_input",
+        sync_status: "failed",
+        sync_error: "Lago rejected the charge",
+      }),
+      created_at: "2026-08-25T09:00:00Z",
+      created_by: "admin-1",
+      updated_at: "2026-08-25T09:00:00Z",
+      updated_by: "admin-1",
     },
     {
-      op: "speak",
-      enabled: false,
-      vendor_service_slug: "platform-elevenlabs",
-      config: {
-        type: "speak",
-        allowed_voice_ids: ["voice-a"],
-        max_chars: 1000,
-        model_id: "eleven_multilingual_v2",
+      operation_id: "00000000-0000-4000-8000-000000000002",
+      catalog_service_id: providerId,
+      provider_slug: "platform-openai",
+      provider_name: "OpenAI",
+      operation_name: "Speak",
+      enabled: true,
+      kind: {
+        type: "constrained",
+        op: "speak",
+        config: {
+          type: "speak",
+          allowed_voice_ids: ["voice-a"],
+          model_id: "eleven_multilingual_v2",
+          max_calls_per_user_per_day: 50,
+        },
       },
-      updated_at: null,
-      updated_by: null,
-    },
-    {
-      op: "call_and_say",
-      enabled: false,
-      vendor_service_slug: "platform-twilio",
-      config: {
-        type: "call_and_say",
-        allowed_destination_prefixes: ["+65"],
-        max_message_chars: 500,
-        voice: "alice",
-        max_calls_per_user_per_day: 3,
-        account_sid: `AC${"a".repeat(32)}`,
-        call_from: "+6512345678",
+      limits: {
+        per_request: { type: "speak", max_chars: 1_000 },
+        per_user_per_day: 50,
       },
-      updated_at: null,
-      updated_by: null,
+      pricing: adminPricing({
+        billable: true,
+        metric: "characters",
+        price_per_unit: "0.0001",
+        display: "0.0001 credits per character",
+        lago_metric_code: "platform_op_speak_characters",
+        sync_status: "synced",
+      }),
+      created_at: "2026-08-25T09:00:00Z",
+      created_by: "admin-1",
+      updated_at: "2026-08-25T09:00:00Z",
+      updated_by: "admin-1",
     },
   ],
 };
+
+const provider: AdminPlatformProvider = {
+  catalog_service_id: providerId,
+  catalog_service_slug: "platform-openai",
+  catalog_service_name: "OpenAI",
+  catalog_service_active: true,
+  eligible: true,
+  eligibility_reason: null,
+  promoted: false,
+  promoted_at: null,
+  promoted_by: null,
+  vendor_terms_accepted_at: null,
+  vendor_terms_accepted_by: null,
+  credential: {
+    configured: false,
+    id: null,
+    auth_method: null,
+    auth_key_name: null,
+    created_at: null,
+    updated_at: null,
+  },
+  enabled_operation_count: 2,
+};
+
+let currentProvider = provider;
 
 vi.mock("@/hooks/use-platform-ops", () => ({
   usePlatformOperations: () => ({
     data: operations,
     error: null,
     isLoading: false,
-    refetch: mockRefetch,
+    refetch: mockRefetchOperations,
+  }),
+  usePlatformProviders: () => ({
+    data: { providers: [currentProvider] },
+    error: null,
+    isLoading: false,
+    refetch: mockRefetchProviders,
   }),
   useUpdatePlatformOperation: () => ({
     isPending: false,
-    mutateAsync: mockMutateAsync,
+    mutateAsync: mockUpdate,
   }),
-  usePlatformVendorRequirements: () => ({
-    data: vendorRequirements,
-    error: null,
-    isLoading: false,
-    refetch: mockRefetch,
-  }),
-  useProvisionPlatformVendor: () => ({
+  usePromotePlatformProvider: () => ({
     isPending: false,
-    mutateAsync: mockProvisionAsync,
+    mutateAsync: mockPromote,
+  }),
+  useDemotePlatformProvider: () => ({
+    isPending: false,
+    mutateAsync: mockDemote,
+  }),
+  useSetPlatformCredential: () => ({
+    isPending: false,
+    mutateAsync: mockSetCredential,
+  }),
+  useDeletePlatformCredential: () => ({
+    isPending: false,
+    mutateAsync: mockDeleteCredential,
   }),
 }));
 
@@ -145,118 +182,170 @@ vi.mock("sonner", () => ({
 describe("AdminPlatformOpsPage", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mockMutateAsync.mockImplementation(
-      async ({ op, data }: { op: string; data: Record<string, unknown> }) => ({
-        op,
-        ...data,
-        updated_at: "2026-08-25T10:00:00Z",
-        updated_by: "admin-1",
-      }),
-    );
-    mockProvisionAsync.mockResolvedValue({ id: "replacement-id" });
+    currentProvider = provider;
+    mockUpdate.mockResolvedValue(operations.operations[0]);
+    mockPromote.mockResolvedValue({ ...provider, promoted: true });
+    mockSetCredential.mockResolvedValue({
+      ...provider,
+      promoted: true,
+      credential: {
+        ...provider.credential,
+        configured: true,
+        id: "00000000-0000-4000-8000-000000000020",
+      },
+    });
   });
 
-  it("renders one typed form for each fixed operation", () => {
+  it("renders provider groups and only the eight truthful admin columns", () => {
     render(<AdminPlatformOpsPage />);
 
-    expect(screen.getByText("X Search")).toBeInTheDocument();
-    expect(screen.getByText("Speak")).toBeInTheDocument();
-    expect(screen.getByText("Call and Say")).toBeInTheDocument();
-    expect(screen.getByLabelText("Maximum Results")).toHaveValue(10);
-    expect(screen.getByLabelText("Allowed Voice IDs")).toBeInTheDocument();
+    for (const heading of [
+      "Provider",
+      "Operation",
+      "Kind",
+      "Enabled",
+      "Metric",
+      "Price",
+      "Limits",
+      "Billing sync",
+    ]) {
+      expect(
+        screen.getByRole("columnheader", { name: heading }),
+      ).toBeInTheDocument();
+    }
+    expect(screen.getAllByText("OpenAI").length).toBeGreaterThan(1);
+    expect(screen.getAllByText("POST /v1/responses").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("+ output tokens").length).toBeGreaterThan(0);
     expect(
-      screen.getByLabelText("Allowed Destination Prefixes"),
-    ).toBeInTheDocument();
-    expect(screen.getByLabelText("Account SID")).toHaveValue(
-      `AC${"a".repeat(32)}`,
-    );
+      screen.getAllByText(
+        "0.000002 credits per input token + 0.000008 credits per output token",
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(screen.getAllByText("failed").length).toBeGreaterThan(0);
+
+    expect(screen.queryByText("Usage today")).not.toBeInTheDocument();
+    expect(screen.queryByText("Credits spent")).not.toBeInTheDocument();
+    expect(screen.queryByText("Health")).not.toBeInTheDocument();
   });
 
-  it("keeps saves dirty-gated and submits the typed operation payload", async () => {
+  it("opens endpoint fields and keeps UUID saves dirty-gated", async () => {
     render(<AdminPlatformOpsPage />);
     const user = userEvent.setup();
-    const save = screen.getByRole("button", { name: "Save X Search" });
-    expect(save).toBeDisabled();
+    const operationRow = screen
+      .getAllByText("POST /v1/responses")[0]
+      ?.closest("tr");
+    expect(operationRow).not.toBeNull();
+    await user.click(operationRow as HTMLElement);
 
-    fireEvent.change(screen.getByLabelText("Maximum Results"), {
-      target: { value: "12" },
+    const drawer = await screen.findByRole("dialog");
+    expect(within(drawer).getByLabelText("Method")).toHaveValue("POST");
+    expect(within(drawer).getByLabelText("Canonical Path")).toHaveValue(
+      "/v1/responses",
+    );
+    expect(within(drawer).getByText("Lago rejected the charge")).toBeVisible();
+    expect(within(drawer).getByLabelText("Secondary Metric")).toHaveTextContent(
+      "output tokens",
+    );
+
+    const save = within(drawer).getByRole("button", { name: "Save changes" });
+    expect(save).toBeDisabled();
+    fireEvent.change(within(drawer).getByLabelText("Canonical Path"), {
+      target: { value: "/v1/responses/{response_id}" },
     });
     await waitFor(() => expect(save).toBeEnabled());
     await user.click(save);
 
     await waitFor(() =>
-      expect(mockMutateAsync).toHaveBeenCalledWith({
-        op: "x_search",
-        data: {
-          enabled: false,
-          vendor_service_slug: "platform-x",
-          config: { type: "x_search", max_results_cap: 12 },
-        },
+      expect(mockUpdate).toHaveBeenCalledWith({
+        operationId: operations.operations[0]?.operation_id,
+        data: expect.objectContaining({
+          kind: expect.objectContaining({
+            kind: "endpoint",
+            method: "POST",
+            path_template: "/v1/responses/{response_id}",
+          }),
+        }),
       }),
     );
-    expect(mockToastSuccess).toHaveBeenCalledWith(
-      "X Search configuration saved",
-    );
   });
 
-  it("edits allowlists as chips instead of raw JSON", async () => {
+  it("keeps the constrained speak daily cap synchronized on save", async () => {
     render(<AdminPlatformOpsPage />);
     const user = userEvent.setup();
-    const voiceInput = screen.getByLabelText("Allowed Voice IDs");
+    const speakRow = screen
+      .getAllByText("Speak")
+      .find((element) => element.closest("tr"))
+      ?.closest("tr");
+    expect(speakRow).not.toBeNull();
+    await user.click(speakRow as HTMLElement);
 
-    await user.type(voiceInput, "voice-b{Enter}");
-
-    expect(screen.getByText("voice-b")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "Remove voice ID voice-b" }),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("textbox", { name: /json/i })).toBeNull();
-  });
-
-  it("prefills locked vendor fields and replaces a broken row in one action", async () => {
-    render(<AdminPlatformOpsPage />);
-    const user = userEvent.setup();
-
+    const drawer = await screen.findByRole("dialog");
+    fireEvent.change(within(drawer).getByLabelText("Daily Calls Per Owner"), {
+      target: { value: "75" },
+    });
     await user.click(
-      screen.getByRole("button", { name: "Add platform vendor" }),
-    );
-    await user.click(screen.getByRole("combobox", { name: "Vendor" }));
-    await user.click(screen.getByRole("option", { name: "ElevenLabs" }));
-
-    expect(screen.getByLabelText("Slug")).toHaveValue(
-      "platform-elevenlabs",
-    );
-    expect(screen.getByLabelText("Slug")).toBeDisabled();
-    expect(screen.getByLabelText("Base URL")).toHaveValue(
-      "https://api.elevenlabs.io",
-    );
-    expect(screen.getByLabelText("Auth method")).toHaveValue("header");
-    expect(screen.getByLabelText("Auth key name")).toHaveValue("xi-api-key");
-    expect(screen.getByText("Serves speak.")).toBeInTheDocument();
-    expect(
-      screen.getByText("Does not expose voice cloning or vendor tools."),
-    ).toBeInTheDocument();
-
-    await user.type(screen.getByLabelText("API key"), "write-only-key");
-    await user.type(
-      screen.getByLabelText("Operator note (optional)"),
-      "Restricted to TTS",
-    );
-    await user.click(
-      screen.getByRole("button", { name: "Replace vendor row" }),
+      within(drawer).getByRole("button", { name: "Save changes" }),
     );
 
     await waitFor(() =>
-      expect(mockProvisionAsync).toHaveBeenCalledWith({
-        requirement: vendorRequirements.vendors[1],
-        data: {
-          vendor: "elevenlabs",
-          credential: "write-only-key",
-          note: "Restricted to TTS",
-        },
-        replaceServiceId: "existing-elevenlabs-id",
+      expect(mockUpdate).toHaveBeenCalledWith({
+        operationId: operations.operations[1]?.operation_id,
+        data: expect.objectContaining({
+          kind: expect.objectContaining({
+            kind: "constrained",
+            op: "speak",
+            config: expect.objectContaining({
+              max_calls_per_user_per_day: 75,
+            }),
+          }),
+          limits: expect.objectContaining({ per_user_per_day: 75 }),
+        }),
       }),
     );
-    expect(screen.queryByDisplayValue("write-only-key")).toBeNull();
+  });
+
+  it("requires explicit vendor-terms acceptance before promotion", async () => {
+    render(<AdminPlatformOpsPage />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Provider" }));
+
+    const drawer = await screen.findByRole("dialog");
+    const promote = within(drawer).getByRole("button", {
+      name: "Promote provider",
+    });
+    expect(promote).toBeDisabled();
+    await user.click(within(drawer).getByLabelText("Accept vendor terms"));
+    expect(promote).toBeEnabled();
+    await user.click(promote);
+
+    await waitFor(() => expect(mockPromote).toHaveBeenCalledWith(providerId));
+  });
+
+  it("submits credential material write-only and clears the password field", async () => {
+    currentProvider = {
+      ...provider,
+      promoted: true,
+      promoted_at: "2026-08-25T10:00:00Z",
+      promoted_by: "admin-1",
+      vendor_terms_accepted_at: "2026-08-25T10:00:00Z",
+      vendor_terms_accepted_by: "admin-1",
+    };
+    render(<AdminPlatformOpsPage />);
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "Provider" }));
+
+    const drawer = await screen.findByRole("dialog");
+    const credential = within(drawer).getByLabelText("Credential");
+    await user.type(credential, "vendor-secret");
+    await user.click(within(drawer).getByRole("button", { name: "Configure" }));
+
+    await waitFor(() =>
+      expect(mockSetCredential).toHaveBeenCalledWith({
+        providerId,
+        data: { credential: "vendor-secret" },
+      }),
+    );
+    await waitFor(() => expect(credential).toHaveValue(""));
+    expect(screen.queryByText("vendor-secret")).not.toBeInTheDocument();
   });
 });

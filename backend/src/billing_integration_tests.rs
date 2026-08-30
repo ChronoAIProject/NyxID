@@ -40,6 +40,10 @@ use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatu
 use crate::models::notification_channel::{
     COLLECTION_NAME as NOTIFICATION_CHANNELS, NotificationChannel,
 };
+use crate::models::platform_operation::{
+    CallAndSayConfig, FlightSearchConfig, PlatformOperationConfig, PlatformOperationName,
+    SpeakConfig,
+};
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
 use crate::models::service_approval_config::ApprovalMode;
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ServiceBilling};
@@ -160,6 +164,12 @@ const COVERAGE_CASES: &[CoverageCase] = &[
         metric: BillingMetric::Requests,
     },
     CoverageCase {
+        ingress: BillingIngress::PlatformOperation,
+        scenario: "platform-request",
+        node_intent: NodeIntent::Direct,
+        metric: BillingMetric::Requests,
+    },
+    CoverageCase {
         ingress: BillingIngress::SshExec,
         scenario: "node-exec",
         node_intent: NodeIntent::Node,
@@ -186,7 +196,7 @@ const COVERAGE_CASES: &[CoverageCase] = &[
 ];
 
 #[derive(Default)]
-struct FakeLago {
+pub(crate) struct FakeLago {
     wallet_creates: AtomicUsize,
 }
 
@@ -308,11 +318,99 @@ async fn billing_route_coverage_smoke() {
     )
     .await
     .expect("enable direct assistant route for billing smoke");
+    let platform_vendors = insert_platform_route_services(&db, &downstream_url).await;
+    for vendor in &platform_vendors {
+        crate::services::platform_preference_service::upsert_preference(
+            &db,
+            &owner_id,
+            &owner_id,
+            &vendor.id,
+            crate::services::platform_preference_service::PreferenceWrite {
+                platform_enabled: true,
+                max_credits_per_call: "1000".to_string(),
+                max_credits_per_day: "10000".to_string(),
+                operation_overrides: Vec::new(),
+            },
+        )
+        .await
+        .expect("opt billing route owner into platform vendor");
+    }
+    crate::services::feature_flag_service::set_platform_override(
+        &db,
+        crate::services::feature_flag_service::PLATFORM_SERVICES_FLAG_KEY,
+        &crate::services::feature_flag_service::FlagTarget::Global,
+        true,
+        "billing-route-test",
+    )
+    .await
+    .expect("enable platform services for billing smoke");
 
     let state = billing_route_state(db.clone(), lago, 100);
     let token = route_access_token(&state, &owner_id);
     let (_, private) = crate::routes::build_router();
     let app = private.with_state(state.clone());
+
+    call_mounted_route(
+        &app,
+        route_request(Method::GET, "/api/v1/platform-ops", &token, Body::empty()),
+    )
+    .await;
+    let departure_date = (Utc::now().date_naive() + chrono::Days::new(1))
+        .format("%Y-%m-%d")
+        .to_string();
+    for (path, mounted_route, body) in [
+        (
+            "/api/v1/platform-ops/speak",
+            "/api/v1/platform-ops/speak",
+            serde_json::json!({ "text": "billing route", "voice_id": "route-voice" }),
+        ),
+        (
+            "/api/v1/platform-ops/call-and-say",
+            "/api/v1/platform-ops/call-and-say",
+            serde_json::json!({ "to": "+6512345678", "message": "billing route" }),
+        ),
+        (
+            "/api/v1/platform-ops/flight-search",
+            "/api/v1/platform-ops/flight-search",
+            serde_json::json!({
+                "origin": "SIN",
+                "destination": "LHR",
+                "departure_date": departure_date,
+                "max_offers": 2
+            }),
+        ),
+    ] {
+        call_mounted_route(
+            &app,
+            route_request(Method::POST, path, &token, Body::from(body.to_string())),
+        )
+        .await;
+        exercised_routes.insert(mounted_route);
+    }
+    let platform_vendor = |slug: &str| {
+        platform_vendors
+            .iter()
+            .find(|vendor| vendor.slug == slug)
+            .expect("platform route vendor exists")
+    };
+    assert_route_settled(
+        &db,
+        &platform_vendor("api-elevenlabs").slug,
+        BillingMetric::Characters,
+    )
+    .await;
+    assert_route_deferred(
+        &db,
+        &platform_vendor("api-twilio").slug,
+        BillingMetric::Seconds,
+    )
+    .await;
+    assert_route_settled(
+        &db,
+        &platform_vendor("duffel").slug,
+        BillingMetric::Requests,
+    )
+    .await;
 
     let direct_body = serde_json::json!({
         "messages": [{"role": "user", "content": "route boundary"}],
@@ -1365,6 +1463,14 @@ async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
                 .into_response();
         }
 
+        if path.ends_with("/Calls.json") {
+            return Json(serde_json::json!({
+                "sid": "CA22222222222222222222222222222222",
+                "status": "queued",
+            }))
+            .into_response();
+        }
+
         if path.contains("stream") {
             return (
                 [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
@@ -1651,7 +1757,10 @@ fn route_access_token(state: &crate::AppState, owner_id: &str) -> String {
         &state.jwt_keys,
         &state.config,
         &Uuid::parse_str(owner_id).expect("route owner UUID"),
-        "proxy",
+        // `platform:spend` is required by the platform-ops routes this smoke
+        // test exercises; `proxy` alone reaches a service the owner already has
+        // a credential for, which is a different grant.
+        "proxy platform:spend",
         None,
         None,
         None,
@@ -1722,6 +1831,104 @@ async fn insert_route_service(
         .await
         .expect("insert route service");
     service
+}
+
+async fn insert_platform_route_services(
+    db: &mongodb::Database,
+    base_url: &str,
+) -> Vec<DownstreamService> {
+    let encryption_keys = crate::test_utils::test_encryption_keys();
+    let mut vendors = Vec::new();
+    for (operation, slug, auth_method, auth_key_name) in [
+        (
+            PlatformOperationName::Speak,
+            "api-elevenlabs",
+            "header",
+            "xi-api-key",
+        ),
+        (
+            PlatformOperationName::CallAndSay,
+            "api-twilio",
+            "basic",
+            "Authorization",
+        ),
+        (
+            PlatformOperationName::FlightSearch,
+            "duffel",
+            "bearer",
+            "Authorization",
+        ),
+    ] {
+        let mut vendor = crate::models::downstream_service::test_helpers::dummy_service();
+        vendor.id = Uuid::new_v4().to_string();
+        vendor.slug = slug.to_string();
+        vendor.name = format!("{slug} billing route");
+        vendor.base_url = base_url.to_string();
+        vendor.service_category = "internal".to_string();
+        vendor.visibility = "public".to_string();
+        vendor.auth_method = auth_method.to_string();
+        vendor.auth_key_name = auth_key_name.to_string();
+        vendor.requires_user_credential = false;
+        vendor.provider_config_id = None;
+        vendor.credential_encrypted = Vec::new();
+        vendor.billing = Some(ServiceBilling {
+            platform_billable: false,
+            platform_metric: Some(BillingMetric::Requests),
+            ..Default::default()
+        });
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&vendor)
+            .await
+            .expect("insert platform route catalog service");
+        crate::services::platform_credential_service::set_credential_for_test(
+            db,
+            &encryption_keys,
+            &vendor.id,
+            &format!("{slug}-route-secret"),
+            "billing-route-test",
+        )
+        .await
+        .expect("set platform route credential");
+
+        let config = match operation {
+            PlatformOperationName::Speak => PlatformOperationConfig::Speak(SpeakConfig {
+                allowed_voice_ids: vec!["route-voice".to_string()],
+                max_chars: 1_000,
+                model_id: "eleven_multilingual_v2".to_string(),
+                max_calls_per_user_per_day: 50,
+            }),
+            PlatformOperationName::CallAndSay => {
+                PlatformOperationConfig::CallAndSay(CallAndSayConfig {
+                    allowed_destination_prefixes: vec!["+65".to_string()],
+                    max_message_chars: 500,
+                    max_duration_seconds: 600,
+                    voice: "alice".to_string(),
+                    max_calls_per_user_per_day: 3,
+                    account_sid: format!("AC{}", "1".repeat(32)),
+                    call_from: "+6512345678".to_string(),
+                })
+            }
+            PlatformOperationName::FlightSearch => {
+                PlatformOperationConfig::FlightSearch(FlightSearchConfig {
+                    max_offers_cap: 10,
+                    max_searches_per_user_per_day: 20,
+                })
+            }
+        };
+        crate::services::platform_operation_service::upsert_operation(
+            db,
+            &encryption_keys,
+            operation,
+            true,
+            slug.to_string(),
+            config,
+            "billing-route-test",
+        )
+        .await
+        .expect("insert platform route operation");
+        vendors.push(vendor);
+    }
+    vendors
 }
 
 async fn insert_route_node(state: &crate::AppState, owner_id: &str, name: &str) -> Node {
@@ -2132,6 +2339,24 @@ async fn assert_route_settled(db: &mongodb::Database, service_slug: &str, metric
     assert_route_settled_count(db, service_slug, metric, 1).await;
 }
 
+async fn assert_route_deferred(db: &mongodb::Database, service_slug: &str, metric: BillingMetric) {
+    let row = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find_one(doc! {
+            "service_slug": service_slug,
+            "metric": bson::to_bson(&metric).expect("serialize billing metric"),
+            "status": "forwarded",
+            "forwarded": true,
+            "released": false,
+            "deferred_quantity.type": "twilio_call",
+        })
+        .await
+        .expect("query deferred route usage")
+        .expect("deferred route usage exists");
+    assert!(row.base_fee_applied);
+    assert!(row.quantity.is_none());
+}
+
 async fn assert_route_settled_count(
     db: &mongodb::Database,
     service_slug: &str,
@@ -2329,6 +2554,28 @@ fn usage_for(case: &CoverageCase) -> (PlatformUsage, i64) {
         }
         BillingMetric::Requests => (PlatformUsage::single_request(9), 1),
         BillingMetric::Bytes => (PlatformUsage::single_request(23), 23),
+        BillingMetric::Characters => (PlatformUsage::single_request(0).with_characters(17), 17),
+        BillingMetric::Seconds => (PlatformUsage::single_request(0).with_seconds(19), 19),
+        BillingMetric::InputTokens => (
+            PlatformUsage::llm_completion(19, 11).with_token_breakdown(Some(
+                crate::models::service_billing::TokenBreakdown {
+                    prompt_tokens: 7,
+                    completion_tokens: 4,
+                    ..Default::default()
+                },
+            )),
+            7,
+        ),
+        BillingMetric::OutputTokens => (
+            PlatformUsage::llm_completion(19, 11).with_token_breakdown(Some(
+                crate::models::service_billing::TokenBreakdown {
+                    prompt_tokens: 7,
+                    completion_tokens: 4,
+                    ..Default::default()
+                },
+            )),
+            4,
+        ),
     }
 }
 

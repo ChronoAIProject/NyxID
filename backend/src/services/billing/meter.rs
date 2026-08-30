@@ -6,7 +6,8 @@ use uuid::Uuid;
 use crate::errors::{AppError, AppResult};
 use crate::models::service_billing::{BillingMetric, PlatformUsage, ResaleUsage};
 use crate::models::usage_meter::{
-    BillingLayer, COLLECTION_NAME as USAGE_METER, UsageFunding, UsageMeterRow, UsageStatus,
+    BillingLayer, COLLECTION_NAME as USAGE_METER, DeferredQuantity, UsageFunding, UsageMeterRow,
+    UsageStatus,
 };
 
 use super::reservation::{self, BillingReservation};
@@ -15,6 +16,10 @@ use super::route_context::BillingRouteContext;
 pub const PLATFORM_REQUESTS_METRIC_CODE: &str = "platform_requests";
 pub const PLATFORM_BYTES_METRIC_CODE: &str = "platform_bytes";
 pub const PLATFORM_TOKENS_METRIC_CODE: &str = "platform_tokens";
+pub const PLATFORM_CHARACTERS_METRIC_CODE: &str = "platform_characters";
+pub const PLATFORM_SECONDS_METRIC_CODE: &str = "platform_seconds";
+pub const PLATFORM_INPUT_TOKENS_METRIC_CODE: &str = "platform_input_tokens";
+pub const PLATFORM_OUTPUT_TOKENS_METRIC_CODE: &str = "platform_output_tokens";
 const SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE: i64 = 100;
 
 #[derive(Clone, Debug, Default)]
@@ -31,6 +36,17 @@ impl MeteredProxyContext {
         self.route.is_some()
     }
 
+    /// Join key from an audit row to the usage meter and billing ledger.
+    ///
+    /// Audit deliberately records this rather than a credit amount: settlement
+    /// happens after the response returns, so any amount written here would be
+    /// an estimate that later disagrees with the ledger.
+    pub fn billing_request_id(&self) -> Option<&str> {
+        self.route
+            .as_ref()
+            .map(|route| route.billing_request_id.as_str())
+    }
+
     pub(crate) fn from_route(route: &BillingRouteContext) -> Self {
         Self {
             route: Some(route.clone()),
@@ -42,13 +58,20 @@ pub(crate) async fn has_complete_meter(
     db: &mongodb::Database,
     ctx: &BillingRouteContext,
 ) -> AppResult<bool> {
-    let mut transaction_ids = Vec::with_capacity(2);
+    let mut transaction_ids = Vec::with_capacity(3);
     if ctx.platform_metered() {
         transaction_ids.push(transaction_id(
             &ctx.billing_request_id,
             BillingLayer::Platform,
             None,
         ));
+        if ctx.platform_secondary.is_some() {
+            transaction_ids.push(transaction_id(
+                &ctx.billing_request_id,
+                BillingLayer::Platform,
+                Some(1),
+            ));
+        }
     }
     if ctx.resale.is_some() {
         transaction_ids.push(transaction_id(
@@ -96,7 +119,7 @@ pub async fn open(
         return Ok(MeteredProxyContext::disabled());
     }
 
-    let mut inserted_row_ids = Vec::with_capacity(2);
+    let mut inserted_row_ids = Vec::with_capacity(3);
     let result: AppResult<()> = async {
         if ctx.platform_metered() {
             let inserted = insert_reserved_row(
@@ -117,6 +140,27 @@ pub async fn open(
                     ));
                 }
                 None => {}
+            }
+            if let Some(secondary) = &ctx.platform_secondary {
+                let inserted = insert_reserved_row(
+                    db,
+                    ctx,
+                    BillingLayer::Platform,
+                    secondary.metric,
+                    secondary.lago_metric_code.clone(),
+                    reservation,
+                    Some(1),
+                )
+                .await?;
+                match inserted {
+                    Some(row_id) => inserted_row_ids.push(row_id),
+                    None if reservation.is_some() => {
+                        return Err(AppError::Conflict(
+                            "billing request is already being metered".to_string(),
+                        ));
+                    }
+                    None => {}
+                }
             }
         }
 
@@ -197,6 +241,78 @@ pub async fn mark_forwarded(
     Ok(())
 }
 
+pub async fn persist_deferred_quantity(
+    db: &mongodb::Database,
+    metered: &MeteredProxyContext,
+    descriptor: &DeferredQuantity,
+) -> AppResult<Option<UsageMeterRow>> {
+    let Some(ctx) = &metered.route else {
+        return Ok(None);
+    };
+    let descriptor_bson = bson::to_bson(descriptor).map_err(|error| {
+        AppError::Internal(format!("failed to encode deferred quantity: {error}"))
+    })?;
+    let now = Utc::now();
+    let row = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .find_one_and_update(
+            doc! {
+                "billing_request_id": &ctx.billing_request_id,
+                "layer": "platform",
+                "status": "forwarded",
+                "released": false,
+                "$or": [
+                    { "deferred_quantity": null },
+                    { "deferred_quantity": { "$exists": false } },
+                ],
+            },
+            doc! {
+                "$set": {
+                    "deferred_quantity": descriptor_bson,
+                    "deferred_attempts": 0_i32,
+                    "deferred_next_retry_at": bson::DateTime::from_chrono(now),
+                    "updated_at": bson::DateTime::from_chrono(now),
+                },
+            },
+        )
+        .return_document(mongodb::options::ReturnDocument::After)
+        .await?;
+    if row.is_none()
+        && db
+            .collection::<UsageMeterRow>(USAGE_METER)
+            .count_documents(doc! {
+                "billing_request_id": &ctx.billing_request_id,
+                "layer": "platform",
+                "status": "forwarded",
+                "released": false,
+                "deferred_quantity": bson::to_bson(descriptor).map_err(|error| {
+                    AppError::Internal(format!("failed to encode deferred quantity: {error}"))
+                })?,
+            })
+            .await?
+            == 0
+    {
+        return Err(AppError::Internal(
+            "forwarded platform meter row could not persist deferred quantity".to_string(),
+        ));
+    }
+    if row.is_some() {
+        return Ok(row);
+    }
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .find_one(doc! {
+            "billing_request_id": &ctx.billing_request_id,
+            "layer": "platform",
+            "status": "forwarded",
+            "released": false,
+            "deferred_quantity": bson::to_bson(descriptor).map_err(|error| {
+                AppError::Internal(format!("failed to encode deferred quantity: {error}"))
+            })?,
+        })
+        .await
+        .map_err(Into::into)
+}
+
 pub async fn settle(
     db: &mongodb::Database,
     metered: &MeteredProxyContext,
@@ -220,23 +336,33 @@ pub(super) async fn persist_settlement_intent(
     };
 
     let mut finalized_rows = Vec::new();
-    let platform_quantity = ctx
+    let platform_primary_quantity = ctx
         .platform_metered()
         .then(|| platform_quantity(ctx.platform_metric, &platform));
+    let platform_secondary_quantity = ctx
+        .platform_metered()
+        .then(|| {
+            ctx.platform_secondary
+                .as_ref()
+                .map(|component| platform_quantity(component.metric, &platform))
+        })
+        .flatten();
     let resale_quantity = resale
         .filter(|_| ctx.resale.is_some())
         .map(|usage| usage.quantity.max(0));
     let finalized_at = Utc::now();
 
-    if let (Some(platform_quantity), Some(resale_quantity)) = (platform_quantity, resale_quantity) {
+    if let Some(platform_quantity) = platform_primary_quantity {
         let coordinator = finalize_layer(
             db,
             &ctx.billing_request_id,
             BillingLayer::Platform,
+            None,
             platform_quantity,
             model.clone(),
             platform.token_breakdown.as_ref(),
-            Some(resale_quantity),
+            resale_quantity,
+            platform_secondary_quantity,
             finalized_at,
         )
         .await?;
@@ -245,38 +371,30 @@ pub(super) async fn persist_settlement_intent(
         }
         let coordinator = match coordinator {
             Some(row) => Some(row),
-            None => {
+            None if resale_quantity.is_some() || platform_secondary_quantity.is_some() => {
                 db.collection::<UsageMeterRow>(USAGE_METER)
                     .find_one(doc! {
-                        "billing_request_id": &ctx.billing_request_id,
-                        "layer": "platform",
-                        "pending_resale_quantity": { "$exists": true, "$ne": Bson::Null },
+                        "transaction_id": transaction_id(
+                            &ctx.billing_request_id,
+                            BillingLayer::Platform,
+                            None,
+                        ),
                     })
                     .await?
             }
+            None => None,
         };
-        if let Some(coordinator) = coordinator
-            && let Some(row) = materialize_pending_resale_intent(db, &coordinator).await?
-        {
-            finalized_rows.push(row);
+        if let Some(coordinator) = coordinator {
+            if let Some(row) =
+                materialize_pending_platform_secondary_intent(db, &coordinator).await?
+            {
+                finalized_rows.push(row);
+            }
+            if let Some(row) = materialize_pending_resale_intent(db, &coordinator).await? {
+                finalized_rows.push(row);
+            }
         }
         return Ok(finalized_rows);
-    }
-
-    if let Some(platform_quantity) = platform_quantity
-        && let Some(row) = finalize_layer(
-            db,
-            &ctx.billing_request_id,
-            BillingLayer::Platform,
-            platform_quantity,
-            model.clone(),
-            platform.token_breakdown.as_ref(),
-            None,
-            finalized_at,
-        )
-        .await?
-    {
-        finalized_rows.push(row);
     }
 
     if let Some(resale_quantity) = resale_quantity
@@ -284,8 +402,10 @@ pub(super) async fn persist_settlement_intent(
             db,
             &ctx.billing_request_id,
             BillingLayer::Resale,
+            None,
             resale_quantity,
             model,
+            None,
             None,
             None,
             finalized_at,
@@ -303,7 +423,10 @@ pub(super) async fn recover_pending_resale_intents(db: &mongodb::Database) -> Ap
         .collection::<UsageMeterRow>(USAGE_METER)
         .find(doc! {
             "layer": "platform",
-            "pending_resale_quantity": { "$exists": true, "$ne": Bson::Null },
+            "$or": [
+                { "pending_resale_quantity": { "$exists": true, "$ne": Bson::Null } },
+                { "pending_platform_secondary_quantity": { "$exists": true, "$ne": Bson::Null } },
+            ],
         })
         .limit(SETTLEMENT_INTENT_RECOVERY_BATCH_SIZE)
         .await?
@@ -312,10 +435,9 @@ pub(super) async fn recover_pending_resale_intents(db: &mongodb::Database) -> Ap
 
     let mut recovered = 0;
     for coordinator in coordinators {
-        if materialize_pending_resale_intent(db, &coordinator)
-            .await?
-            .is_some()
-        {
+        let secondary = materialize_pending_platform_secondary_intent(db, &coordinator).await?;
+        let resale = materialize_pending_resale_intent(db, &coordinator).await?;
+        if secondary.is_some() || resale.is_some() {
             recovered += 1;
         }
     }
@@ -352,7 +474,7 @@ pub async fn fail(
         return Ok(());
     };
 
-    reservation::release_unforwarded_rows(
+    reservation::release_failed_rows(
         db,
         &ctx.billing_request_id,
         UsageStatus::Failed,
@@ -375,10 +497,13 @@ async fn insert_reserved_row(
     let transaction_id = transaction_id(&ctx.billing_request_id, layer, flush_seq);
     let wallet_id = reservation.map(|reservation| reservation.wallet_id.clone());
     let reserved_credits = reservation
-        .map(|reservation| reservation.reserved_for(layer))
+        .map(|reservation| reservation.reserved_for(layer, flush_seq))
         .unwrap_or(0);
     let funding = reservation.map(|reservation| {
-        let layer = reservation.layers.iter().find(|item| item.layer == layer);
+        let layer = reservation
+            .layers
+            .iter()
+            .find(|item| item.layer == layer && item.flush_seq == flush_seq);
         UsageFunding {
             credits_per_unit_micros: layer
                 .map(|item| item.credits_per_unit_micros)
@@ -389,9 +514,26 @@ async fn insert_reserved_row(
             grant_reservations: layer
                 .map(|item| item.grant_reservations.clone())
                 .unwrap_or_default(),
+            base_fee_grant_reservations: layer
+                .map(|item| item.base_fee_grant_reservations.clone())
+                .unwrap_or_default(),
             ..Default::default()
         }
     });
+    let base_fee_micros = if layer == BillingLayer::Platform && flush_seq.is_none() {
+        reservation
+            .and_then(|reservation| {
+                reservation
+                    .layers
+                    .iter()
+                    .find(|item| item.layer == layer && item.flush_seq == flush_seq)
+                    .map(|item| item.base_fee_micros)
+            })
+            .unwrap_or(ctx.platform_base_fee_micros)
+            .max(0)
+    } else {
+        0
+    };
     let row = UsageMeterRow {
         id: Uuid::new_v4().to_string(),
         transaction_id,
@@ -415,7 +557,14 @@ async fn insert_reserved_row(
         reserved_credits,
         funding,
         quantity: None,
+        base_fee_micros: (base_fee_micros > 0).then_some(base_fee_micros),
+        base_fee_applied: false,
+        base_fee_applied_credits: 0,
+        deferred_quantity: None,
+        deferred_attempts: 0,
+        deferred_next_retry_at: None,
         pending_resale_quantity: None,
+        pending_platform_secondary_quantity: None,
         status: UsageStatus::Reserved,
         forwarded: false,
         released: false,
@@ -450,10 +599,12 @@ async fn finalize_layer(
     db: &mongodb::Database,
     billing_request_id: &str,
     layer: BillingLayer,
+    flush_seq: Option<i64>,
     quantity: i64,
     model: Option<String>,
     token_breakdown: Option<&crate::models::service_billing::TokenBreakdown>,
     pending_resale_quantity: Option<i64>,
+    pending_platform_secondary_quantity: Option<i64>,
     finalized_at: chrono::DateTime<Utc>,
 ) -> AppResult<Option<UsageMeterRow>> {
     let model_for_row = model.clone();
@@ -473,12 +624,14 @@ async fn finalize_layer(
     if let Some(resale_quantity) = pending_resale_quantity {
         set.insert("pending_resale_quantity", resale_quantity);
     }
+    if let Some(secondary_quantity) = pending_platform_secondary_quantity {
+        set.insert("pending_platform_secondary_quantity", secondary_quantity);
+    }
     let collection = db.collection::<UsageMeterRow>(USAGE_METER);
     let claimed = collection
         .find_one_and_update(
             doc! {
-                "billing_request_id": billing_request_id,
-                "layer": layer.as_transaction_suffix(),
+                "transaction_id": transaction_id(billing_request_id, layer, flush_seq),
                 "status": "forwarded",
             },
             doc! { "$set": set },
@@ -497,6 +650,67 @@ async fn finalize_layer(
     Ok(Some(claimed))
 }
 
+async fn materialize_pending_platform_secondary_intent(
+    db: &mongodb::Database,
+    coordinator: &UsageMeterRow,
+) -> AppResult<Option<UsageMeterRow>> {
+    let Some(quantity) = coordinator.pending_platform_secondary_quantity else {
+        return Ok(None);
+    };
+    let finalized_at = coordinator.finalized_at.unwrap_or(coordinator.updated_at);
+    let materialized = finalize_layer(
+        db,
+        &coordinator.billing_request_id,
+        BillingLayer::Platform,
+        Some(1),
+        quantity,
+        coordinator.model.clone(),
+        coordinator.token_breakdown.as_ref(),
+        None,
+        None,
+        finalized_at,
+    )
+    .await?;
+    clear_pending_platform_secondary_intent(db, coordinator, quantity).await?;
+    Ok(materialized)
+}
+
+async fn clear_pending_platform_secondary_intent(
+    db: &mongodb::Database,
+    coordinator: &UsageMeterRow,
+    quantity: i64,
+) -> AppResult<()> {
+    let materialized = db
+        .collection::<UsageMeterRow>(USAGE_METER)
+        .count_documents(doc! {
+            "transaction_id": transaction_id(
+                &coordinator.billing_request_id,
+                BillingLayer::Platform,
+                Some(1),
+            ),
+            "status": { "$in": ["finalized", "failed", "dead_letter"] },
+            "quantity": quantity,
+        })
+        .await?
+        > 0;
+    if !materialized {
+        return Err(AppError::Internal(format!(
+            "billing secondary platform settlement intent was not materialized for {}",
+            coordinator.billing_request_id
+        )));
+    }
+    db.collection::<UsageMeterRow>(USAGE_METER)
+        .update_one(
+            doc! {
+                "_id": &coordinator.id,
+                "pending_platform_secondary_quantity": quantity,
+            },
+            doc! { "$unset": { "pending_platform_secondary_quantity": "" } },
+        )
+        .await?;
+    Ok(())
+}
+
 async fn materialize_pending_resale_intent(
     db: &mongodb::Database,
     coordinator: &UsageMeterRow,
@@ -509,8 +723,10 @@ async fn materialize_pending_resale_intent(
         db,
         &coordinator.billing_request_id,
         BillingLayer::Resale,
+        None,
         resale_quantity,
         coordinator.model.clone(),
+        None,
         None,
         None,
         finalized_at,
@@ -590,14 +806,28 @@ pub(crate) fn platform_metric_code(metric: BillingMetric) -> &'static str {
         BillingMetric::Requests => PLATFORM_REQUESTS_METRIC_CODE,
         BillingMetric::Bytes => PLATFORM_BYTES_METRIC_CODE,
         BillingMetric::Tokens => PLATFORM_TOKENS_METRIC_CODE,
+        BillingMetric::Characters => PLATFORM_CHARACTERS_METRIC_CODE,
+        BillingMetric::Seconds => PLATFORM_SECONDS_METRIC_CODE,
+        BillingMetric::InputTokens => PLATFORM_INPUT_TOKENS_METRIC_CODE,
+        BillingMetric::OutputTokens => PLATFORM_OUTPUT_TOKENS_METRIC_CODE,
     }
 }
 
-fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
+pub(crate) fn platform_quantity(metric: BillingMetric, usage: &PlatformUsage) -> i64 {
     match metric {
         BillingMetric::Bytes => usage.bytes.max(0),
         BillingMetric::Requests => usage.requests.max(0),
         BillingMetric::Tokens => usage.tokens.max(0),
+        BillingMetric::Characters => usage.characters.max(0),
+        BillingMetric::Seconds => usage.seconds.max(0),
+        BillingMetric::InputTokens => usage
+            .token_breakdown
+            .map(|breakdown| breakdown.prompt_tokens.max(0))
+            .unwrap_or(0),
+        BillingMetric::OutputTokens => usage
+            .token_breakdown
+            .map(|breakdown| breakdown.completion_tokens.max(0))
+            .unwrap_or(0),
     }
 }
 
@@ -764,6 +994,92 @@ mod tests {
         assert_eq!(row.status, UsageStatus::Finalized);
     }
 
+    #[tokio::test]
+    async fn split_token_components_persist_distinct_rows_and_quantities() {
+        let Some(db) = connect_test_database("usage_meter_split_tokens").await else {
+            return;
+        };
+        create_usage_transaction_index(&db).await;
+        let billing = crate::models::platform_operation::OperationBilling {
+            metric: BillingMetric::InputTokens,
+            price_per_unit: "0.01".to_string(),
+            secondary: Some(
+                crate::models::platform_operation::OperationBillingComponent {
+                    metric: BillingMetric::OutputTokens,
+                    price_per_unit: "0.02".to_string(),
+                    lago_metric_code: "platform_split_output".to_string(),
+                },
+            ),
+            base_fee_per_call: Some("0.5".to_string()),
+            lago_metric_code: "platform_split_input".to_string(),
+            sync_status: crate::models::service_billing::PricingSyncStatus::Synced,
+            sync_error: None,
+        };
+        let breakdown = crate::models::service_billing::TokenBreakdown {
+            prompt_tokens: 7,
+            completion_tokens: 4,
+            ..Default::default()
+        };
+        let usage = PlatformUsage::llm_completion(42, 11).with_token_breakdown(Some(breakdown));
+        let ctx = BillingRouteContext::new(
+            BillingIngress::PlatformOperation,
+            "billing-split-token-request".to_string(),
+            "owner-1".to_string(),
+            "actor-1".to_string(),
+            None,
+            None,
+            Some("catalog-1".to_string()),
+            Some("llm-test".to_string()),
+            NodeIntent::Direct,
+            "bearer".to_string(),
+            CredentialClass::NyxidManagedMaster,
+            BillingMetric::Requests,
+            None::<&ServiceBilling>,
+            false,
+        )
+        .with_platform_operation_billing(&billing, 10_000, Some(20_000), 500_000, &usage)
+        .with_platform_metering(false);
+
+        let metered = open(&db, &ctx, None).await.expect("open split meter");
+        mark_forwarded(&db, &metered)
+            .await
+            .expect("mark split meter forwarded");
+        settle(&db, &metered, usage, None, None)
+            .await
+            .expect("settle split meter");
+
+        let rows: Vec<UsageMeterRow> = db
+            .collection(crate::models::usage_meter::COLLECTION_NAME)
+            .find(doc! { "billing_request_id": "billing-split-token-request" })
+            .await
+            .expect("find split rows")
+            .try_collect()
+            .await
+            .expect("collect split rows");
+        assert_eq!(rows.len(), 2);
+        let input = rows
+            .iter()
+            .find(|row| row.flush_seq.is_none())
+            .expect("primary input row");
+        assert_eq!(input.transaction_id, "billing-split-token-request:platform");
+        assert_eq!(input.metric, BillingMetric::InputTokens);
+        assert_eq!(input.quantity, Some(7));
+        assert_eq!(input.base_fee_micros, Some(500_000));
+        assert!(input.pending_platform_secondary_quantity.is_none());
+        let output = rows
+            .iter()
+            .find(|row| row.flush_seq == Some(1))
+            .expect("secondary output row");
+        assert_eq!(
+            output.transaction_id,
+            "billing-split-token-request:platform:1"
+        );
+        assert_eq!(output.metric, BillingMetric::OutputTokens);
+        assert_eq!(output.quantity, Some(4));
+        assert_eq!(output.base_fee_micros, None);
+        assert_eq!(output.token_breakdown, Some(breakdown));
+    }
+
     #[test]
     fn transaction_id_is_per_layer_and_flush() {
         assert_eq!(
@@ -797,11 +1113,15 @@ mod tests {
             total_reserved_credits: 5,
             layers: vec![crate::services::billing::reservation::LayerReservation {
                 layer: BillingLayer::Platform,
+                flush_seq: None,
+                metric: BillingMetric::Requests,
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
+                base_fee_micros: 0,
                 reserved_credits: 5,
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
@@ -858,11 +1178,15 @@ mod tests {
             total_reserved_credits: 5,
             layers: vec![crate::services::billing::reservation::LayerReservation {
                 layer: BillingLayer::Platform,
+                flush_seq: None,
+                metric: BillingMetric::Requests,
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
+                base_fee_micros: 0,
                 reserved_credits: 5,
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
             }],
         };
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
@@ -950,10 +1274,12 @@ mod tests {
             &db,
             &ctx.billing_request_id,
             BillingLayer::Platform,
+            None,
             42,
             Some("model-before-detach".to_string()),
             None,
             Some(17),
+            None,
             finalized_at,
         )
         .await
@@ -1020,11 +1346,15 @@ mod tests {
             total_reserved_credits: 5,
             layers: vec![crate::services::billing::reservation::LayerReservation {
                 layer: BillingLayer::Platform,
+                flush_seq: None,
+                metric: BillingMetric::Requests,
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
+                base_fee_micros: 0,
                 reserved_credits: 5,
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
@@ -1110,55 +1440,96 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fail_releases_only_never_forwarded_wallet_hold() {
+    async fn fail_releases_wallet_holds_before_and_after_forwarding() {
         let Some(db) = connect_test_database("billing_fail_releases_hold").await else {
             return;
         };
         create_usage_transaction_index(&db).await;
-        let owner_id = "owner-fail-release";
-        insert_wallet(&db, owner_id, 10, 0).await;
 
-        let ctx = platform_context("billing-wallet-fail", owner_id);
-        let reservation = BillingReservation {
-            owner_id: owner_id.to_string(),
-            wallet_id: "wallet-owner-fail-release".to_string(),
-            total_reserved_credits: 4,
-            layers: vec![crate::services::billing::reservation::LayerReservation {
-                layer: BillingLayer::Platform,
-                estimated_quantity: 1,
-                credits_per_unit_micros: 4_000_000,
-                reserved_credits: 4,
-                allowance_reservations: Vec::new(),
-                grant_reservations: Vec::new(),
-            }],
-        };
-        crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 4)
-            .await
-            .expect("reserve")
-            .expect("reserved");
+        for forwarded in [false, true] {
+            let suffix = if forwarded { "forwarded" } else { "reserved" };
+            let owner_id = format!("owner-fail-release-{suffix}");
+            let request_id = format!("billing-wallet-fail-{suffix}");
+            insert_wallet(&db, &owner_id, 10, 0).await;
 
-        let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
-        super::fail(&db, &metered, "before send")
-            .await
-            .expect("fail");
+            let ctx = platform_context(&request_id, &owner_id);
+            let reservation = BillingReservation {
+                owner_id: owner_id.clone(),
+                wallet_id: format!("wallet-{owner_id}"),
+                total_reserved_credits: 4,
+                layers: vec![crate::services::billing::reservation::LayerReservation {
+                    layer: BillingLayer::Platform,
+                    flush_seq: None,
+                    metric: BillingMetric::Requests,
+                    estimated_quantity: 1,
+                    credits_per_unit_micros: 4_000_000,
+                    base_fee_micros: 0,
+                    reserved_credits: 4,
+                    allowance_reservations: Vec::new(),
+                    grant_reservations: Vec::new(),
+                    base_fee_grant_reservations: Vec::new(),
+                }],
+            };
+            crate::services::billing::reservation::try_reserve_prepaid(&db, &owner_id, 4)
+                .await
+                .expect("reserve")
+                .expect("reserved");
 
-        let wallet = db
-            .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
-            .find_one(doc! { "owner_id": owner_id })
-            .await
-            .expect("find wallet")
-            .expect("wallet exists");
-        let row = db
-            .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
-            .find_one(doc! { "billing_request_id": "billing-wallet-fail" })
-            .await
-            .expect("find row")
-            .expect("row exists");
+            let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
+            if forwarded {
+                mark_forwarded(&db, &metered).await.expect("mark forwarded");
+            }
+            super::fail(&db, &metered, "vendor request failed")
+                .await
+                .expect("fail");
 
-        assert_eq!(wallet.reserved_credits, 0);
-        assert_eq!(wallet.pending_lago_debits, 0);
-        assert_eq!(row.status, UsageStatus::Failed);
-        assert!(row.released);
+            let wallet_after_first = db
+                .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+                .find_one(doc! { "owner_id": &owner_id })
+                .await
+                .expect("find wallet")
+                .expect("wallet exists");
+            let row_after_first = db
+                .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+                .find_one(doc! { "billing_request_id": &request_id })
+                .await
+                .expect("find row")
+                .expect("row exists");
+
+            super::fail(&db, &metered, "second failure must be a no-op")
+                .await
+                .expect("idempotent second fail");
+            let wallet_after_second = db
+                .collection::<BillingWallet>(crate::models::billing_wallet::COLLECTION_NAME)
+                .find_one(doc! { "owner_id": &owner_id })
+                .await
+                .expect("find wallet after second fail")
+                .expect("wallet exists after second fail");
+            let row_after_second = db
+                .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+                .find_one(doc! { "billing_request_id": &request_id })
+                .await
+                .expect("find row after second fail")
+                .expect("row exists after second fail");
+
+            assert_eq!(wallet_after_first.reserved_credits, 0);
+            assert_eq!(wallet_after_first.pending_lago_debits, 0);
+            assert_eq!(wallet_after_second.reserved_credits, 0);
+            assert_eq!(wallet_after_second.pending_lago_debits, 0);
+            assert_eq!(
+                wallet_after_second.updated_at,
+                wallet_after_first.updated_at
+            );
+            assert_eq!(row_after_first.status, UsageStatus::Failed);
+            assert_eq!(row_after_first.forwarded, forwarded);
+            assert_eq!(
+                row_after_first.last_error.as_deref(),
+                Some("vendor request failed")
+            );
+            assert!(row_after_first.released);
+            assert_eq!(row_after_second.updated_at, row_after_first.updated_at);
+            assert_eq!(row_after_second.last_error, row_after_first.last_error);
+        }
     }
 
     /// ChronoAIProject/NyxID#1023 — the settle path and the reconciler's
@@ -1194,11 +1565,15 @@ mod tests {
             total_reserved_credits: 5,
             layers: vec![crate::services::billing::reservation::LayerReservation {
                 layer: BillingLayer::Platform,
+                flush_seq: None,
+                metric: BillingMetric::Requests,
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
+                base_fee_micros: 0,
                 reserved_credits: 5,
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
             }],
         };
         crate::services::billing::reservation::try_reserve_prepaid(&db, owner_id, 5)
@@ -1339,11 +1714,15 @@ mod tests {
             total_reserved_credits: 5,
             layers: vec![crate::services::billing::reservation::LayerReservation {
                 layer: BillingLayer::Platform,
+                flush_seq: None,
+                metric: BillingMetric::Requests,
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
+                base_fee_micros: 0,
                 reserved_credits: 5,
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
             }],
         };
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");
@@ -1456,11 +1835,15 @@ mod tests {
             total_reserved_credits: 5,
             layers: vec![crate::services::billing::reservation::LayerReservation {
                 layer: BillingLayer::Platform,
+                flush_seq: None,
+                metric: BillingMetric::Requests,
                 estimated_quantity: 1,
                 credits_per_unit_micros: 5_000_000,
+                base_fee_micros: 0,
                 reserved_credits: 5,
                 allowance_reservations: Vec::new(),
                 grant_reservations: Vec::new(),
+                base_fee_grant_reservations: Vec::new(),
             }],
         };
         let metered = open(&db, &ctx, Some(&reservation)).await.expect("open");

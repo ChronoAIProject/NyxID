@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderHook, waitFor } from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PLATFORM_OPERATION_DISCOVERY_QUERY_KEY } from "@/schemas/platform-ops";
 import { useKeyAuthorizationStatus } from "./use-keys";
 
 const { mockGet } = vi.hoisted(() => ({ mockGet: vi.fn() }));
@@ -111,6 +112,9 @@ describe("useKeyAuthorizationStatus", () => {
         exact: true,
       }),
     );
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: PLATFORM_OPERATION_DISCOVERY_QUERY_KEY,
+    });
   });
 
   it("does not touch the list while still pending", async () => {
