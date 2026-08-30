@@ -306,6 +306,7 @@ impl PlatformUserRateLimiter {
 }
 
 static PLATFORM_USER_LIMITER: OnceLock<PlatformUserRateLimiter> = OnceLock::new();
+static DELEGATION_REFRESH_LIMITER: OnceLock<PlatformUserRateLimiter> = OnceLock::new();
 
 /// Install the process-wide platform per-user limiter. A zero sustained rate
 /// disables limiting, and initialization is intentionally one-shot.
@@ -324,6 +325,44 @@ pub fn cleanup_platform_user_rate_limiter() {
     if let Some(limiter) = platform_user_rate_limiter() {
         limiter.cleanup();
     }
+}
+
+/// Install the process-wide service-delegation refresh limiter. A zero
+/// sustained rate disables limiting, and initialization is one-shot.
+pub fn init_delegation_refresh_rate_limiter(per_second: u32, burst: u32) {
+    if per_second == 0 {
+        return;
+    }
+    let _ = DELEGATION_REFRESH_LIMITER.set(PlatformUserRateLimiter::new(per_second, burst));
+}
+
+pub fn delegation_refresh_rate_limiter() -> Option<&'static PlatformUserRateLimiter> {
+    DELEGATION_REFRESH_LIMITER.get()
+}
+
+pub fn cleanup_delegation_refresh_rate_limiter() {
+    if let Some(limiter) = delegation_refresh_rate_limiter() {
+        limiter.cleanup();
+    }
+}
+
+/// Enforce the per-user, per-UserService service-delegation refresh bucket.
+pub fn enforce_delegation_refresh_limit(
+    limiter: Option<&PlatformUserRateLimiter>,
+    user_id: &str,
+    user_service_id: &str,
+) -> Result<(), crate::errors::AppError> {
+    if let Some(limiter) = limiter
+        && !limiter.check(user_service_id, user_id)
+    {
+        tracing::warn!(
+            user_id,
+            user_service_id,
+            "Service delegation refresh rate limit exceeded"
+        );
+        return Err(crate::errors::AppError::RateLimited);
+    }
+    Ok(())
 }
 
 /// Enforce a platform per-user limit through an explicit limiter seam so the
@@ -1196,6 +1235,19 @@ mod tests {
             Err(crate::errors::AppError::RateLimited)
         ));
         assert!(enforce_platform_user_limit(None, "S", "A").is_ok());
+    }
+
+    #[test]
+    fn enforce_delegation_refresh_limit_maps_to_rate_limited() {
+        let limiter = PlatformUserRateLimiter::new(1, 1);
+        assert!(enforce_delegation_refresh_limit(Some(&limiter), "U", "S").is_ok());
+        assert!(matches!(
+            enforce_delegation_refresh_limit(Some(&limiter), "U", "S"),
+            Err(crate::errors::AppError::RateLimited)
+        ));
+        assert!(enforce_delegation_refresh_limit(Some(&limiter), "U", "T").is_ok());
+        assert!(enforce_delegation_refresh_limit(Some(&limiter), "V", "S").is_ok());
+        assert!(enforce_delegation_refresh_limit(None, "U", "S").is_ok());
     }
 
     #[test]

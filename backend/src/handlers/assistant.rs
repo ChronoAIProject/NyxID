@@ -725,6 +725,9 @@ fn build_forward_authorization(
     service: &DownstreamService,
 ) -> AppResult<HeaderValue> {
     let restrictions = TokenRestrictionClaims::from_auth_user(auth_user);
+    // This is deliberately a legacy, non-refreshable admission credential.
+    // Aevatar seals admission proofs, so an admitted run tolerates bearer
+    // expiry without giving the assistant bridge a renewable service token.
     let token = generate_delegated_access_token(
         &state.jwt_keys,
         &state.config,

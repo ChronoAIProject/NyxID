@@ -464,6 +464,28 @@ pub enum AppError {
 
     #[error("Anonymous endpoint incompatible with service identity exposure: {0}")]
     AnonymousIncompatibleService(String),
+
+    #[error(
+        "'{0}' is a platform-managed service: NyxID provisions it automatically with a platform credential and its route policy is catalog-owned. Use the auto-connected service row; ask an operator to change its identity settings."
+    )]
+    PlatformManagedCatalogService(String),
+
+    #[error("The delegation session has expired")]
+    DelegationSessionExpired,
+
+    #[error(
+        "The delegation origin session or API key is inactive, expired, or no longer authorized"
+    )]
+    DelegationOriginRevoked,
+
+    #[error("The delegated service route is inactive or no longer authorized")]
+    DelegationRouteRevoked,
+
+    #[error(
+        "This delegation token was issued before refreshable service delegation; re-run the proxied request to obtain a refreshable token"
+    )]
+    DelegationRefreshUnsupported,
+
     #[error("Oracle pool not found: {0}")]
     OraclePoolNotFound(String),
 
@@ -657,6 +679,12 @@ impl AppError {
             | Self::InviteCodeDeactivated
             | Self::InviteCodeAlreadyRedeemed => StatusCode::BAD_REQUEST,
             Self::AnonymousIncompatibleService(_) => StatusCode::BAD_REQUEST,
+            Self::PlatformManagedCatalogService(_) => StatusCode::FORBIDDEN,
+            Self::DelegationSessionExpired => StatusCode::UNAUTHORIZED,
+            Self::DelegationOriginRevoked => StatusCode::UNAUTHORIZED,
+            Self::DelegationRouteRevoked | Self::DelegationRefreshUnsupported => {
+                StatusCode::FORBIDDEN
+            }
             Self::OraclePoolNotFound(_) => StatusCode::NOT_FOUND,
             Self::OraclePoolSlugTaken(_) => StatusCode::CONFLICT,
             Self::OraclePoolInactive(_) => StatusCode::SERVICE_UNAVAILABLE,
@@ -817,6 +845,11 @@ impl AppError {
             Self::InviteCodeDeactivated => 8202,
             Self::InviteCodeAlreadyRedeemed => 8203,
             Self::AnonymousIncompatibleService(_) => 11100,
+            Self::PlatformManagedCatalogService(_) => 11800,
+            Self::DelegationSessionExpired => 11810,
+            Self::DelegationOriginRevoked => 11811,
+            Self::DelegationRouteRevoked => 11812,
+            Self::DelegationRefreshUnsupported => 11813,
             Self::OraclePoolNotFound(_) => 11000,
             Self::OraclePoolSlugTaken(_) => 11001,
             Self::OraclePoolInactive(_) => 11002,
@@ -1013,6 +1046,11 @@ impl AppError {
             Self::InviteCodeDeactivated => "invite_code_deactivated",
             Self::InviteCodeAlreadyRedeemed => "invite_code_already_redeemed",
             Self::AnonymousIncompatibleService(_) => "anonymous_incompatible_service",
+            Self::PlatformManagedCatalogService(_) => "platform_managed_catalog_service",
+            Self::DelegationSessionExpired => "delegation_session_expired",
+            Self::DelegationOriginRevoked => "delegation_origin_revoked",
+            Self::DelegationRouteRevoked => "delegation_route_revoked",
+            Self::DelegationRefreshUnsupported => "delegation_refresh_unsupported",
             Self::OraclePoolNotFound(_) => "oracle_pool_not_found",
             Self::OraclePoolSlugTaken(_) => "oracle_pool_slug_taken",
             Self::OraclePoolInactive(_) => "oracle_pool_inactive",
@@ -1134,6 +1172,58 @@ mod tests {
         assert_eq!(payload["error"], "request_body_too_large");
         assert_eq!(payload["error_code"], 11700);
         assert!(payload["message"].as_str().unwrap().contains("2048 bytes"));
+    }
+
+    #[tokio::test]
+    async fn platform_managed_catalog_service_has_structured_403_contract() {
+        let response =
+            AppError::PlatformManagedCatalogService("chrono-sandbox".to_string()).into_response();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload["error"], "platform_managed_catalog_service");
+        assert_eq!(payload["error_code"], 11800);
+        assert_eq!(
+            payload["message"],
+            "'chrono-sandbox' is a platform-managed service: NyxID provisions it automatically with a platform credential and its route policy is catalog-owned. Use the auto-connected service row; ask an operator to change its identity settings."
+        );
+    }
+
+    #[test]
+    fn delegation_refresh_errors_have_stable_contracts() {
+        let cases = [
+            (
+                AppError::DelegationSessionExpired,
+                StatusCode::UNAUTHORIZED,
+                "delegation_session_expired",
+                11810,
+            ),
+            (
+                AppError::DelegationOriginRevoked,
+                StatusCode::UNAUTHORIZED,
+                "delegation_origin_revoked",
+                11811,
+            ),
+            (
+                AppError::DelegationRouteRevoked,
+                StatusCode::FORBIDDEN,
+                "delegation_route_revoked",
+                11812,
+            ),
+            (
+                AppError::DelegationRefreshUnsupported,
+                StatusCode::FORBIDDEN,
+                "delegation_refresh_unsupported",
+                11813,
+            ),
+        ];
+
+        for (error, status, key, code) in cases {
+            assert_eq!(error.status_code(), status);
+            assert_eq!(error.error_key(), key);
+            assert_eq!(error.error_code(), code);
+        }
     }
 
     #[test]

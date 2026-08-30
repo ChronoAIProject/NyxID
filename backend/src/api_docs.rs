@@ -45,6 +45,8 @@
         crate::handlers::auth_device::preview_auth_device,
         crate::handlers::auth_device::approve_auth_device,
         crate::handlers::auth_device::deny_auth_device,
+        // Delegation
+        crate::handlers::delegation::refresh_delegation_token,
         // Catalog
         crate::handlers::catalog::list_catalog,
         crate::handlers::catalog::get_catalog_entry,
@@ -142,6 +144,8 @@
             crate::handlers::auth_device::AuthDeviceApproveBody,
             crate::handlers::auth_device::AuthDeviceDenyBody,
             crate::handlers::auth_device::AuthDeviceDecisionResponse,
+            // Delegation
+            crate::handlers::delegation::DelegationRefreshResponse,
             // Catalog
             crate::handlers::catalog::CatalogEntryResponse,
             crate::handlers::catalog::CatalogListResponse,
@@ -251,6 +255,7 @@
         (name = "AI Services", description = "Unified key management: auto-provisions endpoint, credential, and proxy routing from catalog or custom input"),
         (name = "Connect Links", description = "Hosted single-use service credential connection flows"),
         (name = "Auth Device Login", description = "First-party device-code login review and decisions"),
+        (name = "Delegation", description = "Refresh constrained OAuth-client and service delegation tokens"),
         (name = "Catalog", description = "Read-only service catalog for users (admin-created services and providers)"),
         (name = "Endpoints", description = "User-managed target URLs"),
         (name = "External API Keys", description = "User's external API keys and credentials"),

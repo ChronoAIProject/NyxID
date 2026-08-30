@@ -38,7 +38,7 @@ There are two primary flows depending on whether the downstream service has its 
 | **A: MCP Token Injection** | Downstream service does NOT use NyxID as OIDC provider | NyxID generates and injects a delegation token per tool call |
 | **B: Token Exchange (RFC 8693)** | Downstream service uses NyxID as OIDC provider and has its own user sessions | Service exchanges a user access token for a scoped delegation token |
 
-Both flows produce a delegation token that can be used to call NyxID APIs (LLM gateway, proxy, etc.) on behalf of the user.
+Both flows produce a delegation token that can be used to call NyxID APIs (LLM gateway, proxy, etc.) on behalf of the user. Proxy-injected `UserService` tokens additionally bind the exact route and an absolute refresh-session cap; OAuth exchange tokens retain their client-and-consent refresh model.
 
 ---
 
@@ -184,11 +184,17 @@ NyxID receives this request, validates the delegation token, resolves the user's
 
 ### Token Expiry and Refresh
 
-**TTL:** Delegation tokens injected via MCP have a 5-minute TTL.
+Delegation tokens injected by a resolved `UserService` have a 5-minute bearer
+TTL and an absolute refresh-session cap. The cap is fixed at the first mint by
+`DELEGATION_SESSION_MAX_SECS` (default one hour, clamped to 5 minutes through
+24 hours) and is copied unchanged into every replacement token. Refresh never
+widens the subject, actor, scope, resource, service, or node claims.
 
 **For short-lived operations (most MCP tool calls):** The token is generated fresh for each tool invocation. The downstream service uses it for the duration of that single request. No refresh is needed.
 
-**For long-running operations:** If the downstream service needs to make multiple calls to NyxID over a longer period (e.g., a multi-step workflow triggered by a single tool call), it can refresh the delegation token before it expires:
+**For long-running operations:** Put the injected token in `NYXID_TOKEN` inside
+the isolated execution environment. Refresh it no later than four minutes after
+each mint, before its five-minute bearer expiry:
 
 ```http
 POST /api/v1/delegation/refresh HTTP/1.1
@@ -203,21 +209,62 @@ Response:
   "access_token": "<new_delegation_token>",
   "token_type": "Bearer",
   "expires_in": 300,
+  "session_expires_in": 3294,
   "scope": "llm:proxy"
 }
 ```
 
 **Refresh rules:**
 
-- Only delegation tokens can be refreshed at this endpoint (must have `act.sub` claim)
-- NyxID re-verifies the user is still active
-- NyxID re-verifies the user still has consent for the acting service (if applicable)
-- A new 5-minute token is issued with the same scope and `act.sub`
+- The user must remain active.
+- An originating agent API key must still exist, belong to the user, remain
+  active and unexpired, and still allow the exact `UserService`.
+- An originating login session, when recorded, must still exist, belong to the
+  user, remain unrevoked, and be unexpired. Logout therefore stops renewal.
+- The exact `UserService` must remain active, keep delegation injection enabled,
+  retain every token scope, and remain accessible through the current personal
+  or organization ACL.
+- The service actor is recomputed from the live catalog link (or service slug),
+  and auto-provisioned routes must still satisfy live catalog eligibility.
+- A replacement copies all restrictions verbatim, receives a fresh `jti`, and
+  expires at the earlier of five minutes or the unchanged session cap.
+- If a service token invokes another allowed proxy route, the injected child
+  token inherits the same absolute cap and origin key, OAuth client, and login
+  session lineage; proxy chaining cannot start a new renewal window.
+- If an OAuth-client delegated token invokes a proxy route, the child service
+  session is capped at the parent bearer's `exp` and records that OAuth client
+  as its origin, so it cannot outlive the consent-checked parent credential.
 - The old token remains valid until its original expiry
 
-**Handling expiry errors:** If the token has already expired, the downstream service receives a `401 Unauthorized` response. At that point, the service cannot refresh the token -- it must wait for the next MCP tool invocation to receive a fresh token.
+The renewal authority is revoked by user deactivation; origin-session logout,
+deletion, or expiry; origin-key deletion, deactivation, expiry, ownership
+change, or service-allowlist removal; route disablement; switching
+`inject_delegation_token` off; removing a delegated scope; losing organization
+access; actor/catalog drift; or catalog de-eligibility. An OAuth-origin child
+also stops at the parent bearer's expiry. The absolute cap is final even if
+none of those levers changes.
 
-**Best practice:** Check the `exp` claim and refresh proactively when less than 60 seconds remain.
+Legacy proxy tokens minted through a `DownstreamService`-only resolution have
+no exact `UserService` binding and are deliberately non-refreshable. The
+assistant/Aevatar bridge also deliberately mints a non-refreshable admission
+credential: Aevatar seals admission proofs and tolerates the short bearer
+expiring after admission. Re-run a normal proxied request to receive a current
+refreshable token after a legacy route is migrated.
+
+If either the bearer or absolute cap has expired, the service cannot refresh
+the token and must wait for a new proxied invocation. Service refreshes also
+use a token bucket keyed by `(user_id, user_service_id)`, defaulting to one
+refresh per second with burst 10; `DELEGATION_REFRESH_RATE_LIMIT_PER_SECOND=0`
+disables that dedicated limiter.
+
+Cookie-session mints record the current login session. A JWT caller's `sid` is
+adopted when present, but current first-party access-token issuance leaves
+`Claims.sid` unset; those access-token-origin mints therefore rely on the
+absolute cap and the other live revocation checks rather than logout.
+
+This renewable, bounded service credential is the intended replacement for
+forwarding a raw user bearer or placing a long-lived agent API key in sandboxed
+user code.
 
 ---
 
@@ -300,7 +347,7 @@ Content-Type: application/json
 
 ### Token Refresh
 
-Same as Flow A -- use `POST /api/v1/delegation/refresh` with the delegation token:
+Use the same `POST /api/v1/delegation/refresh` endpoint with the delegation token:
 
 ```http
 POST /api/v1/delegation/refresh HTTP/1.1
@@ -308,7 +355,11 @@ Host: your-nyxid-instance.com
 Authorization: Bearer <delegation_token>
 ```
 
-NyxID re-verifies user consent for the OAuth client before issuing a new token.
+The OAuth branch is intentionally unchanged: NyxID re-verifies the active
+acting/receiving clients, current delegation scopes, user consent, and any
+catalog authority before issuing a new five-minute token. It does not use the
+service-route absolute cap. OAuth refresh responses omit `session_expires_in`;
+that field is present only when a service-delegation absolute cap exists.
 
 **If the user's original access token expires:** The downstream service must use its OIDC refresh token to obtain a new user access token, then perform a new token exchange.
 

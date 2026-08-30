@@ -153,26 +153,137 @@ fn auth_kind_label(method: &crate::mw::auth::AuthMethod) -> &'static str {
 /// UserService slugs may be disambiguated aliases, while downstream services
 /// validate `act.sub` against the catalog service they implement. Custom and
 /// legacy services have no separate catalog identity and keep their own slug.
+struct ProxyDelegationContext<'a> {
+    service_slug: &'a str,
+    catalog_service_slug: Option<&'a str>,
+    user_service_id: Option<&'a str>,
+    session_cap: ProxyDelegationSessionCap,
+    origin_api_key_id: Option<&'a str>,
+    origin_client_id: Option<&'a str>,
+    origin_session_id: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ProxyDelegationSessionCap {
+    Fresh,
+    ParentToken(Option<i64>),
+    Inherited(Option<i64>),
+}
+
+impl ProxyDelegationSessionCap {
+    fn from_auth_user(auth_user: &AuthUser) -> Self {
+        if auth_user.delegation_kind.as_deref() == Some("service") {
+            Self::Inherited(auth_user.delegation_session_exp)
+        } else if auth_user.auth_method == AuthMethod::Delegated {
+            Self::ParentToken(auth_user.token_exp)
+        } else {
+            Self::Fresh
+        }
+    }
+
+    fn resolve(self, now: i64, max_secs: i64) -> AppResult<i64> {
+        match self {
+            Self::Fresh => Ok(now + max_secs),
+            Self::ParentToken(parent_exp) => parent_exp
+                .filter(|parent_exp| now < *parent_exp)
+                .map(|parent_exp| (now + max_secs).min(parent_exp))
+                .ok_or(AppError::DelegationSessionExpired),
+            Self::Inherited(session_exp) => session_exp
+                .filter(|session_exp| now < *session_exp)
+                .ok_or(AppError::DelegationSessionExpired),
+        }
+    }
+
+    fn preserves_existing_cap(self) -> bool {
+        matches!(self, Self::Inherited(_))
+    }
+}
+
+#[derive(Debug, Default)]
+struct ProxyDelegationLineage {
+    origin_api_key_id: Option<String>,
+    origin_client_id: Option<String>,
+    origin_session_id: Option<String>,
+}
+
+impl ProxyDelegationLineage {
+    fn from_auth_user(auth_user: &AuthUser) -> Self {
+        if auth_user.delegation_kind.as_deref() == Some("service") {
+            return Self {
+                origin_api_key_id: auth_user.delegation_origin_api_key_id.clone(),
+                origin_client_id: auth_user.delegation_origin_client_id.clone(),
+                origin_session_id: auth_user.delegation_origin_session_id.clone(),
+            };
+        }
+
+        Self {
+            origin_api_key_id: auth_user.api_key_id.clone(),
+            origin_client_id: (auth_user.auth_method == AuthMethod::Delegated)
+                .then(|| auth_user.acting_client_id.clone())
+                .flatten(),
+            origin_session_id: auth_user
+                .session_id
+                .map(|session_id| session_id.to_string()),
+        }
+    }
+}
+
 fn generate_proxy_delegation_token(
     keys: &crate::crypto::jwt::JwtKeys,
     config: &crate::config::AppConfig,
     user_id: &uuid::Uuid,
     scope: &str,
-    service_slug: &str,
-    catalog_service_slug: Option<&str>,
     restrictions: Option<&crate::crypto::jwt::TokenRestrictionClaims>,
+    context: ProxyDelegationContext<'_>,
 ) -> AppResult<String> {
-    let acting_service_slug = catalog_service_slug.unwrap_or(service_slug);
+    let acting_service_slug = context.catalog_service_slug.unwrap_or(context.service_slug);
 
-    crate::crypto::jwt::generate_delegated_access_token(
-        keys,
-        config,
-        user_id,
-        scope,
-        acting_service_slug,
-        crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
-        restrictions,
-    )
+    if let Some(user_service_id) = context.user_service_id {
+        let now = chrono::Utc::now().timestamp();
+        let session_exp = context
+            .session_cap
+            .resolve(now, config.delegation_session_max_secs)?;
+        crate::crypto::jwt::generate_service_delegation_token(
+            keys,
+            config,
+            user_id,
+            scope,
+            acting_service_slug,
+            (now + crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS).min(session_exp),
+            restrictions,
+            crate::crypto::jwt::ServiceDelegationContext {
+                issued_at: now,
+                user_service_id,
+                session_exp,
+                origin_api_key_id: context.origin_api_key_id,
+                origin_client_id: context.origin_client_id,
+                origin_session_id: context.origin_session_id,
+            },
+        )
+    } else {
+        crate::crypto::jwt::generate_delegated_access_token(
+            keys,
+            config,
+            user_id,
+            scope,
+            acting_service_slug,
+            crate::crypto::jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+            restrictions,
+        )
+    }
+}
+
+fn handle_proxy_delegation_mint(
+    result: AppResult<String>,
+    preserve_session_cap: bool,
+) -> AppResult<Option<String>> {
+    match result {
+        Ok(token) => Ok(Some(token)),
+        Err(AppError::DelegationSessionExpired) if preserve_session_cap => {
+            Err(AppError::DelegationSessionExpired)
+        }
+        Err(_) => Ok(None),
+    }
 }
 
 /// Fire-and-forget emission of `TelemetryEvent::ProxySuccess` from the
@@ -2479,26 +2590,36 @@ async fn execute_proxy_inner(
     if target.service.inject_delegation_token {
         let user_uuid = auth_user.user_id;
         let restrictions = crate::crypto::jwt::TokenRestrictionClaims::from_auth_user(auth_user);
-
-        match generate_proxy_delegation_token(
+        let session_cap = ProxyDelegationSessionCap::from_auth_user(auth_user);
+        let preserve_session_cap = session_cap.preserves_existing_cap();
+        let lineage = ProxyDelegationLineage::from_auth_user(auth_user);
+        let token_result = generate_proxy_delegation_token(
             &state.jwt_keys,
             &state.config,
             &user_uuid,
             &target.service.delegation_token_scope,
-            &target.service.slug,
-            catalog_service_slug.as_deref(),
             Some(&restrictions),
-        ) {
-            Ok(delegation_token) => {
-                identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
-            }
-            Err(e) => {
-                tracing::warn!(
-                    service_id = %service_id,
-                    error = %e,
-                    "Failed to generate delegation token for proxy"
-                );
-            }
+            ProxyDelegationContext {
+                service_slug: &target.service.slug,
+                catalog_service_slug: catalog_service_slug.as_deref(),
+                user_service_id: resolved_user_service_id.as_deref(),
+                session_cap,
+                origin_api_key_id: lineage.origin_api_key_id.as_deref(),
+                origin_client_id: lineage.origin_client_id.as_deref(),
+                origin_session_id: lineage.origin_session_id.as_deref(),
+            },
+        );
+        if let Err(error) = &token_result {
+            tracing::warn!(
+                service_id = %service_id,
+                error = %error,
+                "Failed to generate delegation token for proxy"
+            );
+        }
+        if let Some(delegation_token) =
+            handle_proxy_delegation_mint(token_result, preserve_session_cap)?
+        {
+            identity_headers.push(("X-NyxID-Delegation-Token".to_string(), delegation_token));
         }
     }
 
@@ -5763,15 +5884,17 @@ async fn bridge_websockets_via_node(
 #[cfg(test)]
 mod tests {
     use super::{
-        ALLOWED_RESPONSE_HEADERS, AsyncLocationContext, ConnectionUsageStats, WsPassthroughGuard,
+        ALLOWED_RESPONSE_HEADERS, AsyncLocationContext, ConnectionUsageStats,
+        ProxyDelegationContext, ProxyDelegationSessionCap, WsPassthroughGuard,
         add_websocket_usage_provenance, apply_agent_attribution_headers,
         apply_proxy_request_id_header, auth_kind_label, caller_bearer_token_for_downstream,
         collect_ws_forward_headers, compose_pre_resolved_node_ids, enforce_node_route_scope,
         ensure_proxy_request_id, final_credential_class, forwarded_response_header_value,
-        generate_proxy_delegation_token, is_chat_completions_proxy_path, is_codex_transport_path,
-        is_ws_upgrade_request, read_proxy_request_body, should_enforce_runtime_approval,
-        should_retry_node_failure, single_system_header, strip_durable_idempotency_defaults,
-        validate_range_header, websocket_realtime_usage_enabled, websocket_resale_usage,
+        generate_proxy_delegation_token, handle_proxy_delegation_mint,
+        is_chat_completions_proxy_path, is_codex_transport_path, is_ws_upgrade_request,
+        read_proxy_request_body, should_enforce_runtime_approval, should_retry_node_failure,
+        single_system_header, strip_durable_idempotency_defaults, validate_range_header,
+        websocket_realtime_usage_enabled, websocket_resale_usage,
     };
     use crate::models::service_billing::{BillingMetric, ServiceBilling};
     use crate::models::usage_meter::CredentialClass;
@@ -5821,9 +5944,16 @@ mod tests {
             &config,
             &user_id,
             "proxy:*",
-            "chrono-sandbox-aevatar",
-            Some("chrono-sandbox"),
             None,
+            ProxyDelegationContext {
+                service_slug: "chrono-sandbox-aevatar",
+                catalog_service_slug: Some("chrono-sandbox"),
+                user_service_id: Some("user-service-1"),
+                session_cap: ProxyDelegationSessionCap::Fresh,
+                origin_api_key_id: Some("api-key-1"),
+                origin_client_id: None,
+                origin_session_id: None,
+            },
         )
         .expect("catalog-backed alias should mint a delegation token");
         let claims = crate::crypto::jwt::verify_token(&keys, &config, &token)
@@ -5833,6 +5963,20 @@ mod tests {
             claims.act.expect("delegation actor should be present").sub,
             "chrono-sandbox"
         );
+        assert_eq!(claims.delegation_kind.as_deref(), Some("service"));
+        assert_eq!(
+            claims.delegation_user_service_id.as_deref(),
+            Some("user-service-1")
+        );
+        assert_eq!(
+            claims.delegation_origin_api_key_id.as_deref(),
+            Some("api-key-1")
+        );
+        let session_exp = claims.delegation_session_exp.expect("absolute session cap");
+        assert_eq!(session_exp - claims.iat, config.delegation_session_max_secs);
+        assert!(claims.exp <= session_exp);
+        assert_eq!(claims.delegation_origin_client_id, None);
+        assert_eq!(claims.delegation_origin_session_id, None);
     }
 
     #[test]
@@ -5846,9 +5990,16 @@ mod tests {
             &config,
             &user_id,
             "proxy:*",
-            "custom-sandbox",
             None,
-            None,
+            ProxyDelegationContext {
+                service_slug: "custom-sandbox",
+                catalog_service_slug: None,
+                user_service_id: Some("custom-service-1"),
+                session_cap: ProxyDelegationSessionCap::Fresh,
+                origin_api_key_id: None,
+                origin_client_id: None,
+                origin_session_id: None,
+            },
         )
         .expect("custom service should mint a delegation token");
         let claims = crate::crypto::jwt::verify_token(&keys, &config, &token)
@@ -5858,6 +6009,234 @@ mod tests {
             claims.act.expect("delegation actor should be present").sub,
             "custom-sandbox"
         );
+        assert_eq!(claims.delegation_kind.as_deref(), Some("service"));
+    }
+
+    #[test]
+    fn proxy_delegation_token_preserves_parent_service_session_cap_and_origin() {
+        let keys = crate::test_utils::cached_test_jwt_keys();
+        let config = crate::test_utils::test_app_config();
+        let user_id = uuid::Uuid::new_v4();
+        let inherited_session_exp = chrono::Utc::now().timestamp() + 120;
+
+        let token = generate_proxy_delegation_token(
+            &keys,
+            &config,
+            &user_id,
+            "proxy:*",
+            None,
+            ProxyDelegationContext {
+                service_slug: "nested-service",
+                catalog_service_slug: None,
+                user_service_id: Some("nested-service-1"),
+                session_cap: ProxyDelegationSessionCap::Inherited(Some(inherited_session_exp)),
+                origin_api_key_id: Some("root-api-key"),
+                origin_client_id: Some("root-oauth-client"),
+                origin_session_id: Some("root-session"),
+            },
+        )
+        .expect("nested service mint should preserve its delegation lineage");
+        let claims = crate::crypto::jwt::verify_token(&keys, &config, &token)
+            .expect("nested service delegation token should verify");
+
+        assert_eq!(claims.delegation_session_exp, Some(inherited_session_exp));
+        assert_eq!(claims.exp, inherited_session_exp);
+        assert_eq!(
+            claims.delegation_origin_api_key_id.as_deref(),
+            Some("root-api-key")
+        );
+        assert_eq!(
+            claims.delegation_origin_client_id.as_deref(),
+            Some("root-oauth-client")
+        );
+        assert_eq!(
+            claims.delegation_origin_session_id.as_deref(),
+            Some("root-session")
+        );
+
+        let missing_cap = generate_proxy_delegation_token(
+            &keys,
+            &config,
+            &user_id,
+            "proxy:*",
+            None,
+            ProxyDelegationContext {
+                service_slug: "nested-service",
+                catalog_service_slug: None,
+                user_service_id: Some("nested-service-1"),
+                session_cap: ProxyDelegationSessionCap::Inherited(None),
+                origin_api_key_id: Some("root-api-key"),
+                origin_client_id: Some("root-oauth-client"),
+                origin_session_id: Some("root-session"),
+            },
+        );
+        assert!(matches!(
+            missing_cap,
+            Err(crate::errors::AppError::DelegationSessionExpired)
+        ));
+    }
+
+    #[test]
+    fn oauth_delegated_parent_caps_child_at_parent_expiry_and_records_lineage() {
+        let keys = crate::test_utils::cached_test_jwt_keys();
+        let config = crate::test_utils::test_app_config();
+        let user_id = uuid::Uuid::new_v4();
+        let parent_exp = chrono::Utc::now().timestamp() + 120;
+        let mut oauth_parent = crate::test_utils::test_auth_user(&user_id.to_string());
+        oauth_parent.auth_method = AuthMethod::Delegated;
+        oauth_parent.acting_client_id = Some("oauth-parent-client".to_string());
+        oauth_parent.token_exp = Some(parent_exp);
+        let session_cap = ProxyDelegationSessionCap::from_auth_user(&oauth_parent);
+        let lineage = super::ProxyDelegationLineage::from_auth_user(&oauth_parent);
+
+        let token = generate_proxy_delegation_token(
+            &keys,
+            &config,
+            &user_id,
+            "proxy:*",
+            None,
+            ProxyDelegationContext {
+                service_slug: "oauth-child-service",
+                catalog_service_slug: None,
+                user_service_id: Some("oauth-child-service-1"),
+                session_cap,
+                origin_api_key_id: lineage.origin_api_key_id.as_deref(),
+                origin_client_id: lineage.origin_client_id.as_deref(),
+                origin_session_id: lineage.origin_session_id.as_deref(),
+            },
+        )
+        .expect("OAuth-delegated parent should mint a bounded child token");
+        let claims = crate::crypto::jwt::verify_token(&keys, &config, &token)
+            .expect("OAuth-parent child delegation should verify");
+
+        assert_eq!(claims.delegation_session_exp, Some(parent_exp));
+        assert!(claims.exp <= parent_exp);
+        assert_eq!(
+            claims.delegation_origin_client_id.as_deref(),
+            Some("oauth-parent-client")
+        );
+        assert_eq!(claims.delegation_origin_api_key_id, None);
+    }
+
+    #[test]
+    fn proxy_delegation_cap_and_lineage_follow_auth_origin() {
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let session_id = uuid::Uuid::new_v4();
+
+        let mut session_parent = crate::test_utils::test_auth_user(&user_id);
+        session_parent.session_id = Some(session_id);
+        assert!(matches!(
+            ProxyDelegationSessionCap::from_auth_user(&session_parent),
+            ProxyDelegationSessionCap::Fresh
+        ));
+        let session_lineage = super::ProxyDelegationLineage::from_auth_user(&session_parent);
+        let session_id_string = session_id.to_string();
+        assert_eq!(
+            session_lineage.origin_session_id.as_deref(),
+            Some(session_id_string.as_str())
+        );
+
+        let mut api_key_parent = crate::test_utils::test_auth_user(&user_id);
+        api_key_parent.auth_method = AuthMethod::ApiKey;
+        api_key_parent.api_key_id = Some("agent-key".to_string());
+        assert!(matches!(
+            ProxyDelegationSessionCap::from_auth_user(&api_key_parent),
+            ProxyDelegationSessionCap::Fresh
+        ));
+        let api_key_lineage = super::ProxyDelegationLineage::from_auth_user(&api_key_parent);
+        assert_eq!(
+            api_key_lineage.origin_api_key_id.as_deref(),
+            Some("agent-key")
+        );
+
+        let inherited_exp = chrono::Utc::now().timestamp() + 600;
+        let mut service_parent = crate::test_utils::test_auth_user(&user_id);
+        service_parent.auth_method = AuthMethod::Delegated;
+        service_parent.delegation_kind = Some("service".to_string());
+        service_parent.delegation_session_exp = Some(inherited_exp);
+        service_parent.delegation_origin_api_key_id = Some("root-key".to_string());
+        service_parent.delegation_origin_client_id = Some("root-client".to_string());
+        service_parent.delegation_origin_session_id = Some("root-session".to_string());
+        assert!(matches!(
+            ProxyDelegationSessionCap::from_auth_user(&service_parent),
+            ProxyDelegationSessionCap::Inherited(Some(value)) if value == inherited_exp
+        ));
+        let service_lineage = super::ProxyDelegationLineage::from_auth_user(&service_parent);
+        assert_eq!(
+            service_lineage.origin_api_key_id.as_deref(),
+            Some("root-key")
+        );
+        assert_eq!(
+            service_lineage.origin_client_id.as_deref(),
+            Some("root-client")
+        );
+        assert_eq!(
+            service_lineage.origin_session_id.as_deref(),
+            Some("root-session")
+        );
+    }
+
+    #[test]
+    fn expired_inherited_cap_aborts_proxy_mint_while_other_failures_remain_nonfatal() {
+        assert!(matches!(
+            handle_proxy_delegation_mint(
+                Err(crate::errors::AppError::DelegationSessionExpired),
+                true,
+            ),
+            Err(crate::errors::AppError::DelegationSessionExpired)
+        ));
+        assert!(
+            handle_proxy_delegation_mint(
+                Err(crate::errors::AppError::DelegationSessionExpired),
+                false,
+            )
+            .expect("fresh-parent mint failures retain warn-and-continue behavior")
+            .is_none()
+        );
+        assert!(
+            handle_proxy_delegation_mint(
+                Err(crate::errors::AppError::Internal(
+                    "signing failed".to_string()
+                )),
+                true,
+            )
+            .expect("non-cap mint failures retain warn-and-continue behavior")
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn proxy_delegation_token_keeps_legacy_resolution_non_refreshable() {
+        let keys = crate::test_utils::cached_test_jwt_keys();
+        let config = crate::test_utils::test_app_config();
+        let user_id = uuid::Uuid::new_v4();
+
+        let token = generate_proxy_delegation_token(
+            &keys,
+            &config,
+            &user_id,
+            "proxy:*",
+            None,
+            ProxyDelegationContext {
+                service_slug: "legacy-service",
+                catalog_service_slug: None,
+                user_service_id: None,
+                session_cap: ProxyDelegationSessionCap::Fresh,
+                origin_api_key_id: Some("ignored-origin-key"),
+                origin_client_id: Some("ignored-origin-client"),
+                origin_session_id: Some("ignored-origin-session"),
+            },
+        )
+        .expect("legacy downstream resolution should still mint a delegation token");
+        let claims = crate::crypto::jwt::verify_token(&keys, &config, &token)
+            .expect("legacy delegation token should verify");
+
+        assert_eq!(claims.delegation_kind, None);
+        assert_eq!(claims.delegation_user_service_id, None);
+        assert_eq!(claims.delegation_session_exp, None);
+        assert_eq!(claims.delegation_origin_api_key_id, None);
+        assert_eq!(claims.delegation_origin_client_id, None);
+        assert_eq!(claims.delegation_origin_session_id, None);
     }
 
     #[tokio::test]
@@ -8805,8 +9184,15 @@ mod proxy_resolution_integration_tests {
             session_id: None,
             scope: "proxy".to_string(),
             acting_client_id: None,
+            delegation_kind: None,
+            delegation_user_service_id: None,
+            delegation_session_exp: None,
+            delegation_origin_api_key_id: None,
+            delegation_origin_client_id: None,
+            delegation_origin_session_id: None,
             oauth_client_id: None,
             token_jti: None,
+            token_exp: None,
             approval_owner_user_id: Some(owner_user_id.to_string()),
             auth_method: AuthMethod::ServiceAccount,
             allow_all_services: true,
@@ -8830,8 +9216,15 @@ mod proxy_resolution_integration_tests {
             session_id: None,
             scope: "proxy".to_string(),
             acting_client_id: None,
+            delegation_kind: None,
+            delegation_user_service_id: None,
+            delegation_session_exp: None,
+            delegation_origin_api_key_id: None,
+            delegation_origin_client_id: None,
+            delegation_origin_session_id: None,
             oauth_client_id: None,
             token_jti: None,
+            token_exp: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::AccessToken,
             allow_all_services: true,
@@ -8933,6 +9326,80 @@ mod proxy_resolution_integration_tests {
             .expect("insert user service");
 
         service
+    }
+
+    #[tokio::test]
+    async fn expired_chained_service_cap_aborts_before_downstream_dispatch() {
+        let Some(db) = connect_test_database("proxy_expired_chained_delegation_cap").await else {
+            return;
+        };
+        let downstream_calls = Arc::new(AtomicUsize::new(0));
+        let route_calls = downstream_calls.clone();
+        let app = Router::new().route(
+            "/{*path}",
+            any(move || {
+                let route_calls = route_calls.clone();
+                async move {
+                    route_calls.fetch_add(1, Ordering::SeqCst);
+                    StatusCode::OK
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind delegation-cap downstream");
+        let addr = listener
+            .local_addr()
+            .expect("delegation-cap downstream addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve delegation-cap downstream");
+        });
+
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .expect("insert delegation-cap user");
+        let mut service = insert_user_service(
+            &db,
+            &user_id,
+            "expired-chain-target",
+            &format!("http://{addr}"),
+            None,
+        )
+        .await;
+        service.inject_delegation_token = true;
+        service.delegation_token_scope = "proxy".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .replace_one(doc! { "_id": &service.id }, &service)
+            .await
+            .expect("enable delegation injection on target");
+
+        let state = test_app_state(db);
+        let mut auth = access_token_auth(&user_id);
+        auth.auth_method = AuthMethod::Delegated;
+        auth.acting_client_id = Some("parent-service".to_string());
+        auth.delegation_kind = Some("service".to_string());
+        auth.delegation_session_exp = Some(Utc::now().timestamp() - 1);
+        auth.delegation_user_service_id = Some(Uuid::new_v4().to_string());
+        let mut resolved_slug = String::new();
+        let error = proxy_request_by_slug_inner(
+            &state,
+            &auth,
+            &service.slug,
+            "work",
+            proxy_request("/proxy/s/expired-chain-target/work"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect_err("expired inherited cap must abort the proxy request");
+
+        assert!(matches!(error, AppError::DelegationSessionExpired));
+        assert_eq!(error.error_code(), 11810);
+        assert_eq!(downstream_calls.load(Ordering::SeqCst), 0);
+        server.abort();
     }
 
     async fn insert_gcp_service_account_key(
@@ -10598,6 +11065,16 @@ mod proxy_resolution_integration_tests {
                 Some(expected_accepts[offset]),
             );
         }
+        let legacy_injected = calls[0]
+            .3
+            .get("x-nyxid-delegation-token")
+            .and_then(|value| value.to_str().ok())
+            .expect("legacy downstream request carries delegation token");
+        let legacy_claims =
+            crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, legacy_injected)
+                .expect("verify legacy downstream delegation token");
+        assert_eq!(legacy_claims.delegation_kind, None);
+        assert_eq!(legacy_claims.delegation_user_service_id, None);
 
         assert_eq!(debug_echoes.len(), 11);
         for (call_index, envelope_array) in debug_echoes.iter().enumerate() {

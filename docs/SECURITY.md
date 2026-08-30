@@ -466,8 +466,8 @@ Both the introspection (`POST /oauth/introspect`) and revocation (`POST /oauth/r
 | **Consent verification** | Consent record must exist for `(user_id, client_id)` before token exchange is allowed |
 | **Scope limitation** | OAuth-client token exchange is constrained to the client's configured `delegation_scopes`; service-issued tokens are constrained to the admin-configured service scope |
 | **Time limitation** | Token exchange: 5-minute TTL; MCP injection: 5-minute TTL |
-| **Renewable tokens** | Delegation tokens can be refreshed via `POST /api/v1/delegation/refresh`; each refresh issues a new token with fresh 5-minute TTL, same scope and acting client |
-| **Consent-on-refresh** | Every refresh validates that the user still has active consent for the acting client; revoking consent immediately blocks future refreshes |
+| **Renewable tokens** | OAuth-client delegations retain consent-based refresh. Proxy-injected service delegations refresh with identical claims, a fresh at-most-5-minute bearer TTL, and an absolute session cap fixed at first mint. A service token minted from an OAuth delegation cannot outlive that parent bearer's `exp`. Legacy `DownstreamService`-only tokens and the assistant/Aevatar admission credential are non-refreshable. |
+| **Live refresh authority** | OAuth refresh rechecks client consent. Service refresh rechecks the active user, originating login session and agent key state, exact route state/injection/scopes/owner ACL, actor identity, and auto-provision catalog eligibility. Refresh attempts are token-bucket limited per user and exact route. |
 | **Endpoint restriction** | Native delegated routes remain available; management access requires the exact `account:read` scope and the read-parity controls below |
 | **No credential exposure** | Services never see user's provider credentials -- only NyxID resolves and injects them |
 | **Chained exchange prevention** | Delegated tokens cannot be exchanged for new delegated tokens, preventing indefinite TTL extension |
@@ -503,7 +503,7 @@ When NyxID proxies MCP tool calls, delegation tokens are only injected for servi
 | **Opt-in per service** | `inject_delegation_token` defaults to `false`; must be explicitly enabled by admin |
 | **User intent** | User explicitly invoked the tool call; tokens are not pre-generated |
 | **Scope control** | Token scope is fixed by admin config (`delegation_token_scope`); service cannot request broader access |
-| **Single use window** | 5-minute TTL; token is generated per tool call; refreshable for long-running workflows |
+| **Bounded renewal** | Each bearer has a 5-minute TTL. Current `UserService` tokens may refresh only within the first-mint absolute cap and never widen their original claims. |
 | **Service identity** | `act.sub` claim identifies the downstream service for audit purposes |
 
 The service-issued `sandbox:execute` scope is limited to configured downstream
@@ -519,9 +519,16 @@ and user-service rows. It is not available through OAuth-client token exchange.
 | **Scope escalation** | OAuth-client scopes are strictly limited by `delegation_scopes`; `account:read` is rejected during client validation, token exchange, and refresh. Service-issued scopes are admin-configured. |
 | **Chained token exchange** | Explicitly rejected: delegated tokens have `delegated: true` and are blocked from exchange. |
 | **Token replay** | Delegated tokens have unique JTI and short TTL (5 min). Each refresh issues a new JTI. |
-| **Downstream service replays MCP token** | 5-minute TTL. Refreshable via `/api/v1/delegation/refresh` for legitimate long-running workflows; user must remain active and consent must not be revoked for refresh to succeed. |
+| **Downstream service replays MCP token** | Each bearer lasts at most 5 minutes. Renewal ends at the fixed absolute cap and is revoked by user deactivation, origin-session logout/expiry, origin-key revocation/expiry/ownership/allowlist changes, route disablement, injection disablement, scope removal, owner-access loss, actor drift, or catalog de-eligibility. |
+| **Downstream service chains proxy calls** | A service token may invoke only routes allowed by its immutable restrictions. Any child service token injected by that proxy call inherits the parent's absolute cap and origin key, OAuth client, and login-session lineage, so chaining cannot reset the renewal window. |
 | **Delegated token used on restricted endpoints** | The verified `AuthUser` extractor enforces exact scope, GET-only access, the deny classes, and the no-WebSocket-upgrade rule; middleware rejection is fail-fast only. |
 | **User deactivation** | `AuthUser` extractor checks `is_active` for every request, including delegated tokens. |
+
+A downstream holding a service delegation token holds a renewable credential.
+Long-running sandbox workers should receive it as `NYXID_TOKEN`, refresh no
+later than four minutes after each mint, and discard it at the absolute cap.
+This is the supported replacement for forwarding raw user bearers or embedding
+long-lived agent keys in sandboxed user code.
 
 ---
 

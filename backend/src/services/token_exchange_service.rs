@@ -6,8 +6,14 @@ use uuid::Uuid;
 use crate::config::AppConfig;
 use crate::crypto::jwt::{self, DELEGATED_TOKEN_TTL_SECS, JwtKeys};
 use crate::errors::{AppError, AppResult};
+use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
+use crate::models::downstream_service::{
+    COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+};
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+use crate::models::session::{COLLECTION_NAME as SESSIONS, Session};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
+use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::auth::ACCOUNT_READ_SCOPE;
 use crate::services::{
     api_key_scope_service::{self, ScopeAuthorization},
@@ -254,6 +260,194 @@ pub struct DelegationRefreshResponse {
     pub scope: String,
 }
 
+/// Immutable claims supplied by a verified service delegation token.
+pub struct ServiceDelegationRefreshContext<'a> {
+    pub user_id: &'a str,
+    pub acting_service_slug: &'a str,
+    pub user_service_id: Option<&'a str>,
+    pub session_exp: Option<i64>,
+    pub origin_api_key_id: Option<&'a str>,
+    pub origin_client_id: Option<&'a str>,
+    pub origin_session_id: Option<&'a str>,
+    pub scope: &'a str,
+    pub restrictions: &'a jwt::TokenRestrictionClaims,
+}
+
+pub struct ServiceDelegationRefreshResponse {
+    pub access_token: String,
+    pub token_type: String,
+    pub expires_in: i64,
+    pub session_expires_in: i64,
+    pub scope: String,
+    pub user_service_id: String,
+    pub session_exp: i64,
+}
+
+/// Refresh a proxy-injected delegation token after revalidating every live
+/// authority edge used by its original mint.
+pub async fn refresh_service_delegation_token(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    jwt_keys: &JwtKeys,
+    context: ServiceDelegationRefreshContext<'_>,
+) -> AppResult<ServiceDelegationRefreshResponse> {
+    let now = Utc::now();
+    let now_ts = now.timestamp();
+    let session_exp = context
+        .session_exp
+        .filter(|session_exp| now_ts < *session_exp)
+        .ok_or(AppError::DelegationSessionExpired)?;
+
+    let user = db
+        .collection::<User>(USERS)
+        .find_one(doc! { "_id": context.user_id })
+        .await
+        .map_err(|e| AppError::Internal(format!("User lookup failed: {e}")))?;
+    if !user.is_some_and(|user| user.is_active) {
+        return Err(AppError::Unauthorized(
+            "User account is inactive or not found".to_string(),
+        ));
+    }
+
+    if let Some(origin_session_id) = context.origin_session_id {
+        let session = db
+            .collection::<Session>(SESSIONS)
+            .find_one(doc! { "_id": origin_session_id })
+            .await
+            .map_err(|e| AppError::Internal(format!("Session lookup failed: {e}")))?;
+        let origin_is_live = session.is_some_and(|session| {
+            session.user_id == context.user_id && !session.revoked && session.expires_at > now
+        });
+        if !origin_is_live {
+            return Err(AppError::DelegationOriginRevoked);
+        }
+    }
+
+    let user_service_id = context
+        .user_service_id
+        .filter(|id| !id.is_empty())
+        .ok_or(AppError::DelegationRouteRevoked)?;
+
+    if let Some(origin_api_key_id) = context.origin_api_key_id {
+        let key = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": origin_api_key_id })
+            .await
+            .map_err(|e| AppError::Internal(format!("API key lookup failed: {e}")))?;
+        let origin_is_live = key.as_ref().is_some_and(|key| {
+            key.user_id == context.user_id
+                && key.is_active
+                && key.expires_at.is_none_or(|expires_at| expires_at > now)
+                && (key.allow_all_services
+                    || key
+                        .allowed_service_ids
+                        .iter()
+                        .any(|id| id == user_service_id))
+        });
+        if !origin_is_live {
+            return Err(AppError::DelegationOriginRevoked);
+        }
+    }
+
+    let user_service = db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc! { "_id": user_service_id })
+        .await
+        .map_err(|e| AppError::Internal(format!("User service lookup failed: {e}")))?
+        .ok_or(AppError::DelegationRouteRevoked)?;
+
+    let current_scopes: HashSet<&str> = user_service
+        .delegation_token_scope
+        .split_whitespace()
+        .collect();
+    let scope_is_current = context
+        .scope
+        .split_whitespace()
+        .all(|scope| current_scopes.contains(scope));
+    if !user_service.is_active || !user_service.inject_delegation_token || !scope_is_current {
+        return Err(AppError::DelegationRouteRevoked);
+    }
+
+    use crate::services::org_service::OwnerAccess;
+    let owner_access = crate::services::org_service::resolve_owner_access(
+        db,
+        context.user_id,
+        &user_service.user_id,
+    )
+    .await?;
+    let owner_authorized = match &owner_access {
+        OwnerAccess::Direct => true,
+        OwnerAccess::AsOrgAdmin { .. } => owner_access.allows_resource(user_service_id),
+        OwnerAccess::AsOrgMember { role, .. } => {
+            role.can_proxy()
+                && !user_service.admin_only
+                && owner_access.allows_resource(user_service_id)
+        }
+        OwnerAccess::Forbidden => false,
+    };
+    if !owner_authorized {
+        return Err(AppError::DelegationRouteRevoked);
+    }
+
+    let catalog = if let Some(catalog_id) = user_service.catalog_service_id.as_deref() {
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": catalog_id })
+            .await
+            .map_err(|e| AppError::Internal(format!("Catalog service lookup failed: {e}")))?
+    } else {
+        None
+    };
+    let current_actor = catalog
+        .as_ref()
+        .map(|service| service.slug.as_str())
+        .unwrap_or(user_service.slug.as_str());
+    if current_actor != context.acting_service_slug {
+        return Err(AppError::DelegationRouteRevoked);
+    }
+
+    crate::services::proxy_service::verify_auto_provision_eligibility(
+        db,
+        &user_service,
+        &user_service.user_id,
+    )
+    .await
+    .map_err(|error| match error {
+        AppError::NotFound(_) => AppError::DelegationRouteRevoked,
+        other => other,
+    })?;
+
+    let expires_at = (now_ts + jwt::MCP_DELEGATION_TOKEN_TTL_SECS).min(session_exp);
+    let user_uuid = Uuid::parse_str(context.user_id)
+        .map_err(|e| AppError::Internal(format!("Invalid user_id: {e}")))?;
+    let access_token = jwt::generate_service_delegation_token(
+        jwt_keys,
+        config,
+        &user_uuid,
+        context.scope,
+        context.acting_service_slug,
+        expires_at,
+        Some(context.restrictions),
+        jwt::ServiceDelegationContext {
+            issued_at: now_ts,
+            user_service_id,
+            session_exp,
+            origin_api_key_id: context.origin_api_key_id,
+            origin_client_id: context.origin_client_id,
+            origin_session_id: context.origin_session_id,
+        },
+    )?;
+
+    Ok(ServiceDelegationRefreshResponse {
+        access_token,
+        token_type: "Bearer".to_string(),
+        expires_in: expires_at - now_ts,
+        session_expires_in: session_exp - now_ts,
+        scope: context.scope.to_string(),
+        user_service_id: user_service_id.to_string(),
+        session_exp,
+    })
+}
+
 /// Refresh a delegated access token.
 ///
 /// Validates that:
@@ -310,9 +504,27 @@ pub async fn refresh_delegation_token(
         }
         None => {
             log_exchange_failure(db, Some(user_id), acting_client_id, "client_not_found");
-            return Err(AppError::Forbidden(
-                "Acting OAuth client no longer exists".to_string(),
-            ));
+            let is_legacy_service_actor = db
+                .collection::<mongodb::bson::Document>(DOWNSTREAM_SERVICES)
+                .find_one(doc! { "slug": acting_client_id })
+                .projection(doc! { "_id": 1 })
+                .await
+                .map_err(|e| AppError::Internal(format!("Service lookup failed: {e}")))?
+                .is_some()
+                || db
+                    .collection::<mongodb::bson::Document>(USER_SERVICES)
+                    .find_one(doc! { "slug": acting_client_id })
+                    .projection(doc! { "_id": 1 })
+                    .await
+                    .map_err(|e| AppError::Internal(format!("User service lookup failed: {e}")))?
+                    .is_some();
+            return if is_legacy_service_actor {
+                Err(AppError::DelegationRefreshUnsupported)
+            } else {
+                Err(AppError::Forbidden(
+                    "Acting OAuth client no longer exists".to_string(),
+                ))
+            };
         }
     };
 
@@ -836,6 +1048,666 @@ mod tests {
     };
     use chrono::Utc;
     use tower::ServiceExt;
+
+    fn service_refresh_context<'a>(
+        claims: &'a jwt::Claims,
+        restrictions: &'a jwt::TokenRestrictionClaims,
+    ) -> ServiceDelegationRefreshContext<'a> {
+        ServiceDelegationRefreshContext {
+            user_id: &claims.sub,
+            acting_service_slug: claims
+                .act
+                .as_ref()
+                .expect("service delegation actor")
+                .sub
+                .as_str(),
+            user_service_id: claims.delegation_user_service_id.as_deref(),
+            session_exp: claims.delegation_session_exp,
+            origin_api_key_id: claims.delegation_origin_api_key_id.as_deref(),
+            origin_client_id: claims.delegation_origin_client_id.as_deref(),
+            origin_session_id: claims.delegation_origin_session_id.as_deref(),
+            scope: &claims.scope,
+            restrictions,
+        }
+    }
+
+    fn assert_refresh_error(error: AppError, expected: AppError) {
+        assert_eq!(error.error_code(), expected.error_code());
+        assert_eq!(error.error_key(), expected.error_key());
+    }
+
+    #[tokio::test]
+    async fn service_delegation_refresh_preserves_claims_and_enforces_live_revocation_matrix() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("service_delegation_refresh_matrix").await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let user_id = Uuid::new_v4();
+        let other_owner_id = Uuid::new_v4();
+        let service_id = Uuid::new_v4().to_string();
+        let endpoint_id = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        db.collection::<User>(USERS)
+            .insert_many([
+                crate::test_utils::test_user(
+                    &user_id.to_string(),
+                    crate::models::user::UserType::Person,
+                ),
+                crate::test_utils::test_user(
+                    &other_owner_id.to_string(),
+                    crate::models::user::UserType::Person,
+                ),
+            ])
+            .await
+            .expect("insert service delegation users");
+
+        let mut service = crate::test_utils::test_user_service(
+            &service_id,
+            &user_id.to_string(),
+            "refreshable-service",
+            &endpoint_id,
+            None,
+            None,
+        );
+        service.inject_delegation_token = true;
+        service.delegation_token_scope = "proxy account:read".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert refreshable user service");
+
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(ApiKey {
+                id: key_id.clone(),
+                user_id: user_id.to_string(),
+                name: "refresh-origin".to_string(),
+                key_prefix: "nyxid_ag_refresh".to_string(),
+                key_hash: "hash".to_string(),
+                scopes: "proxy".to_string(),
+                last_used_at: None,
+                expires_at: Some(now + chrono::Duration::hours(1)),
+                is_active: true,
+                created_at: now,
+                rotation_predecessor_id: None,
+                state_version: 1,
+                updated_at: Some(now),
+                description: None,
+                allowed_service_ids: vec![service_id.clone()],
+                allowed_node_ids: Vec::new(),
+                allow_all_services: false,
+                allow_all_nodes: true,
+                rate_limit_per_second: None,
+                rate_limit_burst: None,
+                platform: Some("test".to_string()),
+                callback_url: None,
+                purpose: crate::models::api_key::ApiKeyPurpose::General,
+                scheduled_write_enabled: false,
+            })
+            .await
+            .expect("insert delegation origin key");
+
+        let restrictions = jwt::TokenRestrictionClaims {
+            resources: Some(vec![format!(
+                "{}/api/v1/proxy/s/refreshable-service",
+                state.config.base_url
+            )]),
+            allowed_service_ids: Some(vec![service_id.clone()]),
+            allow_all_services: Some(false),
+            allowed_node_ids: Some(vec!["node-original".to_string()]),
+            allow_all_nodes: Some(false),
+        };
+        let session_exp = now.timestamp() + state.config.delegation_session_max_secs;
+        let original = jwt::generate_service_delegation_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            "proxy account:read",
+            "refreshable-service",
+            now.timestamp() + jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+            Some(&restrictions),
+            jwt::ServiceDelegationContext {
+                issued_at: now.timestamp(),
+                user_service_id: &service_id,
+                session_exp,
+                origin_api_key_id: Some(&key_id),
+                origin_client_id: Some("oauth-origin-client"),
+                origin_session_id: None,
+            },
+        )
+        .expect("mint original service delegation");
+        let original_claims = jwt::verify_token(&state.jwt_keys, &state.config, &original)
+            .expect("verify original service delegation");
+
+        let refreshed = refresh_service_delegation_token(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            service_refresh_context(&original_claims, &restrictions),
+        )
+        .await
+        .expect("refresh service delegation");
+        let refreshed_claims =
+            jwt::verify_token(&state.jwt_keys, &state.config, &refreshed.access_token)
+                .expect("verify refreshed service delegation");
+        assert_ne!(refreshed_claims.jti, original_claims.jti);
+        assert_eq!(refreshed_claims.sub, original_claims.sub);
+        assert_eq!(
+            refreshed_claims
+                .act
+                .as_ref()
+                .map(|actor| actor.sub.as_str()),
+            original_claims.act.as_ref().map(|actor| actor.sub.as_str())
+        );
+        assert_eq!(refreshed_claims.scope, original_claims.scope);
+        assert_eq!(
+            refreshed_claims.delegation_user_service_id,
+            original_claims.delegation_user_service_id
+        );
+        assert_eq!(refreshed_claims.delegation_session_exp, Some(session_exp));
+        assert_eq!(
+            refreshed_claims.delegation_origin_api_key_id,
+            original_claims.delegation_origin_api_key_id
+        );
+        assert_eq!(
+            refreshed_claims.delegation_origin_client_id,
+            original_claims.delegation_origin_client_id
+        );
+        assert_eq!(
+            refreshed_claims.delegation_origin_session_id,
+            original_claims.delegation_origin_session_id
+        );
+        assert_eq!(refreshed_claims.resources, restrictions.resources.clone());
+        assert_eq!(
+            refreshed_claims.allowed_service_ids,
+            Some(vec![service_id.clone()])
+        );
+        assert_eq!(refreshed_claims.allow_all_services, Some(false));
+        assert_eq!(
+            refreshed_claims.allowed_node_ids,
+            restrictions.allowed_node_ids.clone()
+        );
+        assert_eq!(refreshed_claims.allow_all_nodes, Some(false));
+        assert!(refreshed_claims.exp <= session_exp);
+        assert_eq!(refreshed.session_exp, session_exp);
+        assert_eq!(
+            refreshed.expires_in,
+            refreshed_claims.exp - refreshed_claims.iat
+        );
+        assert_eq!(
+            refreshed.session_expires_in,
+            session_exp - refreshed_claims.iat
+        );
+
+        let api_keys = db.collection::<ApiKey>(API_KEYS);
+        api_keys
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": {
+                    "allow_all_services": true,
+                    "allowed_service_ids": [&service_id, "newly-live-route"],
+                } },
+            )
+            .await
+            .unwrap();
+        let widened_live_key_refresh = refresh_service_delegation_token(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            service_refresh_context(&original_claims, &restrictions),
+        )
+        .await
+        .expect("a wider live key must not widen copied token authority");
+        let widened_live_key_claims = jwt::verify_token(
+            &state.jwt_keys,
+            &state.config,
+            &widened_live_key_refresh.access_token,
+        )
+        .unwrap();
+        assert_eq!(
+            widened_live_key_claims.allowed_service_ids,
+            Some(vec![service_id.clone()])
+        );
+        assert_eq!(widened_live_key_claims.allow_all_services, Some(false));
+        api_keys
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": {
+                    "allow_all_services": false,
+                    "allowed_service_ids": [&service_id],
+                } },
+            )
+            .await
+            .unwrap();
+
+        db.collection::<User>(USERS)
+            .update_one(
+                doc! { "_id": user_id.to_string() },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+        let inactive_user_error = refresh_service_delegation_token(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            service_refresh_context(&original_claims, &restrictions),
+        )
+        .await
+        .unwrap_err_or_else("inactive user");
+        assert!(matches!(inactive_user_error, AppError::Unauthorized(_)));
+        db.collection::<User>(USERS)
+            .update_one(
+                doc! { "_id": user_id.to_string() },
+                doc! { "$set": { "is_active": true } },
+            )
+            .await
+            .unwrap();
+
+        let expired_cap = ServiceDelegationRefreshContext {
+            session_exp: Some(Utc::now().timestamp() - 1),
+            ..service_refresh_context(&original_claims, &restrictions)
+        };
+        assert_refresh_error(
+            refresh_service_delegation_token(&db, &state.config, &state.jwt_keys, expired_cap)
+                .await
+                .unwrap_err_or_else("past session cap"),
+            AppError::DelegationSessionExpired,
+        );
+
+        api_keys
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+        assert_refresh_error(
+            refresh_service_delegation_token(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                service_refresh_context(&original_claims, &restrictions),
+            )
+            .await
+            .unwrap_err_or_else("revoked origin key"),
+            AppError::DelegationOriginRevoked,
+        );
+        api_keys
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": { "is_active": true } },
+            )
+            .await
+            .unwrap();
+
+        api_keys
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": { "user_id": other_owner_id.to_string() } },
+            )
+            .await
+            .unwrap();
+        assert_refresh_error(
+            refresh_service_delegation_token(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                service_refresh_context(&original_claims, &restrictions),
+            )
+            .await
+            .unwrap_err_or_else("origin key ownership change"),
+            AppError::DelegationOriginRevoked,
+        );
+        api_keys
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": { "user_id": user_id.to_string() } },
+            )
+            .await
+            .unwrap();
+
+        api_keys
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": { "expires_at": bson::DateTime::from_chrono(now - chrono::Duration::seconds(1)) } },
+            )
+            .await
+            .unwrap();
+        assert_refresh_error(
+            refresh_service_delegation_token(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                service_refresh_context(&original_claims, &restrictions),
+            )
+            .await
+            .unwrap_err_or_else("expired origin key"),
+            AppError::DelegationOriginRevoked,
+        );
+        api_keys
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": { "expires_at": bson::DateTime::from_chrono(now + chrono::Duration::hours(1)) } },
+            )
+            .await
+            .unwrap();
+
+        api_keys
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": { "allowed_service_ids": bson::Bson::Array(Vec::new()) } },
+            )
+            .await
+            .unwrap();
+        assert_refresh_error(
+            refresh_service_delegation_token(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                service_refresh_context(&original_claims, &restrictions),
+            )
+            .await
+            .unwrap_err_or_else("origin allowlist removal"),
+            AppError::DelegationOriginRevoked,
+        );
+        api_keys
+            .update_one(
+                doc! { "_id": &key_id },
+                doc! { "$set": { "allowed_service_ids": [&service_id] } },
+            )
+            .await
+            .unwrap();
+
+        let user_services = db.collection::<UserService>(USER_SERVICES);
+        for (field, denied_value, restored_value, label) in [
+            (
+                "is_active",
+                bson::Bson::Boolean(false),
+                bson::Bson::Boolean(true),
+                "inactive route",
+            ),
+            (
+                "inject_delegation_token",
+                bson::Bson::Boolean(false),
+                bson::Bson::Boolean(true),
+                "disabled injection",
+            ),
+            (
+                "delegation_token_scope",
+                bson::Bson::String("other".to_string()),
+                bson::Bson::String("proxy account:read".to_string()),
+                "removed scope",
+            ),
+            (
+                "user_id",
+                bson::Bson::String(other_owner_id.to_string()),
+                bson::Bson::String(user_id.to_string()),
+                "lost owner access",
+            ),
+        ] {
+            let mut denied_set = bson::Document::new();
+            denied_set.insert(field, denied_value);
+            user_services
+                .update_one(doc! { "_id": &service_id }, doc! { "$set": denied_set })
+                .await
+                .unwrap();
+            assert_refresh_error(
+                refresh_service_delegation_token(
+                    &db,
+                    &state.config,
+                    &state.jwt_keys,
+                    service_refresh_context(&original_claims, &restrictions),
+                )
+                .await
+                .unwrap_err_or_else(label),
+                AppError::DelegationRouteRevoked,
+            );
+            let mut restored_set = bson::Document::new();
+            restored_set.insert(field, restored_value);
+            user_services
+                .update_one(doc! { "_id": &service_id }, doc! { "$set": restored_set })
+                .await
+                .unwrap();
+        }
+
+        let actor_mismatch = ServiceDelegationRefreshContext {
+            acting_service_slug: "different-service",
+            ..service_refresh_context(&original_claims, &restrictions)
+        };
+        assert_refresh_error(
+            refresh_service_delegation_token(&db, &state.config, &state.jwt_keys, actor_mismatch)
+                .await
+                .unwrap_err_or_else("actor mismatch"),
+            AppError::DelegationRouteRevoked,
+        );
+
+        let missing_route_claim = ServiceDelegationRefreshContext {
+            user_service_id: None,
+            ..service_refresh_context(&original_claims, &restrictions)
+        };
+        assert_refresh_error(
+            refresh_service_delegation_token(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                missing_route_claim,
+            )
+            .await
+            .unwrap_err_or_else("missing service binding"),
+            AppError::DelegationRouteRevoked,
+        );
+
+        let catalog_id = Uuid::new_v4().to_string();
+        let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+        catalog.id = catalog_id.clone();
+        catalog.slug = "catalog-refresh-actor".to_string();
+        catalog.is_active = false;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&catalog)
+            .await
+            .expect("insert ineligible catalog service");
+        user_services
+            .update_one(
+                doc! { "_id": &service_id },
+                doc! { "$set": {
+                    "catalog_service_id": &catalog_id,
+                    "source": crate::models::user_service::AUTO_PROVISION_SOURCE,
+                } },
+            )
+            .await
+            .unwrap();
+        let catalog_ineligible = ServiceDelegationRefreshContext {
+            acting_service_slug: "catalog-refresh-actor",
+            ..service_refresh_context(&original_claims, &restrictions)
+        };
+        assert_refresh_error(
+            refresh_service_delegation_token(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                catalog_ineligible,
+            )
+            .await
+            .unwrap_err_or_else("catalog de-eligibility"),
+            AppError::DelegationRouteRevoked,
+        );
+    }
+
+    #[tokio::test]
+    async fn logout_revokes_origin_session_refresh_while_absent_lineage_remains_cap_only() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("service_delegation_origin_session").await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let user_id = Uuid::new_v4();
+        let service_id = Uuid::new_v4().to_string();
+        let session_id = Uuid::new_v4().to_string();
+        let now = Utc::now();
+
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &user_id.to_string(),
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert session-origin user");
+        let mut service = crate::test_utils::test_user_service(
+            &service_id,
+            &user_id.to_string(),
+            "session-origin-service",
+            &Uuid::new_v4().to_string(),
+            None,
+            None,
+        );
+        service.inject_delegation_token = true;
+        service.delegation_token_scope = "proxy".to_string();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .expect("insert session-origin service");
+        db.collection::<Session>(SESSIONS)
+            .insert_one(Session {
+                id: session_id.clone(),
+                user_id: user_id.to_string(),
+                token_hash: "session-origin-hash".to_string(),
+                ip_address: None,
+                user_agent: None,
+                expires_at: now + chrono::Duration::hours(1),
+                revoked: false,
+                created_at: now,
+                last_active_at: now,
+            })
+            .await
+            .expect("insert origin session");
+
+        let session_exp = now.timestamp() + state.config.delegation_session_max_secs;
+        let mint = |origin_session_id: Option<&str>| {
+            jwt::generate_service_delegation_token(
+                &state.jwt_keys,
+                &state.config,
+                &user_id,
+                "proxy",
+                &service.slug,
+                now.timestamp() + jwt::MCP_DELEGATION_TOKEN_TTL_SECS,
+                None,
+                jwt::ServiceDelegationContext {
+                    issued_at: now.timestamp(),
+                    user_service_id: &service_id,
+                    session_exp,
+                    origin_api_key_id: None,
+                    origin_client_id: None,
+                    origin_session_id,
+                },
+            )
+            .expect("mint session-origin service delegation")
+        };
+        let bound_token = mint(Some(&session_id));
+        let unbound_token = mint(None);
+        let bound_claims = jwt::verify_token(&state.jwt_keys, &state.config, &bound_token).unwrap();
+        let unbound_claims =
+            jwt::verify_token(&state.jwt_keys, &state.config, &unbound_token).unwrap();
+        let restrictions = jwt::TokenRestrictionClaims::default();
+
+        let refreshed = refresh_service_delegation_token(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            service_refresh_context(&bound_claims, &restrictions),
+        )
+        .await
+        .expect("live origin session permits refresh");
+        let refreshed_claims =
+            jwt::verify_token(&state.jwt_keys, &state.config, &refreshed.access_token).unwrap();
+        assert_eq!(
+            refreshed_claims.delegation_origin_session_id.as_deref(),
+            Some(session_id.as_str())
+        );
+
+        crate::services::token_service::revoke_session(&db, &session_id, None)
+            .await
+            .expect("logout revokes origin session");
+        assert_refresh_error(
+            refresh_service_delegation_token(
+                &db,
+                &state.config,
+                &state.jwt_keys,
+                service_refresh_context(&bound_claims, &restrictions),
+            )
+            .await
+            .unwrap_err_or_else("logout-revoked origin session"),
+            AppError::DelegationOriginRevoked,
+        );
+
+        let cap_only = refresh_service_delegation_token(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            service_refresh_context(&unbound_claims, &restrictions),
+        )
+        .await
+        .expect("tokens without an origin-session claim retain cap-only behavior");
+        let cap_only_claims =
+            jwt::verify_token(&state.jwt_keys, &state.config, &cap_only.access_token).unwrap();
+        assert_eq!(cap_only_claims.delegation_origin_session_id, None);
+        assert_eq!(cap_only_claims.delegation_session_exp, Some(session_exp));
+    }
+
+    #[tokio::test]
+    async fn missing_oauth_client_is_not_misclassified_as_legacy_service_actor() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("delegation_refresh_deleted_oauth_client")
+                .await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let user_id = Uuid::new_v4();
+        let deleted_client_id = "deleted-oauth-client";
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &user_id.to_string(),
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .expect("insert deleted-client user");
+
+        let error = refresh_delegation_token(
+            &db,
+            &state.config,
+            &state.jwt_keys,
+            &user_id.to_string(),
+            deleted_client_id,
+            None,
+            "proxy",
+            &jwt::TokenRestrictionClaims::default(),
+        )
+        .await
+        .err()
+        .expect("deleted OAuth client must fail refresh");
+        assert!(matches!(
+            error,
+            AppError::Forbidden(ref message)
+                if message == "Acting OAuth client no longer exists"
+        ));
+        assert_ne!(error.error_code(), 11813);
+    }
+
+    trait AppResultTestExt<T> {
+        fn unwrap_err_or_else(self, label: &str) -> AppError;
+    }
+
+    impl<T> AppResultTestExt<T> for AppResult<T> {
+        fn unwrap_err_or_else(self, label: &str) -> AppError {
+            self.err()
+                .unwrap_or_else(|| panic!("{label} must revoke service delegation refresh"))
+        }
+    }
 
     fn restricted(ids: &[&str]) -> AuthorityBound {
         AuthorityBound::Restricted(ids.iter().map(|id| (*id).to_string()).collect())

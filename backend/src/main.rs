@@ -685,6 +685,10 @@ async fn main() {
         config.platform_service_rate_limit_per_second,
         config.platform_service_rate_limit_burst,
     );
+    mw::rate_limit::init_delegation_refresh_rate_limiter(
+        config.delegation_refresh_rate_limit_per_second,
+        config.delegation_refresh_rate_limit_burst,
+    );
 
     // Create shared state
     let billing = Arc::new(services::billing::BillingService::new(
@@ -856,6 +860,7 @@ async fn main() {
             interval.tick().await;
             cleanup_agent_limiter.cleanup();
             mw::rate_limit::cleanup_platform_user_rate_limiter();
+            mw::rate_limit::cleanup_delegation_refresh_rate_limiter();
         }
     });
     let cleanup_direct_chat_limiter = state.direct_chat_limiter.clone();

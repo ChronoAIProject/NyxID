@@ -52,11 +52,25 @@ pub struct AuthUser {
     pub scope: String,
     /// If this is a delegated request, the OAuth client_id of the acting service.
     pub acting_client_id: Option<String>,
+    /// Delegation issuer class copied from a verified delegated JWT.
+    pub delegation_kind: Option<String>,
+    /// Exact UserService bound to a refreshable service delegation.
+    pub delegation_user_service_id: Option<String>,
+    /// Absolute refresh cap for a service delegation session.
+    pub delegation_session_exp: Option<i64>,
+    /// Agent API key that originated the proxied service delegation.
+    pub delegation_origin_api_key_id: Option<String>,
+    /// OAuth client at the root of the service-delegation lineage.
+    pub delegation_origin_client_id: Option<String>,
+    /// Login session at the root of the service-delegation lineage.
+    pub delegation_origin_session_id: Option<String>,
     /// Registered OAuth client that received this ordinary access token.
     pub oauth_client_id: Option<String>,
     /// JWT ID for online delegated-authority validation. `None` for non-JWT
     /// authentication contexts.
     pub token_jti: Option<String>,
+    /// Expiry of the verified JWT used for this request. Non-JWT auth has no value.
+    pub token_exp: Option<i64>,
     /// Resource-owner user ID used for approval/notification decisions.
     /// For service-account auth this points to the SA owner; otherwise `None`.
     pub approval_owner_user_id: Option<String>,
@@ -626,8 +640,15 @@ impl FromRequestParts<AppState> for AuthUser {
                                         session_id: None,
                                         scope: api_key.scopes.clone(),
                                         acting_client_id: None,
+                                        delegation_kind: None,
+                                        delegation_user_service_id: None,
+                                        delegation_session_exp: None,
+                                        delegation_origin_api_key_id: None,
+                                        delegation_origin_client_id: None,
+                                        delegation_origin_session_id: None,
                                         oauth_client_id: None,
                                         token_jti: None,
+                                        token_exp: None,
                                         approval_owner_user_id: None,
                                         auth_method: AuthMethod::ApiKey,
                                         allow_all_services: api_key.allow_all_services,
@@ -718,8 +739,15 @@ impl FromRequestParts<AppState> for AuthUser {
                             session_id: None,
                             scope: claims.scope.clone(),
                             acting_client_id: None,
+                            delegation_kind: None,
+                            delegation_user_service_id: None,
+                            delegation_session_exp: None,
+                            delegation_origin_api_key_id: None,
+                            delegation_origin_client_id: None,
+                            delegation_origin_session_id: None,
                             oauth_client_id: None,
                             token_jti: None,
+                            token_exp: None,
                             approval_owner_user_id: Some(sa.effective_owner_user_id().to_string()),
                             auth_method: AuthMethod::ServiceAccount,
                             allow_all_services: true,
@@ -848,14 +876,27 @@ impl FromRequestParts<AppState> for AuthUser {
                     } else {
                         (true, true, vec![], vec![], None, None)
                     };
+                    // First-party `build_rbac_claim_data` currently leaves `sid` unset. When present,
+                    // logout/session listing and service-delegation lineage deliberately key on it.
+                    let session_id = claims
+                        .sid
+                        .as_deref()
+                        .and_then(|sid| Uuid::parse_str(sid).ok());
 
                     return Ok(AuthUser {
                         user_id,
-                        session_id: None,
+                        session_id,
                         scope: claims.scope.clone(),
                         acting_client_id: claims.act.map(|a| a.sub),
+                        delegation_kind: claims.delegation_kind,
+                        delegation_user_service_id: claims.delegation_user_service_id,
+                        delegation_session_exp: claims.delegation_session_exp,
+                        delegation_origin_api_key_id: claims.delegation_origin_api_key_id,
+                        delegation_origin_client_id: claims.delegation_origin_client_id,
+                        delegation_origin_session_id: claims.delegation_origin_session_id,
                         oauth_client_id: claims.client_id.clone(),
                         token_jti: Some(claims.jti.clone()),
+                        token_exp: Some(claims.exp),
                         approval_owner_user_id: None,
                         auth_method,
                         allow_all_services,
@@ -925,8 +966,15 @@ impl FromRequestParts<AppState> for AuthUser {
                                     session_id: Some(session_id),
                                     scope: String::new(),
                                     acting_client_id: None,
+                                    delegation_kind: None,
+                                    delegation_user_service_id: None,
+                                    delegation_session_exp: None,
+                                    delegation_origin_api_key_id: None,
+                                    delegation_origin_client_id: None,
+                                    delegation_origin_session_id: None,
                                     oauth_client_id: None,
                                     token_jti: None,
+                                    token_exp: None,
                                     approval_owner_user_id: None,
                                     auth_method: AuthMethod::Session,
                                     allow_all_services: true,
@@ -1004,8 +1052,15 @@ impl FromRequestParts<AppState> for AuthUser {
                     session_id: None,
                     scope: key.scopes.clone(),
                     acting_client_id: None,
+                    delegation_kind: None,
+                    delegation_user_service_id: None,
+                    delegation_session_exp: None,
+                    delegation_origin_api_key_id: None,
+                    delegation_origin_client_id: None,
+                    delegation_origin_session_id: None,
                     oauth_client_id: None,
                     token_jti: None,
+                    token_exp: None,
                     approval_owner_user_id: None,
                     auth_method: AuthMethod::ApiKey,
                     allow_all_services: key.allow_all_services,
@@ -1412,8 +1467,15 @@ mod tests {
             session_id: None,
             scope: scope.to_string(),
             acting_client_id: None,
+            delegation_kind: None,
+            delegation_user_service_id: None,
+            delegation_session_exp: None,
+            delegation_origin_api_key_id: None,
+            delegation_origin_client_id: None,
+            delegation_origin_session_id: None,
             oauth_client_id: None,
             token_jti: None,
+            token_exp: None,
             approval_owner_user_id: None,
             auth_method,
             allow_all_services: true,
@@ -1725,6 +1787,12 @@ mod tests {
                 sub: "aevatar".to_string(),
             }),
             delegated: Some(true),
+            delegation_kind: None,
+            delegation_user_service_id: None,
+            delegation_session_exp: None,
+            delegation_origin_api_key_id: None,
+            delegation_origin_client_id: None,
+            delegation_origin_session_id: None,
             sa: None,
             cnf: None,
             relay: None,
@@ -1854,6 +1922,128 @@ mod tests {
         jwt_header.kid = Some(state.jwt_keys.kid.clone());
         jsonwebtoken::encode(&jwt_header, claims, &state.jwt_keys.encoding)
             .expect("sign test claims")
+    }
+
+    async fn extract_auth_user_from_signed_claims(
+        state: &AppState,
+        claims: &jwt::Claims,
+    ) -> AuthUser {
+        let token = sign_test_claims(state, claims);
+        let authorization = format!("Bearer {token}");
+        let mut parts =
+            request_parts_with_headers(&[(header::AUTHORIZATION.as_str(), authorization.as_str())]);
+        AuthUser::from_request_parts(&mut parts, state)
+            .await
+            .expect("signed JWT should extract an authenticated user")
+    }
+
+    #[tokio::test]
+    async fn jwt_extractor_maps_valid_sid_for_access_and_delegated_tokens() {
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+
+        let Some(db) =
+            crate::test_utils::connect_test_database("auth_jwt_valid_sid_session_id").await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let user_id = Uuid::new_v4();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &user_id.to_string(),
+                UserType::Person,
+            ))
+            .await
+            .expect("insert sid test user");
+        let access_token = jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            ACCOUNT_READ_SCOPE,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("mint access token");
+        let delegated_token = jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            ACCOUNT_READ_SCOPE,
+            "aevatar",
+            60,
+            None,
+        )
+        .expect("mint delegated token");
+        let session_id = Uuid::new_v4();
+
+        for (expected_method, token) in [
+            (AuthMethod::AccessToken, access_token),
+            (AuthMethod::Delegated, delegated_token),
+        ] {
+            let mut claims = jwt::verify_token(&state.jwt_keys, &state.config, &token)
+                .expect("verify generated JWT");
+            claims.sid = Some(session_id.to_string());
+            let auth_user = extract_auth_user_from_signed_claims(&state, &claims).await;
+
+            assert_eq!(auth_user.auth_method, expected_method);
+            assert_eq!(auth_user.session_id, Some(session_id));
+        }
+    }
+
+    #[tokio::test]
+    async fn jwt_extractor_ignores_absent_or_non_uuid_sid() {
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+
+        let Some(db) =
+            crate::test_utils::connect_test_database("auth_jwt_invalid_sid_session_id").await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let user_id = Uuid::new_v4();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &user_id.to_string(),
+                UserType::Person,
+            ))
+            .await
+            .expect("insert sid fallback test user");
+        let access_token = jwt::generate_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            ACCOUNT_READ_SCOPE,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("mint access token without sid");
+        let delegated_token = jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            ACCOUNT_READ_SCOPE,
+            "aevatar",
+            60,
+            None,
+        )
+        .expect("mint delegated token");
+        let access_claims = jwt::verify_token(&state.jwt_keys, &state.config, &access_token)
+            .expect("verify access JWT");
+        let mut delegated_claims =
+            jwt::verify_token(&state.jwt_keys, &state.config, &delegated_token)
+                .expect("verify delegated JWT");
+        delegated_claims.sid = Some("not-a-session-uuid".to_string());
+
+        for claims in [&access_claims, &delegated_claims] {
+            let auth_user = extract_auth_user_from_signed_claims(&state, claims).await;
+            assert_eq!(auth_user.session_id, None);
+        }
     }
 
     #[tokio::test]
@@ -2775,8 +2965,15 @@ mod tests {
             session_id: None,
             scope: "read proxy".to_string(),
             acting_client_id: None,
+            delegation_kind: None,
+            delegation_user_service_id: None,
+            delegation_session_exp: None,
+            delegation_origin_api_key_id: None,
+            delegation_origin_client_id: None,
+            delegation_origin_session_id: None,
             oauth_client_id: None,
             token_jti: None,
+            token_exp: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::ApiKey,
             allow_all_services: false,

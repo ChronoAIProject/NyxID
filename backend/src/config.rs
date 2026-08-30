@@ -164,6 +164,13 @@ pub struct AppConfig {
     pub jwt_assistant_forward_ttl_secs: i64,
     /// Refresh token TTL in seconds (default: 604800 = 7 days)
     pub jwt_refresh_ttl_secs: i64,
+    /// Absolute lifetime cap for refreshable service delegation sessions.
+    pub delegation_session_max_secs: i64,
+    /// Sustained refresh rate per user and exact delegated UserService.
+    /// Zero disables this limiter.
+    pub delegation_refresh_rate_limit_per_second: u32,
+    /// Burst capacity for service delegation refreshes per user and route.
+    pub delegation_refresh_rate_limit_burst: u32,
 
     /// Host-configured URL for the independently published release-integrity
     /// manifest. Unset/empty disables admin verification and browser
@@ -523,6 +530,18 @@ impl std::fmt::Debug for AppConfig {
             )
             .field("jwt_refresh_ttl_secs", &self.jwt_refresh_ttl_secs)
             .field(
+                "delegation_session_max_secs",
+                &self.delegation_session_max_secs,
+            )
+            .field(
+                "delegation_refresh_rate_limit_per_second",
+                &self.delegation_refresh_rate_limit_per_second,
+            )
+            .field(
+                "delegation_refresh_rate_limit_burst",
+                &self.delegation_refresh_rate_limit_burst,
+            )
+            .field(
                 "release_integrity_manifest_url",
                 &self.release_integrity_manifest_url,
             )
@@ -872,6 +891,21 @@ impl AppConfig {
     pub fn from_env() -> Self {
         let environment = env::var("ENVIRONMENT").unwrap_or_else(|_| "development".to_string());
         let is_dev = environment == "development" || environment == "dev";
+        let delegation_session_max_secs = parse_delegation_session_max_secs(parse_env_or_default(
+            "DELEGATION_SESSION_MAX_SECS",
+            env::var("DELEGATION_SESSION_MAX_SECS").ok(),
+            3600_i64,
+        ));
+        let delegation_refresh_rate_limit_per_second = parse_env_or_default(
+            "DELEGATION_REFRESH_RATE_LIMIT_PER_SECOND",
+            env::var("DELEGATION_REFRESH_RATE_LIMIT_PER_SECOND").ok(),
+            1_u32,
+        );
+        let delegation_refresh_rate_limit_burst = parse_env_or_default(
+            "DELEGATION_REFRESH_RATE_LIMIT_BURST",
+            env::var("DELEGATION_REFRESH_RATE_LIMIT_BURST").ok(),
+            10_u32,
+        );
 
         let base_url = env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3001".to_string());
 
@@ -933,6 +967,9 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(604800),
+            delegation_session_max_secs,
+            delegation_refresh_rate_limit_per_second,
+            delegation_refresh_rate_limit_burst,
             release_integrity_manifest_url: env::var("RELEASE_INTEGRITY_MANIFEST_URL")
                 .ok()
                 .map(|s| s.trim().to_string())
@@ -1537,9 +1574,86 @@ impl AppConfig {
     }
 }
 
+fn parse_env_or_default<T>(variable: &str, raw: Option<String>, default: T) -> T
+where
+    T: std::str::FromStr + Copy,
+{
+    let Some(raw) = raw else {
+        return default;
+    };
+    match raw.trim().parse() {
+        Ok(value) => value,
+        Err(_) => {
+            tracing::warn!(
+                variable,
+                configured = %raw,
+                "Configuration value is unparsable; using the default"
+            );
+            default
+        }
+    }
+}
+
+fn parse_delegation_session_max_secs(value: i64) -> i64 {
+    let clamped = value.clamp(300, 86_400);
+    if clamped != value {
+        tracing::warn!(
+            configured = value,
+            clamped,
+            "DELEGATION_SESSION_MAX_SECS is outside the supported range; clamping"
+        );
+    }
+    clamped
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn delegation_session_max_defaults_and_clamps_to_supported_range() {
+        assert_eq!(
+            parse_env_or_default("DELEGATION_SESSION_MAX_SECS", None, 3600_i64),
+            3600
+        );
+        assert_eq!(
+            parse_env_or_default(
+                "DELEGATION_SESSION_MAX_SECS",
+                Some("7200".to_string()),
+                3600_i64,
+            ),
+            7200
+        );
+        assert_eq!(
+            parse_env_or_default(
+                "DELEGATION_SESSION_MAX_SECS",
+                Some("not-a-number".to_string()),
+                3600_i64,
+            ),
+            3600
+        );
+        assert_eq!(
+            parse_env_or_default(
+                "DELEGATION_REFRESH_RATE_LIMIT_PER_SECOND",
+                Some("invalid".to_string()),
+                1_u32,
+            ),
+            1
+        );
+        assert_eq!(
+            parse_env_or_default(
+                "DELEGATION_REFRESH_RATE_LIMIT_BURST",
+                Some("invalid".to_string()),
+                10_u32,
+            ),
+            10
+        );
+        assert_eq!(parse_delegation_session_max_secs(3600), 3600);
+        assert_eq!(parse_delegation_session_max_secs(299), 300);
+        assert_eq!(parse_delegation_session_max_secs(300), 300);
+        assert_eq!(parse_delegation_session_max_secs(86_400), 86_400);
+        assert_eq!(parse_delegation_session_max_secs(86_401), 86_400);
+    }
 
     /// Create a minimal AppConfig for testing pure methods.
     fn make_config(base_url: &str, environment: &str, encryption_key: &str) -> AppConfig {
@@ -1561,6 +1675,9 @@ mod tests {
             jwt_relay_access_ttl_secs: 300,
             jwt_assistant_forward_ttl_secs: 300,
             jwt_refresh_ttl_secs: 604800,
+            delegation_session_max_secs: 3600,
+            delegation_refresh_rate_limit_per_second: 1,
+            delegation_refresh_rate_limit_burst: 10,
             release_integrity_manifest_url: None,
             credential_accept_dist_dir: "frontend/dist/credential-accept".to_string(),
             google_client_id: None,

@@ -45,6 +45,11 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 11500 `GrantCascadeConfirmationRequired` (HTTP 409)
 - 11600-11606 triggers: 11600 `TriggerNotFound`, 11601 `TriggerSecretInvalid`, 11602 `TriggerRateLimited`, 11603 `TriggerPayloadTooLarge`, 11604 `TriggerDeliveryUnsupported`, 11605 `TriggerDeliveryFailed`, 11606 `TriggerDeliveryRecordNotFound`
 - 11700 `RequestBodyTooLarge` (HTTP 413): a bounded proxy or forwarding ingress exceeded its configured byte limit
+- 11800 `PlatformManagedCatalogService` (HTTP 403): user-created rows of a public internal master-credential catalog service are refused; identity policy is catalog-owned
+- 11810 `DelegationSessionExpired` (HTTP 401): the absolute service-delegation session cap has elapsed
+- 11811 `DelegationOriginRevoked` (HTTP 401): the originating login session or agent API key is no longer valid for the delegated route
+- 11812 `DelegationRouteRevoked` (HTTP 403): the delegated route, owner access, scope, actor, or catalog eligibility no longer validates
+- 11813 `DelegationRefreshUnsupported` (HTTP 403): a legacy service-actor token lacks refresh context and must be minted again
 
 ### 4. Frontend Patterns
 
@@ -116,6 +121,7 @@ Services/connections/providers were unified into 3 user-managed collections plus
 - Frontend: unified "AI Services" page at `/keys` with 2 tabs (External Services; NyxID API Keys with scope). Services/Connections/Providers removed from the normal user sidebar (admin-only); old `/api-keys` page deleted.
 - Legacy models kept for migration: DownstreamService (now the read-only catalog), UserServiceConnection, UserProviderToken, UserProviderCredentials, NodeServiceBinding (node routing absorbed into `UserService.node_id`)
 - Lifecycle is exactly two actions, named **Disable/Enable** (reversible, sets `UserService.is_active`) and **Delete** (hard-deletes credential + endpoint, leaves an `is_active: false` tombstone). Do not introduce further synonyms; `revoked` is a credential *status*, not a button verb. `GET /keys` is the one listing that returns disabled services — consumers MUST read `is_active` rather than assume every row is usable, and MUST NOT render `status` (the credential's) as the service's state. Every credential-resolving or catalog path keeps the active-only `list_user_services_with_sources`; only `list_keys` uses the `_including_disabled` variant. `/keys/{id_or_slug}` resolves a disabled row by UUID but deliberately not by slug — full rationale and the two known gaps in `docs/AI_SERVICES_ARCHITECTURE.md`.
+- Platform-managed (master-credential) catalog services have no user-created alias by design; NyxID auto-provisions the catalog-owned route instead.
 
 Key files: `services/unified_key_service.rs`, `services/catalog_service.rs` (`list_catalog_all`), `handlers/keys.rs`, `handlers/catalog.rs`, `models/user_{endpoint,api_key,service}.rs`.
 
@@ -260,7 +266,7 @@ All API routes under `/api/v1`:
 - `/proxy/{service_id}/{path}` and `/proxy/s/{slug}/{path}` -- authenticated proxy (UUID- and slug-based); HTTP + WebSocket passthrough
 - `/proxy/services` -- service discovery (paginated list of proxyable services)
 - `/llm` -- LLM gateway (provider proxy, OpenAI-compatible gateway, status)
-- `/delegation/refresh` -- refresh delegated access tokens
+- `/delegation/refresh` -- refresh OAuth-client delegations and service-actor delegations subject to their fixed absolute session cap and live route authority
 - `/notifications` -- notification settings CRUD, Telegram link/disconnect, device token management
 - `/approvals` -- approval history, grants, decide, status polling, per-service approval configs (`approval_mode`: `per_request` default or `grant` opt-in)
 - `/webhooks/telegram` -- Telegram webhook (unauthenticated, secret-verified)
@@ -331,6 +337,9 @@ JWT_RELAY_ACCESS_TTL_SECS=300       # X-NyxID-User-Token relay access token TTL.
 JWT_ASSISTANT_FORWARD_TTL_SECS=300  # Legacy tombstone for the retired assistant_forward token.
                                     # Live assistant delegation uses the compile-time 300s
                                     # MCP_DELEGATION_TOKEN_TTL_SECS constant; this env has no effect.
+DELEGATION_SESSION_MAX_SECS=3600    # Absolute service-delegation refresh cap; clamped to 300..86400
+DELEGATION_REFRESH_RATE_LIMIT_PER_SECOND=1  # Sustained refreshes per user and UserService; 0 disables
+DELEGATION_REFRESH_RATE_LIMIT_BURST=10      # Refresh burst per user and UserService
 SA_TOKEN_TTL_SECS=3600              # Service account tokens
 ENVIRONMENT=development
 RATE_LIMIT_PER_SECOND=10
