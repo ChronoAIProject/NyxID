@@ -172,22 +172,30 @@ impl ReplayStore {
         key: &str,
         ttl: Duration,
     ) -> AppResult<bool> {
-        let ttl = chrono_duration(ttl, "replay TTL")?;
+        let ttl_ms = duration_millis(ttl, "replay TTL")?;
+        let claim_id = uuid::Uuid::new_v4().to_string();
         let key_hash = hash_parts(&[key]);
-        let now = chrono::Utc::now();
-        let record = ReplayRecord {
-            id: hash_parts(&[namespace, key]),
-            namespace: namespace.to_string(),
-            key_hash,
-            created_at: now,
-            expires_at: now + ttl,
-        };
-        match db
+        let id = hash_parts(&[namespace, key]);
+        let update = vec![doc! {
+            "$set": {
+                "namespace": { "$ifNull": ["$namespace", namespace] },
+                "key_hash": { "$ifNull": ["$key_hash", &key_hash] },
+                "claim_id": { "$ifNull": ["$claim_id", &claim_id] },
+                "created_at": { "$ifNull": ["$created_at", "$$NOW"] },
+                "expires_at": { "$ifNull": ["$expires_at", date_add_now(ttl_ms)] },
+            }
+        }];
+        let result = db
             .collection::<ReplayRecord>(REPLAY_COLLECTION_NAME)
-            .insert_one(record)
-            .await
-        {
-            Ok(_) => Ok(true),
+            .find_one_and_update(doc! { "_id": &id }, update)
+            .upsert(true)
+            .return_document(ReturnDocument::After)
+            .await;
+        match result {
+            Ok(Some(record)) => Ok(record.claim_id == claim_id),
+            Ok(None) => Err(AppError::Internal(
+                "Replay claim returned no record".to_string(),
+            )),
             Err(error) if is_duplicate_key_error(&error) => Ok(false),
             Err(error) => Err(error.into()),
         }
@@ -481,11 +489,6 @@ fn duration_millis(duration: Duration, name: &str) -> AppResult<i64> {
         return Err(AppError::Internal(format!("{name} must be positive")));
     }
     Ok(millis)
-}
-
-fn chrono_duration(duration: Duration, name: &str) -> AppResult<chrono::Duration> {
-    let millis = duration_millis(duration, name)?;
-    Ok(chrono::Duration::milliseconds(millis))
 }
 
 fn hash_parts(parts: &[&str]) -> String {

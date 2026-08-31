@@ -33,6 +33,7 @@ pub struct ReplayRecord {
     pub id: String,
     pub namespace: String,
     pub key_hash: String,
+    pub claim_id: String,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
