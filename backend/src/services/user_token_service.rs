@@ -4991,12 +4991,13 @@ mod tests {
         .await;
         let provider_id = Uuid::new_v4().to_string();
         let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
+        let client_secret = encryption_keys.encrypt(b"client-secret").await.unwrap();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(make_test_provider(
                 &provider_id,
                 &token_url,
                 Some(client_id),
-                None,
+                Some(client_secret),
             ))
             .await
             .unwrap();
@@ -5045,7 +5046,10 @@ mod tests {
         let error = crate::services::oauth_flow::refresh_oauth_token(&db, &encryption_keys, &stale)
             .await
             .expect_err("stale legacy provider result must be discarded");
-        assert!(matches!(error, AppError::Conflict(_)));
+        assert!(
+            matches!(error, AppError::Conflict(_)),
+            "expected stale-write conflict, got {error:?}"
+        );
         let stored = db
             .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
             .find_one(doc! { "_id": &stale.id })
