@@ -1,0 +1,3 @@
+ts	phase	decision	why	evidence	result
+2026-08-31T08:08:25Z	frame	Defined completion as all ten findings implemented with Mongo-only shared correctness and full backend verification	The audit contains security and streaming invariants that compilation alone cannot prove	SCALING_IMPLEMENTATION_NOTES.md	baseline build running
+2026-08-31T09:03:00Z	baseline	Use an isolated replica-set MongoDB through NYXID_TEST_DATABASE_URL for final tests	The auto-detected standalone Mongo ran 5630 tests but caused 84 transaction-required failures; using it cannot satisfy the existing test contract	cargo test -p nyxid	5630 passed; 84 environment failures; 0 ignored
