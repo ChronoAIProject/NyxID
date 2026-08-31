@@ -41,10 +41,6 @@ logs/
 # go in docker-compose.local.yml and must be passed explicitly with -f.
 docker-compose.local.yml
 
-# ─── Deployment ───
-k8s/
-
-
 .claude
 .playwright-mcp
 
