@@ -1682,6 +1682,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         internal_dispatch_hmac_key: None,
         internal_auth_max_skew_secs: 30,
         internal_nonce_ttl_secs: 120,
+        internal_duplex_handshake_timeout_secs: 5,
         node_owner_lease_ttl_secs: 90,
         node_owner_lease_renew_secs: 30,
         cluster_lease_ttl_secs: 30,
@@ -1877,6 +1878,10 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         replica_identity.clone(),
         http_client.clone(),
         internal_auth,
+        crate::services::node_ws_manager::node_proxy_ws_message_size_limit(
+            config.proxy_max_body_size,
+        ),
+        std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
     ));
     node_ws_manager.attach_cluster_dispatch(Arc::downgrade(&node_dispatch));
     let developer_webhook_dispatcher = Arc::new(

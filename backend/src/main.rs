@@ -678,6 +678,8 @@ async fn main() {
         replica_identity.clone(),
         http_client.clone(),
         internal_auth,
+        services::node_ws_manager::node_proxy_ws_message_size_limit(config.proxy_max_body_size),
+        std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
     ));
     node_ws_manager.attach_cluster_dispatch(Arc::downgrade(&node_dispatch));
     services::coordination_service::initialize_cluster_lease_runtime(
@@ -1323,8 +1325,11 @@ async fn main() {
         .expect("Failed to bind internal dispatch address");
     let internal_body_limit =
         services::node_ws_manager::node_proxy_ws_message_size_limit(config.proxy_max_body_size);
-    let internal_app =
-        services::node_dispatch::internal_router(internal_node_dispatch, internal_body_limit);
+    let internal_app = services::node_dispatch::internal_router(
+        internal_node_dispatch,
+        internal_body_limit,
+        std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
+    );
 
     tracing::info!("Listening on {addr}");
     tracing::info!(

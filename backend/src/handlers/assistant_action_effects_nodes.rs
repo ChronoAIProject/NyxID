@@ -528,6 +528,10 @@ pub async fn rotate_node_token(
                 .resource_access_revision
                 .is_some_and(|revision| current.access_revision > revision);
             if committed {
+                state
+                    .node_dispatch
+                    .disconnect(&node_id, 4002, "node credentials rotated")
+                    .await?;
                 assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
                 return Ok(Json(node_material_replay_response(&receipt)));
             }
@@ -538,7 +542,6 @@ pub async fn rotate_node_token(
     let (raw_token, signing_secret) =
         node_service::rotate_auth_token(&state.db, &state.encryption_keys, &actor, &node_id)
             .await?;
-    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
     if state
         .node_dispatch
         .disconnect(&node_id, 4002, "node credentials rotated")
@@ -552,6 +555,7 @@ pub async fn rotate_node_token(
     {
         tracing::warn!(node_id = %node_id, error = %error, "failed to persist rotated node disconnect status");
     }
+    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,

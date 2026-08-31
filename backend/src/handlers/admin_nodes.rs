@@ -295,11 +295,11 @@ pub async fn admin_delete_node(
 ) -> AppResult<impl IntoResponse> {
     require_admin(&state, &auth_user).await?;
 
+    node_service::admin_delete_node(&state.db, &node_id).await?;
     let _ = state
         .node_dispatch
         .disconnect(&node_id, 4006, "node deleted by admin")
         .await?;
-    node_service::admin_delete_node(&state.db, &node_id).await?;
 
     audit_service::log_for_user(
         state.db.clone(),

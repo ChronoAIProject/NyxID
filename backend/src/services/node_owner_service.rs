@@ -232,9 +232,11 @@ pub async fn renew(
         set.insert("last_heartbeat_at", now_bson);
     }
 
+    let mut filter = fence.filter();
+    filter.insert("is_active", true);
     let result = db
         .collection::<Node>(NODES)
-        .update_one(fence.filter(), doc! { "$set": set })
+        .update_one(filter, doc! { "$set": set })
         .await?;
     Ok(result.matched_count == 1)
 }
@@ -448,6 +450,48 @@ mod tests {
                 &NodeOwnerFence::from_owner(&node_id, &second),
                 std::time::Duration::from_secs(30),
                 false,
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn inactive_node_cannot_renew_connection_owner() {
+        let Some(db) = crate::test_utils::connect_test_database("node_owner_inactive").await else {
+            return;
+        };
+        let node_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<Node>(NODES)
+            .insert_one(node(&node_id))
+            .await
+            .unwrap();
+        let identity =
+            ReplicaIdentity::with_generation("backend-0", "generation-a", "http://10.0.0.1:3002");
+        let owner = claim(
+            &db,
+            &node_id,
+            &identity,
+            "connection-a",
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        db.collection::<Node>(NODES)
+            .update_one(
+                doc! { "_id": &node_id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !renew(
+                &db,
+                &NodeOwnerFence::from_owner(&node_id, &owner),
+                std::time::Duration::from_secs(30),
+                true,
             )
             .await
             .unwrap()

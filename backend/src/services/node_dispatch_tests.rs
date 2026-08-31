@@ -35,6 +35,13 @@ impl Drop for ReplicaFixture {
 }
 
 async fn two_replica_fixture(prefix: &str) -> Option<ReplicaFixture> {
+    two_replica_fixture_with_limit(prefix, 2 * 1024 * 1024).await
+}
+
+async fn two_replica_fixture_with_limit(
+    prefix: &str,
+    internal_message_limit: usize,
+) -> Option<ReplicaFixture> {
     let db = crate::test_utils::connect_test_database(prefix).await?;
     crate::services::coordination_service::ensure_indexes(&db)
         .await
@@ -90,6 +97,8 @@ async fn two_replica_fixture(prefix: &str) -> Option<ReplicaFixture> {
         owner_identity,
         client.clone(),
         auth.clone(),
+        internal_message_limit,
+        Duration::from_secs(3),
     ));
     let caller_dispatch = Arc::new(NodeDispatch::new(
         db.clone(),
@@ -97,8 +106,14 @@ async fn two_replica_fixture(prefix: &str) -> Option<ReplicaFixture> {
         caller_identity,
         client,
         auth,
+        internal_message_limit,
+        Duration::from_secs(3),
     ));
-    let app = internal_router(owner_dispatch, 2 * 1024 * 1024);
+    let app = internal_router(
+        owner_dispatch,
+        internal_message_limit,
+        Duration::from_secs(3),
+    );
     let server_task = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -212,6 +227,52 @@ async fn remote_complete_proxy_preserves_response_and_request_identity() {
 }
 
 #[tokio::test]
+async fn remote_proxy_preserves_high_byte_body_within_raw_limit() {
+    let Some(mut fixture) =
+        two_replica_fixture_with_limit("node_dispatch_large_body", 2 * 1024 * 1024).await
+    else {
+        return;
+    };
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let expected_body = vec![0xff; 1024 * 1024];
+    let dispatch = fixture.caller_dispatch.clone();
+    let node_id = fixture.node_id.clone();
+    let sent_request_id = request_id.clone();
+    let sent_body = expected_body.clone();
+    let request_task = tokio::spawn(async move {
+        let mut request = proxy_request(&sent_request_id);
+        request.body = Some(sent_body);
+        dispatch
+            .send_proxy_request_classified(&node_id, request, None, internal_node_dispatch_permit())
+            .await
+    });
+
+    let outbound = message_json(&next_outbound(&mut fixture.outbound).await);
+    let forwarded = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        outbound["body"].as_str().expect("forwarded base64 body"),
+    )
+    .unwrap();
+    assert_eq!(forwarded, expected_body);
+    fixture.owner_manager.deliver_proxy_response(
+        &fixture.node_id,
+        NodeProxyResponse {
+            request_id,
+            status: 204,
+            headers: vec![],
+            body: vec![],
+        },
+    );
+    assert!(matches!(
+        request_task
+            .await
+            .unwrap()
+            .unwrap_or_else(|failure| { panic!("remote proxy failed: {}", failure.error) }),
+        ProxyResponseType::Complete(_)
+    ));
+}
+
+#[tokio::test]
 async fn remote_proxy_streams_before_completion_and_cancels_owner_work() {
     let Some(mut fixture) = two_replica_fixture("node_dispatch_stream").await else {
         return;
@@ -270,6 +331,50 @@ async fn remote_proxy_streams_before_completion_and_cancels_owner_work() {
     })
     .await
     .expect("owner-side proxy request was not cancelled");
+}
+
+#[tokio::test]
+async fn remote_proxy_cancellation_before_headers_clears_owner_work() {
+    let Some(mut fixture) = two_replica_fixture("node_dispatch_preheader_cancel").await else {
+        return;
+    };
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let dispatch = fixture.caller_dispatch.clone();
+    let node_id = fixture.node_id.clone();
+    let sent_request_id = request_id.clone();
+    let request_task = tokio::spawn(async move {
+        dispatch
+            .send_proxy_request_classified(
+                &node_id,
+                proxy_request(&sent_request_id),
+                None,
+                internal_node_dispatch_permit(),
+            )
+            .await
+    });
+
+    let outbound = message_json(&next_outbound(&mut fixture.outbound).await);
+    assert_eq!(outbound["request_id"], request_id);
+    assert!(
+        fixture
+            .owner_manager
+            .has_pending_proxy_request(&fixture.node_id, &request_id)
+    );
+
+    request_task.abort();
+    let cleared = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if !fixture
+                .owner_manager
+                .has_pending_proxy_request(&fixture.node_id, &request_id)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(cleared.is_ok(), "owner pending work was not cancelled");
 }
 
 #[tokio::test]
@@ -517,6 +622,91 @@ async fn remote_ws_passthrough_forwards_text_binary_and_close() {
     let close = message_json(&next_outbound(&mut fixture.outbound).await);
     assert_eq!(close["type"], "ws_proxy_close");
     assert_eq!(close["code"], 1000);
+}
+
+#[tokio::test]
+async fn remote_ws_passthrough_preserves_large_binary_frames() {
+    let Some(mut fixture) =
+        two_replica_fixture_with_limit("node_dispatch_ws_large", 8 * 1024 * 1024).await
+    else {
+        return;
+    };
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let dispatch = fixture.caller_dispatch.clone();
+    let node_id = fixture.node_id.clone();
+    let sent_session = session_id.clone();
+    let open_task = tokio::spawn(async move {
+        dispatch
+            .open_ws_proxy(
+                &node_id,
+                NodeWsProxyRequest {
+                    session_id: sent_session,
+                    service_slug: "socket".to_string(),
+                    base_url: "wss://socket.invalid".to_string(),
+                    path: "/events".to_string(),
+                    query: None,
+                    headers: vec![],
+                    ws_frame_injections: vec![],
+                },
+                None,
+                internal_node_dispatch_permit(),
+            )
+            .await
+    });
+    let _ = next_outbound(&mut fixture.outbound).await;
+    assert!(
+        fixture
+            .owner_manager
+            .deliver_ws_proxy_opened(&fixture.node_id, &session_id, None)
+    );
+    let mut session = open_task.await.unwrap().unwrap();
+    let payload = vec![0xff; 5 * 1024 * 1024];
+
+    fixture
+        .caller_dispatch
+        .send_ws_proxy_binary(&fixture.node_id, &session_id, &payload)
+        .unwrap();
+    let outbound = message_json(&next_outbound(&mut fixture.outbound).await);
+    let forwarded = base64::Engine::decode(
+        &base64::engine::general_purpose::STANDARD,
+        outbound["data"].as_str().expect("forwarded base64 frame"),
+    )
+    .unwrap();
+    assert_eq!(forwarded, payload);
+
+    fixture
+        .owner_manager
+        .deliver_ws_proxy_binary(&fixture.node_id, &session_id, payload.clone());
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(3), session.frames.recv()).await,
+        Ok(Some(WsProxyFrame::Binary(data))) if data == payload
+    ));
+}
+
+#[tokio::test]
+async fn unsigned_internal_duplex_handshake_is_rejected_before_upgrade() {
+    let Some(fixture) = two_replica_fixture("node_dispatch_unsigned_duplex").await else {
+        return;
+    };
+    let stored = fixture
+        .db
+        .collection::<Node>(NODES)
+        .find_one(doc! { "_id": &fixture.node_id })
+        .await
+        .unwrap()
+        .unwrap();
+    let base_url = stored.connection_owner.unwrap().internal_base_url;
+    let ws_url = format!(
+        "ws://{}/internal/v1/nodes/{}/duplex",
+        base_url.trim_start_matches("http://"),
+        fixture.node_id
+    );
+
+    let error = tokio_tungstenite::connect_async(ws_url).await.unwrap_err();
+    let tokio_tungstenite::tungstenite::Error::Http(response) = error else {
+        panic!("expected HTTP handshake rejection");
+    };
+    assert_eq!(response.status(), axum::http::StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]

@@ -199,6 +199,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             internal_dispatch_hmac_key: None,
             internal_auth_max_skew_secs: 30,
             internal_nonce_ttl_secs: 120,
+            internal_duplex_handshake_timeout_secs: 5,
             node_owner_lease_ttl_secs: 90,
             node_owner_lease_renew_secs: 30,
             cluster_lease_ttl_secs: 30,

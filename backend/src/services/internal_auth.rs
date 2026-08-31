@@ -18,6 +18,19 @@ pub const SIGNATURE_HEADER: &str = "x-nyxid-internal-signature";
 pub const PROTOCOL_VERSION: &str = "v1";
 const REPLAY_NAMESPACE: &str = "internal-dispatch";
 
+pub struct AuthenticatedBody {
+    digest: String,
+}
+
+impl AuthenticatedBody {
+    pub fn matches(&self, body: &[u8]) -> bool {
+        self.digest
+            .as_bytes()
+            .ct_eq(sha256_hex(body).as_bytes())
+            .into()
+    }
+}
+
 #[derive(Clone)]
 pub struct InternalAuth {
     db: mongodb::Database,
@@ -87,33 +100,34 @@ impl InternalAuth {
         path: &str,
         body: &[u8],
     ) -> bool {
-        let Some(version) = header(headers, VERSION_HEADER) else {
-            return false;
-        };
-        let Some(timestamp) = header(headers, TIMESTAMP_HEADER) else {
-            return false;
-        };
-        let Some(nonce) = header(headers, NONCE_HEADER) else {
-            return false;
-        };
-        let Some(supplied_digest) = header(headers, BODY_SHA256_HEADER) else {
-            return false;
-        };
-        let Some(signature) = header(headers, SIGNATURE_HEADER) else {
-            return false;
-        };
-        if version != PROTOCOL_VERSION || supplied_digest != sha256_hex(body) {
-            return false;
+        self.authenticate_headers(headers, method, path)
+            .await
+            .is_some_and(|authenticated| authenticated.matches(body))
+    }
+
+    pub async fn authenticate_headers(
+        &self,
+        headers: &axum::http::HeaderMap,
+        method: &str,
+        path: &str,
+    ) -> Option<AuthenticatedBody> {
+        let version = header(headers, VERSION_HEADER)?;
+        let timestamp = header(headers, TIMESTAMP_HEADER)?;
+        let nonce = header(headers, NONCE_HEADER)?;
+        let supplied_digest = header(headers, BODY_SHA256_HEADER)?;
+        let signature = header(headers, SIGNATURE_HEADER)?;
+        if version != PROTOCOL_VERSION {
+            return None;
         }
         let Ok(timestamp_secs) = timestamp.parse::<i64>() else {
-            return false;
+            return None;
         };
         let skew = chrono::Utc::now()
             .timestamp()
             .saturating_sub(timestamp_secs)
             .unsigned_abs();
         if skew > self.max_skew.as_secs() {
-            return false;
+            return None;
         }
         if !verify(
             self.key.as_slice(),
@@ -124,13 +138,16 @@ impl InternalAuth {
             supplied_digest,
             signature,
         ) {
-            return false;
+            return None;
         }
         match ReplayStore::claim(&self.db, REPLAY_NAMESPACE, nonce, self.nonce_ttl).await {
-            Ok(claimed) => claimed,
+            Ok(true) => Some(AuthenticatedBody {
+                digest: supplied_digest.to_string(),
+            }),
+            Ok(false) => None,
             Err(error) => {
                 tracing::error!(%error, "Failed to claim internal request nonce");
-                false
+                None
             }
         }
     }

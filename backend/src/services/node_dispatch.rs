@@ -24,12 +24,13 @@ use crate::services::node_ws_manager::{
     NodeRequestSignature, NodeSshExecRequest, NodeSshExecResult, NodeSshNodeKeyExecRequest,
     NodeSshTunnelRequest, NodeWebTerminalRequest, NodeWsManager, NodeWsProxyRequest,
     NodeWsProxySession, PendingCredentialCiphertextParams, ProxyResponseType, SshTunnelChunk,
-    StreamChunk, WebTerminalChunk, WsProxyFrame, sign_proxy_request, sign_ssh_exec_request,
-    sign_ssh_node_exec_request, sign_ssh_tunnel_request, sign_web_terminal_request,
-    sign_ws_proxy_request,
+    StreamChunk, WebTerminalChunk, WsProxyFrame, base64_bytes, sign_proxy_request,
+    sign_ssh_exec_request, sign_ssh_node_exec_request, sign_ssh_tunnel_request,
+    sign_web_terminal_request, sign_ws_proxy_request,
 };
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
 const INTERNAL_PROXY_KIND: &str = "x-nyxid-proxy-kind";
 const INTERNAL_PROXY_STATUS: &str = "x-nyxid-proxy-status";
@@ -44,6 +45,8 @@ pub struct NodeDispatch {
     identity: Arc<ReplicaIdentity>,
     http_client: reqwest::Client,
     auth: InternalAuth,
+    internal_message_limit: usize,
+    duplex_handshake_timeout: Duration,
     remote_duplex: Arc<DashMap<String, mpsc::Sender<DuplexClientFrame>>>,
 }
 
@@ -54,6 +57,8 @@ impl NodeDispatch {
         identity: Arc<ReplicaIdentity>,
         http_client: reqwest::Client,
         auth: InternalAuth,
+        internal_message_limit: usize,
+        duplex_handshake_timeout: Duration,
     ) -> Self {
         Self {
             db,
@@ -61,6 +66,8 @@ impl NodeDispatch {
             identity,
             http_client,
             auth,
+            internal_message_limit,
+            duplex_handshake_timeout,
             remote_duplex: Arc::new(DashMap::new()),
         }
     }
@@ -127,7 +134,7 @@ impl NodeDispatch {
             &owner,
             self.manager.has_connection(node_id, &owner.connection_id),
         ) {
-            OwnerRoute::Local => Ok(OwnerTarget::Local),
+            OwnerRoute::Local => Ok(OwnerTarget::Local { fence }),
             OwnerRoute::Remote => Ok(OwnerTarget::Remote {
                 fence,
                 base_url: validated_owner_url(&owner.internal_base_url)?,
@@ -151,9 +158,15 @@ impl NodeDispatch {
             .await
             .map_err(NodeProxyFailure::before_dispatch)?;
         match target {
-            OwnerTarget::Local => {
+            OwnerTarget::Local { fence } => {
                 self.manager
-                    .send_proxy_request_classified_prepared(node_id, request, signature, permit)
+                    .send_proxy_request_classified_prepared(
+                        node_id,
+                        request,
+                        signature,
+                        Some(&fence.connection_id),
+                        permit,
+                    )
                     .await
             }
             OwnerTarget::Remote { fence, base_url } => {
@@ -173,7 +186,7 @@ impl NodeDispatch {
         let request_id = request.request_id.clone();
         let path = internal_path(&node_id, "proxy");
         let body = serde_json::to_vec(&ProxyEnvelope {
-            fence,
+            fence: fence.clone(),
             request,
             signature,
         })
@@ -184,6 +197,26 @@ impl NodeDispatch {
         })?;
         let headers = self.auth.signed_headers("POST", &path, &body);
         let url = join_internal_url(&base_url, &path).map_err(NodeProxyFailure::before_dispatch)?;
+        let cancel_path = internal_path(&node_id, "proxy-cancel");
+        let cancel_body = serde_json::to_vec(&CancelEnvelope {
+            fence,
+            request_id: request_id.clone(),
+        })
+        .map_err(|error| {
+            NodeProxyFailure::before_dispatch(AppError::Internal(format!(
+                "Failed to encode internal node cancellation: {error}"
+            )))
+        })?;
+        let cancel_url = join_internal_url(&base_url, &cancel_path)
+            .map_err(NodeProxyFailure::before_dispatch)?;
+        let mut cancellation = RemoteProxyCancellationGuard {
+            request: Some(
+                self.http_client
+                    .post(cancel_url)
+                    .headers(self.auth.signed_headers("POST", &cancel_path, &cancel_body))
+                    .body(cancel_body),
+            ),
+        };
         let response = self
             .http_client
             .post(url)
@@ -196,6 +229,7 @@ impl NodeDispatch {
                     "Node owner replica is unavailable".to_string(),
                 ))
             })?;
+        cancellation.disarm();
         if !response.status().is_success() {
             return Err(decode_proxy_failure(response).await);
         }
@@ -294,9 +328,15 @@ impl NodeDispatch {
     ) -> AppResult<mpsc::Receiver<SshTunnelChunk>> {
         let signature = signing_secret.map(|secret| sign_ssh_tunnel_request(secret, &request));
         match self.owner_target(node_id).await? {
-            OwnerTarget::Local => {
+            OwnerTarget::Local { fence } => {
                 self.manager
-                    .open_ssh_tunnel_prepared(node_id, request, signature, permit)
+                    .open_ssh_tunnel_prepared(
+                        node_id,
+                        request,
+                        signature,
+                        Some(&fence.connection_id),
+                        permit,
+                    )
                     .await
             }
             OwnerTarget::Remote { fence, base_url } => {
@@ -395,9 +435,15 @@ impl NodeDispatch {
     ) -> AppResult<mpsc::Receiver<WebTerminalChunk>> {
         let signature = signing_secret.map(|secret| sign_web_terminal_request(secret, &request));
         match self.owner_target(node_id).await? {
-            OwnerTarget::Local => {
+            OwnerTarget::Local { fence } => {
                 self.manager
-                    .open_web_terminal_prepared(node_id, request, signature, permit)
+                    .open_web_terminal_prepared(
+                        node_id,
+                        request,
+                        signature,
+                        Some(&fence.connection_id),
+                        permit,
+                    )
                     .await
             }
             OwnerTarget::Remote { fence, base_url } => {
@@ -516,9 +562,15 @@ impl NodeDispatch {
     ) -> AppResult<NodeWsProxySession> {
         let signature = signing_secret.map(|secret| sign_ws_proxy_request(secret, &request));
         match self.owner_target(node_id).await? {
-            OwnerTarget::Local => {
+            OwnerTarget::Local { fence } => {
                 self.manager
-                    .open_ws_proxy_prepared(node_id, request, signature, permit)
+                    .open_ws_proxy_prepared(
+                        node_id,
+                        request,
+                        signature,
+                        Some(&fence.connection_id),
+                        permit,
+                    )
                     .await
             }
             OwnerTarget::Remote { fence, base_url } => {
@@ -669,9 +721,15 @@ impl NodeDispatch {
         request
             .headers_mut()
             .extend(self.auth.signed_headers("GET", &path, &body));
-        let (mut socket, _) = tokio_tungstenite::connect_async(request)
-            .await
-            .map_err(|_| AppError::NodeOffline("Node owner replica is unavailable".to_string()))?;
+        let websocket_config = WebSocketConfig::default()
+            .max_message_size(Some(self.internal_message_limit))
+            .max_frame_size(Some(self.internal_message_limit));
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async_with_config(request, Some(websocket_config), false)
+                .await
+                .map_err(|_| {
+                    AppError::NodeOffline("Node owner replica is unavailable".to_string())
+                })?;
         socket
             .send(TungsteniteMessage::Text(
                 String::from_utf8(body)
@@ -680,9 +738,10 @@ impl NodeDispatch {
             ))
             .await
             .map_err(|_| AppError::NodeOffline("Node owner replica is unavailable".to_string()))?;
-        let first = socket
-            .next()
+        let first = tokio::time::timeout(self.duplex_handshake_timeout, socket.next())
             .await
+            .ok()
+            .flatten()
             .and_then(Result::ok)
             .and_then(tungstenite_json)
             .ok_or_else(|| {
@@ -744,15 +803,27 @@ impl NodeDispatch {
         permit: BillingEgressPermit,
     ) -> AppResult<NodeSshExecResult> {
         match self.owner_target(node_id).await? {
-            OwnerTarget::Local => match request {
+            OwnerTarget::Local { fence } => match request {
                 ExecRequest::Cert { request, signature } => {
                     self.manager
-                        .exec_ssh_command_prepared(node_id, request, signature, permit)
+                        .exec_ssh_command_prepared(
+                            node_id,
+                            request,
+                            signature,
+                            Some(&fence.connection_id),
+                            permit,
+                        )
                         .await
                 }
                 ExecRequest::NodeKey { request, signature } => {
                     self.manager
-                        .exec_ssh_node_key_command_prepared(node_id, request, signature, permit)
+                        .exec_ssh_node_key_command_prepared(
+                            node_id,
+                            request,
+                            signature,
+                            Some(&fence.connection_id),
+                            permit,
+                        )
                         .await
                 }
             },
@@ -862,7 +933,9 @@ impl NodeDispatch {
 
     async fn send_command(&self, node_id: &str, command: NodeCommand) -> AppResult<()> {
         match self.owner_target(node_id).await? {
-            OwnerTarget::Local => execute_local_command(&self.manager, node_id, command).await,
+            OwnerTarget::Local { fence } => {
+                execute_local_command(&self.manager, node_id, &fence.connection_id, command).await
+            }
             OwnerTarget::Remote { fence, base_url } => {
                 let path = internal_path(node_id, "command");
                 let body =
@@ -937,7 +1010,9 @@ impl NodeDispatch {
 }
 
 enum OwnerTarget {
-    Local,
+    Local {
+        fence: NodeOwnerFence,
+    },
     Remote {
         fence: NodeOwnerFence,
         base_url: url::Url,
@@ -1005,6 +1080,12 @@ struct DisconnectEnvelope {
 }
 
 #[derive(Serialize, Deserialize)]
+struct CancelEnvelope {
+    fence: NodeOwnerFence,
+    request_id: String,
+}
+
+#[derive(Serialize, Deserialize)]
 struct EmptyResponse {
     ok: bool,
 }
@@ -1041,6 +1122,7 @@ enum DuplexOpen {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum DuplexClientFrame {
     Data {
+        #[serde(with = "base64_bytes")]
         data: Vec<u8>,
     },
     Text {
@@ -1063,6 +1145,7 @@ enum DuplexServerFrame {
         selected_protocol: Option<String>,
     },
     Data {
+        #[serde(with = "base64_bytes")]
         data: Vec<u8>,
     },
     Text {
@@ -1101,12 +1184,27 @@ enum WireErrorCode {
     SshHostKeyMismatch,
     SshNodeExecChannelClosed,
     SshAuthModeUnsupported,
+    ClientDisconnected,
     Internal,
 }
 
-pub fn internal_router(dispatch: Arc<NodeDispatch>, max_body_bytes: usize) -> Router {
+#[derive(Clone, Copy)]
+struct InternalDuplexConfig {
+    max_message_bytes: usize,
+    handshake_timeout: Duration,
+}
+
+pub fn internal_router(
+    dispatch: Arc<NodeDispatch>,
+    max_body_bytes: usize,
+    handshake_timeout: Duration,
+) -> Router {
     Router::new()
         .route("/internal/v1/nodes/{node_id}/proxy", post(internal_proxy))
+        .route(
+            "/internal/v1/nodes/{node_id}/proxy-cancel",
+            post(internal_proxy_cancel),
+        )
         .route("/internal/v1/nodes/{node_id}/exec", post(internal_exec))
         .route(
             "/internal/v1/nodes/{node_id}/command",
@@ -1117,6 +1215,10 @@ pub fn internal_router(dispatch: Arc<NodeDispatch>, max_body_bytes: usize) -> Ro
             post(internal_disconnect),
         )
         .route("/internal/v1/nodes/{node_id}/duplex", get(internal_duplex))
+        .layer(axum::Extension(InternalDuplexConfig {
+            max_message_bytes: max_body_bytes,
+            handshake_timeout,
+        }))
         .layer(DefaultBodyLimit::max(max_body_bytes))
         .with_state(dispatch)
 }
@@ -1125,30 +1227,44 @@ async fn internal_duplex(
     State(dispatch): State<Arc<NodeDispatch>>,
     Path(node_id): Path<String>,
     headers: HeaderMap,
+    axum::Extension(config): axum::Extension<InternalDuplexConfig>,
     upgrade: WebSocketUpgrade,
 ) -> Response {
+    let path = internal_path(&node_id, "duplex");
+    let Some(authenticated_body) = dispatch
+        .auth
+        .authenticate_headers(&headers, "GET", &path)
+        .await
+    else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     upgrade
-        .max_message_size(16 * 1024 * 1024)
+        .max_message_size(config.max_message_bytes)
         .on_upgrade(move |socket| async move {
-            serve_internal_duplex(dispatch, node_id, headers, socket).await;
+            serve_internal_duplex(
+                dispatch,
+                node_id,
+                authenticated_body,
+                config.handshake_timeout,
+                socket,
+            )
+            .await;
         })
 }
 
 async fn serve_internal_duplex(
     dispatch: Arc<NodeDispatch>,
     node_id: String,
-    headers: HeaderMap,
+    authenticated_body: crate::services::internal_auth::AuthenticatedBody,
+    handshake_timeout: Duration,
     mut socket: WebSocket,
 ) {
-    let path = internal_path(&node_id, "duplex");
-    let Some(Ok(AxumWsMessage::Text(first))) = socket.next().await else {
+    let Ok(Some(Ok(AxumWsMessage::Text(first)))) =
+        tokio::time::timeout(handshake_timeout, socket.next()).await
+    else {
         return;
     };
-    if !dispatch
-        .auth
-        .authenticate(&headers, "GET", &path, first.as_bytes())
-        .await
-    {
+    if !authenticated_body.matches(first.as_bytes()) {
         let _ = socket.close().await;
         return;
     }
@@ -1160,6 +1276,7 @@ async fn serve_internal_duplex(
         let _ = socket.close().await;
         return;
     }
+    let expected_connection_id = envelope.fence.connection_id;
     match envelope.operation {
         DuplexOpen::SshTunnel { request, signature } => {
             let session_id = request.session_id.clone();
@@ -1169,6 +1286,7 @@ async fn serve_internal_duplex(
                     &node_id,
                     request,
                     signature,
+                    Some(&expected_connection_id),
                     crate::services::billing::route_inventory::internal_node_dispatch_permit(),
                 )
                 .await
@@ -1211,6 +1329,7 @@ async fn serve_internal_duplex(
                     &node_id,
                     request,
                     signature,
+                    Some(&expected_connection_id),
                     crate::services::billing::route_inventory::internal_node_dispatch_permit(),
                 )
                 .await
@@ -1253,6 +1372,7 @@ async fn serve_internal_duplex(
                     &node_id,
                     request,
                     signature,
+                    Some(&expected_connection_id),
                     crate::services::billing::route_inventory::internal_node_dispatch_permit(),
                 )
                 .await
@@ -1471,12 +1591,14 @@ async fn internal_proxy(
         return StatusCode::CONFLICT.into_response();
     }
     let request_id = envelope.request.request_id.clone();
+    let expected_connection_id = envelope.fence.connection_id;
     let result = dispatch
         .manager
         .send_proxy_request_classified_prepared(
             &node_id,
             envelope.request,
             envelope.signature,
+            Some(&expected_connection_id),
             crate::services::billing::route_inventory::internal_node_dispatch_permit(),
         )
         .await;
@@ -1524,6 +1646,39 @@ async fn internal_proxy(
     }
 }
 
+async fn internal_proxy_cancel(
+    State(dispatch): State<Arc<NodeDispatch>>,
+    Path(node_id): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = internal_path(&node_id, "proxy-cancel");
+    if !dispatch
+        .auth
+        .authenticate(&headers, "POST", &path, &body)
+        .await
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let Ok(envelope) = serde_json::from_slice::<CancelEnvelope>(&body) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    if envelope.fence.node_id != node_id
+        || envelope.fence.instance_name != dispatch.identity.instance_name
+        || envelope.fence.generation_id != dispatch.identity.generation_id
+    {
+        return StatusCode::CONFLICT.into_response();
+    }
+    match dispatch.manager.cancel_proxy_request_if(
+        &node_id,
+        &envelope.fence.connection_id,
+        &envelope.request_id,
+    ) {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(_) => StatusCode::CONFLICT.into_response(),
+    }
+}
+
 async fn internal_exec(
     State(dispatch): State<Arc<NodeDispatch>>,
     Path(node_id): Path<String>,
@@ -1544,18 +1699,31 @@ async fn internal_exec(
     if !authorize_live_local_fence(&dispatch, &node_id, &envelope.fence).await {
         return StatusCode::CONFLICT.into_response();
     }
+    let expected_connection_id = envelope.fence.connection_id;
     let permit = crate::services::billing::route_inventory::internal_node_dispatch_permit();
     let result = match envelope.request {
         ExecRequest::Cert { request, signature } => {
             dispatch
                 .manager
-                .exec_ssh_command_prepared(&node_id, request, signature, permit)
+                .exec_ssh_command_prepared(
+                    &node_id,
+                    request,
+                    signature,
+                    Some(&expected_connection_id),
+                    permit,
+                )
                 .await
         }
         ExecRequest::NodeKey { request, signature } => {
             dispatch
                 .manager
-                .exec_ssh_node_key_command_prepared(&node_id, request, signature, permit)
+                .exec_ssh_node_key_command_prepared(
+                    &node_id,
+                    request,
+                    signature,
+                    Some(&expected_connection_id),
+                    permit,
+                )
                 .await
         }
     };
@@ -1582,7 +1750,14 @@ async fn internal_command(
     if !authorize_live_local_fence(&dispatch, &node_id, &envelope.fence).await {
         return StatusCode::CONFLICT.into_response();
     }
-    match execute_local_command(&dispatch.manager, &node_id, envelope.command).await {
+    match execute_local_command(
+        &dispatch.manager,
+        &node_id,
+        &envelope.fence.connection_id,
+        envelope.command,
+    )
+    .await
+    {
         Ok(()) => axum::Json(EmptyResponse { ok: true }).into_response(),
         Err(error) => wire_failure_response(error, false),
     }
@@ -1646,20 +1821,22 @@ async fn authorize_live_local_fence(
 async fn execute_local_command(
     manager: &NodeWsManager,
     node_id: &str,
+    connection_id: &str,
     command: NodeCommand,
 ) -> AppResult<()> {
     match command {
         NodeCommand::CredentialUpdate { params, timeout_ms } => match timeout_ms {
             Some(timeout) => {
                 manager
-                    .send_credential_update_and_wait(
+                    .send_credential_update_and_wait_if(
                         node_id,
                         &params,
                         Duration::from_millis(timeout),
+                        connection_id,
                     )
                     .await
             }
-            None => manager.send_credential_update(node_id, &params),
+            None => manager.send_credential_update_if(node_id, &params, connection_id),
         },
         NodeCommand::CredentialRemove {
             service_slug,
@@ -1667,17 +1844,18 @@ async fn execute_local_command(
         } => match timeout_ms {
             Some(timeout) => {
                 manager
-                    .send_credential_remove_and_wait(
+                    .send_credential_remove_and_wait_if(
                         node_id,
                         &service_slug,
                         Duration::from_millis(timeout),
+                        connection_id,
                     )
                     .await
             }
-            None => manager.send_credential_remove(node_id, &service_slug),
+            None => manager.send_credential_remove_if(node_id, &service_slug, connection_id),
         },
         NodeCommand::PendingCredentialsAvailable => {
-            manager.send_pending_credentials_available(node_id)
+            manager.send_pending_credentials_available_if(node_id, connection_id)
         }
         NodeCommand::PendingCredentialCiphertext {
             pending_id,
@@ -1685,7 +1863,7 @@ async fn execute_local_command(
             admin_pubkey,
             nonce,
             ciphertext,
-        } => manager.send_pending_credential_ciphertext(
+        } => manager.send_pending_credential_ciphertext_if(
             node_id,
             &PendingCredentialCiphertextParams {
                 pending_id: &pending_id,
@@ -1694,6 +1872,7 @@ async fn execute_local_command(
                 nonce: &nonce,
                 ciphertext: &ciphertext,
             },
+            connection_id,
         ),
     }
 }
@@ -1702,6 +1881,29 @@ struct ProxyCancellationGuard {
     manager: Arc<NodeWsManager>,
     node_id: String,
     request_id: String,
+}
+
+struct RemoteProxyCancellationGuard {
+    request: Option<reqwest::RequestBuilder>,
+}
+
+impl RemoteProxyCancellationGuard {
+    fn disarm(&mut self) {
+        self.request = None;
+    }
+}
+
+impl Drop for RemoteProxyCancellationGuard {
+    fn drop(&mut self) {
+        let Some(request) = self.request.take() else {
+            return;
+        };
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let _ = request.send().await;
+            });
+        }
+    }
 }
 
 impl Drop for ProxyCancellationGuard {
@@ -1789,6 +1991,7 @@ fn encode_wire_failure(error: &AppError, dispatched: bool) -> WireFailure {
         AppError::SshAuthModeUnsupportedForOperation(_) => {
             (WireErrorCode::SshAuthModeUnsupported, None, None)
         }
+        AppError::ClientDisconnected => (WireErrorCode::ClientDisconnected, None, None),
         _ => (WireErrorCode::Internal, None, None),
     };
     WireFailure {
@@ -1822,6 +2025,7 @@ fn decode_wire_failure(failure: WireFailure) -> AppError {
         WireErrorCode::SshAuthModeUnsupported => AppError::SshAuthModeUnsupportedForOperation(
             "SSH authentication mode is unsupported".to_string(),
         ),
+        WireErrorCode::ClientDisconnected => AppError::ClientDisconnected,
         WireErrorCode::Internal => AppError::Internal("Internal node dispatch failed".to_string()),
     }
 }

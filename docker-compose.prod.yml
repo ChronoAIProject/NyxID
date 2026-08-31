@@ -39,6 +39,7 @@ services:
       # INSTANCE_NAME and INTERNAL_ADVERTISE_URL default from each container's
       # unique HOSTNAME. The private listener is reachable only on this network.
       INTERNAL_BIND_ADDR: 0.0.0.0:3002
+      INTERNAL_DUPLEX_HANDSHAKE_TIMEOUT_SECS: 5
     volumes:
       - ./keys:/app/keys:ro
     depends_on:

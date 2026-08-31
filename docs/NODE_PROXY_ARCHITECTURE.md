@@ -734,6 +734,13 @@ nonce, and SHA-256 body digest. The receiver checks all of these conditions:
 4. MongoDB accepts the nonce as a unique replay record.
 5. A node-bound request carries the current full owner fence.
 
+Binary proxy bodies and duplex frames use base64 on the inter-replica JSON wire.
+The internal HTTP and WebSocket message ceilings are derived from the configured
+raw proxy body limit, including base64 expansion and envelope overhead.
+Internal WebSockets claim the nonce before upgrade, then require the opening
+envelope within `INTERNAL_DUPLEX_HANDSHAKE_TIMEOUT_SECS` and verify that it
+matches the body digest signed in the upgrade headers.
+
 The nonce collection has a unique index and a TTL index. The atomic insert is
 the replay decision across all replicas. `INTERNAL_DISPATCH_HMAC_KEY` can set a
 shared 32-byte key explicitly. Otherwise, each replica derives the same

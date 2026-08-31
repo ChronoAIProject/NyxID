@@ -68,6 +68,7 @@ listener through a public Service, ingress, or load balancer.
 | `INTERNAL_DISPATCH_HMAC_KEY` | derived from `ENCRYPTION_KEY` | Optional 32-byte HMAC key as 64 hex characters. All replicas must use the same value. Set it explicitly when the local encryption key is unavailable, such as with a KMS key provider. |
 | `INTERNAL_AUTH_MAX_SKEW_SECS` | `30` | Maximum clock skew accepted by the internal request signature verifier. |
 | `INTERNAL_NONCE_TTL_SECS` | `120` | MongoDB replay-record lifetime for internal request nonces. This must exceed twice `INTERNAL_AUTH_MAX_SKEW_SECS`. |
+| `INTERNAL_DUPLEX_HANDSHAKE_TIMEOUT_SECS` | `5` | Maximum time an authenticated internal WebSocket may wait before sending its signed opening envelope. |
 | `NODE_OWNER_LEASE_TTL_SECS` | `90` | Lifetime of a node socket owner record without renewal. |
 | `NODE_OWNER_LEASE_RENEW_SECS` | `30` | Renewal interval for node socket owner records. Keep this below `NODE_OWNER_LEASE_TTL_SECS`. |
 | `CLUSTER_LEASE_TTL_SECS` | `30` | Default lifetime for MongoDB leases, including OAuth refresh claims and Telegram polling leadership. |

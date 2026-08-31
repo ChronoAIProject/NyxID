@@ -1174,11 +1174,11 @@ pub async fn delete_node(
     let user_id_str = auth_user.user_id.to_string();
     let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
 
+    node_service::delete_node(&state.db, &user_id_str, &node_id).await?;
     let _ = state
         .node_dispatch
         .disconnect(&node_id, 4006, "node deleted")
         .await?;
-    node_service::delete_node(&state.db, &user_id_str, &node_id).await?;
 
     audit_service::log_for_user(
         state.db.clone(),

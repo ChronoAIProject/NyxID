@@ -365,6 +365,7 @@ pub struct AppConfig {
     pub internal_dispatch_hmac_key: Option<String>,
     pub internal_auth_max_skew_secs: u64,
     pub internal_nonce_ttl_secs: u64,
+    pub internal_duplex_handshake_timeout_secs: u64,
     pub node_owner_lease_ttl_secs: u64,
     pub node_owner_lease_renew_secs: u64,
     pub cluster_lease_ttl_secs: u64,
@@ -703,6 +704,10 @@ impl std::fmt::Debug for AppConfig {
                 &self.internal_auth_max_skew_secs,
             )
             .field("internal_nonce_ttl_secs", &self.internal_nonce_ttl_secs)
+            .field(
+                "internal_duplex_handshake_timeout_secs",
+                &self.internal_duplex_handshake_timeout_secs,
+            )
             .field("node_owner_lease_ttl_secs", &self.node_owner_lease_ttl_secs)
             .field(
                 "node_owner_lease_renew_secs",
@@ -1148,7 +1153,7 @@ impl AppConfig {
                 .or_else(|_| env::var("HOSTNAME"))
                 .unwrap_or_else(|_| "nyxid-backend".to_string()),
             internal_bind_addr: env::var("INTERNAL_BIND_ADDR")
-                .unwrap_or_else(|_| "0.0.0.0:3002".to_string()),
+                .unwrap_or_else(|_| "127.0.0.1:3002".to_string()),
             internal_advertise_url: env::var("INTERNAL_ADVERTISE_URL").unwrap_or_else(|_| {
                 let host = env::var("POD_IP")
                     .or_else(|_| env::var("HOSTNAME"))
@@ -1166,6 +1171,12 @@ impl AppConfig {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or(120),
+            internal_duplex_handshake_timeout_secs: env::var(
+                "INTERNAL_DUPLEX_HANDSHAKE_TIMEOUT_SECS",
+            )
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(5),
             node_owner_lease_ttl_secs: env::var("NODE_OWNER_LEASE_TTL_SECS")
                 .ok()
                 .and_then(|value| value.parse().ok())
@@ -1656,6 +1667,9 @@ impl AppConfig {
         {
             panic!("INTERNAL_NONCE_TTL_SECS must be at least twice INTERNAL_AUTH_MAX_SKEW_SECS");
         }
+        if self.internal_duplex_handshake_timeout_secs == 0 {
+            panic!("INTERNAL_DUPLEX_HANDSHAKE_TIMEOUT_SECS must be greater than 0");
+        }
         for (name, ttl, renew) in [
             (
                 "NODE_OWNER_LEASE",
@@ -1773,6 +1787,7 @@ mod tests {
             internal_dispatch_hmac_key: None,
             internal_auth_max_skew_secs: 30,
             internal_nonce_ttl_secs: 120,
+            internal_duplex_handshake_timeout_secs: 5,
             node_owner_lease_ttl_secs: 90,
             node_owner_lease_renew_secs: 30,
             cluster_lease_ttl_secs: 30,
