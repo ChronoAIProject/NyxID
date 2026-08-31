@@ -12,6 +12,7 @@ use crate::models::coordination::{
     CoordinationHolder, CoordinationLease, CoordinationSlot, EVENT_DEDUP_COLLECTION_NAME,
     EventDedupRecord, EventDedupState, LEASE_COLLECTION_NAME, RATE_WINDOW_COLLECTION_NAME,
     REPLAY_COLLECTION_NAME, RateWindowRecord, ReplayRecord, SLOT_COLLECTION_NAME,
+    TOKEN_BUCKET_COLLECTION_NAME, TokenBucketRecord,
 };
 
 pub async fn ensure_indexes(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
@@ -57,6 +58,7 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> Result<(), mongodb::error
     for collection_name in [
         REPLAY_COLLECTION_NAME,
         RATE_WINDOW_COLLECTION_NAME,
+        TOKEN_BUCKET_COLLECTION_NAME,
         SLOT_COLLECTION_NAME,
         EVENT_DEDUP_COLLECTION_NAME,
     ] {
@@ -456,6 +458,71 @@ impl RateWindowStore {
     }
 }
 
+const TOKEN_SCALE: i64 = 1_000;
+
+pub struct TokenBucketStore;
+
+impl TokenBucketStore {
+    pub async fn admit(
+        db: &mongodb::Database,
+        namespace: &str,
+        key: &str,
+        rate_per_second: u32,
+        burst: u32,
+    ) -> AppResult<RateAdmission> {
+        if rate_per_second == 0 || burst == 0 {
+            return Ok(RateAdmission {
+                allowed: false,
+                remaining: 0,
+                reset_at: chrono::Utc::now(),
+            });
+        }
+        let rate_per_second = i64::from(rate_per_second);
+        let capacity = i64::from(burst)
+            .checked_mul(TOKEN_SCALE)
+            .ok_or_else(|| AppError::Internal("Token-bucket capacity overflow".to_string()))?;
+        let admission_id = uuid::Uuid::new_v4().to_string();
+        let id = hash_parts(&[namespace, key]);
+        let key_hash = hash_parts(&[key]);
+        let refill_ms = capacity
+            .saturating_add(rate_per_second - 1)
+            .saturating_div(rate_per_second);
+        let retention_ms = refill_ms.max(1_000).saturating_mul(2);
+        let update = token_bucket_pipeline(
+            namespace,
+            &key_hash,
+            &admission_id,
+            rate_per_second,
+            capacity,
+            retention_ms,
+        );
+        let record = db
+            .collection::<TokenBucketRecord>(TOKEN_BUCKET_COLLECTION_NAME)
+            .find_one_and_update(doc! { "_id": &id }, update)
+            .upsert(true)
+            .return_document(ReturnDocument::After)
+            .await?
+            .ok_or_else(|| {
+                AppError::Internal("Token-bucket update returned no record".to_string())
+            })?;
+        let allowed = record.last_admission_id.as_deref() == Some(admission_id.as_str());
+        let remaining = if allowed {
+            u64::try_from(record.tokens_millis.max(0) / TOKEN_SCALE).unwrap_or(0)
+        } else {
+            0
+        };
+        let missing = capacity.saturating_sub(record.tokens_millis.max(0));
+        let reset_ms = missing
+            .saturating_add(rate_per_second - 1)
+            .saturating_div(rate_per_second);
+        Ok(RateAdmission {
+            allowed,
+            remaining,
+            reset_at: record.last_refill_at + chrono::Duration::milliseconds(reset_ms),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SlotToken {
     pub id: String,
@@ -845,6 +912,73 @@ fn rate_window_pipeline(
             }
         },
         doc! { "$unset": ["__current_window", "__new_window"] },
+    ]
+}
+
+fn token_bucket_pipeline(
+    namespace: &str,
+    key_hash: &str,
+    admission_id: &str,
+    rate_per_second: i64,
+    capacity: i64,
+    retention_ms: i64,
+) -> Vec<Document> {
+    vec![
+        doc! {
+            "$set": {
+                "__elapsed_ms": {
+                    "$max": [
+                        0_i64,
+                        {
+                            "$dateDiff": {
+                                "startDate": { "$ifNull": ["$last_refill_at", "$$NOW"] },
+                                "endDate": "$$NOW",
+                                "unit": "millisecond",
+                            }
+                        },
+                    ]
+                },
+            }
+        },
+        doc! {
+            "$set": {
+                "__available": {
+                    "$min": [
+                        capacity,
+                        {
+                            "$add": [
+                                { "$ifNull": ["$tokens_millis", capacity] },
+                                { "$multiply": ["$__elapsed_ms", rate_per_second] },
+                            ]
+                        },
+                    ]
+                },
+            }
+        },
+        doc! {
+            "$set": {
+                "namespace": namespace,
+                "key_hash": key_hash,
+                "tokens_millis": {
+                    "$cond": [
+                        { "$gte": ["$__available", TOKEN_SCALE] },
+                        { "$subtract": ["$__available", TOKEN_SCALE] },
+                        "$__available",
+                    ]
+                },
+                "last_refill_at": "$$NOW",
+                "last_admission_id": {
+                    "$cond": [
+                        { "$gte": ["$__available", TOKEN_SCALE] },
+                        admission_id,
+                        { "$ifNull": ["$last_admission_id", Bson::Null] },
+                    ]
+                },
+                "updated_at": "$$NOW",
+                "expires_at": date_add_now(retention_ms),
+            }
+        },
+        doc! { "$unset": ["__elapsed_ms", "__available"] },
     ]
 }
 

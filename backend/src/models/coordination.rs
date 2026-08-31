@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 pub const LEASE_COLLECTION_NAME: &str = "coordination_leases";
 pub const REPLAY_COLLECTION_NAME: &str = "coordination_replay_records";
 pub const RATE_WINDOW_COLLECTION_NAME: &str = "coordination_rate_windows";
+pub const TOKEN_BUCKET_COLLECTION_NAME: &str = "coordination_token_buckets";
 pub const SLOT_COLLECTION_NAME: &str = "coordination_slots";
 pub const EVENT_DEDUP_COLLECTION_NAME: &str = "event_dedup_records";
 
@@ -62,6 +63,22 @@ pub struct RateWindowRecord {
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub window_start: DateTime<Utc>,
     pub count: i64,
+    pub last_admission_id: Option<String>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub updated_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TokenBucketRecord {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub namespace: String,
+    pub key_hash: String,
+    pub tokens_millis: i64,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub last_refill_at: DateTime<Utc>,
     pub last_admission_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,

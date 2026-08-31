@@ -8,10 +8,11 @@ use mongodb::IndexModel;
 use crate::models::coordination::{
     CoordinationHolder, EVENT_DEDUP_COLLECTION_NAME, LEASE_COLLECTION_NAME,
     RATE_WINDOW_COLLECTION_NAME, REPLAY_COLLECTION_NAME, SLOT_COLLECTION_NAME,
+    TOKEN_BUCKET_COLLECTION_NAME,
 };
 use crate::services::coordination_service::{
     self, ClusterLeaseRuntime, EventDedupClaimResult, EventDedupStore, LeaseStore, RateWindowStore,
-    ReplayStore, SlotStore,
+    ReplayStore, SlotStore, TokenBucketStore,
 };
 use crate::test_utils::connect_test_database;
 
@@ -35,6 +36,7 @@ async fn coordination_collections_have_ttl_indexes() {
         LEASE_COLLECTION_NAME,
         REPLAY_COLLECTION_NAME,
         RATE_WINDOW_COLLECTION_NAME,
+        TOKEN_BUCKET_COLLECTION_NAME,
         SLOT_COLLECTION_NAME,
         EVENT_DEDUP_COLLECTION_NAME,
     ] {
@@ -295,6 +297,65 @@ async fn fixed_window_counter_never_admits_above_the_global_limit() {
     assert!(separate.allowed);
     assert_eq!(separate.remaining, 4);
     assert!(separate.reset_at > chrono::Utc::now());
+}
+
+#[tokio::test]
+async fn token_bucket_never_admits_above_the_cluster_wide_burst() {
+    let Some(db) = connect_test_database("coordination_token_bucket").await else {
+        return;
+    };
+    let db = Arc::new(db);
+    let attempts = (0..24).map(|_| {
+        let db = Arc::clone(&db);
+        tokio::spawn(async move {
+            TokenBucketStore::admit(&db, "agent", "key-1", 1, 5)
+                .await
+                .expect("token admission")
+                .allowed
+        })
+    });
+    let results = futures::future::join_all(attempts).await;
+    assert_eq!(
+        results
+            .into_iter()
+            .filter(|result| *result.as_ref().expect("task joined"))
+            .count(),
+        5
+    );
+
+    let separate = TokenBucketStore::admit(&db, "trigger", "key-1", 1, 5)
+        .await
+        .expect("namespace-isolated admission");
+    assert!(separate.allowed);
+    assert_eq!(separate.remaining, 4);
+}
+
+#[tokio::test]
+async fn token_bucket_refills_using_mongodb_time() {
+    let Some(db) = connect_test_database("coordination_token_refill").await else {
+        return;
+    };
+    for _ in 0..2 {
+        assert!(
+            TokenBucketStore::admit(&db, "agent", "key-1", 10, 2)
+                .await
+                .expect("initial admission")
+                .allowed
+        );
+    }
+    assert!(
+        !TokenBucketStore::admit(&db, "agent", "key-1", 10, 2)
+            .await
+            .expect("empty admission")
+            .allowed
+    );
+    tokio::time::sleep(Duration::from_millis(125)).await;
+    assert!(
+        TokenBucketStore::admit(&db, "agent", "key-1", 10, 2)
+            .await
+            .expect("refilled admission")
+            .allowed
+    );
 }
 
 #[tokio::test]
