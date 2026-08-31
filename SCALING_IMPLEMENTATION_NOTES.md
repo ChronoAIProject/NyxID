@@ -36,28 +36,24 @@ The implementation is complete when all ten audit findings have code, tests, and
 | 9. Deployment config | Done | `eeb9f0bb`, `f5c4c335`, and `72e53f55`: two backend replicas, separate public/headless Services, downward API identity, private internal-port NetworkPolicy, one-hour streaming ingress, MCP Prefix routing and optional affinity, scale-safe Compose, and frontend WebSocket headers. | `kubeconform`: 17 valid; current `yq eval-all` and merged `docker compose config --quiet`: pass; rendered nginx 1.27 `nginx -t`: pass. |
 | 10. Documentation | Done | `5d6e2908` plus the final notes update: deployment, node proxy, environment, channel gateway, cap semantics, Mongo coordination, internal routing, and operational topology now describe the implemented multi-replica system. | `git diff --check` passes; stale stateless, per-instance rate-limit, and single-replica limitation claims are absent. |
 
-## Architecture selection
+## Decisions
 
-Candidate 1 is the base because it follows the required embedded `Node` owner
-record, answers dispatchability from the record already loaded by routing, and
-uses operation-shaped forwarding that preserves streaming and mutation-safety
-semantics. Candidate 2 contributed the separate internal listener, ingress-side
-node signatures, typed duplex session handles, and ordered MCP outbox.
+- Completion requires code, tests, deployment coverage, and Mongo-backed shared correctness for all ten audit items. Compilation alone does not prove the security and streaming invariants.
+- Final database tests use an isolated MongoDB replica set through `NYXID_TEST_DATABASE_URL`. The transaction tests cannot use a standalone MongoDB deployment.
+- The `Node` document owns the fenced connection lease. Routing reads that record before credential resolution, and a local socket is usable only when its full owner fence still matches.
+- Each process uses a generation UUID, and each socket uses a connection UUID. Cleanup matches the full fence tuple so an old reader cannot unregister a replacement connection.
+- Cross-replica dispatch uses operation-specific HTTP and WebSocket forwarding on a separate internal listener. HMAC authentication binds the method, path, timestamp, nonce, and body digest, while MongoDB rejects nonce replay.
+- Forwarding preserves request IDs, large frames, early response streaming, duplex traffic, and caller cancellation. Delete and revoke operations change durable state before disconnecting the socket.
+- MongoDB is authoritative for leases, replay claims, counters, slots, ownership, notification delivery, and event deduplication. Local state is an optional fast path only.
+- Event deduplication uses a fenced claim, commit, and release state machine. A worker cannot commit an expired claim.
+- Every configured production rate limit is global. WebSocket passthrough and per-user SSH caps use renewable cluster slots that cancel work after lease loss.
+- `NODE_MAX_WS_CONNECTIONS` is a per-replica file-descriptor and memory cap. One atomic reservation covers both pending authentication and the live socket.
+- MCP cookie affinity is a latency optimization. Correctness comes from Mongo read-through session state and the durable ordered notification outbox.
+- Kubernetes uses separate public and headless Services. A NetworkPolicy allows the internal listener only between backend pods, and the public ingress never targets that port.
+- Production Compose publishes only the frontend port and resolves scaled backend replicas through Docker DNS. The backend has no fixed container name or published host port.
+- The implementation was split into focused node-routing, Mongo-coordination, MCP-delivery, and deployment changes so each contract could be reviewed and tested independently.
 
-The selected design corrects both candidates where they weaken the brief:
-
-- process generation and socket connection UUIDs replace resettable epochs;
-- owner cleanup matches the complete fence tuple;
-- internal replay nonces use MongoDB unique/TTL storage;
-- all configured production rate limits and passthrough/SSH caps are global;
-- event dedup is claim/commit/release rather than post-success read-then-insert;
-- session slots renew and cancel work when fenced;
-- MCP authentication revalidates durable state so deletes cannot leave stale
-  positive cache entries;
-- the internal plane binds a separate listener and cannot be routed by the
-  public ingress.
-
-The full contract is recorded in `docs/HORIZONTAL_SCALING_ARCHITECTURE.md`.
+The full runtime contract is in `docs/HORIZONTAL_SCALING_ARCHITECTURE.md`.
 
 ## Design constraints
 
@@ -84,7 +80,8 @@ The full contract is recorded in `docs/HORIZONTAL_SCALING_ARCHITECTURE.md`.
 | Node owner Mongo CAS tests | Pass | 3 passed, 0 failed against an isolated MongoDB 8.0.14 `rs0` on `127.0.0.1:27019` |
 | `remote_complete_proxy_preserves_response_and_request_identity` before fix | Expected failure | Complete forwarding returned the node UUID instead of the original request UUID |
 | Two-replica node forwarding tests | Pass | 5 passed, 0 failed: complete HTTP, early streaming + cancellation, SSH exec/tunnel, terminal, WS passthrough, credential ack, and remote disconnect |
-| Internal HMAC tests | Pass | 3 passed, 0 failed, including a Mongo-backed shared nonce replay rejection |
+| Mixed-case internal HMAC regression before fix | Expected failure | `signature_verification_accepts_mixed_case_hex` rejected a case-equivalent hex encoding because `verify()` compared the encoded strings |
+| Internal HMAC tests | Pass | 4 passed, 0 failed against `rs0`, including mixed-case hex acceptance and Mongo-backed shared nonce replay rejection |
 | Node routing tests | Pass | 13 passed, 0 failed against the replica set |
 | Kubernetes schemas | Pass | `kubeconform -strict -summary k8s`: 17 resources valid, 0 invalid, 0 errors, 0 skipped |
 | Kubernetes YAML | Pass | `yq eval-all '.' k8s/*.yaml`: all documents parsed |
@@ -96,10 +93,10 @@ The full contract is recorded in `docs/HORIZONTAL_SCALING_ARCHITECTURE.md`.
 | Rate limiter tests | Pass | 50 tests pass; production constructors use Mongo-backed stores |
 | MCP replica-safety tests | Pass | 17 tests pass for read-through validation, durable ordered notifications, deletion, recovery, and shared admission |
 | OAuth refresh tests | Pass | 89 `user_token_service` tests pass, including modern and legacy cross-replica single-flight, proactive sweeps, and stale-write fencing |
-| Final `cargo fmt --all --check` | Pass | Clean; commit hooks also passed formatting after the final code changes |
+| Final `cargo fmt --all --check` | Pass | Clean after the internal HMAC fix and decision-log consolidation |
 | Final `cargo build -p nyxid` | Pass | Finished in 45.13s; only the known macOS compact-unwind linker warning and upstream `proc-macro-error2` notice |
 | Final replica-set `cargo test -p nyxid` | Pass | 5,708 passed, 0 failed in 430.23s (483.57s wall) using `mongodb://127.0.0.1:27019/?replicaSet=rs0&directConnection=true&retryWrites=true` |
-| Final `cargo clippy -p nyxid --all-targets -- -D warnings` | Pass | Finished in 1m40s with no clippy warnings; only the upstream future-incompatibility notice |
+| Final `cargo clippy -p nyxid --all-targets -- -D warnings` | Pass | Finished in 32.89s with no clippy warnings; only the upstream future-incompatibility notice |
 | Final deployment syntax | Pass | Current Kubernetes YAML parses with `yq`; merged production Compose passes with its required env-file shape and validation-only password |
 
 Final Mongo-backed verification uses an isolated local replica-set deployment
