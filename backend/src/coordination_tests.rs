@@ -338,21 +338,21 @@ async fn token_bucket_refills_using_mongodb_time() {
     };
     for _ in 0..2 {
         assert!(
-            TokenBucketStore::admit(&db, "agent", "key-1", 10, 2)
+            TokenBucketStore::admit(&db, "agent", "key-1", 1, 2)
                 .await
                 .expect("initial admission")
                 .allowed
         );
     }
     assert!(
-        !TokenBucketStore::admit(&db, "agent", "key-1", 10, 2)
+        !TokenBucketStore::admit(&db, "agent", "key-1", 1, 2)
             .await
             .expect("empty admission")
             .allowed
     );
-    tokio::time::sleep(Duration::from_millis(125)).await;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
     assert!(
-        TokenBucketStore::admit(&db, "agent", "key-1", 10, 2)
+        TokenBucketStore::admit(&db, "agent", "key-1", 1, 2)
             .await
             .expect("refilled admission")
             .allowed
@@ -436,6 +436,86 @@ async fn renewable_slot_signals_when_its_fence_is_lost() {
 }
 
 #[tokio::test]
+async fn renewable_slots_enforce_one_cluster_cap_across_managers() {
+    let Some(db) = connect_test_database("coordination_renewable_slot_cluster_cap").await else {
+        return;
+    };
+    let first_manager = RenewableSlotManager::new(
+        db.clone(),
+        holder("pod-a", "generation-a"),
+        Duration::from_secs(30),
+        Duration::from_secs(10),
+    );
+    let second_manager = RenewableSlotManager::new(
+        db,
+        holder("pod-b", "generation-b"),
+        Duration::from_secs(30),
+        Duration::from_secs(10),
+    );
+
+    let first = first_manager
+        .acquire("ws_passthrough", "global", 1)
+        .await
+        .expect("first acquisition")
+        .expect("first slot available");
+    assert!(
+        second_manager
+            .acquire("ws_passthrough", "global", 1)
+            .await
+            .expect("contending acquisition")
+            .is_none()
+    );
+
+    drop(first);
+    let replacement = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if let Some(slot) = second_manager
+                .acquire("ws_passthrough", "global", 1)
+                .await
+                .expect("replacement acquisition")
+            {
+                return slot;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("dropped slot must become available");
+    drop(replacement);
+}
+
+#[tokio::test]
+async fn renewable_slot_loss_cancels_guarded_work() {
+    let Some(db) = connect_test_database("coordination_slot_guarded_work_loss").await else {
+        return;
+    };
+    let manager = RenewableSlotManager::new(
+        db.clone(),
+        holder("pod-a", "generation-a"),
+        Duration::from_secs(30),
+        Duration::from_millis(20),
+    );
+    let guard = manager
+        .acquire("ssh_session", "user-1", 1)
+        .await
+        .expect("slot acquisition")
+        .expect("slot available");
+    db.collection::<mongodb::bson::Document>(SLOT_COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .expect("delete held slot");
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(1),
+        guard
+            .run_until_lost(async { std::future::pending::<crate::errors::AppResult<()>>().await }),
+    )
+    .await
+    .expect("lease loss must stop guarded work");
+    assert!(matches!(result, Err(crate::errors::AppError::RateLimited)));
+}
+
+#[tokio::test]
 async fn event_dedup_claim_commit_and_release_are_atomic_and_fenced() {
     let Some(db) = connect_test_database("coordination_event_dedup").await else {
         return;
@@ -504,4 +584,37 @@ async fn event_dedup_claim_commit_and_release_are_atomic_and_fenced() {
             .expect("claim committed key"),
         EventDedupClaimResult::Duplicate
     ));
+}
+
+#[tokio::test]
+async fn expired_event_claim_cannot_be_committed() {
+    let Some(db) = connect_test_database("coordination_event_dedup_expired_commit").await else {
+        return;
+    };
+    let claim = EventDedupStore::claim(
+        &db,
+        "channel",
+        "conversation-1",
+        "event-expired",
+        Duration::from_secs(30),
+    )
+    .await
+    .expect("claim event");
+    let claim = match claim {
+        EventDedupClaimResult::Claimed(claim) => claim,
+        EventDedupClaimResult::Duplicate => panic!("fresh event must be claimable"),
+    };
+    db.collection::<mongodb::bson::Document>(EVENT_DEDUP_COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": &claim.id },
+            doc! { "$set": { "expires_at": mongodb::bson::DateTime::from_millis(0) } },
+        )
+        .await
+        .expect("expire claim");
+
+    assert!(
+        !EventDedupStore::commit(&db, &claim, Duration::from_secs(300))
+            .await
+            .expect("commit expired claim")
+    );
 }

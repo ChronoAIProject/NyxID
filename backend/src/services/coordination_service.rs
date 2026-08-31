@@ -789,6 +789,7 @@ impl EventDedupStore {
                     "_id": &claim.id,
                     "claim_id": &claim.claim_id,
                     "state": event_state(EventDedupState::Claimed),
+                    "$expr": { "$gt": ["$expires_at", "$$NOW"] },
                 },
                 vec![doc! {
                     "$set": {

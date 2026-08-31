@@ -193,7 +193,7 @@ Single-use hosted credential setup for agents and CLI callers. An authenticated 
 - Developer-app connection webhooks use a server-generated secret encrypted with `EncryptionKeys`. Secrets are returned only by configure/rotate responses, alongside a non-secret key ID. Delivery signs `X-NyxID-Timestamp + "." + raw_body` with HMAC-SHA256 and sends the signature, timestamp, event type, delivery ID, and key ID headers. Connect-link terminal events use the link as a durable bounded outbox; connection-expiry events remain best effort. Transition paths never depend on delivery success.
 - Outbound webhook configuration requires HTTPS and public DNS/IP targets. Apply `webhook_delivery_service::validate_webhook_url` to every new server-fetched webhook URL.
 - Trigger inbound secrets use the `nyx_trg_` prefix and are SHA-256 hashed. HMAC verification additionally retains an encrypted copy because verification requires the raw key. Trigger and delivery types are serde-tagged enums; all secret-bearing structs use redacted `Debug` implementations.
-- Trigger ingress is public; unknown and disabled triggers are not-found-shaped, then per-trigger rate limiting runs before body reads, HMAC decryption, or verification. Webhook-target envelopes are persisted only in `trigger_deliveries`, encrypted with `EncryptionKeys`, and TTL-expired for durable dedup and authenticated replay; `TRIGGER_DELIVERY_RETENTION_HOURS=0` stores metadata only. Agent and notification payloads are never persisted and retain bounded per-process dedup after synchronous success. Agent targets enter through the trusted channel-event service path without broadening the public channel-event auth contract.
+- Trigger ingress is public; unknown and disabled triggers are not-found-shaped, then per-trigger rate limiting runs before body reads, HMAC decryption, or verification. Webhook-target envelopes are persisted only in `trigger_deliveries`, encrypted with `EncryptionKeys`, and TTL-expired for durable dedup and authenticated replay; `TRIGGER_DELIVERY_RETENTION_HOURS=0` stores metadata only. Agent and notification payloads are never persisted; their event IDs use fenced, TTL-expiring dedup claims in MongoDB. Agent targets enter through the trusted channel-event service path without broadening the public channel-event auth contract.
 
 ## File Structure
 
@@ -404,7 +404,6 @@ WS_PASSTHROUGH_MAX_CONNECTIONS=200
 # HTTP Event Gateway (NyxID#221, ADR-013)
 CHANNEL_EVENT_RATE_LIMIT_PER_SECOND=100
 CHANNEL_EVENT_RATE_LIMIT_BURST=200
-CHANNEL_EVENT_DEDUP_CAPACITY=32768  # Sized to honor the 5-min window at 100 events/s
 CHANNEL_EVENT_DEDUP_TTL_SECS=300
 TRIGGER_RATE_LIMIT_PER_SECOND=10
 TRIGGER_RATE_LIMIT_BURST=20

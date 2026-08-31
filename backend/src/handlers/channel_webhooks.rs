@@ -765,7 +765,6 @@ mod tests {
             channel_relay_edit_rate_limit_burst: 20,
             channel_event_rate_limit_per_second: 100,
             channel_event_rate_limit_burst: 200,
-            channel_event_dedup_capacity: 32_768,
             channel_event_dedup_ttl_secs: 300,
             trigger_rate_limit_per_second: 10,
             trigger_rate_limit_burst: 20,
@@ -1124,7 +1123,6 @@ mod tests {
         assert_eq!(config.channel_relay_max_bots_per_user, 5);
         assert_eq!(config.channel_relay_message_ttl_days, 30);
         assert_eq!(config.channel_event_rate_limit_per_second, 100);
-        assert_eq!(config.channel_event_dedup_capacity, 32_768);
         assert_eq!(config.channel_event_dedup_ttl_secs, 300);
         assert!(config.invite_code_required);
         assert!(!config.auto_verify_email);

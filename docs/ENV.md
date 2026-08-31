@@ -358,6 +358,14 @@ The sweep only refreshes the short-lived **access** token. It does **not** exten
 - A Google OAuth app left in **"Testing"** publishing status expires its refresh tokens after 7 days regardless. Publish the app (Google Cloud Console → OAuth consent screen → Publish) to fix.
 - A connection authorized before refresh tokens were issued (no `access_type=offline` consent) has no refresh token to use. Re-add the connection once to obtain one.
 
+## HTTP Event Gateway
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CHANNEL_EVENT_RATE_LIMIT_PER_SECOND` | `100` | Sustained event rate allowed per conversation across the cluster. |
+| `CHANNEL_EVENT_RATE_LIMIT_BURST` | `200` | Per-conversation MongoDB token-bucket capacity. |
+| `CHANNEL_EVENT_DEDUP_TTL_SECS` | `300` | TTL for successful channel and non-webhook trigger event IDs in the shared dedup collection. |
+
 ## Trigger Ingress
 
 | Variable | Default | Description |
@@ -367,7 +375,7 @@ The sweep only refreshes the short-lived **access** token. It does **not** exten
 | `TRIGGER_PAYLOAD_MAX_BYTES` | `262144` | Maximum raw trigger request body size. |
 | `TRIGGER_DELIVERY_RETENTION_HOURS` | `72` | Hours to retain encrypted webhook-target envelopes for durable dedup and replay. `0` disables payload storage/replay while metadata remains bounded to 72 hours. |
 
-Webhook-target dedup uses durable delivery records. Agent and notification targets use the shared `CHANNEL_EVENT_DEDUP_CAPACITY` and `CHANNEL_EVENT_DEDUP_TTL_SECS` bounds in a separate per-process cache.
+Webhook-target dedup uses durable delivery records. Agent and notification targets use fenced claims in the shared MongoDB coordination collection. `CHANNEL_EVENT_DEDUP_TTL_SECS` controls how long a successful event ID remains deduplicated.
 
 ## Mobile Push Notifications (Optional)
 
