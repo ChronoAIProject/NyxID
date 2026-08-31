@@ -2827,7 +2827,7 @@ async fn execute_proxy_inner(
                 *first_dispatch_admission_ms.get_or_insert_with(|| elapsed_ms(exchange_started_at));
             let downstream_started_at = std::time::Instant::now();
             let result = state
-                .node_ws_manager
+                .node_dispatch
                 .send_proxy_request_classified(
                     node_id,
                     attempt_request,
@@ -5409,7 +5409,7 @@ async fn handle_ws_passthrough_via_node(
         };
 
         match state
-            .node_ws_manager
+            .node_dispatch
             .open_ws_proxy(
                 node_id,
                 ws_proxy_request,
@@ -5492,7 +5492,7 @@ async fn handle_ws_passthrough_via_node(
     );
 
     let db = state.db.clone();
-    let ws_manager = state.node_ws_manager.clone();
+    let node_dispatch = state.node_dispatch.clone();
     let billing = state.billing.clone();
     let metered_for_settle = metered.clone();
     let sid = service_id_owned.clone();
@@ -5512,7 +5512,7 @@ async fn handle_ws_passthrough_via_node(
             let stats = bridge_websockets_via_node(
                 client_ws,
                 ws_proxy_session.frames,
-                &ws_manager,
+                &node_dispatch,
                 &node_id_owned,
                 &sess_id,
                 sid.clone(),
@@ -5529,7 +5529,7 @@ async fn handle_ws_passthrough_via_node(
             .await;
 
             // Best-effort close the node-side session.
-            let _ = ws_manager.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
+            let _ = node_dispatch.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
             drop(guard); // explicitly decrement counter
             let platform_usage = websocket_platform_usage(&stats);
             let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
@@ -5570,7 +5570,7 @@ async fn handle_ws_passthrough_via_node(
 async fn bridge_websockets_via_node(
     client_ws: axum::extract::ws::WebSocket,
     mut ws_proxy_rx: tokio::sync::mpsc::Receiver<crate::services::node_ws_manager::WsProxyFrame>,
-    ws_manager: &crate::services::node_ws_manager::NodeWsManager,
+    node_dispatch: &crate::services::node_dispatch::NodeDispatch,
     node_id: &str,
     session_id: &str,
     service_id: String,
@@ -5623,7 +5623,7 @@ async fn bridge_websockets_via_node(
                             tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
                         );
-                        if ws_manager.send_ws_proxy_text(node_id, session_id, &t).is_err() {
+                        if node_dispatch.send_ws_proxy_text(node_id, session_id, &t).is_err() {
                             break;
                         }
                     }
@@ -5635,7 +5635,7 @@ async fn bridge_websockets_via_node(
                             tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
                         );
-                        if ws_manager.send_ws_proxy_binary(node_id, session_id, &b).is_err() {
+                        if node_dispatch.send_ws_proxy_binary(node_id, session_id, &b).is_err() {
                             break;
                         }
                     }
@@ -5643,7 +5643,7 @@ async fn bridge_websockets_via_node(
                         let (code, reason) = frame
                             .map(|f| (Some(f.code), Some(f.reason.to_string())))
                             .unwrap_or((None, None));
-                        let _ = ws_manager.send_ws_proxy_close(node_id, session_id, code, reason);
+                        let _ = node_dispatch.send_ws_proxy_close(node_id, session_id, code, reason);
                         break;
                     }
                     Some(Ok(axum::extract::ws::Message::Ping(p))) => {

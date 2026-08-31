@@ -3328,7 +3328,7 @@ async fn execute_ssh_command_internal(
 
         state.billing.mark_forwarded(&metered).await?;
         match state
-            .node_ws_manager
+            .node_dispatch
             .exec_ssh_command(
                 node_id,
                 crate::services::node_ws_manager::NodeSshExecRequest {

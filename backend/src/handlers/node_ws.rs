@@ -1201,6 +1201,13 @@ async fn handle_node_connection(
     let mut reason: &'static str = "client_close";
 
     while let Some(msg) = ws_stream.next().await {
+        // A reconnect on this replica replaces the local correlation maps.
+        // Fence the old reader before it can deliver a late response into the
+        // replacement connection's request or session entry.
+        if !ws_manager.has_connection(&node_id_reader, &connection_id) {
+            reason = "ownership_lost";
+            break;
+        }
         // Binary frames carry streaming proxy data chunks:
         //   [36 bytes: request_id as ASCII UUID][remaining: raw data]
         if let Ok(Message::Binary(data)) = &msg {
@@ -1669,7 +1676,6 @@ pub async fn node_ws_manager_heartbeat_sweep(
     ws_manager: &Arc<crate::services::node_ws_manager::NodeWsManager>,
     identity: &crate::services::node_owner_service::ReplicaIdentity,
     timeout_secs: u64,
-    lease_ttl_secs: u64,
 ) {
     let node_connections = ws_manager.connected_nodes();
 
@@ -1680,26 +1686,6 @@ pub async fn node_ws_manager_heartbeat_sweep(
             generation_id: identity.generation_id.clone(),
             connection_id: connection_id.clone(),
         };
-        match crate::services::node_owner_service::renew(
-            db,
-            &fence,
-            std::time::Duration::from_secs(lease_ttl_secs),
-            false,
-        )
-        .await
-        {
-            Ok(true) => {}
-            Ok(false) => {
-                ws_manager
-                    .disconnect_connection_if(node_id, connection_id, 4007, "ownership lost")
-                    .await;
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(node_id, %error, "Failed to renew node owner lease during heartbeat sweep");
-                continue;
-            }
-        }
         // 1. Check if the previous heartbeat was answered in time.
         //    Skip for nodes with no last_heartbeat_at (newly connected).
         let timed_out = match node_service::get_node_by_id(db, node_id).await {
@@ -1777,6 +1763,40 @@ pub async fn node_ws_manager_heartbeat_sweep(
         crate::services::node_owner_service::clear_expired(db, chrono::Utc::now()).await
     {
         tracing::warn!(%error, "Failed to clear expired node owner records");
+    }
+}
+
+pub async fn node_ws_manager_owner_lease_sweep(
+    db: &mongodb::Database,
+    ws_manager: &Arc<crate::services::node_ws_manager::NodeWsManager>,
+    identity: &crate::services::node_owner_service::ReplicaIdentity,
+    lease_ttl_secs: u64,
+) {
+    for (node_id, connection_id) in ws_manager.connected_nodes() {
+        let fence = crate::services::node_owner_service::NodeOwnerFence {
+            node_id: node_id.clone(),
+            instance_name: identity.instance_name.clone(),
+            generation_id: identity.generation_id.clone(),
+            connection_id: connection_id.clone(),
+        };
+        match crate::services::node_owner_service::renew(
+            db,
+            &fence,
+            std::time::Duration::from_secs(lease_ttl_secs),
+            false,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                ws_manager
+                    .disconnect_connection_if(&node_id, &connection_id, 4007, "ownership lost")
+                    .await;
+            }
+            Err(error) => {
+                tracing::warn!(node_id, %error, "Failed to renew node owner lease");
+            }
+        }
     }
 }
 

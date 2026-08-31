@@ -2137,15 +2137,18 @@ pub async fn update_key(
             // (twenty-ninth-round Codex P2).
             state
                 .node_ws_manager
-                .await_capability_resolution(old_nid, std::time::Duration::from_millis(500))
+                .await_cluster_capability_resolution(old_nid, std::time::Duration::from_millis(500))
                 .await;
             if state
                 .node_ws_manager
-                .supports_credential_ack_correlation(old_nid)
+                .cluster_session_info(old_nid)
+                .await
+                .capabilities
+                .credential_ack_correlation
             {
                 if let Err(e) = state
                     .node_ws_manager
-                    .send_credential_remove_and_wait(
+                    .send_credential_remove_and_wait_clustered(
                         old_nid,
                         view.slug.as_str(),
                         std::time::Duration::from_secs(10),

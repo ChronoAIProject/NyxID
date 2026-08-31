@@ -673,7 +673,7 @@ async fn handle_node_ssh_socket(
             None
         };
         match state
-            .node_ws_manager
+            .node_dispatch
             .open_ssh_tunnel(
                 node_id,
                 crate::services::node_ws_manager::NodeSshTunnelRequest {
@@ -896,7 +896,7 @@ async fn handle_node_ssh_socket(
                 match ws_message {
                     Some(Ok(Message::Binary(bytes))) => {
                         from_client_bytes += bytes.len() as u64;
-                        if state.node_ws_manager.send_ssh_tunnel_data(&node_id, &session_id, &bytes).is_err() {
+                        if state.node_dispatch.send_ssh_tunnel_data(&node_id, &session_id, &bytes).is_err() {
                             break Some("node_tunnel_send_failed");
                         }
                     }
@@ -1281,7 +1281,7 @@ fn close_node_ssh_tunnel(
     session_id: &str,
     reason: &str,
 ) {
-    if let Err(error) = state.node_ws_manager.close_ssh_tunnel(node_id, session_id) {
+    if let Err(error) = state.node_dispatch.close_ssh_tunnel(node_id, session_id) {
         tracing::warn!(
             service_id,
             node_id,

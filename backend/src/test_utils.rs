@@ -1853,6 +1853,32 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         Arc::new(config.clone()),
     ));
     let encryption_keys = Arc::new(test_encryption_keys());
+    let node_ws_manager = Arc::new(NodeWsManager::new(
+        config.node_proxy_timeout_secs,
+        config.node_max_ws_connections,
+    ));
+    let replica_identity = Arc::new(crate::services::node_owner_service::ReplicaIdentity::new(
+        config.instance_name.clone(),
+        config.internal_advertise_url.clone(),
+    ));
+    let internal_auth = crate::services::internal_auth::InternalAuth::new(
+        db.clone(),
+        crate::services::internal_auth::derive_key(
+            config.internal_dispatch_hmac_key.as_deref(),
+            config.encryption_key.as_deref().map(str::as_bytes),
+            &[],
+        ),
+        std::time::Duration::from_secs(config.internal_auth_max_skew_secs),
+        std::time::Duration::from_secs(config.internal_nonce_ttl_secs),
+    );
+    let node_dispatch = Arc::new(crate::services::node_dispatch::NodeDispatch::new(
+        db.clone(),
+        node_ws_manager.clone(),
+        replica_identity.clone(),
+        http_client.clone(),
+        internal_auth,
+    ));
+    node_ws_manager.attach_cluster_dispatch(Arc::downgrade(&node_dispatch));
     let developer_webhook_dispatcher = Arc::new(
         crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
             http_client.clone(),
@@ -1881,14 +1907,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         ),
         developer_webhook_dispatcher,
         encryption_keys,
-        node_ws_manager: Arc::new(NodeWsManager::new(
-            config.node_proxy_timeout_secs,
-            config.node_max_ws_connections,
-        )),
-        replica_identity: Arc::new(crate::services::node_owner_service::ReplicaIdentity::new(
-            config.instance_name.clone(),
-            config.internal_advertise_url.clone(),
-        )),
+        node_ws_manager,
+        replica_identity,
+        node_dispatch,
         ssh_session_manager: Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user)),
         per_agent_limiter: Arc::new(crate::mw::rate_limit::PerAgentRateLimiter::new()),
         direct_chat_limiter: crate::mw::rate_limit::create_direct_chat_rate_limiter(),

@@ -309,7 +309,7 @@ pub async fn ssh_exec(
                     AppError::Internal("Missing generated SSH certificate".to_string())
                 })?;
                 state
-                    .node_ws_manager
+                    .node_dispatch
                     .exec_ssh_command(
                         node_id,
                         crate::services::node_ws_manager::NodeSshExecRequest {
@@ -329,7 +329,7 @@ pub async fn ssh_exec(
             }
             SshAuthMode::NodeKey => {
                 state
-                    .node_ws_manager
+                    .node_dispatch
                     .exec_ssh_node_key_command(
                         node_id,
                         crate::services::node_ws_manager::NodeSshNodeKeyExecRequest {

@@ -56,6 +56,7 @@ pub mod feature_flag_service;
 pub mod gcp_sa_service;
 pub mod group_service;
 pub mod identity_service;
+pub mod internal_auth;
 pub mod invite_code_service;
 pub mod key_service;
 pub mod lark_permission;
@@ -64,6 +65,9 @@ pub mod llm_usage_service;
 pub mod mcp_approval;
 pub mod mcp_service;
 pub mod mfa_service;
+pub mod node_dispatch;
+#[cfg(test)]
+mod node_dispatch_tests;
 pub mod node_fanout_resolver;
 pub mod node_metrics_service;
 pub mod node_owner_service;

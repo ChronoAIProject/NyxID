@@ -112,6 +112,8 @@ pub struct AppState {
     pub node_ws_manager: Arc<NodeWsManager>,
     /// Process and address identity used to fence node ownership.
     pub replica_identity: Arc<services::node_owner_service::ReplicaIdentity>,
+    /// Cluster-aware dispatch for local and remote credential-node sockets.
+    pub node_dispatch: Arc<services::node_dispatch::NodeDispatch>,
     /// Concurrent SSH tunnel session limiter
     pub ssh_session_manager: Arc<SshSessionManager>,
     /// Per-agent rate limiter keyed by API key ID
@@ -412,6 +414,11 @@ async fn main() {
     );
     services::billing::ledger::init_billing_ledger_hmac_key(billing_ledger_hmac_key.clone());
     let billing_ledger_hmac_key = Arc::new(billing_ledger_hmac_key);
+    let internal_dispatch_hmac_key = services::internal_auth::derive_key(
+        config.internal_dispatch_hmac_key.as_deref(),
+        config.encryption_key.as_deref().map(str::as_bytes),
+        &jwt_private_key_pem,
+    );
     services::chain_verify_service::spawn_chain_verify_worker(
         db.clone(),
         audit_chain_hmac_key.clone(),
@@ -634,7 +641,11 @@ async fn main() {
         .expect("Failed to create HTTP client");
 
     // Create MCP session store with MongoDB persistence
-    let mcp_sessions = Arc::new(McpSessionStore::with_db(db.clone()));
+    let mcp_sessions = Arc::new(McpSessionStore::with_db_options(
+        db.clone(),
+        std::time::Duration::from_secs(config.mcp_notification_ttl_secs),
+        std::time::Duration::from_millis(config.mcp_notification_poll_interval_ms),
+    ));
 
     // Recover MCP sessions from MongoDB (survives server restarts)
     match mcp_sessions.load_from_db().await {
@@ -655,6 +666,20 @@ async fn main() {
         config.instance_name.clone(),
         config.internal_advertise_url.clone(),
     ));
+    let internal_auth = services::internal_auth::InternalAuth::new(
+        db.clone(),
+        internal_dispatch_hmac_key,
+        std::time::Duration::from_secs(config.internal_auth_max_skew_secs),
+        std::time::Duration::from_secs(config.internal_nonce_ttl_secs),
+    );
+    let node_dispatch = Arc::new(services::node_dispatch::NodeDispatch::new(
+        db.clone(),
+        node_ws_manager.clone(),
+        replica_identity.clone(),
+        http_client.clone(),
+        internal_auth,
+    ));
+    node_ws_manager.attach_cluster_dispatch(Arc::downgrade(&node_dispatch));
     let ssh_session_manager = Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user));
 
     // HTTP Event Gateway state (NyxID#221).
@@ -734,6 +759,7 @@ async fn main() {
         encryption_keys: encryption_keys.clone(),
         node_ws_manager,
         replica_identity,
+        node_dispatch,
         ssh_session_manager,
         per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::new()),
         direct_chat_limiter: mw::rate_limit::create_direct_chat_rate_limiter(),
@@ -1148,6 +1174,24 @@ async fn main() {
     let heartbeat_interval = config.node_heartbeat_interval_secs;
     let heartbeat_timeout = config.node_heartbeat_timeout_secs;
     let node_owner_lease_ttl_secs = config.node_owner_lease_ttl_secs;
+    let node_owner_lease_renew_secs = config.node_owner_lease_renew_secs;
+    let owner_lease_db = heartbeat_db.clone();
+    let owner_lease_ws = heartbeat_ws.clone();
+    let owner_lease_identity = heartbeat_identity.clone();
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(node_owner_lease_renew_secs));
+        loop {
+            interval.tick().await;
+            handlers::node_ws::node_ws_manager_owner_lease_sweep(
+                &owner_lease_db,
+                &owner_lease_ws,
+                &owner_lease_identity,
+                node_owner_lease_ttl_secs,
+            )
+            .await;
+        }
+    });
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(heartbeat_interval));
@@ -1158,7 +1202,6 @@ async fn main() {
                 &heartbeat_ws,
                 &heartbeat_identity,
                 heartbeat_timeout,
-                node_owner_lease_ttl_secs,
             )
             .await;
         }
@@ -1229,6 +1272,7 @@ async fn main() {
     // inherits it — public OAuth, `/api/v1`, proxy, LLM gateway, `/mcp`.
     // Applying it to one branch, or merging a router after it, would
     // silently exempt those routes.
+    let internal_node_dispatch = state.node_dispatch.clone();
     let app = mw::security_headers::with_response_headers(
         public_oauth
             .merge(private_api)
@@ -1258,20 +1302,35 @@ async fn main() {
     .layer(Extension(trusted_proxy_ranges))
     .layer(TraceLayer::new_for_http());
 
-    // Bind and serve
+    // Bind both listeners before serving. Internal routes never enter the
+    // public router and therefore cannot be exposed by an ingress path rule.
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = TcpListener::bind(&addr)
         .await
         .expect("Failed to bind address");
+    let internal_listener = TcpListener::bind(&config.internal_bind_addr)
+        .await
+        .expect("Failed to bind internal dispatch address");
+    let internal_body_limit =
+        services::node_ws_manager::node_proxy_ws_message_size_limit(config.proxy_max_body_size);
+    let internal_app =
+        services::node_dispatch::internal_router(internal_node_dispatch, internal_body_limit);
 
     tracing::info!("Listening on {addr}");
+    tracing::info!(
+        bind = %config.internal_bind_addr,
+        "Internal replica listener started"
+    );
 
-    axum::serve(
+    let public_server = axum::serve(
         downstream_disconnect::DisconnectAwareListener::new(listener),
         downstream_disconnect::DisconnectAwareMakeService::new(app),
-    )
-    .await
-    .expect("Server error");
+    );
+    let internal_server = axum::serve(internal_listener, internal_app);
+    tokio::select! {
+        result = public_server => result.expect("Public server error"),
+        result = internal_server => result.expect("Internal replica server error"),
+    }
 }
 
 /// Derive the HMAC key used to key `CliPairing.code_hash`.

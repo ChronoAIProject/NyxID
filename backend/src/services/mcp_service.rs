@@ -1678,7 +1678,7 @@ async fn load_callable_user_services(
             .get(&us.id)
             .copied()
             .unwrap_or(false);
-        let cred_info = classify_credential(&us, &active_key_map, node_ws_manager, has_route);
+        let cred_info = classify_credential(&us, &active_key_map, has_route);
         if !include_non_executable && !cred_info.is_executable {
             continue;
         }
@@ -1718,7 +1718,7 @@ async fn load_callable_user_services(
             .get(&us.id)
             .copied()
             .unwrap_or(false);
-        let cred_info = classify_credential(&us, &active_key_map, node_ws_manager, has_route);
+        let cred_info = classify_credential(&us, &active_key_map, has_route);
         if !include_non_executable && !cred_info.is_executable {
             continue;
         }
@@ -1767,14 +1767,8 @@ struct CredentialClassification {
 fn classify_credential(
     us: &UserService,
     active_key_map: &HashMap<&str, &str>,
-    node_ws_manager: &NodeWsManager,
     any_routing_node_online: bool,
 ) -> CredentialClassification {
-    let node_online = us
-        .node_id
-        .as_deref()
-        .is_some_and(|nid| node_ws_manager.is_connected(nid));
-
     // Node routing check runs BEFORE the `auth_method == "none"` fast
     // path: a no-auth service that was explicitly bound to a node is
     // still a "route via node" contract, and MCP must not advertise it
@@ -1802,7 +1796,6 @@ fn classify_credential(
     // the direct-routing path (fourteenth-round Codex P2).
     let has_explicit_node = us.node_id.as_deref().is_some_and(|n| !n.is_empty());
     if has_explicit_node {
-        let _ = node_online;
         return CredentialClassification {
             is_executable: any_routing_node_online,
             has_server_credential: false,

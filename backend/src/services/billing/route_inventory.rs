@@ -45,6 +45,10 @@ pub(crate) struct BillingEgressPermit {
     _private: (),
 }
 
+pub(crate) fn internal_node_dispatch_permit() -> BillingEgressPermit {
+    BillingEgressPermit { _private: () }
+}
+
 pub(crate) fn enforce_billing_egress_classification(
     policy: Option<BillingRoutePolicy>,
     expected: BillingIngress,

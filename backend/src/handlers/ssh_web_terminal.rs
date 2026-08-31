@@ -379,7 +379,7 @@ async fn handle_node_web_terminal(
         };
 
         match state
-            .node_ws_manager
+            .node_dispatch
             .open_web_terminal(
                 node_id,
                 crate::services::node_ws_manager::NodeWebTerminalRequest {
@@ -543,7 +543,7 @@ async fn handle_node_web_terminal(
                 match ws_msg {
                     Some(Ok(Message::Binary(data))) => {
                         from_client_bytes += data.len() as u64;
-                        if state.node_ws_manager.send_web_terminal_data(&node_id, &session_id, &data).is_err() {
+                        if state.node_dispatch.send_web_terminal_data(&node_id, &session_id, &data).is_err() {
                             break "node_terminal_send_failed";
                         }
                     }
@@ -551,7 +551,7 @@ async fn handle_node_web_terminal(
                         if let Ok(ClientControl::Resize { cols: c, rows: r }) =
                             serde_json::from_str::<ClientControl>(&text)
                         {
-                            let _ = state.node_ws_manager.send_web_terminal_resize(
+                            let _ = state.node_dispatch.send_web_terminal_resize(
                                 &node_id,
                                 &session_id,
                                 c.clamp(10, 500),
@@ -644,10 +644,7 @@ async fn handle_node_web_terminal(
 }
 
 fn close_node_web_terminal(state: &AppState, node_id: &str, session_id: &str, reason: &str) {
-    if let Err(error) = state
-        .node_ws_manager
-        .close_web_terminal(node_id, session_id)
-    {
+    if let Err(error) = state.node_dispatch.close_web_terminal(node_id, session_id) {
         tracing::warn!(
             node_id,
             session_id,

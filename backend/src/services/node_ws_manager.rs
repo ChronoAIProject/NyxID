@@ -55,6 +55,7 @@ pub struct NodeSshTunnelRequest {
 }
 
 /// Response received from a node via WebSocket (non-streaming).
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NodeProxyResponse {
     pub request_id: String,
     pub status: u16,
@@ -390,6 +391,8 @@ pub struct NodeWsManager {
     max_connections: usize,
     /// Counter for connections currently in the auth handshake phase
     pending_auth: AtomicUsize,
+    cluster_dispatch:
+        std::sync::OnceLock<std::sync::Weak<crate::services::node_dispatch::NodeDispatch>>,
 }
 
 /// JSON message sent from NyxID to a node for a proxy request.
@@ -909,6 +912,7 @@ impl fmt::Debug for PendingCredentialCiphertextParams<'_> {
 }
 
 /// Parameters for pushing a credential update to a node.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CredentialUpdateParams {
     pub service_slug: String,
     pub injection_method: String,
@@ -1290,7 +1294,15 @@ impl NodeWsManager {
             proxy_timeout_secs,
             max_connections,
             pending_auth: AtomicUsize::new(0),
+            cluster_dispatch: std::sync::OnceLock::new(),
         }
+    }
+
+    pub fn attach_cluster_dispatch(
+        &self,
+        dispatch: std::sync::Weak<crate::services::node_dispatch::NodeDispatch>,
+    ) {
+        let _ = self.cluster_dispatch.set(dispatch);
     }
 
     /// Total connections including those still in auth handshake.
@@ -1474,6 +1486,33 @@ impl NodeWsManager {
         }
     }
 
+    pub async fn cluster_session_info(&self, node_id: &str) -> NodeSessionInfo {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            return dispatch.session_info(node_id).await;
+        }
+        self.session_info(node_id)
+    }
+
+    pub async fn await_cluster_capability_resolution(
+        &self,
+        node_id: &str,
+        timeout: std::time::Duration,
+    ) {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch.await_capability_resolution(node_id, timeout).await;
+        } else {
+            self.await_capability_resolution(node_id, timeout).await;
+        }
+    }
+
     /// Send a proxy request to a node and wait for the response.
     /// If `signing_secret` is provided, the request is HMAC-signed.
     /// Returns either a complete response or a streaming channel.
@@ -1497,6 +1536,20 @@ impl NodeWsManager {
         signing_secret: Option<&[u8]>,
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            return dispatch
+                .send_proxy_request_classified(
+                    node_id,
+                    request,
+                    signing_secret,
+                    _billing_egress_permit,
+                )
+                .await;
+        }
         let signature = signing_secret.map(|secret| sign_proxy_request(secret, &request));
         self.send_proxy_request_classified_prepared(
             node_id,
@@ -1642,6 +1695,7 @@ impl NodeWsManager {
     }
 
     /// Open an SSH tunnel on a connected node and await the open acknowledgement.
+    #[cfg(test)]
     pub(crate) async fn open_ssh_tunnel(
         &self,
         node_id: &str,
@@ -1848,6 +1902,22 @@ impl NodeWsManager {
         Ok(())
     }
 
+    pub async fn send_credential_update_clustered(
+        &self,
+        node_id: &str,
+        params: &CredentialUpdateParams,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch.send_credential_update(node_id, params).await
+        } else {
+            self.send_credential_update(node_id, params)
+        }
+    }
+
     /// Send a `credential_remove` frame to the node so it drops any
     /// locally-stored credential + target_url for the given service
     /// slug. Used when a `UserService`'s `node_id` changes so the prior
@@ -1882,6 +1952,22 @@ impl NodeWsManager {
         Ok(())
     }
 
+    pub async fn send_credential_remove_clustered(
+        &self,
+        node_id: &str,
+        service_slug: &str,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch.send_credential_remove(node_id, service_slug).await
+        } else {
+            self.send_credential_remove(node_id, service_slug)
+        }
+    }
+
     /// Notify a connected node that pending credential metadata is available.
     /// The node pulls details through the node-agent HTTP endpoint; this frame
     /// intentionally carries no secret material and no semi-sensitive metadata.
@@ -1912,6 +1998,21 @@ impl NodeWsManager {
         );
 
         Ok(())
+    }
+
+    pub async fn send_pending_credentials_available_clustered(
+        &self,
+        node_id: &str,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch.send_pending_credentials_available(node_id).await
+        } else {
+            self.send_pending_credentials_available(node_id)
+        }
     }
 
     pub fn send_pending_credential_ciphertext(
@@ -1951,6 +2052,24 @@ impl NodeWsManager {
         );
 
         Ok(())
+    }
+
+    pub async fn send_pending_credential_ciphertext_clustered(
+        &self,
+        node_id: &str,
+        params: &PendingCredentialCiphertextParams<'_>,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch
+                .send_pending_credential_ciphertext(node_id, params)
+                .await
+        } else {
+            self.send_pending_credential_ciphertext(node_id, params)
+        }
     }
 
     /// Strict-wait variant of `send_credential_update`: generates a
@@ -2038,6 +2157,26 @@ impl NodeWsManager {
         }
     }
 
+    pub async fn send_credential_update_and_wait_clustered(
+        &self,
+        node_id: &str,
+        params: &CredentialUpdateParams,
+        timeout: std::time::Duration,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch
+                .send_credential_update_and_wait(node_id, params, timeout)
+                .await
+        } else {
+            self.send_credential_update_and_wait(node_id, params, timeout)
+                .await
+        }
+    }
+
     /// Strict-wait variant of `send_credential_remove`. Same semantics
     /// as `send_credential_update_and_wait`: returns `Ok(())` only after
     /// the node's `credential_update_ack` echoes back with status=ok.
@@ -2100,6 +2239,26 @@ impl NodeWsManager {
                     "Timed out waiting for credential_update_ack from node {node_id}"
                 )))
             }
+        }
+    }
+
+    pub async fn send_credential_remove_and_wait_clustered(
+        &self,
+        node_id: &str,
+        service_slug: &str,
+        timeout: std::time::Duration,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch
+                .send_credential_remove_and_wait(node_id, service_slug, timeout)
+                .await
+        } else {
+            self.send_credential_remove_and_wait(node_id, service_slug, timeout)
+                .await
         }
     }
 
@@ -2420,6 +2579,12 @@ impl NodeWsManager {
         }
     }
 
+    pub(crate) fn cancel_proxy_request(&self, node_id: &str, request_id: &str) {
+        if let Some(conn) = self.connections.get(node_id) {
+            conn.pending.remove(request_id);
+        }
+    }
+
     pub fn deliver_ssh_tunnel_opened(&self, node_id: &str, session_id: &str) -> bool {
         let Some(conn) = self.connections.get(node_id) else {
             return false;
@@ -2509,20 +2674,6 @@ impl NodeWsManager {
     }
 
     // ---- SSH exec (non-interactive command execution) ----
-
-    /// Execute an SSH command on a connected node and wait for the result.
-    /// If `signing_secret` is provided, the request is HMAC-signed.
-    pub(crate) async fn exec_ssh_command(
-        &self,
-        node_id: &str,
-        request: NodeSshExecRequest,
-        signing_secret: Option<&[u8]>,
-        _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
-    ) -> AppResult<NodeSshExecResult> {
-        let signature = signing_secret.map(|secret| sign_ssh_exec_request(secret, &request));
-        self.exec_ssh_command_prepared(node_id, request, signature, _billing_egress_permit)
-            .await
-    }
 
     pub(crate) async fn exec_ssh_command_prepared(
         &self,
@@ -2617,20 +2768,6 @@ impl NodeWsManager {
                 Err(AppError::NodeProxyTimeout)
             }
         }
-    }
-
-    /// Execute an SSH command on a connected node using a node-local SSH key.
-    /// If `signing_secret` is provided, the request is HMAC-signed.
-    pub(crate) async fn exec_ssh_node_key_command(
-        &self,
-        node_id: &str,
-        request: NodeSshNodeKeyExecRequest,
-        signing_secret: Option<&[u8]>,
-        _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
-    ) -> AppResult<NodeSshExecResult> {
-        let signature = signing_secret.map(|secret| sign_ssh_node_exec_request(secret, &request));
-        self.exec_ssh_node_key_command_prepared(node_id, request, signature, _billing_egress_permit)
-            .await
     }
 
     pub(crate) async fn exec_ssh_node_key_command_prepared(
@@ -2834,6 +2971,7 @@ impl NodeWsManager {
     // ---- Web terminal session management ----
 
     /// Open a web terminal session on a connected node and await the started acknowledgement.
+    #[cfg(test)]
     pub(crate) async fn open_web_terminal(
         &self,
         node_id: &str,
@@ -3116,20 +3254,6 @@ impl NodeWsManager {
     }
 
     // ---- WebSocket proxy passthrough ----
-
-    /// Open a WS proxy session through a connected node.
-    /// Sends `ws_proxy_open` and waits for `ws_proxy_opened` or error.
-    pub(crate) async fn open_ws_proxy(
-        &self,
-        node_id: &str,
-        request: NodeWsProxyRequest,
-        signing_secret: Option<&[u8]>,
-        _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
-    ) -> AppResult<NodeWsProxySession> {
-        let signature = signing_secret.map(|secret| sign_ws_proxy_request(secret, &request));
-        self.open_ws_proxy_prepared(node_id, request, signature, _billing_egress_permit)
-            .await
-    }
 
     pub(crate) async fn open_ws_proxy_prepared(
         &self,

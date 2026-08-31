@@ -25,7 +25,7 @@ The implementation is complete when all ten audit findings have code, tests, and
 
 | Item | Status | Implementation | Evidence |
 | --- | --- | --- | --- |
-| 1. Node WebSocket registry | In progress | Fenced Mongo owner claims, renew/release, capability snapshot, crash expiry cleanup, ownership-aware routing/status, and connection UUID teardown are implemented. Internal forwarding and remote revocation remain. | Routing regression and local fence tests pass; Mongo CAS tests await replica-set recovery. |
+| 1. Node WebSocket registry | In progress | Fenced Mongo owner claims, lease renewal/release, capability snapshots, ownership-aware routing/status, authenticated internal forwarding, remote revocation, and HTTP/SSH/terminal/WS/credential dispatch are implemented. The adversarial audit found remaining large-frame, reconnect TOCTOU, delete-ordering, and pre-header cancellation hardening work. | Mongo-backed owner/routing tests and five two-replica forwarding tests pass; hardening regressions are being added. |
 | 2. OAuth refresh sweep | Pending | Per-key Mongo lease for sweep and proxy refresh | Pending |
 | 3. DPoP replay cache | Pending | Mongo unique insert and TTL expiry | Pending |
 | 4. Event dedup cache | Pending | Mongo unique insert and TTL expiry | Pending |
@@ -81,7 +81,11 @@ The full contract is recorded in `docs/HORIZONTAL_SCALING_ARCHITECTURE.md`.
 | `expired_owner_fences_a_stale_local_socket` after fix | Pass | 1 passed, 0 failed, 5,718 filtered out |
 | `stale_reader_cannot_unregister_replacement_connection` | Pass | 1 passed, 0 failed, 5,718 filtered out |
 | `connection_owner_debug_redacts_internal_address` | Pass | 1 passed, 0 failed, 5,718 filtered out |
-| Node owner Mongo CAS tests | Blocked by test infrastructure | The earlier replica-set listener on `127.0.0.1:27019` stopped and Docker Desktop did not answer; tests remain implemented and will be rerun after the fixture is restored. |
+| Node owner Mongo CAS tests | Pass | 3 passed, 0 failed against an isolated MongoDB 8.0.14 `rs0` on `127.0.0.1:27019` |
+| `remote_complete_proxy_preserves_response_and_request_identity` before fix | Expected failure | Complete forwarding returned the node UUID instead of the original request UUID |
+| Two-replica node forwarding tests | Pass | 5 passed, 0 failed: complete HTTP, early streaming + cancellation, SSH exec/tunnel, terminal, WS passthrough, credential ack, and remote disconnect |
+| Internal HMAC tests | Pass | 3 passed, 0 failed, including a Mongo-backed shared nonce replay rejection |
+| Node routing tests | Pass | 13 passed, 0 failed against the replica set |
 | Kubernetes schemas | Pass | `kubeconform -strict -summary k8s`: 17 resources valid, 0 invalid, 0 errors, 0 skipped |
 | Kubernetes YAML | Pass | `yq eval-all '.' k8s/*.yaml`: all documents parsed |
 | Production Compose | Pass | Merged `docker-compose.yml` and `docker-compose.prod.yml` passes `docker compose config --quiet`; backend has no container name or published host port |

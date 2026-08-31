@@ -250,12 +250,11 @@ pub async fn admin_disconnect_node(
 ) -> AppResult<impl IntoResponse> {
     require_admin(&state, &auth_user).await?;
 
-    let was_connected = state.node_ws_manager.is_connected(&node_id);
+    let was_connected = state
+        .node_dispatch
+        .disconnect(&node_id, 4000, "admin disconnected node")
+        .await?;
     if was_connected {
-        state
-            .node_ws_manager
-            .disconnect_connection(&node_id, 4000, "admin disconnected node")
-            .await;
         node_service::set_node_status(&state.db, &node_id, NodeStatus::Offline).await?;
     }
 
@@ -296,15 +295,11 @@ pub async fn admin_delete_node(
 ) -> AppResult<impl IntoResponse> {
     require_admin(&state, &auth_user).await?;
 
+    let _ = state
+        .node_dispatch
+        .disconnect(&node_id, 4006, "node deleted by admin")
+        .await?;
     node_service::admin_delete_node(&state.db, &node_id).await?;
-
-    // Disconnect WebSocket if connected
-    if state.node_ws_manager.is_connected(&node_id) {
-        state
-            .node_ws_manager
-            .disconnect_connection(&node_id, 4006, "node deleted by admin")
-            .await;
-    }
 
     audit_service::log_for_user(
         state.db.clone(),

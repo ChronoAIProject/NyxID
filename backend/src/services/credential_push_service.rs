@@ -183,7 +183,10 @@ pub async fn push_credential_to_node_if_owned(
             _ => None,
         };
         let params = build_credential_params(svc, &credential, target_url);
-        if let Err(e) = node_ws_manager.send_credential_update(node_id, &params) {
+        if let Err(e) = node_ws_manager
+            .send_credential_update_clustered(node_id, &params)
+            .await
+        {
             tracing::warn!(
                 node_id = %node_id,
                 service_slug = %svc.slug,
@@ -282,7 +285,10 @@ pub async fn push_credential_to_node_if_routed(
 
         let params = build_credential_params(svc, &credential, target_url);
 
-        if let Err(e) = node_ws_manager.send_credential_update(node_id, &params) {
+        if let Err(e) = node_ws_manager
+            .send_credential_update_clustered(node_id, &params)
+            .await
+        {
             tracing::warn!(
                 node_id = %node_id,
                 service_slug = %svc.slug,
@@ -383,19 +389,29 @@ pub async fn push_credential_to_node_strict(
     // through — old agents that never send one must still make
     // progress.
     node_ws_manager
-        .await_capability_resolution(target.target_node_id, std::time::Duration::from_millis(500))
+        .await_cluster_capability_resolution(
+            target.target_node_id,
+            std::time::Duration::from_millis(500),
+        )
         .await;
 
-    if node_ws_manager.supports_credential_ack_correlation(target.target_node_id) {
+    if node_ws_manager
+        .cluster_session_info(target.target_node_id)
+        .await
+        .capabilities
+        .credential_ack_correlation
+    {
         node_ws_manager
-            .send_credential_update_and_wait(
+            .send_credential_update_and_wait_clustered(
                 target.target_node_id,
                 &params,
                 std::time::Duration::from_secs(10),
             )
             .await?;
     } else {
-        node_ws_manager.send_credential_update(target.target_node_id, &params)?;
+        node_ws_manager
+            .send_credential_update_clustered(target.target_node_id, &params)
+            .await?;
         tracing::info!(
             node_id = %target.target_node_id,
             service_slug = %target.service_slug,
@@ -444,7 +460,11 @@ pub async fn push_no_auth_to_node_strict(
     // cases, so without this guard an offline node was being told to
     // "upgrade the agent" even though retrying when it reconnects is
     // the right move.
-    if !node_ws_manager.is_connected(node_id) {
+    if !node_ws_manager
+        .cluster_session_info(node_id)
+        .await
+        .is_connected
+    {
         return Err(AppError::NodeOffline(format!(
             "Node {node_id} is not connected; cannot downgrade service '{service_slug}' to no-auth \
              without first clearing the credential on the node."
@@ -452,22 +472,35 @@ pub async fn push_no_auth_to_node_strict(
     }
 
     node_ws_manager
-        .await_capability_resolution(node_id, std::time::Duration::from_millis(500))
+        .await_cluster_capability_resolution(node_id, std::time::Duration::from_millis(500))
         .await;
 
     // Re-check connection after the capability wait: the node may
     // have dropped while we awaited. Same reasoning as above —
     // surface `NodeOffline` for a retryable outage, not the
     // legacy-agent `BadRequest`.
-    if !node_ws_manager.is_connected(node_id) {
+    if !node_ws_manager
+        .cluster_session_info(node_id)
+        .await
+        .is_connected
+    {
         return Err(AppError::NodeOffline(format!(
             "Node {node_id} disconnected before no-auth placeholder could be pushed"
         )));
     }
 
-    if node_ws_manager.supports_credential_ack_correlation(node_id) {
+    if node_ws_manager
+        .cluster_session_info(node_id)
+        .await
+        .capabilities
+        .credential_ack_correlation
+    {
         node_ws_manager
-            .send_credential_update_and_wait(node_id, &params, std::time::Duration::from_secs(10))
+            .send_credential_update_and_wait_clustered(
+                node_id,
+                &params,
+                std::time::Duration::from_secs(10),
+            )
             .await
     } else {
         Err(AppError::BadRequest(format!(

@@ -760,7 +760,7 @@ fn validate_fan_out_ciphertext_request(
     )
 }
 
-fn send_pending_ciphertext_to_node(
+async fn send_pending_ciphertext_to_node(
     state: &AppState,
     node_id: &str,
     pending: &NodePendingCredential,
@@ -787,11 +787,12 @@ fn send_pending_ciphertext_to_node(
         ciphertext: &ciphertext_b64,
     };
     state
-        .node_ws_manager
+        .node_dispatch
         .send_pending_credential_ciphertext(node_id, &params)
+        .await
 }
 
-fn send_fan_out_ciphertext_to_node(
+async fn send_fan_out_ciphertext_to_node(
     state: &AppState,
     pending: &NodePendingCredential,
     target: &FanOutNodeState,
@@ -820,8 +821,9 @@ fn send_fan_out_ciphertext_to_node(
         ciphertext: &ciphertext_b64,
     };
     state
-        .node_ws_manager
+        .node_dispatch
         .send_pending_credential_ciphertext(&target.node_id, &params)
+        .await
 }
 
 fn pending_ciphertext_state(pending: &NodePendingCredential, fallback: &'static str) -> String {
@@ -1172,15 +1174,11 @@ pub async fn delete_node(
     let user_id_str = auth_user.user_id.to_string();
     let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
 
+    let _ = state
+        .node_dispatch
+        .disconnect(&node_id, 4006, "node deleted")
+        .await?;
     node_service::delete_node(&state.db, &user_id_str, &node_id).await?;
-
-    // Disconnect WebSocket if connected
-    if state.node_ws_manager.is_connected(&node_id) {
-        state
-            .node_ws_manager
-            .disconnect_connection(&node_id, 4006, "node deleted")
-            .await;
-    }
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -1222,11 +1220,11 @@ pub async fn rotate_token(
             .await?;
 
     // Disconnect the node since its old token is now invalid
-    if state.node_ws_manager.is_connected(&node_id) {
-        state
-            .node_ws_manager
-            .disconnect_connection(&node_id, 4002, "node credentials rotated")
-            .await;
+    if state
+        .node_dispatch
+        .disconnect(&node_id, 4002, "node credentials rotated")
+        .await?
+    {
         node_service::set_node_status(
             &state.db,
             &node_id,
@@ -1343,10 +1341,10 @@ pub async fn push_pending_credential(
         })),
     );
 
-    if state.node_ws_manager.is_connected(&node_id)
-        && let Err(err) = state
-            .node_ws_manager
-            .send_pending_credentials_available(&node_id)
+    if let Err(err) = state
+        .node_dispatch
+        .send_pending_credentials_available(&node_id)
+        .await
     {
         tracing::warn!(
             node_id = %node_id,
@@ -1390,10 +1388,10 @@ pub async fn push_pending_credential_fan_out(
     );
 
     for target in &result.targets {
-        if state.node_ws_manager.is_connected(&target.node_id)
-            && let Err(err) = state
-                .node_ws_manager
-                .send_pending_credentials_available(&target.node_id)
+        if let Err(err) = state
+            .node_dispatch
+            .send_pending_credentials_available(&target.node_id)
+            .await
         {
             tracing::warn!(
                 node_id = %target.node_id,
@@ -1473,17 +1471,14 @@ pub async fn post_fan_out_pending_credential_ciphertexts(
             now,
         )
         .await?;
-    input.online_node_ids = input
-        .items
-        .iter()
-        .filter(|item| {
-            state.node_ws_manager.is_connected(&item.node_id)
-                && state
-                    .node_ws_manager
-                    .supports_remote_credential_crypto(&item.node_id)
-        })
-        .map(|item| item.node_id.clone())
-        .collect::<HashSet<_>>();
+    let mut online_node_ids = HashSet::new();
+    for item in &input.items {
+        let session = state.node_dispatch.session_info(&item.node_id).await;
+        if session.is_connected && session.capabilities.remote_credential_crypto_v1 {
+            online_node_ids.insert(item.node_id.clone());
+        }
+    }
+    input.online_node_ids = online_node_ids;
 
     let outcome = node_pending_credential_service::store_fan_out_ciphertexts_revision_guard(
         &state.db,
@@ -1509,7 +1504,7 @@ pub async fn post_fan_out_pending_credential_ciphertexts(
             Some(RemoteCryptoState::CiphertextReceived)
         )
     }) {
-        match send_fan_out_ciphertext_to_node(&state, &outcome.pending, target) {
+        match send_fan_out_ciphertext_to_node(&state, &outcome.pending, target).await {
             Ok(()) => {
                 log_rci_for_pending_fan_out_target(
                     &state,
@@ -1577,10 +1572,10 @@ pub async fn retry_failed_fan_out_pending_credential(
     );
 
     for target in &result.targets {
-        if state.node_ws_manager.is_connected(&target.node_id)
-            && let Err(err) = state
-                .node_ws_manager
-                .send_pending_credentials_available(&target.node_id)
+        if let Err(err) = state
+            .node_dispatch
+            .send_pending_credentials_available(&target.node_id)
+            .await
         {
             tracing::warn!(
                 node_id = %target.node_id,
@@ -1683,10 +1678,10 @@ pub async fn init_pending_credential_remote_crypto(
     )
     .await?;
 
-    if state.node_ws_manager.is_connected(&node_id)
-        && let Err(err) = state
-            .node_ws_manager
-            .send_pending_credentials_available(&node_id)
+    if let Err(err) = state
+        .node_dispatch
+        .send_pending_credentials_available(&node_id)
+        .await
     {
         tracing::warn!(
             node_id = %node_id,
@@ -1741,10 +1736,9 @@ pub async fn post_pending_credential_ciphertext(
             now,
         )
         .await?;
-    let node_can_receive_now = state.node_ws_manager.is_connected(&node_id)
-        && state
-            .node_ws_manager
-            .supports_remote_credential_crypto(&node_id);
+    let session = state.node_dispatch.session_info(&node_id).await;
+    let node_can_receive_now =
+        session.is_connected && session.capabilities.remote_credential_crypto_v1;
 
     let outcome = node_pending_credential_service::store_pending_ciphertext_first_writer_wins(
         &state.db,
@@ -1816,7 +1810,7 @@ pub async fn post_pending_credential_ciphertext(
                 &pending,
                 RciAuditEventKind::CiphertextReceived,
             );
-            match send_pending_ciphertext_to_node(&state, &node_id, &pending) {
+            match send_pending_ciphertext_to_node(&state, &node_id, &pending).await {
                 Ok(()) => {
                     log_rci_for_pending_user(
                         &state,

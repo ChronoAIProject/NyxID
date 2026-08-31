@@ -1,6 +1,7 @@
 use chrono::{DateTime, Duration, Utc};
 use mongodb::bson::{self, doc};
 use mongodb::options::{FindOneAndUpdateOptions, ReturnDocument};
+use serde::{Deserialize, Serialize};
 
 use crate::errors::AppResult;
 use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeConnectionOwner, NodeStatus};
@@ -36,12 +37,18 @@ impl ReplicaIdentity {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeOwnerFence {
     pub node_id: String,
     pub instance_name: String,
     pub generation_id: String,
     pub connection_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct InvalidatedNodeOwner {
+    pub fence: NodeOwnerFence,
+    pub internal_base_url: String,
 }
 
 impl NodeOwnerFence {
@@ -54,7 +61,7 @@ impl NodeOwnerFence {
         }
     }
 
-    fn filter(&self) -> bson::Document {
+    pub(crate) fn filter(&self) -> bson::Document {
         doc! {
             "_id": &self.node_id,
             "connection_owner.instance_name": &self.instance_name,
@@ -62,6 +69,58 @@ impl NodeOwnerFence {
             "connection_owner.connection_id": &self.connection_id,
         }
     }
+}
+
+pub async fn matches_live_fence(
+    db: &mongodb::Database,
+    fence: &NodeOwnerFence,
+    now: DateTime<Utc>,
+) -> AppResult<bool> {
+    let mut filter = fence.filter();
+    filter.insert("is_active", true);
+    filter.insert(
+        "connection_owner.expires_at",
+        doc! { "$gt": bson::DateTime::from_chrono(now) },
+    );
+    Ok(db
+        .collection::<Node>(NODES)
+        .count_documents(filter)
+        .limit(1)
+        .await?
+        == 1)
+}
+
+pub async fn invalidate_current(
+    db: &mongodb::Database,
+    node_id: &str,
+) -> AppResult<Option<InvalidatedNodeOwner>> {
+    let now = bson::DateTime::from_chrono(Utc::now());
+    let options = FindOneAndUpdateOptions::builder()
+        .return_document(ReturnDocument::Before)
+        .build();
+    let previous = db
+        .collection::<Node>(NODES)
+        .find_one_and_update(
+            doc! {
+                "_id": node_id,
+                "connection_owner": { "$ne": null },
+            },
+            doc! {
+                "$unset": { "connection_owner": "" },
+                "$set": {
+                    "status": NodeStatus::Offline.as_str(),
+                    "updated_at": now,
+                },
+            },
+        )
+        .with_options(options)
+        .await?;
+    Ok(previous
+        .and_then(|node| node.connection_owner)
+        .map(|owner| InvalidatedNodeOwner {
+            fence: NodeOwnerFence::from_owner(node_id, &owner),
+            internal_base_url: owner.internal_base_url,
+        }))
 }
 
 pub fn live_owner(node: &Node, now: DateTime<Utc>) -> Option<&NodeConnectionOwner> {
