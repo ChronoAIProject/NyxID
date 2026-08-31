@@ -9,7 +9,7 @@
 #     docker compose -f docker-compose.yml -f docker-compose.prod.yml \
 #                    --env-file .env.production pull
 #     docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-#                    --env-file .env.production up -d
+#                    --env-file .env.production up -d --scale backend=2
 #
 # Multi-arch images are published to GitHub Container Registry by the
 # `Publish Images` workflow on every merge to main and on every `v*` tag.
@@ -25,10 +25,10 @@ services:
 
   backend:
     image: ghcr.io/chronoaiproject/nyxid/backend:${NYXID_VERSION:-latest}
-    container_name: nyxid-backend
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:3001:3001"
+    expose:
+      - "3001"
+      - "3002"
     env_file:
       - .env.production
     environment:
@@ -36,6 +36,9 @@ services:
       # env_file entries are passed through to the container verbatim (no
       # ${...} expansion), so DATABASE_URL must live in this block.
       DATABASE_URL: mongodb://${MONGO_ROOT_USER:-nyxid}:${MONGO_ROOT_PASSWORD}@mongodb:27017/nyxid?authSource=admin
+      # INSTANCE_NAME and INTERNAL_ADVERTISE_URL default from each container's
+      # unique HOSTNAME. The private listener is reachable only on this network.
+      INTERNAL_BIND_ADDR: 0.0.0.0:3002
     volumes:
       - ./keys:/app/keys:ro
     depends_on:
@@ -50,7 +53,6 @@ services:
 
   frontend:
     image: ghcr.io/chronoaiproject/nyxid/frontend:${NYXID_VERSION:-latest}
-    container_name: nyxid-frontend
     restart: unless-stopped
     ports:
       - "127.0.0.1:3000:8080"
