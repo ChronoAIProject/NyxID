@@ -63,7 +63,6 @@ pub async fn post_event(
         &state.config,
         &state.jwt_keys,
         &state.per_channel_event_limiter,
-        &state.event_dedup_cache,
         state.telemetry.as_deref(),
         &tele,
         &auth_user,

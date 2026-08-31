@@ -24,10 +24,6 @@ use crate::models::user::{User, UserType};
 use crate::models::user_endpoint::UserEndpoint;
 use crate::models::user_service::UserService;
 use crate::mw::auth::{AuthMethod, AuthUser};
-use crate::services::dpop_jti_cache::{
-    DPOP_JTI_CACHE_CAPACITY, DPOP_JTI_CACHE_TTL_SECS, DpopJtiCache,
-};
-use crate::services::event_dedup_cache::EventDedupCache;
 use crate::services::node_ws_manager::NodeWsManager;
 use crate::services::platform_settings_service::BrokerPolicy;
 use crate::services::provider_token_exchange_service::TokenExchangeCache;
@@ -1937,21 +1933,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             config.channel_relay_edit_rate_limit_per_second,
             config.channel_relay_edit_rate_limit_burst,
         )),
-        event_dedup_cache: Arc::new(EventDedupCache::new(
-            config.channel_event_dedup_capacity,
-            Duration::from_secs(config.channel_event_dedup_ttl_secs),
-        )),
         per_trigger_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(
             config.trigger_rate_limit_per_second,
             config.trigger_rate_limit_burst,
-        )),
-        trigger_dedup_cache: Arc::new(EventDedupCache::new(
-            config.channel_event_dedup_capacity,
-            Duration::from_secs(config.channel_event_dedup_ttl_secs),
-        )),
-        dpop_jti_cache: Arc::new(DpopJtiCache::new(
-            DPOP_JTI_CACHE_CAPACITY,
-            Duration::from_secs(DPOP_JTI_CACHE_TTL_SECS),
         )),
         ws_passthrough_count: Arc::new(AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),

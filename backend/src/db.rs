@@ -101,6 +101,8 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    crate::services::coordination_service::ensure_indexes(db).await?;
+
     // ── assistant_wire_logs ──
     db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)
         .create_index(

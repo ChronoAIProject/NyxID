@@ -41,6 +41,8 @@ pub mod connection_expiry_service;
 pub mod connection_service;
 pub mod consent_service;
 pub mod content_type;
+#[allow(dead_code)]
+pub mod coordination_service;
 pub mod credential_push_service;
 pub mod delegation_service;
 pub mod developer_webhook_service;

@@ -39,6 +39,9 @@ mod grant_visibility_tests;
 #[cfg(test)]
 mod credit_schedule_tests;
 
+#[cfg(test)]
+mod coordination_tests;
+
 use std::sync::Arc;
 
 /// Install `aws_lc_rs` as the rustls process-wide crypto provider.
@@ -72,8 +75,6 @@ use crypto::key_provider::KeyProvider;
 use crypto::local_key_provider::LocalKeyProvider;
 use models::mcp_session::McpSessionStore;
 
-use services::dpop_jti_cache::{DPOP_JTI_CACHE_CAPACITY, DPOP_JTI_CACHE_TTL_SECS, DpopJtiCache};
-use services::event_dedup_cache::EventDedupCache;
 use services::node_ws_manager::NodeWsManager;
 use services::platform_settings_service::BrokerPolicy;
 use services::provider_token_exchange_service::TokenExchangeCache;
@@ -177,14 +178,8 @@ pub struct AppState {
     pub per_channel_event_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
     /// Per-upstream-message edit limiter for progressive channel relay edits.
     pub per_message_edit_limiter: mw::rate_limit::SharedPerMessageEditRateLimiter,
-    /// Best-effort idempotency cache for inbound channel events.
-    pub event_dedup_cache: Arc<EventDedupCache>,
     /// Per-trigger token bucket for public trigger ingress.
     pub per_trigger_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
-    /// Best-effort idempotency cache for inbound trigger events.
-    pub trigger_dedup_cache: Arc<EventDedupCache>,
-    /// Per-process DPoP proof replay cache keyed by proof jti.
-    pub dpop_jti_cache: Arc<DpopJtiCache>,
     /// Active WebSocket passthrough connection count (for resource limiting)
     pub ws_passthrough_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Generic downstream-provider token exchange cache with per-key
@@ -667,21 +662,9 @@ async fn main() {
         config.channel_event_rate_limit_per_second,
         config.channel_event_rate_limit_burst,
     ));
-    let event_dedup_cache = Arc::new(EventDedupCache::new(
-        config.channel_event_dedup_capacity,
-        std::time::Duration::from_secs(config.channel_event_dedup_ttl_secs),
-    ));
     let per_trigger_limiter = Arc::new(mw::rate_limit::PerChannelEventLimiter::new(
         config.trigger_rate_limit_per_second,
         config.trigger_rate_limit_burst,
-    ));
-    let trigger_dedup_cache = Arc::new(EventDedupCache::new(
-        config.channel_event_dedup_capacity,
-        std::time::Duration::from_secs(config.channel_event_dedup_ttl_secs),
-    ));
-    let dpop_jti_cache = Arc::new(DpopJtiCache::new(
-        DPOP_JTI_CACHE_CAPACITY,
-        std::time::Duration::from_secs(DPOP_JTI_CACHE_TTL_SECS),
     ));
     let per_message_edit_limiter = Arc::new(mw::rate_limit::PerMessageEditRateLimiter::new(
         config.channel_relay_edit_rate_limit_per_second,
@@ -782,10 +765,7 @@ async fn main() {
         billing_ledger_hmac_key,
         per_channel_event_limiter,
         per_message_edit_limiter,
-        event_dedup_cache,
         per_trigger_limiter,
-        trigger_dedup_cache,
-        dpop_jti_cache,
         ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
         cloud_response_cache: Arc::new(
@@ -956,8 +936,8 @@ async fn main() {
         }
     });
 
-    // Spawn background cleanup for the per-channel event limiter and the
-    // event idempotency LRU. Same cadence as the per-agent limiter.
+    // Spawn background cleanup for the per-channel event limiter. MongoDB
+    // TTL indexes clean up event idempotency records.
     let cleanup_event_limiter = state.per_channel_event_limiter.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -976,13 +956,11 @@ async fn main() {
         }
     });
     let cleanup_trigger_limiter = state.per_trigger_limiter.clone();
-    let cleanup_trigger_dedup = state.trigger_dedup_cache.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
             cleanup_trigger_limiter.cleanup();
-            cleanup_trigger_dedup.cleanup();
         }
     });
     let cleanup_edit_limiter = state.per_message_edit_limiter.clone();
@@ -993,15 +971,6 @@ async fn main() {
             cleanup_edit_limiter.cleanup();
         }
     });
-    let cleanup_event_dedup = state.event_dedup_cache.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_event_dedup.cleanup();
-        }
-    });
-
     // Expire abandoned app-bound connect links even when their creator has
     // stopped polling. Disabled when the interval is 0.
     if config.connect_link_expiry_sweep_interval_secs > 0 {

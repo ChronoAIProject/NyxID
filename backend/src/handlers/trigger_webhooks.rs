@@ -83,34 +83,58 @@ pub async fn receive_trigger(
         }));
     }
 
-    // Synchronous agent and notification targets intentionally insert only
-    // after successful delivery so provider retries can recover failures.
-    // Concurrent identical requests may both pass this best-effort check,
-    // matching the existing channel-event gateway contract.
-    if state.trigger_dedup_cache.contains(&trigger.id, &event_id) {
-        return Ok(Json(TriggerIngressResponse {
-            status: "duplicate",
-            event_id,
-        }));
-    }
-    trigger_service::deliver_event(
+    let dedup_ttl = std::time::Duration::from_secs(state.config.channel_event_dedup_ttl_secs);
+    let claim = match crate::services::event_dedup_cache::EventDedupStore::claim(
+        &state.db,
+        crate::services::event_dedup_cache::TRIGGER_EVENT_NAMESPACE,
+        &trigger.id,
+        &event_id,
+        dedup_ttl,
+    )
+    .await?
+    {
+        crate::services::event_dedup_cache::EventDedupClaimResult::Claimed(claim) => claim,
+        crate::services::event_dedup_cache::EventDedupClaimResult::Duplicate => {
+            return Ok(Json(TriggerIngressResponse {
+                status: "duplicate",
+                event_id,
+            }));
+        }
+    };
+    let delivery = trigger_service::deliver_event(
         &state.db,
         &state.encryption_keys,
         &state.http_client,
         &state.config,
         &state.jwt_keys,
         &state.per_channel_event_limiter,
-        &state.event_dedup_cache,
         state.fcm_auth.as_deref(),
         state.apns_auth.as_deref(),
         &trigger,
         &event_id,
         payload,
     )
-    .await?;
-    state
-        .trigger_dedup_cache
-        .insert_if_absent(&trigger.id, &event_id);
+    .await;
+    if let Err(error) = delivery {
+        if let Err(release_error) =
+            crate::services::event_dedup_cache::EventDedupStore::release(&state.db, &claim).await
+        {
+            tracing::warn!(
+                trigger_id = %trigger.id,
+                event_id = %event_id,
+                error = %release_error,
+                "Failed to release trigger dedup claim after delivery failure"
+            );
+        }
+        return Err(error);
+    }
+    if !crate::services::event_dedup_cache::EventDedupStore::commit(&state.db, &claim, dedup_ttl)
+        .await?
+    {
+        return Err(crate::errors::AppError::Internal(
+            "Trigger dedup claim was lost before commit".to_string(),
+        ));
+    }
     audit_service::log_async(
         state.db.clone(),
         Some(trigger.user_id.clone()),

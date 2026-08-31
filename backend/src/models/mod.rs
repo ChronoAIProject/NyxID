@@ -25,6 +25,8 @@ pub mod channel_message;
 pub mod cli_pairing;
 pub mod connect_link;
 pub mod consent;
+#[allow(dead_code)]
+pub mod coordination;
 pub mod credit_grant;
 pub mod credit_schedule;
 pub mod credit_schedule_period;
