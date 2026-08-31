@@ -4922,12 +4922,13 @@ mod tests {
         .await;
         let provider_id = Uuid::new_v4().to_string();
         let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
+        let client_secret = encryption_keys.encrypt(b"client-secret").await.unwrap();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
             .insert_one(make_test_provider(
                 &provider_id,
                 &token_url,
                 Some(client_id),
-                None,
+                Some(client_secret),
             ))
             .await
             .unwrap();
@@ -4965,9 +4966,11 @@ mod tests {
                 &second_runtime,
             ),
         );
+        let first = first.expect("first replica refresh");
+        let second = second.expect("second replica refresh");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
-        assert_eq!(first.unwrap(), "fresh-legacy-access");
-        assert_eq!(second.unwrap(), "fresh-legacy-access");
+        assert_eq!(first, "fresh-legacy-access");
+        assert_eq!(second, "fresh-legacy-access");
     }
 
     #[tokio::test]
