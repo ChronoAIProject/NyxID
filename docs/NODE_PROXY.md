@@ -404,7 +404,7 @@ Response:
 - Verify the agent can reach `wss://your-nyxid-server/api/v1/nodes/ws`
 - Check that the auth token has not been rotated
 - Ensure TLS certificates are valid (WebSocket requires WSS in production)
-- Check if the maximum concurrent connections limit has been reached (`NODE_MAX_WS_CONNECTIONS`, default: 100)
+- Atomically reserve a per-replica connection slot (`NODE_MAX_WS_CONNECTIONS`, default: 100)
 
 ### Registration token expired
 
@@ -456,7 +456,7 @@ Each user can register up to `NODE_MAX_PER_USER` nodes (default: 10). Delete unu
 - WebSocket connections must use WSS (TLS) in production
 - Auth tokens are transmitted in the first WebSocket message, not as URL parameters (avoids server access logs)
 - Connections without valid authentication within 10 seconds are terminated with close code 4001
-- A configurable maximum concurrent connections limit prevents resource exhaustion (`NODE_MAX_WS_CONNECTIONS`, default: 100)
+- A configurable per-replica maximum concurrent connections limit prevents process resource exhaustion (`NODE_MAX_WS_CONNECTIONS`, default: 100)
 
 ### Proxy Request Integrity
 
@@ -483,7 +483,7 @@ All node proxy settings are optional with sensible defaults:
 | `NODE_PROXY_TIMEOUT_SECS` | `30` | Timeout for proxy requests routed through nodes |
 | `NODE_REGISTRATION_TOKEN_TTL_SECS` | `3600` | Registration token validity (1 hour) |
 | `NODE_MAX_PER_USER` | `10` | Maximum nodes per user |
-| `NODE_MAX_WS_CONNECTIONS` | `100` | Maximum concurrent WebSocket connections (authenticated + pending) |
+| `NODE_MAX_WS_CONNECTIONS` | `100` | Maximum concurrent WebSocket connections per replica (authenticated + pending) |
 | `NODE_MAX_STREAM_DURATION_SECS` | `300` | Maximum duration for streaming proxy responses |
 | `NODE_HMAC_SIGNING_ENABLED` | `true` | Enable HMAC request signing for node proxy requests |
 

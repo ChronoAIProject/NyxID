@@ -1,8 +1,6 @@
-use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
-use dashmap::DashMap;
 use mongodb::bson::doc;
 use rand::RngCore;
 use ssh_key::{Algorithm, LineEnding, PrivateKey, PublicKey, certificate};
@@ -15,10 +13,10 @@ use crate::models::downstream_service::{
 };
 use crate::models::ssh_auth_mode::SshAuthMode;
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct SshSessionManager {
-    concurrent_by_user: Arc<DashMap<String, usize>>,
-    max_sessions_per_user: usize,
+    slots: crate::services::cluster_slot_service::RenewableSlotManager,
+    max_sessions_per_user: u32,
 }
 
 #[derive(Debug)]
@@ -29,56 +27,25 @@ pub struct ResolvedSshAuthContext {
 }
 
 impl SshSessionManager {
-    pub fn new(max_sessions_per_user: usize) -> Self {
+    pub fn new(
+        slots: crate::services::cluster_slot_service::RenewableSlotManager,
+        max_sessions_per_user: usize,
+    ) -> Self {
         Self {
-            concurrent_by_user: Arc::new(DashMap::new()),
-            max_sessions_per_user,
+            slots,
+            max_sessions_per_user: u32::try_from(max_sessions_per_user).unwrap_or(u32::MAX),
         }
     }
 
-    pub fn try_acquire(&self, user_id: &str) -> AppResult<SshSessionGuard> {
-        let mut entry = self
-            .concurrent_by_user
-            .entry(user_id.to_string())
-            .or_insert(0);
-        if *entry >= self.max_sessions_per_user {
-            return Err(AppError::RateLimited);
-        }
-
-        *entry += 1;
-        drop(entry);
-
-        Ok(SshSessionGuard {
-            manager: self.concurrent_by_user.clone(),
-            user_id: user_id.to_string(),
-        })
-    }
-
-    pub fn active_sessions_for_user(&self, user_id: &str) -> usize {
-        self.concurrent_by_user
-            .get(user_id)
-            .map(|entry| *entry)
-            .unwrap_or(0)
+    pub async fn try_acquire(&self, user_id: &str) -> AppResult<SshSessionGuard> {
+        self.slots
+            .acquire("ssh_session", user_id, self.max_sessions_per_user)
+            .await?
+            .ok_or(AppError::RateLimited)
     }
 }
 
-pub struct SshSessionGuard {
-    manager: Arc<DashMap<String, usize>>,
-    user_id: String,
-}
-
-impl Drop for SshSessionGuard {
-    fn drop(&mut self) {
-        let _ = self.manager.remove_if_mut(&self.user_id, |_, count| {
-            if *count > 1 {
-                *count -= 1;
-                false
-            } else {
-                true
-            }
-        });
-    }
-}
+pub type SshSessionGuard = crate::services::cluster_slot_service::RenewableSlotGuard;
 
 pub struct IssuedSshCertificate {
     pub key_id: String,
@@ -445,9 +412,9 @@ pub async fn issue_certificate(
 #[cfg(test)]
 mod tests {
     use super::{
-        SshConfigInput, SshSessionManager, build_ssh_config, issue_certificate,
-        resolve_ssh_auth_context_for_owner, target_base_url, validate_certificate_settings,
-        validate_principal, validate_ssh_target_syntax,
+        SshConfigInput, build_ssh_config, issue_certificate, resolve_ssh_auth_context_for_owner,
+        target_base_url, validate_certificate_settings, validate_principal,
+        validate_ssh_target_syntax,
     };
     use crate::crypto::aes::EncryptionKeys;
     use crate::crypto::local_key_provider::LocalKeyProvider;
@@ -602,19 +569,6 @@ mod tests {
         assert!(validate_principal("ubuntu").is_ok());
         assert!(validate_principal("deploy.user@example.com").is_ok());
         assert!(validate_principal("bad principal").is_err());
-    }
-
-    #[test]
-    fn tracks_concurrent_sessions_per_user() {
-        let manager = SshSessionManager::new(2);
-        let guard1 = manager.try_acquire("user-1").expect("first");
-        let guard2 = manager.try_acquire("user-1").expect("second");
-        assert_eq!(manager.active_sessions_for_user("user-1"), 2);
-        assert!(manager.try_acquire("user-1").is_err());
-        drop(guard1);
-        assert_eq!(manager.active_sessions_for_user("user-1"), 1);
-        drop(guard2);
-        assert_eq!(manager.active_sessions_for_user("user-1"), 0);
     }
 
     #[tokio::test]

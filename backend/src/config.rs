@@ -386,7 +386,7 @@ pub struct AppConfig {
     pub node_pending_credential_ttl_secs: i64,
     /// Maximum nodes per user (default: 10)
     pub node_max_per_user: u32,
-    /// Maximum concurrent WebSocket connections (default: 100)
+    /// Maximum concurrent node WebSocket connections per replica (default: 100)
     pub node_max_ws_connections: usize,
     /// Maximum duration for streaming proxy responses in seconds (default: 300)
     pub node_max_stream_duration_secs: u64,
@@ -401,7 +401,7 @@ pub struct AppConfig {
     /// Idle timeout for proxy streaming responses in seconds (default: 60).
     /// Stream is terminated if no data chunk arrives within this duration.
     pub proxy_stream_idle_timeout_secs: u64,
-    /// Maximum concurrent SSH WebSocket tunnel sessions per user (default: 4)
+    /// Maximum concurrent SSH operations per user across the cluster (default: 4)
     pub ssh_max_sessions_per_user: usize,
     /// Timeout for connecting to a downstream SSH target in seconds (default: 10)
     pub ssh_connect_timeout_secs: u64,

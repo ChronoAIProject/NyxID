@@ -433,7 +433,7 @@ Relevant environment variables:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `SSH_MAX_SESSIONS_PER_USER` | `4` | Maximum concurrent SSH tunnels per authenticated user |
+| `SSH_MAX_SESSIONS_PER_USER` | `4` | Maximum concurrent SSH tunnels, browser terminals, and exec operations per authenticated user across the cluster |
 | `SSH_CONNECT_TIMEOUT_SECS` | `10` | Timeout when NyxID or a node opens the downstream TCP connection |
 | `SSH_MAX_TUNNEL_DURATION_SECS` | `3600` | Maximum lifetime for a single SSH tunnel session before NyxID closes it |
 

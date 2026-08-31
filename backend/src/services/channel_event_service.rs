@@ -160,7 +160,7 @@ pub async fn forward_event(
 
     // 3. Per-channel rate limit. Only authenticated, authorized callers
     //    count against the bucket.
-    if !rate_limiter.check(conversation_id) {
+    if !rate_limiter.check_shared(conversation_id).await? {
         tracing::warn!(
             conversation_id = %conversation_id,
             event_id = %envelope.event_id,

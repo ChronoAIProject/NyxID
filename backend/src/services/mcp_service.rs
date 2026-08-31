@@ -3569,7 +3569,13 @@ pub async fn execute_tool(
                 user_service_id,
                 Some(&service.service_slug),
                 None,
-                Some(connection_expiry_notifier),
+                proxy_service::ProxyExecutionContext::new(
+                    Some(connection_expiry_notifier),
+                    crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
+                        config.platform_service_rate_limit_per_second,
+                        config.platform_service_rate_limit_burst,
+                    ),
+                ),
             )
             .await?
             .ok_or_else(|| {
@@ -3709,6 +3715,10 @@ pub async fn execute_tool(
                     encryption_keys,
                     user_id,
                     downstream_service_id,
+                    crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
+                        config.platform_service_rate_limit_per_second,
+                        config.platform_service_rate_limit_burst,
+                    ),
                 )
                 .await?
             } else {
@@ -3717,6 +3727,10 @@ pub async fn execute_tool(
                     encryption_keys,
                     user_id,
                     downstream_service_id,
+                    crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
+                        config.platform_service_rate_limit_per_second,
+                        config.platform_service_rate_limit_burst,
+                    ),
                 )
                 .await?;
                 (t, true)

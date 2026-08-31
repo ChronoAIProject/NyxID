@@ -827,7 +827,9 @@ pub async fn mcp_post(
         auth.api_key_id.as_deref(),
         auth.rate_limit_per_second,
         auth.rate_limit_burst,
-    ) {
+    )
+    .await
+    {
         return app_error_to_rpc(request.id.clone(), &e);
     }
 
@@ -963,7 +965,9 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
         auth.api_key_id.as_deref(),
         auth.rate_limit_per_second,
         auth.rate_limit_burst,
-    ) {
+    )
+    .await
+    {
         return app_error_to_rpc(None, &e);
     }
 
@@ -1049,7 +1053,9 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
         auth.api_key_id.as_deref(),
         auth.rate_limit_per_second,
         auth.rate_limit_burst,
-    ) {
+    )
+    .await
+    {
         return app_error_to_rpc(None, &e);
     }
 
@@ -2330,7 +2336,15 @@ async fn handle_meta_connect(
             || format!("user:{}", auth.user_id),
             |id| format!("api-key:{id}"),
         );
-        if !state.connect_link_create_limiter.check(&rate_key) {
+        let admitted = match state
+            .connect_link_create_limiter
+            .check_shared(&rate_key)
+            .await
+        {
+            Ok(admitted) => admitted,
+            Err(error) => return app_error_to_rpc(request_id.clone(), &error),
+        };
+        if !admitted {
             return tool_result(
                 request_id,
                 &crate::errors::AppError::ConnectLinkRateLimited.to_string(),
@@ -3285,7 +3299,7 @@ async fn execute_ssh_command_internal(
     let request_len = command.len() as i64;
 
     // Session limiting
-    let session_guard = state.ssh_session_manager.try_acquire(user_id)?;
+    let session_guard = state.ssh_session_manager.try_acquire(user_id).await?;
 
     // Generate ephemeral SSH credentials (key + cert as strings, no files)
     let ephemeral = super::ssh_web_terminal::generate_ephemeral_credentials(
@@ -3327,9 +3341,8 @@ async fn execute_ssh_command_internal(
         };
 
         state.billing.mark_forwarded(&metered).await?;
-        match state
-            .node_dispatch
-            .exec_ssh_command(
+        match session_guard
+            .run_until_lost(state.node_dispatch.exec_ssh_command(
                 node_id,
                 crate::services::node_ws_manager::NodeSshExecRequest {
                     request_id: request_id.clone(),
@@ -3343,7 +3356,7 @@ async fn execute_ssh_command_internal(
                 },
                 signing_secret.as_ref().map(|s| s.as_slice()),
                 billing_egress_permit,
-            )
+            ))
             .await
         {
             Ok(result) => {
@@ -3393,6 +3406,7 @@ async fn execute_ssh_command_internal(
 
                 return Ok(response);
             }
+            Err(error @ AppError::RateLimited) => return Err(error),
             Err(error) => {
                 tracing::warn!(
                     service_id = %service_id,

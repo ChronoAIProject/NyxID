@@ -1890,9 +1890,15 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             encryption_keys.clone(),
         ),
     );
+    let cluster_slot_manager = crate::services::cluster_slot_service::RenewableSlotManager::new(
+        db.clone(),
+        replica_identity.coordination_holder(),
+        std::time::Duration::from_secs(config.cluster_slot_ttl_secs),
+        std::time::Duration::from_secs(config.cluster_slot_renew_secs),
+    );
 
     AppState {
-        db,
+        db: db.clone(),
         config: config.clone(),
         jwt_keys,
         http_client: http_client.clone(),
@@ -1915,26 +1921,90 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         node_ws_manager,
         replica_identity,
         node_dispatch,
-        ssh_session_manager: Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user)),
-        per_agent_limiter: Arc::new(crate::mw::rate_limit::PerAgentRateLimiter::new()),
-        direct_chat_limiter: crate::mw::rate_limit::create_direct_chat_rate_limiter(),
-        device_code_pubkey_limiter: crate::mw::rate_limit::create_per_pubkey_rate_limiter(),
-        device_code_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
-        auth_device_request_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
-        auth_device_poll_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(60, 60),
-        auth_device_approve_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(10, 60),
-        auth_device_approve_per_user_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
-            10, 300,
+        ssh_session_manager: Arc::new(SshSessionManager::new(
+            cluster_slot_manager.clone(),
+            config.ssh_max_sessions_per_user,
+        )),
+        cluster_slot_manager: cluster_slot_manager.clone(),
+        per_agent_limiter: Arc::new(crate::mw::rate_limit::PerAgentRateLimiter::with_db(
+            db.clone(),
+            "agent",
+        )),
+        platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
+            config.platform_service_rate_limit_per_second,
+            config.platform_service_rate_limit_burst,
         ),
-        auth_device_preview_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(30, 60),
-        connect_link_create_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(10, 60),
-        connect_link_preview_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(30, 60),
-        connect_link_complete_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(30, 60),
+        direct_chat_limiter: crate::mw::rate_limit::create_direct_chat_rate_limiter(
+            db.clone(),
+            cluster_slot_manager,
+        ),
+        device_code_pubkey_limiter: crate::mw::rate_limit::create_per_pubkey_rate_limiter(
+            db.clone(),
+            "device_code_pubkey",
+        ),
+        device_code_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "device_code_ip",
+            5,
+            60,
+        ),
+        auth_device_request_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_device_request",
+            5,
+            60,
+        ),
+        auth_device_poll_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_device_poll",
+            60,
+            60,
+        ),
+        auth_device_approve_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_device_approve",
+            10,
+            60,
+        ),
+        auth_device_approve_per_user_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "auth_device_approve_user",
+            10,
+            300,
+        ),
+        auth_device_preview_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_device_preview",
+            30,
+            60,
+        ),
+        connect_link_create_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "connect_link_create",
+            10,
+            60,
+        ),
+        connect_link_preview_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "connect_link_preview",
+            30,
+            60,
+        ),
+        connect_link_complete_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "connect_link_complete",
+            30,
+            60,
+        ),
         public_proxy_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "public_proxy",
             config.public_proxy_rate_limit_per_minute,
             60,
         ),
         public_mcp_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "public_mcp",
             config.public_mcp_rate_limit_per_minute,
             60,
         ),
@@ -1942,7 +2012,12 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         // Production default from backend/src/main.rs — 5 claims per
         // 60s per IP; mirror here so claim-rate-limit tests see the
         // same shape.
-        cli_pairing_claim_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        cli_pairing_claim_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "cli_pairing_claim",
+            5,
+            60,
+        ),
         // Tests don't exercise pairing-code HMAC verification; a
         // zero-filled key is deterministic and never touches prod data.
         cli_pairing_hmac_key: Arc::new(zeroize::Zeroizing::new([0u8; 32])),
@@ -1951,19 +2026,28 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         auth_device_hmac_key: Arc::new(zeroize::Zeroizing::new([1u8; 32])),
         audit_chain_hmac_key: Arc::new(zeroize::Zeroizing::new([2u8; 32])),
         billing_ledger_hmac_key: Arc::new(zeroize::Zeroizing::new([3u8; 32])),
-        per_channel_event_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(
-            config.channel_event_rate_limit_per_second,
-            config.channel_event_rate_limit_burst,
-        )),
-        per_message_edit_limiter: Arc::new(crate::mw::rate_limit::PerMessageEditRateLimiter::new(
-            config.channel_relay_edit_rate_limit_per_second,
-            config.channel_relay_edit_rate_limit_burst,
-        )),
-        per_trigger_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(
+        per_channel_event_limiter: Arc::new(
+            crate::mw::rate_limit::PerChannelEventLimiter::with_db(
+                db.clone(),
+                "channel_event",
+                config.channel_event_rate_limit_per_second,
+                config.channel_event_rate_limit_burst,
+            ),
+        ),
+        per_message_edit_limiter: Arc::new(
+            crate::mw::rate_limit::PerMessageEditRateLimiter::with_db(
+                db.clone(),
+                "channel_message_edit",
+                config.channel_relay_edit_rate_limit_per_second,
+                config.channel_relay_edit_rate_limit_burst,
+            ),
+        ),
+        per_trigger_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::with_db(
+            db,
+            "trigger_ingress",
             config.trigger_rate_limit_per_second,
             config.trigger_rate_limit_burst,
         )),
-        ws_passthrough_count: Arc::new(AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
         cloud_response_cache: Arc::new(
             crate::services::cloud_response_cache::CloudResponseCache::new(0),

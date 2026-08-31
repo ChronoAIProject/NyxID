@@ -23,6 +23,13 @@ impl ReplicaIdentity {
         }
     }
 
+    pub fn coordination_holder(&self) -> crate::models::coordination::CoordinationHolder {
+        crate::models::coordination::CoordinationHolder {
+            instance_id: self.instance_name.clone(),
+            generation_id: self.generation_id.clone(),
+        }
+    }
+
     #[cfg(test)]
     fn with_generation(
         instance_name: impl Into<String>,

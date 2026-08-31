@@ -445,11 +445,23 @@ pub struct NodeWsManager {
     proxy_timeout_secs: u64,
     /// Maximum concurrent WebSocket connections (authenticated + pending auth)
     max_connections: usize,
-    /// Counter for connections currently in the auth handshake phase
-    pending_auth: AtomicUsize,
+    /// Reservations held from upgrade admission through socket teardown.
+    connection_reservations: AtomicUsize,
     cancelled_proxy_requests: DashMap<String, std::time::Instant>,
     cluster_dispatch:
         std::sync::OnceLock<std::sync::Weak<crate::services::node_dispatch::NodeDispatch>>,
+}
+
+pub struct NodeConnectionReservation {
+    manager: Arc<NodeWsManager>,
+}
+
+impl Drop for NodeConnectionReservation {
+    fn drop(&mut self) {
+        self.manager
+            .connection_reservations
+            .fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// JSON message sent from NyxID to a node for a proxy request.
@@ -590,6 +602,13 @@ struct WsSshExec {
 }
 
 #[derive(Debug, Serialize)]
+struct WsSshExecCancel {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    request_id: String,
+}
+
+#[derive(Debug, Serialize)]
 struct WsSshNodeExecOpen {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -611,6 +630,64 @@ struct WsSshNodeExecOpen {
     nonce: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hmac: Option<String>,
+}
+
+struct PendingSshExecGuard {
+    request_id: String,
+    tx: mpsc::Sender<NodeOutboundMessage>,
+    requests: Arc<DashMap<String, PendingSshExec>>,
+    streams: Arc<DashMap<String, PendingSshNodeExecStream>>,
+    armed: bool,
+}
+
+impl PendingSshExecGuard {
+    fn new(conn: &NodeConnection, request_id: String) -> Self {
+        Self {
+            request_id,
+            tx: conn.tx.clone(),
+            requests: Arc::clone(&conn.ssh_exec_requests),
+            streams: Arc::clone(&conn.ssh_node_exec_streams),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingSshExecGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        self.requests.remove(&self.request_id);
+        self.streams.remove(&self.request_id);
+
+        let Ok(message) = serde_json::to_string(&WsSshExecCancel {
+            msg_type: "ssh_exec_cancel",
+            request_id: self.request_id.clone(),
+        }) else {
+            return;
+        };
+        let outbound = NodeOutboundMessage::Text(message);
+        match self.tx.try_send(outbound) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(mpsc::error::TrySendError::Full(outbound)) => {
+                let tx = self.tx.clone();
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            tx.send(outbound),
+                        )
+                        .await;
+                    });
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1350,7 +1427,7 @@ impl NodeWsManager {
             connections: DashMap::new(),
             proxy_timeout_secs,
             max_connections,
-            pending_auth: AtomicUsize::new(0),
+            connection_reservations: AtomicUsize::new(0),
             cancelled_proxy_requests: DashMap::new(),
             cluster_dispatch: std::sync::OnceLock::new(),
         }
@@ -1363,9 +1440,9 @@ impl NodeWsManager {
         let _ = self.cluster_dispatch.set(dispatch);
     }
 
-    /// Total connections including those still in auth handshake.
+    /// Total sockets reserved before upgrade, including pending authentication.
     pub fn total_connection_count(&self) -> usize {
-        self.connections.len() + self.pending_auth.load(Ordering::Relaxed)
+        self.connection_reservations.load(Ordering::Acquire)
     }
 
     /// Maximum allowed concurrent connections.
@@ -1373,14 +1450,27 @@ impl NodeWsManager {
         self.max_connections
     }
 
-    /// Increment the pending auth counter (called before WS upgrade).
-    pub fn increment_pending_auth(&self) {
-        self.pending_auth.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Decrement the pending auth counter (called after auth completes or fails).
-    pub fn decrement_pending_auth(&self) {
-        self.pending_auth.fetch_sub(1, Ordering::Relaxed);
+    /// Atomically reserve one per-replica socket slot before the HTTP upgrade.
+    pub fn try_reserve_connection(self: &Arc<Self>) -> Option<NodeConnectionReservation> {
+        let mut current = self.connection_reservations.load(Ordering::Acquire);
+        loop {
+            if current >= self.max_connections {
+                return None;
+            }
+            match self.connection_reservations.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(NodeConnectionReservation {
+                        manager: Arc::clone(self),
+                    });
+                }
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Register a new WebSocket connection with a pre-created sender.
@@ -2951,18 +3041,21 @@ impl NodeWsManager {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
                 conn.ssh_exec_requests.remove(&request_id);
+                conn.ssh_node_exec_streams.remove(&request_id);
                 return Err(AppError::NodeOffline(format!(
                     "Node {node_id} write buffer full"
                 )));
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 conn.ssh_exec_requests.remove(&request_id);
+                conn.ssh_node_exec_streams.remove(&request_id);
                 return Err(AppError::NodeOffline(format!(
                     "Node {node_id} connection closed"
                 )));
             }
         }
 
+        let mut pending_guard = PendingSshExecGuard::new(&conn, request_id.clone());
         drop(conn);
 
         // Use the configured proxy timeout plus the command timeout as the
@@ -2970,7 +3063,11 @@ impl NodeWsManager {
         // process, but we need a server-side deadline too).
         let total_timeout =
             std::time::Duration::from_secs(self.proxy_timeout_secs + request.timeout_secs as u64);
-        match tokio::time::timeout(total_timeout, resp_rx).await {
+        let response = tokio::time::timeout(total_timeout, resp_rx).await;
+        if response.is_ok() {
+            pending_guard.disarm();
+        }
+        match response {
             Ok(Ok(result)) => {
                 if let Some(ref error) = result.error {
                     Err(map_ssh_exec_result_error(
@@ -2985,12 +3082,7 @@ impl NodeWsManager {
             Ok(Err(_)) => Err(AppError::NodeOffline(format!(
                 "Node {node_id} disconnected during SSH exec"
             ))),
-            Err(_) => {
-                if let Some(conn) = self.connections.get(node_id) {
-                    conn.ssh_exec_requests.remove(&request_id);
-                }
-                Err(AppError::NodeProxyTimeout)
-            }
+            Err(_) => Err(AppError::NodeProxyTimeout),
         }
     }
 
@@ -3069,11 +3161,16 @@ impl NodeWsManager {
             }
         }
 
+        let mut pending_guard = PendingSshExecGuard::new(&conn, request_id.clone());
         drop(conn);
 
         let total_timeout =
             std::time::Duration::from_secs(self.proxy_timeout_secs + request.timeout_secs as u64);
-        match tokio::time::timeout(total_timeout, resp_rx).await {
+        let response = tokio::time::timeout(total_timeout, resp_rx).await;
+        if response.is_ok() {
+            pending_guard.disarm();
+        }
+        match response {
             Ok(Ok(result)) => {
                 if let Some(ref error) = result.error {
                     Err(map_ssh_exec_result_error(
@@ -3088,13 +3185,7 @@ impl NodeWsManager {
             Ok(Err(_)) => Err(AppError::NodeOffline(format!(
                 "Node {node_id} disconnected during SSH node-key exec"
             ))),
-            Err(_) => {
-                if let Some(conn) = self.connections.get(node_id) {
-                    conn.ssh_exec_requests.remove(&request_id);
-                    conn.ssh_node_exec_streams.remove(&request_id);
-                }
-                Err(AppError::NodeProxyTimeout)
-            }
+            Err(_) => Err(AppError::NodeProxyTimeout),
         }
     }
 
@@ -3883,6 +3974,7 @@ pub fn sign_ws_proxy_request(secret: &[u8], request: &NodeWsProxyRequest) -> Nod
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::time::Duration;
 
     fn billing_egress_permit(
         ingress: crate::services::billing::BillingIngress,
@@ -4873,21 +4965,138 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn aborting_cert_ssh_exec_sends_cancel_and_cleans_pending_state() {
+        let mgr = Arc::new(NodeWsManager::new(30, 100));
+        let (tx, mut rx) = mpsc::channel(256);
+        mgr.register_connection("node-1", tx);
+
+        let exec = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move {
+                mgr.exec_ssh_command_prepared(
+                    "node-1",
+                    NodeSshExecRequest {
+                        request_id: "exec-cert-cancel".to_string(),
+                        host: "ssh.internal".to_string(),
+                        port: 22,
+                        principal: "deploy".to_string(),
+                        private_key_pem: "private-key".to_string(),
+                        certificate_openssh: "certificate".to_string(),
+                        command: "sleep 30".to_string(),
+                        timeout_secs: 30,
+                    },
+                    None,
+                    None,
+                    billing_egress_permit(crate::services::billing::BillingIngress::SshExec),
+                )
+                .await
+            }
+        });
+
+        let open = rx.recv().await.expect("exec open frame");
+        let NodeOutboundMessage::Text(open) = open else {
+            panic!("expected text exec open frame");
+        };
+        let open: Value = serde_json::from_str(&open).expect("exec open json");
+        assert_eq!(open["type"], "ssh_exec");
+
+        exec.abort();
+        let _ = exec.await;
+
+        let cancel = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("cancel frame timeout")
+            .expect("cancel frame");
+        let NodeOutboundMessage::Text(cancel) = cancel else {
+            panic!("expected text exec cancel frame");
+        };
+        let cancel: Value = serde_json::from_str(&cancel).expect("exec cancel json");
+        assert_eq!(cancel["type"], "ssh_exec_cancel");
+        assert_eq!(cancel["request_id"], "exec-cert-cancel");
+
+        let conn = mgr.connections.get("node-1").expect("node connection");
+        assert!(!conn.ssh_exec_requests.contains_key("exec-cert-cancel"));
+        assert!(!conn.ssh_node_exec_streams.contains_key("exec-cert-cancel"));
+    }
+
+    #[tokio::test]
+    async fn aborting_node_key_ssh_exec_sends_cancel_and_cleans_pending_state() {
+        let mgr = Arc::new(NodeWsManager::new(30, 100));
+        let (tx, mut rx) = mpsc::channel(256);
+        mgr.register_connection("node-1", tx);
+
+        let exec = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move {
+                mgr.exec_ssh_node_key_command_prepared(
+                    "node-1",
+                    NodeSshNodeKeyExecRequest {
+                        request_id: "exec-node-key-cancel".to_string(),
+                        service_slug: "server".to_string(),
+                        principal: "deploy".to_string(),
+                        command: "sleep 30".to_string(),
+                        timeout_secs: 30,
+                        target_host: Some("ssh.internal".to_string()),
+                        target_port: Some(22),
+                        host_key_sha256: None,
+                    },
+                    None,
+                    None,
+                    billing_egress_permit(crate::services::billing::BillingIngress::SshExec),
+                )
+                .await
+            }
+        });
+
+        let open = rx.recv().await.expect("exec open frame");
+        let NodeOutboundMessage::Text(open) = open else {
+            panic!("expected text exec open frame");
+        };
+        let open: Value = serde_json::from_str(&open).expect("exec open json");
+        assert_eq!(open["type"], "ssh_node_exec_open");
+
+        exec.abort();
+        let _ = exec.await;
+
+        let cancel = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("cancel frame timeout")
+            .expect("cancel frame");
+        let NodeOutboundMessage::Text(cancel) = cancel else {
+            panic!("expected text exec cancel frame");
+        };
+        let cancel: Value = serde_json::from_str(&cancel).expect("exec cancel json");
+        assert_eq!(cancel["type"], "ssh_exec_cancel");
+        assert_eq!(cancel["request_id"], "exec-node-key-cancel");
+
+        let conn = mgr.connections.get("node-1").expect("node connection");
+        assert!(!conn.ssh_exec_requests.contains_key("exec-node-key-cancel"));
+        assert!(
+            !conn
+                .ssh_node_exec_streams
+                .contains_key("exec-node-key-cancel")
+        );
+    }
+
     #[test]
-    fn total_connection_count_includes_pending_auth() {
-        let mgr = NodeWsManager::new(30, 100);
+    fn connection_reservation_is_atomic_and_spans_socket_lifetime() {
+        let mgr = Arc::new(NodeWsManager::new(30, 1));
         assert_eq!(mgr.total_connection_count(), 0);
 
-        mgr.increment_pending_auth();
+        let reservation = mgr.try_reserve_connection().expect("first reservation");
         assert_eq!(mgr.total_connection_count(), 1);
+        assert!(mgr.try_reserve_connection().is_none());
 
         let (tx, _rx) = mpsc::channel(256);
         mgr.register_connection("node-1", tx);
-        mgr.decrement_pending_auth();
         assert_eq!(mgr.total_connection_count(), 1);
 
         mgr.unregister_connection("node-1");
+        assert_eq!(mgr.total_connection_count(), 1);
+        drop(reservation);
         assert_eq!(mgr.total_connection_count(), 0);
+        assert!(mgr.try_reserve_connection().is_some());
     }
 
     #[test]

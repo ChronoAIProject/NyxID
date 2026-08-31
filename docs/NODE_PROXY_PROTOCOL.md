@@ -55,7 +55,7 @@ Node Agent                              NyxID Server
 
 ### Connection Limits
 
-NyxID enforces a maximum concurrent WebSocket connections limit (default: 100, configurable via `NODE_MAX_WS_CONNECTIONS`). This includes both authenticated connections and those still in the authentication handshake. If the limit is reached, the WebSocket upgrade request receives HTTP 503 Service Unavailable.
+Each NyxID replica enforces its own maximum concurrent WebSocket connection limit (default: 100, configurable via `NODE_MAX_WS_CONNECTIONS`). A reservation is acquired atomically before upgrade and retained through socket teardown, covering both authentication and the registered connection. If a replica reaches its limit, the WebSocket upgrade request receives HTTP 503 Service Unavailable.
 
 ---
 
@@ -473,6 +473,18 @@ Node-key command output is streamed back to NyxID:
 
 The node also emits a compatibility `ssh_exec_result` for older backend receivers.
 
+### ssh_exec_cancel
+
+NyxID sends this frame when the caller disconnects, the backend command deadline expires, or the
+cluster-wide SSH concurrency lease is lost:
+
+```json
+{ "type": "ssh_exec_cancel", "request_id": "<uuid>" }
+```
+
+The node MUST cancel the matching cert-mode or node-key command and close its SSH channel. Unknown
+or already-completed request IDs are ignored. Cancellation is idempotent.
+
 ### web_terminal_open for node-key
 
 The browser terminal reuses the web terminal frame for cert and node-key sessions. For node-key sessions, NyxID sends `auth_mode: "node_key"`, omits private key material, and includes `service_slug` so the node can load the local key:
@@ -601,6 +613,7 @@ Requests that fail replay checks are rejected with HTTP 403 and the error messag
 | `ssh_tunnel_close` | Close an active SSH tunnel on the node | `session_id` |
 | `ssh_exec` | Execute a command with a short-lived SSH certificate | `request_id`, `host`, `port`, `principal`, `auth_mode`, `private_key_pem`, `certificate_openssh`, `command`, `timeout_secs`, `timestamp`, `nonce`, `hmac` (when HMAC enabled) |
 | `ssh_node_exec_open` | Execute a command with a node-local SSH private key | `request_id`, `service_slug`, `principal`, `auth_mode`, `command`, `timeout_secs`, `timestamp`, `nonce`, `hmac` (when HMAC enabled) |
+| `ssh_exec_cancel` | Cancel an active cert-mode or node-key SSH command | `request_id` |
 | `web_terminal_open` | Open a cert or node-key browser SSH terminal | `session_id`, `service_id`, `service_slug`, `auth_mode`, `host`, `port`, `principal`, `private_key_pem`/`certificate_openssh` (cert only), `cols`, `rows`, `term`, `timestamp`, `nonce`, `hmac` (when HMAC enabled) |
 | `web_terminal_data` | Terminal payload bytes flowing from NyxID to the node | `session_id`, `data` (base64) |
 | `web_terminal_resize` | Resize an active browser terminal | `session_id`, `cols`, `rows` |

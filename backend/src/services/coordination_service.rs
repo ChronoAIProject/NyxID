@@ -458,7 +458,7 @@ impl RateWindowStore {
     }
 }
 
-const TOKEN_SCALE: i64 = 1_000;
+const TOKEN_SCALE: i64 = 60_000;
 
 pub struct TokenBucketStore;
 
@@ -470,14 +470,41 @@ impl TokenBucketStore {
         rate_per_second: u32,
         burst: u32,
     ) -> AppResult<RateAdmission> {
-        if rate_per_second == 0 || burst == 0 {
+        Self::admit_over_period(
+            db,
+            namespace,
+            key,
+            rate_per_second,
+            Duration::from_secs(1),
+            burst,
+        )
+        .await
+    }
+
+    pub async fn admit_over_period(
+        db: &mongodb::Database,
+        namespace: &str,
+        key: &str,
+        refill_tokens: u32,
+        refill_period: Duration,
+        burst: u32,
+    ) -> AppResult<RateAdmission> {
+        if refill_tokens == 0 || burst == 0 {
             return Ok(RateAdmission {
                 allowed: false,
                 remaining: 0,
                 reset_at: chrono::Utc::now(),
             });
         }
-        let rate_per_second = i64::from(rate_per_second);
+        let period_ms = duration_millis(refill_period, "token refill period")?;
+        let refill_units_per_ms = i64::from(refill_tokens)
+            .checked_mul(TOKEN_SCALE)
+            .ok_or_else(|| AppError::Internal("Token-bucket refill overflow".to_string()))?
+            .checked_div(period_ms)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                AppError::Internal("Token-bucket refill precision is too small".to_string())
+            })?;
         let capacity = i64::from(burst)
             .checked_mul(TOKEN_SCALE)
             .ok_or_else(|| AppError::Internal("Token-bucket capacity overflow".to_string()))?;
@@ -485,14 +512,14 @@ impl TokenBucketStore {
         let id = hash_parts(&[namespace, key]);
         let key_hash = hash_parts(&[key]);
         let refill_ms = capacity
-            .saturating_add(rate_per_second - 1)
-            .saturating_div(rate_per_second);
+            .saturating_add(refill_units_per_ms - 1)
+            .saturating_div(refill_units_per_ms);
         let retention_ms = refill_ms.max(1_000).saturating_mul(2);
         let update = token_bucket_pipeline(
             namespace,
             &key_hash,
             &admission_id,
-            rate_per_second,
+            refill_units_per_ms,
             capacity,
             retention_ms,
         );
@@ -513,8 +540,8 @@ impl TokenBucketStore {
         };
         let missing = capacity.saturating_sub(record.tokens_millis.max(0));
         let reset_ms = missing
-            .saturating_add(rate_per_second - 1)
-            .saturating_div(rate_per_second);
+            .saturating_add(refill_units_per_ms - 1)
+            .saturating_div(refill_units_per_ms);
         Ok(RateAdmission {
             allowed,
             remaining,
@@ -919,7 +946,7 @@ fn token_bucket_pipeline(
     namespace: &str,
     key_hash: &str,
     admission_id: &str,
-    rate_per_second: i64,
+    refill_units_per_ms: i64,
     capacity: i64,
     retention_ms: i64,
 ) -> Vec<Document> {
@@ -948,7 +975,7 @@ fn token_bucket_pipeline(
                         {
                             "$add": [
                                 { "$ifNull": ["$tokens_millis", capacity] },
-                                { "$multiply": ["$__elapsed_ms", rate_per_second] },
+                                { "$multiply": ["$__elapsed_ms", refill_units_per_ms] },
                             ]
                         },
                     ]

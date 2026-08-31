@@ -3,13 +3,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::TryStreamExt;
-use mongodb::IndexModel;
+use mongodb::{IndexModel, bson::doc};
 
 use crate::models::coordination::{
     CoordinationHolder, EVENT_DEDUP_COLLECTION_NAME, LEASE_COLLECTION_NAME,
     RATE_WINDOW_COLLECTION_NAME, REPLAY_COLLECTION_NAME, SLOT_COLLECTION_NAME,
     TOKEN_BUCKET_COLLECTION_NAME,
 };
+use crate::services::cluster_slot_service::RenewableSlotManager;
 use crate::services::coordination_service::{
     self, ClusterLeaseRuntime, EventDedupClaimResult, EventDedupStore, LeaseStore, RateWindowStore,
     ReplayStore, SlotStore, TokenBucketStore,
@@ -406,6 +407,32 @@ async fn global_slots_enforce_cap_and_fence_release() {
             .expect("replacement slot")
             .is_some()
     );
+}
+
+#[tokio::test]
+async fn renewable_slot_signals_when_its_fence_is_lost() {
+    let Some(db) = connect_test_database("coordination_slot_renewal_loss").await else {
+        return;
+    };
+    let manager = RenewableSlotManager::new(
+        db.clone(),
+        holder("pod-a", "generation-a"),
+        Duration::from_secs(30),
+        Duration::from_millis(20),
+    );
+    let guard = manager
+        .acquire("ws", "global", 1)
+        .await
+        .expect("slot acquisition")
+        .expect("slot available");
+    db.collection::<mongodb::bson::Document>(SLOT_COLLECTION_NAME)
+        .delete_many(doc! {})
+        .await
+        .expect("delete held slot");
+
+    tokio::time::timeout(Duration::from_secs(1), guard.cancelled())
+        .await
+        .expect("renewal loss must cancel work");
 }
 
 #[tokio::test]

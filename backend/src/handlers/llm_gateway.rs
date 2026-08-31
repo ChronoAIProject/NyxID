@@ -237,7 +237,7 @@ pub async fn llm_proxy_request(
     )?;
 
     // Per-agent rate limit check
-    crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth_user)?;
+    crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth_user).await?;
 
     let user_id_str = auth_user.user_id.to_string();
 
@@ -297,7 +297,10 @@ pub async fn llm_proxy_request(
             &user_id_str,
             None,
             Some(&service_id),
-            Some(&state.connection_expiry_notifier),
+            proxy_service::ProxyExecutionContext::new(
+                Some(&state.connection_expiry_notifier),
+                state.platform_user_rate_limit,
+            ),
         )
         .await?
         {
@@ -332,6 +335,7 @@ pub async fn llm_proxy_request(
                     &state.encryption_keys,
                     &user_id_str,
                     &service_id,
+                    state.platform_user_rate_limit,
                 )
                 .await?;
                 (legacy, false, false, None)
@@ -568,7 +572,7 @@ pub async fn gateway_request(
     )?;
 
     // Per-agent rate limit check
-    crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth_user)?;
+    crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, &auth_user).await?;
 
     let user_id_str = auth_user.user_id.to_string();
 
@@ -664,7 +668,10 @@ pub async fn gateway_request(
             &user_id_str,
             None,
             Some(&service_id),
-            Some(&state.connection_expiry_notifier),
+            proxy_service::ProxyExecutionContext::new(
+                Some(&state.connection_expiry_notifier),
+                state.platform_user_rate_limit,
+            ),
         )
         .await?
         {
@@ -736,6 +743,7 @@ pub async fn gateway_request(
                     &state.encryption_keys,
                     &user_id_str,
                     &service_id,
+                    state.platform_user_rate_limit,
                 )
                 .await?;
                 // Still personal routing — attribute it so unmigrated users

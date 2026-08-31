@@ -12,8 +12,8 @@ use crate::crypto::aes::EncryptionKeys;
 use crate::crypto::token::generate_random_token;
 use crate::errors::{AppError, AppResult};
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
-use crate::mw::rate_limit::{PerKeyRateLimiter, SharedPerKeyRateLimiter};
 use crate::services::audit_service;
+use crate::services::coordination_service::RateWindowStore;
 use crate::services::webhook_delivery_service::{self, DeliveryFailure, SignatureContract};
 
 pub const CONNECTION_WEBHOOK_SECRET_PREFIX: &str = "nyx_cwh_";
@@ -24,7 +24,6 @@ const APP_WEBHOOK_MAX_PER_MINUTE: u32 = 120;
 pub struct DeveloperWebhookDispatcher {
     http_client: reqwest::Client,
     encryption_keys: Arc<EncryptionKeys>,
-    limiter: SharedPerKeyRateLimiter,
 }
 
 impl std::fmt::Debug for DeveloperWebhookDispatcher {
@@ -49,12 +48,7 @@ impl DeveloperWebhookDispatcher {
         Self {
             http_client,
             encryption_keys,
-            limiter: Arc::new(PerKeyRateLimiter::new(APP_WEBHOOK_MAX_PER_MINUTE, 60)),
         }
-    }
-
-    pub fn cleanup(&self) {
-        self.limiter.cleanup();
     }
 
     pub fn dispatch(&self, db: Database, app_id: String, event_type: &str, data: Value) {
@@ -109,7 +103,26 @@ impl DeveloperWebhookDispatcher {
         if !client.connection_webhook_enabled {
             return Ok(());
         }
-        if !self.limiter.check(app_id) {
+        let admitted = match RateWindowStore::admit(
+            db,
+            "developer_webhook",
+            app_id,
+            u64::from(APP_WEBHOOK_MAX_PER_MINUTE),
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        {
+            Ok(admission) => admission.allowed,
+            Err(error) => {
+                tracing::error!(app_id, %error, "developer webhook rate admission failed");
+                return Err(DeliveryFailure {
+                    attempts: 0,
+                    reason: "rate_limit_unavailable",
+                    last_status: None,
+                });
+            }
+        };
+        if !admitted {
             return Err(DeliveryFailure {
                 attempts: 0,
                 reason: "app_rate_limited",

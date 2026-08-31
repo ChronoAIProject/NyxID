@@ -7,30 +7,83 @@ use axum::{
     response::Response,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
-use governor::{
-    Quota, RateLimiter,
-    clock::DefaultClock,
-    state::{InMemoryState, NotKeyed},
-};
 use mongodb::{Database, bson::doc};
-use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::num::NonZeroU32;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
+use std::sync::{Arc, OnceLock};
+#[cfg(test)]
+use std::{collections::HashMap, sync::Mutex, time::Instant};
 
 use crate::config::{TrustedProxyRange, normalize_ip_address};
 use crate::errors::AppError;
 use crate::models::device_code::{COLLECTION_NAME as DEVICE_CODES, DeviceCode};
+use crate::services::cluster_slot_service::{RenewableSlotGuard, RenewableSlotManager};
+use crate::services::coordination_service::{RateWindowStore, TokenBucketStore};
 
-/// A shared rate limiter instance for global fallback.
-/// Uses a token-bucket algorithm via the `governor` crate.
-pub type SharedRateLimiter = Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>;
+const GLOBAL_NAMESPACE: &str = "global";
+
+#[derive(Clone)]
+pub struct GlobalRateLimiter {
+    db: Option<Database>,
+    per_second: u32,
+    burst: u32,
+    #[cfg(test)]
+    local: Arc<Mutex<AgentBucket>>,
+}
+
+impl GlobalRateLimiter {
+    pub async fn check_shared(&self) -> Result<bool, AppError> {
+        if let Some(db) = self.db.as_ref() {
+            return Ok(TokenBucketStore::admit(
+                db,
+                GLOBAL_NAMESPACE,
+                "all",
+                self.per_second,
+                self.burst,
+            )
+            .await?
+            .allowed);
+        }
+        #[cfg(test)]
+        {
+            let now = Instant::now();
+            let mut bucket = self.local.lock().unwrap_or_else(|error| error.into_inner());
+            let elapsed = now.duration_since(bucket.last_refill).as_secs_f64();
+            bucket.tokens =
+                (bucket.tokens + elapsed * f64::from(self.per_second)).min(f64::from(self.burst));
+            bucket.last_refill = now;
+            if bucket.tokens < 1.0 {
+                return Ok(false);
+            }
+            bucket.tokens -= 1.0;
+            Ok(true)
+        }
+        #[cfg(not(test))]
+        unreachable!("production rate limiters always have a MongoDB backend")
+    }
+
+    #[cfg(test)]
+    pub fn new_local(per_second: u32, burst: u32) -> Self {
+        Self {
+            db: None,
+            per_second,
+            burst,
+            local: Arc::new(Mutex::new(AgentBucket {
+                tokens: f64::from(burst),
+                last_refill: Instant::now(),
+            })),
+        }
+    }
+}
+
+pub type SharedRateLimiter = Arc<GlobalRateLimiter>;
 
 /// Per-IP rate limiter state using a simple sliding window approach.
 #[derive(Clone)]
 pub struct PerIpRateLimiter {
+    db: Option<Database>,
+    namespace: String,
     /// Map of IP address to (request count, window start time)
+    #[cfg(test)]
     state: Arc<Mutex<HashMap<IpAddr, (u32, Instant)>>>,
     /// Maximum requests allowed per window
     max_requests: u32,
@@ -39,16 +92,54 @@ pub struct PerIpRateLimiter {
 }
 
 impl PerIpRateLimiter {
+    #[cfg(test)]
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
         Self {
+            db: None,
+            namespace: "test_ip".to_string(),
             state: Arc::new(Mutex::new(HashMap::new())),
             max_requests,
             window_secs,
         }
     }
 
+    pub fn with_db(
+        db: Database,
+        namespace: impl Into<String>,
+        max_requests: u32,
+        window_secs: u64,
+    ) -> Self {
+        Self {
+            db: Some(db),
+            namespace: namespace.into(),
+            #[cfg(test)]
+            state: Arc::new(Mutex::new(HashMap::new())),
+            max_requests,
+            window_secs,
+        }
+    }
+
+    pub async fn check_shared(&self, ip: IpAddr) -> Result<bool, AppError> {
+        if let Some(db) = self.db.as_ref() {
+            return Ok(RateWindowStore::admit(
+                db,
+                &self.namespace,
+                &ip.to_string(),
+                u64::from(self.max_requests),
+                std::time::Duration::from_secs(self.window_secs),
+            )
+            .await?
+            .allowed);
+        }
+        #[cfg(test)]
+        return Ok(self.check(ip));
+        #[cfg(not(test))]
+        unreachable!("production rate limiters always have a MongoDB backend")
+    }
+
     /// Check if a request from the given IP should be allowed.
     /// Returns true if allowed, false if rate limited.
+    #[cfg(test)]
     pub fn check(&self, ip: IpAddr) -> bool {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -71,6 +162,7 @@ impl PerIpRateLimiter {
 
     /// Periodically clean up expired entries to prevent memory growth.
     /// Call this from a background task.
+    #[cfg(test)]
     pub fn cleanup(&self) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -86,20 +178,62 @@ pub type SharedPerIpRateLimiter = Arc<PerIpRateLimiter>;
 /// `PerIpRateLimiter`.
 #[derive(Clone)]
 pub struct PerKeyRateLimiter {
+    db: Option<Database>,
+    namespace: String,
+    #[cfg(test)]
     state: Arc<Mutex<HashMap<String, (u32, Instant)>>>,
     max_requests: u32,
     window_secs: u64,
 }
 
 impl PerKeyRateLimiter {
+    #[cfg(test)]
     pub fn new(max_requests: u32, window_secs: u64) -> Self {
         Self {
+            db: None,
+            namespace: "test_key".to_string(),
+            #[cfg(test)]
             state: Arc::new(Mutex::new(HashMap::new())),
             max_requests,
             window_secs,
         }
     }
 
+    pub fn with_db(
+        db: Database,
+        namespace: impl Into<String>,
+        max_requests: u32,
+        window_secs: u64,
+    ) -> Self {
+        Self {
+            db: Some(db),
+            namespace: namespace.into(),
+            #[cfg(test)]
+            state: Arc::new(Mutex::new(HashMap::new())),
+            max_requests,
+            window_secs,
+        }
+    }
+
+    pub async fn check_shared(&self, key: &str) -> Result<bool, AppError> {
+        if let Some(db) = self.db.as_ref() {
+            return Ok(RateWindowStore::admit(
+                db,
+                &self.namespace,
+                key,
+                u64::from(self.max_requests),
+                std::time::Duration::from_secs(self.window_secs),
+            )
+            .await?
+            .allowed);
+        }
+        #[cfg(test)]
+        return Ok(self.check(key));
+        #[cfg(not(test))]
+        unreachable!("production rate limiters always have a MongoDB backend")
+    }
+
+    #[cfg(test)]
     pub fn check(&self, key: &str) -> bool {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -118,6 +252,7 @@ impl PerKeyRateLimiter {
         true
     }
 
+    #[cfg(test)]
     pub fn cleanup(&self) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -132,12 +267,16 @@ pub type SharedPerKeyRateLimiter = Arc<PerKeyRateLimiter>;
 /// slot until the returned permit is dropped.
 #[derive(Clone)]
 pub struct DirectChatRateLimiter {
+    db: Option<Database>,
+    slot_manager: Option<RenewableSlotManager>,
+    #[cfg(test)]
     state: Arc<Mutex<HashMap<String, DirectChatUserState>>>,
     max_requests: u32,
     window_secs: u64,
     max_in_flight: u32,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct DirectChatUserState {
     request_count: u32,
@@ -146,8 +285,12 @@ struct DirectChatUserState {
 }
 
 impl DirectChatRateLimiter {
+    #[cfg(test)]
     pub fn new(max_requests: u32, window_secs: u64, max_in_flight: u32) -> Self {
         Self {
+            db: None,
+            slot_manager: None,
+            #[cfg(test)]
             state: Arc::new(Mutex::new(HashMap::new())),
             max_requests,
             window_secs,
@@ -155,36 +298,85 @@ impl DirectChatRateLimiter {
         }
     }
 
-    pub fn try_acquire(self: &Arc<Self>, user_id: &str) -> Result<DirectChatPermit, AppError> {
-        let now = Instant::now();
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = state
-            .entry(user_id.to_string())
-            .or_insert(DirectChatUserState {
-                request_count: 0,
-                window_start: now,
-                in_flight: 0,
-            });
-
-        if now.duration_since(entry.window_start).as_secs() >= self.window_secs {
-            entry.request_count = 0;
-            entry.window_start = now;
+    pub fn with_db(db: Database, slot_manager: RenewableSlotManager) -> Self {
+        Self {
+            db: Some(db),
+            slot_manager: Some(slot_manager),
+            #[cfg(test)]
+            state: Arc::new(Mutex::new(HashMap::new())),
+            max_requests: 10,
+            window_secs: 60,
+            max_in_flight: 2,
         }
-
-        if entry.request_count >= self.max_requests || entry.in_flight >= self.max_in_flight {
-            return Err(AppError::RateLimited);
-        }
-
-        entry.request_count += 1;
-        entry.in_flight += 1;
-        drop(state);
-
-        Ok(DirectChatPermit {
-            limiter: self.clone(),
-            user_id: user_id.to_string(),
-        })
     }
 
+    pub async fn try_acquire(
+        self: &Arc<Self>,
+        user_id: &str,
+    ) -> Result<DirectChatPermit, AppError> {
+        if let (Some(db), Some(slot_manager)) = (&self.db, &self.slot_manager) {
+            let slot = slot_manager
+                .acquire("direct_chat", user_id, self.max_in_flight)
+                .await?
+                .ok_or(AppError::RateLimited)?;
+            let admitted = RateWindowStore::admit(
+                db,
+                "direct_chat_request",
+                user_id,
+                u64::from(self.max_requests),
+                std::time::Duration::from_secs(self.window_secs),
+            )
+            .await?
+            .allowed;
+            if !admitted {
+                return Err(AppError::RateLimited);
+            }
+            return Ok(DirectChatPermit {
+                slot: Some(slot),
+                #[cfg(test)]
+                local_limiter: None,
+                #[cfg(test)]
+                user_id: user_id.to_string(),
+            });
+        }
+
+        #[cfg(not(test))]
+        unreachable!("production direct-chat limiters always have a MongoDB backend");
+
+        #[cfg(test)]
+        {
+            let now = Instant::now();
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = state
+                .entry(user_id.to_string())
+                .or_insert(DirectChatUserState {
+                    request_count: 0,
+                    window_start: now,
+                    in_flight: 0,
+                });
+
+            if now.duration_since(entry.window_start).as_secs() >= self.window_secs {
+                entry.request_count = 0;
+                entry.window_start = now;
+            }
+
+            if entry.request_count >= self.max_requests || entry.in_flight >= self.max_in_flight {
+                return Err(AppError::RateLimited);
+            }
+
+            entry.request_count += 1;
+            entry.in_flight += 1;
+            drop(state);
+
+            Ok(DirectChatPermit {
+                slot: None,
+                local_limiter: Some(self.clone()),
+                user_id: user_id.to_string(),
+            })
+        }
+    }
+
+    #[cfg(test)]
     pub fn cleanup(&self) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -194,6 +386,7 @@ impl DirectChatRateLimiter {
         });
     }
 
+    #[cfg(test)]
     fn release(&self, user_id: &str) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(entry) = state.get_mut(user_id) {
@@ -203,20 +396,39 @@ impl DirectChatRateLimiter {
 }
 
 pub struct DirectChatPermit {
-    limiter: Arc<DirectChatRateLimiter>,
+    slot: Option<RenewableSlotGuard>,
+    #[cfg(test)]
+    local_limiter: Option<Arc<DirectChatRateLimiter>>,
+    #[cfg(test)]
     user_id: String,
+}
+
+impl DirectChatPermit {
+    pub async fn cancelled(&self) {
+        if let Some(slot) = self.slot.as_ref() {
+            slot.cancelled().await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    }
 }
 
 impl Drop for DirectChatPermit {
     fn drop(&mut self) {
-        self.limiter.release(&self.user_id);
+        #[cfg(test)]
+        if let Some(limiter) = self.local_limiter.as_ref() {
+            limiter.release(&self.user_id);
+        }
     }
 }
 
 pub type SharedDirectChatRateLimiter = Arc<DirectChatRateLimiter>;
 
-pub fn create_direct_chat_rate_limiter() -> SharedDirectChatRateLimiter {
-    Arc::new(DirectChatRateLimiter::new(10, 60, 2))
+pub fn create_direct_chat_rate_limiter(
+    db: Database,
+    slot_manager: RenewableSlotManager,
+) -> SharedDirectChatRateLimiter {
+    Arc::new(DirectChatRateLimiter::with_db(db, slot_manager))
 }
 
 /// Per-agent rate limiter keyed by API key ID.
@@ -224,9 +436,13 @@ pub fn create_direct_chat_rate_limiter() -> SharedDirectChatRateLimiter {
 /// `rate_limit_per_second` controls refill rate and `burst` controls capacity.
 #[derive(Clone)]
 pub struct PerAgentRateLimiter {
+    db: Option<Database>,
+    namespace: String,
+    #[cfg(test)]
     state: Arc<Mutex<HashMap<String, AgentBucket>>>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug)]
 struct AgentBucket {
     tokens: f64,
@@ -234,14 +450,51 @@ struct AgentBucket {
 }
 
 impl PerAgentRateLimiter {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self {
+            db: None,
+            namespace: "test_agent".to_string(),
+            #[cfg(test)]
             state: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
+    pub fn with_db(db: Database, namespace: impl Into<String>) -> Self {
+        Self {
+            db: Some(db),
+            namespace: namespace.into(),
+            #[cfg(test)]
+            state: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub async fn check_shared(
+        &self,
+        agent_id: &str,
+        rate_per_second: u32,
+        burst_capacity: u32,
+    ) -> Result<bool, AppError> {
+        if let Some(db) = self.db.as_ref() {
+            return Ok(TokenBucketStore::admit(
+                db,
+                &self.namespace,
+                agent_id,
+                rate_per_second,
+                burst_capacity,
+            )
+            .await?
+            .allowed);
+        }
+        #[cfg(test)]
+        return Ok(self.check(agent_id, rate_per_second, burst_capacity));
+        #[cfg(not(test))]
+        unreachable!("production rate limiters always have a MongoDB backend")
+    }
+
     /// Check if a request from the given agent should be allowed.
     /// Returns true if allowed, false if rate limited.
+    #[cfg(test)]
     pub fn check(&self, agent_id: &str, rate_per_second: u32, burst_capacity: u32) -> bool {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -263,6 +516,7 @@ impl PerAgentRateLimiter {
     }
 
     /// Remove stale entries to prevent unbounded memory growth.
+    #[cfg(test)]
     pub fn cleanup(&self) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -272,15 +526,33 @@ impl PerAgentRateLimiter {
 
 pub type SharedPerAgentRateLimiter = Arc<PerAgentRateLimiter>;
 
+#[derive(Clone, Copy, Debug)]
+pub struct PlatformUserRateLimitPolicy {
+    pub per_second: u32,
+    pub burst: u32,
+}
+
+impl PlatformUserRateLimitPolicy {
+    pub const fn new(per_second: u32, burst: u32) -> Self {
+        Self { per_second, burst }
+    }
+
+    pub const fn disabled() -> Self {
+        Self::new(0, 0)
+    }
+}
+
 /// Per-(platform service, user) token bucket guarding shared master
 /// credentials. The keyed bucket is deliberately separate from API-key
 /// limiting so browser-session callers receive the same protection.
+#[cfg(test)]
 pub struct PlatformUserRateLimiter {
     inner: PerAgentRateLimiter,
     per_second: u32,
     burst: u32,
 }
 
+#[cfg(test)]
 impl PlatformUserRateLimiter {
     pub fn new(per_second: u32, burst: u32) -> Self {
         Self {
@@ -292,6 +564,16 @@ impl PlatformUserRateLimiter {
 
     /// Check a request for the given platform service and user.
     /// Returns true if allowed, false if rate limited.
+    pub async fn check_shared(&self, service_id: &str, user_id: &str) -> Result<bool, AppError> {
+        self.inner
+            .check_shared(
+                &format!("{service_id}:{user_id}"),
+                self.per_second,
+                self.burst,
+            )
+            .await
+    }
+
     pub fn check(&self, service_id: &str, user_id: &str) -> bool {
         self.inner.check(
             &format!("{service_id}:{user_id}"),
@@ -299,45 +581,40 @@ impl PlatformUserRateLimiter {
             self.burst,
         )
     }
-
-    pub fn cleanup(&self) {
-        self.inner.cleanup();
-    }
 }
 
-static PLATFORM_USER_LIMITER: OnceLock<PlatformUserRateLimiter> = OnceLock::new();
-
-/// Install the process-wide platform per-user limiter. A zero sustained rate
-/// disables limiting, and initialization is intentionally one-shot.
-pub fn init_platform_user_rate_limiter(per_second: u32, burst: u32) {
-    if per_second == 0 {
-        return;
-    }
-    let _ = PLATFORM_USER_LIMITER.set(PlatformUserRateLimiter::new(per_second, burst));
-}
-
-pub fn platform_user_rate_limiter() -> Option<&'static PlatformUserRateLimiter> {
-    PLATFORM_USER_LIMITER.get()
-}
-
-pub fn cleanup_platform_user_rate_limiter() {
-    if let Some(limiter) = platform_user_rate_limiter() {
-        limiter.cleanup();
-    }
-}
-
-/// Enforce a platform per-user limit through an explicit limiter seam so the
-/// authorization path can be tested without initializing the global OnceLock.
-pub fn enforce_platform_user_limit(
+/// Enforce a platform per-user limit through an explicit limiter seam.
+#[cfg(test)]
+pub async fn enforce_platform_user_limit_with_limiter(
     limiter: Option<&PlatformUserRateLimiter>,
     service_id: &str,
     user_id: &str,
 ) -> Result<(), crate::errors::AppError> {
     if let Some(limiter) = limiter
-        && !limiter.check(service_id, user_id)
+        && !limiter.check_shared(service_id, user_id).await?
     {
         tracing::warn!(service_id, "Platform per-user rate limit exceeded");
         return Err(crate::errors::AppError::RateLimited);
+    }
+    Ok(())
+}
+
+pub async fn enforce_platform_user_limit(
+    db: &Database,
+    policy: PlatformUserRateLimitPolicy,
+    service_id: &str,
+    user_id: &str,
+) -> Result<(), AppError> {
+    if policy.per_second == 0 {
+        return Ok(());
+    }
+    let key = format!("{service_id}:{user_id}");
+    if !TokenBucketStore::admit(db, "platform_user", &key, policy.per_second, policy.burst)
+        .await?
+        .allowed
+    {
+        tracing::warn!(service_id, "Platform per-user rate limit exceeded");
+        return Err(AppError::RateLimited);
     }
     Ok(())
 }
@@ -351,30 +628,71 @@ pub fn enforce_platform_user_limit(
 /// not give an attacker a fresh rate-limit identity.
 #[derive(Clone)]
 pub struct PerPubkeyRateLimiter {
+    db: Option<Database>,
+    namespace: String,
+    #[cfg(test)]
     state: Arc<Mutex<HashMap<[u8; 32], AgentBucket>>>,
+    #[cfg(test)]
     tokens_per_second: f64,
     burst: u32,
 }
 
 impl PerPubkeyRateLimiter {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::new_with_rate(5.0 / 60.0, 5)
     }
 
+    #[cfg(test)]
     fn new_with_rate(tokens_per_second: f64, burst: u32) -> Self {
         Self {
+            db: None,
+            namespace: "test_pubkey".to_string(),
             state: Arc::new(Mutex::new(HashMap::new())),
             tokens_per_second,
             burst,
         }
     }
 
+    pub fn with_db(db: Database, namespace: impl Into<String>) -> Self {
+        Self {
+            db: Some(db),
+            namespace: namespace.into(),
+            #[cfg(test)]
+            state: Arc::new(Mutex::new(HashMap::new())),
+            #[cfg(test)]
+            tokens_per_second: 5.0 / 60.0,
+            burst: 5,
+        }
+    }
+
+    pub async fn check_shared(&self, pubkey: &[u8; 32]) -> Result<bool, AppError> {
+        if let Some(db) = self.db.as_ref() {
+            return Ok(TokenBucketStore::admit_over_period(
+                db,
+                &self.namespace,
+                &hex::encode(pubkey),
+                5,
+                std::time::Duration::from_secs(60),
+                self.burst,
+            )
+            .await?
+            .allowed);
+        }
+        #[cfg(test)]
+        return Ok(self.check(pubkey));
+        #[cfg(not(test))]
+        unreachable!("production rate limiters always have a MongoDB backend")
+    }
+
+    #[cfg(test)]
     pub fn check(&self, pubkey: &[u8; 32]) -> bool {
         self.check_at(pubkey, Instant::now())
     }
 
     /// Check if a request from the given device public key should be allowed.
     /// Returns true if allowed, false if rate limited.
+    #[cfg(test)]
     fn check_at(&self, pubkey: &[u8; 32], now: Instant) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let entry = state.entry(*pubkey).or_insert(AgentBucket {
@@ -395,6 +713,7 @@ impl PerPubkeyRateLimiter {
     }
 
     /// Remove stale entries to prevent unbounded memory growth.
+    #[cfg(test)]
     pub fn cleanup(&self) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -430,21 +749,63 @@ pub struct ResolvedClientIp {
 /// message cannot starve the rest of the relay.
 #[derive(Clone)]
 pub struct PerMessageEditRateLimiter {
+    db: Option<Database>,
+    namespace: String,
+    #[cfg(test)]
     state: Arc<Mutex<HashMap<String, AgentBucket>>>,
     rate_per_second: u32,
     burst: u32,
 }
 
 impl PerMessageEditRateLimiter {
+    #[cfg(test)]
     pub fn new(rate_per_second: u32, burst: u32) -> Self {
         Self {
+            db: None,
+            namespace: "test_message_edit".to_string(),
+            #[cfg(test)]
             state: Arc::new(Mutex::new(HashMap::new())),
             rate_per_second,
             burst,
         }
     }
 
+    pub fn with_db(
+        db: Database,
+        namespace: impl Into<String>,
+        rate_per_second: u32,
+        burst: u32,
+    ) -> Self {
+        Self {
+            db: Some(db),
+            namespace: namespace.into(),
+            #[cfg(test)]
+            state: Arc::new(Mutex::new(HashMap::new())),
+            rate_per_second,
+            burst,
+        }
+    }
+
+    pub async fn check_shared(&self, platform_message_id: &str) -> Result<bool, AppError> {
+        if let Some(db) = self.db.as_ref() {
+            return Ok(TokenBucketStore::admit(
+                db,
+                &self.namespace,
+                platform_message_id,
+                self.rate_per_second,
+                self.burst,
+            )
+            .await?
+            .allowed);
+        }
+        #[cfg(test)]
+        return Ok(self.check(platform_message_id));
+        #[cfg(not(test))]
+        unreachable!("production rate limiters always have a MongoDB backend")
+    }
+
     /// Check if an edit for the given upstream message should be allowed.
+    #[cfg(test)]
     pub fn check(&self, platform_message_id: &str) -> bool {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -468,6 +829,7 @@ impl PerMessageEditRateLimiter {
     }
 
     /// Remove stale entries to prevent unbounded memory growth.
+    #[cfg(test)]
     pub fn cleanup(&self) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -487,26 +849,69 @@ pub type SharedPerMessageEditRateLimiter = Arc<PerMessageEditRateLimiter>;
 /// initial implementation.
 #[derive(Clone)]
 pub struct PerChannelEventLimiter {
+    db: Option<Database>,
+    namespace: String,
+    #[cfg(test)]
     state: Arc<Mutex<HashMap<String, AgentBucket>>>,
     rate_per_second: u32,
     burst: u32,
 }
 
 impl PerChannelEventLimiter {
+    #[cfg(test)]
     pub fn new(rate_per_second: u32, burst: u32) -> Self {
         Self {
+            db: None,
+            namespace: "test_channel".to_string(),
+            #[cfg(test)]
             state: Arc::new(Mutex::new(HashMap::new())),
             rate_per_second,
             burst,
         }
     }
 
+    pub fn with_db(
+        db: Database,
+        namespace: impl Into<String>,
+        rate_per_second: u32,
+        burst: u32,
+    ) -> Self {
+        Self {
+            db: Some(db),
+            namespace: namespace.into(),
+            #[cfg(test)]
+            state: Arc::new(Mutex::new(HashMap::new())),
+            rate_per_second,
+            burst,
+        }
+    }
+
+    pub async fn check_shared(&self, conversation_id: &str) -> Result<bool, AppError> {
+        if let Some(db) = self.db.as_ref() {
+            return Ok(TokenBucketStore::admit(
+                db,
+                &self.namespace,
+                conversation_id,
+                self.rate_per_second,
+                self.burst,
+            )
+            .await?
+            .allowed);
+        }
+        #[cfg(test)]
+        return Ok(self.check(conversation_id));
+        #[cfg(not(test))]
+        unreachable!("production rate limiters always have a MongoDB backend")
+    }
+
     /// Check if an event for the given conversation should be allowed.
     /// Returns `true` if allowed, `false` if rate-limited.
+    #[cfg(test)]
     pub fn check(&self, conversation_id: &str) -> bool {
         self.check_at(conversation_id, Instant::now())
     }
 
+    #[cfg(test)]
     fn check_at(&self, conversation_id: &str, now: Instant) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let entry = state
@@ -529,6 +934,7 @@ impl PerChannelEventLimiter {
     }
 
     /// Remove stale entries to prevent unbounded memory growth.
+    #[cfg(test)]
     pub fn cleanup(&self) {
         let now = Instant::now();
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -544,7 +950,7 @@ impl PerChannelEventLimiter {
 pub type SharedPerChannelEventLimiter = Arc<PerChannelEventLimiter>;
 
 /// Check per-agent rate limit. Call from proxy handlers after auth extraction.
-pub fn check_agent_rate_limit(
+pub async fn check_agent_rate_limit(
     limiter: &PerAgentRateLimiter,
     auth_user: &crate::mw::auth::AuthUser,
 ) -> Result<(), crate::errors::AppError> {
@@ -554,11 +960,12 @@ pub fn check_agent_rate_limit(
         auth_user.rate_limit_per_second,
         auth_user.rate_limit_burst,
     )
+    .await
 }
 
 /// Check per-agent rate limit using raw API-key identity and limit fields.
 /// Used by callers that don't hold an `AuthUser` (e.g. the MCP transport).
-pub fn check_agent_rate_limit_raw(
+pub async fn check_agent_rate_limit_raw(
     limiter: &PerAgentRateLimiter,
     api_key_id: Option<&str>,
     rate_limit_per_second: Option<u32>,
@@ -568,7 +975,7 @@ pub fn check_agent_rate_limit_raw(
         // When no explicit burst is set, use the sustained rate as the ceiling.
         // Users who want a higher burst can set rate_limit_burst explicitly.
         let burst = rate_limit_burst.unwrap_or(rps);
-        if !limiter.check(agent_id, rps, burst) {
+        if !limiter.check_shared(agent_id, rps, burst).await? {
             tracing::warn!(
                 agent_id = %agent_id,
                 rate_limit = rps,
@@ -584,29 +991,58 @@ pub fn check_agent_rate_limit_raw(
 ///
 /// The limiter allows `per_second` requests per second with a burst capacity
 /// of `burst` requests.
-pub fn create_rate_limiter(per_second: u64, burst: u32) -> SharedRateLimiter {
-    let quota = Quota::per_second(NonZeroU32::new(per_second as u32).unwrap_or(NonZeroU32::MIN))
-        .allow_burst(NonZeroU32::new(burst).unwrap_or(NonZeroU32::MIN));
-
-    Arc::new(RateLimiter::direct(quota))
+pub fn create_rate_limiter(db: Database, per_second: u64, burst: u32) -> SharedRateLimiter {
+    Arc::new(GlobalRateLimiter {
+        db: Some(db),
+        per_second: u32::try_from(per_second).unwrap_or(u32::MAX),
+        burst,
+        #[cfg(test)]
+        local: Arc::new(Mutex::new(AgentBucket {
+            tokens: f64::from(burst),
+            last_refill: Instant::now(),
+        })),
+    })
 }
 
 /// Create a per-IP rate limiter.
-pub fn create_per_ip_rate_limiter(max_requests: u32, window_secs: u64) -> SharedPerIpRateLimiter {
-    Arc::new(PerIpRateLimiter::new(max_requests, window_secs))
+pub fn create_per_ip_rate_limiter(
+    db: Database,
+    namespace: impl Into<String>,
+    max_requests: u32,
+    window_secs: u64,
+) -> SharedPerIpRateLimiter {
+    Arc::new(PerIpRateLimiter::with_db(
+        db,
+        namespace,
+        max_requests,
+        window_secs,
+    ))
 }
 
 /// Create a per-string-key rate limiter.
-pub fn create_per_key_rate_limiter(max_requests: u32, window_secs: u64) -> SharedPerKeyRateLimiter {
-    Arc::new(PerKeyRateLimiter::new(max_requests, window_secs))
+pub fn create_per_key_rate_limiter(
+    db: Database,
+    namespace: impl Into<String>,
+    max_requests: u32,
+    window_secs: u64,
+) -> SharedPerKeyRateLimiter {
+    Arc::new(PerKeyRateLimiter::with_db(
+        db,
+        namespace,
+        max_requests,
+        window_secs,
+    ))
 }
 
 /// Create a per-pubkey limiter for device authorization endpoints.
-pub fn create_per_pubkey_rate_limiter() -> SharedPerPubkeyRateLimiter {
-    Arc::new(PerPubkeyRateLimiter::new())
+pub fn create_per_pubkey_rate_limiter(
+    db: Database,
+    namespace: impl Into<String>,
+) -> SharedPerPubkeyRateLimiter {
+    Arc::new(PerPubkeyRateLimiter::with_db(db, namespace))
 }
 
-pub fn enforce_public_ip_rate_limit(
+pub async fn enforce_public_ip_rate_limit(
     limiter: &SharedPerIpRateLimiter,
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
@@ -621,7 +1057,7 @@ pub fn enforce_public_ip_rate_limit(
         return Ok(None);
     };
 
-    if !limiter.check(client_ip) {
+    if !limiter.check_shared(client_ip).await? {
         tracing::warn!(
             path = %path,
             ip = %client_ip,
@@ -882,7 +1318,7 @@ pub async fn rate_limit_middleware(
     let client_ip = extract_client_ip(&request, trusted_proxies.as_slice());
 
     // Check per-IP rate limit first
-    if !per_ip_limiter.check(client_ip) {
+    if !per_ip_limiter.check_shared(client_ip).await? {
         tracing::warn!(
             path = %path,
             ip = %client_ip,
@@ -892,7 +1328,7 @@ pub async fn rate_limit_middleware(
     }
 
     // Also check global rate limit as a safety net
-    if global_limiter.check().is_err() {
+    if !global_limiter.check_shared().await? {
         tracing::warn!(
             path = %path,
             "Global rate limit exceeded"
@@ -916,7 +1352,8 @@ pub async fn device_code_rate_limit_middleware(
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(peer)| *peer);
-    enforce_device_code_ip_rate_limit(&limiters, request.headers(), peer, request.uri().path())?;
+    enforce_device_code_ip_rate_limit(&limiters, request.headers(), peer, request.uri().path())
+        .await?;
 
     let (parts, body) = request.into_parts();
     let bytes = to_bytes(body, 64 * 1024)
@@ -924,7 +1361,7 @@ pub async fn device_code_rate_limit_middleware(
         .map_err(|_| AppError::BadRequest("Unable to read request body".to_string()))?;
 
     if let Some(pubkey) = extract_device_pubkey_for_rate_limit(limiters.db.as_ref(), &bytes).await
-        && !limiters.per_pubkey.check(&pubkey)
+        && !limiters.per_pubkey.check_shared(&pubkey).await?
     {
         tracing::warn!(
             path = %parts.uri.path(),
@@ -938,7 +1375,7 @@ pub async fn device_code_rate_limit_middleware(
     Ok(next.run(request).await)
 }
 
-fn enforce_device_code_ip_rate_limit(
+async fn enforce_device_code_ip_rate_limit(
     limiters: &DeviceCodeRateLimiters,
     headers: &HeaderMap,
     peer: Option<SocketAddr>,
@@ -954,7 +1391,7 @@ fn enforce_device_code_ip_rate_limit(
         return Ok(None);
     };
 
-    if !limiters.per_ip.check(client_ip) {
+    if !limiters.per_ip.check_shared(client_ip).await? {
         tracing::warn!(
             path = %path,
             ip = %client_ip,
@@ -1050,24 +1487,24 @@ mod tests {
 
     #[test]
     fn create_rate_limiter_does_not_panic() {
-        let _limiter = create_rate_limiter(10, 30);
+        let _limiter = GlobalRateLimiter::new_local(10, 30);
     }
 
     #[test]
     fn create_per_ip_rate_limiter_does_not_panic() {
-        let _limiter = create_per_ip_rate_limiter(30, 1);
+        let _limiter = PerIpRateLimiter::new(30, 1);
     }
 
-    #[test]
-    fn direct_chat_request_window_is_per_user() {
+    #[tokio::test]
+    async fn direct_chat_request_window_is_per_user() {
         let limiter = Arc::new(DirectChatRateLimiter::new(2, 60, 2));
-        drop(limiter.try_acquire("user-a").unwrap());
-        drop(limiter.try_acquire("user-a").unwrap());
+        drop(limiter.try_acquire("user-a").await.unwrap());
+        drop(limiter.try_acquire("user-a").await.unwrap());
         assert!(matches!(
-            limiter.try_acquire("user-a"),
+            limiter.try_acquire("user-a").await,
             Err(AppError::RateLimited)
         ));
-        assert!(limiter.try_acquire("user-b").is_ok());
+        assert!(limiter.try_acquire("user-b").await.is_ok());
     }
 
     #[test]
@@ -1187,15 +1624,23 @@ mod tests {
         assert!(limiter.check("T", "A"));
     }
 
-    #[test]
-    fn enforce_platform_user_limit_maps_to_rate_limited() {
+    #[tokio::test]
+    async fn enforce_platform_user_limit_maps_to_rate_limited() {
         let limiter = PlatformUserRateLimiter::new(1, 1);
-        assert!(enforce_platform_user_limit(Some(&limiter), "S", "A").is_ok());
+        assert!(
+            enforce_platform_user_limit_with_limiter(Some(&limiter), "S", "A")
+                .await
+                .is_ok()
+        );
         assert!(matches!(
-            enforce_platform_user_limit(Some(&limiter), "S", "A"),
+            enforce_platform_user_limit_with_limiter(Some(&limiter), "S", "A").await,
             Err(crate::errors::AppError::RateLimited)
         ));
-        assert!(enforce_platform_user_limit(None, "S", "A").is_ok());
+        assert!(
+            enforce_platform_user_limit_with_limiter(None, "S", "A")
+                .await
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1530,8 +1975,8 @@ mod tests {
         assert!(resolved.is_none());
     }
 
-    #[test]
-    fn device_code_ip_limiter_skips_ip_bucket_without_peer() {
+    #[tokio::test]
+    async fn device_code_ip_limiter_skips_ip_bucket_without_peer() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "198.51.100.4".parse().unwrap());
         let limiters = DeviceCodeRateLimiters {
@@ -1547,13 +1992,14 @@ mod tests {
             None,
             "/api/v1/devices/code/poll",
         )
+        .await
         .expect("missing peer should skip IP bucket");
 
         assert!(result.is_none());
     }
 
-    #[test]
-    fn device_code_ip_limiter_honors_xff_only_from_trusted_proxy() {
+    #[tokio::test]
+    async fn device_code_ip_limiter_honors_xff_only_from_trusted_proxy() {
         let proxy_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         let client_ip = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
         let mut headers = HeaderMap::new();
@@ -1571,6 +2017,7 @@ mod tests {
             Some(socket(proxy_ip)),
             "/api/v1/devices/code/request",
         )
+        .await
         .expect("first request allowed");
         let second = enforce_device_code_ip_rate_limit(
             &limiters,
@@ -1578,6 +2025,7 @@ mod tests {
             Some(socket(proxy_ip)),
             "/api/v1/devices/code/request",
         )
+        .await
         .expect_err("second request should be rate-limited by forwarded client IP");
 
         assert_eq!(first, Some(client_ip));

@@ -189,7 +189,11 @@ pub async fn claim_pairing(
         );
         return Err(AppError::RateLimited);
     };
-    if !state.cli_pairing_claim_limiter.check(client_ip) {
+    if !state
+        .cli_pairing_claim_limiter
+        .check_shared(client_ip)
+        .await?
+    {
         tracing::warn!(
             client_ip = %client_ip,
             peer_ip = %peer.ip(),

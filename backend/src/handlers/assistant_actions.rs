@@ -1247,9 +1247,7 @@ mod tests {
         manifest_body, resolve_assistant_actions_body,
     };
     use crate::config::TrustedProxyRange;
-    use crate::mw::rate_limit::{
-        create_per_ip_rate_limiter, create_rate_limiter, rate_limit_middleware,
-    };
+    use crate::mw::rate_limit::{GlobalRateLimiter, PerIpRateLimiter, rate_limit_middleware};
 
     const MAXIMUM_REGISTRY_BYTES: usize = 1_048_576;
     /// Names the manifest may contain. The first 14 mirror the Aevatar
@@ -3114,8 +3112,8 @@ mod tests {
     async fn assistant_actions_route_with_query_remains_rate_limit_exempt() {
         let state = crate::test_utils::test_app_state_no_db().await;
         let (_, private_api) = crate::routes::build_router();
-        let per_ip = create_per_ip_rate_limiter(1, 60);
-        let global = create_rate_limiter(1, 1);
+        let per_ip = Arc::new(PerIpRateLimiter::new(1, 60));
+        let global = Arc::new(GlobalRateLimiter::new_local(1, 1));
         let app = private_api
             .with_state(state)
             .layer(middleware::from_fn(rate_limit_middleware))

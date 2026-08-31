@@ -195,7 +195,7 @@ pub async fn ssh_exec(
     check_dangerous_command(&command)?;
 
     // -- Session limiting --
-    let session_guard = state.ssh_session_manager.try_acquire(&user_id)?;
+    let session_guard = state.ssh_session_manager.try_acquire(&user_id).await?;
 
     let ip_address = Some(addr.ip().to_string());
     let user_agent = headers
@@ -303,52 +303,58 @@ pub async fn ssh_exec(
         };
 
         state.billing.mark_forwarded(&metered).await?;
-        let exec_result = match auth_context.mode {
-            SshAuthMode::Cert => {
-                let ephemeral = ephemeral.as_ref().ok_or_else(|| {
-                    AppError::Internal("Missing generated SSH certificate".to_string())
-                })?;
-                state
-                    .node_dispatch
-                    .exec_ssh_command(
-                        node_id,
-                        crate::services::node_ws_manager::NodeSshExecRequest {
-                            request_id: request_id.clone(),
-                            host: ssh_svc.host.clone(),
-                            port: ssh_svc.port,
-                            principal: principal.clone(),
-                            private_key_pem: ephemeral.private_key_pem.clone(),
-                            certificate_openssh: ephemeral.certificate_openssh.clone(),
-                            command: command.clone(),
-                            timeout_secs,
-                        },
-                        signing_secret.as_ref().map(|s| s.as_slice()),
-                        billing_egress_permit,
-                    )
-                    .await
-            }
-            SshAuthMode::NodeKey => {
-                state
-                    .node_dispatch
-                    .exec_ssh_node_key_command(
-                        node_id,
-                        crate::services::node_ws_manager::NodeSshNodeKeyExecRequest {
-                            request_id: request_id.clone(),
-                            service_slug: auth_context.service_slug.clone(),
-                            principal: principal.clone(),
-                            command: command.clone(),
-                            timeout_secs,
-                            target_host: Some(ssh_svc.host.clone()),
-                            target_port: Some(ssh_svc.port),
-                            host_key_sha256: None,
-                        },
-                        signing_secret.as_ref().map(|s| s.as_slice()),
-                        billing_egress_permit,
-                    )
-                    .await
-            }
-            SshAuthMode::ProxyOnly => unreachable!("proxy-only returned before node dispatch"),
-        };
+        let exec_result = session_guard
+            .run_until_lost(async {
+                match auth_context.mode {
+                    SshAuthMode::Cert => {
+                        let ephemeral = ephemeral.as_ref().ok_or_else(|| {
+                            AppError::Internal("Missing generated SSH certificate".to_string())
+                        })?;
+                        state
+                            .node_dispatch
+                            .exec_ssh_command(
+                                node_id,
+                                crate::services::node_ws_manager::NodeSshExecRequest {
+                                    request_id: request_id.clone(),
+                                    host: ssh_svc.host.clone(),
+                                    port: ssh_svc.port,
+                                    principal: principal.clone(),
+                                    private_key_pem: ephemeral.private_key_pem.clone(),
+                                    certificate_openssh: ephemeral.certificate_openssh.clone(),
+                                    command: command.clone(),
+                                    timeout_secs,
+                                },
+                                signing_secret.as_ref().map(|s| s.as_slice()),
+                                billing_egress_permit,
+                            )
+                            .await
+                    }
+                    SshAuthMode::NodeKey => {
+                        state
+                            .node_dispatch
+                            .exec_ssh_node_key_command(
+                                node_id,
+                                crate::services::node_ws_manager::NodeSshNodeKeyExecRequest {
+                                    request_id: request_id.clone(),
+                                    service_slug: auth_context.service_slug.clone(),
+                                    principal: principal.clone(),
+                                    command: command.clone(),
+                                    timeout_secs,
+                                    target_host: Some(ssh_svc.host.clone()),
+                                    target_port: Some(ssh_svc.port),
+                                    host_key_sha256: None,
+                                },
+                                signing_secret.as_ref().map(|s| s.as_slice()),
+                                billing_egress_permit,
+                            )
+                            .await
+                    }
+                    SshAuthMode::ProxyOnly => {
+                        unreachable!("proxy-only returned before node dispatch")
+                    }
+                }
+            })
+            .await;
 
         match exec_result {
             Ok(result) => {
@@ -420,6 +426,7 @@ pub async fn ssh_exec(
 
                 return Ok(Json(response));
             }
+            Err(error @ AppError::RateLimited) => return Err(error),
             Err(error) => {
                 if auth_context.mode == SshAuthMode::NodeKey {
                     let error_message = error.to_string();

@@ -54,7 +54,8 @@ async fn execute_public_proxy(
         peer,
         &state.config.trusted_proxy_ips,
         &request_path,
-    )?;
+    )
+    .await?;
 
     if is_ws_upgrade_request(&request) {
         return Err(AppError::BadRequest(

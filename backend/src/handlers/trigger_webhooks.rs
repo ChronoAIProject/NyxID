@@ -25,7 +25,7 @@ pub async fn receive_trigger(
     request: Request<Body>,
 ) -> AppResult<Json<TriggerIngressResponse>> {
     let trigger = trigger_service::load_active_for_ingress(&state.db, &trigger_id).await?;
-    if !state.per_trigger_limiter.check(&trigger.id) {
+    if !state.per_trigger_limiter.check_shared(&trigger.id).await? {
         return Err(AppError::TriggerRateLimited);
     }
     let headers = request.headers().clone();

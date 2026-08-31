@@ -429,7 +429,7 @@ All manual forwarding limits return the structured `request_body_too_large` erro
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SSH_MAX_SESSIONS_PER_USER` | `4` | Maximum concurrent SSH tunnel sessions per authenticated user across the cluster |
+| `SSH_MAX_SESSIONS_PER_USER` | `4` | Maximum concurrent SSH tunnels, browser terminals, and exec operations per authenticated user across the cluster. MongoDB capacity slots enforce the cap. |
 | `SSH_CONNECT_TIMEOUT_SECS` | `10` | Timeout for connecting to the downstream SSH target |
 | `SSH_MAX_TUNNEL_DURATION_SECS` | `3600` | Maximum duration for a single SSH tunnel before forced close |
 

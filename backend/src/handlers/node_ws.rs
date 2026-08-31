@@ -19,13 +19,14 @@ use crate::models::node_pending_credential::NodePendingCredential;
 use crate::services::{
     audit_service, node_pending_credential_service, node_service,
     node_ws_manager::{
-        NodeCapabilitiesMsg, NodeOutboundMessage, NodeProxyResponse, NodeSshExecResult,
-        NodeWsManager, PendingCredentialCiphertextParams, WsFrameInjectedInbound,
-        WsProxyBinaryInbound, WsProxyClosedInbound, WsProxyErrorInbound, WsProxyOpenedInbound,
-        WsProxyResponseChunkMsg, WsProxyResponseEndMsg, WsProxyResponseStartMsg,
-        WsProxyTextInbound, WsSshExecResultMsg, WsSshNodeExecCloseMsg, WsSshNodeExecDataMsg,
-        WsSshNodeExecErrorMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg, WsSshTunnelOpenedMsg,
-        WsWebTerminalClosedMsg, WsWebTerminalDataMsg, WsWebTerminalStartedMsg,
+        NodeCapabilitiesMsg, NodeConnectionReservation, NodeOutboundMessage, NodeProxyResponse,
+        NodeSshExecResult, NodeWsManager, PendingCredentialCiphertextParams,
+        WsFrameInjectedInbound, WsProxyBinaryInbound, WsProxyClosedInbound, WsProxyErrorInbound,
+        WsProxyOpenedInbound, WsProxyResponseChunkMsg, WsProxyResponseEndMsg,
+        WsProxyResponseStartMsg, WsProxyTextInbound, WsSshExecResultMsg, WsSshNodeExecCloseMsg,
+        WsSshNodeExecDataMsg, WsSshNodeExecErrorMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg,
+        WsSshTunnelOpenedMsg, WsWebTerminalClosedMsg, WsWebTerminalDataMsg,
+        WsWebTerminalStartedMsg,
     },
     rci_audit_service::{
         self, RciAuditDelivery, RciAuditErrorKind, RciAuditEventKind, RciAuditSubject,
@@ -36,18 +37,6 @@ use crate::telemetry::{
     sampling::hash_short_id,
     schema::TelemetryEvent,
 };
-
-/// RAII guard that decrements the pending auth counter on drop.
-/// Prevents counter leaks if the WS handler future is cancelled (H3).
-struct PendingAuthGuard {
-    manager: Arc<NodeWsManager>,
-}
-
-impl Drop for PendingAuthGuard {
-    fn drop(&mut self) {
-        self.manager.decrement_pending_auth();
-    }
-}
 
 /// Size of the bounded channel for WS writer messages (H4).
 const WS_WRITER_CHANNEL_SIZE: usize = 256;
@@ -810,24 +799,13 @@ pub async fn ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // Enforce max concurrent WebSocket connections (includes pending auth).
-    // M6: This check + increment is not atomic (TOCTOU). Concurrent upgrade
-    // requests could slightly exceed the limit (by 1-2 connections). This is
-    // acceptable since the limit is a soft cap and the race window is narrow.
-    if state.node_ws_manager.total_connection_count() >= state.node_ws_manager.max_connections() {
+    // Reserve before upgrade and retain the slot until the socket task exits.
+    let Some(reservation) = state.node_ws_manager.try_reserve_connection() else {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "Maximum node connections reached",
         )
             .into_response();
-    }
-
-    state.node_ws_manager.increment_pending_auth();
-
-    // H3: Create RAII guard so the pending auth counter is decremented
-    // even if the upgrade future is cancelled or the task is aborted.
-    let guard = PendingAuthGuard {
-        manager: state.node_ws_manager.clone(),
     };
 
     let ip = ws_extract_ip(&headers, Some(peer), &state.config.trusted_proxy_ips);
@@ -841,7 +819,7 @@ pub async fn ws_handler(
 
     ws.max_message_size(control_message_limit)
         .max_frame_size(control_message_limit)
-        .on_upgrade(move |socket| handle_node_connection(state, socket, guard, ip, ua))
+        .on_upgrade(move |socket| handle_node_connection(state, socket, reservation, ip, ua))
         .into_response()
 }
 
@@ -890,7 +868,7 @@ fn normalize_legacy_ip_text(value: &str) -> String {
 async fn handle_node_connection(
     state: AppState,
     socket: WebSocket,
-    _guard: PendingAuthGuard,
+    _reservation: NodeConnectionReservation,
     ip_address: Option<String>,
     user_agent: Option<String>,
 ) {
@@ -1085,10 +1063,6 @@ async fn handle_node_connection(
         None
     })
     .await;
-
-    // H3: The RAII guard (_guard) decrements pending_auth on drop.
-    // Drop it explicitly here since auth phase is complete.
-    drop(_guard);
 
     let (node_id, owner_user_id) = match auth_result {
         Ok(Some(pair)) => pair,

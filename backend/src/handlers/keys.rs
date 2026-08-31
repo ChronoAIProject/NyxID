@@ -4223,7 +4223,10 @@ mod tests {
             &member_id,
             Some(&created.slug),
             created.catalog_service_id.as_deref(),
-            None,
+            crate::services::proxy_service::ProxyExecutionContext::new(
+                None,
+                state.platform_user_rate_limit,
+            ),
         )
         .await
         .expect("member proxy resolution should not fail")
@@ -4249,7 +4252,10 @@ mod tests {
                 &override_member_id,
                 Some(&created.slug),
                 created.catalog_service_id.as_deref(),
-                None,
+                crate::services::proxy_service::ProxyExecutionContext::new(
+                    None,
+                    state.platform_user_rate_limit,
+                ),
             )
             .await;
         match override_proxy_result {
