@@ -139,3 +139,32 @@ spec:
       port: 3002
       targetPort: internal
       protocol: TCP
+---
+# Port 3001 remains reachable from ingress and frontend pods. Port 3002 accepts
+# traffic only from another backend pod, even if a Service is misconfigured.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: nyxid-backend-internal
+  namespace: chronoai-platform
+  labels:
+    app.kubernetes.io/name: nyxid-backend
+    app.kubernetes.io/component: backend-internal
+    app.kubernetes.io/part-of: nyxid
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: nyxid-backend
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - port: public
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: nyxid-backend
+      ports:
+        - port: internal
+          protocol: TCP
