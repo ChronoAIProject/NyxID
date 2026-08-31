@@ -680,6 +680,16 @@ async fn main() {
         internal_auth,
     ));
     node_ws_manager.attach_cluster_dispatch(Arc::downgrade(&node_dispatch));
+    services::coordination_service::initialize_cluster_lease_runtime(
+        services::coordination_service::ClusterLeaseRuntime::new(
+            models::coordination::CoordinationHolder {
+                instance_id: replica_identity.instance_name.clone(),
+                generation_id: replica_identity.generation_id.clone(),
+            },
+            std::time::Duration::from_secs(config.cluster_lease_ttl_secs),
+            std::time::Duration::from_secs(config.cluster_lease_renew_secs),
+        ),
+    );
     let ssh_session_manager = Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user));
 
     // HTTP Event Gateway state (NyxID#221).

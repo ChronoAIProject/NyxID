@@ -118,6 +118,12 @@ pub async fn transition_oauth_key_to_dead(
                 "updated_at": bson::DateTime::from_chrono(api_key.updated_at),
                 "credential_type": "oauth2",
                 "status": "active",
+                "$expr": {
+                    "$eq": [
+                        { "$ifNull": ["$credential_epoch", 1_i64] },
+                        api_key.credential_epoch,
+                    ]
+                },
             },
             doc! { "$set": {
                 "status": dead_status,

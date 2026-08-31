@@ -59,6 +59,30 @@ pub fn generate_code_challenge(verifier: &str) -> String {
     base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, hash)
 }
 
+fn provider_token_refresh_revision_filter(token: &UserProviderToken) -> bson::Document {
+    let mut filter = doc! {
+        "_id": &token.id,
+        "updated_at": bson::DateTime::from_chrono(token.updated_at),
+        "status": { "$in": ["active", "expired"] },
+        "$expr": {
+            "$eq": [
+                { "$ifNull": ["$state_version", 0_i64] },
+                token.state_version,
+            ]
+        },
+    };
+    if let Some(refresh_token) = &token.refresh_token_encrypted {
+        filter.insert(
+            "refresh_token_encrypted",
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: refresh_token.clone(),
+            },
+        );
+    }
+    filter
+}
+
 /// Refresh an OAuth2 access token using the stored refresh token.
 ///
 /// Uses a dedicated no-redirect HTTP client (SEC-H2) and truncates error
@@ -130,11 +154,12 @@ pub async fn refresh_oauth_token(
         let body = response.text().await.unwrap_or_default();
 
         // SEC-M5: Truncate error body before storing to prevent leaking provider internals
-        let truncated_body = &body[..body.len().min(200)];
+        let truncated_body: String = body.chars().take(200).collect();
 
-        db.collection::<UserProviderToken>(COLLECTION_NAME)
+        let update = db
+            .collection::<UserProviderToken>(COLLECTION_NAME)
             .update_one(
-                doc! { "_id": &token.id },
+                provider_token_refresh_revision_filter(token),
                 doc! { "$set": {
                     "status": "refresh_failed",
                     "error_message": format!("Refresh failed: {status} {truncated_body}"),
@@ -142,6 +167,16 @@ pub async fn refresh_oauth_token(
                 }},
             )
             .await?;
+
+        if update.modified_count == 0 {
+            tracing::info!(
+                token_id = %token.id,
+                "OAuth refresh failure discarded because the provider-token revision changed"
+            );
+            return Err(AppError::Conflict(
+                "OAuth credential changed while it was being refreshed".to_string(),
+            ));
+        }
 
         return Err(AppError::Internal(format!(
             "Token refresh failed with status {status}"
@@ -190,9 +225,19 @@ pub async fn refresh_oauth_token(
         );
     }
 
-    db.collection::<UserProviderToken>(COLLECTION_NAME)
-        .update_one(doc! { "_id": &token.id }, doc! { "$set": set_doc })
+    let update = db
+        .collection::<UserProviderToken>(COLLECTION_NAME)
+        .update_one(
+            provider_token_refresh_revision_filter(token),
+            doc! { "$set": set_doc },
+        )
         .await?;
+
+    if update.modified_count == 0 {
+        return Err(AppError::Conflict(
+            "OAuth credential changed while it was being refreshed".to_string(),
+        ));
+    }
 
     tracing::info!(
         user_id = %token.user_id,
