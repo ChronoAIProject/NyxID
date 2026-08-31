@@ -185,9 +185,27 @@ pub fn sign(
     nonce: &str,
     body_digest: &str,
 ) -> String {
+    hex::encode(signature_bytes(
+        key,
+        method,
+        path,
+        timestamp,
+        nonce,
+        body_digest,
+    ))
+}
+
+fn signature_bytes(
+    key: &[u8],
+    method: &str,
+    path: &str,
+    timestamp: &str,
+    nonce: &str,
+    body_digest: &str,
+) -> [u8; 32] {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
     mac.update(canonical(method, path, timestamp, nonce, body_digest).as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+    mac.finalize().into_bytes().into()
 }
 
 pub fn verify(
@@ -199,17 +217,14 @@ pub fn verify(
     body_digest: &str,
     supplied_signature: &str,
 ) -> bool {
-    let expected = sign(key, method, path, timestamp, nonce, body_digest);
+    let expected = signature_bytes(key, method, path, timestamp, nonce, body_digest);
     let Ok(supplied) = hex::decode(supplied_signature) else {
         return false;
     };
     if supplied.len() != 32 {
         return false;
     }
-    expected
-        .as_bytes()
-        .ct_eq(supplied_signature.as_bytes())
-        .into()
+    expected.as_slice().ct_eq(supplied.as_slice()).into()
 }
 
 fn canonical(method: &str, path: &str, timestamp: &str, nonce: &str, body_digest: &str) -> String {
@@ -262,6 +277,42 @@ mod tests {
             "nonce-a",
             &sha256_hex(b"different"),
             &signature,
+        ));
+    }
+
+    #[test]
+    fn signature_verification_accepts_mixed_case_hex() {
+        let key = [0x42_u8; 32];
+        let body_digest = sha256_hex(br#"{"node_id":"node-a"}"#);
+        let signature = sign(
+            &key,
+            "POST",
+            "/internal/v1/nodes/node-a/proxy",
+            "1725100000",
+            "nonce-a",
+            &body_digest,
+        );
+        let mixed_case_signature: String = signature
+            .chars()
+            .enumerate()
+            .map(|(index, character)| {
+                if index % 2 == 0 {
+                    character.to_ascii_uppercase()
+                } else {
+                    character
+                }
+            })
+            .collect();
+
+        assert_ne!(signature, mixed_case_signature);
+        assert!(verify(
+            &key,
+            "POST",
+            "/internal/v1/nodes/node-a/proxy",
+            "1725100000",
+            "nonce-a",
+            &body_digest,
+            &mixed_case_signature,
         ));
     }
 
