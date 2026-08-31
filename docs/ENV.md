@@ -53,6 +53,35 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
 | `ENVIRONMENT` | `development` | `development`, `staging`, `production` |
 
+## Cluster coordination
+
+NyxID uses MongoDB for shared ownership, leases, replay checks, rate windows,
+capacity slots, and MCP notifications. The internal HTTP listener forwards only
+operations that must reach a process-owned node WebSocket. Do not route this
+listener through a public Service, ingress, or load balancer.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `INSTANCE_NAME` | `POD_NAME`, then `HOSTNAME` | Stable name for one pod or host. A random process generation fences restarts that reuse this name. Kubernetes sets this from `metadata.name`. |
+| `INTERNAL_BIND_ADDR` | `127.0.0.1:3002` | Bind address for the private authenticated listener. Multi-replica deployments must bind it to a peer-reachable interface, such as `0.0.0.0:3002` inside a pod network. |
+| `INTERNAL_ADVERTISE_URL` | `http://{POD_IP}:3002`, then `http://{HOSTNAME}:3002` | Peer-reachable base URL stored in ownership records. Set an internal pod IP or private DNS URL. Never set the public ingress URL. |
+| `INTERNAL_DISPATCH_HMAC_KEY` | derived from `ENCRYPTION_KEY` | Optional 32-byte HMAC key as 64 hex characters. All replicas must use the same value. Set it explicitly when the local encryption key is unavailable, such as with a KMS key provider. |
+| `INTERNAL_AUTH_MAX_SKEW_SECS` | `30` | Maximum clock skew accepted by the internal request signature verifier. |
+| `INTERNAL_NONCE_TTL_SECS` | `120` | MongoDB replay-record lifetime for internal request nonces. This must exceed twice `INTERNAL_AUTH_MAX_SKEW_SECS`. |
+| `NODE_OWNER_LEASE_TTL_SECS` | `90` | Lifetime of a node socket owner record without renewal. |
+| `NODE_OWNER_LEASE_RENEW_SECS` | `30` | Renewal interval for node socket owner records. Keep this below `NODE_OWNER_LEASE_TTL_SECS`. |
+| `CLUSTER_LEASE_TTL_SECS` | `30` | Default lifetime for MongoDB leases, including OAuth refresh claims and Telegram polling leadership. |
+| `CLUSTER_LEASE_RENEW_SECS` | `10` | Default renewal interval for renewable cluster leases. Keep this below `CLUSTER_LEASE_TTL_SECS`. |
+| `CLUSTER_SLOT_TTL_SECS` | `30` | Lifetime of a global WebSocket or SSH capacity slot without renewal. |
+| `CLUSTER_SLOT_RENEW_SECS` | `10` | Renewal interval for occupied capacity slots. Losing renewal cancels the associated session. |
+| `MCP_NOTIFICATION_POLL_INTERVAL_MS` | `250` | Poll interval used by an SSE holder to read its durable MongoDB notification outbox. |
+| `MCP_NOTIFICATION_TTL_SECS` | `86400` | Retention period for delivered or abandoned MCP outbox notifications. |
+
+Kubernetes also injects `POD_NAME` and `POD_IP` through the downward API. The
+manifest copies `POD_NAME` to `INSTANCE_NAME` and builds
+`INTERNAL_ADVERTISE_URL` from `POD_IP`. These two downward API variables are
+deployment inputs, not standalone NyxID settings.
+
 ## Assistant Diagnostics
 
 The Aevatar assistant chat wire-log diagnostic has no environment variable. It
@@ -182,8 +211,8 @@ Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RATE_LIMIT_PER_SECOND` | `10` | Global rate limit (requests/second) |
-| `RATE_LIMIT_BURST` | `30` | Burst capacity and per-IP limit |
+| `RATE_LIMIT_PER_SECOND` | `10` | Cluster-wide sustained request rate |
+| `RATE_LIMIT_BURST` | `30` | Cluster-wide burst capacity and per-IP limit |
 | `PLATFORM_SERVICE_RATE_LIMIT_PER_SECOND` | `0` | Sustained requests/second per user for each platform-credentialed service. Defaults to `0` (disabled): enabling a cap on a shared credential is a deliberate operator decision taken after observing real traffic, so it never arrives with a deploy. |
 | `PLATFORM_SERVICE_RATE_LIMIT_BURST` | `10` | Burst capacity per user for each platform-credentialed service. |
 | `PLATFORM_REQUIRE_OPERATION_POLICY` | `false` | When true, a platform-credentialed catalog row with no `proxy_operation_policy` is refused on actor-addressed paths (`/proxy/s/{slug}`, `/llm/*`). Ships **disabled** so deploying changes no existing behaviour; enable per environment once every such row either carries a policy or is confirmed to receive no actor-addressed traffic. Server-chosen surfaces (the assistant) are unaffected either way — they cannot name an operation, so a policy has no meaning there. |
@@ -373,7 +402,7 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 | `NODE_PROXY_TIMEOUT_SECS` | `30` | Timeout for proxy requests routed through nodes |
 | `NODE_REGISTRATION_TOKEN_TTL_SECS` | `3600` | Registration token validity (1 hour) |
 | `NODE_MAX_PER_USER` | `10` | Maximum nodes per user |
-| `NODE_MAX_WS_CONNECTIONS` | `100` | Maximum concurrent node WebSocket connections |
+| `NODE_MAX_WS_CONNECTIONS` | `100` | Maximum concurrent node WebSocket connections per replica. This protects each process's file descriptors and memory. |
 | `NODE_MAX_STREAM_DURATION_SECS` | `300` | Maximum duration for streaming proxy responses |
 | `NODE_HMAC_SIGNING_ENABLED` | `true` | Enable HMAC request signing for node proxy requests |
 
@@ -387,7 +416,7 @@ For development, Mailpit is provided via Docker Compose (SMTP on `localhost:1025
 | `PUBLIC_PROXY_RATE_LIMIT_PER_MINUTE` | `60` | Dedicated per-IP rate limit for `/public/s/{slug}/{path}` anonymous proxy requests. Honors `TRUSTED_PROXY_IPS` before trusting forwarded client IP headers. |
 | `PUBLIC_MCP_RATE_LIMIT_PER_MINUTE` | `30` | Dedicated per-IP rate limit for `POST /public/mcp` anonymous MCP discovery requests. Honors `TRUSTED_PROXY_IPS` before trusting forwarded client IP headers. |
 | `PROXY_STREAM_IDLE_TIMEOUT_SECS` | `60` | Terminate a streamed proxy response if no chunk arrives within N seconds |
-| `WS_PASSTHROUGH_MAX_CONNECTIONS` | `200` | Maximum concurrent WebSocket passthrough connections |
+| `WS_PASSTHROUGH_MAX_CONNECTIONS` | `200` | Maximum concurrent WebSocket passthrough connections across the cluster. MongoDB capacity slots enforce the global cap. |
 
 Other forwarding surfaces remain intentionally fixed and bounded: assistant direct/chat
 requests are capped at 256 KiB, SSH exec JSON requests at 64 KiB, and Oracle consumer
@@ -399,7 +428,7 @@ All manual forwarding limits return the structured `request_body_too_large` erro
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SSH_MAX_SESSIONS_PER_USER` | `4` | Maximum concurrent SSH tunnel sessions per authenticated user |
+| `SSH_MAX_SESSIONS_PER_USER` | `4` | Maximum concurrent SSH tunnel sessions per authenticated user across the cluster |
 | `SSH_CONNECT_TIMEOUT_SECS` | `10` | Timeout for connecting to the downstream SSH target |
 | `SSH_MAX_TUNNEL_DURATION_SECS` | `3600` | Maximum duration for a single SSH tunnel before forced close |
 

@@ -33,8 +33,8 @@ The implementation is complete when all ten audit findings have code, tests, and
 | 6. MCP sessions and SSE | Pending | Read-through sessions and durable notifications | Pending |
 | 7. Rate limiters | Pending | Atomic Mongo fixed-window counters | Pending |
 | 8. Process caps | Pending | Global counters or explicit per-replica contracts | Pending |
-| 9. Deployment config | Pending | Kubernetes, nginx, and Compose changes | Pending |
-| 10. Documentation | Pending | Deployment, environment, and node architecture docs | Pending |
+| 9. Deployment config | Done | Restored tracked Kubernetes manifests with two backend replicas, separate public and headless Services, downward API identity, private-port NetworkPolicy, streaming ingress policy, scale-safe Compose, and nginx WebSocket support | `kubeconform`: 17 valid; `docker compose config --quiet`: pass; `nginx -t`: pass |
+| 10. Documentation | Done | Documented the fenced node owner, authenticated private listener, MongoDB coordination stores, durable MCP outbox, global limits, deployment topology, and every new environment variable | `git diff --check`: pass; stale single-replica claims absent |
 
 ## Architecture selection
 
@@ -75,12 +75,19 @@ The full contract is recorded in `docs/HORIZONTAL_SCALING_ARCHITECTURE.md`.
 | --- | --- | --- |
 | Pre-change `cargo build -p nyxid` | Pass | Finished in 3m08s; only the macOS compact-unwind linker warning and upstream `proc-macro-error2` future-incompatibility notice |
 | Pre-change `cargo test -p nyxid` | Environment failure | 5,630 passed, 84 failed in 178.09s because the auto-detected MongoDB is standalone; transaction tests require a replica set and fail at `test_utils.rs:188` |
-| Pre-change `cargo test -p nyxid` with replica set | Pass | 5,714 passed, 0 failed using `mongodb://127.0.0.1:27019/?replicaSet=rs0&directConnection=true&retryWrites=true` |
+| Pre-change `cargo test -p nyxid` with replica set | Pass | 5,714 passed, 0 failed in 109.75s using `mongodb://127.0.0.1:27019/?replicaSet=rs0&directConnection=true&retryWrites=true` |
 | Ownership `cargo check -p nyxid` | Pass | Finished dev profile with no touched-code warnings |
 | `expired_owner_fences_a_stale_local_socket` before fix | Expected failure | Stale local map entry made an expired persisted owner dispatchable |
 | `expired_owner_fences_a_stale_local_socket` after fix | Pass | 1 passed, 0 failed, 5,718 filtered out |
 | `stale_reader_cannot_unregister_replacement_connection` | Pass | 1 passed, 0 failed, 5,718 filtered out |
 | `connection_owner_debug_redacts_internal_address` | Pass | 1 passed, 0 failed, 5,718 filtered out |
 | Node owner Mongo CAS tests | Blocked by test infrastructure | The earlier replica-set listener on `127.0.0.1:27019` stopped and Docker Desktop did not answer; tests remain implemented and will be rerun after the fixture is restored. |
+| Kubernetes schemas | Pass | `kubeconform -strict -summary k8s`: 17 resources valid, 0 invalid, 0 errors, 0 skipped |
+| Kubernetes YAML | Pass | `yq eval-all '.' k8s/*.yaml`: all documents parsed |
+| Production Compose | Pass | Merged `docker-compose.yml` and `docker-compose.prod.yml` passes `docker compose config --quiet`; backend has no container name or published host port |
+| Frontend nginx | Pass | Rendered `frontend/nginx.conf.template` passes nginx 1.27 `nginx -t` with WebSocket headers and one-hour stream timeouts |
+| Deployment documentation | Pass | `git diff --check`; removed stale stateless, per-instance rate-limit, and sticky-session claims |
 
-Final Mongo-backed verification will set `NYXID_TEST_DATABASE_URL` to an isolated local replica-set deployment. This is required to execute, rather than skip or weaken, the repository's transaction tests.
+Final Mongo-backed verification uses an isolated local replica-set deployment
+through `NYXID_TEST_DATABASE_URL`. This executes the repository's transaction
+tests without skips or weakened assertions.

@@ -2,37 +2,45 @@
 
 ## Overview
 
-The Node Proxy feature introduces a **control plane / data plane** architecture for NyxID's credential proxy. Users can run lightweight "credential nodes" on their own infrastructure. Instead of storing credentials in NyxID's database, credentials stay on the user's node. When a proxy request arrives, NyxID routes it to the user's node via WebSocket, and the node injects credentials locally before forwarding the request to the downstream service.
+The Node Proxy feature separates NyxID's control plane from credential use.
+Users can run lightweight credential nodes on their own infrastructure.
+Credentials stay on the user's node. When a proxy request arrives, NyxID
+routes it to that node through a WebSocket. The node injects credentials before
+it forwards the request to the downstream service.
+
+The backend can run multiple replicas. A node WebSocket belongs to one process,
+but its fenced owner record lives on the `Node` document in MongoDB. Any
+replica can find the owner and forward an operation through the private
+inter-replica listener. The client does not need to connect to the owner.
 
 This is an opt-in feature. Users without nodes continue using the existing proxy (credentials stored in NyxID). Users with nodes can selectively route specific services through their nodes while keeping others on NyxID.
 
 For the WebSocket protocol specification, see [NODE_PROXY_PROTOCOL.md](NODE_PROXY_PROTOCOL.md). For end-user documentation, see [NODE_PROXY.md](NODE_PROXY.md) and [NYXID_NODE.md](NYXID_NODE.md).
 
-## Architecture Diagram
+## Architecture diagram
 
+```text
+                           public Service :3001
+Client or ingress  +----------------------------------+
+       |           |                                  |
+       v           v                                  v
+  replica B ingress handler                       replica A
+       |           |                                  |
+       |           +---- MongoDB owner lookup --------+
+       |                                              |
+       +---- HMAC-authenticated private request ------> NodeWsManager
+                          :3002                         |
+                                                        | WebSocket
+                                                        v
+                                                 credential node
+                                                        |
+                                                        v
+                                              downstream service
 ```
-                        +-----------------------------------+
-                        |          NyxID Server              |
-    Client --HTTP-->    |  +---------+  +--------------+     |
-                        |  |  Proxy  |  |   Node WS    |     |
-                        |  | Handler +-->   Manager     |     |
-                        |  +----+----+  +------+-------+     |
-                        |       |              |             |
-                        |  +----v----+    WebSocket          |
-                        |  |  Node   |         |             |
-                        |  |  Router |         |             |
-                        |  +----+----+         |             |
-                        +-------+--------------+-------------+
-                                |              |
-                     +----------+              |
-                     | (fallback)              | (node route)
-                     v                         v
-              +----------+            +-----------------+
-              |Downstream|            |  User's Node    |
-              | Service  |<---HTTP----|  (credentials   |
-              |          |            |   stored here)  |
-              +----------+            +-----------------+
-```
+
+If replica B also owns the socket, `NodeDispatch` calls its local
+`NodeWsManager` directly. Direct and remote dispatch preserve the same response,
+streaming, cancellation, timeout, and failover behavior.
 
 ---
 
@@ -77,6 +85,7 @@ pub struct Node {
     pub signing_secret_hash: String,   // SHA-256 hash of the HMAC signing secret
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub connected_at: Option<DateTime<Utc>>,
+    pub connection_owner: Option<NodeConnectionOwner>,
     pub metadata: Option<NodeMetadata>,
     #[serde(default)]
     pub metrics: NodeMetrics,
@@ -85,6 +94,13 @@ pub struct Node {
     pub updated_at: DateTime<Utc>,
 }
 ```
+
+`NodeConnectionOwner` contains `instance_name`, `generation_id`,
+`connection_id`, `internal_base_url`, `claimed_at`, `renewed_at`, `expires_at`,
+`capabilities`, and `capabilities_resolved`. `generation_id` changes on every backend
+process start. `connection_id` changes on every socket connection. Every
+renewal, release, capability update, and dispatch fence matches both values, so
+an old process or socket cannot change its replacement.
 
 ### NodeServiceBinding (collection: `node_service_bindings`)
 
@@ -140,6 +156,7 @@ pub struct NodeRegistrationToken {
 { "user_id": 1, "name": 1 }               // unique
 { "user_id": 1, "is_active": 1 }
 { "auth_token_hash": 1 }
+{ "connection_owner.expires_at": 1 }
 
 // node_service_bindings
 { "node_id": 1, "service_id": 1 }         // unique
@@ -273,12 +290,13 @@ pub struct NodeRoute {
 
 /// Check if a user has a node binding for this service.
 /// Returns Some(NodeRoute) if the user has an active binding to an active,
-/// online node. Returns None to fall through to standard proxy.
+/// node with an unexpired owner lease. Returns None to fall through to the
+/// standard proxy.
 ///
 /// Selection logic:
 /// 1. Find active bindings for (user_id, service_id) ordered by priority
 /// 2. Batch-fetch the corresponding nodes
-/// 3. Filter to nodes that are both DB-online AND WS-connected
+/// 3. Filter to active nodes with an unexpired connection_owner lease
 /// 4. Skip unhealthy nodes (>50% error rate with >10 samples)
 /// 5. Return first viable node as primary, rest as fallbacks
 /// 6. Return None if no connected node found
@@ -286,13 +304,19 @@ pub async fn resolve_node_route(
     db: &mongodb::Database,
     user_id: &str,
     service_id: &str,
-    ws_manager: &NodeWsManager,
 ) -> AppResult<Option<NodeRoute>>;
 ```
 
+Routing never uses another replica's local connection map. Node status and
+`is_connected` responses use the same owner lease check. An expired owner is
+offline even if `Node.status` has not yet been updated by the cleanup sweep.
+
 ### node_ws_manager (`backend/src/services/node_ws_manager.rs`)
 
-In-memory WebSocket connection pool. Manages active connections and provides request/response correlation for proxy forwarding. Shared via `Arc` in `AppState`; uses `DashMap` for lock-free concurrent access.
+Process-local WebSocket connection pool. It manages sockets owned by this
+process and correlates their responses. `NodeWsManager` is not the cluster
+connectivity registry. `Node.connection_owner` is that registry, and
+`NodeDispatch` resolves local and remote owners before it calls the manager.
 
 ```rust
 /// Request sent to a node via WebSocket.
@@ -360,7 +384,7 @@ impl NodeWsManager {
     /// Remove a node's connection (called on WS close).
     pub fn unregister_connection(&self, node_id: &str);
 
-    /// Check if a node has an active WebSocket connection.
+    /// Check if this process has the active WebSocket connection.
     pub fn is_connected(&self, node_id: &str) -> bool;
 
     /// Send a proxy request to a node and wait for the response.
@@ -380,6 +404,32 @@ impl NodeWsManager {
     pub fn connected_node_ids(&self) -> Vec<String>;
 }
 ```
+
+### node dispatch
+
+`NodeDispatch` is the common entry point for every node-bound operation. It
+loads the current owner, checks its expiry and fence, then chooses a local call
+or an authenticated request to the owner's internal URL. It retries owner
+resolution once only when a fence rejection proves that the node did not
+receive the operation.
+
+The private listener supports three transport forms:
+
+- Unary HTTP for SSH exec, credential update and removal pushes, and
+  administrative disconnect.
+- Streamed HTTP bodies for proxy responses, with no full-response buffer.
+- One WebSocket per SSH tunnel, web terminal, or downstream WebSocket
+  passthrough session.
+
+The ingress replica computes the node request signature before forwarding.
+Node signing secrets never cross the private listener. The owner acknowledges
+dispatch only after its bounded node writer accepts the frame.
+
+Once a node may have received an operation, an uncertain transport failure is
+reported with `dispatched = true`. The proxy failover logic does not retry an
+unsafe method in that state. Closing a remote response stream or duplex session
+cancels the owner-side correlation entry and closes the corresponding node
+operation.
 
 **Streaming dispatch in the WS reader task (`node_ws.rs`):**
 
@@ -452,7 +502,7 @@ pub struct NodeInfo {
     pub id: String,
     pub name: String,
     pub status: String,
-    pub is_connected: bool,  // Real-time from NodeWsManager
+    pub is_connected: bool,  // Unexpired MongoDB connection_owner lease
     pub last_heartbeat_at: Option<String>,
     pub connected_at: Option<String>,
     pub metadata: Option<NodeMetadata>,
@@ -527,12 +577,17 @@ async fn handle_node_connection(state: AppState, socket: WebSocket) {
     // 1. Split into reader/writer
     // 2. Wait for auth/register message (10s timeout)
     // 3. Validate token, identify node
-    // 4. Register connection in NodeWsManager
-    // 5. Mark node as "online" in DB
-    // 6. Spawn reader + writer tasks
-    // 7. On disconnect: unregister, mark "offline"
+    // 4. Claim Node.connection_owner with this process and connection fence
+    // 5. Register the local connection in NodeWsManager
+    // 6. Spawn reader, writer, and owner-renewal tasks
+    // 7. On disconnect: unregister and release only the matching owner fence
 }
 ```
+
+The claim is one atomic MongoDB compare-and-set. It succeeds when ownership is
+absent, expired, or held by the same process generation. A reconnect on the
+same process installs a new `connection_id`. Teardown from the older socket
+cannot clear the replacement.
 
 ### admin_nodes.rs -- Admin Node Management
 
@@ -544,6 +599,11 @@ GET    /api/v1/admin/nodes/{node_id}                Get node details (any user's
 POST   /api/v1/admin/nodes/{node_id}/disconnect     Force-disconnect a node
 DELETE /api/v1/admin/nodes/{node_id}                Admin force-delete a node
 ```
+
+Disconnect and delete capture the current owner fence before they change the
+node. They invalidate that exact owner in MongoDB, then use `NodeDispatch` to
+close the socket on its owning replica. If that replica has crashed, its next
+renewal cannot restore ownership and the lease expires normally.
 
 ```rust
 #[derive(Deserialize)]
@@ -577,49 +637,30 @@ pub struct AdminNodeInfo {
 
 The node routing decision point is inserted in `execute_proxy()` after the approval check and before the identity headers / credential resolution block.
 
-### Routing and Failover
+### Routing and failover
 
-```rust
-// In execute_proxy(), after approval check:
-if let Some(node_route) = resolve_node_route(
-    &state.db, &user_id_str, service_id, &state.node_ws_manager,
-).await? {
-    let all_nodes = std::iter::once(&node_route.node_id)
-        .chain(node_route.fallback_node_ids.iter());
+`execute_proxy()` resolves the route before it resolves credentials. For each
+candidate, it asks `NodeDispatch` to send the request to the current fenced
+owner. A local owner uses the process's `NodeWsManager`; a remote owner uses the
+private listener. Both paths return the same dispatch outcome.
 
-    for node_id in all_nodes {
-        let start = std::time::Instant::now();
-        match state.node_ws_manager.send_proxy_request(
-            node_id, request.clone(), signing_secret.as_deref(),
-        ).await {
-            Ok(response) => {
-                let latency_ms = start.elapsed().as_millis() as u64;
-                tokio::spawn(node_metrics_service::record_success(
-                    state.db.clone(), node_id.clone(), latency_ms,
-                ));
-                // Build axum Response, audit with node_id, return
-                return Ok(build_response(response));
-            }
-            Err(AppError::NodeOffline(_) | AppError::NodeProxyTimeout) => {
-                tracing::warn!(node_id = %node_id, "Node failed, trying next");
-                tokio::spawn(node_metrics_service::record_error(
-                    state.db.clone(), node_id.clone(), e.to_string(),
-                ));
-                continue;
-            }
-            Err(e) => return Err(e), // Non-retryable error
-        }
-    }
-    // All nodes failed -- fall through to standard proxy
-}
-// ... existing credential resolution and forwarding logic ...
-```
+A failure can fall through to a fallback node only when the dispatch outcome
+proves that the first node did not receive the request, or when the method is
+safe to retry. An ambiguous peer failure widens the outcome to
+`dispatched = true`. Each failover attempt gets a new `request_id` to avoid a
+correlation collision.
 
-On failover retry, a **new** `request_id` is generated to avoid correlation conflicts. `NodeProxyRequest` derives `Clone` to support this.
+The same dispatch boundary handles normal HTTP proxy requests, streaming HTTP
+responses, SSH exec, SSH tunnels, browser terminals, downstream WebSocket
+passthrough, and credential update or removal pushes. Administrative disconnect
+and delete also use it. No node-bound handler reads the local connection map to
+decide cluster connectivity.
 
 ### Streaming Responses
 
-When the server receives a `StreamChunk::Start` from the WS manager, it converts the channel receiver into an `axum::body::Body::from_stream()`:
+When the ingress replica receives `StreamChunk::Start`, it converts the channel
+receiver into `axum::body::Body::from_stream()`. A remote owner forwards chunks
+as they arrive. It does not buffer the complete response.
 
 ```rust
 match response_type {
@@ -671,6 +712,36 @@ Node-routed proxy requests include extra fields in audit data:
     "node_id": "..."
 }
 ```
+
+The ingress replica owns billing reservation, forwarded marking, byte
+accounting, settlement, metrics, and audit emission. The internal owner only
+performs node egress, so a remote operation is never billed or audited twice.
+
+---
+
+## Inter-replica authentication
+
+The internal router listens on `INTERNAL_BIND_ADDR`, separate from the public
+Axum listener. Kubernetes exposes that port only through the
+`nyxid-backend-headless` Service. No public route mounts the internal handlers.
+
+Each request signature binds the protocol version, method, path, timestamp,
+nonce, and SHA-256 body digest. The receiver checks all of these conditions:
+
+1. The request arrived on the private listener.
+2. The timestamp is within `INTERNAL_AUTH_MAX_SKEW_SECS`.
+3. The HMAC matches in constant time.
+4. MongoDB accepts the nonce as a unique replay record.
+5. A node-bound request carries the current full owner fence.
+
+The nonce collection has a unique index and a TTL index. The atomic insert is
+the replay decision across all replicas. `INTERNAL_DISPATCH_HMAC_KEY` can set a
+shared 32-byte key explicitly. Otherwise, each replica derives the same
+domain-separated key from `ENCRYPTION_KEY`.
+
+Authentication failures return a generic unauthorized response. Internal URLs,
+signatures, nonces, and verification details do not appear in external errors
+or audit data.
 
 ---
 
@@ -749,7 +820,7 @@ fn verify_request_signature(
 
 ## Heartbeat and Health
 
-### Server-Side Heartbeat Task
+### Server-side heartbeat task
 
 A background task runs at `NODE_HEARTBEAT_INTERVAL_SECS` (default: 30s) intervals:
 
@@ -764,7 +835,15 @@ tokio::spawn(async move {
 });
 ```
 
-The sweep sends `heartbeat_ping` to all connected nodes. Nodes that have not responded within `NODE_HEARTBEAT_TIMEOUT_SECS` (default: 90s) are marked offline and their WebSocket connections are closed.
+Each replica sweeps only the sockets in its local `NodeWsManager`. For every
+healthy local socket, the sweep sends `heartbeat_ping` and renews the matching
+MongoDB owner fence. If renewal loses its fence, the replica closes that local
+socket and its pending operations.
+
+Any replica may clear an owner whose `expires_at` is in the past. The cleanup
+update matches the expired fence before it marks the node offline. A replica
+therefore cannot mark a node offline merely because another process owns its
+socket, and stale cleanup cannot clear a new connection.
 
 ### Health-Aware Routing
 
@@ -921,14 +1000,13 @@ On SIGINT/SIGTERM, the agent stops accepting new proxy requests and drains in-fl
 pub struct AppState {
     // ... existing fields ...
     pub node_ws_manager: Arc<NodeWsManager>,
+    pub node_dispatch: Arc<NodeDispatch>,
 }
 ```
 
-Initialized in `main()`:
-
-```rust
-let node_ws_manager = Arc::new(NodeWsManager::new(config.node_proxy_timeout_secs));
-```
+`NodeWsManager` owns only local sockets. `NodeDispatch` combines it with the
+MongoDB owner store, the replica identity, and the authenticated internal HTTP
+client.
 
 ---
 
@@ -963,9 +1041,16 @@ All optional with sensible defaults:
 | `NODE_PROXY_TIMEOUT_SECS` | `30` | Timeout for proxy requests through nodes |
 | `NODE_REGISTRATION_TOKEN_TTL_SECS` | `3600` | Registration token validity (1 hour) |
 | `NODE_MAX_PER_USER` | `10` | Maximum nodes per user |
-| `NODE_MAX_WS_CONNECTIONS` | `100` | Maximum concurrent node WebSocket connections |
+| `NODE_MAX_WS_CONNECTIONS` | `100` | Maximum concurrent node WebSocket connections per replica |
 | `NODE_MAX_STREAM_DURATION_SECS` | `300` | Maximum duration for streaming proxy responses |
 | `NODE_HMAC_SIGNING_ENABLED` | `true` | Enable HMAC request signing for node proxy |
+| `NODE_OWNER_LEASE_TTL_SECS` | `90` | Owner lifetime without a successful renewal |
+| `NODE_OWNER_LEASE_RENEW_SECS` | `30` | Owner renewal interval |
+| `INTERNAL_BIND_ADDR` | `127.0.0.1:3002` | Private inter-replica listener address |
+| `INTERNAL_ADVERTISE_URL` | pod IP, then host name, on port 3002 | Peer-reachable private URL stored in owner records |
+
+See [Environment variables](ENV.md#cluster-coordination) for internal HMAC,
+nonce, and shared lease settings.
 
 ---
 
@@ -1103,10 +1188,12 @@ Admin routes under the admin router:
 - Auth tokens are sent in the initial WS message, not as URL parameters (avoids server logs)
 - Connections without valid auth within 10 seconds are terminated
 - Heartbeat mechanism detects stale connections
+- MongoDB owner fences prevent a stale replica or socket from dispatching
+- Inter-replica requests require HMAC authentication and a shared replay check
 
 ### Node Limits
 - Configurable max nodes per user (default: 10) prevents abuse
-- Configurable max concurrent WS connections (default: 100)
+- Configurable max concurrent node WebSocket connections per replica (default: 100)
 - Proxy requests through nodes have a timeout (default: 30s)
 - Streaming responses have a max duration (default: 300s)
 
