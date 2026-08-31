@@ -1,3 +1,5 @@
+use std::future::Future;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use mongodb::IndexModel;
@@ -13,8 +15,30 @@ use crate::models::coordination::{
 };
 
 pub async fn ensure_indexes(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
+    // Earlier scaling builds indexed every lease by `expires_at`. Durable
+    // checkpoint leases must survive expiry, so remove that superseded index
+    // before creating the partial TTL index. Concurrent startup drops are
+    // harmless; another replica may have removed it first.
+    let _ = db
+        .collection::<Document>(LEASE_COLLECTION_NAME)
+        .drop_index(format!("{LEASE_COLLECTION_NAME}_expiry_ttl"))
+        .await;
+    db.collection::<Document>(LEASE_COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name(format!("{LEASE_COLLECTION_NAME}_ephemeral_expiry_ttl"))
+                        .expire_after(Duration::from_secs(0))
+                        .partial_filter_expression(doc! { "checkpoint": { "$exists": false } })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     for collection_name in [
-        LEASE_COLLECTION_NAME,
         REPLAY_COLLECTION_NAME,
         RATE_WINDOW_COLLECTION_NAME,
         SLOT_COLLECTION_NAME,
@@ -84,6 +108,98 @@ pub struct LeaseToken {
     pub lease_id: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ClusterLeaseRuntime {
+    pub holder: CoordinationHolder,
+    pub ttl: Duration,
+    pub renew_interval: Duration,
+}
+
+impl ClusterLeaseRuntime {
+    pub fn new(holder: CoordinationHolder, ttl: Duration, renew_interval: Duration) -> Self {
+        Self {
+            holder,
+            ttl,
+            renew_interval,
+        }
+    }
+
+    pub async fn acquire(
+        &self,
+        db: &mongodb::Database,
+        name: &str,
+    ) -> AppResult<Option<LeaseToken>> {
+        LeaseStore::acquire(db, name, &self.holder, self.ttl).await
+    }
+
+    pub fn contender_wait(&self) -> Duration {
+        self.renew_interval / 10
+    }
+
+    /// Poll `operation` and lease renewal together. Returning `None` means
+    /// ownership could no longer be proven and the operation was cancelled.
+    pub async fn run_while_renewed<T, F>(
+        &self,
+        db: &mongodb::Database,
+        token: &LeaseToken,
+        operation: F,
+    ) -> Option<T>
+    where
+        F: Future<Output = T>,
+    {
+        tokio::pin!(operation);
+        let mut renewal = tokio::time::interval(self.renew_interval);
+        renewal.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        renewal.tick().await;
+
+        loop {
+            tokio::select! {
+                result = &mut operation => return Some(result),
+                _ = renewal.tick() => {
+                    match LeaseStore::renew(db, token, self.ttl).await {
+                        Ok(true) => {}
+                        Ok(false) => return None,
+                        Err(error) => {
+                            tracing::warn!(lease_name = %token.name, error = %error, "Lease renewal failed; cancelling fenced operation");
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+static CLUSTER_LEASE_RUNTIME: OnceLock<ClusterLeaseRuntime> = OnceLock::new();
+
+pub fn initialize_cluster_lease_runtime(runtime: ClusterLeaseRuntime) {
+    CLUSTER_LEASE_RUNTIME
+        .set(runtime)
+        .expect("cluster lease runtime initialized more than once");
+}
+
+pub fn cluster_lease_runtime() -> &'static ClusterLeaseRuntime {
+    #[cfg(not(test))]
+    {
+        CLUSTER_LEASE_RUNTIME
+            .get()
+            .expect("cluster lease runtime must be initialized before background work starts")
+    }
+    #[cfg(test)]
+    {
+        CLUSTER_LEASE_RUNTIME.get_or_init(|| {
+            ClusterLeaseRuntime::new(
+                CoordinationHolder {
+                    instance_id: "test-instance".to_string(),
+                    generation_id: uuid::Uuid::new_v4().to_string(),
+                },
+                Duration::from_secs(30),
+                Duration::from_secs(10),
+            )
+        })
+    }
+}
+
 pub struct LeaseStore;
 
 impl LeaseStore {
@@ -151,15 +267,63 @@ impl LeaseStore {
     }
 
     pub async fn release(db: &mongodb::Database, token: &LeaseToken) -> AppResult<bool> {
-        let result = db
+        let mut without_checkpoint =
+            exact_lease_filter(&token.name, &token.holder, &token.lease_id);
+        without_checkpoint.insert("checkpoint", doc! { "$exists": false });
+        let deleted = db
             .collection::<CoordinationLease>(LEASE_COLLECTION_NAME)
-            .delete_one(exact_lease_filter(
+            .delete_one(without_checkpoint)
+            .await?;
+        if deleted.deleted_count == 1 {
+            return Ok(true);
+        }
+
+        let mut with_checkpoint = exact_lease_filter(&token.name, &token.holder, &token.lease_id);
+        with_checkpoint.insert("checkpoint", doc! { "$exists": true });
+        let released = db
+            .collection::<CoordinationLease>(LEASE_COLLECTION_NAME)
+            .update_one(
+                with_checkpoint,
+                doc! { "$set": {
+                    "updated_at": bson::DateTime::now(),
+                    "expires_at": bson::DateTime::from_millis(0),
+                }},
+            )
+            .await?;
+        Ok(released.modified_count == 1)
+    }
+
+    pub async fn load_checkpoint(
+        db: &mongodb::Database,
+        token: &LeaseToken,
+    ) -> AppResult<Option<Bson>> {
+        let record = db
+            .collection::<CoordinationLease>(LEASE_COLLECTION_NAME)
+            .find_one(active_lease_filter(
                 &token.name,
                 &token.holder,
                 &token.lease_id,
             ))
             .await?;
-        Ok(result.deleted_count == 1)
+        Ok(record.and_then(|lease| lease.checkpoint))
+    }
+
+    pub async fn store_checkpoint(
+        db: &mongodb::Database,
+        token: &LeaseToken,
+        checkpoint: Bson,
+    ) -> AppResult<bool> {
+        let result = db
+            .collection::<CoordinationLease>(LEASE_COLLECTION_NAME)
+            .update_one(
+                active_lease_filter(&token.name, &token.holder, &token.lease_id),
+                doc! { "$set": {
+                    "checkpoint": checkpoint,
+                    "updated_at": bson::DateTime::now(),
+                }},
+            )
+            .await?;
+        Ok(result.modified_count == 1)
     }
 }
 

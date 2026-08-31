@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use mongodb::bson::Bson;
 use serde::{Deserialize, Serialize};
 
 pub const LEASE_COLLECTION_NAME: &str = "coordination_leases";
@@ -25,6 +26,10 @@ pub struct CoordinationLease {
     pub updated_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
+    /// Durable cursor owned by the named lease. Records with a checkpoint are
+    /// retained after expiry so a replacement holder can resume work.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<Bson>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::TryStreamExt;
@@ -9,8 +10,8 @@ use crate::models::coordination::{
     RATE_WINDOW_COLLECTION_NAME, REPLAY_COLLECTION_NAME, SLOT_COLLECTION_NAME,
 };
 use crate::services::coordination_service::{
-    self, EventDedupClaimResult, EventDedupStore, LeaseStore, RateWindowStore, ReplayStore,
-    SlotStore,
+    self, ClusterLeaseRuntime, EventDedupClaimResult, EventDedupStore, LeaseStore, RateWindowStore,
+    ReplayStore, SlotStore,
 };
 use crate::test_utils::connect_test_database;
 
@@ -139,6 +140,106 @@ async fn expired_named_lease_can_be_taken_over() {
             .await
             .expect("stale release")
     );
+}
+
+#[tokio::test]
+async fn checkpoint_is_fenced_and_survives_lease_handoff() {
+    let Some(db) = connect_test_database("coordination_lease_checkpoint").await else {
+        eprintln!("skipping checkpoint lease test: no local MongoDB available");
+        return;
+    };
+    let first_holder = holder("pod-a", "generation-a");
+    let second_holder = holder("pod-b", "generation-b");
+    let ttl = Duration::from_secs(30);
+    let first = LeaseStore::acquire(&db, "telegram-poller", &first_holder, ttl)
+        .await
+        .expect("acquire first")
+        .expect("first lease");
+
+    assert!(
+        LeaseStore::store_checkpoint(&db, &first, mongodb::bson::Bson::Int64(42))
+            .await
+            .expect("store checkpoint")
+    );
+    assert_eq!(
+        LeaseStore::load_checkpoint(&db, &first)
+            .await
+            .expect("load checkpoint"),
+        Some(mongodb::bson::Bson::Int64(42))
+    );
+    assert!(
+        LeaseStore::release(&db, &first)
+            .await
+            .expect("release checkpoint lease")
+    );
+    assert!(
+        !LeaseStore::store_checkpoint(&db, &first, mongodb::bson::Bson::Int64(43))
+            .await
+            .expect("stale checkpoint write")
+    );
+
+    let second = LeaseStore::acquire(&db, "telegram-poller", &second_holder, ttl)
+        .await
+        .expect("acquire replacement")
+        .expect("replacement lease");
+    assert_eq!(
+        LeaseStore::load_checkpoint(&db, &second)
+            .await
+            .expect("replacement loads checkpoint"),
+        Some(mongodb::bson::Bson::Int64(42))
+    );
+}
+
+#[tokio::test]
+async fn renewal_loss_cancels_fenced_operation() {
+    struct DropSignal(Arc<AtomicBool>);
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    let Some(db) = connect_test_database("coordination_lease_cancel").await else {
+        eprintln!("skipping lease cancellation test: no local MongoDB available");
+        return;
+    };
+    let runtime = ClusterLeaseRuntime::new(
+        holder("pod-a", "generation-a"),
+        Duration::from_millis(200),
+        Duration::from_millis(20),
+    );
+    let lease = runtime
+        .acquire(&db, "cancel-on-fence-loss")
+        .await
+        .expect("acquire lease")
+        .expect("lease acquired");
+    let release_token = lease.clone();
+    let operation_db = db.clone();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let operation_dropped = dropped.clone();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async move {
+        runtime
+            .run_while_renewed(&operation_db, &lease, async move {
+                let _drop_signal = DropSignal(operation_dropped);
+                let _ = started_tx.send(());
+                futures::future::pending::<()>().await;
+            })
+            .await
+    });
+
+    started_rx.await.expect("operation started");
+    assert!(
+        LeaseStore::release(&db, &release_token)
+            .await
+            .expect("force lease loss")
+    );
+    let result = tokio::time::timeout(Duration::from_secs(1), task)
+        .await
+        .expect("renewal detected lease loss")
+        .expect("operation task joined");
+    assert!(result.is_none());
+    assert!(dropped.load(Ordering::SeqCst));
 }
 
 #[tokio::test]
