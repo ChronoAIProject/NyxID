@@ -275,7 +275,7 @@ async fn fixed_window_counter_never_admits_above_the_global_limit() {
     let attempts = (0..24).map(|_| {
         let db = Arc::clone(&db);
         tokio::spawn(async move {
-            RateWindowStore::admit(&db, "auth", "198.51.100.7", 5, Duration::from_secs(1))
+            RateWindowStore::admit(&db, "auth", "198.51.100.7", 5, Duration::from_secs(30))
                 .await
                 .expect("rate admission")
                 .allowed
@@ -289,7 +289,7 @@ async fn fixed_window_counter_never_admits_above_the_global_limit() {
             .count(),
         5
     );
-    let separate = RateWindowStore::admit(&db, "auth", "203.0.113.9", 5, Duration::from_secs(1))
+    let separate = RateWindowStore::admit(&db, "auth", "203.0.113.9", 5, Duration::from_secs(30))
         .await
         .expect("separate rate admission");
     assert!(separate.allowed);

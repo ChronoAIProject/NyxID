@@ -14,12 +14,20 @@ pub struct CoordinationHolder {
     pub generation_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinationLeaseKind {
+    Ephemeral,
+    Checkpoint,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CoordinationLease {
     #[serde(rename = "_id")]
     pub id: String,
     pub holder: CoordinationHolder,
     pub lease_id: String,
+    pub record_kind: CoordinationLeaseKind,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub acquired_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]

@@ -15,15 +15,31 @@ use crate::models::coordination::{
 };
 
 pub async fn ensure_indexes(db: &mongodb::Database) -> Result<(), mongodb::error::Error> {
-    // Earlier scaling builds indexed every lease by `expires_at`. Durable
-    // checkpoint leases must survive expiry, so remove that superseded index
-    // before creating the partial TTL index. Concurrent startup drops are
-    // harmless; another replica may have removed it first.
-    let _ = db
-        .collection::<Document>(LEASE_COLLECTION_NAME)
-        .drop_index(format!("{LEASE_COLLECTION_NAME}_expiry_ttl"))
-        .await;
-    db.collection::<Document>(LEASE_COLLECTION_NAME)
+    let leases = db.collection::<Document>(LEASE_COLLECTION_NAME);
+    for index_name in [
+        format!("{LEASE_COLLECTION_NAME}_expiry_ttl"),
+        format!("{LEASE_COLLECTION_NAME}_ephemeral_expiry_ttl"),
+    ] {
+        // Concurrent startup drops are harmless; another replica may have
+        // removed a superseded definition first.
+        let _ = leases.drop_index(index_name).await;
+    }
+    leases
+        .update_many(
+            doc! {
+                "record_kind": { "$exists": false },
+                "checkpoint": { "$exists": true },
+            },
+            doc! { "$set": { "record_kind": "checkpoint" } },
+        )
+        .await?;
+    leases
+        .update_many(
+            doc! { "record_kind": { "$exists": false } },
+            doc! { "$set": { "record_kind": "ephemeral" } },
+        )
+        .await?;
+    leases
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "expires_at": 1 })
@@ -31,7 +47,7 @@ pub async fn ensure_indexes(db: &mongodb::Database) -> Result<(), mongodb::error
                     IndexOptions::builder()
                         .name(format!("{LEASE_COLLECTION_NAME}_ephemeral_expiry_ttl"))
                         .expire_after(Duration::from_secs(0))
-                        .partial_filter_expression(doc! { "checkpoint": { "$exists": false } })
+                        .partial_filter_expression(doc! { "record_kind": "ephemeral" })
                         .build(),
                 )
                 .build(),
@@ -214,29 +230,53 @@ impl LeaseStore {
         let holder_bson = bson::to_bson(holder).map_err(|error| {
             AppError::Internal(format!("Failed to encode lease holder: {error}"))
         })?;
-        let filter = expired_record_filter(name);
-        let update = vec![doc! {
-            "$set": {
-                "holder": holder_bson,
-                "lease_id": &lease_id,
-                "acquired_at": "$$NOW",
-                "updated_at": "$$NOW",
-                "expires_at": date_add_now(ttl_ms),
-            }
-        }];
+        let update = vec![
+            doc! {
+                "$set": {
+                    "__claimable": {
+                        "$lte": [
+                            { "$ifNull": ["$expires_at", DateTime::from_millis(0)] },
+                            "$$NOW",
+                        ]
+                    },
+                }
+            },
+            doc! {
+                "$set": {
+                    "holder": { "$cond": ["$__claimable", holder_bson, "$holder"] },
+                    "lease_id": { "$cond": ["$__claimable", &lease_id, "$lease_id"] },
+                    "record_kind": {
+                        "$cond": [
+                            "$__claimable",
+                            { "$ifNull": ["$record_kind", "ephemeral"] },
+                            "$record_kind",
+                        ]
+                    },
+                    "acquired_at": {
+                        "$cond": ["$__claimable", "$$NOW", "$acquired_at"]
+                    },
+                    "updated_at": { "$cond": ["$__claimable", "$$NOW", "$updated_at"] },
+                    "expires_at": {
+                        "$cond": ["$__claimable", date_add_now(ttl_ms), "$expires_at"]
+                    },
+                }
+            },
+            doc! { "$unset": "__claimable" },
+        ];
         let result = db
             .collection::<CoordinationLease>(LEASE_COLLECTION_NAME)
-            .find_one_and_update(filter, update)
+            .find_one_and_update(doc! { "_id": name }, update)
             .upsert(true)
             .return_document(ReturnDocument::After)
             .await;
 
         match result {
-            Ok(Some(_)) => Ok(Some(LeaseToken {
+            Ok(Some(record)) if record.lease_id == lease_id => Ok(Some(LeaseToken {
                 name: name.to_string(),
                 holder: holder.clone(),
                 lease_id,
             })),
+            Ok(Some(_)) => Ok(None),
             Ok(None) => Err(AppError::Internal(
                 "Lease acquisition returned no record".to_string(),
             )),
@@ -319,6 +359,7 @@ impl LeaseStore {
                 active_lease_filter(&token.name, &token.holder, &token.lease_id),
                 doc! { "$set": {
                     "checkpoint": checkpoint,
+                    "record_kind": "checkpoint",
                     "updated_at": bson::DateTime::now(),
                 }},
             )
@@ -450,26 +491,42 @@ impl SlotStore {
         for offset in 0..limit {
             let slot = (start + offset) % limit;
             let id = hash_parts(&[namespace, scope, &slot.to_string()]);
-            let update = vec![doc! {
-                "$set": {
-                    "namespace": namespace,
-                    "scope_hash": &scope_hash,
-                    "slot": i64::from(slot),
-                    "holder": holder_bson.clone(),
-                    "lease_id": &lease_id,
-                    "acquired_at": "$$NOW",
-                    "updated_at": "$$NOW",
-                    "expires_at": date_add_now(ttl_ms),
-                }
-            }];
+            let update = vec![
+                claimable_stage(),
+                doc! {
+                    "$set": {
+                        "namespace": { "$cond": ["$__claimable", namespace, "$namespace"] },
+                        "scope_hash": {
+                            "$cond": ["$__claimable", &scope_hash, "$scope_hash"]
+                        },
+                        "slot": { "$cond": ["$__claimable", i64::from(slot), "$slot"] },
+                        "holder": {
+                            "$cond": ["$__claimable", holder_bson.clone(), "$holder"]
+                        },
+                        "lease_id": {
+                            "$cond": ["$__claimable", &lease_id, "$lease_id"]
+                        },
+                        "acquired_at": {
+                            "$cond": ["$__claimable", "$$NOW", "$acquired_at"]
+                        },
+                        "updated_at": {
+                            "$cond": ["$__claimable", "$$NOW", "$updated_at"]
+                        },
+                        "expires_at": {
+                            "$cond": ["$__claimable", date_add_now(ttl_ms), "$expires_at"]
+                        },
+                    }
+                },
+                doc! { "$unset": "__claimable" },
+            ];
             let result = db
                 .collection::<CoordinationSlot>(SLOT_COLLECTION_NAME)
-                .find_one_and_update(expired_record_filter(&id), update)
+                .find_one_and_update(doc! { "_id": &id }, update)
                 .upsert(true)
                 .return_document(ReturnDocument::After)
                 .await;
             match result {
-                Ok(Some(_)) => {
+                Ok(Some(record)) if record.lease_id == lease_id => {
                     return Ok(Some(SlotToken {
                         id,
                         namespace: namespace.to_string(),
@@ -479,6 +536,7 @@ impl SlotStore {
                         lease_id,
                     }));
                 }
+                Ok(Some(_)) => continue,
                 Ok(None) => {
                     return Err(AppError::Internal(
                         "Slot acquisition returned no record".to_string(),
@@ -550,29 +608,46 @@ impl EventDedupStore {
         let ttl_ms = duration_millis(ttl, "event claim TTL")?;
         let id = hash_parts(&[namespace, scope, event_id]);
         let claim_id = uuid::Uuid::new_v4().to_string();
-        let update = vec![doc! {
-            "$set": {
-                "namespace": namespace,
-                "scope_hash": hash_parts(&[scope]),
-                "event_hash": hash_parts(&[event_id]),
-                "state": "claimed",
-                "claim_id": &claim_id,
-                "created_at": "$$NOW",
-                "updated_at": "$$NOW",
-                "expires_at": date_add_now(ttl_ms),
-            }
-        }];
+        let update = vec![
+            claimable_stage(),
+            doc! {
+                "$set": {
+                    "namespace": { "$cond": ["$__claimable", namespace, "$namespace"] },
+                    "scope_hash": {
+                        "$cond": ["$__claimable", hash_parts(&[scope]), "$scope_hash"]
+                    },
+                    "event_hash": {
+                        "$cond": ["$__claimable", hash_parts(&[event_id]), "$event_hash"]
+                    },
+                    "state": { "$cond": ["$__claimable", "claimed", "$state"] },
+                    "claim_id": { "$cond": ["$__claimable", &claim_id, "$claim_id"] },
+                    "created_at": {
+                        "$cond": ["$__claimable", "$$NOW", "$created_at"]
+                    },
+                    "updated_at": {
+                        "$cond": ["$__claimable", "$$NOW", "$updated_at"]
+                    },
+                    "expires_at": {
+                        "$cond": ["$__claimable", date_add_now(ttl_ms), "$expires_at"]
+                    },
+                }
+            },
+            doc! { "$unset": "__claimable" },
+        ];
         let result = db
             .collection::<EventDedupRecord>(EVENT_DEDUP_COLLECTION_NAME)
-            .find_one_and_update(expired_record_filter(&id), update)
+            .find_one_and_update(doc! { "_id": &id }, update)
             .upsert(true)
             .return_document(ReturnDocument::After)
             .await;
         match result {
-            Ok(Some(_)) => Ok(EventDedupClaimResult::Claimed(EventDedupClaim {
-                id,
-                claim_id,
-            })),
+            Ok(Some(record)) if record.claim_id == claim_id => {
+                Ok(EventDedupClaimResult::Claimed(EventDedupClaim {
+                    id,
+                    claim_id,
+                }))
+            }
+            Ok(Some(_)) => Ok(EventDedupClaimResult::Duplicate),
             Ok(None) => Err(AppError::Internal(
                 "Event dedup claim returned no record".to_string(),
             )),
@@ -674,14 +749,15 @@ fn date_add_now(amount_ms: i64) -> Document {
     }
 }
 
-fn expired_record_filter(id: &str) -> Document {
+fn claimable_stage() -> Document {
     doc! {
-        "_id": id,
-        "$expr": {
-            "$lte": [
-                { "$ifNull": ["$expires_at", DateTime::from_millis(0)] },
-                "$$NOW",
-            ]
+        "$set": {
+            "__claimable": {
+                "$lte": [
+                    { "$ifNull": ["$expires_at", DateTime::from_millis(0)] },
+                    "$$NOW",
+                ]
+            },
         }
     }
 }
