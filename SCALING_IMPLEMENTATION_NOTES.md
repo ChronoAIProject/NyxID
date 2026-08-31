@@ -36,6 +36,29 @@ The implementation is complete when all ten audit findings have code, tests, and
 | 9. Deployment config | Pending | Kubernetes, nginx, and Compose changes | Pending |
 | 10. Documentation | Pending | Deployment, environment, and node architecture docs | Pending |
 
+## Architecture selection
+
+Candidate 1 is the base because it follows the required embedded `Node` owner
+record, answers dispatchability from the record already loaded by routing, and
+uses operation-shaped forwarding that preserves streaming and mutation-safety
+semantics. Candidate 2 contributed the separate internal listener, ingress-side
+node signatures, typed duplex session handles, and ordered MCP outbox.
+
+The selected design corrects both candidates where they weaken the brief:
+
+- process generation and socket connection UUIDs replace resettable epochs;
+- owner cleanup matches the complete fence tuple;
+- internal replay nonces use MongoDB unique/TTL storage;
+- all configured production rate limits and passthrough/SSH caps are global;
+- event dedup is claim/commit/release rather than post-success read-then-insert;
+- session slots renew and cancel work when fenced;
+- MCP authentication revalidates durable state so deletes cannot leave stale
+  positive cache entries;
+- the internal plane binds a separate listener and cannot be routed by the
+  public ingress.
+
+The full contract is recorded in `docs/HORIZONTAL_SCALING_ARCHITECTURE.md`.
+
 ## Design constraints
 
 - MongoDB is the only shared data store.
