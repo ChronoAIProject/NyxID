@@ -406,10 +406,14 @@ pub fn build_dispatch_info(node: &Node, ws_manager: &NodeWsManager) -> NodeDispa
             reason: "node_status_not_online".to_string(),
         };
     }
-    if !ws_manager.is_connected(&node.id) {
+    if !crate::services::node_owner_service::is_connected_somewhere(
+        node,
+        ws_manager.is_connected(&node.id),
+        chrono::Utc::now(),
+    ) {
         return NodeDispatchInfo {
             dispatchable: false,
-            reason: "no_websocket_session_on_this_backend".to_string(),
+            reason: "no_websocket_session".to_string(),
         };
     }
     NodeDispatchInfo {
@@ -424,7 +428,7 @@ fn node_info_from_model(
     binding_count: u64,
     ws_manager: &NodeWsManager,
 ) -> NodeInfo {
-    let session = ws_manager.session_info(&node.id);
+    let session = node_session_info(node, ws_manager);
     NodeInfo {
         id: node.id.clone(),
         name: node.name.clone(),
@@ -440,6 +444,27 @@ fn node_info_from_model(
         dispatch: build_dispatch_info(node, ws_manager),
         binding_count,
         created_at: node.created_at.to_rfc3339(),
+    }
+}
+
+fn node_session_info(
+    node: &Node,
+    ws_manager: &NodeWsManager,
+) -> crate::services::node_ws_manager::NodeSessionInfo {
+    if let Some(owner) = crate::services::node_owner_service::live_owner(node, chrono::Utc::now()) {
+        crate::services::node_ws_manager::NodeSessionInfo {
+            is_connected: true,
+            capabilities_resolved: owner.capabilities_resolved,
+            capabilities: crate::services::node_ws_manager::NodeCapabilitiesFlags {
+                credential_ack_correlation: owner.credential_ack_correlation,
+                remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
+                proxy_max_body_size: owner.proxy_max_body_size,
+            },
+        }
+    } else if node.connection_owner.is_none() {
+        ws_manager.session_info(&node.id)
+    } else {
+        crate::services::node_ws_manager::NodeSessionInfo::disconnected()
     }
 }
 
@@ -2113,6 +2138,7 @@ mod tests {
             connected_at: None,
             metadata: None,
             metrics: NodeMetrics::default(),
+            connection_owner: None,
             is_active: true,
             created_at: now,
             updated_at: now,

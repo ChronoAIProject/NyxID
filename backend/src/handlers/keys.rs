@@ -2592,7 +2592,12 @@ async fn enrich_key_responses(
                         key.node_last_heartbeat_at =
                             node.last_heartbeat_at.map(|dt| dt.to_rfc3339());
 
-                        let is_connected = ws_manager.is_connected(&node.id);
+                        let is_connected =
+                            crate::services::node_owner_service::is_connected_somewhere(
+                                node,
+                                ws_manager.is_connected(&node.id),
+                                chrono::Utc::now(),
+                            );
                         let is_stale = if let Some(last_hb) = node.last_heartbeat_at {
                             chrono::Utc::now()
                                 .signed_duration_since(last_hb)

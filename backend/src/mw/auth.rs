@@ -2034,6 +2034,7 @@ mod tests {
             connected_at: None,
             metadata: None,
             metrics: Default::default(),
+            connection_owner: None,
             is_active: true,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

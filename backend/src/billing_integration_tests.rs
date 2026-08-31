@@ -1738,6 +1738,7 @@ async fn insert_route_node(state: &crate::AppState, owner_id: &str, name: &str) 
         connected_at: Some(now),
         metadata: None,
         metrics: NodeMetrics::default(),
+        connection_owner: None,
         is_active: true,
         created_at: now,
         updated_at: now,

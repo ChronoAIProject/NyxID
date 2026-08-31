@@ -1167,6 +1167,26 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    nodes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "connection_owner.instance_name": 1,
+                    "connection_owner.generation_id": 1,
+                    "connection_owner.expires_at": 1,
+                })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+    nodes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "connection_owner.expires_at": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
 
     // ── node_service_bindings ──
     let nsb = db.collection::<mongodb::bson::Document>("node_service_bindings");

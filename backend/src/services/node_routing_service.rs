@@ -19,13 +19,20 @@ pub struct NodeRoute {
 }
 
 fn is_node_dispatchable(node: &Node, ws_manager: &NodeWsManager) -> bool {
-    node.is_active && node.status == NodeStatus::Online && ws_manager.is_connected(&node.id)
+    node.is_active
+        && node.status == NodeStatus::Online
+        && crate::services::node_owner_service::is_connected_somewhere(
+            node,
+            ws_manager.is_connected(&node.id),
+            chrono::Utc::now(),
+        )
 }
 
-/// Validate that a specific node_id is dispatchable for proxy routing on this backend instance.
+/// Validate that a specific node_id is dispatchable on some backend replica.
 ///
-/// Dispatchability means the node is active and marked Online in MongoDB, AND has an
-/// active WebSocket connection on this instance.
+/// Dispatchability means the node is active, marked Online in MongoDB, and has an
+/// unexpired owner lease. The local map fallback supports a rolling upgrade from
+/// replicas that predate owner records.
 ///
 /// This is the single source of truth for "can we actually send a proxy request to
 /// this node right now?" and must stay aligned with the pre-send check in
@@ -499,6 +506,7 @@ mod tests {
             connected_at: Some(Utc::now()),
             metadata: None,
             metrics: NodeMetrics::default(),
+            connection_owner: None,
             is_active: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -510,6 +518,29 @@ mod tests {
         let (tx, _rx) = tokio::sync::mpsc::channel(8);
         manager.register_connection(node_id, tx);
         manager
+    }
+
+    #[test]
+    fn expired_owner_fences_a_stale_local_socket() {
+        let node_id = "node-fenced";
+        let manager = connected_ws_manager(node_id);
+        let mut node = node(node_id, "owner-1");
+        let expired_at = Utc::now() - chrono::Duration::seconds(1);
+        node.connection_owner = Some(crate::models::node::NodeConnectionOwner {
+            instance_name: "other-backend".to_string(),
+            generation_id: "generation-b".to_string(),
+            connection_id: "connection-b".to_string(),
+            internal_base_url: "http://10.0.0.2:3002".to_string(),
+            claimed_at: expired_at - chrono::Duration::seconds(30),
+            renewed_at: expired_at - chrono::Duration::seconds(30),
+            expires_at: expired_at,
+            credential_ack_correlation: false,
+            remote_credential_crypto_v1: false,
+            proxy_max_body_size: None,
+            capabilities_resolved: false,
+        });
+
+        assert!(!super::is_node_dispatchable(&node, &manager));
     }
 
     async fn insert_actor_org_membership(

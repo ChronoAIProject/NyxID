@@ -355,6 +355,24 @@ pub struct AppConfig {
     pub gcp_kms_key_name_previous: Option<String>,
 
     // Node Proxy
+    /// Stable pod/host identity. The process generation is created at startup.
+    pub instance_name: String,
+    /// Dedicated private listener for inter-replica traffic.
+    pub internal_bind_addr: String,
+    /// Peer-reachable base URL for this exact replica.
+    pub internal_advertise_url: String,
+    /// Optional 32-byte hex override for the internal request HMAC key.
+    pub internal_dispatch_hmac_key: Option<String>,
+    pub internal_auth_max_skew_secs: u64,
+    pub internal_nonce_ttl_secs: u64,
+    pub node_owner_lease_ttl_secs: u64,
+    pub node_owner_lease_renew_secs: u64,
+    pub cluster_lease_ttl_secs: u64,
+    pub cluster_lease_renew_secs: u64,
+    pub cluster_slot_ttl_secs: u64,
+    pub cluster_slot_renew_secs: u64,
+    pub mcp_notification_poll_interval_ms: u64,
+    pub mcp_notification_ttl_secs: u64,
     /// Heartbeat ping interval in seconds (default: 30)
     pub node_heartbeat_interval_secs: u64,
     /// Mark node offline after this many seconds without heartbeat (default: 90)
@@ -669,6 +687,36 @@ impl std::fmt::Debug for AppConfig {
                     &"None"
                 },
             )
+            .field("instance_name", &self.instance_name)
+            .field("internal_bind_addr", &self.internal_bind_addr)
+            .field("internal_advertise_url", &"[REDACTED]")
+            .field(
+                "internal_dispatch_hmac_key",
+                if self.internal_dispatch_hmac_key.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "internal_auth_max_skew_secs",
+                &self.internal_auth_max_skew_secs,
+            )
+            .field("internal_nonce_ttl_secs", &self.internal_nonce_ttl_secs)
+            .field("node_owner_lease_ttl_secs", &self.node_owner_lease_ttl_secs)
+            .field(
+                "node_owner_lease_renew_secs",
+                &self.node_owner_lease_renew_secs,
+            )
+            .field("cluster_lease_ttl_secs", &self.cluster_lease_ttl_secs)
+            .field("cluster_lease_renew_secs", &self.cluster_lease_renew_secs)
+            .field("cluster_slot_ttl_secs", &self.cluster_slot_ttl_secs)
+            .field("cluster_slot_renew_secs", &self.cluster_slot_renew_secs)
+            .field(
+                "mcp_notification_poll_interval_ms",
+                &self.mcp_notification_poll_interval_ms,
+            )
+            .field("mcp_notification_ttl_secs", &self.mcp_notification_ttl_secs)
             .field(
                 "node_heartbeat_interval_secs",
                 &self.node_heartbeat_interval_secs,
@@ -1095,6 +1143,61 @@ impl AppConfig {
                 .ok()
                 .filter(|s| !s.is_empty()),
 
+            instance_name: env::var("INSTANCE_NAME")
+                .or_else(|_| env::var("POD_NAME"))
+                .or_else(|_| env::var("HOSTNAME"))
+                .unwrap_or_else(|_| "nyxid-backend".to_string()),
+            internal_bind_addr: env::var("INTERNAL_BIND_ADDR")
+                .unwrap_or_else(|_| "0.0.0.0:3002".to_string()),
+            internal_advertise_url: env::var("INTERNAL_ADVERTISE_URL").unwrap_or_else(|_| {
+                let host = env::var("POD_IP")
+                    .or_else(|_| env::var("HOSTNAME"))
+                    .unwrap_or_else(|_| "127.0.0.1".to_string());
+                format!("http://{host}:3002")
+            }),
+            internal_dispatch_hmac_key: env::var("INTERNAL_DISPATCH_HMAC_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            internal_auth_max_skew_secs: env::var("INTERNAL_AUTH_MAX_SKEW_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(30),
+            internal_nonce_ttl_secs: env::var("INTERNAL_NONCE_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(120),
+            node_owner_lease_ttl_secs: env::var("NODE_OWNER_LEASE_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(90),
+            node_owner_lease_renew_secs: env::var("NODE_OWNER_LEASE_RENEW_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(30),
+            cluster_lease_ttl_secs: env::var("CLUSTER_LEASE_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(30),
+            cluster_lease_renew_secs: env::var("CLUSTER_LEASE_RENEW_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(10),
+            cluster_slot_ttl_secs: env::var("CLUSTER_SLOT_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(30),
+            cluster_slot_renew_secs: env::var("CLUSTER_SLOT_RENEW_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(10),
+            mcp_notification_poll_interval_ms: env::var("MCP_NOTIFICATION_POLL_INTERVAL_MS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(250),
+            mcp_notification_ttl_secs: env::var("MCP_NOTIFICATION_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(86_400),
             node_heartbeat_interval_secs: env::var("NODE_HEARTBEAT_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1535,6 +1638,54 @@ impl AppConfig {
             panic!("SSH_MAX_TUNNEL_DURATION_SECS must be greater than 0");
         }
     }
+
+    pub fn validate_cluster_runtime_config(&self) {
+        if self.instance_name.trim().is_empty() {
+            panic!("INSTANCE_NAME must not be empty");
+        }
+        self.internal_bind_addr
+            .parse::<std::net::SocketAddr>()
+            .unwrap_or_else(|_| panic!("INTERNAL_BIND_ADDR must be a socket address"));
+        let advertise = url::Url::parse(&self.internal_advertise_url)
+            .unwrap_or_else(|_| panic!("INTERNAL_ADVERTISE_URL must be a valid URL"));
+        if !matches!(advertise.scheme(), "http" | "https") || advertise.host().is_none() {
+            panic!("INTERNAL_ADVERTISE_URL must use http or https and include a host");
+        }
+        if self.internal_auth_max_skew_secs == 0
+            || self.internal_nonce_ttl_secs < self.internal_auth_max_skew_secs.saturating_mul(2)
+        {
+            panic!("INTERNAL_NONCE_TTL_SECS must be at least twice INTERNAL_AUTH_MAX_SKEW_SECS");
+        }
+        for (name, ttl, renew) in [
+            (
+                "NODE_OWNER_LEASE",
+                self.node_owner_lease_ttl_secs,
+                self.node_owner_lease_renew_secs,
+            ),
+            (
+                "CLUSTER_LEASE",
+                self.cluster_lease_ttl_secs,
+                self.cluster_lease_renew_secs,
+            ),
+            (
+                "CLUSTER_SLOT",
+                self.cluster_slot_ttl_secs,
+                self.cluster_slot_renew_secs,
+            ),
+        ] {
+            if renew == 0 || ttl <= renew.saturating_mul(2) {
+                panic!("{name}_TTL_SECS must be greater than twice {name}_RENEW_SECS");
+            }
+        }
+        if self.mcp_notification_poll_interval_ms == 0 || self.mcp_notification_ttl_secs == 0 {
+            panic!("MCP notification poll interval and TTL must be greater than zero");
+        }
+        if let Some(key) = self.internal_dispatch_hmac_key.as_deref()
+            && (key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            panic!("INTERNAL_DISPATCH_HMAC_KEY must be 64 hex characters");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1616,6 +1767,20 @@ mod tests {
             aws_kms_key_arn_previous: None,
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
+            instance_name: "test-backend".to_string(),
+            internal_bind_addr: "127.0.0.1:3002".to_string(),
+            internal_advertise_url: "http://127.0.0.1:3002".to_string(),
+            internal_dispatch_hmac_key: None,
+            internal_auth_max_skew_secs: 30,
+            internal_nonce_ttl_secs: 120,
+            node_owner_lease_ttl_secs: 90,
+            node_owner_lease_renew_secs: 30,
+            cluster_lease_ttl_secs: 30,
+            cluster_lease_renew_secs: 10,
+            cluster_slot_ttl_secs: 30,
+            cluster_slot_renew_secs: 10,
+            mcp_notification_poll_interval_ms: 250,
+            mcp_notification_ttl_secs: 86_400,
             node_heartbeat_interval_secs: 30,
             node_heartbeat_timeout_secs: 90,
             node_proxy_timeout_secs: 30,

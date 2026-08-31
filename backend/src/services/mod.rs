@@ -64,6 +64,7 @@ pub mod mcp_service;
 pub mod mfa_service;
 pub mod node_fanout_resolver;
 pub mod node_metrics_service;
+pub mod node_owner_service;
 pub mod node_pending_credential_service;
 pub mod node_routing_service;
 pub mod node_service;

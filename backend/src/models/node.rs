@@ -1,5 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use super::bson_datetime;
 
@@ -64,6 +65,63 @@ pub struct NodeMetrics {
     pub last_success_at: Option<DateTime<Utc>>,
 }
 
+/// Fenced ownership of a live node WebSocket.
+///
+/// The pod name alone is not a fence because Kubernetes reuses it after a
+/// restart. `generation_id` distinguishes processes and `connection_id`
+/// distinguishes reconnects handled by the same process.
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct NodeConnectionOwner {
+    pub instance_name: String,
+    pub generation_id: String,
+    pub connection_id: String,
+    pub internal_base_url: String,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub claimed_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub renewed_at: DateTime<Utc>,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub expires_at: DateTime<Utc>,
+    #[serde(default)]
+    pub credential_ack_correlation: bool,
+    #[serde(default)]
+    pub remote_credential_crypto_v1: bool,
+    #[serde(default)]
+    pub proxy_max_body_size: Option<usize>,
+    #[serde(default)]
+    pub capabilities_resolved: bool,
+}
+
+impl fmt::Debug for NodeConnectionOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodeConnectionOwner")
+            .field("instance_name", &self.instance_name)
+            .field("generation_id", &self.generation_id)
+            .field("connection_id", &self.connection_id)
+            .field("internal_base_url", &"[REDACTED]")
+            .field("claimed_at", &self.claimed_at)
+            .field("renewed_at", &self.renewed_at)
+            .field("expires_at", &self.expires_at)
+            .field(
+                "credential_ack_correlation",
+                &self.credential_ack_correlation,
+            )
+            .field(
+                "remote_credential_crypto_v1",
+                &self.remote_credential_crypto_v1,
+            )
+            .field("proxy_max_body_size", &self.proxy_max_body_size)
+            .field("capabilities_resolved", &self.capabilities_resolved)
+            .finish()
+    }
+}
+
+impl NodeConnectionOwner {
+    pub fn is_live_at(&self, now: DateTime<Utc>) -> bool {
+        self.expires_at > now
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Node {
     #[serde(rename = "_id")]
@@ -88,6 +146,8 @@ pub struct Node {
     /// Embedded proxy metrics
     #[serde(default)]
     pub metrics: NodeMetrics,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_owner: Option<NodeConnectionOwner>,
     pub is_active: bool,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
@@ -117,6 +177,7 @@ mod tests {
             connected_at: None,
             metadata: None,
             metrics: NodeMetrics::default(),
+            connection_owner: None,
             is_active: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -216,5 +277,27 @@ mod tests {
         doc.remove("metrics");
         let restored: Node = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.metrics.total_requests, 0);
+    }
+
+    #[test]
+    fn connection_owner_debug_redacts_internal_address() {
+        let now = Utc::now();
+        let owner = NodeConnectionOwner {
+            instance_name: "backend-0".to_string(),
+            generation_id: uuid::Uuid::new_v4().to_string(),
+            connection_id: uuid::Uuid::new_v4().to_string(),
+            internal_base_url: "http://10.0.0.7:3002".to_string(),
+            claimed_at: now,
+            renewed_at: now,
+            expires_at: now + chrono::Duration::seconds(30),
+            credential_ack_correlation: true,
+            remote_credential_crypto_v1: true,
+            proxy_max_body_size: Some(1024),
+            capabilities_resolved: true,
+        };
+
+        let rendered = format!("{owner:?}");
+        assert!(!rendered.contains("10.0.0.7"));
+        assert!(rendered.contains("[REDACTED]"));
     }
 }

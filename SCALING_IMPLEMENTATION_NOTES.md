@@ -25,7 +25,7 @@ The implementation is complete when all ten audit findings have code, tests, and
 
 | Item | Status | Implementation | Evidence |
 | --- | --- | --- | --- |
-| 1. Node WebSocket registry | In progress | Architecture grounding and routing design | Pending |
+| 1. Node WebSocket registry | In progress | Fenced Mongo owner claims, renew/release, capability snapshot, crash expiry cleanup, ownership-aware routing/status, and connection UUID teardown are implemented. Internal forwarding and remote revocation remain. | Routing regression and local fence tests pass; Mongo CAS tests await replica-set recovery. |
 | 2. OAuth refresh sweep | Pending | Per-key Mongo lease for sweep and proxy refresh | Pending |
 | 3. DPoP replay cache | Pending | Mongo unique insert and TTL expiry | Pending |
 | 4. Event dedup cache | Pending | Mongo unique insert and TTL expiry | Pending |
@@ -75,5 +75,12 @@ The full contract is recorded in `docs/HORIZONTAL_SCALING_ARCHITECTURE.md`.
 | --- | --- | --- |
 | Pre-change `cargo build -p nyxid` | Pass | Finished in 3m08s; only the macOS compact-unwind linker warning and upstream `proc-macro-error2` future-incompatibility notice |
 | Pre-change `cargo test -p nyxid` | Environment failure | 5,630 passed, 84 failed in 178.09s because the auto-detected MongoDB is standalone; transaction tests require a replica set and fail at `test_utils.rs:188` |
+| Pre-change `cargo test -p nyxid` with replica set | Pass | 5,714 passed, 0 failed using `mongodb://127.0.0.1:27019/?replicaSet=rs0&directConnection=true&retryWrites=true` |
+| Ownership `cargo check -p nyxid` | Pass | Finished dev profile with no touched-code warnings |
+| `expired_owner_fences_a_stale_local_socket` before fix | Expected failure | Stale local map entry made an expired persisted owner dispatchable |
+| `expired_owner_fences_a_stale_local_socket` after fix | Pass | 1 passed, 0 failed, 5,718 filtered out |
+| `stale_reader_cannot_unregister_replacement_connection` | Pass | 1 passed, 0 failed, 5,718 filtered out |
+| `connection_owner_debug_redacts_internal_address` | Pass | 1 passed, 0 failed, 5,718 filtered out |
+| Node owner Mongo CAS tests | Blocked by test infrastructure | The earlier replica-set listener on `127.0.0.1:27019` stopped and Docker Desktop did not answer; tests remain implemented and will be rerun after the fixture is restored. |
 
 Final Mongo-backed verification will set `NYXID_TEST_DATABASE_URL` to an isolated local replica-set deployment. This is required to execute, rather than skip or weaken, the repository's transaction tests.

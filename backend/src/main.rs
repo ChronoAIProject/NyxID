@@ -109,6 +109,8 @@ pub struct AppState {
     pub encryption_keys: Arc<EncryptionKeys>,
     /// WebSocket connection manager for credential nodes
     pub node_ws_manager: Arc<NodeWsManager>,
+    /// Process and address identity used to fence node ownership.
+    pub replica_identity: Arc<services::node_owner_service::ReplicaIdentity>,
     /// Concurrent SSH tunnel session limiter
     pub ssh_session_manager: Arc<SshSessionManager>,
     /// Per-agent rate limiter keyed by API key ID
@@ -353,6 +355,7 @@ async fn main() {
     // Load configuration
     let mut config = AppConfig::from_env();
     config.validate_ssh_runtime_config();
+    config.validate_cluster_runtime_config();
     if config.trusted_proxy_ips.is_empty() {
         tracing::warn!(
             "TRUSTED_PROXY_IPS is empty; forwarded client IPs and Cloudflare country headers cannot be verified. Requester attribution will be unavailable when the observed peer is an internal proxy, and strict public per-IP limits may collapse to that proxy address."
@@ -653,6 +656,10 @@ async fn main() {
         config.node_proxy_timeout_secs,
         config.node_max_ws_connections,
     ));
+    let replica_identity = Arc::new(services::node_owner_service::ReplicaIdentity::new(
+        config.instance_name.clone(),
+        config.internal_advertise_url.clone(),
+    ));
     let ssh_session_manager = Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user));
 
     // HTTP Event Gateway state (NyxID#221).
@@ -743,6 +750,7 @@ async fn main() {
         developer_webhook_dispatcher,
         encryption_keys: encryption_keys.clone(),
         node_ws_manager,
+        replica_identity,
         ssh_session_manager,
         per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::new()),
         direct_chat_limiter: mw::rate_limit::create_direct_chat_rate_limiter(),
@@ -1162,8 +1170,10 @@ async fn main() {
     // Spawn background heartbeat sweep for node WebSocket connections
     let heartbeat_db = state.db.clone();
     let heartbeat_ws = state.node_ws_manager.clone();
+    let heartbeat_identity = state.replica_identity.clone();
     let heartbeat_interval = config.node_heartbeat_interval_secs;
     let heartbeat_timeout = config.node_heartbeat_timeout_secs;
+    let node_owner_lease_ttl_secs = config.node_owner_lease_ttl_secs;
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(heartbeat_interval));
@@ -1172,7 +1182,9 @@ async fn main() {
             handlers::node_ws::node_ws_manager_heartbeat_sweep(
                 &heartbeat_db,
                 &heartbeat_ws,
+                &heartbeat_identity,
                 heartbeat_timeout,
+                node_owner_lease_ttl_secs,
             )
             .await;
         }

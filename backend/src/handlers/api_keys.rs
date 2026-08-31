@@ -2327,6 +2327,7 @@ mod tests {
                 connected_at: Some(now),
                 metadata: None,
                 metrics: NodeMetrics::default(),
+                connection_owner: None,
                 is_active: true,
                 created_at: now,
                 updated_at: now,
