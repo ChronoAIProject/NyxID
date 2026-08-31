@@ -2489,7 +2489,7 @@ mod tests {
 
         let state = test_app_state(db.clone());
         let (tx, mut rx) = mpsc::channel(1);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
 
         apply_status_update_capabilities(
             &state,
@@ -2557,7 +2557,7 @@ mod tests {
 
         let state = test_app_state(db.clone());
         let (tx, _rx) = mpsc::channel(1);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
 
         apply_status_update_capabilities(&state, &node.id, Some("0.7.1".to_string()), None, None)
             .await;
@@ -2610,7 +2610,7 @@ mod tests {
 
         let state = test_app_state(db.clone());
         let (tx, mut rx) = mpsc::channel(1);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         apply_status_update_capabilities(
             &state,
             &node.id,
@@ -2718,7 +2718,7 @@ mod tests {
         store_ciphertext(&db, &owner_id, &node.id, &pending.id, false).await;
         let state = test_app_state(db.clone());
         let (tx, _rx) = mpsc::channel(1);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         state
             .node_ws_manager
             .send_pending_credentials_available(&node.id)

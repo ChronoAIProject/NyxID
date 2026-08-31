@@ -182,6 +182,35 @@ fn message_json(message: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
+async fn local_session_info_prefers_exact_socket_capabilities() {
+    let Some(db) = crate::test_utils::connect_test_database("node_dispatch_local_session").await
+    else {
+        return;
+    };
+    let node_id = uuid::Uuid::new_v4().to_string();
+    db.collection::<Node>(NODES)
+        .insert_one(test_node(&node_id))
+        .await
+        .unwrap();
+    let state = crate::test_utils::test_app_state(db);
+    let (tx, _rx) = mpsc::channel(8);
+    crate::test_utils::register_test_node_connection(&state, &node_id, tx).await;
+    state.node_ws_manager.record_capabilities(
+        &node_id,
+        &crate::services::node_ws_manager::NodeCapabilitiesMsg {
+            remote_credential_crypto_v1: true,
+            ..Default::default()
+        },
+    );
+    state.node_ws_manager.mark_status_update_received(&node_id);
+
+    let session = state.node_dispatch.session_info(&node_id).await;
+    assert!(session.is_connected);
+    assert!(session.capabilities_resolved);
+    assert!(session.capabilities.remote_credential_crypto_v1);
+}
+
+#[tokio::test]
 async fn remote_complete_proxy_preserves_response_and_request_identity() {
     let Some(mut fixture) = two_replica_fixture("node_dispatch_complete").await else {
         return;

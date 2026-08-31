@@ -1902,7 +1902,7 @@ mod tests {
 
         let state = test_app_state(db.clone());
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        state.node_ws_manager.register_connection(&node_id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node_id, tx).await;
         state.node_ws_manager.record_capabilities(
             &node_id,
             &crate::services::node_ws_manager::NodeCapabilitiesMsg {

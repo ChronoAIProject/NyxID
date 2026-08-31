@@ -9290,7 +9290,7 @@ mod proxy_resolution_integration_tests {
             .expect("attach node to service");
 
         let (tx, rx) = mpsc::channel(256);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
         assert_ws_proxy_upgrade(
@@ -9347,7 +9347,7 @@ mod proxy_resolution_integration_tests {
             .expect("attach node to service");
 
         let (tx, rx) = mpsc::channel(256);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
         assert_ws_proxy_upgrade(

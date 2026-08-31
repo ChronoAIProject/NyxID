@@ -93,6 +93,12 @@ impl NodeDispatch {
         else {
             return crate::services::node_ws_manager::NodeSessionInfo::disconnected();
         };
+        if owner.instance_name == self.identity.instance_name
+            && owner.generation_id == self.identity.generation_id
+            && self.manager.has_connection(node_id, &owner.connection_id)
+        {
+            return self.manager.session_info(node_id);
+        }
         crate::services::node_ws_manager::NodeSessionInfo {
             is_connected: true,
             capabilities_resolved: owner.capabilities_resolved,

@@ -24,7 +24,7 @@ use crate::models::user::{User, UserType};
 use crate::models::user_endpoint::UserEndpoint;
 use crate::models::user_service::UserService;
 use crate::mw::auth::{AuthMethod, AuthUser};
-use crate::services::node_ws_manager::NodeWsManager;
+use crate::services::node_ws_manager::{NodeOutboundMessage, NodeWsManager};
 use crate::services::platform_settings_service::BrokerPolicy;
 use crate::services::provider_token_exchange_service::TokenExchangeCache;
 use crate::services::ssh_service::SshSessionManager;
@@ -2054,6 +2054,29 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         billing,
         telemetry: None,
     }
+}
+
+/// Register a test node through the same owner-claim ordering as the WebSocket handler.
+pub(crate) async fn register_test_node_connection(
+    state: &AppState,
+    node_id: &str,
+    tx: tokio::sync::mpsc::Sender<NodeOutboundMessage>,
+) -> String {
+    let connection_id = Uuid::new_v4().to_string();
+    crate::services::node_owner_service::claim(
+        &state.db,
+        node_id,
+        &state.replica_identity,
+        &connection_id,
+        Duration::from_secs(state.config.node_owner_lease_ttl_secs),
+    )
+    .await
+    .expect("claim test node owner")
+    .expect("test node owner claim must succeed");
+    state
+        .node_ws_manager
+        .register_connection_with_id(node_id, connection_id.clone(), tx);
+    connection_id
 }
 
 /// Build an `AppState` for tests that never perform MongoDB operations.

@@ -2760,7 +2760,7 @@ mod tests {
 
         let state = test_app_state(db.clone());
         let (tx, mut rx) = mpsc::channel(1);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let token = access_token(&state, &actor_id);
         let app = api_app(state);
 
@@ -2871,7 +2871,7 @@ mod tests {
 
         let state = test_app_state(db.clone());
         let (tx, mut rx) = mpsc::channel(1);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let token = access_token(&state, &actor_id);
         let app = api_app(state);
 
@@ -2962,12 +2962,8 @@ mod tests {
             fan_out_route_fixture("pending_route_fanout_push_success").await;
         let (first_tx, mut first_rx) = mpsc::channel(2);
         let (second_tx, mut second_rx) = mpsc::channel(2);
-        state
-            .node_ws_manager
-            .register_connection(&first.id, first_tx);
-        state
-            .node_ws_manager
-            .register_connection(&second.id, second_tx);
+        crate::test_utils::register_test_node_connection(&state, &first.id, first_tx).await;
+        crate::test_utils::register_test_node_connection(&state, &second.id, second_tx).await;
         let created_audit = audit_service::notify_on_audit_write_for_user(
             "node_credential_rci_fan_out_created",
             actor_id.clone(),
@@ -3140,9 +3136,7 @@ mod tests {
         let pending = record_all_fan_out_pubkeys(&db, &fanout_id, &first.id, &second.id).await;
 
         let (first_tx, mut first_rx) = mpsc::channel(4);
-        state
-            .node_ws_manager
-            .register_connection(&first.id, first_tx);
+        crate::test_utils::register_test_node_connection(&state, &first.id, first_tx).await;
         state.node_ws_manager.record_capabilities(
             &first.id,
             &NodeCapabilitiesMsg {
@@ -3364,9 +3358,7 @@ mod tests {
             Some(RemoteCryptoState::PartialDecrypted)
         );
         let (second_tx, mut second_rx) = mpsc::channel(2);
-        state
-            .node_ws_manager
-            .register_connection(&second.id, second_tx);
+        crate::test_utils::register_test_node_connection(&state, &second.id, second_tx).await;
         let retry_audit = audit_service::notify_on_audit_write(
             "node_credential_rci_fan_out_retry_started",
             Some(fanout_id.clone()),
@@ -3548,7 +3540,7 @@ mod tests {
         let (db, state, app, token, node, pending) =
             pending_route_fixture("pending_route_post_sent", "sent-node", "openclaw", true).await;
         let (tx, mut rx) = mpsc::channel(4);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         state.node_ws_manager.record_capabilities(
             &node.id,
             &NodeCapabilitiesMsg {
@@ -3824,11 +3816,11 @@ mod tests {
             match case {
                 "unsupported" => {
                     let (tx, _rx) = mpsc::channel(4);
-                    state.node_ws_manager.register_connection(&node.id, tx);
+                    crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
                 }
                 "send-failure" => {
                     let (tx, _rx) = mpsc::channel(1);
-                    state.node_ws_manager.register_connection(&node.id, tx);
+                    crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
                     state.node_ws_manager.record_capabilities(
                         &node.id,
                         &NodeCapabilitiesMsg {
