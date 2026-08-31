@@ -652,7 +652,7 @@ pub async fn revoke_session(
 
     // Cascade: remove MCP sessions for the affected user
     if let (Some(mcp), Some(session)) = (mcp_sessions, &session_doc) {
-        mcp.remove_by_user_id(&session.user_id);
+        mcp.remove_by_user_id(&session.user_id).await?;
     }
 
     tracing::info!(session_id = %session_id, "Session revoked");

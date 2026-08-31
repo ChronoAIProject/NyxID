@@ -41,6 +41,7 @@ pub mod feature_flag_metadata;
 pub mod feature_flag_override;
 pub mod group;
 pub mod invite_code;
+pub mod mcp_notification;
 pub mod mcp_session;
 pub mod mfa_factor;
 pub mod node;

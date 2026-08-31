@@ -11,7 +11,6 @@ use chrono::Utc;
 use mongodb::bson::doc;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use tokio_stream::StreamExt;
 
 use crate::AppState;
 use crate::crypto::jwt;
@@ -570,12 +569,19 @@ async fn authenticate_mcp(
     let session_id = headers.get("mcp-session-id").and_then(|v| v.to_str().ok());
 
     if let Some(sid) = session_id
-        && let Some(user_id) = state.mcp_sessions.get_user_id(sid)
+        && let Some(session) = state
+            .mcp_sessions
+            .get_for_auth(sid)
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, "Failed to load MCP session for authentication");
+                rpc_error(None, -32603, "Internal error")
+            })?
     {
-        if !state.mcp_sessions.allows_proxy_access(sid) {
+        if !session.proxy_authorized {
             return Err(mcp_403_insufficient_scope());
         }
-        let user_id = verify_user_active(state, user_id).await?;
+        let user_id = verify_user_active(state, session.user_id).await?;
         let mut ctx = McpAuthContext::user(user_id, AuthMethod::Session);
         ctx.ip_address = request_ip;
         ctx.user_agent = request_ua;
@@ -632,16 +638,34 @@ fn require_session(headers: &HeaderMap) -> Result<String, Response> {
 
 /// Validate session exists and belongs to user, then touch it.
 #[allow(clippy::result_large_err)]
-fn validate_session(
+async fn validate_session(
     state: &AppState,
     session_id: &str,
     user_id: &str,
     request_id: Option<serde_json::Value>,
 ) -> Result<(), Response> {
-    if !state.mcp_sessions.validate(session_id, user_id) {
+    let valid = state
+        .mcp_sessions
+        .validate(session_id, user_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Failed to validate MCP session");
+            rpc_error(request_id.clone(), -32603, "Internal error")
+        })?;
+    if !valid {
         return Err(rpc_error(request_id, -32002, "Invalid or expired session"));
     }
-    state.mcp_sessions.touch(session_id);
+    let touched = state
+        .mcp_sessions
+        .touch(session_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "Failed to persist MCP session activity");
+            rpc_error(request_id.clone(), -32603, "Internal error")
+        })?;
+    if !touched {
+        return Err(rpc_error(request_id, -32002, "Invalid or expired session"));
+    }
     Ok(())
 }
 
@@ -745,23 +769,11 @@ fn ensure_service_in_scope(
     }
 }
 
-/// Send a `notifications/tools/list_changed` JSON-RPC notification
-/// to the session's SSE stream.
-fn send_tools_list_changed(state: &AppState, session_id: &str) {
-    let notification = serde_json::json!({
+fn tools_list_changed_notification() -> serde_json::Value {
+    serde_json::json!({
         "jsonrpc": JSONRPC_VERSION,
         "method": "notifications/tools/list_changed",
-    });
-
-    if !state
-        .mcp_sessions
-        .send_notification(session_id, notification)
-    {
-        tracing::debug!(
-            session_id,
-            "Failed to send tools/list_changed notification (no SSE listener)"
-        );
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -840,17 +852,29 @@ pub async fn mcp_post(
                 auth.user_agent.as_deref(),
                 &tele,
             )
+            .await
         }
 
         "notifications/initialized" => {
             if let Ok(sid) = require_session(&headers) {
-                state.mcp_sessions.touch(&sid);
+                match state.mcp_sessions.touch(&sid).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return rpc_error(request.id, -32002, "Invalid or expired session");
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "Failed to persist MCP session activity");
+                        return rpc_error(request.id, -32603, "Internal error");
+                    }
+                }
             }
             StatusCode::ACCEPTED.into_response()
         }
 
         "tools/list" => {
-            let sid = match resolve_session(&state, &headers, &user_id, &auth, request.id.clone()) {
+            let sid = match resolve_session(&state, &headers, &user_id, &auth, request.id.clone())
+                .await
+            {
                 Ok(s) => s,
                 Err(r) => return r,
             };
@@ -858,7 +882,9 @@ pub async fn mcp_post(
         }
 
         "tools/call" => {
-            let sid = match resolve_session(&state, &headers, &user_id, &auth, request.id.clone()) {
+            let sid = match resolve_session(&state, &headers, &user_id, &auth, request.id.clone())
+                .await
+            {
                 Ok(s) => s,
                 Err(r) => return r,
             };
@@ -898,7 +924,7 @@ fn app_error_to_rpc(id: Option<serde_json::Value>, err: &crate::errors::AppError
 /// header is present it must be valid; if absent the request proceeds
 /// statelessly (returns `None`), re-authenticating on every call.
 #[allow(clippy::result_large_err)]
-fn resolve_session(
+async fn resolve_session(
     state: &AppState,
     headers: &HeaderMap,
     user_id: &str,
@@ -911,12 +937,12 @@ fn resolve_session(
         (true, None) => Ok(None),
         (true, Some(sid)) => {
             let sid = sid.to_string();
-            validate_session(state, &sid, user_id, request_id)?;
+            validate_session(state, &sid, user_id, request_id).await?;
             Ok(Some(sid))
         }
         (false, _) => {
             let sid = require_session(headers)?;
-            validate_session(state, &sid, user_id, request_id)?;
+            validate_session(state, &sid, user_id, request_id).await?;
             Ok(Some(sid))
         }
     }
@@ -961,30 +987,43 @@ pub async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Respo
         Err(r) => return r,
     };
 
-    if let Err(r) = validate_session(&state, &sid, &user_id, None) {
+    if let Err(r) = validate_session(&state, &sid, &user_id, None).await {
         return r;
     }
 
-    // Take the notification receiver for this session.
-    // If already taken (reconnect), create a new channel pair.
-    let rx = match state.mcp_sessions.take_notification_rx(&sid) {
-        Some(rx) => rx,
-        None => {
-            // Reconnect: create new channel, update session's tx
-            let (tx, rx) = tokio::sync::mpsc::channel(32);
-            state.mcp_sessions.set_notification_tx(&sid, tx);
-            rx
+    let mut cursor = headers
+        .get("last-event-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<i64>().ok())
+        .filter(|value| *value >= 0)
+        .unwrap_or(0);
+    let sessions = state.mcp_sessions.clone();
+    let poll_interval = sessions.notification_poll_interval();
+    let stream = async_stream::stream! {
+        loop {
+            match sessions.notifications_after(&sid, cursor).await {
+                Ok(Some(notifications)) if notifications.is_empty() => {
+                    tokio::time::sleep(poll_interval).await;
+                }
+                Ok(Some(notifications)) => {
+                    for notification in notifications {
+                        cursor = notification.sequence;
+                        yield Ok::<_, Infallible>(
+                            Event::default()
+                                .event("message")
+                                .id(notification.sequence.to_string())
+                                .data(notification.payload.to_string()),
+                        );
+                    }
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    tracing::warn!(%error, session_id = %sid, "MCP notification poll failed");
+                    tokio::time::sleep(poll_interval).await;
+                }
+            }
         }
     };
-
-    // Convert mpsc::Receiver into an SSE-compatible stream
-    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(|notification| {
-        Ok::<_, Infallible>(
-            Event::default()
-                .event("message")
-                .data(notification.to_string()),
-        )
-    });
 
     Sse::new(stream)
         .keep_alive(
@@ -1025,15 +1064,12 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
         Err(r) => return r,
     };
 
-    if let Err(r) = validate_session(&state, &sid, &auth.user_id, None) {
+    if let Err(r) = validate_session(&state, &sid, &auth.user_id, None).await {
         return r;
     }
 
     // Look up the persisted session's `created_at` before removing it so we
-    // can emit `mcp.session_ended` with a duration. Best-effort: the write
-    // that persists the record is fire-and-forget at create time, so the
-    // record may not exist yet for very-short-lived sessions -- duration
-    // falls back to 0 in that case. See `docs/TELEMETRY.md` §6.5.
+    // can emit `mcp.session_ended` with a duration.
     let persisted_created_at = state
         .db
         .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
@@ -1043,7 +1079,10 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
         .flatten()
         .map(|rec| rec.created_at);
 
-    state.mcp_sessions.remove(&sid);
+    if let Err(error) = state.mcp_sessions.remove(&sid).await {
+        tracing::error!(%error, "Failed to delete MCP session");
+        return rpc_error(None, -32603, "Internal error");
+    }
 
     // Audit log for session deletion -- attribute API key when present.
     audit_service::log_async(
@@ -1094,7 +1133,7 @@ pub async fn mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> Re
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-fn handle_initialize(
+async fn handle_initialize(
     state: &AppState,
     user_id: &str,
     request: &JsonRpcRequest,
@@ -1113,8 +1152,12 @@ fn handle_initialize(
     let session_id = if stateless {
         None
     } else {
-        match state.mcp_sessions.create_with_proxy_access(user_id, true) {
-            Some(id) => {
+        match state
+            .mcp_sessions
+            .create_with_proxy_access(user_id, true)
+            .await
+        {
+            Ok(Some(id)) => {
                 audit_service::log_async(
                     state.db.clone(),
                     Some(user_id.to_string()),
@@ -1127,7 +1170,13 @@ fn handle_initialize(
                 );
                 Some(id)
             }
-            None => return rpc_error(request.id.clone(), -32000, "Too many active MCP sessions"),
+            Ok(None) => {
+                return rpc_error(request.id.clone(), -32000, "Too many active MCP sessions");
+            }
+            Err(error) => {
+                tracing::error!(%error, "Failed to persist MCP session");
+                return rpc_error(request.id.clone(), -32603, "Internal error");
+            }
         }
     };
 
@@ -1236,7 +1285,13 @@ async fn handle_tools_list(
     // Stateless (API-key) clients with no session get the full tool list up front.
     let mut tool_defs = match session_id {
         Some(sid) => {
-            let activated = state.mcp_sessions.get_activated_service_ids(sid);
+            let activated = match state.mcp_sessions.get_activated_service_ids(sid).await {
+                Ok(activated) => activated,
+                Err(error) => {
+                    tracing::error!(%error, "Failed to load activated MCP services");
+                    return rpc_error(request.id.clone(), -32603, "Internal error");
+                }
+            };
             mcp_service::generate_tool_definitions(
                 &services,
                 Some(&activated),
@@ -1398,7 +1453,16 @@ async fn handle_tools_call(
     }
 
     // -- Service tool: verify activation (when stateful), load, resolve, execute --
-    let activated = session_id.map(|sid| state.mcp_sessions.get_activated_service_ids(sid));
+    let activated = match session_id {
+        Some(sid) => match state.mcp_sessions.get_activated_service_ids(sid).await {
+            Ok(activated) => Some(activated),
+            Err(error) => {
+                tracing::error!(%error, "Failed to load activated MCP services");
+                return rpc_error(request.id.clone(), -32603, "Internal error");
+            }
+        },
+        None => None,
+    };
 
     // Scoped discovery so resolve_tool_call can't match tools whose
     // only dispatchable routes fall outside the caller's API-key node scope
@@ -2024,13 +2088,21 @@ async fn handle_meta_call_tool(
     // Stateless (API-key, no session) requests skip activation tracking.
     let changed = match session_id {
         Some(sid) => {
-            let changed = state
+            match state
                 .mcp_sessions
-                .activate_services(sid, std::slice::from_ref(&service.service_id));
-            if changed {
-                send_tools_list_changed(state, sid);
+                .activate_services_and_notify(
+                    sid,
+                    std::slice::from_ref(&service.service_id),
+                    tools_list_changed_notification(),
+                )
+                .await
+            {
+                Ok(changed) => changed,
+                Err(error) => {
+                    tracing::error!(%error, "Failed to persist MCP service activation");
+                    return rpc_error(request_id, -32603, "Internal error");
+                }
             }
-            changed
         }
         None => false,
     };
@@ -2303,14 +2375,21 @@ async fn handle_meta_connect(
             // no session) callers skip activation tracking.
             let changed = match session_id {
                 Some(sid) => {
-                    let changed = state
+                    match state
                         .mcp_sessions
-                        .activate_services(sid, &[service_id.to_string()]);
-                    // Send via GET SSE channel (fallback for clients that have it)
-                    if changed {
-                        send_tools_list_changed(state, sid);
+                        .activate_services_and_notify(
+                            sid,
+                            &[service_id.to_string()],
+                            tools_list_changed_notification(),
+                        )
+                        .await
+                    {
+                        Ok(changed) => changed,
+                        Err(error) => {
+                            tracing::error!(%error, "Failed to persist MCP service activation");
+                            return rpc_error(request_id, -32603, "Internal error");
+                        }
                     }
-                    changed
                 }
                 None => false,
             };
@@ -2402,15 +2481,29 @@ async fn handle_wait_for_connection(
                 crate::models::connect_link::ConnectLinkStatus::Expired => "expired",
                 crate::models::connect_link::ConnectLinkStatus::Cancelled => "cancelled",
             };
-            let changed = status == "completed"
-                && session_id.is_some_and(|sid| {
-                    state
+            let changed = if status == "completed" {
+                if let Some(sid) = session_id {
+                    match state
                         .mcp_sessions
-                        .activate_services(sid, std::slice::from_ref(&view.link.service_id))
-                });
-            if changed && let Some(sid) = session_id {
-                send_tools_list_changed(state, sid);
-            }
+                        .activate_services_and_notify(
+                            sid,
+                            std::slice::from_ref(&view.link.service_id),
+                            tools_list_changed_notification(),
+                        )
+                        .await
+                    {
+                        Ok(changed) => changed,
+                        Err(error) => {
+                            tracing::error!(%error, "Failed to persist MCP service activation");
+                            return rpc_error(request_id, -32603, "Internal error");
+                        }
+                    }
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
             let result = serde_json::json!({
                 "status": status,
                 "connect_link_id": view.link.id,

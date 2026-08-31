@@ -92,7 +92,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Pre-computed JWK for the JWKS endpoint
     pub jwk_json: serde_json::Value,
-    /// Hybrid in-memory + MongoDB MCP session store
+    /// MongoDB-authoritative MCP session and notification store
     pub mcp_sessions: Arc<McpSessionStore>,
     /// JWKS cache for verifying external provider ID tokens (Google)
     pub jwks_cache: Arc<JwksCache>,
@@ -1003,9 +1003,14 @@ async fn main() {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
         loop {
             interval.tick().await;
-            mcp_sessions_for_reaper.reap_expired(std::time::Duration::from_secs(
-                models::mcp_session::MCP_SESSION_MAX_IDLE_SECS,
-            ));
+            if let Err(error) = mcp_sessions_for_reaper
+                .reap_expired(std::time::Duration::from_secs(
+                    models::mcp_session::MCP_SESSION_MAX_IDLE_SECS,
+                ))
+                .await
+            {
+                tracing::warn!(%error, "MCP session reaper failed");
+            }
         }
     });
 
