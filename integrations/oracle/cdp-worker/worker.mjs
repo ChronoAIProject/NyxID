@@ -109,6 +109,7 @@ const SESSION_AAD = SESSION_INFO;
 const SESSION_FORMAT_VERSION = 1;
 const MAX_SESSION_SNAPSHOT_BYTES = 512 * 1024;
 const MAX_SESSION_PLAINTEXT_BYTES = 350 * 1024;
+const NPM_EXECUTABLE = process.env.NYXID_NPM_EXECUTABLE || "npm";
 const CAPABILITIES = ["commands_v1", "upgrade_v1", "session_import_v1", "attempt_fencing_v1"];
 // Result-image caps (the server re-validates and caps lower-or-equal). Kept
 // below the 16 MiB worker body cap once base64-inflated (~33%).
@@ -1839,17 +1840,46 @@ async function installBundle(command) {
   const source = response.bundle || "";
   const actual = createHash("sha256").update(source).digest("hex");
   const version = String(response.version || "");
+  const playwrightVersion = String(response.playwright_core_version || "1.62.1");
   if (
     !/^[a-f0-9]{64}$/.test(response.sha256 || "") ||
     response.sha256 !== actual ||
     (command.bundle_sha256 && command.bundle_sha256 !== actual) ||
     !/^[A-Za-z0-9._+-]{1,128}$/.test(version) ||
     !version.endsWith(actual.slice(0, 12)) ||
-    (command.bundle_version && command.bundle_version !== version)
+    (command.bundle_version && command.bundle_version !== version) ||
+    !/^\d+\.\d+\.\d+$/.test(playwrightVersion)
   ) {
     throw new TaskFailure("bundle_checksum_mismatch");
   }
   const target = resolve(process.argv[1]);
+  const installDir = dirname(target);
+  const packagePath = resolve(installDir, "package.json");
+  const packageTemp = `${packagePath}.upgrade-${process.pid}`;
+  const packageBody = {
+    name: "nyxid-oracle-worker-install",
+    private: true,
+    type: "module",
+    dependencies: { "playwright-core": playwrightVersion },
+    nyxid_bundle_version: version,
+  };
+  writeFileSync(packageTemp, `${JSON.stringify(packageBody, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(packageTemp, 0o600);
+  renameSync(packageTemp, packagePath);
+  await new Promise((resolveInstall, rejectInstall) => {
+    const child = spawn(
+      NPM_EXECUTABLE,
+      ["install", "--omit=dev", "--no-audit", "--no-fund", "--save-exact"],
+      { cwd: installDir, stdio: "inherit" }
+    );
+    child.once("error", rejectInstall);
+    child.once("exit", (code, signal) => {
+      if (code === 0) resolveInstall();
+      else rejectInstall(Object.assign(new Error(`npm install failed (${code ?? signal})`), {
+        code: "upgrade_dependency_install_failed",
+      }));
+    });
+  });
   const mode = statSync(target).mode & 0o777;
   const temp = `${target}.upgrade-${process.pid}`;
   const versionTemp = `${BUNDLE_VERSION_FILE}.upgrade-${process.pid}`;
@@ -1857,8 +1887,8 @@ async function installBundle(command) {
   chmodSync(temp, mode);
   writeFileSync(versionTemp, `${version}\n`, { mode: 0o644 });
   chmodSync(versionTemp, 0o644);
-  renameSync(versionTemp, BUNDLE_VERSION_FILE);
   renameSync(temp, target);
+  renameSync(versionTemp, BUNDLE_VERSION_FILE);
   return "upgrade_installed";
 }
 

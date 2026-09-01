@@ -32,7 +32,7 @@ use crate::org_resolver::resolve_org_id;
 const POLL_INTERVAL_SECS: u64 = 3;
 const SESSION_FORMAT_VERSION: u32 = 1;
 const SESSION_INFO: &[u8] = b"nyxid-oracle-session-v1";
-const PLAYWRIGHT_VERSION: &str = "^1.49.0";
+const DEFAULT_PLAYWRIGHT_CORE_VERSION: &str = "1.62.1";
 
 pub async fn run(command: OracleCommands) -> Result<()> {
     match command {
@@ -779,6 +779,7 @@ struct WorkerBundle {
     version: String,
     sha256: String,
     source: String,
+    playwright_core_version: String,
 }
 
 async fn fetch_manager_bundle(api: &mut ApiClient) -> Result<WorkerBundle> {
@@ -795,12 +796,30 @@ async fn fetch_manager_bundle(api: &mut ApiClient) -> Result<WorkerBundle> {
         .as_str()
         .context("bundle response omitted source")?
         .to_string();
+    let playwright_core_version = response["playwright_core_version"]
+        .as_str()
+        .unwrap_or(DEFAULT_PLAYWRIGHT_CORE_VERSION)
+        .to_string();
+    validate_playwright_version(&playwright_core_version)?;
     verify_bundle(&source, &sha256)?;
     Ok(WorkerBundle {
         version,
         sha256,
         source,
+        playwright_core_version,
     })
+}
+
+fn validate_playwright_version(version: &str) -> Result<()> {
+    if version.is_empty()
+        || version.len() > 32
+        || !version
+            .split('.')
+            .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        bail!("bundle returned an invalid playwright_core_version")
+    }
+    Ok(())
 }
 
 fn verify_bundle(source: &str, expected: &str) -> Result<()> {
@@ -843,7 +862,7 @@ fn install_bundle_runtime(dir: &Path, bundle: &WorkerBundle, npm: &Path) -> Resu
         "name": "nyxid-oracle-worker-install",
         "private": true,
         "type": "module",
-        "dependencies": { "playwright-core": PLAYWRIGHT_VERSION },
+        "dependencies": { "playwright-core": bundle.playwright_core_version },
         "nyxid_bundle_version": bundle.version,
     });
     fs::write(

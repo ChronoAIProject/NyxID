@@ -9,6 +9,7 @@ pub struct OracleWorkerBundleResponse {
     pub version: String,
     pub sha256: String,
     pub bundle: String,
+    pub playwright_core_version: String,
 }
 
 pub fn bundle_response() -> OracleWorkerBundleResponse {
@@ -17,6 +18,7 @@ pub fn bundle_response() -> OracleWorkerBundleResponse {
         version: bundle.version.to_string(),
         sha256: bundle.sha256.to_string(),
         bundle: bundle.source.to_string(),
+        playwright_core_version: bundle.playwright_core_version.to_string(),
     }
 }
 
