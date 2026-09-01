@@ -1328,6 +1328,19 @@ async fn run_login(
     Ok(())
 }
 
+/// Derive the AES-256-GCM cipher for a login snapshot from the pool worker
+/// token and per-envelope salt via HKDF-SHA256. The key material is never a
+/// hard-coded value: the zeroed buffer is overwritten by `hkdf.expand` before
+/// use and kept in `Zeroizing`.
+fn snapshot_cipher(salt: &[u8], worker_token: &[u8]) -> Result<Aes256Gcm> {
+    let hkdf = Hkdf::<Sha256>::new(Some(salt), worker_token);
+    let mut key = Zeroizing::new([0_u8; 32]);
+    hkdf.expand(SESSION_INFO, key.as_mut())
+        .map_err(|_| anyhow::anyhow!("Could not derive login snapshot key"))?;
+    Aes256Gcm::new_from_slice(key.as_ref())
+        .map_err(|_| anyhow::anyhow!("Could not initialize login snapshot encryption"))
+}
+
 fn encrypt_login_snapshot(plaintext: &[u8], worker_token: &[u8]) -> Result<Vec<u8>> {
     if plaintext.is_empty() || plaintext.len() > 350 * 1024 {
         bail!("Captured login state must be 1-358400 bytes")
@@ -1336,12 +1349,7 @@ fn encrypt_login_snapshot(plaintext: &[u8], worker_token: &[u8]) -> Result<Vec<u
     let mut nonce_bytes = [0_u8; 12];
     rand::rngs::OsRng.fill_bytes(&mut salt);
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
-    let hkdf = Hkdf::<Sha256>::new(Some(&salt), worker_token);
-    let mut key = Zeroizing::new([0_u8; 32]);
-    hkdf.expand(SESSION_INFO, key.as_mut())
-        .map_err(|_| anyhow::anyhow!("Could not derive login snapshot key"))?;
-    let cipher = Aes256Gcm::new_from_slice(key.as_ref())
-        .map_err(|_| anyhow::anyhow!("Could not initialize login snapshot encryption"))?;
+    let cipher = snapshot_cipher(&salt, worker_token)?;
     let ciphertext = cipher
         .encrypt(
             Nonce::from_slice(&nonce_bytes),
@@ -1831,10 +1839,7 @@ mod tests {
         let ciphertext = base64::engine::general_purpose::STANDARD
             .decode(envelope["ciphertext_base64"].as_str().unwrap())
             .unwrap();
-        let hkdf = Hkdf::<Sha256>::new(Some(&salt), token);
-        let mut key = [0_u8; 32];
-        hkdf.expand(SESSION_INFO, &mut key).unwrap();
-        let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
+        let cipher = snapshot_cipher(&salt, token).expect("derive cipher");
         let restored = cipher
             .decrypt(
                 Nonce::from_slice(&nonce),
@@ -1849,9 +1854,7 @@ mod tests {
         let mut wrong_bytes = [0_u8; 24];
         rand::rngs::OsRng.fill_bytes(&mut wrong_bytes);
         let wrong_token = format!("nyx_owk_{}", hex::encode(wrong_bytes)).into_bytes();
-        let wrong_hkdf = Hkdf::<Sha256>::new(Some(&salt), wrong_token.as_slice());
-        wrong_hkdf.expand(SESSION_INFO, &mut key).unwrap();
-        let wrong = Aes256Gcm::new_from_slice(&key).unwrap();
+        let wrong = snapshot_cipher(&salt, wrong_token.as_slice()).expect("derive cipher");
         assert!(
             wrong
                 .decrypt(
