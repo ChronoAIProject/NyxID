@@ -1611,7 +1611,10 @@ fn build_router_internal(
             )
             .route(
                 "/pools/{id_or_slug}/login-snapshots",
-                post(handlers::oracle_workers::upload_login_snapshot),
+                post(handlers::oracle_workers::upload_login_snapshot).layer(DefaultBodyLimit::max(
+                    crate::services::oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS
+                        + 4096,
+                ),),
             )
             .route(
                 "/worker-bundle",
