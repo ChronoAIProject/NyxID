@@ -1003,7 +1003,7 @@ async function uploadAttachment(runtime, page, task) {
   const buffer = Buffer.from(task.attachment_base64, "base64");
   const name = task.attachment_name || "attachment.bin";
   const mime = fileMime(name);
-  log(`uploading attachment ${name} (${(buffer.length / 1024).toFixed(0)} KB, ${mime})`);
+  log(`uploading attachment (${(buffer.length / 1024).toFixed(0)} KB, ${mime})`);
   let fileInput = page.locator("input[type='file']").first();
   if ((await fileInput.count()) === 0) {
     const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button'], button[aria-haspopup='menu']").first();
@@ -1041,7 +1041,7 @@ async function uploadPdf(runtime, page, task) {
   if (!task.pdf_base64) return false;
   const buffer = Buffer.from(task.pdf_base64, "base64");
   const name = task.pdf_name || "attachment.pdf";
-  log(`uploading PDF ${name} (${(buffer.length / 1024).toFixed(0)} KB)`);
+  log(`uploading PDF (${(buffer.length / 1024).toFixed(0)} KB)`);
   let fileInput = page.locator("input[type='file']").first();
   if ((await fileInput.count()) === 0) {
     const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button'], button[aria-haspopup='menu']").first();
