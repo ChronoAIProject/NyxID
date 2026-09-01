@@ -75,7 +75,23 @@ fn admin_node_info_from_model(
     binding_count: u64,
     ws_manager: &NodeWsManager,
 ) -> AdminNodeInfo {
-    let session = ws_manager.session_info(&node.id);
+    let session = if let Some(owner) =
+        crate::services::node_owner_service::live_owner(node, chrono::Utc::now())
+    {
+        crate::services::node_ws_manager::NodeSessionInfo {
+            is_connected: true,
+            capabilities_resolved: owner.capabilities_resolved,
+            capabilities: NodeCapabilitiesFlags {
+                credential_ack_correlation: owner.credential_ack_correlation,
+                remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
+                proxy_max_body_size: owner.proxy_max_body_size,
+            },
+        }
+    } else if node.connection_owner.is_none() {
+        ws_manager.session_info(&node.id)
+    } else {
+        crate::services::node_ws_manager::NodeSessionInfo::disconnected()
+    };
     AdminNodeInfo {
         id: node.id.clone(),
         name: node.name.clone(),
@@ -234,12 +250,11 @@ pub async fn admin_disconnect_node(
 ) -> AppResult<impl IntoResponse> {
     require_admin(&state, &auth_user).await?;
 
-    let was_connected = state.node_ws_manager.is_connected(&node_id);
+    let was_connected = state
+        .node_dispatch
+        .disconnect(&node_id, 4000, "admin disconnected node")
+        .await?;
     if was_connected {
-        state
-            .node_ws_manager
-            .disconnect_connection(&node_id, 4000, "admin disconnected node")
-            .await;
         node_service::set_node_status(&state.db, &node_id, NodeStatus::Offline).await?;
     }
 
@@ -281,14 +296,10 @@ pub async fn admin_delete_node(
     require_admin(&state, &auth_user).await?;
 
     node_service::admin_delete_node(&state.db, &node_id).await?;
-
-    // Disconnect WebSocket if connected
-    if state.node_ws_manager.is_connected(&node_id) {
-        state
-            .node_ws_manager
-            .disconnect_connection(&node_id, 4006, "node deleted by admin")
-            .await;
-    }
+    let _ = state
+        .node_dispatch
+        .disconnect(&node_id, 4006, "node deleted by admin")
+        .await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -353,6 +364,7 @@ mod tests {
             connected_at: None,
             metadata: None,
             metrics: NodeMetrics::default(),
+            connection_owner: None,
             is_active: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),

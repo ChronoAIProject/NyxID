@@ -853,7 +853,10 @@ async fn resolve_execution_authority(
                 user_service_id,
                 Some(service_slug),
                 None,
-                Some(&state.connection_expiry_notifier),
+                proxy_service::ProxyExecutionContext::new(
+                    Some(&state.connection_expiry_notifier),
+                    state.platform_user_rate_limit,
+                ),
             )
             .await?
         }

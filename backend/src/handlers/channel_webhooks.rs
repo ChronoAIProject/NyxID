@@ -721,6 +721,21 @@ mod tests {
             aws_kms_key_arn_previous: None,
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
+            instance_name: "test-backend".to_string(),
+            internal_bind_addr: "127.0.0.1:3002".to_string(),
+            internal_advertise_url: "http://127.0.0.1:3002".to_string(),
+            internal_dispatch_hmac_key: None,
+            internal_auth_max_skew_secs: 30,
+            internal_nonce_ttl_secs: 120,
+            internal_duplex_handshake_timeout_secs: 5,
+            node_owner_lease_ttl_secs: 90,
+            node_owner_lease_renew_secs: 30,
+            cluster_lease_ttl_secs: 30,
+            cluster_lease_renew_secs: 10,
+            cluster_slot_ttl_secs: 30,
+            cluster_slot_renew_secs: 10,
+            mcp_notification_poll_interval_ms: 250,
+            mcp_notification_ttl_secs: 86_400,
             node_heartbeat_interval_secs: 30,
             node_heartbeat_timeout_secs: 90,
             node_proxy_timeout_secs: 30,
@@ -750,7 +765,6 @@ mod tests {
             channel_relay_edit_rate_limit_burst: 20,
             channel_event_rate_limit_per_second: 100,
             channel_event_rate_limit_burst: 200,
-            channel_event_dedup_capacity: 32_768,
             channel_event_dedup_ttl_secs: 300,
             trigger_rate_limit_per_second: 10,
             trigger_rate_limit_burst: 20,
@@ -1109,7 +1123,6 @@ mod tests {
         assert_eq!(config.channel_relay_max_bots_per_user, 5);
         assert_eq!(config.channel_relay_message_ttl_days, 30);
         assert_eq!(config.channel_event_rate_limit_per_second, 100);
-        assert_eq!(config.channel_event_dedup_capacity, 32_768);
         assert_eq!(config.channel_event_dedup_ttl_secs, 300);
         assert!(config.invite_code_required);
         assert!(!config.auto_verify_email);

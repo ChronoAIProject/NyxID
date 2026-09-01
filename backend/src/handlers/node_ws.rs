@@ -14,18 +14,19 @@ use tokio::sync::mpsc;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::node::{NodeMetadata, NodeStatus};
+use crate::models::node::NodeMetadata;
 use crate::models::node_pending_credential::NodePendingCredential;
 use crate::services::{
     audit_service, node_pending_credential_service, node_service,
     node_ws_manager::{
-        NodeCapabilitiesMsg, NodeOutboundMessage, NodeProxyResponse, NodeSshExecResult,
-        NodeWsManager, PendingCredentialCiphertextParams, WsFrameInjectedInbound,
-        WsProxyBinaryInbound, WsProxyClosedInbound, WsProxyErrorInbound, WsProxyOpenedInbound,
-        WsProxyResponseChunkMsg, WsProxyResponseEndMsg, WsProxyResponseStartMsg,
-        WsProxyTextInbound, WsSshExecResultMsg, WsSshNodeExecCloseMsg, WsSshNodeExecDataMsg,
-        WsSshNodeExecErrorMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg, WsSshTunnelOpenedMsg,
-        WsWebTerminalClosedMsg, WsWebTerminalDataMsg, WsWebTerminalStartedMsg,
+        NodeCapabilitiesMsg, NodeConnectionReservation, NodeOutboundMessage, NodeProxyResponse,
+        NodeSshExecResult, NodeWsManager, PendingCredentialCiphertextParams,
+        WsFrameInjectedInbound, WsProxyBinaryInbound, WsProxyClosedInbound, WsProxyErrorInbound,
+        WsProxyOpenedInbound, WsProxyResponseChunkMsg, WsProxyResponseEndMsg,
+        WsProxyResponseStartMsg, WsProxyTextInbound, WsSshExecResultMsg, WsSshNodeExecCloseMsg,
+        WsSshNodeExecDataMsg, WsSshNodeExecErrorMsg, WsSshTunnelClosedMsg, WsSshTunnelDataMsg,
+        WsSshTunnelOpenedMsg, WsWebTerminalClosedMsg, WsWebTerminalDataMsg,
+        WsWebTerminalStartedMsg,
     },
     rci_audit_service::{
         self, RciAuditDelivery, RciAuditErrorKind, RciAuditEventKind, RciAuditSubject,
@@ -36,18 +37,6 @@ use crate::telemetry::{
     sampling::hash_short_id,
     schema::TelemetryEvent,
 };
-
-/// RAII guard that decrements the pending auth counter on drop.
-/// Prevents counter leaks if the WS handler future is cancelled (H3).
-struct PendingAuthGuard {
-    manager: Arc<NodeWsManager>,
-}
-
-impl Drop for PendingAuthGuard {
-    fn drop(&mut self) {
-        self.manager.decrement_pending_auth();
-    }
-}
 
 /// Size of the bounded channel for WS writer messages (H4).
 const WS_WRITER_CHANNEL_SIZE: usize = 256;
@@ -473,6 +462,7 @@ async fn apply_status_update_capabilities(
     node_id: &str,
     agent_version: Option<String>,
     capabilities: Option<NodeCapabilitiesMsg>,
+    owner_fence: Option<&crate::services::node_owner_service::NodeOwnerFence>,
 ) {
     if let Some(agent_version) = agent_version
         && let Err(error) =
@@ -485,10 +475,22 @@ async fn apply_status_update_capabilities(
             "Failed to persist node agent version from status_update"
         );
     }
-    if let Some(caps) = capabilities {
-        state.node_ws_manager.record_capabilities(node_id, &caps);
+    if let Some(caps) = capabilities.as_ref() {
+        state.node_ws_manager.record_capabilities(node_id, caps);
     }
     state.node_ws_manager.mark_status_update_received(node_id);
+    if let Some(fence) = owner_fence {
+        let flags = state.node_ws_manager.session_info(node_id).capabilities;
+        match crate::services::node_owner_service::record_capabilities(
+            &state.db, fence, flags, true,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(node_id, "Ignored capabilities from a fenced node socket"),
+            Err(error) => tracing::warn!(node_id, %error, "Failed to persist node capabilities"),
+        }
+    }
     if state
         .node_ws_manager
         .supports_remote_credential_crypto(node_id)
@@ -797,24 +799,13 @@ pub async fn ws_handler(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    // Enforce max concurrent WebSocket connections (includes pending auth).
-    // M6: This check + increment is not atomic (TOCTOU). Concurrent upgrade
-    // requests could slightly exceed the limit (by 1-2 connections). This is
-    // acceptable since the limit is a soft cap and the race window is narrow.
-    if state.node_ws_manager.total_connection_count() >= state.node_ws_manager.max_connections() {
+    // Reserve before upgrade and retain the slot until the socket task exits.
+    let Some(reservation) = state.node_ws_manager.try_reserve_connection() else {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "Maximum node connections reached",
         )
             .into_response();
-    }
-
-    state.node_ws_manager.increment_pending_auth();
-
-    // H3: Create RAII guard so the pending auth counter is decremented
-    // even if the upgrade future is cancelled or the task is aborted.
-    let guard = PendingAuthGuard {
-        manager: state.node_ws_manager.clone(),
     };
 
     let ip = ws_extract_ip(&headers, Some(peer), &state.config.trusted_proxy_ips);
@@ -828,7 +819,7 @@ pub async fn ws_handler(
 
     ws.max_message_size(control_message_limit)
         .max_frame_size(control_message_limit)
-        .on_upgrade(move |socket| handle_node_connection(state, socket, guard, ip, ua))
+        .on_upgrade(move |socket| handle_node_connection(state, socket, reservation, ip, ua))
         .into_response()
 }
 
@@ -877,7 +868,7 @@ fn normalize_legacy_ip_text(value: &str) -> String {
 async fn handle_node_connection(
     state: AppState,
     socket: WebSocket,
-    _guard: PendingAuthGuard,
+    _reservation: NodeConnectionReservation,
     ip_address: Option<String>,
     user_agent: Option<String>,
 ) {
@@ -1073,10 +1064,6 @@ async fn handle_node_connection(
     })
     .await;
 
-    // H3: The RAII guard (_guard) decrements pending_auth on drop.
-    // Drop it explicitly here since auth phase is complete.
-    drop(_guard);
-
     let (node_id, owner_user_id) = match auth_result {
         Ok(Some(pair)) => pair,
         _ => {
@@ -1095,7 +1082,42 @@ async fn handle_node_connection(
 
     // H4: Use bounded channel to prevent memory exhaustion from slow/malicious nodes
     let (tx, mut rx) = mpsc::channel::<NodeOutboundMessage>(WS_WRITER_CHANNEL_SIZE);
-    state.node_ws_manager.register_connection(&node_id, tx);
+    let connection_id = uuid::Uuid::new_v4().to_string();
+    let owner = match crate::services::node_owner_service::claim(
+        &state.db,
+        &node_id,
+        &state.replica_identity,
+        &connection_id,
+        std::time::Duration::from_secs(state.config.node_owner_lease_ttl_secs),
+    )
+    .await
+    {
+        Ok(Some(owner)) => owner,
+        Ok(None) => {
+            let _ = ws_sink
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 4008,
+                    reason: "Node is connected to another backend".into(),
+                })))
+                .await;
+            return;
+        }
+        Err(error) => {
+            tracing::error!(node_id, %error, "Failed to claim node connection ownership");
+            let _ = ws_sink
+                .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                    code: 4002,
+                    reason: "Node registration failed".into(),
+                })))
+                .await;
+            return;
+        }
+    };
+    let owner_fence =
+        crate::services::node_owner_service::NodeOwnerFence::from_owner(&node_id, &owner);
+    state
+        .node_ws_manager
+        .register_connection_with_id(&node_id, connection_id.clone(), tx);
 
     // Telemetry: node.connected. Emitted once after WS auth + registration
     // in the manager. `profile` is unknown server-side -- only the CLI knows
@@ -1117,11 +1139,6 @@ async fn handle_node_connection(
                 profile: "unknown".to_string(),
             },
         );
-    }
-
-    // Mark node online
-    if let Err(e) = node_service::set_node_status(&state.db, &node_id, NodeStatus::Online).await {
-        tracing::warn!(node_id = %node_id, error = %e, "Failed to set node status to online");
     }
 
     // Spawn writer task: forwards messages from the channel to the WS sink
@@ -1158,6 +1175,13 @@ async fn handle_node_connection(
     let mut reason: &'static str = "client_close";
 
     while let Some(msg) = ws_stream.next().await {
+        // A reconnect on this replica replaces the local correlation maps.
+        // Fence the old reader before it can deliver a late response into the
+        // replacement connection's request or session entry.
+        if !ws_manager.has_connection(&node_id_reader, &connection_id) {
+            reason = "ownership_lost";
+            break;
+        }
         // Binary frames carry streaming proxy data chunks:
         //   [36 bytes: request_id as ASCII UUID][remaining: raw data]
         if let Ok(Message::Binary(data)) = &msg {
@@ -1197,12 +1221,22 @@ async fn handle_node_connection(
 
         match parsed {
             NodeMessage::HeartbeatPong { .. } => {
-                if let Err(e) = node_service::update_heartbeat(&db, &node_id_reader, None).await {
-                    tracing::warn!(
-                        node_id = %node_id_reader,
-                        error = %e,
-                        "Failed to update heartbeat"
-                    );
+                match crate::services::node_owner_service::renew(
+                    &db,
+                    &owner_fence,
+                    std::time::Duration::from_secs(state.config.node_owner_lease_ttl_secs),
+                    true,
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        reason = "ownership_lost";
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::warn!(node_id = %node_id_reader, %error, "Failed to renew node owner lease");
+                    }
                 }
             }
             NodeMessage::ProxyResponse(resp) => {
@@ -1305,6 +1339,7 @@ async fn handle_node_connection(
                     &node_id_reader,
                     agent_version,
                     capabilities,
+                    Some(&owner_fence),
                 )
                 .await;
                 tracing::debug!(node_id = %node_id_reader, "Received status_update");
@@ -1575,10 +1610,11 @@ async fn handle_node_connection(
     // Cleanup on disconnect
     tracing::info!(node_id = %node_id, "Node disconnected");
     writer_task.abort();
-    ws_manager.unregister_connection(&node_id);
+    ws_manager.unregister_connection_if(&node_id, &connection_id);
 
-    if let Err(e) = node_service::set_node_status(&state.db, &node_id, NodeStatus::Offline).await {
-        tracing::warn!(node_id = %node_id, error = %e, "Failed to set node status to offline");
+    if let Err(error) = crate::services::node_owner_service::release(&state.db, &owner_fence).await
+    {
+        tracing::warn!(node_id = %node_id, %error, "Failed to release node connection ownership");
     }
 
     // Telemetry: node.disconnected. Single-owner rule -- only the reader
@@ -1612,11 +1648,18 @@ async fn handle_node_connection(
 pub async fn node_ws_manager_heartbeat_sweep(
     db: &mongodb::Database,
     ws_manager: &Arc<crate::services::node_ws_manager::NodeWsManager>,
+    identity: &crate::services::node_owner_service::ReplicaIdentity,
     timeout_secs: u64,
 ) {
-    let node_ids = ws_manager.connected_node_ids();
+    let node_connections = ws_manager.connected_nodes();
 
-    for node_id in &node_ids {
+    for (node_id, connection_id) in &node_connections {
+        let fence = crate::services::node_owner_service::NodeOwnerFence {
+            node_id: node_id.clone(),
+            instance_name: identity.instance_name.clone(),
+            generation_id: identity.generation_id.clone(),
+            connection_id: connection_id.clone(),
+        };
         // 1. Check if the previous heartbeat was answered in time.
         //    Skip for nodes with no last_heartbeat_at (newly connected).
         let timed_out = match node_service::get_node_by_id(db, node_id).await {
@@ -1632,10 +1675,15 @@ pub async fn node_ws_manager_heartbeat_sweep(
                             "Node heartbeat timeout, disconnecting"
                         );
                         ws_manager
-                            .disconnect_connection(node_id, 4005, "heartbeat timeout")
+                            .disconnect_connection_if(
+                                node_id,
+                                connection_id,
+                                4005,
+                                "heartbeat timeout",
+                            )
                             .await;
                         if let Err(e) =
-                            node_service::set_node_status(db, node_id, NodeStatus::Offline).await
+                            crate::services::node_owner_service::release(db, &fence).await
                         {
                             tracing::warn!(
                                 node_id = %node_id,
@@ -1654,7 +1702,7 @@ pub async fn node_ws_manager_heartbeat_sweep(
             Ok(None) => {
                 // Node was deleted, disconnect
                 ws_manager
-                    .disconnect_connection(node_id, 4006, "node deleted")
+                    .disconnect_connection_if(node_id, connection_id, 4006, "node deleted")
                     .await;
                 true
             }
@@ -1677,10 +1725,50 @@ pub async fn node_ws_manager_heartbeat_sweep(
         if let Err(e) = ws_manager.send_heartbeat_ping(node_id) {
             tracing::debug!(node_id = %node_id, error = %e, "Failed to send heartbeat ping");
             ws_manager
-                .disconnect_connection(node_id, 4004, "heartbeat ping failed")
+                .disconnect_connection_if(node_id, connection_id, 4004, "heartbeat ping failed")
                 .await;
-            if let Err(e) = node_service::set_node_status(db, node_id, NodeStatus::Offline).await {
+            if let Err(e) = crate::services::node_owner_service::release(db, &fence).await {
                 tracing::warn!(node_id = %node_id, error = %e, "Failed to set node offline after ping failure");
+            }
+        }
+    }
+
+    if let Err(error) =
+        crate::services::node_owner_service::clear_expired(db, chrono::Utc::now()).await
+    {
+        tracing::warn!(%error, "Failed to clear expired node owner records");
+    }
+}
+
+pub async fn node_ws_manager_owner_lease_sweep(
+    db: &mongodb::Database,
+    ws_manager: &Arc<crate::services::node_ws_manager::NodeWsManager>,
+    identity: &crate::services::node_owner_service::ReplicaIdentity,
+    lease_ttl_secs: u64,
+) {
+    for (node_id, connection_id) in ws_manager.connected_nodes() {
+        let fence = crate::services::node_owner_service::NodeOwnerFence {
+            node_id: node_id.clone(),
+            instance_name: identity.instance_name.clone(),
+            generation_id: identity.generation_id.clone(),
+            connection_id: connection_id.clone(),
+        };
+        match crate::services::node_owner_service::renew(
+            db,
+            &fence,
+            std::time::Duration::from_secs(lease_ttl_secs),
+            false,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                ws_manager
+                    .disconnect_connection_if(&node_id, &connection_id, 4007, "ownership lost")
+                    .await;
+            }
+            Err(error) => {
+                tracing::warn!(node_id, %error, "Failed to renew node owner lease");
             }
         }
     }
@@ -1749,6 +1837,7 @@ mod tests {
             connected_at: None,
             metadata: None,
             metrics: NodeMetrics::default(),
+            connection_owner: None,
             is_active: true,
             created_at: now,
             updated_at: now,
@@ -2400,7 +2489,7 @@ mod tests {
 
         let state = test_app_state(db.clone());
         let (tx, mut rx) = mpsc::channel(1);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
 
         apply_status_update_capabilities(
             &state,
@@ -2410,6 +2499,7 @@ mod tests {
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             }),
+            None,
         )
         .await;
 
@@ -2467,9 +2557,10 @@ mod tests {
 
         let state = test_app_state(db.clone());
         let (tx, _rx) = mpsc::channel(1);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
 
-        apply_status_update_capabilities(&state, &node.id, Some("0.7.1".to_string()), None).await;
+        apply_status_update_capabilities(&state, &node.id, Some("0.7.1".to_string()), None, None)
+            .await;
 
         let stored = db
             .collection::<Node>(NODES)
@@ -2519,7 +2610,7 @@ mod tests {
 
         let state = test_app_state(db.clone());
         let (tx, mut rx) = mpsc::channel(1);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         apply_status_update_capabilities(
             &state,
             &node.id,
@@ -2528,6 +2619,7 @@ mod tests {
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             }),
+            None,
         )
         .await;
 
@@ -2626,7 +2718,7 @@ mod tests {
         store_ciphertext(&db, &owner_id, &node.id, &pending.id, false).await;
         let state = test_app_state(db.clone());
         let (tx, _rx) = mpsc::channel(1);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         state
             .node_ws_manager
             .send_pending_credentials_available(&node.id)

@@ -25,6 +25,8 @@ pub mod channel_message;
 pub mod cli_pairing;
 pub mod connect_link;
 pub mod consent;
+#[allow(dead_code)]
+pub mod coordination;
 pub mod credit_grant;
 pub mod credit_schedule;
 pub mod credit_schedule_period;
@@ -39,6 +41,7 @@ pub mod feature_flag_metadata;
 pub mod feature_flag_override;
 pub mod group;
 pub mod invite_code;
+pub mod mcp_notification;
 pub mod mcp_session;
 pub mod mfa_factor;
 pub mod node;

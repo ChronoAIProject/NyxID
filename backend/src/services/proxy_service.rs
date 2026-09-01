@@ -988,6 +988,7 @@ pub async fn resolve_proxy_target(
     encryption_keys: &EncryptionKeys,
     user_id: &str,
     service_id: &str,
+    platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
 ) -> AppResult<ProxyTarget> {
     // Load the downstream service
     let service = db
@@ -1084,10 +1085,12 @@ pub async fn resolve_proxy_target(
         let actor = EffectiveActor::from_user_id(user_id.to_string());
         let authorized = authorize_master_credential(db, &service, &actor).await?;
         crate::mw::rate_limit::enforce_platform_user_limit(
-            crate::mw::rate_limit::platform_user_rate_limiter(),
+            db,
+            platform_user_rate_limit,
             &service.id,
             &actor.user_id,
-        )?;
+        )
+        .await?;
         decrypt_master_credential_string(encryption_keys, &authorized).await?
     } else {
         String::new()
@@ -1123,6 +1126,7 @@ pub async fn resolve_proxy_target_lenient(
     encryption_keys: &EncryptionKeys,
     user_id: &str,
     service_id: &str,
+    platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
 ) -> AppResult<(ProxyTarget, bool)> {
     let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -1224,10 +1228,12 @@ pub async fn resolve_proxy_target_lenient(
         let actor = EffectiveActor::from_user_id(user_id.to_string());
         let authorized = authorize_master_credential(db, &service, &actor).await?;
         crate::mw::rate_limit::enforce_platform_user_limit(
-            crate::mw::rate_limit::platform_user_rate_limiter(),
+            db,
+            platform_user_rate_limit,
             &service.id,
             &actor.user_id,
-        )?;
+        )
+        .await?;
         (
             decrypt_master_credential_string(encryption_keys, &authorized).await?,
             true,
@@ -1325,15 +1331,35 @@ async fn lookup_service_pool_member(
 }
 
 #[derive(Clone, Copy)]
+pub struct ProxyExecutionContext<'a> {
+    pub connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
+    pub platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
+}
+
+impl<'a> ProxyExecutionContext<'a> {
+    pub const fn new(
+        connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
+        platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
+    ) -> Self {
+        Self {
+            connection_expiry_notifier,
+            platform_user_rate_limit,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
 struct ProxyCredentialResolution<'a> {
     connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
+    platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
     materialize_credentials: bool,
 }
 
 impl<'a> ProxyCredentialResolution<'a> {
-    fn materialize(connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>) -> Self {
+    fn materialize(context: ProxyExecutionContext<'a>) -> Self {
         Self {
-            connection_expiry_notifier,
+            connection_expiry_notifier: context.connection_expiry_notifier,
+            platform_user_rate_limit: context.platform_user_rate_limit,
             materialize_credentials: true,
         }
     }
@@ -1341,6 +1367,8 @@ impl<'a> ProxyCredentialResolution<'a> {
     fn read_only_snapshot() -> Self {
         Self {
             connection_expiry_notifier: None,
+            platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(
+            ),
             materialize_credentials: false,
         }
     }
@@ -1370,9 +1398,9 @@ pub async fn resolve_proxy_target_from_user_service(
     user_id: &str,
     slug: Option<&str>,
     catalog_service_id: Option<&str>,
-    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
+    execution_context: ProxyExecutionContext<'_>,
 ) -> AppResult<Option<UserServiceResolution>> {
-    let credential_resolution = ProxyCredentialResolution::materialize(connection_expiry_notifier);
+    let credential_resolution = ProxyCredentialResolution::materialize(execution_context);
     // NyxID#974 routing boundary: identical-instance service pools belong
     // here, before `finish_resolution()`, because this function is the
     // authoritative place that preserves personal/legacy/org precedence and
@@ -1810,7 +1838,7 @@ pub async fn resolve_proxy_target_by_user_service_id(
     user_service_id: &str,
     expected_slug: Option<&str>,
     expected_catalog_service_id: Option<&str>,
-    connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
+    execution_context: ProxyExecutionContext<'_>,
 ) -> AppResult<Option<UserServiceResolution>> {
     resolve_proxy_target_by_user_service_id_with_mode(
         db,
@@ -1819,7 +1847,7 @@ pub async fn resolve_proxy_target_by_user_service_id(
         user_service_id,
         expected_slug,
         expected_catalog_service_id,
-        ProxyCredentialResolution::materialize(connection_expiry_notifier),
+        ProxyCredentialResolution::materialize(execution_context),
     )
     .await
 }
@@ -2379,6 +2407,7 @@ async fn finish_resolution(
 ) -> AppResult<UserServiceResolution> {
     let materialize_credentials = credential_resolution.materialize_credentials;
     let connection_expiry_notifier = credential_resolution.connection_expiry_notifier;
+    let platform_user_rate_limit = credential_resolution.platform_user_rate_limit;
     // For auto-provisioned services, verify the catalog entry is still eligible
     // before allowing the proxy request through.
     verify_auto_provision_eligibility(db, &user_service, effective_owner_id).await?;
@@ -2474,10 +2503,12 @@ async fn finish_resolution(
         let authorized = authorize_master_credential(db, &catalog_service, &actor).await?;
         let credential = if materialize_credentials {
             crate::mw::rate_limit::enforce_platform_user_limit(
-                crate::mw::rate_limit::platform_user_rate_limiter(),
+                db,
+                platform_user_rate_limit,
                 &catalog_service.id,
                 &actor.user_id,
-            )?;
+            )
+            .await?;
             let decrypted_bytes = Zeroizing::new(
                 decrypt_authorized_master_credential(encryption_keys, &authorized).await?,
             );
@@ -3032,12 +3063,10 @@ async fn maybe_refresh_provider_backed_api_key(
     // place so a per-key revocation / expiry never disturbs sibling
     // connections under the same `(user, provider)` pair.
     //
-    // Concurrency: `refresh_user_api_key_in_place` is read-modify-write
-    // without a row lock (see its rustdoc). Two simultaneous proxy
-    // requests for the same expiring key can race; last-write-wins on
-    // the response, and a rotated refresh_token from response A may be
-    // overwritten by B's now-invalidated value. Self-healing on the
-    // next refresh attempt; acceptable for v1.
+    // A per-key Mongo lease serializes refreshes across replicas. A contender
+    // waits for the credential revision or lease outcome and returns the
+    // winner's row. If the wait bound expires while the lease remains held,
+    // the conflict propagates instead of falling back to this stale row.
     if api_key.connection_id.is_some() {
         return match user_token_service::refresh_user_api_key_in_place(
             db,
@@ -3859,6 +3888,14 @@ mod tests {
         }
     }
 
+    fn disabled_platform_rate_limit() -> crate::mw::rate_limit::PlatformUserRateLimitPolicy {
+        crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled()
+    }
+
+    fn test_execution_context() -> ProxyExecutionContext<'static> {
+        ProxyExecutionContext::new(None, disabled_platform_rate_limit())
+    }
+
     #[tokio::test]
     async fn server_chosen_master_credential_requires_public_valid_row() {
         let db = connect_test_database("proxy_master_credential_server_chosen").await;
@@ -4198,16 +4235,27 @@ mod tests {
         assert_eq!(server_target.credential, "catalog-secret");
         assert!(server_target.service.inject_delegation_token);
 
-        let strict_target = resolve_proxy_target(&db, &keys, &user_id, &service.id)
-            .await
-            .expect("strict resolver should retain the master credential");
+        let strict_target = resolve_proxy_target(
+            &db,
+            &keys,
+            &user_id,
+            &service.id,
+            disabled_platform_rate_limit(),
+        )
+        .await
+        .expect("strict resolver should retain the master credential");
         assert_eq!(strict_target.credential, "catalog-secret");
         assert!(strict_target.service.inject_delegation_token);
 
-        let (lenient_target, has_credential) =
-            resolve_proxy_target_lenient(&db, &keys, &user_id, &service.id)
-                .await
-                .expect("lenient resolver should retain the master credential");
+        let (lenient_target, has_credential) = resolve_proxy_target_lenient(
+            &db,
+            &keys,
+            &user_id,
+            &service.id,
+            disabled_platform_rate_limit(),
+        )
+        .await
+        .expect("lenient resolver should retain the master credential");
         assert!(has_credential);
         assert_eq!(lenient_target.credential, "catalog-secret");
         assert!(lenient_target.service.inject_delegation_token);
@@ -4252,7 +4300,7 @@ mod tests {
             &user_id,
             Some(&service.slug),
             None,
-            None,
+            test_execution_context(),
         )
         .await
         .expect("auto-provision resolver should succeed")
@@ -4793,7 +4841,7 @@ mod tests {
             &member_id,
             Some("svc-a"),
             None,
-            None,
+            test_execution_context(),
         )
         .await
         .expect("service A should resolve")
@@ -4814,7 +4862,7 @@ mod tests {
             &member_id,
             Some("svc-c"),
             None,
-            None,
+            test_execution_context(),
         )
         .await
         {
@@ -4843,7 +4891,7 @@ mod tests {
             &member_id,
             Some("svc-a"),
             None,
-            None,
+            test_execution_context(),
         )
         .await
         {
@@ -4914,7 +4962,7 @@ mod tests {
             &member_id,
             Some("admin-svc"),
             None,
-            None,
+            test_execution_context(),
         )
         .await
         {
@@ -4930,7 +4978,7 @@ mod tests {
             &service_id,
             Some("admin-svc"),
             None,
-            None,
+            test_execution_context(),
         )
         .await
         {
@@ -4955,7 +5003,7 @@ mod tests {
             &admin_id,
             Some("admin-svc"),
             None,
-            None,
+            test_execution_context(),
         )
         .await
         .expect("admin should resolve admin-only service")
@@ -4984,7 +5032,7 @@ mod tests {
             &member_id,
             Some("admin-svc"),
             None,
-            None,
+            test_execution_context(),
         )
         .await
         .expect("member resolution should succeed after disabling admin-only")

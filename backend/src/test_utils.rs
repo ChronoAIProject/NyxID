@@ -24,11 +24,7 @@ use crate::models::user::{User, UserType};
 use crate::models::user_endpoint::UserEndpoint;
 use crate::models::user_service::UserService;
 use crate::mw::auth::{AuthMethod, AuthUser};
-use crate::services::dpop_jti_cache::{
-    DPOP_JTI_CACHE_CAPACITY, DPOP_JTI_CACHE_TTL_SECS, DpopJtiCache,
-};
-use crate::services::event_dedup_cache::EventDedupCache;
-use crate::services::node_ws_manager::NodeWsManager;
+use crate::services::node_ws_manager::{NodeOutboundMessage, NodeWsManager};
 use crate::services::platform_settings_service::BrokerPolicy;
 use crate::services::provider_token_exchange_service::TokenExchangeCache;
 use crate::services::ssh_service::SshSessionManager;
@@ -1680,6 +1676,21 @@ pub(crate) fn test_app_config() -> AppConfig {
         aws_kms_key_arn_previous: None,
         gcp_kms_key_name: None,
         gcp_kms_key_name_previous: None,
+        instance_name: "test-backend".to_string(),
+        internal_bind_addr: "127.0.0.1:3002".to_string(),
+        internal_advertise_url: "http://127.0.0.1:3002".to_string(),
+        internal_dispatch_hmac_key: None,
+        internal_auth_max_skew_secs: 30,
+        internal_nonce_ttl_secs: 120,
+        internal_duplex_handshake_timeout_secs: 5,
+        node_owner_lease_ttl_secs: 90,
+        node_owner_lease_renew_secs: 30,
+        cluster_lease_ttl_secs: 30,
+        cluster_lease_renew_secs: 10,
+        cluster_slot_ttl_secs: 30,
+        cluster_slot_renew_secs: 10,
+        mcp_notification_poll_interval_ms: 250,
+        mcp_notification_ttl_secs: 86_400,
         node_heartbeat_interval_secs: 30,
         node_heartbeat_timeout_secs: 90,
         node_proxy_timeout_secs: 30,
@@ -1709,7 +1720,6 @@ pub(crate) fn test_app_config() -> AppConfig {
         channel_relay_edit_rate_limit_burst: 20,
         channel_event_rate_limit_per_second: 100,
         channel_event_rate_limit_burst: 200,
-        channel_event_dedup_capacity: 32_768,
         channel_event_dedup_ttl_secs: 300,
         trigger_rate_limit_per_second: 10,
         trigger_rate_limit_burst: 20,
@@ -1843,15 +1853,51 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         Arc::new(config.clone()),
     ));
     let encryption_keys = Arc::new(test_encryption_keys());
+    let node_ws_manager = Arc::new(NodeWsManager::new(
+        config.node_proxy_timeout_secs,
+        config.node_max_ws_connections,
+    ));
+    let replica_identity = Arc::new(crate::services::node_owner_service::ReplicaIdentity::new(
+        config.instance_name.clone(),
+        config.internal_advertise_url.clone(),
+    ));
+    let internal_auth = crate::services::internal_auth::InternalAuth::new(
+        db.clone(),
+        crate::services::internal_auth::derive_key(
+            config.internal_dispatch_hmac_key.as_deref(),
+            config.encryption_key.as_deref().map(str::as_bytes),
+            &[],
+        ),
+        std::time::Duration::from_secs(config.internal_auth_max_skew_secs),
+        std::time::Duration::from_secs(config.internal_nonce_ttl_secs),
+    );
+    let node_dispatch = Arc::new(crate::services::node_dispatch::NodeDispatch::new(
+        db.clone(),
+        node_ws_manager.clone(),
+        replica_identity.clone(),
+        http_client.clone(),
+        internal_auth,
+        crate::services::node_ws_manager::node_proxy_ws_message_size_limit(
+            config.proxy_max_body_size,
+        ),
+        std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
+    ));
+    node_ws_manager.attach_cluster_dispatch(Arc::downgrade(&node_dispatch));
     let developer_webhook_dispatcher = Arc::new(
         crate::services::developer_webhook_service::DeveloperWebhookDispatcher::new(
             http_client.clone(),
             encryption_keys.clone(),
         ),
     );
+    let cluster_slot_manager = crate::services::cluster_slot_service::RenewableSlotManager::new(
+        db.clone(),
+        replica_identity.coordination_holder(),
+        std::time::Duration::from_secs(config.cluster_slot_ttl_secs),
+        std::time::Duration::from_secs(config.cluster_slot_renew_secs),
+    );
 
     AppState {
-        db,
+        db: db.clone(),
         config: config.clone(),
         jwt_keys,
         http_client: http_client.clone(),
@@ -1871,30 +1917,93 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         ),
         developer_webhook_dispatcher,
         encryption_keys,
-        node_ws_manager: Arc::new(NodeWsManager::new(
-            config.node_proxy_timeout_secs,
-            config.node_max_ws_connections,
+        node_ws_manager,
+        replica_identity,
+        node_dispatch,
+        ssh_session_manager: Arc::new(SshSessionManager::new(
+            cluster_slot_manager.clone(),
+            config.ssh_max_sessions_per_user,
         )),
-        ssh_session_manager: Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user)),
-        per_agent_limiter: Arc::new(crate::mw::rate_limit::PerAgentRateLimiter::new()),
-        direct_chat_limiter: crate::mw::rate_limit::create_direct_chat_rate_limiter(),
-        device_code_pubkey_limiter: crate::mw::rate_limit::create_per_pubkey_rate_limiter(),
-        device_code_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
-        auth_device_request_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
-        auth_device_poll_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(60, 60),
-        auth_device_approve_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(10, 60),
-        auth_device_approve_per_user_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
-            10, 300,
+        cluster_slot_manager: cluster_slot_manager.clone(),
+        per_agent_limiter: Arc::new(crate::mw::rate_limit::PerAgentRateLimiter::with_db(
+            db.clone(),
+            "agent",
+        )),
+        platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy::new(
+            config.platform_service_rate_limit_per_second,
+            config.platform_service_rate_limit_burst,
         ),
-        auth_device_preview_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(30, 60),
-        connect_link_create_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(10, 60),
-        connect_link_preview_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(30, 60),
-        connect_link_complete_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(30, 60),
+        direct_chat_limiter: crate::mw::rate_limit::create_direct_chat_rate_limiter(
+            db.clone(),
+            cluster_slot_manager,
+        ),
+        device_code_pubkey_limiter: crate::mw::rate_limit::create_per_pubkey_rate_limiter(
+            db.clone(),
+            "device_code_pubkey",
+        ),
+        device_code_ip_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "device_code_ip",
+            5,
+            60,
+        ),
+        auth_device_request_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_device_request",
+            5,
+            60,
+        ),
+        auth_device_poll_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_device_poll",
+            60,
+            60,
+        ),
+        auth_device_approve_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_device_approve",
+            10,
+            60,
+        ),
+        auth_device_approve_per_user_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "auth_device_approve_user",
+            10,
+            300,
+        ),
+        auth_device_preview_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_device_preview",
+            30,
+            60,
+        ),
+        connect_link_create_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "connect_link_create",
+            10,
+            60,
+        ),
+        connect_link_preview_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "connect_link_preview",
+            30,
+            60,
+        ),
+        connect_link_complete_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "connect_link_complete",
+            30,
+            60,
+        ),
         public_proxy_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "public_proxy",
             config.public_proxy_rate_limit_per_minute,
             60,
         ),
         public_mcp_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "public_mcp",
             config.public_mcp_rate_limit_per_minute,
             60,
         ),
@@ -1902,7 +2011,12 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         // Production default from backend/src/main.rs — 5 claims per
         // 60s per IP; mirror here so claim-rate-limit tests see the
         // same shape.
-        cli_pairing_claim_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        cli_pairing_claim_limiter: crate::mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "cli_pairing_claim",
+            5,
+            60,
+        ),
         // Tests don't exercise pairing-code HMAC verification; a
         // zero-filled key is deterministic and never touches prod data.
         cli_pairing_hmac_key: Arc::new(zeroize::Zeroizing::new([0u8; 32])),
@@ -1911,31 +2025,28 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         auth_device_hmac_key: Arc::new(zeroize::Zeroizing::new([1u8; 32])),
         audit_chain_hmac_key: Arc::new(zeroize::Zeroizing::new([2u8; 32])),
         billing_ledger_hmac_key: Arc::new(zeroize::Zeroizing::new([3u8; 32])),
-        per_channel_event_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(
-            config.channel_event_rate_limit_per_second,
-            config.channel_event_rate_limit_burst,
-        )),
-        per_message_edit_limiter: Arc::new(crate::mw::rate_limit::PerMessageEditRateLimiter::new(
-            config.channel_relay_edit_rate_limit_per_second,
-            config.channel_relay_edit_rate_limit_burst,
-        )),
-        event_dedup_cache: Arc::new(EventDedupCache::new(
-            config.channel_event_dedup_capacity,
-            Duration::from_secs(config.channel_event_dedup_ttl_secs),
-        )),
-        per_trigger_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::new(
+        per_channel_event_limiter: Arc::new(
+            crate::mw::rate_limit::PerChannelEventLimiter::with_db(
+                db.clone(),
+                "channel_event",
+                config.channel_event_rate_limit_per_second,
+                config.channel_event_rate_limit_burst,
+            ),
+        ),
+        per_message_edit_limiter: Arc::new(
+            crate::mw::rate_limit::PerMessageEditRateLimiter::with_db(
+                db.clone(),
+                "channel_message_edit",
+                config.channel_relay_edit_rate_limit_per_second,
+                config.channel_relay_edit_rate_limit_burst,
+            ),
+        ),
+        per_trigger_limiter: Arc::new(crate::mw::rate_limit::PerChannelEventLimiter::with_db(
+            db,
+            "trigger_ingress",
             config.trigger_rate_limit_per_second,
             config.trigger_rate_limit_burst,
         )),
-        trigger_dedup_cache: Arc::new(EventDedupCache::new(
-            config.channel_event_dedup_capacity,
-            Duration::from_secs(config.channel_event_dedup_ttl_secs),
-        )),
-        dpop_jti_cache: Arc::new(DpopJtiCache::new(
-            DPOP_JTI_CACHE_CAPACITY,
-            Duration::from_secs(DPOP_JTI_CACHE_TTL_SECS),
-        )),
-        ws_passthrough_count: Arc::new(AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
         cloud_response_cache: Arc::new(
             crate::services::cloud_response_cache::CloudResponseCache::new(0),
@@ -1943,6 +2054,29 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
         billing,
         telemetry: None,
     }
+}
+
+/// Register a test node through the same owner-claim ordering as the WebSocket handler.
+pub(crate) async fn register_test_node_connection(
+    state: &AppState,
+    node_id: &str,
+    tx: tokio::sync::mpsc::Sender<NodeOutboundMessage>,
+) -> String {
+    let connection_id = Uuid::new_v4().to_string();
+    crate::services::node_owner_service::claim(
+        &state.db,
+        node_id,
+        &state.replica_identity,
+        &connection_id,
+        Duration::from_secs(state.config.node_owner_lease_ttl_secs),
+    )
+    .await
+    .expect("claim test node owner")
+    .expect("test node owner claim must succeed");
+    state
+        .node_ws_manager
+        .register_connection_with_id(node_id, connection_id.clone(), tx);
+    connection_id
 }
 
 /// Build an `AppState` for tests that never perform MongoDB operations.

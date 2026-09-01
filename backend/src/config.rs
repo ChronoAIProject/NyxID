@@ -1,4 +1,80 @@
-use std::{env, net::IpAddr};
+use std::{
+    env,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
+};
+
+const DEFAULT_INTERNAL_BIND_ADDR: &str = "127.0.0.1:3002";
+
+fn resolve_internal_advertise_url(
+    explicit_url: Option<&str>,
+    pod_ip: Option<&str>,
+    internal_bind_addr: &str,
+    hostname: Option<&str>,
+    detect_ip: impl FnOnce() -> Option<IpAddr>,
+) -> String {
+    if let Some(explicit_url) = explicit_url {
+        return explicit_url.to_string();
+    }
+
+    let bind_addr = internal_bind_addr.parse::<SocketAddr>().ok();
+    let port = bind_addr.map(|address| address.port()).unwrap_or_default();
+    if let Some(pod_ip) = pod_ip {
+        return internal_http_url(pod_ip, port);
+    }
+    if bind_addr.is_some_and(|address| !address.ip().is_loopback())
+        && let Some(detected_ip) = detect_ip()
+    {
+        return internal_http_url(&detected_ip.to_string(), port);
+    }
+    internal_http_url(hostname.unwrap_or("127.0.0.1"), port)
+}
+
+fn internal_http_url(host: &str, port: u16) -> String {
+    if host.parse::<Ipv6Addr>().is_ok() {
+        format!("http://[{host}]:{port}")
+    } else {
+        format!("http://{host}:{port}")
+    }
+}
+
+fn detect_internal_advertise_ip() -> Option<IpAddr> {
+    for target in [
+        SocketAddr::from(([10, 255, 255, 255], 1)),
+        SocketAddr::from(([8, 8, 8, 8], 80)),
+    ] {
+        let Ok(socket) = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0))) else {
+            continue;
+        };
+        if socket.connect(target).is_err() {
+            continue;
+        }
+        let Some(address) = socket.local_addr().ok().map(|address| address.ip()) else {
+            continue;
+        };
+        if is_advertisable_ip(address) {
+            return Some(address);
+        }
+    }
+    None
+}
+
+fn is_advertisable_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            !address.is_unspecified()
+                && !address.is_loopback()
+                && !address.is_link_local()
+                && !address.is_multicast()
+                && address != Ipv4Addr::BROADCAST
+        }
+        IpAddr::V6(address) => {
+            !address.is_unspecified()
+                && !address.is_loopback()
+                && !address.is_unicast_link_local()
+                && !address.is_multicast()
+        }
+    }
+}
 
 /// Canonicalize IPv4-mapped IPv6 addresses so trust and rate-limit decisions
 /// cannot split one endpoint across two address-family representations.
@@ -355,6 +431,25 @@ pub struct AppConfig {
     pub gcp_kms_key_name_previous: Option<String>,
 
     // Node Proxy
+    /// Stable pod/host identity. The process generation is created at startup.
+    pub instance_name: String,
+    /// Dedicated private listener for inter-replica traffic.
+    pub internal_bind_addr: String,
+    /// Peer-reachable base URL for this exact replica.
+    pub internal_advertise_url: String,
+    /// Optional 32-byte hex override for the internal request HMAC key.
+    pub internal_dispatch_hmac_key: Option<String>,
+    pub internal_auth_max_skew_secs: u64,
+    pub internal_nonce_ttl_secs: u64,
+    pub internal_duplex_handshake_timeout_secs: u64,
+    pub node_owner_lease_ttl_secs: u64,
+    pub node_owner_lease_renew_secs: u64,
+    pub cluster_lease_ttl_secs: u64,
+    pub cluster_lease_renew_secs: u64,
+    pub cluster_slot_ttl_secs: u64,
+    pub cluster_slot_renew_secs: u64,
+    pub mcp_notification_poll_interval_ms: u64,
+    pub mcp_notification_ttl_secs: u64,
     /// Heartbeat ping interval in seconds (default: 30)
     pub node_heartbeat_interval_secs: u64,
     /// Mark node offline after this many seconds without heartbeat (default: 90)
@@ -367,7 +462,7 @@ pub struct AppConfig {
     pub node_pending_credential_ttl_secs: i64,
     /// Maximum nodes per user (default: 10)
     pub node_max_per_user: u32,
-    /// Maximum concurrent WebSocket connections (default: 100)
+    /// Maximum concurrent node WebSocket connections per replica (default: 100)
     pub node_max_ws_connections: usize,
     /// Maximum duration for streaming proxy responses in seconds (default: 300)
     pub node_max_stream_duration_secs: u64,
@@ -382,7 +477,7 @@ pub struct AppConfig {
     /// Idle timeout for proxy streaming responses in seconds (default: 60).
     /// Stream is terminated if no data chunk arrives within this duration.
     pub proxy_stream_idle_timeout_secs: u64,
-    /// Maximum concurrent SSH WebSocket tunnel sessions per user (default: 4)
+    /// Maximum concurrent SSH operations per user across the cluster (default: 4)
     pub ssh_max_sessions_per_user: usize,
     /// Timeout for connecting to a downstream SSH target in seconds (default: 10)
     pub ssh_connect_timeout_secs: u64,
@@ -414,8 +509,6 @@ pub struct AppConfig {
     pub channel_event_rate_limit_per_second: u32,
     /// Per-channel event rate limit burst capacity (default 200).
     pub channel_event_rate_limit_burst: u32,
-    /// Event dedup LRU cache capacity (default 10_000).
-    pub channel_event_dedup_capacity: usize,
     /// Event dedup TTL in seconds (default 300 = 5 minutes).
     pub channel_event_dedup_ttl_secs: u64,
     /// Per-trigger ingress rate limit (events per second, default 10).
@@ -669,6 +762,40 @@ impl std::fmt::Debug for AppConfig {
                     &"None"
                 },
             )
+            .field("instance_name", &self.instance_name)
+            .field("internal_bind_addr", &self.internal_bind_addr)
+            .field("internal_advertise_url", &"[REDACTED]")
+            .field(
+                "internal_dispatch_hmac_key",
+                if self.internal_dispatch_hmac_key.is_some() {
+                    &"Some([REDACTED])"
+                } else {
+                    &"None"
+                },
+            )
+            .field(
+                "internal_auth_max_skew_secs",
+                &self.internal_auth_max_skew_secs,
+            )
+            .field("internal_nonce_ttl_secs", &self.internal_nonce_ttl_secs)
+            .field(
+                "internal_duplex_handshake_timeout_secs",
+                &self.internal_duplex_handshake_timeout_secs,
+            )
+            .field("node_owner_lease_ttl_secs", &self.node_owner_lease_ttl_secs)
+            .field(
+                "node_owner_lease_renew_secs",
+                &self.node_owner_lease_renew_secs,
+            )
+            .field("cluster_lease_ttl_secs", &self.cluster_lease_ttl_secs)
+            .field("cluster_lease_renew_secs", &self.cluster_lease_renew_secs)
+            .field("cluster_slot_ttl_secs", &self.cluster_slot_ttl_secs)
+            .field("cluster_slot_renew_secs", &self.cluster_slot_renew_secs)
+            .field(
+                "mcp_notification_poll_interval_ms",
+                &self.mcp_notification_poll_interval_ms,
+            )
+            .field("mcp_notification_ttl_secs", &self.mcp_notification_ttl_secs)
             .field(
                 "node_heartbeat_interval_secs",
                 &self.node_heartbeat_interval_secs,
@@ -748,10 +875,6 @@ impl std::fmt::Debug for AppConfig {
             .field(
                 "channel_event_rate_limit_burst",
                 &self.channel_event_rate_limit_burst,
-            )
-            .field(
-                "channel_event_dedup_capacity",
-                &self.channel_event_dedup_capacity,
             )
             .field(
                 "channel_event_dedup_ttl_secs",
@@ -874,6 +997,18 @@ impl AppConfig {
         let is_dev = environment == "development" || environment == "dev";
 
         let base_url = env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3001".to_string());
+        let internal_bind_addr = env::var("INTERNAL_BIND_ADDR")
+            .unwrap_or_else(|_| DEFAULT_INTERNAL_BIND_ADDR.to_string());
+        let explicit_internal_advertise_url = env::var("INTERNAL_ADVERTISE_URL").ok();
+        let pod_ip = env::var("POD_IP").ok();
+        let hostname = env::var("HOSTNAME").ok();
+        let internal_advertise_url = resolve_internal_advertise_url(
+            explicit_internal_advertise_url.as_deref(),
+            pod_ip.as_deref(),
+            &internal_bind_addr,
+            hostname.as_deref(),
+            detect_internal_advertise_ip,
+        );
 
         Self {
             port: env::var("PORT")
@@ -1095,6 +1230,61 @@ impl AppConfig {
                 .ok()
                 .filter(|s| !s.is_empty()),
 
+            instance_name: env::var("INSTANCE_NAME")
+                .or_else(|_| env::var("POD_NAME"))
+                .or_else(|_| env::var("HOSTNAME"))
+                .unwrap_or_else(|_| "nyxid-backend".to_string()),
+            internal_bind_addr,
+            internal_advertise_url,
+            internal_dispatch_hmac_key: env::var("INTERNAL_DISPATCH_HMAC_KEY")
+                .ok()
+                .filter(|value| !value.trim().is_empty()),
+            internal_auth_max_skew_secs: env::var("INTERNAL_AUTH_MAX_SKEW_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(30),
+            internal_nonce_ttl_secs: env::var("INTERNAL_NONCE_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(120),
+            internal_duplex_handshake_timeout_secs: env::var(
+                "INTERNAL_DUPLEX_HANDSHAKE_TIMEOUT_SECS",
+            )
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(5),
+            node_owner_lease_ttl_secs: env::var("NODE_OWNER_LEASE_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(90),
+            node_owner_lease_renew_secs: env::var("NODE_OWNER_LEASE_RENEW_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(30),
+            cluster_lease_ttl_secs: env::var("CLUSTER_LEASE_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(30),
+            cluster_lease_renew_secs: env::var("CLUSTER_LEASE_RENEW_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(10),
+            cluster_slot_ttl_secs: env::var("CLUSTER_SLOT_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(30),
+            cluster_slot_renew_secs: env::var("CLUSTER_SLOT_RENEW_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(10),
+            mcp_notification_poll_interval_ms: env::var("MCP_NOTIFICATION_POLL_INTERVAL_MS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(250),
+            mcp_notification_ttl_secs: env::var("MCP_NOTIFICATION_TTL_SECS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(86_400),
             node_heartbeat_interval_secs: env::var("NODE_HEARTBEAT_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1207,15 +1397,6 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(200),
-            channel_event_dedup_capacity: env::var("CHANNEL_EVENT_DEDUP_CAPACITY")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                // Default sized to honor the 5-min TTL window under the
-                // default rate limit: 100 events/s × 300s = 30,000 entries
-                // for a single saturated channel. 32_768 leaves headroom
-                // and is a power of two. Operators with many concurrent
-                // high-throughput channels should tune this up.
-                .unwrap_or(32_768),
             channel_event_dedup_ttl_secs: env::var("CHANNEL_EVENT_DEDUP_TTL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1535,11 +1716,134 @@ impl AppConfig {
             panic!("SSH_MAX_TUNNEL_DURATION_SECS must be greater than 0");
         }
     }
+
+    pub fn validate_cluster_runtime_config(&self) {
+        if self.instance_name.trim().is_empty() {
+            panic!("INSTANCE_NAME must not be empty");
+        }
+        self.internal_bind_addr
+            .parse::<std::net::SocketAddr>()
+            .unwrap_or_else(|_| panic!("INTERNAL_BIND_ADDR must be a socket address"));
+        let advertise = url::Url::parse(&self.internal_advertise_url)
+            .unwrap_or_else(|_| panic!("INTERNAL_ADVERTISE_URL must be a valid URL"));
+        if !matches!(advertise.scheme(), "http" | "https") || advertise.host().is_none() {
+            panic!("INTERNAL_ADVERTISE_URL must use http or https and include a host");
+        }
+        if self.internal_auth_max_skew_secs == 0
+            || self.internal_nonce_ttl_secs < self.internal_auth_max_skew_secs.saturating_mul(2)
+        {
+            panic!("INTERNAL_NONCE_TTL_SECS must be at least twice INTERNAL_AUTH_MAX_SKEW_SECS");
+        }
+        if self.internal_duplex_handshake_timeout_secs == 0 {
+            panic!("INTERNAL_DUPLEX_HANDSHAKE_TIMEOUT_SECS must be greater than 0");
+        }
+        for (name, ttl, renew) in [
+            (
+                "NODE_OWNER_LEASE",
+                self.node_owner_lease_ttl_secs,
+                self.node_owner_lease_renew_secs,
+            ),
+            (
+                "CLUSTER_LEASE",
+                self.cluster_lease_ttl_secs,
+                self.cluster_lease_renew_secs,
+            ),
+            (
+                "CLUSTER_SLOT",
+                self.cluster_slot_ttl_secs,
+                self.cluster_slot_renew_secs,
+            ),
+        ] {
+            if renew == 0 || ttl <= renew.saturating_mul(2) {
+                panic!("{name}_TTL_SECS must be greater than twice {name}_RENEW_SECS");
+            }
+        }
+        if self.mcp_notification_poll_interval_ms == 0 || self.mcp_notification_ttl_secs == 0 {
+            panic!("MCP notification poll interval and TTL must be greater than zero");
+        }
+        if let Some(key) = self.internal_dispatch_hmac_key.as_deref()
+            && (key.len() != 64 || !key.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            panic!("INTERNAL_DISPATCH_HMAC_KEY must be 64 hex characters");
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_advertise_url_prefers_explicit_url() {
+        let resolved = resolve_internal_advertise_url(
+            Some("https://backend-1.internal:9443"),
+            Some("10.42.0.12"),
+            "0.0.0.0:4123",
+            Some("backend-1"),
+            || panic!("detection must not run when an explicit URL is configured"),
+        );
+
+        assert_eq!(resolved, "https://backend-1.internal:9443");
+    }
+
+    #[test]
+    fn internal_advertise_url_prefers_pod_ip_and_uses_bind_port() {
+        let resolved = resolve_internal_advertise_url(
+            None,
+            Some("10.42.0.12"),
+            "0.0.0.0:4123",
+            Some("backend-1"),
+            || panic!("detection must not run when POD_IP is configured"),
+        );
+
+        assert_eq!(resolved, "http://10.42.0.12:4123");
+    }
+
+    #[test]
+    fn internal_advertise_url_uses_detected_ip_before_hostname() {
+        let resolved = resolve_internal_advertise_url(
+            None,
+            None,
+            "0.0.0.0:4123",
+            Some("unresolvable-pod-name"),
+            || Some("10.42.0.27".parse().unwrap()),
+        );
+
+        assert_eq!(resolved, "http://10.42.0.27:4123");
+    }
+
+    #[test]
+    fn internal_advertise_url_skips_detection_for_loopback_bind() {
+        let resolved = resolve_internal_advertise_url(
+            None,
+            None,
+            "127.0.0.1:4123",
+            Some("backend.local"),
+            || panic!("detection must not run for a loopback-only listener"),
+        );
+
+        assert_eq!(resolved, "http://backend.local:4123");
+    }
+
+    #[test]
+    fn internal_advertise_url_uses_hostname_after_detection_failure() {
+        let resolved = resolve_internal_advertise_url(
+            None,
+            None,
+            "0.0.0.0:4123",
+            Some("backend.local"),
+            || None,
+        );
+
+        assert_eq!(resolved, "http://backend.local:4123");
+    }
+
+    #[test]
+    fn internal_advertise_url_falls_back_to_loopback() {
+        let resolved = resolve_internal_advertise_url(None, None, "0.0.0.0:4123", None, || None);
+
+        assert_eq!(resolved, "http://127.0.0.1:4123");
+    }
 
     /// Create a minimal AppConfig for testing pure methods.
     fn make_config(base_url: &str, environment: &str, encryption_key: &str) -> AppConfig {
@@ -1616,6 +1920,21 @@ mod tests {
             aws_kms_key_arn_previous: None,
             gcp_kms_key_name: None,
             gcp_kms_key_name_previous: None,
+            instance_name: "test-backend".to_string(),
+            internal_bind_addr: "127.0.0.1:3002".to_string(),
+            internal_advertise_url: "http://127.0.0.1:3002".to_string(),
+            internal_dispatch_hmac_key: None,
+            internal_auth_max_skew_secs: 30,
+            internal_nonce_ttl_secs: 120,
+            internal_duplex_handshake_timeout_secs: 5,
+            node_owner_lease_ttl_secs: 90,
+            node_owner_lease_renew_secs: 30,
+            cluster_lease_ttl_secs: 30,
+            cluster_lease_renew_secs: 10,
+            cluster_slot_ttl_secs: 30,
+            cluster_slot_renew_secs: 10,
+            mcp_notification_poll_interval_ms: 250,
+            mcp_notification_ttl_secs: 86_400,
             node_heartbeat_interval_secs: 30,
             node_heartbeat_timeout_secs: 90,
             node_proxy_timeout_secs: 30,
@@ -1645,7 +1964,6 @@ mod tests {
             channel_relay_edit_rate_limit_burst: 20,
             channel_event_rate_limit_per_second: 100,
             channel_event_rate_limit_burst: 200,
-            channel_event_dedup_capacity: 32_768,
             channel_event_dedup_ttl_secs: 300,
             trigger_rate_limit_per_second: 10,
             trigger_rate_limit_burst: 20,

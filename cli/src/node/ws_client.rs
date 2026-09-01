@@ -179,6 +179,12 @@ pub enum NodeWsMessage {
 
 type SharedSigningSecret = Arc<Zeroizing<String>>;
 type ActiveSshTunnelMap = Arc<tokio::sync::Mutex<HashMap<String, ActiveSshTunnelEntry>>>;
+type ActiveSshExecMap = Arc<tokio::sync::Mutex<HashMap<String, ActiveSshExecEntry>>>;
+
+struct ActiveSshExecEntry {
+    generation: uuid::Uuid,
+    cancel_tx: watch::Sender<bool>,
+}
 
 struct ActiveSshTunnelEntry {
     control_tx: mpsc::Sender<SshTunnelControl>,
@@ -917,6 +923,7 @@ async fn connect_and_serve(
     let active_web_terminals: ActiveWebTerminalMap =
         Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let active_ws_proxies: ActiveWsProxyMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+    let active_ssh_execs: ActiveSshExecMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
     let cert_host_key_store: SharedCertHostKeyStore =
         Arc::new(Mutex::new(CertHostKeyStore::load(config_dir).map_err(
             |error| Error::Config(format!("Failed to load SSH host-key store: {error}")),
@@ -1120,6 +1127,9 @@ async fn connect_and_serve(
                 let secret = signing_secret.clone();
                 let replay = replay_guard.clone();
                 let cert_host_key_store = cert_host_key_store.clone();
+                let execs = active_ssh_execs.clone();
+                let request_id = parsed["request_id"].as_str().map(str::to_string);
+                let cancellation = register_active_ssh_exec(&execs, request_id.as_deref()).await;
                 tokio::spawn(async move {
                     handle_ssh_exec(
                         &parsed,
@@ -1128,8 +1138,11 @@ async fn connect_and_serve(
                         cert_host_key_store,
                         secret,
                         replay,
+                        cancellation.receiver,
                     )
                     .await;
+                    finish_active_ssh_exec(&execs, request_id.as_deref(), cancellation.generation)
+                        .await;
                 });
             }
             Some("ssh_node_exec_open") => {
@@ -1140,6 +1153,9 @@ async fn connect_and_serve(
                 let storage_backend = storage_backend.to_string();
                 let secret = signing_secret.clone();
                 let replay = replay_guard.clone();
+                let execs = active_ssh_execs.clone();
+                let request_id = parsed["request_id"].as_str().map(str::to_string);
+                let cancellation = register_active_ssh_exec(&execs, request_id.as_deref()).await;
                 tokio::spawn(async move {
                     handle_ssh_node_exec_open(
                         &parsed,
@@ -1150,9 +1166,15 @@ async fn connect_and_serve(
                         tx_clone,
                         secret,
                         replay,
+                        cancellation.receiver,
                     )
                     .await;
+                    finish_active_ssh_exec(&execs, request_id.as_deref(), cancellation.generation)
+                        .await;
                 });
+            }
+            Some("ssh_exec_cancel") => {
+                handle_ssh_exec_cancel(&parsed, &active_ssh_execs).await;
             }
             Some("credential_update") => {
                 // Process credential update synchronously (SecretBackend is
@@ -1270,6 +1292,7 @@ async fn connect_and_serve(
     } else {
         drain_active_ssh_tunnels(&active_ssh_tunnels).await;
     }
+    cancel_active_ssh_execs(&active_ssh_execs).await;
     drain_active_web_terminals(&active_web_terminals).await;
     drain_active_ws_proxies(&active_ws_proxies).await;
     writer_task.abort();
@@ -1669,6 +1692,19 @@ async fn drain_active_ssh_tunnels(active_tunnels: &ActiveSshTunnelMap) {
     }
 }
 
+async fn cancel_active_ssh_execs(active_execs: &ActiveSshExecMap) {
+    let entries = {
+        let mut active_execs = active_execs.lock().await;
+        active_execs
+            .drain()
+            .map(|(_, entry)| entry)
+            .collect::<Vec<_>>()
+    };
+    for entry in entries {
+        let _ = entry.cancel_tx.send(true);
+    }
+}
+
 async fn close_active_ssh_tunnels(active_tunnels: &ActiveSshTunnelMap, timeout: Duration) {
     let deadline = tokio::time::Instant::now() + timeout;
 
@@ -1756,6 +1792,80 @@ fn normalize_target_host(host: &str) -> String {
 // SSH exec handler
 // ---------------------------------------------------------------------------
 
+struct ActiveSshExecCancellation {
+    generation: Option<uuid::Uuid>,
+    receiver: watch::Receiver<bool>,
+}
+
+async fn register_active_ssh_exec(
+    active_execs: &ActiveSshExecMap,
+    request_id: Option<&str>,
+) -> ActiveSshExecCancellation {
+    let (cancel_tx, receiver) = watch::channel(false);
+    let generation = request_id.filter(|id| !id.is_empty()).map(|request_id| {
+        let generation = uuid::Uuid::new_v4();
+        (request_id.to_string(), generation)
+    });
+
+    if let Some((request_id, generation)) = generation.as_ref() {
+        let replaced = active_execs.lock().await.insert(
+            request_id.clone(),
+            ActiveSshExecEntry {
+                generation: *generation,
+                cancel_tx,
+            },
+        );
+        if let Some(replaced) = replaced {
+            let _ = replaced.cancel_tx.send(true);
+        }
+    }
+
+    ActiveSshExecCancellation {
+        generation: generation.map(|(_, generation)| generation),
+        receiver,
+    }
+}
+
+async fn finish_active_ssh_exec(
+    active_execs: &ActiveSshExecMap,
+    request_id: Option<&str>,
+    generation: Option<uuid::Uuid>,
+) {
+    let (Some(request_id), Some(generation)) = (request_id, generation) else {
+        return;
+    };
+    let mut active_execs = active_execs.lock().await;
+    if active_execs
+        .get(request_id)
+        .is_some_and(|entry| entry.generation == generation)
+    {
+        active_execs.remove(request_id);
+    }
+}
+
+async fn handle_ssh_exec_cancel(parsed: &serde_json::Value, active_execs: &ActiveSshExecMap) {
+    let Some(request_id) = parsed["request_id"].as_str().filter(|id| !id.is_empty()) else {
+        tracing::warn!("ssh_exec_cancel missing request_id");
+        return;
+    };
+    if let Some(active) = active_execs.lock().await.remove(request_id) {
+        let _ = active.cancel_tx.send(true);
+        tracing::debug!(request_id = %request_id, "Cancelled SSH exec at server request");
+    }
+}
+
+async fn wait_for_ssh_exec_cancel(cancel_rx: &mut watch::Receiver<bool>) {
+    if *cancel_rx.borrow() {
+        return;
+    }
+    while cancel_rx.changed().await.is_ok() {
+        if *cancel_rx.borrow() {
+            return;
+        }
+    }
+    std::future::pending::<()>().await;
+}
+
 async fn handle_ssh_exec(
     parsed: &serde_json::Value,
     ssh_config: &SshConfig,
@@ -1763,6 +1873,7 @@ async fn handle_ssh_exec(
     cert_host_key_store: SharedCertHostKeyStore,
     signing_secret: Option<SharedSigningSecret>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
+    mut cancel_rx: watch::Receiver<bool>,
 ) {
     let request_id = match parsed["request_id"].as_str() {
         Some(id) if !id.is_empty() => id.to_string(),
@@ -1914,7 +2025,12 @@ async fn handle_ssh_exec(
         cert_host_key_store,
     );
 
-    match ssh_node_exec::exec_command(entry, command, timeout_secs).await {
+    let result = tokio::select! {
+        biased;
+        () = wait_for_ssh_exec_cancel(&mut cancel_rx) => return,
+        result = ssh_node_exec::exec_command(entry, command, timeout_secs) => result,
+    };
+    match result {
         Ok(output) => {
             let _ = send_ssh_exec_result(
                 &tx,
@@ -2047,6 +2163,7 @@ async fn handle_ssh_node_exec_open(
     tx: mpsc::Sender<NodeWsMessage>,
     signing_secret: Option<SharedSigningSecret>,
     replay_guard: Arc<tokio::sync::Mutex<ReplayGuard>>,
+    mut cancel_rx: watch::Receiver<bool>,
 ) {
     let request_id = match parsed["request_id"].as_str() {
         Some(id) if !id.is_empty() => id.to_string(),
@@ -2274,7 +2391,11 @@ async fn handle_ssh_node_exec_open(
 
     let host = entry.target_host.clone();
     let port = entry.target_port;
-    let result = ssh_node_exec::exec_command(entry, command, timeout_secs).await;
+    let result = tokio::select! {
+        biased;
+        () = wait_for_ssh_exec_cancel(&mut cancel_rx) => return,
+        result = ssh_node_exec::exec_command(entry, command, timeout_secs) => result,
+    };
     match result {
         Ok(output) => {
             if !output.stdout.is_empty() {
@@ -5303,6 +5424,42 @@ mod tests {
 
         assert!(active_tunnels.lock().await.is_empty());
         assert!(abort_handle.is_finished());
+    }
+
+    #[tokio::test]
+    async fn ssh_exec_cancel_signals_active_command_and_removes_registration() {
+        let active_execs: ActiveSshExecMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let mut cancellation = register_active_ssh_exec(&active_execs, Some("exec-1")).await;
+
+        handle_ssh_exec_cancel(
+            &serde_json::json!({
+                "type": "ssh_exec_cancel",
+                "request_id": "exec-1",
+            }),
+            &active_execs,
+        )
+        .await;
+
+        cancellation
+            .receiver
+            .changed()
+            .await
+            .expect("cancel signal");
+        assert!(*cancellation.receiver.borrow());
+        assert!(active_execs.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ssh_exec_completion_is_fenced_from_reused_request_id() {
+        let active_execs: ActiveSshExecMap = Arc::new(tokio::sync::Mutex::new(HashMap::new()));
+        let first = register_active_ssh_exec(&active_execs, Some("exec-1")).await;
+        let second = register_active_ssh_exec(&active_execs, Some("exec-1")).await;
+
+        finish_active_ssh_exec(&active_execs, Some("exec-1"), first.generation).await;
+        assert!(active_execs.lock().await.contains_key("exec-1"));
+
+        finish_active_ssh_exec(&active_execs, Some("exec-1"), second.generation).await;
+        assert!(active_execs.lock().await.is_empty());
     }
 
     #[tokio::test]

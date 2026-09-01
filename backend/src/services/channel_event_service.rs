@@ -9,7 +9,7 @@
 //! 2. Conversation lookup (404 on miss).
 //! 3. Auth binding check — `auth_user.api_key_id` must match
 //!    `conversation.agent_api_key_id` (401 on mismatch).
-//! 4. Dedup LRU check — duplicates short-circuit and are logged as `deduped`.
+//! 4. Atomic MongoDB dedup claim — duplicates short-circuit and are logged as `deduped`.
 //! 5. Load the `ApiKey` record for `callback_url` + `key_hash`.
 //! 6. Build a `CallbackPayload` with `platform = "device"`.
 //! 7. Measure latency around `channel_relay_service::forward_to_agent`.
@@ -17,7 +17,7 @@
 //!
 //! This service never persists payload content.
 
-use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use mongodb::bson::{Document, doc};
@@ -42,7 +42,9 @@ use crate::services::channel_relay_service::{
     self, CallbackAgent, CallbackContent, CallbackConversation, CallbackPayload, CallbackSender,
 };
 use crate::services::channel_routing_service;
-use crate::services::event_dedup_cache::EventDedupCache;
+use crate::services::event_dedup_cache::{
+    CHANNEL_EVENT_NAMESPACE, EventDedupClaim, EventDedupClaimResult, EventDedupStore,
+};
 use crate::telemetry::{TelemetryClient, TelemetryContext, TelemetryEvent, emit_event};
 
 /// Device event envelope as accepted from the HTTP client.
@@ -66,6 +68,13 @@ pub enum ForwardOutcome {
     Deduped,
 }
 
+struct PreparedDeviceEvent {
+    api_key: ApiKey,
+    callback_url: String,
+    stored_message: ChannelMessage,
+    payload: CallbackPayload,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_event(
     db: &mongodb::Database,
@@ -73,7 +82,6 @@ pub async fn forward_event(
     config: &AppConfig,
     keys: &crate::crypto::jwt::JwtKeys,
     rate_limiter: &PerChannelEventLimiter,
-    dedup_cache: &Arc<EventDedupCache>,
     telemetry: Option<&TelemetryClient>,
     tele: &TelemetryContext,
     auth_user: &AuthUser,
@@ -152,7 +160,7 @@ pub async fn forward_event(
 
     // 3. Per-channel rate limit. Only authenticated, authorized callers
     //    count against the bucket.
-    if !rate_limiter.check(conversation_id) {
+    if !rate_limiter.check_shared(conversation_id).await? {
         tracing::warn!(
             conversation_id = %conversation_id,
             event_id = %envelope.event_id,
@@ -175,98 +183,76 @@ pub async fn forward_event(
         return Err(AppError::RateLimited);
     }
 
-    // 4. Dedup check — read-only. We do NOT insert into the cache yet:
-    //    if the forward fails, a client retry with the same event_id must
-    //    be allowed through, not silently dropped as a duplicate. The
-    //    cache is only marked after a successful delivery below.
-    if dedup_cache.contains(conversation_id, &envelope.event_id) {
-        // Dedup hits never reach the upstream agent — record `None` so
-        // `upstream_status_code` is the 0 sentinel rather than a misleading
-        // 200. The `outcome = "deduped"` field disambiguates from genuine
-        // transport failures (which also use 0).
-        write_log(
-            db,
-            conversation_id,
-            api_key_id,
-            envelope,
-            None,
-            0,
-            OUTCOME_DEDUPED,
-        )
-        .await;
-        // Telemetry: device channel event received (deduplicated path).
-        // Distinct id is the conversation owner's user_id. This endpoint
-        // is API-key-authenticated, so thread `api_key_id` through: that
-        // triggers the `surface="agent"` override in `emit_event` and
-        // preserves per-agent attribution for `channel.event_received`.
-        emit_event(
-            telemetry,
-            &conversation.user_id.to_string(),
-            Some(api_key_id),
-            tele,
-            TelemetryEvent::ChannelEventReceived {
-                source: envelope.source.clone(),
-                event_type: envelope.event_type.clone(),
-                deduplicated: true,
-            },
-        );
-        audit(
-            db,
-            auth_user,
-            conversation_id,
-            envelope,
-            ForwardOutcome::Deduped,
-            0,
-        );
-        return Ok(ForwardOutcome::Deduped);
-    }
-
-    // 5. Load API key for callback URL + HMAC signing key.
-    let api_key = db
-        .collection::<ApiKey>(API_KEYS)
-        .find_one(doc! { "_id": api_key_id, "is_active": true })
-        .await?
-        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
-
-    let callback_url = api_key.callback_url.as_deref().ok_or_else(|| {
-        AppError::ChannelRelayFailed(
-            "agent_callback_url_not_configured: target API key has no callback_url".to_string(),
-        )
-    })?;
-
-    // 6. Carry forward the most recent inbound message's `thread_id`, if
-    //    any, from a webhook-driven source. This covers both Discord
-    //    deferred-interaction follow-up tokens (15-min / 5-follow-up
-    //    window) and Telegram forum-topic ids (no TTL). See
-    //    `lookup_recent_inbound_thread_id` for the kind-specific handling.
-    //    For conversations with no recent thread_id, this returns `None`
-    //    and the device-event row stores `thread_id = None`.
-    let inherited_thread_id = lookup_recent_inbound_thread_id(db, conversation_id).await?;
-
-    // 7. Persist a metadata-only ChannelMessage row so the agent can reply
-    //    back through POST /api/v1/channel-relay/reply. Without this, the
-    //    reply handler would 404 looking up the message by ID. Mirrors the
-    //    webhook path's "persist before forward" ordering.
-    let stored_message = channel_relay_service::store_device_event_message(
+    // 4. Claim before forwarding. MongoDB's unique key makes this a
+    //    cluster-wide first-writer-wins decision. Failed forwards release
+    //    their exact claim so a provider retry is not suppressed.
+    let dedup_ttl = Duration::from_secs(config.channel_event_dedup_ttl_secs);
+    let dedup_claim = match EventDedupStore::claim(
         db,
-        conversation.channel_bot_id.as_deref(),
+        CHANNEL_EVENT_NAMESPACE,
         conversation_id,
-        &conversation.platform_conversation_id,
-        &conversation.user_id,
         &envelope.event_id,
-        &envelope.source,
-        &envelope.event_type,
-        api_key_id,
-        inherited_thread_id,
+        dedup_ttl,
     )
-    .await?;
+    .await?
+    {
+        EventDedupClaimResult::Claimed(claim) => claim,
+        EventDedupClaimResult::Duplicate => {
+            // Dedup hits never reach the upstream agent — record `None` so
+            // `upstream_status_code` is the 0 sentinel rather than a misleading
+            // 200. The `outcome = "deduped"` field disambiguates from genuine
+            // transport failures (which also use 0).
+            write_log(
+                db,
+                conversation_id,
+                api_key_id,
+                envelope,
+                None,
+                0,
+                OUTCOME_DEDUPED,
+            )
+            .await;
+            // Telemetry: device channel event received (deduplicated path).
+            // Distinct id is the conversation owner's user_id. This endpoint
+            // is API-key-authenticated, so thread `api_key_id` through: that
+            // triggers the `surface="agent"` override in `emit_event` and
+            // preserves per-agent attribution for `channel.event_received`.
+            emit_event(
+                telemetry,
+                &conversation.user_id.to_string(),
+                Some(api_key_id),
+                tele,
+                TelemetryEvent::ChannelEventReceived {
+                    source: envelope.source.clone(),
+                    event_type: envelope.event_type.clone(),
+                    deduplicated: true,
+                },
+            );
+            audit(
+                db,
+                auth_user,
+                conversation_id,
+                envelope,
+                ForwardOutcome::Deduped,
+                0,
+            );
+            return Ok(ForwardOutcome::Deduped);
+        }
+    };
 
-    // 7. Build the callback payload (platform = "device").
-    //    Use the persisted NyxID message id, not the client-supplied
-    //    event_id: the agent will echo it back in /channel-relay/reply and
-    //    the handler resolves it via get_message() → ChannelMessage._id.
-    let payload =
-        build_device_callback_payload(&conversation, &api_key, envelope, &stored_message.id)?;
+    let prepared = match prepare_device_event(db, &conversation, api_key_id, envelope).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            release_event_claim(db, &dedup_claim, conversation_id, &envelope.event_id).await;
+            return Err(error);
+        }
+    };
+    let PreparedDeviceEvent {
+        api_key,
+        callback_url,
+        stored_message,
+        payload,
+    } = prepared;
 
     // 8. Forward and measure latency.
     let started = std::time::Instant::now();
@@ -274,7 +260,7 @@ pub async fn forward_event(
         http_client,
         config,
         keys,
-        callback_url,
+        &callback_url,
         payload,
         &api_key.id,
         &api_key.key_hash,
@@ -286,10 +272,11 @@ pub async fn forward_event(
 
     match delivery.result {
         Ok(()) => {
-            // Mark the event as seen *only* after a successful forward.
-            // Concurrent duplicates that sneak past the read-only contains()
-            // check are tolerated as best-effort at-least-once delivery.
-            dedup_cache.insert_if_absent(conversation_id, &envelope.event_id);
+            if !EventDedupStore::commit(db, &dedup_claim, dedup_ttl).await? {
+                return Err(AppError::Internal(
+                    "Event dedup claim was lost before commit".to_string(),
+                ));
+            }
 
             // Flip the ChannelMessage row from "pending" → "delivered" so
             // the bot-detail UI and /channel-relay/messages views reflect
@@ -361,6 +348,7 @@ pub async fn forward_event(
             Ok(ForwardOutcome::Delivered)
         }
         Err(err) => {
+            release_event_claim(db, &dedup_claim, conversation_id, &envelope.event_id).await;
             // Flip the ChannelMessage row from "pending" → "failed" so
             // retries don't accumulate phantom in-flight entries.
             if let Err(update_err) =
@@ -398,6 +386,63 @@ pub async fn forward_event(
     }
 }
 
+async fn prepare_device_event(
+    db: &mongodb::Database,
+    conversation: &ChannelConversation,
+    api_key_id: &str,
+    envelope: &EventEnvelope,
+) -> AppResult<PreparedDeviceEvent> {
+    let api_key = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! { "_id": api_key_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NotFound("API key not found".to_string()))?;
+    let callback_url = api_key.callback_url.clone().ok_or_else(|| {
+        AppError::ChannelRelayFailed(
+            "agent_callback_url_not_configured: target API key has no callback_url".to_string(),
+        )
+    })?;
+
+    let inherited_thread_id = lookup_recent_inbound_thread_id(db, &conversation.id).await?;
+    let stored_message = channel_relay_service::store_device_event_message(
+        db,
+        conversation.channel_bot_id.as_deref(),
+        &conversation.id,
+        &conversation.platform_conversation_id,
+        &conversation.user_id,
+        &envelope.event_id,
+        &envelope.source,
+        &envelope.event_type,
+        api_key_id,
+        inherited_thread_id,
+    )
+    .await?;
+    let payload =
+        build_device_callback_payload(conversation, &api_key, envelope, &stored_message.id)?;
+    Ok(PreparedDeviceEvent {
+        api_key,
+        callback_url,
+        stored_message,
+        payload,
+    })
+}
+
+async fn release_event_claim(
+    db: &mongodb::Database,
+    claim: &EventDedupClaim,
+    conversation_id: &str,
+    event_id: &str,
+) {
+    if let Err(error) = EventDedupStore::release(db, claim).await {
+        tracing::warn!(
+            conversation_id,
+            event_id,
+            error = %error,
+            "Failed to release event dedup claim after delivery failure"
+        );
+    }
+}
+
 /// Trusted trigger injection into the existing device-event pipeline. The
 /// trigger owner and target conversation are matched in one query before the
 /// normal API-key binding checks and delivery code run.
@@ -408,7 +453,6 @@ pub async fn forward_trigger_event(
     config: &AppConfig,
     keys: &crate::crypto::jwt::JwtKeys,
     rate_limiter: &PerChannelEventLimiter,
-    dedup_cache: &Arc<EventDedupCache>,
     owner_user_id: &str,
     conversation_id: &str,
     envelope: &EventEnvelope,
@@ -453,7 +497,6 @@ pub async fn forward_trigger_event(
         config,
         keys,
         rate_limiter,
-        dedup_cache,
         None,
         &TelemetryContext::default(),
         &auth_user,

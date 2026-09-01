@@ -153,7 +153,11 @@ pub async fn request_auth_device(
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
 
-    if !state.auth_device_request_limiter.check(client_ip) {
+    if !state
+        .auth_device_request_limiter
+        .check_shared(client_ip)
+        .await?
+    {
         rate_limit_hit("request", &client_ip_hash);
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
@@ -238,7 +242,11 @@ pub async fn poll_auth_device(
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
 
-    if !state.auth_device_poll_limiter.check(client_ip) {
+    if !state
+        .auth_device_poll_limiter
+        .check_shared(client_ip)
+        .await?
+    {
         rate_limit_hit("poll", &client_ip_hash);
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
@@ -326,7 +334,11 @@ pub async fn poll_auth_device_web(
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
 
-    if !state.auth_device_poll_limiter.check(client_ip) {
+    if !state
+        .auth_device_poll_limiter
+        .check_shared(client_ip)
+        .await?
+    {
         rate_limit_hit("poll-web", &client_ip_hash);
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
@@ -470,13 +482,21 @@ pub async fn approve_auth_device(
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
 
-    if !state.auth_device_approve_limiter.check(client_ip) {
+    if !state
+        .auth_device_approve_limiter
+        .check_shared(client_ip)
+        .await?
+    {
         rate_limit_hit("approve", &client_ip_hash);
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
 
     let user_key = format!("user:{}", user.user_id);
-    if !state.auth_device_approve_per_user_limiter.check(&user_key) {
+    if !state
+        .auth_device_approve_per_user_limiter
+        .check_shared(&user_key)
+        .await?
+    {
         rate_limit_hit("approve", &client_ip_hash);
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
@@ -533,13 +553,21 @@ pub async fn deny_auth_device(
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
 
-    if !state.auth_device_approve_limiter.check(client_ip) {
+    if !state
+        .auth_device_approve_limiter
+        .check_shared(client_ip)
+        .await?
+    {
         rate_limit_hit("deny", &client_ip_hash);
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
 
     let user_key = format!("user:{}", user.user_id);
-    if !state.auth_device_approve_per_user_limiter.check(&user_key) {
+    if !state
+        .auth_device_approve_per_user_limiter
+        .check_shared(&user_key)
+        .await?
+    {
         rate_limit_hit("deny", &client_ip_hash);
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
@@ -589,7 +617,11 @@ pub async fn preview_auth_device(
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
 
-    if !state.auth_device_preview_limiter.check(client_ip) {
+    if !state
+        .auth_device_preview_limiter
+        .check_shared(client_ip)
+        .await?
+    {
         rate_limit_hit("preview", &client_ip_hash);
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
@@ -1461,7 +1493,8 @@ mod tests {
         let Some(mut state) = setup_state("auth_device_web_poll_shared_limit").await else {
             return;
         };
-        state.auth_device_poll_limiter = crate::mw::rate_limit::create_per_ip_rate_limiter(1, 60);
+        state.auth_device_poll_limiter =
+            std::sync::Arc::new(crate::mw::rate_limit::PerIpRateLimiter::new(1, 60));
         let server = spawn_test_server(state).await;
 
         let (status, json) = post_json(

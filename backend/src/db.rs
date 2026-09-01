@@ -101,6 +101,8 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 /// Uses `create_index` which is idempotent -- if the index already exists
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
+    crate::services::coordination_service::ensure_indexes(db).await?;
+
     // ── assistant_wire_logs ──
     db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)
         .create_index(
@@ -978,6 +980,52 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     mcp_sessions
         .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
+    let mcp_session_slots = db.collection::<mongodb::bson::Document>("mcp_session_slots");
+    mcp_session_slots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    mcp_session_slots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "session_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    mcp_session_slots
+        .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
+        .await?;
+
+    let mcp_notifications = db.collection::<mongodb::bson::Document>("mcp_session_notifications");
+    mcp_notifications
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "session_id": 1, "sequence": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    mcp_notifications
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // ── approval_requests ──
     let approval_requests = db.collection::<mongodb::bson::Document>("approval_requests");
@@ -1164,6 +1212,26 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "auth_token_hash": 1 })
+                .build(),
+        )
+        .await?;
+    nodes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {
+                    "connection_owner.instance_name": 1,
+                    "connection_owner.generation_id": 1,
+                    "connection_owner.expires_at": 1,
+                })
+                .options(IndexOptions::builder().sparse(true).build())
+                .build(),
+        )
+        .await?;
+    nodes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "connection_owner.expires_at": 1 })
+                .options(IndexOptions::builder().sparse(true).build())
                 .build(),
         )
         .await?;
@@ -4439,6 +4507,37 @@ mod tests {
         ensure_indexes(&db)
             .await
             .expect("ensure_indexes should be idempotent on second call");
+
+        let notification_indexes: Vec<IndexModel> = db
+            .collection::<Document>("mcp_session_notifications")
+            .list_indexes()
+            .await
+            .expect("list MCP notification indexes")
+            .try_collect()
+            .await
+            .expect("collect MCP notification indexes");
+        let ordered_outbox = notification_indexes
+            .iter()
+            .find(|index| index.keys == doc! { "session_id": 1, "sequence": 1 })
+            .expect("ordered MCP notification index");
+        assert_eq!(
+            ordered_outbox
+                .options
+                .as_ref()
+                .and_then(|options| options.unique),
+            Some(true)
+        );
+        let notification_ttl = notification_indexes
+            .iter()
+            .find(|index| index.keys == doc! { "expires_at": 1 })
+            .expect("MCP notification TTL index");
+        assert_eq!(
+            notification_ttl
+                .options
+                .as_ref()
+                .and_then(|options| options.expire_after),
+            Some(Duration::from_secs(0))
+        );
 
         let approval_indexes: Vec<IndexModel> = db
             .collection::<Document>("approval_requests")

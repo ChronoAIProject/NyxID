@@ -412,7 +412,7 @@ fn dpop_token_error(err: AppError) -> AppError {
     }
 }
 
-fn sender_constraint_from_headers(
+async fn sender_constraint_from_headers(
     state: &AppState,
     headers: &HeaderMap,
 ) -> AppResult<Option<crate::crypto::jwt::Cnf>> {
@@ -425,7 +425,8 @@ fn sender_constraint_from_headers(
                 crate::crypto::dpop::htu_from_base_and_path(&state.config.base_url, "/oauth/token")
                     .map_err(dpop_token_error)?;
             Some(
-                crate::crypto::dpop::validate_proof(proof, "POST", &htu, &state.dpop_jti_cache)
+                crate::crypto::dpop::validate_proof(proof, "POST", &htu, &state.db)
+                    .await
                     .map_err(dpop_token_error)?,
             )
         }
@@ -1909,7 +1910,7 @@ async fn token_inner(
                 .as_deref()
                 .ok_or_else(|| AppError::BadRequest("Missing client_id parameter".to_string()))?;
 
-            let sender_constraint = sender_constraint_from_headers(state, headers)?;
+            let sender_constraint = sender_constraint_from_headers(state, headers).await?;
             let dpop_jkt = sender_constraint
                 .as_ref()
                 .and_then(|cnf| cnf.jkt.as_deref());
@@ -2254,7 +2255,7 @@ async fn token_inner(
                     return Err(AppError::ExternalTokenInvalid("invalid_grant".to_string()));
                 }
 
-                let sender_constraint = sender_constraint_from_headers(state, headers)?;
+                let sender_constraint = sender_constraint_from_headers(state, headers).await?;
                 let dpop_jkt = sender_constraint
                     .as_ref()
                     .and_then(|cnf| cnf.jkt.as_deref());

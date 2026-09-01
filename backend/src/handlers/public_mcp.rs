@@ -45,7 +45,8 @@ async fn handle_public_mcp_post(
         peer,
         &state.config.trusted_proxy_ips,
         &path,
-    )?;
+    )
+    .await?;
 
     let body = super::body_limit::read_request_body(
         request,

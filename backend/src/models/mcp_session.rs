@@ -1,34 +1,28 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures::TryStreamExt;
-use mongodb::bson::doc;
+use mongodb::bson::{self, doc};
+use mongodb::options::ReturnDocument;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-/// Maximum number of services that can be activated per session.
-/// Prevents unbounded memory growth.
+use crate::models::mcp_notification::{
+    COLLECTION_NAME as MCP_NOTIFICATION_COLLECTION, McpSessionNotification,
+};
+
 pub const MAX_ACTIVATED_SERVICES: usize = 20;
-
-/// Maximum idle time for MCP sessions (30 days).
-/// Sessions are extended on every request via `touch()`, so active users
-/// never need to re-authenticate.
 pub const MCP_SESSION_MAX_IDLE_SECS: u64 = 30 * 24 * 3600;
-
-/// MongoDB collection name for persisted MCP sessions.
 pub const MCP_SESSION_COLLECTION: &str = "mcp_sessions";
+pub const MCP_SESSION_SLOT_COLLECTION: &str = "mcp_session_slots";
+pub const DEFAULT_MCP_NOTIFICATION_TTL_SECS: u64 = 30 * 24 * 3600;
+pub const DEFAULT_MCP_NOTIFICATION_POLL_INTERVAL_MILLIS: u64 = 250;
 
-/// Minimum interval between touch() writes to MongoDB (5 minutes).
-const TOUCH_DEBOUNCE_SECS: u64 = 300;
-
-/// Maximum number of concurrent MCP sessions per user.
 const MAX_PER_USER_SESSIONS: usize = 50;
+const NOTIFICATION_PAGE_SIZE: i64 = 100;
 
-/// MongoDB-persisted MCP session record.
-/// The in-memory `McpSession` holds runtime state (channels, activated services),
-/// while this record holds the durable session identity for cross-restart recovery.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct McpSessionRecord {
     #[serde(rename = "_id")]
@@ -39,6 +33,8 @@ pub struct McpSessionRecord {
     pub activated_service_ids: Vec<String>,
     #[serde(default)]
     pub proxy_authorized: bool,
+    #[serde(default)]
+    pub notification_sequence: i64,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
@@ -47,33 +43,41 @@ pub struct McpSessionRecord {
     pub expires_at: DateTime<Utc>,
 }
 
-/// An in-memory MCP session with runtime state.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct McpSessionSlot {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub user_id: String,
+    pub session_id: String,
+    pub slot: i32,
+    #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct McpSessionAccess {
+    pub user_id: String,
+    pub proxy_authorized: bool,
+}
+
 pub struct McpSession {
     pub user_id: String,
+    pub created_at: DateTime<Utc>,
     pub last_active: DateTime<Utc>,
-    /// Service IDs whose tools are currently exposed in tools/list.
+    pub expires_at: DateTime<Utc>,
     pub activated_service_ids: HashSet<String>,
-    /// Whether the session was initialized with proxy-capable credentials.
     pub proxy_authorized: bool,
-    /// Channel to send JSON-RPC notifications to the SSE stream.
-    /// None if no SSE listener is connected.
+    pub notification_sequence: i64,
     pub notification_tx: Option<mpsc::Sender<serde_json::Value>>,
 }
 
-/// Thread-safe, hybrid in-memory + MongoDB store for active MCP sessions.
-///
-/// In-memory state holds runtime data (notification channels, activated services).
-/// MongoDB provides durability so sessions survive server restarts.
-/// All DB writes are fire-and-forget (spawned tasks) to keep sync APIs fast.
 #[derive(Clone)]
 pub struct McpSessionStore {
     sessions: Arc<RwLock<HashMap<String, McpSession>>>,
-    /// Pending notification receivers, waiting for SSE connection.
     pending_receivers: Arc<RwLock<HashMap<String, mpsc::Receiver<serde_json::Value>>>>,
-    /// Optional MongoDB handle for persistence. None in tests.
     db: Option<mongodb::Database>,
-    /// Tracks when each session was last persisted to MongoDB (for touch debouncing).
-    last_persisted: Arc<RwLock<HashMap<String, Instant>>>,
+    notification_ttl: Duration,
+    notification_poll_interval: Duration,
 }
 
 impl Default for McpSessionStore {
@@ -83,946 +87,1258 @@ impl Default for McpSessionStore {
 }
 
 impl McpSessionStore {
-    /// Create a store without MongoDB persistence (for tests).
     pub fn new() -> Self {
-        Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            pending_receivers: Arc::new(RwLock::new(HashMap::new())),
-            db: None,
-            last_persisted: Arc::new(RwLock::new(HashMap::new())),
-        }
+        Self::with_options(
+            None,
+            Duration::from_secs(DEFAULT_MCP_NOTIFICATION_TTL_SECS),
+            Duration::from_millis(DEFAULT_MCP_NOTIFICATION_POLL_INTERVAL_MILLIS),
+        )
     }
 
-    /// Create a store with MongoDB persistence.
     pub fn with_db(db: mongodb::Database) -> Self {
+        Self::with_db_options(
+            db,
+            Duration::from_secs(DEFAULT_MCP_NOTIFICATION_TTL_SECS),
+            Duration::from_millis(DEFAULT_MCP_NOTIFICATION_POLL_INTERVAL_MILLIS),
+        )
+    }
+
+    pub fn with_db_options(
+        db: mongodb::Database,
+        notification_ttl: Duration,
+        notification_poll_interval: Duration,
+    ) -> Self {
+        Self::with_options(Some(db), notification_ttl, notification_poll_interval)
+    }
+
+    fn with_options(
+        db: Option<mongodb::Database>,
+        notification_ttl: Duration,
+        notification_poll_interval: Duration,
+    ) -> Self {
+        assert!(
+            !notification_ttl.is_zero(),
+            "MCP notification TTL must be positive"
+        );
+        assert!(
+            !notification_poll_interval.is_zero(),
+            "MCP notification poll interval must be positive"
+        );
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             pending_receivers: Arc::new(RwLock::new(HashMap::new())),
-            db: Some(db),
-            last_persisted: Arc::new(RwLock::new(HashMap::new())),
+            db,
+            notification_ttl,
+            notification_poll_interval,
         }
     }
 
-    /// Load non-expired sessions from MongoDB into memory.
-    /// Called once at startup to recover sessions across restarts.
-    ///
-    /// Filters out MCP sessions for users whose auth sessions have all been
-    /// revoked (e.g., due to refresh token reuse detection). This handles the
-    /// edge case where the fire-and-forget MongoDB deletion in
-    /// `remove_by_user_id` didn't complete before a server restart.
-    ///
-    /// Returns the number of sessions recovered.
-    pub async fn load_from_db(&self) -> Result<usize, mongodb::error::Error> {
-        let db = match &self.db {
-            Some(db) => db,
-            None => return Ok(0),
-        };
+    pub fn notification_poll_interval(&self) -> Duration {
+        self.notification_poll_interval
+    }
 
+    pub async fn load_from_db(&self) -> Result<usize, mongodb::error::Error> {
+        let Some(db) = &self.db else {
+            return Ok(0);
+        };
         let now = bson::DateTime::from_chrono(Utc::now());
-        let cursor = db
+        let records: Vec<McpSessionRecord> = db
             .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
             .find(doc! { "expires_at": { "$gt": now } })
+            .await?
+            .try_collect()
             .await?;
-
-        let records: Vec<McpSessionRecord> = cursor.try_collect().await?;
-
         if records.is_empty() {
             return Ok(0);
         }
 
-        // Collect unique user IDs and check which users still have at least
-        // one active (non-revoked, non-expired) session.
-        let unique_user_ids: HashSet<&str> = records.iter().map(|r| r.user_id.as_str()).collect();
-
-        let bson_now = bson::DateTime::from_chrono(Utc::now());
-        let users_with_sessions_cursor = db
+        let user_ids: HashSet<&str> = records
+            .iter()
+            .map(|record| record.user_id.as_str())
+            .collect();
+        let active_auth_sessions: Vec<mongodb::bson::Document> = db
             .collection::<mongodb::bson::Document>("sessions")
             .find(doc! {
-                "user_id": { "$in": unique_user_ids.iter().copied().collect::<Vec<_>>() },
+                "user_id": { "$in": user_ids.iter().copied().collect::<Vec<_>>() },
                 "revoked": false,
-                "expires_at": { "$gt": bson_now },
+                "expires_at": { "$gt": now },
             })
+            .await?
+            .try_collect()
             .await?;
-
-        let active_session_docs: Vec<mongodb::bson::Document> =
-            users_with_sessions_cursor.try_collect().await?;
-
-        let users_with_active_sessions: HashSet<String> = active_session_docs
+        let active_users: HashSet<String> = active_auth_sessions
             .iter()
-            .filter_map(|d| d.get_str("user_id").ok().map(String::from))
+            .filter_map(|session| session.get_str("user_id").ok().map(str::to_string))
             .collect();
 
-        // Filter: only recover MCP sessions for users who still have a valid
-        // auth session. Orphaned records are cleaned up below.
-        let mut orphaned_ids: Vec<String> = Vec::new();
-
-        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
-        let mut receivers = self
-            .pending_receivers
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-
-        for record in &records {
-            if !users_with_active_sessions.contains(&record.user_id) {
-                orphaned_ids.push(record.id.clone());
-                continue;
+        let mut records = records;
+        records.sort_by_key(|record| (record.created_at, record.id.clone()));
+        let mut orphaned_ids = Vec::new();
+        let mut loaded = 0;
+        for record in records {
+            if active_users.contains(&record.user_id) && self.ensure_recovered_slot(&record).await?
+            {
+                self.hydrate(record);
+                loaded += 1;
+            } else {
+                orphaned_ids.push(record.id);
             }
-
-            let (tx, rx) = mpsc::channel(32);
-            let activated: HashSet<String> = record.activated_service_ids.iter().cloned().collect();
-            sessions.insert(
-                record.id.clone(),
-                McpSession {
-                    user_id: record.user_id.clone(),
-                    last_active: record.last_active_at,
-                    activated_service_ids: activated,
-                    proxy_authorized: record.proxy_authorized,
-                    notification_tx: Some(tx),
-                },
-            );
-            receivers.insert(record.id.clone(), rx);
         }
-
-        let count = sessions.len();
-
-        drop(sessions);
-        drop(receivers);
-
-        // Clean up orphaned MCP session records from MongoDB
         if !orphaned_ids.is_empty() {
-            tracing::info!(
-                orphaned = orphaned_ids.len(),
-                "Cleaning up orphaned MCP sessions (users with no active auth sessions)"
-            );
-            let db = db.clone();
-            tokio::spawn(async move {
-                if let Err(e) = db
-                    .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                    .delete_many(doc! { "_id": { "$in": &orphaned_ids } })
-                    .await
-                {
-                    tracing::warn!("Failed to delete orphaned MCP sessions: {e}");
-                }
-            });
+            db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                .delete_many(doc! { "_id": { "$in": &orphaned_ids } })
+                .await?;
+            db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
+                .delete_many(doc! { "session_id": { "$in": &orphaned_ids } })
+                .await?;
+            db.collection::<McpSessionNotification>(MCP_NOTIFICATION_COLLECTION)
+                .delete_many(doc! { "session_id": { "$in": &orphaned_ids } })
+                .await?;
         }
-
-        Ok(count)
+        Ok(loaded)
     }
 
-    /// Create a new session for the given user, returning the session ID.
-    /// Returns `None` if the per-user session limit has been reached.
-    /// Internally creates a notification channel; the rx end is stored in
-    /// `pending_receivers` for the SSE handler to take.
-    /// Also persists to MongoDB (fire-and-forget).
-    pub fn create(&self, user_id: &str) -> Option<String> {
-        self.create_with_proxy_access(user_id, false)
+    pub async fn create(&self, user_id: &str) -> Result<Option<String>, mongodb::error::Error> {
+        self.create_with_proxy_access(user_id, false).await
     }
 
-    /// Create a new session with explicit proxy authorization.
-    pub fn create_with_proxy_access(
+    pub async fn create_with_proxy_access(
         &self,
         user_id: &str,
         proxy_authorized: bool,
-    ) -> Option<String> {
-        let (tx, rx) = mpsc::channel(32);
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let now = Utc::now();
-        let session = McpSession {
-            user_id: user_id.to_string(),
-            last_active: now,
-            activated_service_ids: HashSet::new(),
-            proxy_authorized,
-            notification_tx: Some(tx),
+    ) -> Result<Option<String>, mongodb::error::Error> {
+        let Some(db) = &self.db else {
+            return Ok(self.create_in_memory(user_id, proxy_authorized));
         };
 
-        {
-            let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
-            // Enforce per-user session limit
-            let user_count = sessions.values().filter(|s| s.user_id == user_id).count();
-            if user_count >= MAX_PER_USER_SESSIONS {
-                return None;
-            }
-            sessions.insert(session_id.clone(), session);
-        }
-
-        self.pending_receivers
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(session_id.clone(), rx);
-
-        // Persist to MongoDB
-        if let Some(db) = &self.db {
+        for slot in 0..MAX_PER_USER_SESSIONS {
+            let now = Utc::now();
+            let expires_at = now + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64);
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let slot_id = format!("{user_id}:{slot}");
             let record = McpSessionRecord {
                 id: session_id.clone(),
                 user_id: user_id.to_string(),
                 client_info: None,
                 activated_service_ids: Vec::new(),
                 proxy_authorized,
+                notification_sequence: 0,
                 created_at: now,
                 last_active_at: now,
-                expires_at: now + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64),
+                expires_at,
             };
-            let db = db.clone();
-            tokio::spawn(async move {
-                if let Err(e) = db
-                    .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                    .insert_one(&record)
-                    .await
-                {
-                    tracing::warn!("Failed to persist MCP session to MongoDB: {e}");
+            let mut transaction = db.client().start_session().await?;
+            transaction.start_transaction().await?;
+            let claim = db
+                .collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
+                .find_one_and_update(
+                    doc! {
+                        "_id": &slot_id,
+                        "$or": [
+                            { "expires_at": { "$lte": bson::DateTime::from_chrono(now) } },
+                            { "session_id": &session_id },
+                        ],
+                    },
+                    doc! { "$set": {
+                        "user_id": user_id,
+                        "session_id": &session_id,
+                        "slot": slot as i32,
+                        "expires_at": bson::DateTime::from_chrono(expires_at),
+                    }},
+                )
+                .upsert(true)
+                .return_document(ReturnDocument::After)
+                .session(&mut transaction)
+                .await;
+            match claim {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    transaction.abort_transaction().await?;
+                    continue;
                 }
-            });
+                Err(error) if is_duplicate_key_error(&error) => {
+                    let _ = transaction.abort_transaction().await;
+                    continue;
+                }
+                Err(error) => {
+                    let _ = transaction.abort_transaction().await;
+                    return Err(error);
+                }
+            }
+            if let Err(error) = db
+                .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                .insert_one(&record)
+                .session(&mut transaction)
+                .await
+            {
+                let _ = transaction.abort_transaction().await;
+                return Err(error);
+            }
+            transaction.commit_transaction().await?;
+            self.hydrate(record);
+            return Ok(Some(session_id));
         }
-
-        Some(session_id)
+        Ok(None)
     }
 
-    /// Check that a session exists and belongs to the given user.
-    pub fn validate(&self, session_id: &str, user_id: &str) -> bool {
-        self.sessions
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(session_id)
-            .is_some_and(|s| s.user_id == user_id)
+    pub async fn get_for_auth(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<McpSessionAccess>, mongodb::error::Error> {
+        Ok(self
+            .authoritative_record(session_id)
+            .await?
+            .map(|record| McpSessionAccess {
+                user_id: record.user_id,
+                proxy_authorized: record.proxy_authorized,
+            }))
     }
 
-    /// Get the user_id for an existing session, or `None` if it doesn't exist.
-    /// Used for session-based auth fallback when JWT has expired.
-    pub fn get_user_id(&self, session_id: &str) -> Option<String> {
-        self.sessions
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(session_id)
-            .map(|s| s.user_id.clone())
+    pub async fn validate(
+        &self,
+        session_id: &str,
+        user_id: &str,
+    ) -> Result<bool, mongodb::error::Error> {
+        Ok(self
+            .authoritative_record(session_id)
+            .await?
+            .is_some_and(|record| record.user_id == user_id))
     }
 
-    /// Check whether a session was created with proxy-capable credentials.
-    pub fn allows_proxy_access(&self, session_id: &str) -> bool {
-        self.sessions
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(session_id)
-            .is_some_and(|s| s.proxy_authorized)
+    pub async fn get_user_id(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, mongodb::error::Error> {
+        Ok(self
+            .authoritative_record(session_id)
+            .await?
+            .map(|record| record.user_id))
     }
 
-    /// Update the `last_active` timestamp to prevent expiry.
-    /// MongoDB writes are debounced: only persists if >5 minutes since last DB write.
-    pub fn touch(&self, session_id: &str) {
+    pub async fn allows_proxy_access(
+        &self,
+        session_id: &str,
+    ) -> Result<bool, mongodb::error::Error> {
+        Ok(self
+            .authoritative_record(session_id)
+            .await?
+            .is_some_and(|record| record.proxy_authorized))
+    }
+
+    pub async fn touch(&self, session_id: &str) -> Result<bool, mongodb::error::Error> {
         let now = Utc::now();
-        if let Some(session) = self
-            .sessions
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .get_mut(session_id)
-        {
-            session.last_active = now;
-        } else {
-            return;
-        }
-
-        // Debounce MongoDB write
-        if let Some(db) = &self.db {
-            let should_persist = {
-                let last = self
-                    .last_persisted
-                    .read()
-                    .unwrap_or_else(|e| e.into_inner());
-                match last.get(session_id) {
-                    Some(instant) => instant.elapsed() > Duration::from_secs(TOUCH_DEBOUNCE_SECS),
-                    None => true,
-                }
+        let expires_at = now + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64);
+        let Some(db) = &self.db else {
+            let mut sessions = self
+                .sessions
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(session) = sessions.get_mut(session_id) else {
+                return Ok(false);
             };
-
-            if should_persist {
-                self.last_persisted
-                    .write()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .insert(session_id.to_string(), Instant::now());
-
-                let db = db.clone();
-                let sid = session_id.to_string();
-                let new_expires = now + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64);
-                tokio::spawn(async move {
-                    if let Err(e) = db
-                        .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                        .update_one(
-                            doc! { "_id": &sid },
-                            doc! { "$set": {
-                                "last_active_at": bson::DateTime::from_chrono(now),
-                                "expires_at": bson::DateTime::from_chrono(new_expires),
-                            }},
-                        )
-                        .await
-                    {
-                        tracing::warn!("Failed to persist MCP session touch to MongoDB: {e}");
-                    }
-                });
-            }
-        }
-    }
-
-    /// Remove a session (called on DELETE /mcp).
-    /// Also deletes from MongoDB (fire-and-forget).
-    pub fn remove(&self, session_id: &str) {
-        self.sessions
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(session_id);
-        self.pending_receivers
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(session_id);
-        self.last_persisted
-            .write()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(session_id);
-
-        // Delete from MongoDB
-        if let Some(db) = &self.db {
-            let db = db.clone();
-            let sid = session_id.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = db
-                    .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                    .delete_one(doc! { "_id": &sid })
-                    .await
-                {
-                    tracing::warn!("Failed to delete MCP session from MongoDB: {e}");
-                }
-            });
-        }
-    }
-
-    /// Remove all sessions for a given user from both memory and MongoDB.
-    /// Used for session revocation cascade (e.g., when refresh token reuse is detected).
-    pub fn remove_by_user_id(&self, user_id: &str) {
-        let removed_ids: Vec<String> = {
-            let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
-            let ids: Vec<String> = sessions
-                .iter()
-                .filter(|(_, s)| s.user_id == user_id)
-                .map(|(id, _)| id.clone())
-                .collect();
-            for id in &ids {
-                sessions.remove(id);
-            }
-            ids
+            session.last_active = now;
+            session.expires_at = expires_at;
+            return Ok(true);
         };
 
-        if removed_ids.is_empty() {
-            return;
-        }
-
-        {
-            let mut receivers = self
-                .pending_receivers
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for id in &removed_ids {
-                receivers.remove(id);
-            }
-        }
-
-        {
-            let mut lp = self
-                .last_persisted
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for id in &removed_ids {
-                lp.remove(id);
-            }
-        }
-
-        // Delete from MongoDB
-        if let Some(db) = &self.db {
-            let db = db.clone();
-            let uid = user_id.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = db
-                    .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                    .delete_many(doc! { "user_id": &uid })
-                    .await
-                {
-                    tracing::warn!("Failed to delete MCP sessions for user from MongoDB: {e}");
-                }
-            });
-        }
+        let mut transaction = db.client().start_session().await?;
+        transaction.start_transaction().await?;
+        let updated = db
+            .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+            .find_one_and_update(
+                doc! {
+                    "_id": session_id,
+                    "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
+                },
+                doc! { "$set": {
+                    "last_active_at": bson::DateTime::from_chrono(now),
+                    "expires_at": bson::DateTime::from_chrono(expires_at),
+                }},
+            )
+            .return_document(ReturnDocument::After)
+            .session(&mut transaction)
+            .await?;
+        let Some(record) = updated else {
+            transaction.abort_transaction().await?;
+            self.evict(session_id);
+            return Ok(false);
+        };
+        db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
+            .update_one(
+                doc! { "session_id": session_id },
+                doc! { "$set": { "expires_at": bson::DateTime::from_chrono(expires_at) } },
+            )
+            .session(&mut transaction)
+            .await?;
+        transaction.commit_transaction().await?;
+        self.hydrate(record);
+        Ok(true)
     }
 
-    /// Activate services for a session. Returns true if any were newly activated.
-    /// Enforces MAX_ACTIVATED_SERVICES.
-    /// Also persists the updated list to MongoDB (fire-and-forget).
-    pub fn activate_services(&self, session_id: &str, service_ids: &[String]) -> bool {
-        let (changed, activated_list) = {
-            let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
-            let session = match sessions.get_mut(session_id) {
-                Some(s) => s,
-                None => return false,
+    pub async fn remove(&self, session_id: &str) -> Result<(), mongodb::error::Error> {
+        if let Some(db) = &self.db {
+            let mut transaction = db.client().start_session().await?;
+            transaction.start_transaction().await?;
+            db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                .delete_one(doc! { "_id": session_id })
+                .session(&mut transaction)
+                .await?;
+            db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
+                .delete_many(doc! { "session_id": session_id })
+                .session(&mut transaction)
+                .await?;
+            db.collection::<McpSessionNotification>(MCP_NOTIFICATION_COLLECTION)
+                .delete_many(doc! { "session_id": session_id })
+                .session(&mut transaction)
+                .await?;
+            transaction.commit_transaction().await?;
+        }
+        self.evict(session_id);
+        Ok(())
+    }
+
+    pub async fn remove_by_user_id(&self, user_id: &str) -> Result<(), mongodb::error::Error> {
+        if let Some(db) = &self.db {
+            let mut transaction = db.client().start_session().await?;
+            transaction.start_transaction().await?;
+            let mut cursor = db
+                .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                .find(doc! { "user_id": user_id })
+                .session(&mut transaction)
+                .await?;
+            let ids: Vec<String> = cursor
+                .stream(&mut transaction)
+                .map_ok(|record| record.id)
+                .try_collect()
+                .await?;
+            db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                .delete_many(doc! { "user_id": user_id })
+                .session(&mut transaction)
+                .await?;
+            db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
+                .delete_many(doc! { "user_id": user_id })
+                .session(&mut transaction)
+                .await?;
+            if !ids.is_empty() {
+                db.collection::<McpSessionNotification>(MCP_NOTIFICATION_COLLECTION)
+                    .delete_many(doc! { "session_id": { "$in": &ids } })
+                    .session(&mut transaction)
+                    .await?;
+            }
+            transaction.commit_transaction().await?;
+        }
+        self.evict_user(user_id);
+        Ok(())
+    }
+
+    pub async fn activate_services(
+        &self,
+        session_id: &str,
+        service_ids: &[String],
+    ) -> Result<bool, mongodb::error::Error> {
+        self.activate_services_with_optional_notification(session_id, service_ids, None)
+            .await
+    }
+
+    pub async fn activate_services_and_notify(
+        &self,
+        session_id: &str,
+        service_ids: &[String],
+        notification: serde_json::Value,
+    ) -> Result<bool, mongodb::error::Error> {
+        self.activate_services_with_optional_notification(
+            session_id,
+            service_ids,
+            Some(notification),
+        )
+        .await
+    }
+
+    async fn activate_services_with_optional_notification(
+        &self,
+        session_id: &str,
+        service_ids: &[String],
+        notification: Option<serde_json::Value>,
+    ) -> Result<bool, mongodb::error::Error> {
+        if service_ids.is_empty() {
+            return Ok(false);
+        }
+        let Some(db) = &self.db else {
+            let mut sessions = self
+                .sessions
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(session) = sessions.get_mut(session_id) else {
+                return Ok(false);
             };
             let mut changed = false;
             for id in service_ids {
                 if session.activated_service_ids.len() >= MAX_ACTIVATED_SERVICES {
                     break;
                 }
-                if session.activated_service_ids.insert(id.clone()) {
-                    changed = true;
-                }
+                changed |= session.activated_service_ids.insert(id.clone());
             }
-            let list: Vec<String> = session.activated_service_ids.iter().cloned().collect();
-            (changed, list)
+            if changed
+                && let Some(notification) = notification
+                && let Some(sender) = session.notification_tx.as_ref()
+            {
+                let _ = sender.try_send(notification);
+            }
+            return Ok(changed);
         };
 
-        // Persist to MongoDB if changed
-        if changed && let Some(db) = &self.db {
-            let db = db.clone();
-            let sid = session_id.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = db
-                    .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                    .update_one(
-                        doc! { "_id": &sid },
-                        doc! { "$set": { "activated_service_ids": &activated_list } },
-                    )
-                    .await
-                {
-                    tracing::warn!("Failed to persist activated services to MongoDB: {e}");
-                }
-            });
+        let now = Utc::now();
+        let requested_service_ids = bson::to_bson(service_ids).expect("MCP service ids serialize");
+        let mut transaction = db.client().start_session().await?;
+        transaction.start_transaction().await?;
+        let before = db
+            .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+            .find_one_and_update(
+                doc! {
+                    "_id": session_id,
+                    "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
+                },
+                vec![doc! { "$set": {
+                    "activated_service_ids": {
+                        "$let": {
+                            "vars": {
+                                "existing": { "$ifNull": ["$activated_service_ids", []] },
+                            },
+                            "in": {
+                                "$reduce": {
+                                    "input": requested_service_ids,
+                                    "initialValue": "$$existing",
+                                    "in": {
+                                        "$cond": [
+                                            { "$or": [
+                                                { "$in": ["$$this", "$$value"] },
+                                                { "$gte": [
+                                                    { "$size": "$$value" },
+                                                    MAX_ACTIVATED_SERVICES as i64,
+                                                ] },
+                                            ] },
+                                            "$$value",
+                                            { "$concatArrays": ["$$value", ["$$this"]] },
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }}],
+            )
+            .return_document(ReturnDocument::Before)
+            .session(&mut transaction)
+            .await?;
+        let Some(before) = before else {
+            transaction.abort_transaction().await?;
+            self.evict(session_id);
+            return Ok(false);
+        };
+        let after = db
+            .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+            .find_one(doc! { "_id": session_id })
+            .session(&mut transaction)
+            .await?
+            .expect("activation update returned a session");
+        let before_ids: HashSet<&str> = before
+            .activated_service_ids
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let after_ids: HashSet<&str> = after
+            .activated_service_ids
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let changed = service_ids
+            .iter()
+            .any(|id| !before_ids.contains(id.as_str()) && after_ids.contains(id.as_str()));
+
+        let after = if changed && let Some(payload) = notification {
+            let sequenced = db
+                .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                .find_one_and_update(
+                    doc! { "_id": session_id },
+                    doc! { "$inc": { "notification_sequence": 1_i64 } },
+                )
+                .return_document(ReturnDocument::After)
+                .session(&mut transaction)
+                .await?
+                .expect("activated session still exists in transaction");
+            self.insert_notification_in_transaction(
+                db,
+                &mut transaction,
+                session_id,
+                sequenced.notification_sequence,
+                payload,
+                now,
+            )
+            .await?;
+            sequenced
+        } else {
+            after
+        };
+        transaction.commit_transaction().await?;
+        self.hydrate(after);
+        Ok(changed)
+    }
+
+    pub async fn get_activated_service_ids(
+        &self,
+        session_id: &str,
+    ) -> Result<HashSet<String>, mongodb::error::Error> {
+        Ok(self
+            .authoritative_record(session_id)
+            .await?
+            .map(|record| record.activated_service_ids.into_iter().collect())
+            .unwrap_or_default())
+    }
+
+    pub async fn send_notification(
+        &self,
+        session_id: &str,
+        payload: serde_json::Value,
+    ) -> Result<bool, mongodb::error::Error> {
+        let Some(db) = &self.db else {
+            let sessions = self
+                .sessions
+                .read()
+                .unwrap_or_else(|error| error.into_inner());
+            let Some(sender) = sessions
+                .get(session_id)
+                .and_then(|session| session.notification_tx.as_ref())
+            else {
+                return Ok(false);
+            };
+            return Ok(sender.try_send(payload).is_ok());
+        };
+
+        let now = Utc::now();
+        let mut transaction = db.client().start_session().await?;
+        transaction.start_transaction().await?;
+        let session = db
+            .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+            .find_one_and_update(
+                doc! {
+                    "_id": session_id,
+                    "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
+                },
+                doc! { "$inc": { "notification_sequence": 1_i64 } },
+            )
+            .return_document(ReturnDocument::After)
+            .session(&mut transaction)
+            .await?;
+        let Some(session) = session else {
+            transaction.abort_transaction().await?;
+            self.evict(session_id);
+            return Ok(false);
+        };
+        self.insert_notification_in_transaction(
+            db,
+            &mut transaction,
+            session_id,
+            session.notification_sequence,
+            payload,
+            now,
+        )
+        .await?;
+        transaction.commit_transaction().await?;
+        self.hydrate(session);
+        Ok(true)
+    }
+
+    pub async fn notifications_after(
+        &self,
+        session_id: &str,
+        after_sequence: i64,
+    ) -> Result<Option<Vec<McpSessionNotification>>, mongodb::error::Error> {
+        let Some(db) = &self.db else {
+            return Ok(self
+                .sessions
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .contains_key(session_id)
+                .then(Vec::new));
+        };
+        if self.authoritative_record(session_id).await?.is_none() {
+            return Ok(None);
         }
-
-        changed
+        let notifications = db
+            .collection::<McpSessionNotification>(MCP_NOTIFICATION_COLLECTION)
+            .find(doc! {
+                "session_id": session_id,
+                "sequence": { "$gt": after_sequence },
+                "expires_at": { "$gt": bson::DateTime::from_chrono(Utc::now()) },
+            })
+            .sort(doc! { "sequence": 1 })
+            .limit(NOTIFICATION_PAGE_SIZE)
+            .await?
+            .try_collect()
+            .await?;
+        Ok(Some(notifications))
     }
 
-    /// Get the set of activated service IDs for a session.
-    pub fn get_activated_service_ids(&self, session_id: &str) -> HashSet<String> {
-        self.sessions
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(session_id)
-            .map(|s| s.activated_service_ids.clone())
-            .unwrap_or_default()
-    }
-
-    /// Send a JSON-RPC notification to the session's SSE stream.
-    /// Returns true if sent successfully, false if no listener or channel full.
-    pub fn send_notification(&self, session_id: &str, notification: serde_json::Value) -> bool {
-        let sessions = self.sessions.read().unwrap_or_else(|e| e.into_inner());
-        if let Some(session) = sessions.get(session_id)
-            && let Some(tx) = &session.notification_tx
-        {
-            return tx.try_send(notification).is_ok();
-        }
-        false
-    }
-
-    /// Take the pending notification receiver for a session.
-    /// Returns None if already taken or session doesn't exist.
     pub fn take_notification_rx(
         &self,
         session_id: &str,
     ) -> Option<mpsc::Receiver<serde_json::Value>> {
         self.pending_receivers
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|error| error.into_inner())
             .remove(session_id)
     }
 
-    /// Attach a new notification sender (e.g., when SSE reconnects).
     pub fn set_notification_tx(&self, session_id: &str, tx: mpsc::Sender<serde_json::Value>) {
         if let Some(session) = self
             .sessions
             .write()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(|error| error.into_inner())
             .get_mut(session_id)
         {
             session.notification_tx = Some(tx);
         }
     }
 
-    /// Remove sessions that have been idle longer than `max_idle`.
-    /// Called periodically by a background task.
-    /// In-memory cleanup only; MongoDB TTL index handles DB-side expiry.
-    pub fn reap_expired(&self, max_idle: Duration) {
-        let cutoff =
-            Utc::now() - chrono::Duration::from_std(max_idle).unwrap_or(chrono::Duration::hours(1));
-        let mut sessions = self.sessions.write().unwrap_or_else(|e| e.into_inner());
-
-        // Collect expired session IDs
-        let expired_ids: Vec<String> = sessions
+    pub async fn reap_expired(&self, max_idle: Duration) -> Result<usize, mongodb::error::Error> {
+        let cutoff = Utc::now()
+            - chrono::Duration::from_std(max_idle).unwrap_or_else(|_| chrono::Duration::hours(1));
+        let expired_ids: Vec<String> = self
+            .sessions
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
             .iter()
-            .filter(|(_, s)| s.last_active <= cutoff)
+            .filter(|(_, session)| session.last_active <= cutoff)
             .map(|(id, _)| id.clone())
             .collect();
-
         for id in &expired_ids {
-            sessions.remove(id);
+            self.evict(id);
         }
-
-        drop(sessions); // Release lock before acquiring pending_receivers lock
-
-        // Also clean up pending receivers for expired sessions
-        let mut receivers = self
-            .pending_receivers
-            .write()
-            .unwrap_or_else(|e| e.into_inner());
-        for id in &expired_ids {
-            receivers.remove(id);
+        if let Some(db) = &self.db {
+            let now = bson::DateTime::from_chrono(Utc::now());
+            db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+                .delete_many(doc! { "expires_at": { "$lte": now } })
+                .await?;
+            db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
+                .delete_many(doc! { "expires_at": { "$lte": now } })
+                .await?;
         }
+        Ok(expired_ids.len())
+    }
 
-        drop(receivers);
-
-        let removed = expired_ids.len();
-        if removed > 0 {
-            tracing::info!(removed, "Reaped expired MCP sessions");
-
-            // Clean up last_persisted tracking
-            let mut lp = self
-                .last_persisted
-                .write()
-                .unwrap_or_else(|e| e.into_inner());
-            for id in &expired_ids {
-                lp.remove(id);
+    async fn authoritative_record(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<McpSessionRecord>, mongodb::error::Error> {
+        let Some(db) = &self.db else {
+            return Ok(self.local_record(session_id));
+        };
+        let record = db
+            .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+            .find_one(doc! {
+                "_id": session_id,
+                "expires_at": { "$gt": bson::DateTime::from_chrono(Utc::now()) },
+            })
+            .await?;
+        match record {
+            Some(record) => {
+                self.hydrate(record.clone());
+                Ok(Some(record))
             }
-
-            // Delete from MongoDB (fire-and-forget).
-            // Note: MongoDB TTL index also removes expired docs, but this
-            // keeps in-memory and DB state consistent sooner.
-            if let Some(db) = &self.db {
-                let db = db.clone();
-                let ids = expired_ids;
-                tokio::spawn(async move {
-                    if let Err(e) = db
-                        .collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-                        .delete_many(doc! { "_id": { "$in": &ids } })
-                        .await
-                    {
-                        tracing::warn!("Failed to delete reaped MCP sessions from MongoDB: {e}");
-                    }
-                });
+            None => {
+                self.evict(session_id);
+                Ok(None)
             }
         }
     }
+
+    async fn insert_notification_in_transaction(
+        &self,
+        db: &mongodb::Database,
+        transaction: &mut mongodb::ClientSession,
+        session_id: &str,
+        sequence: i64,
+        payload: serde_json::Value,
+        now: DateTime<Utc>,
+    ) -> Result<(), mongodb::error::Error> {
+        let expires_at = now
+            + chrono::Duration::from_std(self.notification_ttl)
+                .expect("validated MCP notification TTL fits chrono duration");
+        db.collection::<McpSessionNotification>(MCP_NOTIFICATION_COLLECTION)
+            .insert_one(McpSessionNotification {
+                id: format!("{session_id}:{sequence}"),
+                session_id: session_id.to_string(),
+                sequence,
+                payload,
+                created_at: now,
+                expires_at,
+            })
+            .session(transaction)
+            .await?;
+        Ok(())
+    }
+
+    async fn ensure_recovered_slot(
+        &self,
+        record: &McpSessionRecord,
+    ) -> Result<bool, mongodb::error::Error> {
+        let Some(db) = &self.db else {
+            return Ok(true);
+        };
+        let slots = db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION);
+        if slots
+            .find_one(doc! { "session_id": &record.id })
+            .await?
+            .is_some()
+        {
+            slots
+                .update_one(
+                    doc! { "session_id": &record.id },
+                    doc! { "$set": {
+                        "expires_at": bson::DateTime::from_chrono(record.expires_at),
+                    }},
+                )
+                .await?;
+            return Ok(true);
+        }
+
+        let now = bson::DateTime::from_chrono(Utc::now());
+        for slot in 0..MAX_PER_USER_SESSIONS {
+            let slot_id = format!("{}:{slot}", record.user_id);
+            let result = slots
+                .find_one_and_update(
+                    doc! {
+                        "_id": &slot_id,
+                        "$or": [
+                            { "expires_at": { "$lte": now } },
+                            { "session_id": &record.id },
+                        ],
+                    },
+                    doc! { "$set": {
+                        "user_id": &record.user_id,
+                        "session_id": &record.id,
+                        "slot": slot as i32,
+                        "expires_at": bson::DateTime::from_chrono(record.expires_at),
+                    }},
+                )
+                .upsert(true)
+                .return_document(ReturnDocument::After)
+                .await;
+            match result {
+                Ok(Some(_)) => return Ok(true),
+                Ok(None) => continue,
+                Err(error) if is_duplicate_key_error(&error) => {
+                    if slots
+                        .find_one(doc! { "session_id": &record.id })
+                        .await?
+                        .is_some()
+                    {
+                        return Ok(true);
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(false)
+    }
+
+    fn create_in_memory(&self, user_id: &str, proxy_authorized: bool) -> Option<String> {
+        let mut sessions = self
+            .sessions
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if sessions
+            .values()
+            .filter(|session| session.user_id == user_id)
+            .count()
+            >= MAX_PER_USER_SESSIONS
+        {
+            return None;
+        }
+        let now = Utc::now();
+        let id = uuid::Uuid::new_v4().to_string();
+        let (tx, rx) = mpsc::channel(32);
+        sessions.insert(
+            id.clone(),
+            McpSession {
+                user_id: user_id.to_string(),
+                created_at: now,
+                last_active: now,
+                expires_at: now + chrono::Duration::seconds(MCP_SESSION_MAX_IDLE_SECS as i64),
+                activated_service_ids: HashSet::new(),
+                proxy_authorized,
+                notification_sequence: 0,
+                notification_tx: Some(tx),
+            },
+        );
+        drop(sessions);
+        self.pending_receivers
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(id.clone(), rx);
+        Some(id)
+    }
+
+    fn hydrate(&self, record: McpSessionRecord) {
+        let mut sessions = self
+            .sessions
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(session) = sessions.get_mut(&record.id) {
+            session.user_id = record.user_id;
+            session.created_at = record.created_at;
+            session.last_active = record.last_active_at;
+            session.expires_at = record.expires_at;
+            session.activated_service_ids = record.activated_service_ids.into_iter().collect();
+            session.proxy_authorized = record.proxy_authorized;
+            session.notification_sequence = record.notification_sequence;
+            return;
+        }
+        let (tx, rx) = mpsc::channel(32);
+        let id = record.id.clone();
+        sessions.insert(
+            id.clone(),
+            McpSession {
+                user_id: record.user_id,
+                created_at: record.created_at,
+                last_active: record.last_active_at,
+                expires_at: record.expires_at,
+                activated_service_ids: record.activated_service_ids.into_iter().collect(),
+                proxy_authorized: record.proxy_authorized,
+                notification_sequence: record.notification_sequence,
+                notification_tx: Some(tx),
+            },
+        );
+        drop(sessions);
+        self.pending_receivers
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(id)
+            .or_insert(rx);
+    }
+
+    fn local_record(&self, session_id: &str) -> Option<McpSessionRecord> {
+        self.sessions
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(session_id)
+            .map(|session| McpSessionRecord {
+                id: session_id.to_string(),
+                user_id: session.user_id.clone(),
+                client_info: None,
+                activated_service_ids: session.activated_service_ids.iter().cloned().collect(),
+                proxy_authorized: session.proxy_authorized,
+                notification_sequence: session.notification_sequence,
+                created_at: session.created_at,
+                last_active_at: session.last_active,
+                expires_at: session.expires_at,
+            })
+    }
+
+    fn evict(&self, session_id: &str) {
+        self.sessions
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(session_id);
+        self.pending_receivers
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(session_id);
+    }
+
+    fn evict_user(&self, user_id: &str) {
+        let ids: Vec<String> = self
+            .sessions
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .filter(|(_, session)| session.user_id == user_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in ids {
+            self.evict(&id);
+        }
+    }
+}
+
+fn is_duplicate_key_error(error: &mongodb::error::Error) -> bool {
+    error.to_string().contains("E11000") || error.to_string().contains("duplicate key")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn collection_name() {
-        assert_eq!(MCP_SESSION_COLLECTION, "mcp_sessions");
-    }
-
-    #[test]
-    fn create_and_validate() {
-        let store = McpSessionStore::new();
-        let session_id = store.create("user-1").expect("create");
-        assert!(store.validate(&session_id, "user-1"));
-        assert!(!store.validate(&session_id, "user-2"));
-    }
-
-    #[test]
-    fn validate_nonexistent_returns_false() {
-        let store = McpSessionStore::new();
-        assert!(!store.validate("nonexistent-id", "user-1"));
-    }
-
-    #[test]
-    fn remove_session() {
-        let store = McpSessionStore::new();
-        let session_id = store.create("user-1").expect("create");
-        assert!(store.validate(&session_id, "user-1"));
-        store.remove(&session_id);
-        assert!(!store.validate(&session_id, "user-1"));
-    }
-
-    #[test]
-    fn remove_cleans_up_pending_receivers() {
-        let store = McpSessionStore::new();
-        let session_id = store.create("user-1").expect("create");
-        // The rx should be in pending_receivers
-        assert!(store.take_notification_rx(&session_id).is_some());
-        // Put a new rx back for next test
-        let (tx, rx) = mpsc::channel(1);
-        store.set_notification_tx(&session_id, tx);
-        store
-            .pending_receivers
-            .write()
-            .unwrap()
-            .insert(session_id.clone(), rx);
-        // Now remove should clean up
-        store.remove(&session_id);
-        assert!(store.take_notification_rx(&session_id).is_none());
-    }
-
-    #[test]
-    fn touch_does_not_invalidate() {
-        let store = McpSessionStore::new();
-        let session_id = store.create("user-1").expect("create");
-        store.touch(&session_id);
-        assert!(store.validate(&session_id, "user-1"));
-    }
-
-    #[test]
-    fn touch_nonexistent_is_noop() {
-        let store = McpSessionStore::new();
-        store.touch("nonexistent-id"); // should not panic
-    }
-
-    #[test]
-    fn remove_nonexistent_is_noop() {
-        let store = McpSessionStore::new();
-        store.remove("nonexistent-id"); // should not panic
-    }
-
-    #[test]
-    fn get_user_id_returns_user() {
-        let store = McpSessionStore::new();
-        let sid = store.create("user-1").expect("create");
-        assert_eq!(store.get_user_id(&sid), Some("user-1".to_string()));
-    }
-
-    #[test]
-    fn get_user_id_nonexistent_returns_none() {
-        let store = McpSessionStore::new();
-        assert_eq!(store.get_user_id("no-such-session"), None);
-    }
-
-    #[test]
-    fn create_defaults_proxy_authorized_to_false() {
-        let store = McpSessionStore::new();
-        let sid = store.create("user-1").expect("create");
-
-        assert!(!store.allows_proxy_access(&sid));
-    }
-
-    #[test]
-    fn create_with_proxy_access_sets_flag() {
-        let store = McpSessionStore::new();
-        let sid = store
-            .create_with_proxy_access("user-1", true)
-            .expect("create");
-
-        assert!(store.allows_proxy_access(&sid));
-    }
-
-    #[test]
-    fn multiple_sessions_independent() {
-        let store = McpSessionStore::new();
-        let s1 = store.create("user-1").expect("create");
-        let s2 = store.create("user-2").expect("create");
-        assert!(store.validate(&s1, "user-1"));
-        assert!(store.validate(&s2, "user-2"));
-        assert!(!store.validate(&s1, "user-2"));
-        assert!(!store.validate(&s2, "user-1"));
-    }
-
-    #[test]
-    fn reap_expired_with_zero_idle() {
-        let store = McpSessionStore::new();
-        store.create("user-1").expect("create");
-        // Reap with 0 duration means everything is expired
-        store.reap_expired(Duration::from_secs(0));
-    }
-
-    #[test]
-    fn reap_expired_keeps_fresh_sessions() {
-        let store = McpSessionStore::new();
-        let session_id = store.create("user-1").expect("create");
-        // Reap with 1 hour idle -- session was just created so it's fresh
-        store.reap_expired(Duration::from_secs(3600));
-        assert!(store.validate(&session_id, "user-1"));
-    }
-
-    #[test]
-    fn session_ids_are_unique() {
-        let store = McpSessionStore::new();
-        let s1 = store.create("user-1").expect("create");
-        let s2 = store.create("user-1").expect("create");
-        assert_ne!(s1, s2);
-    }
-
-    // -- Tests for lazy loading features --
-
-    #[test]
-    fn activate_services_returns_true_on_change() {
-        let store = McpSessionStore::new();
-        let sid = store.create("user-1").expect("create");
-        let changed = store.activate_services(&sid, &["svc-1".to_string(), "svc-2".to_string()]);
-        assert!(changed);
-        let activated = store.get_activated_service_ids(&sid);
-        assert!(activated.contains("svc-1"));
-        assert!(activated.contains("svc-2"));
-        assert_eq!(activated.len(), 2);
-    }
-
-    #[test]
-    fn activate_services_returns_false_on_duplicate() {
-        let store = McpSessionStore::new();
-        let sid = store.create("user-1").expect("create");
-        store.activate_services(&sid, &["svc-1".to_string()]);
-        let changed = store.activate_services(&sid, &["svc-1".to_string()]);
-        assert!(!changed);
-    }
-
-    #[test]
-    fn activate_services_enforces_max_limit() {
-        let store = McpSessionStore::new();
-        let sid = store.create("user-1").expect("create");
-        // Activate MAX services
-        let ids: Vec<String> = (0..MAX_ACTIVATED_SERVICES)
-            .map(|i| format!("svc-{i}"))
-            .collect();
-        store.activate_services(&sid, &ids);
-        assert_eq!(
-            store.get_activated_service_ids(&sid).len(),
-            MAX_ACTIVATED_SERVICES
-        );
-        // Try to add one more -- should not increase
-        let changed = store.activate_services(&sid, &["overflow".to_string()]);
-        assert!(!changed);
-        assert_eq!(
-            store.get_activated_service_ids(&sid).len(),
-            MAX_ACTIVATED_SERVICES
-        );
-    }
-
-    #[test]
-    fn activate_services_nonexistent_session_returns_false() {
-        let store = McpSessionStore::new();
-        let changed = store.activate_services("no-such-session", &["svc-1".to_string()]);
-        assert!(!changed);
-    }
-
-    #[test]
-    fn get_activated_service_ids_empty_for_new_session() {
-        let store = McpSessionStore::new();
-        let sid = store.create("user-1").expect("create");
-        assert!(store.get_activated_service_ids(&sid).is_empty());
-    }
-
-    #[test]
-    fn get_activated_service_ids_nonexistent_returns_empty() {
-        let store = McpSessionStore::new();
-        assert!(store.get_activated_service_ids("no-such").is_empty());
-    }
-
-    #[tokio::test]
-    async fn send_notification_succeeds() {
-        let store = McpSessionStore::new();
-        let sid = store.create("user-1").expect("create");
-        // Take the rx so the channel is active
-        let mut rx = store.take_notification_rx(&sid).unwrap();
-
-        let sent = store.send_notification(
-            &sid,
-            serde_json::json!({"method": "notifications/tools/list_changed"}),
-        );
-        assert!(sent);
-
-        let msg = rx.recv().await.unwrap();
-        assert_eq!(msg["method"], "notifications/tools/list_changed");
-    }
-
-    #[test]
-    fn send_notification_returns_false_without_listener() {
-        let store = McpSessionStore::new();
-        let sid = store.create("user-1").expect("create");
-        // Drop the tx by removing the notification_tx
-        {
-            let mut sessions = store.sessions.write().unwrap();
-            sessions.get_mut(&sid).unwrap().notification_tx = None;
-        }
-        let sent = store.send_notification(&sid, serde_json::json!({"method": "test"}));
-        assert!(!sent);
-    }
-
-    #[test]
-    fn send_notification_nonexistent_returns_false() {
-        let store = McpSessionStore::new();
-        let sent = store.send_notification("no-such", serde_json::json!({"method": "test"}));
-        assert!(!sent);
-    }
-
-    #[test]
-    fn take_notification_rx_returns_once() {
-        let store = McpSessionStore::new();
-        let sid = store.create("user-1").expect("create");
-        assert!(store.take_notification_rx(&sid).is_some());
-        assert!(store.take_notification_rx(&sid).is_none());
-    }
-
-    #[tokio::test]
-    async fn set_notification_tx_replaces_sender() {
-        let store = McpSessionStore::new();
-        let sid = store.create("user-1").expect("create");
-        // Take original rx (won't receive after replacement)
-        let _old_rx = store.take_notification_rx(&sid);
-
-        // Set a new tx
-        let (new_tx, mut new_rx) = mpsc::channel(8);
-        store.set_notification_tx(&sid, new_tx);
-
-        // Send via the store -- should go to new rx
-        let sent = store.send_notification(&sid, serde_json::json!({"method": "reconnect_test"}));
-        assert!(sent);
-
-        let msg = new_rx.recv().await.unwrap();
-        assert_eq!(msg["method"], "reconnect_test");
-    }
-
-    #[test]
-    fn reap_expired_cleans_pending_receivers() {
-        let store = McpSessionStore::new();
-        let sid = store.create("user-1").expect("create");
-        // Force last_active to the past
-        {
-            let mut sessions = store.sessions.write().unwrap();
-            sessions.get_mut(&sid).unwrap().last_active = Utc::now() - chrono::Duration::hours(2);
-        }
-        store.reap_expired(Duration::from_secs(3600)); // 1 hour max idle
-        assert!(!store.validate(&sid, "user-1"));
-        assert!(store.take_notification_rx(&sid).is_none());
-    }
-
-    #[test]
-    fn bson_roundtrip_session_record() {
-        let record = McpSessionRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            user_id: uuid::Uuid::new_v4().to_string(),
-            client_info: Some("test-client".to_string()),
-            activated_service_ids: vec!["svc-1".to_string(), "svc-2".to_string()],
-            proxy_authorized: true,
-            created_at: Utc::now(),
-            last_active_at: Utc::now(),
-            expires_at: Utc::now() + chrono::Duration::days(30),
-        };
-        let doc = bson::to_document(&record).expect("serialize");
-        let restored: McpSessionRecord = bson::from_document(doc).expect("deserialize");
-        assert_eq!(record.id, restored.id);
-        assert_eq!(record.user_id, restored.user_id);
-        assert_eq!(record.client_info, restored.client_info);
-        assert_eq!(record.activated_service_ids, restored.activated_service_ids);
-        assert_eq!(record.proxy_authorized, restored.proxy_authorized);
-    }
-
-    #[test]
-    fn per_user_session_limit() {
-        let store = McpSessionStore::new();
-        for i in 0..MAX_PER_USER_SESSIONS {
-            assert!(
-                store.create("user-1").is_some(),
-                "should create session {i}"
-            );
-        }
-        // Next create should fail
-        assert!(store.create("user-1").is_none(), "should reject over limit");
-        // Different user should still work
-        assert!(
-            store.create("user-2").is_some(),
-            "different user should work"
-        );
-    }
-
-    #[test]
-    fn remove_by_user_id_clears_all() {
-        let store = McpSessionStore::new();
-        let s1 = store.create("user-1").expect("create");
-        let s2 = store.create("user-1").expect("create");
-        let s3 = store.create("user-2").expect("create");
-        store.remove_by_user_id("user-1");
-        assert!(!store.validate(&s1, "user-1"));
-        assert!(!store.validate(&s2, "user-1"));
-        // user-2's session should be unaffected
-        assert!(store.validate(&s3, "user-2"));
-    }
-
-    #[tokio::test]
-    async fn load_from_db_without_database_returns_zero() {
-        let store = McpSessionStore::new();
-
-        let loaded = store
-            .load_from_db()
-            .await
-            .expect("no-db load is infallible");
-
-        assert_eq!(loaded, 0);
-    }
-
-    #[tokio::test]
-    async fn load_from_db_recovers_only_non_expired_sessions_with_active_auth_session() {
-        let Some(db) = crate::test_utils::connect_test_database("mcp_load_recover").await else {
-            return;
-        };
+    fn record(user_id: &str) -> McpSessionRecord {
         let now = Utc::now();
-        let active_user = uuid::Uuid::new_v4().to_string();
-        let orphan_user = uuid::Uuid::new_v4().to_string();
-
-        db.collection::<mongodb::bson::Document>("sessions")
-            .insert_one(doc! {
-                "_id": uuid::Uuid::new_v4().to_string(),
-                "user_id": &active_user,
-                "revoked": false,
-                "expires_at": bson::DateTime::from_chrono(now + chrono::Duration::hours(1)),
-            })
-            .await
-            .expect("insert active auth session");
-
-        let recoverable = McpSessionRecord {
+        McpSessionRecord {
             id: uuid::Uuid::new_v4().to_string(),
-            user_id: active_user.clone(),
-            client_info: Some("claude-desktop".to_string()),
-            activated_service_ids: vec!["svc-1".to_string(), "svc-2".to_string()],
-            proxy_authorized: true,
-            created_at: now - chrono::Duration::minutes(5),
-            last_active_at: now - chrono::Duration::minutes(1),
-            expires_at: now + chrono::Duration::hours(1),
-        };
-        let expired = McpSessionRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            user_id: active_user.clone(),
+            user_id: user_id.to_string(),
             client_info: None,
-            activated_service_ids: vec!["expired-svc".to_string()],
-            proxy_authorized: false,
-            created_at: now - chrono::Duration::hours(2),
-            last_active_at: now - chrono::Duration::hours(2),
-            expires_at: now - chrono::Duration::minutes(1),
-        };
-        let orphaned = McpSessionRecord {
-            id: uuid::Uuid::new_v4().to_string(),
-            user_id: orphan_user.clone(),
-            client_info: None,
-            activated_service_ids: vec!["orphan-svc".to_string()],
+            activated_service_ids: Vec::new(),
             proxy_authorized: true,
+            notification_sequence: 0,
             created_at: now,
             last_active_at: now,
             expires_at: now + chrono::Duration::hours(1),
+        }
+    }
+
+    #[test]
+    fn collection_names_are_stable() {
+        assert_eq!(MCP_SESSION_COLLECTION, "mcp_sessions");
+        assert_eq!(MCP_SESSION_SLOT_COLLECTION, "mcp_session_slots");
+        assert_eq!(MCP_NOTIFICATION_COLLECTION, "mcp_session_notifications");
+    }
+
+    #[tokio::test]
+    async fn in_memory_session_lifecycle() {
+        let store = McpSessionStore::new();
+        let id = store.create("user-1").await.unwrap().expect("create");
+        assert!(store.validate(&id, "user-1").await.unwrap());
+        assert!(store.touch(&id).await.unwrap());
+        store.remove(&id).await.unwrap();
+        assert!(!store.validate(&id, "user-1").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn session_identity_and_proxy_authorization_are_independent() {
+        let store = McpSessionStore::new();
+        let ordinary = store.create("user-1").await.unwrap().expect("create");
+        let proxy = store
+            .create_with_proxy_access("user-2", true)
+            .await
+            .unwrap()
+            .expect("create proxy session");
+
+        assert_eq!(
+            store.get_user_id(&ordinary).await.unwrap().as_deref(),
+            Some("user-1")
+        );
+        assert!(!store.allows_proxy_access(&ordinary).await.unwrap());
+        assert!(store.allows_proxy_access(&proxy).await.unwrap());
+        assert!(!store.validate(&ordinary, "user-2").await.unwrap());
+        assert!(store.get_user_id("missing").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn in_memory_limit_and_activation_limit_are_preserved() {
+        let store = McpSessionStore::new();
+        let first = store.create("user-1").await.unwrap().expect("create");
+        for _ in 1..MAX_PER_USER_SESSIONS {
+            assert!(store.create("user-1").await.unwrap().is_some());
+        }
+        assert!(store.create("user-1").await.unwrap().is_none());
+
+        let service_ids: Vec<String> = (0..MAX_ACTIVATED_SERVICES + 1)
+            .map(|index| format!("service-{index}"))
+            .collect();
+        assert!(store.activate_services(&first, &service_ids).await.unwrap());
+        assert_eq!(
+            store.get_activated_service_ids(&first).await.unwrap().len(),
+            MAX_ACTIVATED_SERVICES
+        );
+        assert!(
+            !store
+                .activate_services(&first, &["overflow".to_string()])
+                .await
+                .unwrap()
+        );
+        assert!(
+            !store
+                .activate_services("missing", &["service".to_string()])
+                .await
+                .unwrap()
+        );
+        assert!(
+            store
+                .get_activated_service_ids("missing")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn duplicate_activation_is_not_reported_as_a_change() {
+        let store = McpSessionStore::new();
+        let id = store.create("user-1").await.unwrap().expect("create");
+        let services = ["service-1".to_string()];
+        assert!(store.activate_services(&id, &services).await.unwrap());
+        assert!(!store.activate_services(&id, &services).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn local_notification_channel_supports_reconnect() {
+        let store = McpSessionStore::new();
+        let id = store.create("user-1").await.unwrap().expect("create");
+        let mut first_receiver = store
+            .take_notification_rx(&id)
+            .expect("initial notification receiver");
+        assert!(
+            store
+                .send_notification(&id, serde_json::json!({"value": 1}))
+                .await
+                .unwrap()
+        );
+        assert_eq!(first_receiver.recv().await.unwrap()["value"], 1);
+
+        let (sender, mut replacement_receiver) = mpsc::channel(1);
+        store.set_notification_tx(&id, sender);
+        assert!(
+            store
+                .send_notification(&id, serde_json::json!({"value": 2}))
+                .await
+                .unwrap()
+        );
+        assert_eq!(replacement_receiver.recv().await.unwrap()["value"], 2);
+    }
+
+    #[tokio::test]
+    async fn remove_by_user_only_removes_matching_local_sessions() {
+        let store = McpSessionStore::new();
+        let first = store.create("user-1").await.unwrap().expect("create");
+        let second = store.create("user-2").await.unwrap().expect("create");
+        store.remove_by_user_id("user-1").await.unwrap();
+
+        assert!(!store.validate(&first, "user-1").await.unwrap());
+        assert!(store.validate(&second, "user-2").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn reaper_removes_idle_local_sessions_and_receivers() {
+        let store = McpSessionStore::new();
+        let id = store.create("user-1").await.unwrap().expect("create");
+        store
+            .sessions
+            .write()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .last_active = Utc::now() - chrono::Duration::hours(2);
+
+        assert_eq!(
+            store.reap_expired(Duration::from_secs(3600)).await.unwrap(),
+            1
+        );
+        assert!(!store.validate(&id, "user-1").await.unwrap());
+        assert!(store.take_notification_rx(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn load_without_database_is_empty() {
+        assert_eq!(McpSessionStore::new().load_from_db().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn validation_reads_through_on_a_replica_local_miss() {
+        let Some(db) = crate::test_utils::connect_test_database("mcp_read_through").await else {
+            return;
         };
+        let record = record(&uuid::Uuid::new_v4().to_string());
+        db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+            .insert_one(&record)
+            .await
+            .expect("insert remote session");
+
+        let other_replica = McpSessionStore::with_db(db);
+        assert!(
+            other_replica
+                .validate(&record.id, &record.user_id)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            other_replica.get_user_id(&record.id).await.unwrap(),
+            Some(record.user_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn validation_rejects_a_cached_session_deleted_by_another_replica() {
+        let Some(db) = crate::test_utils::connect_test_database("mcp_stale_positive").await else {
+            return;
+        };
+        let record = record(&uuid::Uuid::new_v4().to_string());
+        db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+            .insert_one(&record)
+            .await
+            .expect("insert session");
+        let cached_replica = McpSessionStore::with_db(db.clone());
+        assert!(
+            cached_replica
+                .validate(&record.id, &record.user_id)
+                .await
+                .unwrap()
+        );
 
         db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
-            .insert_many(vec![recoverable.clone(), expired.clone(), orphaned.clone()])
+            .delete_one(doc! { "_id": &record.id })
             .await
-            .expect("insert mcp session records");
+            .expect("delete from another replica");
 
+        assert!(
+            !cached_replica
+                .validate(&record.id, &record.user_id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            cached_replica
+                .get_user_id(&record.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_hydrates_valid_sessions_and_backfills_admission_slots() {
+        let Some(db) = crate::test_utils::connect_test_database("mcp_recovery_slots").await else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let mut persisted = record(&user_id);
+        persisted.activated_service_ids = vec!["service-1".to_string()];
+        db.collection::<mongodb::bson::Document>("sessions")
+            .insert_one(doc! {
+                "_id": uuid::Uuid::new_v4().to_string(),
+                "user_id": &user_id,
+                "revoked": false,
+                "expires_at": bson::DateTime::from_chrono(Utc::now() + chrono::Duration::hours(1)),
+            })
+            .await
+            .expect("insert auth session");
+        db.collection::<McpSessionRecord>(MCP_SESSION_COLLECTION)
+            .insert_one(&persisted)
+            .await
+            .expect("insert MCP session");
+
+        let store = McpSessionStore::with_db(db.clone());
+        assert_eq!(store.load_from_db().await.unwrap(), 1);
+        assert!(store.validate(&persisted.id, &user_id).await.unwrap());
+        assert!(
+            store
+                .get_activated_service_ids(&persisted.id)
+                .await
+                .unwrap()
+                .contains("service-1")
+        );
+        assert!(
+            db.collection::<McpSessionSlot>(MCP_SESSION_SLOT_COLLECTION)
+                .find_one(doc! { "session_id": &persisted.id })
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn cross_replica_notifications_are_durable_and_strictly_ordered() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("mcp_notification_outbox").await;
+        let owner = McpSessionStore::with_db_options(
+            db.clone(),
+            Duration::from_secs(3600),
+            Duration::from_millis(10),
+        );
+        let producer = McpSessionStore::with_db_options(
+            db,
+            Duration::from_secs(3600),
+            Duration::from_millis(10),
+        );
+        let id = owner
+            .create_with_proxy_access("user-1", true)
+            .await
+            .unwrap()
+            .expect("create");
+
+        assert!(
+            producer
+                .activate_services_and_notify(
+                    &id,
+                    &["service-1".to_string()],
+                    serde_json::json!({"value": 1}),
+                )
+                .await
+                .unwrap()
+        );
+        assert!(
+            producer
+                .activate_services_and_notify(
+                    &id,
+                    &["service-2".to_string()],
+                    serde_json::json!({"value": 2}),
+                )
+                .await
+                .unwrap()
+        );
+        let notifications = owner
+            .notifications_after(&id, 0)
+            .await
+            .unwrap()
+            .expect("active session");
+
+        assert_eq!(notifications.len(), 2);
+        assert_eq!(notifications[0].sequence, 1);
+        assert_eq!(notifications[0].payload["value"], 1);
+        assert_eq!(notifications[1].sequence, 2);
+        assert_eq!(notifications[1].payload["value"], 2);
+    }
+
+    #[tokio::test]
+    async fn deletion_removes_durable_notifications_and_stops_polling() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("mcp_notification_delete").await;
         let store = McpSessionStore::with_db(db);
-        let loaded = store.load_from_db().await.expect("load from db");
+        let id = store.create("user-1").await.unwrap().expect("create");
+        store
+            .send_notification(&id, serde_json::json!({"value": 1}))
+            .await
+            .unwrap();
+        store.remove(&id).await.unwrap();
 
-        assert_eq!(loaded, 1);
-        assert!(store.validate(&recoverable.id, &active_user));
-        assert!(!store.validate(&expired.id, &active_user));
-        assert!(!store.validate(&orphaned.id, &orphan_user));
-        assert!(store.allows_proxy_access(&recoverable.id));
+        assert!(store.notifications_after(&id, 0).await.unwrap().is_none());
+    }
 
-        let activated = store.get_activated_service_ids(&recoverable.id);
-        assert_eq!(activated.len(), 2);
-        assert!(activated.contains("svc-1"));
-        assert!(activated.contains("svc-2"));
+    #[tokio::test]
+    async fn mongo_admission_limit_is_shared_across_replicas() {
+        let db = crate::test_utils::connect_transaction_test_database("mcp_global_limit").await;
+        let first = McpSessionStore::with_db(db.clone());
+        let second = McpSessionStore::with_db(db);
+        for index in 0..MAX_PER_USER_SESSIONS {
+            let store = if index % 2 == 0 { &first } else { &second };
+            assert!(store.create("user-1").await.unwrap().is_some());
+        }
+        assert!(second.create("user-1").await.unwrap().is_none());
+    }
 
-        let mut rx = store
-            .take_notification_rx(&recoverable.id)
-            .expect("loaded sessions get pending notification receivers");
-        assert!(store.send_notification(&recoverable.id, serde_json::json!({"method": "loaded"})));
-        let notification = rx.recv().await.expect("notification should arrive");
-        assert_eq!(notification["method"], "loaded");
+    #[tokio::test]
+    async fn mongo_activation_overflow_preserves_existing_services() {
+        let db = crate::test_utils::connect_transaction_test_database("mcp_activation_limit").await;
+        let store = McpSessionStore::with_db(db);
+        let id = store.create("user-1").await.unwrap().expect("create");
+        let service_ids: Vec<String> = (0..MAX_ACTIVATED_SERVICES)
+            .map(|index| format!("service-{index}"))
+            .collect();
+
+        assert!(store.activate_services(&id, &service_ids).await.unwrap());
+        let before = store.get_activated_service_ids(&id).await.unwrap();
+        assert!(
+            !store
+                .activate_services(&id, &["overflow".to_string()])
+                .await
+                .unwrap()
+        );
+        assert_eq!(store.get_activated_service_ids(&id).await.unwrap(), before);
+    }
+
+    #[test]
+    fn bson_roundtrip_session_record_includes_notification_sequence() {
+        let mut record = record("user-1");
+        record.notification_sequence = 7;
+        let document = bson::to_document(&record).expect("serialize");
+        let restored: McpSessionRecord = bson::from_document(document).expect("deserialize");
+        assert_eq!(restored.notification_sequence, 7);
     }
 }

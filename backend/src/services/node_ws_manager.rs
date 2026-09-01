@@ -19,6 +19,10 @@ const WS_PROXY_BUFFER_CAPACITY: usize = 512;
 const LEGACY_NODE_PROXY_MAX_BODY_SIZE: usize = 11 * 1024 * 1024;
 pub(crate) const NODE_PROXY_MESSAGE_OVERHEAD_BYTES: usize = 1024 * 1024;
 
+fn proxy_cancellation_key(node_id: &str, request_id: &str) -> String {
+    format!("{}:{node_id}{request_id}", node_id.len())
+}
+
 pub(crate) fn node_proxy_ws_message_size_limit(raw_body_limit: usize) -> usize {
     let encoded_body_limit = (raw_body_limit / 3).saturating_mul(4).saturating_add(
         if raw_body_limit.is_multiple_of(3) {
@@ -30,8 +34,58 @@ pub(crate) fn node_proxy_ws_message_size_limit(raw_body_limit: usize) -> usize {
     encoded_body_limit.saturating_add(NODE_PROXY_MESSAGE_OVERHEAD_BYTES)
 }
 
+pub(crate) mod base64_bytes {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+mod optional_base64_bytes {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S>(bytes: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        bytes
+            .as_ref()
+            .map(|value| base64::engine::general_purpose::STANDARD.encode(value))
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<String>::deserialize(deserializer)?
+            .map(|encoded| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(serde::de::Error::custom)
+            })
+            .transpose()
+    }
+}
+
 /// Request sent to a node via WebSocket.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeProxyRequest {
     pub request_id: String,
     pub service_id: String,
@@ -42,11 +96,12 @@ pub struct NodeProxyRequest {
     pub query: Option<String>,
     pub headers: Vec<(String, String)>,
     /// Raw bytes (serialized to base64 in WS message)
+    #[serde(default, with = "optional_base64_bytes")]
     pub body: Option<Vec<u8>>,
 }
 
 /// Request sent to a node to open an SSH TCP tunnel.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeSshTunnelRequest {
     pub session_id: String,
     pub service_id: String,
@@ -55,6 +110,7 @@ pub struct NodeSshTunnelRequest {
 }
 
 /// Response received from a node via WebSocket (non-streaming).
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NodeProxyResponse {
     pub request_id: String,
     pub status: u16,
@@ -95,14 +151,14 @@ pub(crate) struct NodeProxyFailure {
 }
 
 impl NodeProxyFailure {
-    fn before_dispatch(error: AppError) -> Self {
+    pub(crate) fn before_dispatch(error: AppError) -> Self {
         Self {
             error,
             dispatched: false,
         }
     }
 
-    fn after_dispatch(error: AppError) -> Self {
+    pub(crate) fn after_dispatch(error: AppError) -> Self {
         Self {
             error,
             dispatched: true,
@@ -184,7 +240,7 @@ pub(crate) enum PendingWsProxy {
 }
 
 /// Request sent to a node to open a WS proxy connection.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeWsProxyRequest {
     pub session_id: String,
     pub service_slug: String,
@@ -211,7 +267,7 @@ struct PendingSshNodeExecStream {
 }
 
 /// Request sent to a node to execute an SSH command.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeSshExecRequest {
     pub request_id: String,
     pub host: String,
@@ -224,7 +280,7 @@ pub struct NodeSshExecRequest {
 }
 
 /// Request sent to a node to execute an SSH command using a node-local key.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeSshNodeKeyExecRequest {
     pub request_id: String,
     pub service_slug: String,
@@ -237,7 +293,7 @@ pub struct NodeSshNodeKeyExecRequest {
 }
 
 /// Result received from a node after SSH command execution.
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NodeSshExecResult {
     pub request_id: String,
     pub exit_code: i32,
@@ -250,7 +306,7 @@ pub struct NodeSshExecResult {
 }
 
 /// Request sent to a node to open a web terminal session.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct NodeWebTerminalRequest {
     pub session_id: String,
     pub service_id: String,
@@ -264,13 +320,33 @@ pub struct NodeWebTerminalRequest {
 }
 
 /// SSH credential mode for a node-backed web terminal.
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum NodeWebTerminalAuthMode {
     Cert {
         private_key_pem: String,
         certificate_openssh: String,
     },
     NodeKey,
+}
+
+/// Node-protocol HMAC fields computed by the ingress replica. The signing
+/// secret never crosses the internal forwarding plane.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct NodeRequestSignature {
+    pub timestamp: String,
+    pub nonce: String,
+    pub signature: String,
+}
+
+impl fmt::Debug for NodeRequestSignature {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NodeRequestSignature")
+            .field("timestamp", &self.timestamp)
+            .field("nonce", &self.nonce)
+            .field("signature", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Outbound command for a node connection writer task.
@@ -282,11 +358,15 @@ pub(crate) enum NodeOutboundMessage {
 
 /// Handle for sending messages to a connected node.
 struct NodeConnection {
+    /// UUID for this exact WebSocket. It fences a reconnect handled by the
+    /// same process from teardown performed by the older reader task.
+    connection_id: String,
     /// Bounded channel to send WS messages to the node's write task (H4).
     /// Prevents memory exhaustion from slow/malicious nodes.
     tx: mpsc::Sender<NodeOutboundMessage>,
     /// Pending proxy request correlation map
     pending: Arc<DashMap<String, PendingRequest>>,
+    proxy_dispatch_gate: Arc<std::sync::Mutex<()>>,
     /// Pending and active SSH tunnel sessions keyed by session_id
     ssh_tunnels: Arc<DashMap<String, PendingSshTunnel>>,
     /// Pending and active web terminal sessions keyed by session_id
@@ -348,7 +428,7 @@ pub struct NodeSessionInfo {
 }
 
 impl NodeSessionInfo {
-    fn disconnected() -> Self {
+    pub(crate) fn disconnected() -> Self {
         Self {
             is_connected: false,
             capabilities_resolved: false,
@@ -365,8 +445,23 @@ pub struct NodeWsManager {
     proxy_timeout_secs: u64,
     /// Maximum concurrent WebSocket connections (authenticated + pending auth)
     max_connections: usize,
-    /// Counter for connections currently in the auth handshake phase
-    pending_auth: AtomicUsize,
+    /// Reservations held from upgrade admission through socket teardown.
+    connection_reservations: AtomicUsize,
+    cancelled_proxy_requests: DashMap<String, std::time::Instant>,
+    cluster_dispatch:
+        std::sync::OnceLock<std::sync::Weak<crate::services::node_dispatch::NodeDispatch>>,
+}
+
+pub struct NodeConnectionReservation {
+    manager: Arc<NodeWsManager>,
+}
+
+impl Drop for NodeConnectionReservation {
+    fn drop(&mut self) {
+        self.manager
+            .connection_reservations
+            .fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// JSON message sent from NyxID to a node for a proxy request.
@@ -507,6 +602,13 @@ struct WsSshExec {
 }
 
 #[derive(Debug, Serialize)]
+struct WsSshExecCancel {
+    #[serde(rename = "type")]
+    msg_type: &'static str,
+    request_id: String,
+}
+
+#[derive(Debug, Serialize)]
 struct WsSshNodeExecOpen {
     #[serde(rename = "type")]
     msg_type: &'static str,
@@ -528,6 +630,64 @@ struct WsSshNodeExecOpen {
     nonce: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hmac: Option<String>,
+}
+
+struct PendingSshExecGuard {
+    request_id: String,
+    tx: mpsc::Sender<NodeOutboundMessage>,
+    requests: Arc<DashMap<String, PendingSshExec>>,
+    streams: Arc<DashMap<String, PendingSshNodeExecStream>>,
+    armed: bool,
+}
+
+impl PendingSshExecGuard {
+    fn new(conn: &NodeConnection, request_id: String) -> Self {
+        Self {
+            request_id,
+            tx: conn.tx.clone(),
+            requests: Arc::clone(&conn.ssh_exec_requests),
+            streams: Arc::clone(&conn.ssh_node_exec_streams),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for PendingSshExecGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+
+        self.requests.remove(&self.request_id);
+        self.streams.remove(&self.request_id);
+
+        let Ok(message) = serde_json::to_string(&WsSshExecCancel {
+            msg_type: "ssh_exec_cancel",
+            request_id: self.request_id.clone(),
+        }) else {
+            return;
+        };
+        let outbound = NodeOutboundMessage::Text(message);
+        match self.tx.try_send(outbound) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => {}
+            Err(mpsc::error::TrySendError::Full(outbound)) => {
+                let tx = self.tx.clone();
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move {
+                        let _ = tokio::time::timeout(
+                            std::time::Duration::from_millis(100),
+                            tx.send(outbound),
+                        )
+                        .await;
+                    });
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -886,6 +1046,7 @@ impl fmt::Debug for PendingCredentialCiphertextParams<'_> {
 }
 
 /// Parameters for pushing a credential update to a node.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CredentialUpdateParams {
     pub service_slug: String,
     pub injection_method: String,
@@ -971,6 +1132,25 @@ pub fn compute_hmac_signature(
     hex::encode(mac.finalize().into_bytes())
 }
 
+pub fn sign_proxy_request(secret: &[u8], request: &NodeProxyRequest) -> NodeRequestSignature {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let signature = compute_hmac_signature(
+        secret,
+        &timestamp,
+        &nonce,
+        &request.method,
+        &request.path,
+        request.query.as_deref(),
+        request.body.as_deref(),
+    );
+    NodeRequestSignature {
+        timestamp,
+        nonce,
+        signature,
+    }
+}
+
 /// Compute HMAC-SHA256 signature for an SSH tunnel open request.
 pub fn compute_ssh_tunnel_hmac_signature(
     secret: &[u8],
@@ -992,6 +1172,28 @@ pub fn compute_ssh_tunnel_hmac_signature(
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
     mac.update(message.as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+pub fn sign_ssh_tunnel_request(
+    secret: &[u8],
+    request: &NodeSshTunnelRequest,
+) -> NodeRequestSignature {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let signature = compute_ssh_tunnel_hmac_signature(
+        secret,
+        &timestamp,
+        &nonce,
+        &request.session_id,
+        &request.service_id,
+        &request.host,
+        request.port,
+    );
+    NodeRequestSignature {
+        timestamp,
+        nonce,
+        signature,
+    }
 }
 
 /// Compute HMAC-SHA256 signature for a cert-mode SSH exec request.
@@ -1033,6 +1235,30 @@ pub fn compute_ssh_exec_hmac_signature(secret: &[u8], envelope: SshExecHmacEnvel
     hex::encode(mac.finalize().into_bytes())
 }
 
+pub fn sign_ssh_exec_request(secret: &[u8], request: &NodeSshExecRequest) -> NodeRequestSignature {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let signature = compute_ssh_exec_hmac_signature(
+        secret,
+        SshExecHmacEnvelope {
+            timestamp: &timestamp,
+            nonce: &nonce,
+            request_id: &request.request_id,
+            host: &request.host,
+            port: request.port,
+            principal: &request.principal,
+            auth_mode: "cert",
+            command: &request.command,
+            certificate_openssh: &request.certificate_openssh,
+        },
+    );
+    NodeRequestSignature {
+        timestamp,
+        nonce,
+        signature,
+    }
+}
+
 /// Compute HMAC-SHA256 signature for a node-key SSH exec request.
 /// Message format:
 /// `{timestamp}\n{nonce}\n{request_id}\n{service_slug}\n{principal}\n{auth_mode}\n{sha256(command)}`.
@@ -1068,6 +1294,31 @@ pub fn compute_ssh_node_exec_hmac_signature(
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
     mac.update(message.as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+pub fn sign_ssh_node_exec_request(
+    secret: &[u8],
+    request: &NodeSshNodeKeyExecRequest,
+) -> NodeRequestSignature {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let signature = compute_ssh_node_exec_hmac_signature(
+        secret,
+        SshNodeExecHmacEnvelope {
+            timestamp: &timestamp,
+            nonce: &nonce,
+            request_id: &request.request_id,
+            service_slug: &request.service_slug,
+            principal: &request.principal,
+            auth_mode: "node_key",
+            command: &request.command,
+        },
+    );
+    NodeRequestSignature {
+        timestamp,
+        nonce,
+        signature,
+    }
 }
 
 /// Compute HMAC-SHA256 signature for a web terminal open request.
@@ -1114,6 +1365,40 @@ pub fn compute_web_terminal_hmac_signature(
     hex::encode(mac.finalize().into_bytes())
 }
 
+pub fn sign_web_terminal_request(
+    secret: &[u8],
+    request: &NodeWebTerminalRequest,
+) -> NodeRequestSignature {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let (auth_mode, auth_material) = match &request.auth_mode {
+        NodeWebTerminalAuthMode::Cert {
+            certificate_openssh,
+            ..
+        } => ("cert", certificate_openssh.as_str()),
+        NodeWebTerminalAuthMode::NodeKey => ("node_key", ""),
+    };
+    let signature = compute_web_terminal_hmac_signature(
+        secret,
+        WebTerminalHmacEnvelope {
+            timestamp: &timestamp,
+            nonce: &nonce,
+            session_id: &request.session_id,
+            host: &request.host,
+            port: request.port,
+            principal: &request.principal,
+            auth_mode,
+            service_slug: &request.service_slug,
+            auth_material,
+        },
+    );
+    NodeRequestSignature {
+        timestamp,
+        nonce,
+        signature,
+    }
+}
+
 impl NodeWsManager {
     fn handle_stream_send_result(
         result: Result<(), mpsc::error::TrySendError<StreamChunk>>,
@@ -1142,13 +1427,22 @@ impl NodeWsManager {
             connections: DashMap::new(),
             proxy_timeout_secs,
             max_connections,
-            pending_auth: AtomicUsize::new(0),
+            connection_reservations: AtomicUsize::new(0),
+            cancelled_proxy_requests: DashMap::new(),
+            cluster_dispatch: std::sync::OnceLock::new(),
         }
     }
 
-    /// Total connections including those still in auth handshake.
+    pub fn attach_cluster_dispatch(
+        &self,
+        dispatch: std::sync::Weak<crate::services::node_dispatch::NodeDispatch>,
+    ) {
+        let _ = self.cluster_dispatch.set(dispatch);
+    }
+
+    /// Total sockets reserved before upgrade, including pending authentication.
     pub fn total_connection_count(&self) -> usize {
-        self.connections.len() + self.pending_auth.load(Ordering::Relaxed)
+        self.connection_reservations.load(Ordering::Acquire)
     }
 
     /// Maximum allowed concurrent connections.
@@ -1156,21 +1450,44 @@ impl NodeWsManager {
         self.max_connections
     }
 
-    /// Increment the pending auth counter (called before WS upgrade).
-    pub fn increment_pending_auth(&self) {
-        self.pending_auth.fetch_add(1, Ordering::Relaxed);
-    }
-
-    /// Decrement the pending auth counter (called after auth completes or fails).
-    pub fn decrement_pending_auth(&self) {
-        self.pending_auth.fetch_sub(1, Ordering::Relaxed);
+    /// Atomically reserve one per-replica socket slot before the HTTP upgrade.
+    pub fn try_reserve_connection(self: &Arc<Self>) -> Option<NodeConnectionReservation> {
+        let mut current = self.connection_reservations.load(Ordering::Acquire);
+        loop {
+            if current >= self.max_connections {
+                return None;
+            }
+            match self.connection_reservations.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(NodeConnectionReservation {
+                        manager: Arc::clone(self),
+                    });
+                }
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Register a new WebSocket connection with a pre-created sender.
     /// Returns the pending request map for the WS reader task to deliver responses.
+    #[cfg(test)]
     pub(crate) fn register_connection(
         &self,
         node_id: &str,
+        tx: mpsc::Sender<NodeOutboundMessage>,
+    ) -> Arc<DashMap<String, PendingRequest>> {
+        self.register_connection_with_id(node_id, uuid::Uuid::new_v4().to_string(), tx)
+    }
+
+    pub(crate) fn register_connection_with_id(
+        &self,
+        node_id: &str,
+        connection_id: String,
         tx: mpsc::Sender<NodeOutboundMessage>,
     ) -> Arc<DashMap<String, PendingRequest>> {
         let pending = Arc::new(DashMap::new());
@@ -1184,8 +1501,10 @@ impl NodeWsManager {
         self.connections.insert(
             node_id.to_string(),
             NodeConnection {
+                connection_id,
                 tx,
                 pending,
+                proxy_dispatch_gate: Arc::new(std::sync::Mutex::new(())),
                 ssh_tunnels,
                 web_terminals,
                 ssh_exec_requests,
@@ -1205,21 +1524,32 @@ impl NodeWsManager {
     /// Drops all pending request senders so receivers get RecvError.
     pub fn unregister_connection(&self, node_id: &str) {
         if let Some((_, conn)) = self.connections.remove(node_id) {
-            conn.pending.clear();
-            conn.ssh_tunnels.clear();
-            conn.web_terminals.clear();
-            conn.ssh_exec_requests.clear();
-            conn.ssh_node_exec_streams.clear();
-            conn.ws_proxies.clear();
-            // Drop pending credential-ack waiters so any in-flight
-            // `send_credential_update_and_wait` / `_remove_and_wait`
-            // fails immediately with RecvError (→ our NodeOffline
-            // branch) instead of blocking for the full 10-second
-            // timeout (twenty-sixth-round Codex P3). Clearing the map
-            // drops the `oneshot::Sender`s, which closes the
-            // receivers.
-            conn.credential_acks.clear();
+            Self::clear_connection(&conn);
         }
+    }
+
+    pub fn unregister_connection_if(&self, node_id: &str, connection_id: &str) -> bool {
+        if let Some((_, conn)) = self
+            .connections
+            .remove_if(node_id, |_, conn| conn.connection_id == connection_id)
+        {
+            Self::clear_connection(&conn);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn clear_connection(conn: &NodeConnection) {
+        conn.pending.clear();
+        conn.ssh_tunnels.clear();
+        conn.web_terminals.clear();
+        conn.ssh_exec_requests.clear();
+        conn.ssh_node_exec_streams.clear();
+        conn.ws_proxies.clear();
+        // Dropping the senders makes strict credential writers fail
+        // immediately instead of waiting for their full timeout.
+        conn.credential_acks.clear();
     }
 
     /// Force-close a node connection by sending a WebSocket close frame.
@@ -1227,32 +1557,79 @@ impl NodeWsManager {
     /// immediately observe disconnect semantics.
     pub async fn disconnect_connection(&self, node_id: &str, code: u16, reason: &str) -> bool {
         if let Some((_, conn)) = self.connections.remove(node_id) {
-            conn.pending.clear();
-            conn.ssh_tunnels.clear();
-            conn.web_terminals.clear();
-            conn.ssh_exec_requests.clear();
-            conn.ssh_node_exec_streams.clear();
-            conn.ws_proxies.clear();
-            conn.credential_acks.clear();
-            let close_msg = NodeOutboundMessage::Close {
-                code,
-                reason: reason.to_string(),
-            };
-            match conn.tx.try_send(close_msg.clone()) {
-                Ok(()) => {}
-                Err(mpsc::error::TrySendError::Full(_)) => {
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_millis(100),
-                        conn.tx.send(close_msg),
-                    )
-                    .await;
-                }
-                Err(mpsc::error::TrySendError::Closed(_)) => {}
-            }
+            Self::close_connection(&conn, code, reason).await;
             true
         } else {
             false
         }
+    }
+
+    pub async fn disconnect_connection_if(
+        &self,
+        node_id: &str,
+        connection_id: &str,
+        code: u16,
+        reason: &str,
+    ) -> bool {
+        if let Some((_, conn)) = self
+            .connections
+            .remove_if(node_id, |_, conn| conn.connection_id == connection_id)
+        {
+            Self::close_connection(&conn, code, reason).await;
+            true
+        } else {
+            false
+        }
+    }
+
+    async fn close_connection(conn: &NodeConnection, code: u16, reason: &str) {
+        Self::clear_connection(conn);
+        let close_msg = NodeOutboundMessage::Close {
+            code,
+            reason: reason.to_string(),
+        };
+        match conn.tx.try_send(close_msg.clone()) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    conn.tx.send(close_msg),
+                )
+                .await;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+
+    pub fn connection_id(&self, node_id: &str) -> Option<String> {
+        self.connections
+            .get(node_id)
+            .map(|connection| connection.connection_id.clone())
+    }
+
+    pub fn has_connection(&self, node_id: &str, connection_id: &str) -> bool {
+        self.connections
+            .get(node_id)
+            .is_some_and(|connection| connection.connection_id == connection_id)
+    }
+
+    fn connection_for<'a>(
+        &'a self,
+        node_id: &str,
+        expected_connection_id: Option<&str>,
+    ) -> AppResult<dashmap::mapref::one::Ref<'a, String, NodeConnection>> {
+        let connection = self
+            .connections
+            .get(node_id)
+            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        if expected_connection_id
+            .is_some_and(|expected| connection.connection_id.as_str() != expected)
+        {
+            return Err(AppError::NodeOffline(format!(
+                "Node {node_id} connection changed before dispatch"
+            )));
+        }
+        Ok(connection)
     }
 
     /// Check if a node has an active WebSocket connection.
@@ -1274,6 +1651,33 @@ impl NodeWsManager {
             is_connected: true,
             capabilities_resolved: conn.capabilities_resolved.load(Ordering::Acquire),
             capabilities,
+        }
+    }
+
+    pub async fn cluster_session_info(&self, node_id: &str) -> NodeSessionInfo {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            return dispatch.session_info(node_id).await;
+        }
+        self.session_info(node_id)
+    }
+
+    pub async fn await_cluster_capability_resolution(
+        &self,
+        node_id: &str,
+        timeout: std::time::Duration,
+    ) {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch.await_capability_resolution(node_id, timeout).await;
+        } else {
+            self.await_capability_resolution(node_id, timeout).await;
         }
     }
 
@@ -1300,16 +1704,47 @@ impl NodeWsManager {
         signing_secret: Option<&[u8]>,
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> Result<ProxyResponseType, NodeProxyFailure> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            return dispatch
+                .send_proxy_request_classified(
+                    node_id,
+                    request,
+                    signing_secret,
+                    _billing_egress_permit,
+                )
+                .await;
+        }
+        let signature = signing_secret.map(|secret| sign_proxy_request(secret, &request));
+        self.send_proxy_request_classified_prepared(
+            node_id,
+            request,
+            signature,
+            None,
+            _billing_egress_permit,
+        )
+        .await
+    }
+
+    pub(crate) async fn send_proxy_request_classified_prepared(
+        &self,
+        node_id: &str,
+        request: NodeProxyRequest,
+        prepared_signature: Option<NodeRequestSignature>,
+        expected_connection_id: Option<&str>,
+        _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    ) -> Result<ProxyResponseType, NodeProxyFailure> {
         let request_body_len = request.body.as_ref().map_or(0, Vec::len);
         if request_body_len > LEGACY_NODE_PROXY_MAX_BODY_SIZE {
             self.await_capability_resolution(node_id, std::time::Duration::from_millis(500))
                 .await;
         }
-        let conn = self.connections.get(node_id).ok_or_else(|| {
-            NodeProxyFailure::before_dispatch(AppError::NodeOffline(format!(
-                "Node {node_id} is not connected"
-            )))
-        })?;
+        let conn = self
+            .connection_for(node_id, expected_connection_id)
+            .map_err(NodeProxyFailure::before_dispatch)?;
         let node_body_limit = conn
             .capabilities
             .lock()
@@ -1325,6 +1760,17 @@ impl NodeWsManager {
             ));
         }
         let request_id = request.request_id.clone();
+        let dispatch_gate = conn.proxy_dispatch_gate.clone();
+        let _dispatch_guard = dispatch_gate.lock().map_err(|_| {
+            NodeProxyFailure::before_dispatch(AppError::Internal(
+                "Node proxy dispatch gate is unavailable".to_string(),
+            ))
+        })?;
+        if self.take_proxy_cancellation(node_id, &request_id) {
+            return Err(NodeProxyFailure::before_dispatch(
+                AppError::ClientDisconnected,
+            ));
+        }
 
         // Create oneshot channel for response correlation. The response may be a
         // complete payload or a live streaming receiver.
@@ -1344,23 +1790,15 @@ impl NodeWsManager {
             base64::engine::general_purpose::STANDARD.encode(b)
         });
 
-        // Compute HMAC signature if signing secret is provided
-        let (timestamp, nonce, signature) = if let Some(secret) = signing_secret {
-            let ts = chrono::Utc::now().to_rfc3339();
-            let n = uuid::Uuid::new_v4().to_string();
-            let sig = compute_hmac_signature(
-                secret,
-                &ts,
-                &n,
-                &request.method,
-                &request.path,
-                request.query.as_deref(),
-                request.body.as_deref(),
-            );
-            (Some(ts), Some(n), Some(sig))
-        } else {
-            (None, None, None)
-        };
+        let (timestamp, nonce, signature) = prepared_signature
+            .map(|prepared| {
+                (
+                    Some(prepared.timestamp),
+                    Some(prepared.nonce),
+                    Some(prepared.signature),
+                )
+            })
+            .unwrap_or((None, None, None));
 
         // Build WS message
         let ws_msg = WsProxyRequest {
@@ -1404,6 +1842,8 @@ impl NodeWsManager {
             }
         }
 
+        drop(_dispatch_guard);
+
         // Drop the connection ref before awaiting
         drop(conn);
 
@@ -1436,6 +1876,7 @@ impl NodeWsManager {
     }
 
     /// Open an SSH tunnel on a connected node and await the open acknowledgement.
+    #[cfg(test)]
     pub(crate) async fn open_ssh_tunnel(
         &self,
         node_id: &str,
@@ -1443,31 +1884,34 @@ impl NodeWsManager {
         signing_secret: Option<&[u8]>,
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> AppResult<mpsc::Receiver<SshTunnelChunk>> {
-        let conn = self
-            .connections
-            .get(node_id)
-            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let signature = signing_secret.map(|secret| sign_ssh_tunnel_request(secret, &request));
+        self.open_ssh_tunnel_prepared(node_id, request, signature, None, _billing_egress_permit)
+            .await
+    }
+
+    pub(crate) async fn open_ssh_tunnel_prepared(
+        &self,
+        node_id: &str,
+        request: NodeSshTunnelRequest,
+        prepared_signature: Option<NodeRequestSignature>,
+        expected_connection_id: Option<&str>,
+        _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    ) -> AppResult<mpsc::Receiver<SshTunnelChunk>> {
+        let conn = self.connection_for(node_id, expected_connection_id)?;
         let session_id = request.session_id.clone();
         let (ready_tx, ready_rx) = oneshot::channel();
         conn.ssh_tunnels
             .insert(session_id.clone(), PendingSshTunnel::Awaiting(ready_tx));
 
-        let (timestamp, nonce, signature) = if let Some(secret) = signing_secret {
-            let ts = chrono::Utc::now().to_rfc3339();
-            let n = uuid::Uuid::new_v4().to_string();
-            let sig = compute_ssh_tunnel_hmac_signature(
-                secret,
-                &ts,
-                &n,
-                &request.session_id,
-                &request.service_id,
-                &request.host,
-                request.port,
-            );
-            (Some(ts), Some(n), Some(sig))
-        } else {
-            (None, None, None)
-        };
+        let (timestamp, nonce, signature) = prepared_signature
+            .map(|prepared| {
+                (
+                    Some(prepared.timestamp),
+                    Some(prepared.nonce),
+                    Some(prepared.signature),
+                )
+            })
+            .unwrap_or((None, None, None));
 
         let msg = serde_json::to_string(&WsSshTunnelOpen {
             msg_type: "ssh_tunnel_open",
@@ -1601,10 +2045,25 @@ impl NodeWsManager {
         node_id: &str,
         params: &CredentialUpdateParams,
     ) -> AppResult<()> {
-        let conn = self
-            .connections
-            .get(node_id)
-            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        self.send_credential_update_for(node_id, params, None)
+    }
+
+    pub(crate) fn send_credential_update_if(
+        &self,
+        node_id: &str,
+        params: &CredentialUpdateParams,
+        connection_id: &str,
+    ) -> AppResult<()> {
+        self.send_credential_update_for(node_id, params, Some(connection_id))
+    }
+
+    fn send_credential_update_for(
+        &self,
+        node_id: &str,
+        params: &CredentialUpdateParams,
+        expected_connection_id: Option<&str>,
+    ) -> AppResult<()> {
+        let conn = self.connection_for(node_id, expected_connection_id)?;
 
         let msg = WsCredentialUpdate {
             msg_type: "credential_update",
@@ -1637,15 +2096,46 @@ impl NodeWsManager {
         Ok(())
     }
 
+    pub async fn send_credential_update_clustered(
+        &self,
+        node_id: &str,
+        params: &CredentialUpdateParams,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch.send_credential_update(node_id, params).await
+        } else {
+            self.send_credential_update(node_id, params)
+        }
+    }
+
     /// Send a `credential_remove` frame to the node so it drops any
     /// locally-stored credential + target_url for the given service
     /// slug. Used when a `UserService`'s `node_id` changes so the prior
     /// node stops holding the secret.
     pub fn send_credential_remove(&self, node_id: &str, service_slug: &str) -> AppResult<()> {
-        let conn = self
-            .connections
-            .get(node_id)
-            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        self.send_credential_remove_for(node_id, service_slug, None)
+    }
+
+    pub(crate) fn send_credential_remove_if(
+        &self,
+        node_id: &str,
+        service_slug: &str,
+        connection_id: &str,
+    ) -> AppResult<()> {
+        self.send_credential_remove_for(node_id, service_slug, Some(connection_id))
+    }
+
+    fn send_credential_remove_for(
+        &self,
+        node_id: &str,
+        service_slug: &str,
+        expected_connection_id: Option<&str>,
+    ) -> AppResult<()> {
+        let conn = self.connection_for(node_id, expected_connection_id)?;
 
         let msg = WsCredentialRemove {
             msg_type: "credential_remove",
@@ -1671,14 +2161,43 @@ impl NodeWsManager {
         Ok(())
     }
 
+    pub async fn send_credential_remove_clustered(
+        &self,
+        node_id: &str,
+        service_slug: &str,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch.send_credential_remove(node_id, service_slug).await
+        } else {
+            self.send_credential_remove(node_id, service_slug)
+        }
+    }
+
     /// Notify a connected node that pending credential metadata is available.
     /// The node pulls details through the node-agent HTTP endpoint; this frame
     /// intentionally carries no secret material and no semi-sensitive metadata.
     pub fn send_pending_credentials_available(&self, node_id: &str) -> AppResult<()> {
-        let conn = self
-            .connections
-            .get(node_id)
-            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        self.send_pending_credentials_available_for(node_id, None)
+    }
+
+    pub(crate) fn send_pending_credentials_available_if(
+        &self,
+        node_id: &str,
+        connection_id: &str,
+    ) -> AppResult<()> {
+        self.send_pending_credentials_available_for(node_id, Some(connection_id))
+    }
+
+    fn send_pending_credentials_available_for(
+        &self,
+        node_id: &str,
+        expected_connection_id: Option<&str>,
+    ) -> AppResult<()> {
+        let conn = self.connection_for(node_id, expected_connection_id)?;
 
         let msg = WsPendingCredentialsAvailable {
             msg_type: "pending_credentials_available",
@@ -1703,15 +2222,45 @@ impl NodeWsManager {
         Ok(())
     }
 
+    pub async fn send_pending_credentials_available_clustered(
+        &self,
+        node_id: &str,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch.send_pending_credentials_available(node_id).await
+        } else {
+            self.send_pending_credentials_available(node_id)
+        }
+    }
+
     pub fn send_pending_credential_ciphertext(
         &self,
         node_id: &str,
         params: &PendingCredentialCiphertextParams<'_>,
     ) -> AppResult<()> {
-        let conn = self
-            .connections
-            .get(node_id)
-            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        self.send_pending_credential_ciphertext_for(node_id, params, None)
+    }
+
+    pub(crate) fn send_pending_credential_ciphertext_if(
+        &self,
+        node_id: &str,
+        params: &PendingCredentialCiphertextParams<'_>,
+        connection_id: &str,
+    ) -> AppResult<()> {
+        self.send_pending_credential_ciphertext_for(node_id, params, Some(connection_id))
+    }
+
+    fn send_pending_credential_ciphertext_for(
+        &self,
+        node_id: &str,
+        params: &PendingCredentialCiphertextParams<'_>,
+        expected_connection_id: Option<&str>,
+    ) -> AppResult<()> {
+        let conn = self.connection_for(node_id, expected_connection_id)?;
 
         let msg = WsPendingCredentialCiphertext {
             msg_type: "pending_credential_ciphertext",
@@ -1742,6 +2291,24 @@ impl NodeWsManager {
         Ok(())
     }
 
+    pub async fn send_pending_credential_ciphertext_clustered(
+        &self,
+        node_id: &str,
+        params: &PendingCredentialCiphertextParams<'_>,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch
+                .send_pending_credential_ciphertext(node_id, params)
+                .await
+        } else {
+            self.send_pending_credential_ciphertext(node_id, params)
+        }
+    }
+
     /// Strict-wait variant of `send_credential_update`: generates a
     /// `request_id`, registers a pending oneshot waiter, sends the
     /// frame, then awaits the node's `credential_update_ack` with a
@@ -1755,12 +2322,31 @@ impl NodeWsManager {
         params: &CredentialUpdateParams,
         timeout: std::time::Duration,
     ) -> AppResult<()> {
+        self.send_credential_update_and_wait_for(node_id, params, timeout, None)
+            .await
+    }
+
+    pub(crate) async fn send_credential_update_and_wait_if(
+        &self,
+        node_id: &str,
+        params: &CredentialUpdateParams,
+        timeout: std::time::Duration,
+        connection_id: &str,
+    ) -> AppResult<()> {
+        self.send_credential_update_and_wait_for(node_id, params, timeout, Some(connection_id))
+            .await
+    }
+
+    async fn send_credential_update_and_wait_for(
+        &self,
+        node_id: &str,
+        params: &CredentialUpdateParams,
+        timeout: std::time::Duration,
+        expected_connection_id: Option<&str>,
+    ) -> AppResult<()> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx_ack, rx_ack) = oneshot::channel::<CredentialAckOutcome>();
-        let conn = self
-            .connections
-            .get(node_id)
-            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let conn = self.connection_for(node_id, expected_connection_id)?;
         conn.credential_acks.insert(request_id.clone(), tx_ack);
 
         let msg = WsCredentialUpdate {
@@ -1827,6 +2413,26 @@ impl NodeWsManager {
         }
     }
 
+    pub async fn send_credential_update_and_wait_clustered(
+        &self,
+        node_id: &str,
+        params: &CredentialUpdateParams,
+        timeout: std::time::Duration,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch
+                .send_credential_update_and_wait(node_id, params, timeout)
+                .await
+        } else {
+            self.send_credential_update_and_wait(node_id, params, timeout)
+                .await
+        }
+    }
+
     /// Strict-wait variant of `send_credential_remove`. Same semantics
     /// as `send_credential_update_and_wait`: returns `Ok(())` only after
     /// the node's `credential_update_ack` echoes back with status=ok.
@@ -1836,12 +2442,36 @@ impl NodeWsManager {
         service_slug: &str,
         timeout: std::time::Duration,
     ) -> AppResult<()> {
+        self.send_credential_remove_and_wait_for(node_id, service_slug, timeout, None)
+            .await
+    }
+
+    pub(crate) async fn send_credential_remove_and_wait_if(
+        &self,
+        node_id: &str,
+        service_slug: &str,
+        timeout: std::time::Duration,
+        connection_id: &str,
+    ) -> AppResult<()> {
+        self.send_credential_remove_and_wait_for(
+            node_id,
+            service_slug,
+            timeout,
+            Some(connection_id),
+        )
+        .await
+    }
+
+    async fn send_credential_remove_and_wait_for(
+        &self,
+        node_id: &str,
+        service_slug: &str,
+        timeout: std::time::Duration,
+        expected_connection_id: Option<&str>,
+    ) -> AppResult<()> {
         let request_id = uuid::Uuid::new_v4().to_string();
         let (tx_ack, rx_ack) = oneshot::channel::<CredentialAckOutcome>();
-        let conn = self
-            .connections
-            .get(node_id)
-            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let conn = self.connection_for(node_id, expected_connection_id)?;
         conn.credential_acks.insert(request_id.clone(), tx_ack);
 
         let msg = WsCredentialRemove {
@@ -1889,6 +2519,26 @@ impl NodeWsManager {
                     "Timed out waiting for credential_update_ack from node {node_id}"
                 )))
             }
+        }
+    }
+
+    pub async fn send_credential_remove_and_wait_clustered(
+        &self,
+        node_id: &str,
+        service_slug: &str,
+        timeout: std::time::Duration,
+    ) -> AppResult<()> {
+        if let Some(dispatch) = self
+            .cluster_dispatch
+            .get()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            dispatch
+                .send_credential_remove_and_wait(node_id, service_slug, timeout)
+                .await
+        } else {
+            self.send_credential_remove_and_wait(node_id, service_slug, timeout)
+                .await
         }
     }
 
@@ -2001,6 +2651,13 @@ impl NodeWsManager {
         self.connections
             .iter()
             .map(|entry| entry.key().clone())
+            .collect()
+    }
+
+    pub fn connected_nodes(&self) -> Vec<(String, String)> {
+        self.connections
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.connection_id.clone()))
             .collect()
     }
 
@@ -2202,6 +2859,48 @@ impl NodeWsManager {
         }
     }
 
+    pub(crate) fn cancel_proxy_request(&self, node_id: &str, request_id: &str) {
+        if let Some(conn) = self.connections.get(node_id) {
+            conn.pending.remove(request_id);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_pending_proxy_request(&self, node_id: &str, request_id: &str) -> bool {
+        self.connections
+            .get(node_id)
+            .is_some_and(|connection| connection.pending.contains_key(request_id))
+    }
+
+    pub(crate) fn cancel_proxy_request_if(
+        &self,
+        node_id: &str,
+        connection_id: &str,
+        request_id: &str,
+    ) -> AppResult<()> {
+        let connection = self.connection_for(node_id, Some(connection_id))?;
+        let dispatch_gate = connection.proxy_dispatch_gate.clone();
+        let _dispatch_guard = dispatch_gate.lock().map_err(|_| {
+            AppError::Internal("Node proxy dispatch gate is unavailable".to_string())
+        })?;
+        self.cancelled_proxy_requests.insert(
+            proxy_cancellation_key(node_id, request_id),
+            std::time::Instant::now()
+                + std::time::Duration::from_secs(self.proxy_timeout_secs.saturating_add(5)),
+        );
+        connection.pending.remove(request_id);
+        Ok(())
+    }
+
+    fn take_proxy_cancellation(&self, node_id: &str, request_id: &str) -> bool {
+        let now = std::time::Instant::now();
+        self.cancelled_proxy_requests
+            .retain(|_, expires_at| *expires_at > now);
+        self.cancelled_proxy_requests
+            .remove(&proxy_cancellation_key(node_id, request_id))
+            .is_some()
+    }
+
     pub fn deliver_ssh_tunnel_opened(&self, node_id: &str, session_id: &str) -> bool {
         let Some(conn) = self.connections.get(node_id) else {
             return false;
@@ -2292,19 +2991,15 @@ impl NodeWsManager {
 
     // ---- SSH exec (non-interactive command execution) ----
 
-    /// Execute an SSH command on a connected node and wait for the result.
-    /// If `signing_secret` is provided, the request is HMAC-signed.
-    pub(crate) async fn exec_ssh_command(
+    pub(crate) async fn exec_ssh_command_prepared(
         &self,
         node_id: &str,
         request: NodeSshExecRequest,
-        signing_secret: Option<&[u8]>,
+        prepared_signature: Option<NodeRequestSignature>,
+        expected_connection_id: Option<&str>,
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> AppResult<NodeSshExecResult> {
-        let conn = self
-            .connections
-            .get(node_id)
-            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let conn = self.connection_for(node_id, expected_connection_id)?;
         let request_id = request.request_id.clone();
 
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -2312,27 +3007,15 @@ impl NodeWsManager {
         conn.ssh_node_exec_streams
             .insert(request_id.clone(), PendingSshNodeExecStream::default());
 
-        let (timestamp, nonce, hmac) = if let Some(secret) = signing_secret {
-            let ts = chrono::Utc::now().to_rfc3339();
-            let n = uuid::Uuid::new_v4().to_string();
-            let sig = compute_ssh_exec_hmac_signature(
-                secret,
-                SshExecHmacEnvelope {
-                    timestamp: &ts,
-                    nonce: &n,
-                    request_id: &request.request_id,
-                    host: &request.host,
-                    port: request.port,
-                    principal: &request.principal,
-                    auth_mode: "cert",
-                    command: &request.command,
-                    certificate_openssh: &request.certificate_openssh,
-                },
-            );
-            (Some(ts), Some(n), Some(sig))
-        } else {
-            (None, None, None)
-        };
+        let (timestamp, nonce, hmac) = prepared_signature
+            .map(|prepared| {
+                (
+                    Some(prepared.timestamp),
+                    Some(prepared.nonce),
+                    Some(prepared.signature),
+                )
+            })
+            .unwrap_or((None, None, None));
 
         let msg = serde_json::to_string(&WsSshExec {
             msg_type: "ssh_exec",
@@ -2358,18 +3041,21 @@ impl NodeWsManager {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
                 conn.ssh_exec_requests.remove(&request_id);
+                conn.ssh_node_exec_streams.remove(&request_id);
                 return Err(AppError::NodeOffline(format!(
                     "Node {node_id} write buffer full"
                 )));
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 conn.ssh_exec_requests.remove(&request_id);
+                conn.ssh_node_exec_streams.remove(&request_id);
                 return Err(AppError::NodeOffline(format!(
                     "Node {node_id} connection closed"
                 )));
             }
         }
 
+        let mut pending_guard = PendingSshExecGuard::new(&conn, request_id.clone());
         drop(conn);
 
         // Use the configured proxy timeout plus the command timeout as the
@@ -2377,7 +3063,11 @@ impl NodeWsManager {
         // process, but we need a server-side deadline too).
         let total_timeout =
             std::time::Duration::from_secs(self.proxy_timeout_secs + request.timeout_secs as u64);
-        match tokio::time::timeout(total_timeout, resp_rx).await {
+        let response = tokio::time::timeout(total_timeout, resp_rx).await;
+        if response.is_ok() {
+            pending_guard.disarm();
+        }
+        match response {
             Ok(Ok(result)) => {
                 if let Some(ref error) = result.error {
                     Err(map_ssh_exec_result_error(
@@ -2392,28 +3082,19 @@ impl NodeWsManager {
             Ok(Err(_)) => Err(AppError::NodeOffline(format!(
                 "Node {node_id} disconnected during SSH exec"
             ))),
-            Err(_) => {
-                if let Some(conn) = self.connections.get(node_id) {
-                    conn.ssh_exec_requests.remove(&request_id);
-                }
-                Err(AppError::NodeProxyTimeout)
-            }
+            Err(_) => Err(AppError::NodeProxyTimeout),
         }
     }
 
-    /// Execute an SSH command on a connected node using a node-local SSH key.
-    /// If `signing_secret` is provided, the request is HMAC-signed.
-    pub(crate) async fn exec_ssh_node_key_command(
+    pub(crate) async fn exec_ssh_node_key_command_prepared(
         &self,
         node_id: &str,
         request: NodeSshNodeKeyExecRequest,
-        signing_secret: Option<&[u8]>,
+        prepared_signature: Option<NodeRequestSignature>,
+        expected_connection_id: Option<&str>,
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> AppResult<NodeSshExecResult> {
-        let conn = self
-            .connections
-            .get(node_id)
-            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let conn = self.connection_for(node_id, expected_connection_id)?;
         let request_id = request.request_id.clone();
 
         let (resp_tx, resp_rx) = oneshot::channel();
@@ -2429,25 +3110,15 @@ impl NodeWsManager {
         conn.ssh_node_exec_streams
             .insert(request_id.clone(), PendingSshNodeExecStream::default());
 
-        let (timestamp, nonce, hmac) = if let Some(secret) = signing_secret {
-            let ts = chrono::Utc::now().to_rfc3339();
-            let n = uuid::Uuid::new_v4().to_string();
-            let sig = compute_ssh_node_exec_hmac_signature(
-                secret,
-                SshNodeExecHmacEnvelope {
-                    timestamp: &ts,
-                    nonce: &n,
-                    request_id: &request.request_id,
-                    service_slug: &request.service_slug,
-                    principal: &request.principal,
-                    auth_mode: "node_key",
-                    command: &request.command,
-                },
-            );
-            (Some(ts), Some(n), Some(sig))
-        } else {
-            (None, None, None)
-        };
+        let (timestamp, nonce, hmac) = prepared_signature
+            .map(|prepared| {
+                (
+                    Some(prepared.timestamp),
+                    Some(prepared.nonce),
+                    Some(prepared.signature),
+                )
+            })
+            .unwrap_or((None, None, None));
 
         let msg = serde_json::to_string(&WsSshNodeExecOpen {
             msg_type: "ssh_node_exec_open",
@@ -2490,11 +3161,16 @@ impl NodeWsManager {
             }
         }
 
+        let mut pending_guard = PendingSshExecGuard::new(&conn, request_id.clone());
         drop(conn);
 
         let total_timeout =
             std::time::Duration::from_secs(self.proxy_timeout_secs + request.timeout_secs as u64);
-        match tokio::time::timeout(total_timeout, resp_rx).await {
+        let response = tokio::time::timeout(total_timeout, resp_rx).await;
+        if response.is_ok() {
+            pending_guard.disarm();
+        }
+        match response {
             Ok(Ok(result)) => {
                 if let Some(ref error) = result.error {
                     Err(map_ssh_exec_result_error(
@@ -2509,13 +3185,7 @@ impl NodeWsManager {
             Ok(Err(_)) => Err(AppError::NodeOffline(format!(
                 "Node {node_id} disconnected during SSH node-key exec"
             ))),
-            Err(_) => {
-                if let Some(conn) = self.connections.get(node_id) {
-                    conn.ssh_exec_requests.remove(&request_id);
-                    conn.ssh_node_exec_streams.remove(&request_id);
-                }
-                Err(AppError::NodeProxyTimeout)
-            }
+            Err(_) => Err(AppError::NodeProxyTimeout),
         }
     }
 
@@ -2614,6 +3284,7 @@ impl NodeWsManager {
     // ---- Web terminal session management ----
 
     /// Open a web terminal session on a connected node and await the started acknowledgement.
+    #[cfg(test)]
     pub(crate) async fn open_web_terminal(
         &self,
         node_id: &str,
@@ -2621,10 +3292,20 @@ impl NodeWsManager {
         signing_secret: Option<&[u8]>,
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> AppResult<mpsc::Receiver<WebTerminalChunk>> {
-        let conn = self
-            .connections
-            .get(node_id)
-            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let signature = signing_secret.map(|secret| sign_web_terminal_request(secret, &request));
+        self.open_web_terminal_prepared(node_id, request, signature, None, _billing_egress_permit)
+            .await
+    }
+
+    pub(crate) async fn open_web_terminal_prepared(
+        &self,
+        node_id: &str,
+        request: NodeWebTerminalRequest,
+        prepared_signature: Option<NodeRequestSignature>,
+        expected_connection_id: Option<&str>,
+        _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    ) -> AppResult<mpsc::Receiver<WebTerminalChunk>> {
+        let conn = self.connection_for(node_id, expected_connection_id)?;
         let session_id = request.session_id.clone();
         let (ready_tx, ready_rx) = oneshot::channel();
         conn.web_terminals
@@ -2638,28 +3319,15 @@ impl NodeWsManager {
             NodeWebTerminalAuthMode::NodeKey => ("node_key", None, None),
         };
 
-        let (timestamp, nonce, signature) = if let Some(secret) = signing_secret {
-            let ts = chrono::Utc::now().to_rfc3339();
-            let n = uuid::Uuid::new_v4().to_string();
-            let auth_material = certificate_openssh.as_deref().unwrap_or("");
-            let sig = compute_web_terminal_hmac_signature(
-                secret,
-                WebTerminalHmacEnvelope {
-                    timestamp: &ts,
-                    nonce: &n,
-                    session_id: &request.session_id,
-                    host: &request.host,
-                    port: request.port,
-                    principal: &request.principal,
-                    auth_mode,
-                    service_slug: &request.service_slug,
-                    auth_material,
-                },
-            );
-            (Some(ts), Some(n), Some(sig))
-        } else {
-            (None, None, None)
-        };
+        let (timestamp, nonce, signature) = prepared_signature
+            .map(|prepared| {
+                (
+                    Some(prepared.timestamp),
+                    Some(prepared.nonce),
+                    Some(prepared.signature),
+                )
+            })
+            .unwrap_or((None, None, None));
 
         let msg = serde_json::to_string(&WsWebTerminalOpen {
             msg_type: "web_terminal_open",
@@ -2898,41 +3566,29 @@ impl NodeWsManager {
 
     // ---- WebSocket proxy passthrough ----
 
-    /// Open a WS proxy session through a connected node.
-    /// Sends `ws_proxy_open` and waits for `ws_proxy_opened` or error.
-    pub(crate) async fn open_ws_proxy(
+    pub(crate) async fn open_ws_proxy_prepared(
         &self,
         node_id: &str,
         request: NodeWsProxyRequest,
-        signing_secret: Option<&[u8]>,
+        prepared_signature: Option<NodeRequestSignature>,
+        expected_connection_id: Option<&str>,
         _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
     ) -> AppResult<NodeWsProxySession> {
-        let conn = self
-            .connections
-            .get(node_id)
-            .ok_or_else(|| AppError::NodeOffline(format!("Node {node_id} is not connected")))?;
+        let conn = self.connection_for(node_id, expected_connection_id)?;
         let session_id = request.session_id.clone();
         let (ready_tx, ready_rx) = oneshot::channel();
         conn.ws_proxies
             .insert(session_id.clone(), PendingWsProxy::Awaiting(ready_tx));
 
-        let (timestamp, nonce, signature) = if let Some(secret) = signing_secret {
-            let ts = chrono::Utc::now().to_rfc3339();
-            let n = uuid::Uuid::new_v4().to_string();
-            let sig = compute_ws_proxy_hmac_signature(
-                secret,
-                &ts,
-                &n,
-                &request.session_id,
-                &request.service_slug,
-                &request.base_url,
-                &request.path,
-                request.query.as_deref(),
-            );
-            (Some(ts), Some(n), Some(sig))
-        } else {
-            (None, None, None)
-        };
+        let (timestamp, nonce, signature) = prepared_signature
+            .map(|prepared| {
+                (
+                    Some(prepared.timestamp),
+                    Some(prepared.nonce),
+                    Some(prepared.signature),
+                )
+            })
+            .unwrap_or((None, None, None));
 
         let headers_json: serde_json::Value = request
             .headers
@@ -3294,10 +3950,31 @@ pub fn compute_ws_proxy_hmac_signature(
     hex::encode(mac.finalize().into_bytes())
 }
 
+pub fn sign_ws_proxy_request(secret: &[u8], request: &NodeWsProxyRequest) -> NodeRequestSignature {
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let signature = compute_ws_proxy_hmac_signature(
+        secret,
+        &timestamp,
+        &nonce,
+        &request.session_id,
+        &request.service_slug,
+        &request.base_url,
+        &request.path,
+        request.query.as_deref(),
+    );
+    NodeRequestSignature {
+        timestamp,
+        nonce,
+        signature,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::time::Duration;
 
     fn billing_egress_permit(
         ingress: crate::services::billing::BillingIngress,
@@ -3318,6 +3995,81 @@ mod tests {
             node_proxy_ws_message_size_limit(raw_limit)
                 >= base64_len + NODE_PROXY_MESSAGE_OVERHEAD_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn replaced_connection_rejects_dispatch_for_previous_fence() {
+        let manager = NodeWsManager::new(30, 100);
+        let (old_tx, _old_rx) = mpsc::channel(256);
+        manager.register_connection_with_id("node-1", "connection-a".to_string(), old_tx);
+        let (new_tx, mut new_rx) = mpsc::channel(256);
+        manager.register_connection_with_id("node-1", "connection-b".to_string(), new_tx);
+
+        let result = manager
+            .send_proxy_request_classified_prepared(
+                "node-1",
+                NodeProxyRequest {
+                    request_id: "request-1".to_string(),
+                    service_id: "service-1".to_string(),
+                    service_slug: "service".to_string(),
+                    base_url: "https://example.test".to_string(),
+                    method: "GET".to_string(),
+                    path: "/resource".to_string(),
+                    query: None,
+                    headers: vec![],
+                    body: None,
+                },
+                None,
+                Some("connection-a"),
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
+            )
+            .await;
+
+        let failure = match result {
+            Err(failure) => failure,
+            Ok(_) => panic!("stale owner fence must not dispatch to replacement socket"),
+        };
+        assert!(!failure.dispatched);
+        assert!(matches!(failure.error, AppError::NodeOffline(_)));
+        assert!(new_rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn proxy_cancel_arriving_before_dispatch_prevents_socket_enqueue() {
+        let manager = NodeWsManager::new(30, 100);
+        let (tx, mut rx) = mpsc::channel(256);
+        manager.register_connection_with_id("node-1", "connection-a".to_string(), tx);
+        manager
+            .cancel_proxy_request_if("node-1", "connection-a", "request-cancelled")
+            .expect("record cancellation");
+
+        let result = manager
+            .send_proxy_request_classified_prepared(
+                "node-1",
+                NodeProxyRequest {
+                    request_id: "request-cancelled".to_string(),
+                    service_id: "service-1".to_string(),
+                    service_slug: "service".to_string(),
+                    base_url: "https://example.test".to_string(),
+                    method: "POST".to_string(),
+                    path: "/resource".to_string(),
+                    query: None,
+                    headers: vec![],
+                    body: None,
+                },
+                None,
+                Some("connection-a"),
+                billing_egress_permit(crate::services::billing::BillingIngress::Proxy),
+            )
+            .await;
+
+        let failure = match result {
+            Err(failure) => failure,
+            Ok(_) => panic!("cancelled request must not reach the node"),
+        };
+        assert!(!failure.dispatched);
+        assert!(matches!(failure.error, AppError::ClientDisconnected));
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]
@@ -3427,6 +4179,20 @@ mod tests {
         let mut ids = mgr.connected_node_ids();
         ids.sort();
         assert_eq!(ids, vec!["node-a", "node-b"]);
+    }
+
+    #[test]
+    fn stale_reader_cannot_unregister_replacement_connection() {
+        let mgr = NodeWsManager::new(30, 100);
+        let (old_tx, _old_rx) = mpsc::channel(256);
+        mgr.register_connection_with_id("node-a", "old".to_string(), old_tx);
+        let (new_tx, _new_rx) = mpsc::channel(256);
+        mgr.register_connection_with_id("node-a", "new".to_string(), new_tx);
+
+        assert!(!mgr.unregister_connection_if("node-a", "old"));
+        assert!(mgr.has_connection("node-a", "new"));
+        assert!(mgr.unregister_connection_if("node-a", "new"));
+        assert!(!mgr.is_connected("node-a"));
     }
 
     #[test]
@@ -4199,21 +4965,138 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn aborting_cert_ssh_exec_sends_cancel_and_cleans_pending_state() {
+        let mgr = Arc::new(NodeWsManager::new(30, 100));
+        let (tx, mut rx) = mpsc::channel(256);
+        mgr.register_connection("node-1", tx);
+
+        let exec = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move {
+                mgr.exec_ssh_command_prepared(
+                    "node-1",
+                    NodeSshExecRequest {
+                        request_id: "exec-cert-cancel".to_string(),
+                        host: "ssh.internal".to_string(),
+                        port: 22,
+                        principal: "deploy".to_string(),
+                        private_key_pem: "private-key".to_string(),
+                        certificate_openssh: "certificate".to_string(),
+                        command: "sleep 30".to_string(),
+                        timeout_secs: 30,
+                    },
+                    None,
+                    None,
+                    billing_egress_permit(crate::services::billing::BillingIngress::SshExec),
+                )
+                .await
+            }
+        });
+
+        let open = rx.recv().await.expect("exec open frame");
+        let NodeOutboundMessage::Text(open) = open else {
+            panic!("expected text exec open frame");
+        };
+        let open: Value = serde_json::from_str(&open).expect("exec open json");
+        assert_eq!(open["type"], "ssh_exec");
+
+        exec.abort();
+        let _ = exec.await;
+
+        let cancel = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("cancel frame timeout")
+            .expect("cancel frame");
+        let NodeOutboundMessage::Text(cancel) = cancel else {
+            panic!("expected text exec cancel frame");
+        };
+        let cancel: Value = serde_json::from_str(&cancel).expect("exec cancel json");
+        assert_eq!(cancel["type"], "ssh_exec_cancel");
+        assert_eq!(cancel["request_id"], "exec-cert-cancel");
+
+        let conn = mgr.connections.get("node-1").expect("node connection");
+        assert!(!conn.ssh_exec_requests.contains_key("exec-cert-cancel"));
+        assert!(!conn.ssh_node_exec_streams.contains_key("exec-cert-cancel"));
+    }
+
+    #[tokio::test]
+    async fn aborting_node_key_ssh_exec_sends_cancel_and_cleans_pending_state() {
+        let mgr = Arc::new(NodeWsManager::new(30, 100));
+        let (tx, mut rx) = mpsc::channel(256);
+        mgr.register_connection("node-1", tx);
+
+        let exec = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move {
+                mgr.exec_ssh_node_key_command_prepared(
+                    "node-1",
+                    NodeSshNodeKeyExecRequest {
+                        request_id: "exec-node-key-cancel".to_string(),
+                        service_slug: "server".to_string(),
+                        principal: "deploy".to_string(),
+                        command: "sleep 30".to_string(),
+                        timeout_secs: 30,
+                        target_host: Some("ssh.internal".to_string()),
+                        target_port: Some(22),
+                        host_key_sha256: None,
+                    },
+                    None,
+                    None,
+                    billing_egress_permit(crate::services::billing::BillingIngress::SshExec),
+                )
+                .await
+            }
+        });
+
+        let open = rx.recv().await.expect("exec open frame");
+        let NodeOutboundMessage::Text(open) = open else {
+            panic!("expected text exec open frame");
+        };
+        let open: Value = serde_json::from_str(&open).expect("exec open json");
+        assert_eq!(open["type"], "ssh_node_exec_open");
+
+        exec.abort();
+        let _ = exec.await;
+
+        let cancel = tokio::time::timeout(Duration::from_millis(100), rx.recv())
+            .await
+            .expect("cancel frame timeout")
+            .expect("cancel frame");
+        let NodeOutboundMessage::Text(cancel) = cancel else {
+            panic!("expected text exec cancel frame");
+        };
+        let cancel: Value = serde_json::from_str(&cancel).expect("exec cancel json");
+        assert_eq!(cancel["type"], "ssh_exec_cancel");
+        assert_eq!(cancel["request_id"], "exec-node-key-cancel");
+
+        let conn = mgr.connections.get("node-1").expect("node connection");
+        assert!(!conn.ssh_exec_requests.contains_key("exec-node-key-cancel"));
+        assert!(
+            !conn
+                .ssh_node_exec_streams
+                .contains_key("exec-node-key-cancel")
+        );
+    }
+
     #[test]
-    fn total_connection_count_includes_pending_auth() {
-        let mgr = NodeWsManager::new(30, 100);
+    fn connection_reservation_is_atomic_and_spans_socket_lifetime() {
+        let mgr = Arc::new(NodeWsManager::new(30, 1));
         assert_eq!(mgr.total_connection_count(), 0);
 
-        mgr.increment_pending_auth();
+        let reservation = mgr.try_reserve_connection().expect("first reservation");
         assert_eq!(mgr.total_connection_count(), 1);
+        assert!(mgr.try_reserve_connection().is_none());
 
         let (tx, _rx) = mpsc::channel(256);
         mgr.register_connection("node-1", tx);
-        mgr.decrement_pending_auth();
         assert_eq!(mgr.total_connection_count(), 1);
 
         mgr.unregister_connection("node-1");
+        assert_eq!(mgr.total_connection_count(), 1);
+        drop(reservation);
         assert_eq!(mgr.total_connection_count(), 0);
+        assert!(mgr.try_reserve_connection().is_some());
     }
 
     #[test]

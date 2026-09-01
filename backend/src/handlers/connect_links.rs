@@ -194,7 +194,11 @@ pub async fn create_connect_link(
         .api_key_id
         .as_deref()
         .map_or_else(|| format!("user:{actor_id}"), |id| format!("api-key:{id}"));
-    if !state.connect_link_create_limiter.check(&rate_key) {
+    if !state
+        .connect_link_create_limiter
+        .check_shared(&rate_key)
+        .await?
+    {
         return Err(AppError::ConnectLinkRateLimited);
     }
 
@@ -321,7 +325,11 @@ pub async fn preview_connect_link(
     Json(body): Json<PreviewConnectLinkRequest>,
 ) -> AppResult<Json<PreviewConnectLinkResponse>> {
     let client_ip = resolve_client_ip(&headers, addr, &state)?;
-    if !state.connect_link_preview_limiter.check(client_ip) {
+    if !state
+        .connect_link_preview_limiter
+        .check_shared(client_ip)
+        .await?
+    {
         return Err(AppError::ConnectLinkRateLimited);
     }
     let view = connect_link_service::preview(&state.db, &body.token).await?;
@@ -373,7 +381,11 @@ pub async fn cancel_hosted_connect_link(
     Json(body): Json<CancelHostedConnectLinkRequest>,
 ) -> AppResult<Json<ConnectLinkStatusResponse>> {
     let client_ip = resolve_client_ip(&headers, addr, &state)?;
-    if !state.connect_link_complete_limiter.check(client_ip) {
+    if !state
+        .connect_link_complete_limiter
+        .check_shared(client_ip)
+        .await?
+    {
         return Err(AppError::ConnectLinkRateLimited);
     }
     let view = match connect_link_service::cancel_by_token(
@@ -433,7 +445,11 @@ pub async fn complete_connect_link(
     Json(body): Json<CompleteConnectLinkRequest>,
 ) -> AppResult<Json<CompleteConnectLinkResponse>> {
     let client_ip = resolve_client_ip(&headers, addr, &state)?;
-    if !state.connect_link_complete_limiter.check(client_ip) {
+    if !state
+        .connect_link_complete_limiter
+        .check_shared(client_ip)
+        .await?
+    {
         return Err(AppError::ConnectLinkRateLimited);
     }
     let actor_id = auth_user.user_id.to_string();

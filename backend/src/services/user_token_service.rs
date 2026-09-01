@@ -15,6 +15,7 @@ use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, Provid
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_provider_token::{COLLECTION_NAME, UserProviderToken};
 use crate::services::connection_expiry_service::{self, ConnectionExpiryNotifier};
+use crate::services::coordination_service::{self, ClusterLeaseRuntime, LeaseStore};
 use crate::services::oauth_flow;
 use crate::services::user_credentials_service;
 
@@ -2217,15 +2218,147 @@ fn classify_device_poll_failure(
 /// Caller (`proxy_service::maybe_refresh_provider_backed_api_key`)
 /// reaches this path only when `api_key.connection_id.is_some()`.
 ///
-/// Concurrency: this function is read-modify-write on the `UserApiKey`
-/// row without a database-level lock. Two simultaneous refreshes for the
-/// same `_id` will both call the IdP; the loser's response is discarded
-/// (last-write-wins), and if the provider rotates the refresh_token, the
-/// loser may end up persisting an already-invalidated value. Acceptable
-/// per the design intent — the next refresh attempt would fail and the
-/// row would be marked `status: "failed"`. Callers should not invoke
-/// this function concurrently for the same key.
 pub async fn refresh_user_api_key_in_place(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    api_key: &UserApiKey,
+    notifier: Option<&ConnectionExpiryNotifier>,
+) -> AppResult<UserApiKey> {
+    refresh_user_api_key_with_runtime(
+        db,
+        encryption_keys,
+        api_key,
+        notifier,
+        coordination_service::cluster_lease_runtime(),
+    )
+    .await
+}
+
+fn user_api_key_refresh_lease_name(api_key_id: &str) -> String {
+    format!("oauth-refresh:user-api-key:{api_key_id}")
+}
+
+fn same_user_api_key_refresh_revision(expected: &UserApiKey, current: &UserApiKey) -> bool {
+    expected.credential_epoch == current.credential_epoch
+        && expected.updated_at.timestamp_millis() == current.updated_at.timestamp_millis()
+        && expected.refresh_token_encrypted == current.refresh_token_encrypted
+}
+
+async fn load_user_api_key(db: &mongodb::Database, api_key_id: &str) -> AppResult<UserApiKey> {
+    db.collection::<UserApiKey>(USER_API_KEYS)
+        .find_one(doc! { "_id": api_key_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("OAuth credential no longer exists".to_string()))
+}
+
+/// Wait for a lease holder to change the credential revision or release its
+/// lease. Acquiring the released lease proves that an unchanged row is the
+/// outcome of a completed or expired refresh attempt, not an active winner.
+async fn wait_for_concurrent_refresh<T, Load, LoadFuture, SameRevision>(
+    db: &mongodb::Database,
+    lease_name: &str,
+    expected: &T,
+    runtime: &ClusterLeaseRuntime,
+    mut load: Load,
+    same_revision: SameRevision,
+) -> AppResult<T>
+where
+    Load: FnMut() -> LoadFuture,
+    LoadFuture: std::future::Future<Output = AppResult<T>>,
+    SameRevision: Fn(&T, &T) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + runtime.ttl.saturating_add(runtime.renew_interval);
+    let poll_interval = runtime
+        .contender_wait()
+        .max(std::time::Duration::from_millis(1));
+    let mut observed_initial_revision = false;
+
+    loop {
+        let current = load().await?;
+        if !same_revision(expected, &current) {
+            return Ok(current);
+        }
+        if !observed_initial_revision {
+            runtime.notify_contender_observed();
+            observed_initial_revision = true;
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(AppError::Conflict(
+                "OAuth credential refresh is still in progress".to_string(),
+            ));
+        }
+
+        if let Some(lease) = runtime.acquire(db, lease_name).await? {
+            let outcome = load().await;
+            if let Err(error) = LeaseStore::release(db, &lease).await {
+                tracing::warn!(lease_name = %lease.name, error = %error, "Failed to release OAuth refresh outcome lease");
+            }
+            return outcome;
+        }
+
+        tokio::time::sleep(poll_interval.min(deadline.saturating_duration_since(now))).await;
+    }
+}
+
+async fn refresh_user_api_key_with_runtime(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    api_key: &UserApiKey,
+    notifier: Option<&ConnectionExpiryNotifier>,
+    runtime: &ClusterLeaseRuntime,
+) -> AppResult<UserApiKey> {
+    let lease_name = user_api_key_refresh_lease_name(&api_key.id);
+    let Some(lease) = runtime.acquire(db, &lease_name).await? else {
+        return wait_for_concurrent_refresh(
+            db,
+            &lease_name,
+            api_key,
+            runtime,
+            || load_user_api_key(db, &api_key.id),
+            same_user_api_key_refresh_revision,
+        )
+        .await;
+    };
+
+    let current = load_user_api_key(db, &api_key.id).await?;
+    if !same_user_api_key_refresh_revision(api_key, &current)
+        || current.status != "active"
+        || current.credential_type != "oauth2"
+    {
+        if let Err(error) = LeaseStore::release(db, &lease).await {
+            tracing::warn!(lease_name = %lease.name, error = %error, "Failed to release OAuth refresh lease");
+        }
+        return Ok(current);
+    }
+    if current.refresh_token_encrypted.is_none() {
+        if let Err(error) = LeaseStore::release(db, &lease).await {
+            tracing::warn!(lease_name = %lease.name, error = %error, "Failed to release OAuth refresh lease");
+        }
+        return Err(AppError::Internal(
+            "UserApiKey missing refresh_token for refresh".to_string(),
+        ));
+    }
+
+    let result = runtime
+        .run_while_renewed(
+            db,
+            &lease,
+            refresh_user_api_key_under_lease(db, encryption_keys, &current, notifier),
+        )
+        .await;
+    if let Err(error) = LeaseStore::release(db, &lease).await {
+        tracing::warn!(lease_name = %lease.name, error = %error, "Failed to release OAuth refresh lease");
+    }
+
+    match result {
+        Some(result) => result,
+        None => load_user_api_key(db, &api_key.id).await,
+    }
+}
+
+async fn refresh_user_api_key_under_lease(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     api_key: &UserApiKey,
@@ -2477,18 +2610,19 @@ pub async fn refresh_user_api_key_in_place(
         set_doc.insert("token_scopes", scope);
     }
 
-    // Status predicate refuses to resurrect a row a sibling write has
-    // moved to a terminal state (`revoked` or `failed`). Without it, a
-    // concurrent revoke could be overwritten by this success write,
-    // re-activating a credential the user just told us to drop.
-    // Concurrent successful refreshes keep last-write-wins (see the
-    // function-level rustdoc) — both writes have valid token material,
-    // so a later one overwriting an earlier one is fine.
-    db.collection::<UserApiKey>(USER_API_KEYS)
+    let update = db
+        .collection::<UserApiKey>(USER_API_KEYS)
         .update_one(
             doc! {
                 "_id": &api_key.id,
-                "status": { "$nin": ["revoked", "failed"] },
+                "updated_at": bson::DateTime::from_chrono(api_key.updated_at),
+                "status": "active",
+                "$expr": {
+                    "$eq": [
+                        { "$ifNull": ["$credential_epoch", 1_i64] },
+                        api_key.credential_epoch,
+                    ]
+                },
             },
             doc! { "$set": set_doc },
         )
@@ -2504,12 +2638,19 @@ pub async fn refresh_user_api_key_in_place(
             )
         })?;
 
-    tracing::info!(
-        user_id = %api_key.user_id,
-        connection_id = ?api_key.connection_id,
-        provider_id = %provider_id,
-        "UserApiKey OAuth tokens refreshed in place (multi-connection path)"
-    );
+    if update.modified_count == 1 {
+        tracing::info!(
+            user_id = %api_key.user_id,
+            connection_id = ?api_key.connection_id,
+            provider_id = %provider_id,
+            "UserApiKey OAuth tokens refreshed in place (multi-connection path)"
+        );
+    } else {
+        tracing::info!(
+            api_key_id = %api_key.id,
+            "OAuth refresh result discarded because the credential revision changed"
+        );
+    }
 
     Ok(refreshed)
 }
@@ -2546,17 +2687,9 @@ pub struct RefreshSweepReport {
 /// days, and a connection authorized before refresh tokens were issued
 /// has nothing to refresh. Both cases land as `status: "failed"` here.
 ///
-/// Concurrency: `refresh_user_api_key_in_place` is not lock-serialized
-/// against the proxy-time lazy-refresh path (it documents "callers should
-/// not invoke concurrently for the same key"). The expiry-window filter
-/// makes a collision unlikely — a key the proxy just refreshed has a
-/// ~1h expiry and won't match the window — and for non-rotating providers
-/// (Google, LinkedIn) a duplicate refresh is merely a wasted call. If a
-/// rotating-refresh-token provider (Auth0 / Okta / GitHub App style) is
-/// ever added as a BYO catalog entry, a per-credential single-flight lock
-/// shared with the proxy path should be introduced first to avoid a
-/// reuse-detection `invalid_grant` from a sweep+proxy race. Tracked as a
-/// follow-up; not a concern for the current Google / Lark use cases.
+/// Every candidate is claimed through the same per-key Mongo lease used by
+/// proxy-time refresh, so replicas cannot concurrently spend a rotating
+/// refresh token.
 pub async fn refresh_expiring_oauth_keys(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -2615,6 +2748,102 @@ pub async fn refresh_expiring_oauth_keys(
     Ok(report)
 }
 
+fn provider_token_refresh_lease_name(token_id: &str) -> String {
+    format!("oauth-refresh:user-provider-token:{token_id}")
+}
+
+fn same_provider_token_refresh_revision(
+    expected: &UserProviderToken,
+    current: &UserProviderToken,
+) -> bool {
+    expected.state_version == current.state_version
+        && expected.updated_at.timestamp_millis() == current.updated_at.timestamp_millis()
+        && expected.refresh_token_encrypted == current.refresh_token_encrypted
+}
+
+async fn load_provider_token(
+    db: &mongodb::Database,
+    token_id: &str,
+) -> AppResult<UserProviderToken> {
+    db.collection::<UserProviderToken>(COLLECTION_NAME)
+        .find_one(doc! { "_id": token_id })
+        .await?
+        .ok_or_else(|| AppError::NotFound("OAuth credential no longer exists".to_string()))
+}
+
+async fn decrypt_provider_access_token(
+    encryption_keys: &EncryptionKeys,
+    token: &UserProviderToken,
+) -> AppResult<String> {
+    if !matches!(token.status.as_str(), "active" | "expired") {
+        return Err(AppError::Internal(
+            "OAuth credential is no longer active".to_string(),
+        ));
+    }
+    let encrypted = token.access_token_encrypted.as_ref().ok_or_else(|| {
+        AppError::Internal("OAuth token missing encrypted access_token".to_string())
+    })?;
+    let decrypted = Zeroizing::new(encryption_keys.decrypt(encrypted).await?);
+    String::from_utf8((*decrypted).clone())
+        .map_err(|error| AppError::Internal(format!("Failed to decode access token: {error}")))
+}
+
+async fn refresh_provider_token_with_runtime(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    token: &UserProviderToken,
+    runtime: &ClusterLeaseRuntime,
+) -> AppResult<String> {
+    let lease_name = provider_token_refresh_lease_name(&token.id);
+    let Some(lease) = runtime.acquire(db, &lease_name).await? else {
+        let current = wait_for_concurrent_refresh(
+            db,
+            &lease_name,
+            token,
+            runtime,
+            || load_provider_token(db, &token.id),
+            same_provider_token_refresh_revision,
+        )
+        .await?;
+        return decrypt_provider_access_token(encryption_keys, &current).await;
+    };
+
+    let current = load_provider_token(db, &token.id).await?;
+    let still_needs_refresh = current
+        .expires_at
+        .is_some_and(|expires_at| expires_at <= Utc::now() + Duration::minutes(5));
+    if !same_provider_token_refresh_revision(token, &current)
+        || !matches!(current.status.as_str(), "active" | "expired")
+        || current.refresh_token_encrypted.is_none()
+        || !still_needs_refresh
+    {
+        if let Err(error) = LeaseStore::release(db, &lease).await {
+            tracing::warn!(lease_name = %lease.name, error = %error, "Failed to release OAuth refresh lease");
+        }
+        return decrypt_provider_access_token(encryption_keys, &current).await;
+    }
+
+    let result = runtime
+        .run_while_renewed(
+            db,
+            &lease,
+            oauth_flow::refresh_oauth_token(db, encryption_keys, &current),
+        )
+        .await;
+    if let Err(error) = LeaseStore::release(db, &lease).await {
+        tracing::warn!(lease_name = %lease.name, error = %error, "Failed to release OAuth refresh lease");
+    }
+
+    match result {
+        Some(Ok(access_token)) => Ok(access_token),
+        Some(Err(AppError::Conflict(_))) | None => {
+            let current = load_provider_token(db, &token.id).await?;
+            decrypt_provider_access_token(encryption_keys, &current).await
+        }
+        Some(Err(error)) => Err(error),
+    }
+}
+
 /// Get a user's decrypted token for a provider, with lazy refresh for OAuth tokens.
 pub async fn get_active_token(
     db: &mongodb::Database,
@@ -2664,7 +2893,14 @@ pub async fn get_active_token(
                 .is_some_and(|exp| exp <= now + Duration::minutes(5));
 
             if needs_refresh && token.refresh_token_encrypted.is_some() {
-                match oauth_flow::refresh_oauth_token(db, encryption_keys, &token).await {
+                match refresh_provider_token_with_runtime(
+                    db,
+                    encryption_keys,
+                    &token,
+                    coordination_service::cluster_lease_runtime(),
+                )
+                .await
+                {
                     Ok(new_access_token) => {
                         return Ok(DecryptedProviderToken {
                             token_type: "oauth2".to_string(),
@@ -2672,6 +2908,7 @@ pub async fn get_active_token(
                             api_key: None,
                         });
                     }
+                    Err(error @ AppError::Conflict(_)) => return Err(error),
                     Err(e) => {
                         if let Err(transition_error) =
                             transition_legacy_keys_from_stored_token_state(db, &token, notifier)
@@ -2909,8 +3146,11 @@ mod tests {
     use crate::models::provider_config::ProviderConfig;
     use crate::models::user_provider_token::UserProviderToken;
     use chrono::Utc;
-    use mongodb::bson::Bson;
+    use mongodb::bson::{self, Bson};
     use std::collections::HashMap;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
 
     #[test]
     fn chat_state_discriminator_requires_canonical_uuid_v4() {
@@ -3526,6 +3766,50 @@ mod tests {
         (format!("http://{addr}/token"), handle)
     }
 
+    async fn spawn_counting_token_server(
+        response: serde_json::Value,
+    ) -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        Arc<AtomicUsize>,
+        Arc<Notify>,
+        Arc<Notify>,
+    ) {
+        let requests = Arc::new(AtomicUsize::new(0));
+        let handler_requests = requests.clone();
+        let request_started = Arc::new(Notify::new());
+        let handler_request_started = request_started.clone();
+        let release_response = Arc::new(Notify::new());
+        let handler_release_response = release_response.clone();
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(move || {
+                let response = response.clone();
+                let requests = handler_requests.clone();
+                let request_started = handler_request_started.clone();
+                let release_response = handler_release_response.clone();
+                async move {
+                    requests.fetch_add(1, Ordering::SeqCst);
+                    request_started.notify_one();
+                    release_response.notified().await;
+                    axum::Json(response)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (
+            format!("http://{addr}/token"),
+            handle,
+            requests,
+            request_started,
+            release_response,
+        )
+    }
+
     fn make_test_provider(
         id: &str,
         token_url: &str,
@@ -3622,6 +3906,214 @@ mod tests {
             .await
             .unwrap();
         key
+    }
+
+    fn refresh_runtime(
+        instance: &str,
+    ) -> crate::services::coordination_service::ClusterLeaseRuntime {
+        crate::services::coordination_service::ClusterLeaseRuntime::new(
+            crate::models::coordination::CoordinationHolder {
+                instance_id: instance.to_string(),
+                generation_id: Uuid::new_v4().to_string(),
+            },
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_millis(200),
+        )
+    }
+
+    #[tokio::test]
+    async fn user_api_key_refresh_is_single_flight_across_replicas() {
+        let Some(db) = connect_test_database("refresh_in_place_single_flight").await else {
+            eprintln!("skipping OAuth single-flight test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = Arc::new(test_encryption_keys());
+        let (token_url, _server, requests, request_started, release_response) =
+            spawn_counting_token_server(serde_json::json!({
+                "access_token": "fresh-access",
+                "refresh_token": "rotated-refresh",
+                "expires_in": 3600,
+            }))
+            .await;
+        let provider_id = Uuid::new_v4().to_string();
+        let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(make_test_provider(
+                &provider_id,
+                &token_url,
+                Some(client_id),
+                None,
+            ))
+            .await
+            .unwrap();
+        let key =
+            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let first_runtime = refresh_runtime("pod-a");
+        let contender_observed = Arc::new(Notify::new());
+        let second_runtime =
+            refresh_runtime("pod-b").with_contender_observer(contender_observed.clone());
+
+        let first_db = db.clone();
+        let first_encryption_keys = encryption_keys.clone();
+        let first_key = key.clone();
+        let first = tokio::spawn(async move {
+            super::refresh_user_api_key_with_runtime(
+                &first_db,
+                &first_encryption_keys,
+                &first_key,
+                None,
+                &first_runtime,
+            )
+            .await
+        });
+        request_started.notified().await;
+
+        let second_db = db.clone();
+        let second_encryption_keys = encryption_keys.clone();
+        let second_key = key.clone();
+        let second = tokio::spawn(async move {
+            super::refresh_user_api_key_with_runtime(
+                &second_db,
+                &second_encryption_keys,
+                &second_key,
+                None,
+                &second_runtime,
+            )
+            .await
+        });
+        contender_observed.notified().await;
+        release_response.notify_one();
+        let (first, second) = tokio::join!(first, second);
+        let first = first.expect("winner task");
+        let second = second.expect("contender task");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        for refreshed in [first.unwrap(), second.unwrap()] {
+            let access = encryption_keys
+                .decrypt(refreshed.access_token_encrypted.as_ref().unwrap())
+                .await
+                .unwrap();
+            assert_eq!(access, b"fresh-access");
+        }
+    }
+
+    #[tokio::test]
+    async fn stale_refresh_cannot_overwrite_user_credential_replacement() {
+        let Some(db) = connect_test_database("refresh_in_place_replacement_fence").await else {
+            eprintln!("skipping OAuth replacement-fence test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let (token_url, _server) = spawn_token_server(
+            serde_json::json!({
+                "access_token": "stale-holder-access",
+                "refresh_token": "stale-holder-refresh",
+                "expires_in": 3600,
+            }),
+            axum::http::StatusCode::OK,
+        )
+        .await;
+        let provider_id = Uuid::new_v4().to_string();
+        let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(make_test_provider(
+                &provider_id,
+                &token_url,
+                Some(client_id),
+                None,
+            ))
+            .await
+            .unwrap();
+        let stale =
+            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let replacement_access = encryption_keys
+            .encrypt(b"replacement-access")
+            .await
+            .unwrap();
+        let replacement_refresh = encryption_keys
+            .encrypt(b"replacement-refresh")
+            .await
+            .unwrap();
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &stale.id },
+                vec![doc! { "$set": {
+                    "access_token_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: replacement_access,
+                    },
+                    "refresh_token_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: replacement_refresh,
+                    },
+                    "credential_epoch": {
+                        "$add": [{ "$ifNull": ["$credential_epoch", 1_i64] }, 1_i64]
+                    },
+                    "updated_at": bson::DateTime::from_chrono(Utc::now() + Duration::seconds(1)),
+                }}],
+            )
+            .await
+            .unwrap();
+
+        let returned = super::refresh_user_api_key_under_lease(&db, &encryption_keys, &stale, None)
+            .await
+            .expect("stale provider result should be discarded");
+        assert_eq!(returned.credential_epoch, 2);
+        let stored_access = encryption_keys
+            .decrypt(returned.access_token_encrypted.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(stored_access, b"replacement-access");
+    }
+
+    #[tokio::test]
+    async fn stale_refresh_failure_cannot_fail_user_credential_replacement() {
+        let Some(db) = connect_test_database("refresh_failure_replacement_fence").await else {
+            eprintln!("skipping OAuth failure-fence test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let (token_url, _server) = spawn_token_server(
+            serde_json::json!({ "error": "invalid_grant" }),
+            axum::http::StatusCode::UNAUTHORIZED,
+        )
+        .await;
+        let provider_id = Uuid::new_v4().to_string();
+        let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(make_test_provider(
+                &provider_id,
+                &token_url,
+                Some(client_id),
+                None,
+            ))
+            .await
+            .unwrap();
+        let stale =
+            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &stale.id },
+                vec![doc! { "$set": {
+                    "credential_epoch": {
+                        "$add": [{ "$ifNull": ["$credential_epoch", 1_i64] }, 1_i64]
+                    },
+                    "updated_at": bson::DateTime::from_chrono(Utc::now() + Duration::seconds(1)),
+                }}],
+            )
+            .await
+            .unwrap();
+
+        super::refresh_user_api_key_under_lease(&db, &encryption_keys, &stale, None)
+            .await
+            .expect_err("provider rejection remains an error");
+        let stored = db
+            .collection::<UserApiKey>(USER_API_KEYS)
+            .find_one(doc! { "_id": &stale.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.credential_epoch, 2);
+        assert_eq!(stored.status, "active");
     }
 
     // ───────────────────────────────────────────────────────────────────
@@ -4519,6 +5011,183 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_provider_token_refresh_is_single_flight_across_replicas() {
+        let Some(db) = connect_test_database("legacy_refresh_single_flight").await else {
+            eprintln!("skipping legacy OAuth single-flight test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = Arc::new(test_encryption_keys());
+        let (token_url, _server, requests, request_started, release_response) =
+            spawn_counting_token_server(serde_json::json!({
+                "access_token": "fresh-legacy-access",
+                "refresh_token": "rotated-legacy-refresh",
+                "expires_in": 3600,
+            }))
+            .await;
+        let provider_id = Uuid::new_v4().to_string();
+        let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
+        let client_secret = encryption_keys.encrypt(b"client-secret").await.unwrap();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(make_test_provider(
+                &provider_id,
+                &token_url,
+                Some(client_id),
+                Some(client_secret),
+            ))
+            .await
+            .unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let mut token = make_oauth_token(
+            &encryption_keys,
+            &user_id,
+            &provider_id,
+            "stale-legacy-access",
+            "active",
+            Some(Utc::now() - Duration::minutes(1)),
+        )
+        .await;
+        token.refresh_token_encrypted = Some(
+            encryption_keys
+                .encrypt(b"legacy-refresh-token")
+                .await
+                .unwrap(),
+        );
+        insert_test_token(&db, &token).await;
+        let first_runtime = refresh_runtime("pod-a");
+        let contender_observed = Arc::new(Notify::new());
+        let second_runtime =
+            refresh_runtime("pod-b").with_contender_observer(contender_observed.clone());
+
+        let first_db = db.clone();
+        let first_encryption_keys = encryption_keys.clone();
+        let first_token = token.clone();
+        let first = tokio::spawn(async move {
+            super::refresh_provider_token_with_runtime(
+                &first_db,
+                &first_encryption_keys,
+                &first_token,
+                &first_runtime,
+            )
+            .await
+        });
+        request_started.notified().await;
+
+        let second_db = db.clone();
+        let second_encryption_keys = encryption_keys.clone();
+        let second_token = token.clone();
+        let second = tokio::spawn(async move {
+            super::refresh_provider_token_with_runtime(
+                &second_db,
+                &second_encryption_keys,
+                &second_token,
+                &second_runtime,
+            )
+            .await
+        });
+        contender_observed.notified().await;
+        release_response.notify_one();
+        let (first, second) = tokio::join!(first, second);
+        let first = first.expect("winner task").expect("first replica refresh");
+        let second = second
+            .expect("contender task")
+            .expect("second replica refresh");
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        assert_eq!(first, "fresh-legacy-access");
+        assert_eq!(second, "fresh-legacy-access");
+    }
+
+    #[tokio::test]
+    async fn stale_legacy_refresh_cannot_overwrite_reauthorized_token() {
+        let Some(db) = connect_test_database("legacy_refresh_replacement_fence").await else {
+            eprintln!("skipping legacy OAuth replacement-fence test: no local MongoDB available");
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let (token_url, _server) = spawn_token_server(
+            serde_json::json!({
+                "access_token": "stale-holder-access",
+                "refresh_token": "stale-holder-refresh",
+                "expires_in": 3600,
+            }),
+            axum::http::StatusCode::OK,
+        )
+        .await;
+        let provider_id = Uuid::new_v4().to_string();
+        let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
+        let client_secret = encryption_keys.encrypt(b"client-secret").await.unwrap();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(make_test_provider(
+                &provider_id,
+                &token_url,
+                Some(client_id),
+                Some(client_secret),
+            ))
+            .await
+            .unwrap();
+        let user_id = Uuid::new_v4().to_string();
+        let mut stale = make_oauth_token(
+            &encryption_keys,
+            &user_id,
+            &provider_id,
+            "stale-access",
+            "active",
+            Some(Utc::now() - Duration::minutes(1)),
+        )
+        .await;
+        stale.refresh_token_encrypted =
+            Some(encryption_keys.encrypt(b"stale-refresh").await.unwrap());
+        insert_test_token(&db, &stale).await;
+        let replacement_access = encryption_keys
+            .encrypt(b"replacement-access")
+            .await
+            .unwrap();
+        let replacement_refresh = encryption_keys
+            .encrypt(b"replacement-refresh")
+            .await
+            .unwrap();
+        db.collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .update_one(
+                doc! { "_id": &stale.id },
+                vec![doc! { "$set": {
+                    "access_token_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: replacement_access,
+                    },
+                    "refresh_token_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: replacement_refresh,
+                    },
+                    "state_version": {
+                        "$add": [{ "$ifNull": ["$state_version", 0_i64] }, 1_i64]
+                    },
+                    "updated_at": bson::DateTime::from_chrono(Utc::now() + Duration::seconds(1)),
+                }}],
+            )
+            .await
+            .unwrap();
+
+        let error = crate::services::oauth_flow::refresh_oauth_token(&db, &encryption_keys, &stale)
+            .await
+            .expect_err("stale legacy provider result must be discarded");
+        assert!(
+            matches!(error, AppError::Conflict(_)),
+            "expected stale-write conflict, got {error:?}"
+        );
+        let stored = db
+            .collection::<UserProviderToken>(USER_PROVIDER_TOKENS)
+            .find_one(doc! { "_id": &stale.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.state_version, 2);
+        let access = encryption_keys
+            .decrypt(stored.access_token_encrypted.as_ref().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(access, b"replacement-access");
     }
 
     // --- get_active_token tests ---

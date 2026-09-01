@@ -448,6 +448,7 @@ mod tests {
                 connected_at: Some(Utc::now()),
                 metadata: None,
                 metrics: NodeMetrics::default(),
+                connection_owner: None,
                 is_active: true,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
@@ -455,9 +456,7 @@ mod tests {
             .await
             .expect("insert fixture node for explicit node-bound token");
         let (node_tx, node_rx) = tokio::sync::mpsc::channel(8);
-        state
-            .node_ws_manager
-            .register_connection(TEST_NODE_ID, node_tx);
+        crate::test_utils::register_test_node_connection(&state, TEST_NODE_ID, node_tx).await;
 
         let source_token = jwt::generate_oauth_access_token(
             &state.jwt_keys,
@@ -2855,6 +2854,7 @@ mod tests {
                 connected_at: Some(Utc::now()),
                 metadata: None,
                 metrics: NodeMetrics::default(),
+                connection_owner: None,
                 is_active: true,
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
@@ -2862,10 +2862,12 @@ mod tests {
             .await
             .expect("insert out-of-scope node for binding mutation");
         let (out_of_scope_node_tx, out_of_scope_node_rx) = tokio::sync::mpsc::channel(8);
-        fixture
-            .state
-            .node_ws_manager
-            .register_connection(TEST_OUT_OF_SCOPE_NODE_ID, out_of_scope_node_tx);
+        crate::test_utils::register_test_node_connection(
+            &fixture.state,
+            TEST_OUT_OF_SCOPE_NODE_ID,
+            out_of_scope_node_tx,
+        )
+        .await;
         user_services
             .update_one(
                 mongodb::bson::doc! { "_id": TEST_SERVICE_A },

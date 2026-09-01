@@ -20,7 +20,7 @@ pub async fn create_request(
     Json(input): Json<ExactServiceApprovalCreate>,
 ) -> AppResult<Json<ExactServiceApprovalResult>> {
     auth_user.ensure_rest_proxy_access()?;
-    enforce_rate_limit(&state, &auth_user)?;
+    enforce_rate_limit(&state, &auth_user).await?;
     let caller = caller(&auth_user)?;
     Ok(Json(
         exact_service_approval_service::create_request(&state, &caller, input).await?,
@@ -33,7 +33,7 @@ pub async fn observe_request(
     Path(request_id): Path<String>,
 ) -> AppResult<Json<ExactServiceApprovalResult>> {
     auth_user.ensure_rest_proxy_access()?;
-    enforce_rate_limit(&state, &auth_user)?;
+    enforce_rate_limit(&state, &auth_user).await?;
     let caller = caller(&auth_user)?;
     Ok(Json(
         exact_service_approval_service::observe_request(&state, &caller, &request_id).await?,
@@ -48,7 +48,7 @@ pub async fn redeem_request(
     Json(fence): Json<ExactServiceApprovalFence>,
 ) -> AppResult<Json<ExactServiceApprovalResult>> {
     auth_user.ensure_rest_proxy_access()?;
-    enforce_rate_limit(&state, &auth_user)?;
+    enforce_rate_limit(&state, &auth_user).await?;
     let caller = caller(&auth_user)?;
     let permit =
         enforce_billing_egress_classification(Some(billing_route_policy), BillingIngress::Mcp)?;
@@ -108,13 +108,14 @@ fn caller(auth_user: &AuthUser) -> AppResult<ExactServiceApprovalCaller> {
     })
 }
 
-fn enforce_rate_limit(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
+async fn enforce_rate_limit(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
     crate::mw::rate_limit::check_agent_rate_limit_raw(
         &state.per_agent_limiter,
         auth_user.api_key_id.as_deref(),
         auth_user.rate_limit_per_second,
         auth_user.rate_limit_burst,
     )
+    .await
 }
 
 #[cfg(test)]

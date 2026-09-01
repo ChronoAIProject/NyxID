@@ -39,6 +39,9 @@ mod grant_visibility_tests;
 #[cfg(test)]
 mod credit_schedule_tests;
 
+#[cfg(test)]
+mod coordination_tests;
+
 use std::sync::Arc;
 
 /// Install `aws_lc_rs` as the rustls process-wide crypto provider.
@@ -72,8 +75,6 @@ use crypto::key_provider::KeyProvider;
 use crypto::local_key_provider::LocalKeyProvider;
 use models::mcp_session::McpSessionStore;
 
-use services::dpop_jti_cache::{DPOP_JTI_CACHE_CAPACITY, DPOP_JTI_CACHE_TTL_SECS, DpopJtiCache};
-use services::event_dedup_cache::EventDedupCache;
 use services::node_ws_manager::NodeWsManager;
 use services::platform_settings_service::BrokerPolicy;
 use services::provider_token_exchange_service::TokenExchangeCache;
@@ -91,7 +92,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Pre-computed JWK for the JWKS endpoint
     pub jwk_json: serde_json::Value,
-    /// Hybrid in-memory + MongoDB MCP session store
+    /// MongoDB-authoritative MCP session and notification store
     pub mcp_sessions: Arc<McpSessionStore>,
     /// JWKS cache for verifying external provider ID tokens (Google)
     pub jwks_cache: Arc<JwksCache>,
@@ -109,10 +110,18 @@ pub struct AppState {
     pub encryption_keys: Arc<EncryptionKeys>,
     /// WebSocket connection manager for credential nodes
     pub node_ws_manager: Arc<NodeWsManager>,
+    /// Process and address identity used to fence node ownership.
+    pub replica_identity: Arc<services::node_owner_service::ReplicaIdentity>,
+    /// Cluster-aware dispatch for local and remote credential-node sockets.
+    pub node_dispatch: Arc<services::node_dispatch::NodeDispatch>,
     /// Concurrent SSH tunnel session limiter
     pub ssh_session_manager: Arc<SshSessionManager>,
+    /// Renewable MongoDB capacity slots shared by cluster-wide session caps.
+    pub cluster_slot_manager: services::cluster_slot_service::RenewableSlotManager,
     /// Per-agent rate limiter keyed by API key ID
     pub per_agent_limiter: mw::rate_limit::SharedPerAgentRateLimiter,
+    /// Parsed per-user limit for each platform-owned downstream credential.
+    pub platform_user_rate_limit: mw::rate_limit::PlatformUserRateLimitPolicy,
     /// Per-user request and in-flight limiter for direct assistant streams.
     pub direct_chat_limiter: mw::rate_limit::SharedDirectChatRateLimiter,
     /// Per-device-code public key limiter for headless provisioning.
@@ -175,16 +184,8 @@ pub struct AppState {
     pub per_channel_event_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
     /// Per-upstream-message edit limiter for progressive channel relay edits.
     pub per_message_edit_limiter: mw::rate_limit::SharedPerMessageEditRateLimiter,
-    /// Best-effort idempotency cache for inbound channel events.
-    pub event_dedup_cache: Arc<EventDedupCache>,
     /// Per-trigger token bucket for public trigger ingress.
     pub per_trigger_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
-    /// Best-effort idempotency cache for inbound trigger events.
-    pub trigger_dedup_cache: Arc<EventDedupCache>,
-    /// Per-process DPoP proof replay cache keyed by proof jti.
-    pub dpop_jti_cache: Arc<DpopJtiCache>,
-    /// Active WebSocket passthrough connection count (for resource limiting)
-    pub ws_passthrough_count: Arc<std::sync::atomic::AtomicUsize>,
     /// Generic downstream-provider token exchange cache with per-key
     /// single-flight. Backs the `token_exchange` auth method (Lark/Feishu
     /// tenant tokens, OAuth 2.0 client_credentials, etc.) and the channel
@@ -353,6 +354,7 @@ async fn main() {
     // Load configuration
     let mut config = AppConfig::from_env();
     config.validate_ssh_runtime_config();
+    config.validate_cluster_runtime_config();
     if config.trusted_proxy_ips.is_empty() {
         tracing::warn!(
             "TRUSTED_PROXY_IPS is empty; forwarded client IPs and Cloudflare country headers cannot be verified. Requester attribution will be unavailable when the observed peer is an internal proxy, and strict public per-IP limits may collapse to that proxy address."
@@ -414,6 +416,11 @@ async fn main() {
     );
     services::billing::ledger::init_billing_ledger_hmac_key(billing_ledger_hmac_key.clone());
     let billing_ledger_hmac_key = Arc::new(billing_ledger_hmac_key);
+    let internal_dispatch_hmac_key = services::internal_auth::derive_key(
+        config.internal_dispatch_hmac_key.as_deref(),
+        config.encryption_key.as_deref().map(str::as_bytes),
+        &jwt_private_key_pem,
+    );
     services::chain_verify_service::spawn_chain_verify_worker(
         db.clone(),
         audit_chain_hmac_key.clone(),
@@ -636,7 +643,11 @@ async fn main() {
         .expect("Failed to create HTTP client");
 
     // Create MCP session store with MongoDB persistence
-    let mcp_sessions = Arc::new(McpSessionStore::with_db(db.clone()));
+    let mcp_sessions = Arc::new(McpSessionStore::with_db_options(
+        db.clone(),
+        std::time::Duration::from_secs(config.mcp_notification_ttl_secs),
+        std::time::Duration::from_millis(config.mcp_notification_poll_interval_ms),
+    ));
 
     // Recover MCP sessions from MongoDB (survives server restarts)
     match mcp_sessions.load_from_db().await {
@@ -653,38 +664,66 @@ async fn main() {
         config.node_proxy_timeout_secs,
         config.node_max_ws_connections,
     ));
-    let ssh_session_manager = Arc::new(SshSessionManager::new(config.ssh_max_sessions_per_user));
+    let replica_identity = Arc::new(services::node_owner_service::ReplicaIdentity::new(
+        config.instance_name.clone(),
+        config.internal_advertise_url.clone(),
+    ));
+    let internal_auth = services::internal_auth::InternalAuth::new(
+        db.clone(),
+        internal_dispatch_hmac_key,
+        std::time::Duration::from_secs(config.internal_auth_max_skew_secs),
+        std::time::Duration::from_secs(config.internal_nonce_ttl_secs),
+    );
+    let node_dispatch = Arc::new(services::node_dispatch::NodeDispatch::new(
+        db.clone(),
+        node_ws_manager.clone(),
+        replica_identity.clone(),
+        http_client.clone(),
+        internal_auth,
+        services::node_ws_manager::node_proxy_ws_message_size_limit(config.proxy_max_body_size),
+        std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
+    ));
+    node_ws_manager.attach_cluster_dispatch(Arc::downgrade(&node_dispatch));
+    services::coordination_service::initialize_cluster_lease_runtime(
+        services::coordination_service::ClusterLeaseRuntime::new(
+            models::coordination::CoordinationHolder {
+                instance_id: replica_identity.instance_name.clone(),
+                generation_id: replica_identity.generation_id.clone(),
+            },
+            std::time::Duration::from_secs(config.cluster_lease_ttl_secs),
+            std::time::Duration::from_secs(config.cluster_lease_renew_secs),
+        ),
+    );
+    let cluster_slot_manager = services::cluster_slot_service::RenewableSlotManager::new(
+        db.clone(),
+        replica_identity.coordination_holder(),
+        std::time::Duration::from_secs(config.cluster_slot_ttl_secs),
+        std::time::Duration::from_secs(config.cluster_slot_renew_secs),
+    );
+    let ssh_session_manager = Arc::new(SshSessionManager::new(
+        cluster_slot_manager.clone(),
+        config.ssh_max_sessions_per_user,
+    ));
 
     // HTTP Event Gateway state (NyxID#221).
-    let per_channel_event_limiter = Arc::new(mw::rate_limit::PerChannelEventLimiter::new(
+    let per_channel_event_limiter = Arc::new(mw::rate_limit::PerChannelEventLimiter::with_db(
+        db.clone(),
+        "channel_event",
         config.channel_event_rate_limit_per_second,
         config.channel_event_rate_limit_burst,
     ));
-    let event_dedup_cache = Arc::new(EventDedupCache::new(
-        config.channel_event_dedup_capacity,
-        std::time::Duration::from_secs(config.channel_event_dedup_ttl_secs),
-    ));
-    let per_trigger_limiter = Arc::new(mw::rate_limit::PerChannelEventLimiter::new(
+    let per_trigger_limiter = Arc::new(mw::rate_limit::PerChannelEventLimiter::with_db(
+        db.clone(),
+        "trigger_ingress",
         config.trigger_rate_limit_per_second,
         config.trigger_rate_limit_burst,
     ));
-    let trigger_dedup_cache = Arc::new(EventDedupCache::new(
-        config.channel_event_dedup_capacity,
-        std::time::Duration::from_secs(config.channel_event_dedup_ttl_secs),
-    ));
-    let dpop_jti_cache = Arc::new(DpopJtiCache::new(
-        DPOP_JTI_CACHE_CAPACITY,
-        std::time::Duration::from_secs(DPOP_JTI_CACHE_TTL_SECS),
-    ));
-    let per_message_edit_limiter = Arc::new(mw::rate_limit::PerMessageEditRateLimiter::new(
+    let per_message_edit_limiter = Arc::new(mw::rate_limit::PerMessageEditRateLimiter::with_db(
+        db.clone(),
+        "channel_message_edit",
         config.channel_relay_edit_rate_limit_per_second,
         config.channel_relay_edit_rate_limit_burst,
     ));
-
-    mw::rate_limit::init_platform_user_rate_limiter(
-        config.platform_service_rate_limit_per_second,
-        config.platform_service_rate_limit_burst,
-    );
 
     // Create shared state
     let billing = Arc::new(services::billing::BillingService::new(
@@ -730,7 +769,7 @@ async fn main() {
         ),
     );
     let state = AppState {
-        db,
+        db: db.clone(),
         config: config.clone(),
         jwt_keys,
         http_client: http_client.clone(),
@@ -743,27 +782,97 @@ async fn main() {
         developer_webhook_dispatcher,
         encryption_keys: encryption_keys.clone(),
         node_ws_manager,
+        replica_identity,
+        node_dispatch,
         ssh_session_manager,
-        per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::new()),
-        direct_chat_limiter: mw::rate_limit::create_direct_chat_rate_limiter(),
-        device_code_pubkey_limiter: mw::rate_limit::create_per_pubkey_rate_limiter(),
-        device_code_ip_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
-        auth_device_request_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
-        auth_device_poll_limiter: mw::rate_limit::create_per_ip_rate_limiter(60, 60),
-        auth_device_approve_limiter: mw::rate_limit::create_per_ip_rate_limiter(10, 60),
-        auth_device_approve_per_user_limiter: mw::rate_limit::create_per_key_rate_limiter(10, 300),
-        auth_device_preview_limiter: mw::rate_limit::create_per_ip_rate_limiter(30, 60),
-        connect_link_create_limiter: mw::rate_limit::create_per_key_rate_limiter(10, 60),
-        connect_link_preview_limiter: mw::rate_limit::create_per_ip_rate_limiter(30, 60),
-        connect_link_complete_limiter: mw::rate_limit::create_per_ip_rate_limiter(30, 60),
+        cluster_slot_manager: cluster_slot_manager.clone(),
+        per_agent_limiter: Arc::new(mw::rate_limit::PerAgentRateLimiter::with_db(
+            db.clone(),
+            "agent",
+        )),
+        platform_user_rate_limit: mw::rate_limit::PlatformUserRateLimitPolicy::new(
+            config.platform_service_rate_limit_per_second,
+            config.platform_service_rate_limit_burst,
+        ),
+        direct_chat_limiter: mw::rate_limit::create_direct_chat_rate_limiter(
+            db.clone(),
+            cluster_slot_manager,
+        ),
+        device_code_pubkey_limiter: mw::rate_limit::create_per_pubkey_rate_limiter(
+            db.clone(),
+            "device_code_pubkey",
+        ),
+        device_code_ip_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "device_code_ip",
+            5,
+            60,
+        ),
+        auth_device_request_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_device_request",
+            5,
+            60,
+        ),
+        auth_device_poll_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_device_poll",
+            60,
+            60,
+        ),
+        auth_device_approve_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_device_approve",
+            10,
+            60,
+        ),
+        auth_device_approve_per_user_limiter: mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "auth_device_approve_user",
+            10,
+            300,
+        ),
+        auth_device_preview_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_device_preview",
+            30,
+            60,
+        ),
+        connect_link_create_limiter: mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "connect_link_create",
+            10,
+            60,
+        ),
+        connect_link_preview_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "connect_link_preview",
+            30,
+            60,
+        ),
+        connect_link_complete_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "connect_link_complete",
+            30,
+            60,
+        ),
         // 5 claim attempts per 60 seconds per IP; window-based, not token
         // bucket, because we want a hard cap on guesses per unit time.
-        cli_pairing_claim_limiter: mw::rate_limit::create_per_ip_rate_limiter(5, 60),
+        cli_pairing_claim_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "cli_pairing_claim",
+            5,
+            60,
+        ),
         public_proxy_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "public_proxy",
             config.public_proxy_rate_limit_per_minute,
             60,
         ),
         public_mcp_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "public_mcp",
             config.public_mcp_rate_limit_per_minute,
             60,
         ),
@@ -774,11 +883,7 @@ async fn main() {
         billing_ledger_hmac_key,
         per_channel_event_limiter,
         per_message_edit_limiter,
-        event_dedup_cache,
         per_trigger_limiter,
-        trigger_dedup_cache,
-        dpop_jti_cache,
-        ws_passthrough_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
         cloud_response_cache: Arc::new(
             services::cloud_response_cache::CloudResponseCache::with_bounds(
@@ -801,198 +906,17 @@ async fn main() {
     spawn_broker_policy_refresh_task(state.clone());
 
     // Create rate limiters
-    let global_rate_limiter =
-        mw::rate_limit::create_rate_limiter(config.rate_limit_per_second, config.rate_limit_burst);
+    let global_rate_limiter = mw::rate_limit::create_rate_limiter(
+        state.db.clone(),
+        config.rate_limit_per_second,
+        config.rate_limit_burst,
+    );
     let per_ip_rate_limiter = mw::rate_limit::create_per_ip_rate_limiter(
+        state.db.clone(),
+        "global_ip",
         config.rate_limit_burst, // per-IP max requests per window
         1,                       // 1-second window
     );
-
-    // Spawn background cleanup task for per-IP rate limiter
-    let cleanup_limiter = per_ip_rate_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_limiter.cleanup();
-        }
-    });
-
-    // Spawn background cleanup task for the CLI-pairing claim limiter.
-    // Same cadence as the global per-IP limiter.
-    let cleanup_pairing_claim_limiter = state.cli_pairing_claim_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_pairing_claim_limiter.cleanup();
-        }
-    });
-    let cleanup_public_proxy_limiter = state.public_proxy_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_public_proxy_limiter.cleanup();
-        }
-    });
-    let cleanup_public_mcp_limiter = state.public_mcp_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_public_mcp_limiter.cleanup();
-        }
-    });
-
-    // Spawn background cleanup task for the per-agent token bucket limiter.
-    // Entries are retained for 120 seconds to avoid re-allocation for agents
-    // that send bursts slightly apart.
-    // 60-second cleanup interval is intentionally coarse to minimize lock contention.
-    let cleanup_agent_limiter = state.per_agent_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_agent_limiter.cleanup();
-            mw::rate_limit::cleanup_platform_user_rate_limiter();
-        }
-    });
-    let cleanup_direct_chat_limiter = state.direct_chat_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_direct_chat_limiter.cleanup();
-        }
-    });
-    let cleanup_device_code_pubkey_limiter = state.device_code_pubkey_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_device_code_pubkey_limiter.cleanup();
-        }
-    });
-    let cleanup_device_code_ip_limiter = state.device_code_ip_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_device_code_ip_limiter.cleanup();
-        }
-    });
-    let cleanup_auth_device_request_limiter = state.auth_device_request_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_auth_device_request_limiter.cleanup();
-        }
-    });
-    let cleanup_auth_device_poll_limiter = state.auth_device_poll_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_auth_device_poll_limiter.cleanup();
-        }
-    });
-    let cleanup_auth_device_approve_limiter = state.auth_device_approve_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_auth_device_approve_limiter.cleanup();
-        }
-    });
-    let cleanup_auth_device_approve_per_user_limiter =
-        state.auth_device_approve_per_user_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_auth_device_approve_per_user_limiter.cleanup();
-        }
-    });
-    let cleanup_auth_device_preview_limiter = state.auth_device_preview_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_auth_device_preview_limiter.cleanup();
-        }
-    });
-    let cleanup_connect_link_create_limiter = state.connect_link_create_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_connect_link_create_limiter.cleanup();
-        }
-    });
-    let cleanup_connect_link_preview_limiter = state.connect_link_preview_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_connect_link_preview_limiter.cleanup();
-        }
-    });
-    let cleanup_connect_link_complete_limiter = state.connect_link_complete_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_connect_link_complete_limiter.cleanup();
-        }
-    });
-
-    // Spawn background cleanup for the per-channel event limiter and the
-    // event idempotency LRU. Same cadence as the per-agent limiter.
-    let cleanup_event_limiter = state.per_channel_event_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_event_limiter.cleanup();
-        }
-    });
-
-    let cleanup_developer_webhooks = state.developer_webhook_dispatcher.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(120));
-        loop {
-            interval.tick().await;
-            cleanup_developer_webhooks.cleanup();
-        }
-    });
-    let cleanup_trigger_limiter = state.per_trigger_limiter.clone();
-    let cleanup_trigger_dedup = state.trigger_dedup_cache.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_trigger_limiter.cleanup();
-            cleanup_trigger_dedup.cleanup();
-        }
-    });
-    let cleanup_edit_limiter = state.per_message_edit_limiter.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_edit_limiter.cleanup();
-        }
-    });
-    let cleanup_event_dedup = state.event_dedup_cache.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-        loop {
-            interval.tick().await;
-            cleanup_event_dedup.cleanup();
-        }
-    });
 
     // Expire abandoned app-bound connect links even when their creator has
     // stopped polling. Disabled when the interval is 0.
@@ -1026,9 +950,14 @@ async fn main() {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
         loop {
             interval.tick().await;
-            mcp_sessions_for_reaper.reap_expired(std::time::Duration::from_secs(
-                models::mcp_session::MCP_SESSION_MAX_IDLE_SECS,
-            ));
+            if let Err(error) = mcp_sessions_for_reaper
+                .reap_expired(std::time::Duration::from_secs(
+                    models::mcp_session::MCP_SESSION_MAX_IDLE_SECS,
+                ))
+                .await
+            {
+                tracing::warn!(%error, "MCP session reaper failed");
+            }
         }
     });
 
@@ -1162,8 +1091,28 @@ async fn main() {
     // Spawn background heartbeat sweep for node WebSocket connections
     let heartbeat_db = state.db.clone();
     let heartbeat_ws = state.node_ws_manager.clone();
+    let heartbeat_identity = state.replica_identity.clone();
     let heartbeat_interval = config.node_heartbeat_interval_secs;
     let heartbeat_timeout = config.node_heartbeat_timeout_secs;
+    let node_owner_lease_ttl_secs = config.node_owner_lease_ttl_secs;
+    let node_owner_lease_renew_secs = config.node_owner_lease_renew_secs;
+    let owner_lease_db = heartbeat_db.clone();
+    let owner_lease_ws = heartbeat_ws.clone();
+    let owner_lease_identity = heartbeat_identity.clone();
+    tokio::spawn(async move {
+        let mut interval =
+            tokio::time::interval(std::time::Duration::from_secs(node_owner_lease_renew_secs));
+        loop {
+            interval.tick().await;
+            handlers::node_ws::node_ws_manager_owner_lease_sweep(
+                &owner_lease_db,
+                &owner_lease_ws,
+                &owner_lease_identity,
+                node_owner_lease_ttl_secs,
+            )
+            .await;
+        }
+    });
     tokio::spawn(async move {
         let mut interval =
             tokio::time::interval(std::time::Duration::from_secs(heartbeat_interval));
@@ -1172,6 +1121,7 @@ async fn main() {
             handlers::node_ws::node_ws_manager_heartbeat_sweep(
                 &heartbeat_db,
                 &heartbeat_ws,
+                &heartbeat_identity,
                 heartbeat_timeout,
             )
             .await;
@@ -1243,6 +1193,7 @@ async fn main() {
     // inherits it — public OAuth, `/api/v1`, proxy, LLM gateway, `/mcp`.
     // Applying it to one branch, or merging a router after it, would
     // silently exempt those routes.
+    let internal_node_dispatch = state.node_dispatch.clone();
     let app = mw::security_headers::with_response_headers(
         public_oauth
             .merge(private_api)
@@ -1272,20 +1223,39 @@ async fn main() {
     .layer(Extension(trusted_proxy_ranges))
     .layer(TraceLayer::new_for_http());
 
-    // Bind and serve
+    // Bind both listeners before serving. Internal routes never enter the
+    // public router and therefore cannot be exposed by an ingress path rule.
     let addr = format!("0.0.0.0:{}", config.port);
     let listener = TcpListener::bind(&addr)
         .await
         .expect("Failed to bind address");
+    let internal_listener = TcpListener::bind(&config.internal_bind_addr)
+        .await
+        .expect("Failed to bind internal dispatch address");
+    let internal_body_limit =
+        services::node_ws_manager::node_proxy_ws_message_size_limit(config.proxy_max_body_size);
+    let internal_app = services::node_dispatch::internal_router(
+        internal_node_dispatch,
+        internal_body_limit,
+        std::time::Duration::from_secs(config.internal_duplex_handshake_timeout_secs),
+    );
 
     tracing::info!("Listening on {addr}");
+    tracing::info!(
+        bind = %config.internal_bind_addr,
+        advertise_url = %config.internal_advertise_url,
+        "Internal replica listener started"
+    );
 
-    axum::serve(
+    let public_server = axum::serve(
         downstream_disconnect::DisconnectAwareListener::new(listener),
         downstream_disconnect::DisconnectAwareMakeService::new(app),
-    )
-    .await
-    .expect("Server error");
+    );
+    let internal_server = axum::serve(internal_listener, internal_app);
+    tokio::select! {
+        result = public_server => result.expect("Public server error"),
+        result = internal_server => result.expect("Internal replica server error"),
+    }
 }
 
 /// Derive the HMAC key used to key `CliPairing.code_hash`.

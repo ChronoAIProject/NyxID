@@ -188,13 +188,18 @@ chmod 644 keys/private.pem keys/public.pem
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
                --env-file .env.production pull
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-               --env-file .env.production up -d
+               --env-file .env.production up -d --scale backend=2
 ```
 
-The combined config starts three services:
-- **backend**: pulls `ghcr.io/chronoaiproject/nyxid/backend:${NYXID_VERSION:-latest}`, mounts `keys/` read-only, waits for MongoDB health (MCP transport is built into the backend at `/mcp`)
-- **frontend**: pulls `ghcr.io/chronoaiproject/nyxid/frontend:${NYXID_VERSION:-latest}`, proxies API requests to backend via `BACKEND_URL` env var
+The combined config starts four containers by default:
+
+- **backend**: starts two replicas, mounts `keys/` read-only, and waits for MongoDB health. The service has no fixed container name or host port. Docker DNS distributes frontend requests across the replicas.
+- **frontend**: binds `127.0.0.1:3000` and proxies API, WebSocket, and MCP traffic to the backend service through `BACKEND_URL`.
 - **mongodb**: persistent volume, health check via `mongosh`, password sourced from `MONGO_ROOT_PASSWORD` in `.env.production`
+
+Change the backend count with `--scale backend=N`. Keep the frontend as the
+only published application port. Each backend derives its instance name and
+private advertise URL from that container's unique `HOSTNAME`.
 
 Multi-arch (linux/amd64, linux/arm64) images are published to GHCR by the
 `Publish Images` workflow on every merge to main and every `v*` tag. Pin to
@@ -229,13 +234,13 @@ Kubernetes manifests are provided in the `k8s/` directory for deploying NyxID to
 
 | File | Resource |
 |------|----------|
-| `k8s/namespace.yaml` | `nyxid` namespace |
+| `k8s/namespace.yaml` | `chronoai-platform` namespace |
 | `k8s/configmap.yaml` | Non-secret configuration (URLs, JWT settings, rate limits) |
 | `k8s/secrets.yaml` | Secret templates (DB credentials, encryption key, JWT keys) |
-| `k8s/backend-deployment.yaml` | Backend Deployment (2 replicas) + ClusterIP Service |
+| `k8s/backend-deployment.yaml` | Backend Deployment (2 replicas), public ClusterIP Service, private headless Service, and internal-port NetworkPolicy |
 | `k8s/frontend-deployment.yaml` | Frontend Deployment (2 replicas) + ClusterIP Service |
 | `k8s/mongodb-statefulset.yaml` | MongoDB StatefulSet (1 replica) + headless Service + 10Gi PVC |
-| `k8s/ingress.yaml` | Ingress rules for `auth.example.com` and `app.example.com` |
+| `k8s/ingress.yaml` | Ingress rules for the backend, long-lived node and MCP connections, and the frontend |
 
 ### Step 1: Create Namespace
 
@@ -248,19 +253,19 @@ kubectl apply -f k8s/namespace.yaml
 ```bash
 # Create JWT key pair secret from files
 kubectl create secret generic nyxid-jwt-keys \
-  --namespace nyxid \
+  --namespace chronoai-platform \
   --from-file=private.pem=keys/private.pem \
   --from-file=public.pem=keys/public.pem
 
 # Create application secrets
 kubectl create secret generic nyxid-secrets \
-  --namespace nyxid \
+  --namespace chronoai-platform \
   --from-literal=DATABASE_URL='mongodb://nyxid:YOUR_PASSWORD@nyxid-mongodb:27017/nyxid?authSource=admin' \
   --from-literal=ENCRYPTION_KEY="$(openssl rand -hex 32)"
 
 # Create MongoDB credentials
 kubectl create secret generic nyxid-mongo-secret \
-  --namespace nyxid \
+  --namespace chronoai-platform \
   --from-literal=MONGO_INITDB_ROOT_USERNAME=nyxid \
   --from-literal=MONGO_INITDB_ROOT_PASSWORD='YOUR_STRONG_PASSWORD'
 ```
@@ -272,7 +277,10 @@ Edit `k8s/configmap.yaml` and replace the placeholder URLs:
 - `FRONTEND_URL`: Your frontend's public URL (e.g., `https://app.yourdomain.com`)
 - `JWT_ISSUER`: Defaults to `BASE_URL`; leave unset unless you need a custom issuer
 
-Edit `k8s/ingress.yaml` and replace `auth.example.com` / `app.example.com` with your domains.
+Edit `k8s/ingress.yaml` and replace `nyx-api.chrono-ai.fun` and
+`nyx.chrono-ai.fun` with your domains. Keep the internal port out of every
+Ingress. The `nyxid-backend-headless` Service is the only Service that exposes
+port 3002.
 
 ### Step 4: Update Image References
 
@@ -283,37 +291,47 @@ image: registry.example.com/nyxid/backend:v0.5.0  # replace
 image: registry.example.com/nyxid/frontend:v0.5.0  # replace
 ```
 
-### Step 5: Apply All Manifests
+### Step 5: Apply the workload manifests
 
 ```bash
-kubectl apply -f k8s/
+kubectl apply -f k8s/configmap.yaml
+kubectl apply -f k8s/mongodb-statefulset.yaml
+kubectl apply -f k8s/backend-deployment.yaml
+kubectl apply -f k8s/frontend-deployment.yaml
+kubectl apply -f k8s/ingress.yaml
 ```
+
+Step 2 created the three Secret resources. Do not apply the placeholder values
+in `k8s/secrets.yaml` over those resources.
 
 ### Step 6: Verify
 
 ```bash
 # Check all resources
-kubectl get all -n nyxid
+kubectl get all -n chronoai-platform
 
 # Check backend health
-kubectl port-forward -n nyxid svc/nyxid-backend 3001:3001
+kubectl port-forward -n chronoai-platform svc/nyxid-backend 3001:3001
 curl http://localhost:3001/health
 
 # Check logs
-kubectl logs -n nyxid -l app.kubernetes.io/name=nyxid-backend --tail=50
+kubectl logs -n chronoai-platform -l app.kubernetes.io/name=nyxid-backend --tail=50
 ```
 
 ### Scaling
 
 ```bash
 # Scale backend horizontally
-kubectl scale deployment nyxid-backend -n nyxid --replicas=4
+kubectl scale deployment nyxid-backend -n chronoai-platform --replicas=4
 
 # Scale frontend
-kubectl scale deployment nyxid-frontend -n nyxid --replicas=3
+kubectl scale deployment nyxid-frontend -n chronoai-platform --replicas=3
 ```
 
-All backend instances must share the same RSA keys and encryption key (handled automatically via shared K8s secrets). See [Scaling](#scaling) for additional considerations.
+All backend instances share the RSA keys, encryption key, and coordination
+settings through the same Kubernetes Secrets and ConfigMap. The downward API
+sets `POD_NAME`, `POD_IP`, and `INSTANCE_NAME` per replica. See
+[Scaling](#scaling) for the runtime model.
 
 ### TLS with cert-manager
 
@@ -804,34 +822,68 @@ mongorestore --uri="mongodb://user:pass@host:27017/nyxid?authSource=admin" \
 
 ## Scaling
 
-### Horizontal Scaling (Multiple Backend Instances)
+### Multiple backend replicas
 
-NyxID is stateless at the application layer. All state lives in MongoDB. You can run multiple instances behind a load balancer:
+NyxID keeps durable application and coordination state in MongoDB. Credential
+node WebSockets and MCP SSE response channels remain attached to one process.
+MongoDB records which process owns each live connection, so a request can land
+on any replica.
 
+```text
+                              public :3001
+Ingress -> nyxid-backend --------------------------+
+                 |                                 |
+                 +--> replica A <----+----> replica B
+                       :3002         |       :3002
+                                      |
+                                  MongoDB
 ```
-                    +---> NyxID instance 1 ---+
-Load Balancer ----->+---> NyxID instance 2 ---+---> MongoDB
-                    +---> NyxID instance 3 ---+
-```
 
-Requirements for horizontal scaling:
-- All instances must share the same RSA key pair
-- All instances must use the same `ENCRYPTION_KEY` and `ENCRYPTION_KEY_PREVIOUS` (if set)
-- All instances must connect to the same MongoDB instance or replica set
-- Load balancer should use sticky sessions or round-robin (both work since state is in the database)
+The public `nyxid-backend` ClusterIP is the only ingress target. Replica owners
+advertise their pod IP through `Node.connection_owner`. The private
+`nyxid-backend-headless` Service exposes port 3002 inside the cluster for
+cross-replica dispatch. Each internal request uses a timestamped HMAC and a
+MongoDB-backed nonce check. A NetworkPolicy allows port 3002 only between
+backend pods. Do not expose port 3002 through an ingress.
 
-### MongoDB Scaling
+The owner record includes an instance name, a process generation, and a socket
+connection ID. These values fence stale processes and replaced sockets. The
+owner renews a 90-second lease every 30 seconds. After a crash, the lease
+expires and a reconnecting node can claim ownership on another replica.
+
+MongoDB also provides the shared OAuth refresh leases, Telegram polling lease,
+DPoP replay records, event dedup claims, rate windows, and capacity slots.
+Configured authentication, per-key, per-agent, platform-service, WebSocket,
+and SSH limits apply to the whole cluster. `NODE_MAX_WS_CONNECTIONS` is the one
+intentional per-replica limit because it protects that process's file
+descriptors and memory.
+
+MCP sessions use MongoDB as the authority. SSE notifications use a durable
+MongoDB outbox, so a POST can land on a different replica from the SSE stream.
+The MCP ingress cookie keeps clients on one replica when possible and reduces
+outbox polling latency. Correctness does not depend on that cookie.
+
+All replicas must:
+
+- Share the same RSA key pair and encryption keys.
+- Connect to the same MongoDB deployment.
+- Use the same coordination TTLs and the same internal HMAC key.
+- Advertise a private URL that other replicas can reach.
+- Keep clocks synchronized within `INTERNAL_AUTH_MAX_SKEW_SECS`.
+
+The manifests start two backend replicas. The node WebSocket and MCP
+Ingress resources use 3,600-second read and send timeouts. `/mcp` uses prefix
+routing, so its session subpaths reach the backend.
+
+See [Horizontal scaling architecture](HORIZONTAL_SCALING_ARCHITECTURE.md) for
+the ownership and failure semantics. See [Environment variables](ENV.md#cluster-coordination)
+for every coordination setting.
+
+### MongoDB scaling
 
 - **Replica Set**: For high availability (3+ nodes recommended)
 - **Sharding**: Not required at typical auth workloads (millions of users are fine on a single replica set)
 - **Read Preferences**: Use `secondaryPreferred` for read-heavy admin/audit queries
-
-### Rate Limiting Caveat
-
-The current rate limiter is per-instance (in-memory). When running multiple instances, each instance tracks its own counters independently. For distributed rate limiting, consider:
-- An external rate limiter (e.g., Redis-backed)
-- Rate limiting at the reverse proxy / load balancer level
-- Accepting that per-instance limits are approximate but still effective
 
 ---
 
@@ -1515,7 +1567,7 @@ APPROVAL_EXPIRY_INTERVAL_SECS=10  # Check every 10 seconds
 
 **Rate limiting too aggressive**
 - Increase `RATE_LIMIT_PER_SECOND` and `RATE_LIMIT_BURST`
-- Check if multiple instances are behind a load balancer (rate limits are per-instance)
+- Inspect the shared rate-window rows in MongoDB to identify the exhausted key
 
 ### Database issues
 

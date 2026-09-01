@@ -984,7 +984,10 @@ async fn proxy_request_inner(
             us_id,
             None,
             Some(service_id),
-            Some(&state.connection_expiry_notifier),
+            proxy_service::ProxyExecutionContext::new(
+                Some(&state.connection_expiry_notifier),
+                state.platform_user_rate_limit,
+            ),
         )
         .await?
         {
@@ -1046,7 +1049,10 @@ async fn proxy_request_inner(
         &user_id_str,
         None,
         Some(service_id),
-        Some(&state.connection_expiry_notifier),
+        proxy_service::ProxyExecutionContext::new(
+            Some(&state.connection_expiry_notifier),
+            state.platform_user_rate_limit,
+        ),
     )
     .await?
     {
@@ -1215,7 +1221,10 @@ async fn proxy_request_by_slug_inner(
             us_id,
             Some(slug),
             None,
-            Some(&state.connection_expiry_notifier),
+            proxy_service::ProxyExecutionContext::new(
+                Some(&state.connection_expiry_notifier),
+                state.platform_user_rate_limit,
+            ),
         )
         .await?
         {
@@ -1277,7 +1286,10 @@ async fn proxy_request_by_slug_inner(
         &user_id_str,
         Some(slug),
         None,
-        Some(&state.connection_expiry_notifier),
+        proxy_service::ProxyExecutionContext::new(
+            Some(&state.connection_expiry_notifier),
+            state.platform_user_rate_limit,
+        ),
     )
     .await?
     {
@@ -1541,6 +1553,7 @@ async fn resolve_via_downstream_service(
             &state.encryption_keys,
             user_id_str,
             service_id,
+            state.platform_user_rate_limit,
         )
         .await
         {
@@ -1564,6 +1577,7 @@ async fn resolve_via_downstream_service(
             &state.encryption_keys,
             user_id_str,
             service_id,
+            state.platform_user_rate_limit,
         )
         .await
         {
@@ -1790,7 +1804,7 @@ async fn execute_proxy_inner(
     // count rate-limited requests in both `request_count` and `error_count`
     // (see ChronoAIProject/NyxID#341).
     if let Err(e) =
-        crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, auth_user)
+        crate::mw::rate_limit::check_agent_rate_limit(&state.per_agent_limiter, auth_user).await
     {
         audit_service::log_for_user(
             state.db.clone(),
@@ -2827,7 +2841,7 @@ async fn execute_proxy_inner(
                 *first_dispatch_admission_ms.get_or_insert_with(|| elapsed_ms(exchange_started_at));
             let downstream_started_at = std::time::Instant::now();
             let result = state
-                .node_ws_manager
+                .node_dispatch
                 .send_proxy_request_classified(
                     node_id,
                     attempt_request,
@@ -4908,6 +4922,7 @@ async fn bridge_websockets(
     api_key_name: Option<String>,
     ip_address: Option<String>,
     user_agent: Option<String>,
+    slot_cancel: tokio_util::sync::CancellationToken,
 ) -> ConnectionUsageStats {
     let start = std::time::Instant::now();
     let mut stats = ConnectionUsageStats::default();
@@ -4929,6 +4944,10 @@ async fn bridge_websockets(
 
     loop {
         tokio::select! {
+            () = slot_cancel.cancelled() => {
+                tracing::warn!(service_id = %service_id, "WS passthrough capacity slot was lost");
+                break;
+            }
             _ = &mut max_duration => {
                 tracing::info!(
                     service_id = %service_id,
@@ -5114,26 +5133,6 @@ const WS_PASSTHROUGH_MAX_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
 /// Maximum time spent establishing the downstream WS connection.
 const WS_PASSTHROUGH_CONNECT_TIMEOUT_SECS: u64 = 10;
 
-/// RAII guard that decrements the WS passthrough connection counter on drop.
-/// Prevents counter leaks if the `on_upgrade` callback is never invoked
-/// (e.g. client disconnects between HTTP response and WS handshake).
-struct WsPassthroughGuard {
-    counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl WsPassthroughGuard {
-    fn new(counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) -> Self {
-        Self { counter }
-    }
-}
-
-impl Drop for WsPassthroughGuard {
-    fn drop(&mut self) {
-        self.counter
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 /// Handle a WebSocket passthrough: connect to the downstream service,
 /// upgrade the client connection, and bridge frames bidirectionally.
 #[allow(clippy::too_many_arguments)]
@@ -5155,19 +5154,16 @@ async fn handle_ws_passthrough(
 ) -> AppResult<Response> {
     let downstream_url = build_downstream_ws_url(target, path, query, delegated)?;
 
-    // Enforce global connection limit.
-    let current = state
-        .ws_passthrough_count
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if current >= state.config.ws_passthrough_max_connections {
-        state
-            .ws_passthrough_count
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        return Err(AppError::RateLimited);
-    }
-    // Guard auto-decrements the counter on all error-return paths and if
-    // the on_upgrade callback is never invoked.
-    let guard = WsPassthroughGuard::new(state.ws_passthrough_count.clone());
+    let guard = state
+        .cluster_slot_manager
+        .acquire(
+            "ws_passthrough",
+            "global",
+            u32::try_from(state.config.ws_passthrough_max_connections).unwrap_or(u32::MAX),
+        )
+        .await?
+        .ok_or(AppError::RateLimited)?;
+    let slot_cancel = guard.cancellation_token();
 
     // Connect to downstream BEFORE upgrading the client connection.
     // If the downstream is unreachable, the client gets a normal HTTP error.
@@ -5234,9 +5230,10 @@ async fn handle_ws_passthrough(
                 ak_name.clone(),
                 req_ip.clone(),
                 req_ua.clone(),
+                slot_cancel,
             )
             .await;
-            drop(guard); // decrement counter (guard moved into closure)
+            drop(guard);
             let platform_usage = websocket_platform_usage(&stats);
             let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
             settle_meter_async(
@@ -5350,19 +5347,16 @@ async fn handle_ws_passthrough_via_node(
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
         .collect();
 
-    // Enforce global connection limit.
-    let current = state
-        .ws_passthrough_count
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    if current >= state.config.ws_passthrough_max_connections {
-        state
-            .ws_passthrough_count
-            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        return Err(AppError::RateLimited);
-    }
-    // Guard auto-decrements the counter on all error-return paths and if
-    // the on_upgrade callback is never invoked.
-    let guard = WsPassthroughGuard::new(state.ws_passthrough_count.clone());
+    let guard = state
+        .cluster_slot_manager
+        .acquire(
+            "ws_passthrough",
+            "global",
+            u32::try_from(state.config.ws_passthrough_max_connections).unwrap_or(u32::MAX),
+        )
+        .await?
+        .ok_or(AppError::RateLimited)?;
+    let slot_cancel = guard.cancellation_token();
 
     let session_id = uuid::Uuid::new_v4().to_string();
     let mut last_error: Option<AppError> = None;
@@ -5409,7 +5403,7 @@ async fn handle_ws_passthrough_via_node(
         };
 
         match state
-            .node_ws_manager
+            .node_dispatch
             .open_ws_proxy(
                 node_id,
                 ws_proxy_request,
@@ -5492,7 +5486,7 @@ async fn handle_ws_passthrough_via_node(
     );
 
     let db = state.db.clone();
-    let ws_manager = state.node_ws_manager.clone();
+    let node_dispatch = state.node_dispatch.clone();
     let billing = state.billing.clone();
     let metered_for_settle = metered.clone();
     let sid = service_id_owned.clone();
@@ -5512,7 +5506,7 @@ async fn handle_ws_passthrough_via_node(
             let stats = bridge_websockets_via_node(
                 client_ws,
                 ws_proxy_session.frames,
-                &ws_manager,
+                &node_dispatch,
                 &node_id_owned,
                 &sess_id,
                 sid.clone(),
@@ -5525,12 +5519,13 @@ async fn handle_ws_passthrough_via_node(
                 actor_for_audit.clone(),
                 req_ip.clone(),
                 req_ua.clone(),
+                slot_cancel,
             )
             .await;
 
             // Best-effort close the node-side session.
-            let _ = ws_manager.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
-            drop(guard); // explicitly decrement counter
+            let _ = node_dispatch.send_ws_proxy_close(&node_id_owned, &sess_id, None, None);
+            drop(guard);
             let platform_usage = websocket_platform_usage(&stats);
             let resale_usage = websocket_resale_usage(&metered_for_settle, &stats);
             settle_meter_async(
@@ -5570,7 +5565,7 @@ async fn handle_ws_passthrough_via_node(
 async fn bridge_websockets_via_node(
     client_ws: axum::extract::ws::WebSocket,
     mut ws_proxy_rx: tokio::sync::mpsc::Receiver<crate::services::node_ws_manager::WsProxyFrame>,
-    ws_manager: &crate::services::node_ws_manager::NodeWsManager,
+    node_dispatch: &crate::services::node_dispatch::NodeDispatch,
     node_id: &str,
     session_id: &str,
     service_id: String,
@@ -5583,6 +5578,7 @@ async fn bridge_websockets_via_node(
     proxy_actor_user_id: String,
     ip_address: Option<String>,
     user_agent: Option<String>,
+    slot_cancel: tokio_util::sync::CancellationToken,
 ) -> ConnectionUsageStats {
     use crate::services::node_ws_manager::WsProxyFrame;
 
@@ -5604,6 +5600,10 @@ async fn bridge_websockets_via_node(
 
     loop {
         tokio::select! {
+            () = slot_cancel.cancelled() => {
+                tracing::warn!(service_id = %service_id, "Node WS passthrough capacity slot was lost");
+                break;
+            }
             _ = &mut max_duration => {
                 tracing::info!(service_id = %service_id, "Node WS passthrough max duration reached");
                 break;
@@ -5623,7 +5623,7 @@ async fn bridge_websockets_via_node(
                             tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
                         );
-                        if ws_manager.send_ws_proxy_text(node_id, session_id, &t).is_err() {
+                        if node_dispatch.send_ws_proxy_text(node_id, session_id, &t).is_err() {
                             break;
                         }
                     }
@@ -5635,7 +5635,7 @@ async fn bridge_websockets_via_node(
                             tokio::time::Instant::now()
                                 + std::time::Duration::from_secs(WS_PASSTHROUGH_IDLE_TIMEOUT_SECS),
                         );
-                        if ws_manager.send_ws_proxy_binary(node_id, session_id, &b).is_err() {
+                        if node_dispatch.send_ws_proxy_binary(node_id, session_id, &b).is_err() {
                             break;
                         }
                     }
@@ -5643,7 +5643,7 @@ async fn bridge_websockets_via_node(
                         let (code, reason) = frame
                             .map(|f| (Some(f.code), Some(f.reason.to_string())))
                             .unwrap_or((None, None));
-                        let _ = ws_manager.send_ws_proxy_close(node_id, session_id, code, reason);
+                        let _ = node_dispatch.send_ws_proxy_close(node_id, session_id, code, reason);
                         break;
                     }
                     Some(Ok(axum::extract::ws::Message::Ping(p))) => {
@@ -5763,7 +5763,7 @@ async fn bridge_websockets_via_node(
 #[cfg(test)]
 mod tests {
     use super::{
-        ALLOWED_RESPONSE_HEADERS, AsyncLocationContext, ConnectionUsageStats, WsPassthroughGuard,
+        ALLOWED_RESPONSE_HEADERS, AsyncLocationContext, ConnectionUsageStats,
         add_websocket_usage_provenance, apply_agent_attribution_headers,
         apply_proxy_request_id_header, auth_kind_label, caller_bearer_token_for_downstream,
         collect_ws_forward_headers, compose_pre_resolved_node_ids, enforce_node_route_scope,
@@ -5790,10 +5790,7 @@ mod tests {
         routing::get,
     };
     use futures::{SinkExt, StreamExt};
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::Arc;
     use tower::ServiceExt;
 
     async fn assert_body_limit_error(error: crate::errors::AppError, max_body_size: usize) {
@@ -6228,21 +6225,6 @@ mod tests {
             &AuthMethod::Session
         ));
         assert!(!should_enforce_runtime_approval(false, &AuthMethod::ApiKey));
-    }
-
-    #[test]
-    fn ws_passthrough_guard_drops_when_upgrade_callback_is_discarded() {
-        let counter = Arc::new(AtomicUsize::new(1));
-        let guard = WsPassthroughGuard::new(counter.clone());
-
-        // Model axum storing the on_upgrade callback and then dropping it
-        // before invocation because the HTTP upgrade never completes.
-        let callback = move || {
-            let _guard = guard;
-        };
-
-        drop(callback);
-        assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 
     fn token_resale_metered_context(credential_class: CredentialClass) -> MeteredProxyContext {
@@ -6759,6 +6741,7 @@ mod tests {
                 None,
                 None,
                 None,
+                tokio_util::sync::CancellationToken::new(),
             )
             .await;
         })
@@ -8285,30 +8268,6 @@ mod tests {
     fn validate_proxy_path_rejects_null_bytes() {
         assert!(validate_requested_proxy_path("/path\0evil").is_err());
     }
-
-    // ---- WsPassthroughGuard ----
-
-    #[test]
-    fn ws_passthrough_guard_decrements_on_drop() {
-        let counter = Arc::new(AtomicUsize::new(5));
-        let guard = WsPassthroughGuard::new(counter.clone());
-        assert_eq!(counter.load(Ordering::Relaxed), 5);
-        drop(guard);
-        assert_eq!(counter.load(Ordering::Relaxed), 4);
-    }
-
-    #[test]
-    fn ws_passthrough_guard_wraps_on_underflow() {
-        // AtomicUsize::fetch_sub wraps on underflow. The guard uses
-        // Relaxed ordering and does not saturate -- this is acceptable
-        // because in production the counter is always incremented
-        // before the guard is created. This test documents the raw
-        // wrapping behavior.
-        let counter = Arc::new(AtomicUsize::new(0));
-        let guard = WsPassthroughGuard::new(counter.clone());
-        drop(guard);
-        assert_eq!(counter.load(Ordering::Relaxed), usize::MAX);
-    }
 }
 
 #[cfg(test)]
@@ -9006,6 +8965,7 @@ mod proxy_resolution_integration_tests {
             connected_at: Some(now),
             metadata: None,
             metrics: NodeMetrics::default(),
+            connection_owner: None,
             is_active: true,
             created_at: now,
             updated_at: now,
@@ -9330,7 +9290,7 @@ mod proxy_resolution_integration_tests {
             .expect("attach node to service");
 
         let (tx, rx) = mpsc::channel(256);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
         assert_ws_proxy_upgrade(
@@ -9387,7 +9347,7 @@ mod proxy_resolution_integration_tests {
             .expect("attach node to service");
 
         let (tx, rx) = mpsc::channel(256);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let responder = spawn_ws_open_responder(&state, &node.id, rx, service.slug.clone());
 
         assert_ws_proxy_upgrade(

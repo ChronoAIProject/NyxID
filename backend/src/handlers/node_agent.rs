@@ -156,8 +156,11 @@ pub async fn list_pending_credentials(
         node_pending_credential_service::list_pending_credentials_for_node(&state.db, &node.id)
             .await?;
     let include_remote_crypto = state
-        .node_ws_manager
-        .supports_remote_credential_crypto(&node.id);
+        .node_dispatch
+        .session_info(&node.id)
+        .await
+        .capabilities
+        .remote_credential_crypto_v1;
 
     Ok(Json(NodeAgentPendingCredentialListResponse {
         pending_credentials: pending
@@ -326,6 +329,7 @@ mod tests {
             connected_at: None,
             metadata: None,
             metrics: NodeMetrics::default(),
+            connection_owner: None,
             is_active: true,
             created_at: now,
             updated_at: now,

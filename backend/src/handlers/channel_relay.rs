@@ -426,8 +426,15 @@ async fn reply_token_has_been_consumed(state: &AppState, jti: &str) -> AppResult
         .is_some())
 }
 
-fn check_message_edit_rate_limit(state: &AppState, platform_message_id: &str) -> AppResult<()> {
-    if !state.per_message_edit_limiter.check(platform_message_id) {
+async fn check_message_edit_rate_limit(
+    state: &AppState,
+    platform_message_id: &str,
+) -> AppResult<()> {
+    if !state
+        .per_message_edit_limiter
+        .check_shared(platform_message_id)
+        .await?
+    {
         tracing::warn!(
             platform_message_id = %platform_message_id,
             "Per-message edit rate limit exceeded"
@@ -868,7 +875,7 @@ pub async fn update_reply(
     Json(body): Json<UpdateReplyRequest>,
 ) -> AppResult<Json<UpdateReplyResponse>> {
     // Deliberately rate-limit before auth/DB work so unauth floods fail on one cheap hashmap check.
-    check_message_edit_rate_limit(&state, &body.message_id)?;
+    check_message_edit_rate_limit(&state, &body.message_id).await?;
 
     let EditRequestContext {
         outbound,

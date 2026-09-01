@@ -105,7 +105,8 @@ pub async fn completions(
     require_direct_chat_enabled(&state, &auth_user).await?;
     let permit = state
         .direct_chat_limiter
-        .try_acquire(&auth_user.user_id.to_string())?;
+        .try_acquire(&auth_user.user_id.to_string())
+        .await?;
 
     let (mut parts, body) = request.into_parts();
     let bytes = super::body_limit::read_body(
@@ -196,8 +197,15 @@ fn attach_in_flight_permit(response: Response, permit: DirectChatPermit) -> Resp
     let stream = async_stream::stream! {
         let _permit = permit;
         let mut body = body.into_data_stream();
-        while let Some(chunk) = body.next().await {
-            yield chunk;
+        loop {
+            tokio::select! {
+                biased;
+                () = _permit.cancelled() => break,
+                chunk = body.next() => match chunk {
+                    Some(chunk) => yield chunk,
+                    None => break,
+                }
+            }
         }
     };
     Response::from_parts(parts, Body::from_stream(stream))
@@ -439,8 +447,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn response_body_holds_in_flight_slot_until_drop_and_isolates_users() {
+    #[tokio::test]
+    async fn response_body_holds_in_flight_slot_until_drop_and_isolates_users() {
         let limiter =
             std::sync::Arc::new(crate::mw::rate_limit::DirectChatRateLimiter::new(10, 60, 2));
         let response = || {
@@ -449,16 +457,18 @@ mod tests {
             >()))
         };
 
-        let first = attach_in_flight_permit(response(), limiter.try_acquire("user-a").unwrap());
-        let second = attach_in_flight_permit(response(), limiter.try_acquire("user-a").unwrap());
+        let first =
+            attach_in_flight_permit(response(), limiter.try_acquire("user-a").await.unwrap());
+        let second =
+            attach_in_flight_permit(response(), limiter.try_acquire("user-a").await.unwrap());
         assert!(matches!(
-            limiter.try_acquire("user-a"),
+            limiter.try_acquire("user-a").await,
             Err(AppError::RateLimited)
         ));
-        assert!(limiter.try_acquire("user-b").is_ok());
+        assert!(limiter.try_acquire("user-b").await.is_ok());
 
         drop(first);
-        assert!(limiter.try_acquire("user-a").is_ok());
+        assert!(limiter.try_acquire("user-a").await.is_ok());
         drop(second);
     }
 }

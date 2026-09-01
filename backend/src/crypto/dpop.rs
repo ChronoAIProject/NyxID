@@ -1,8 +1,7 @@
 //! DPoP (RFC 9449) proof validation for sender-constrained access tokens.
 //!
-//! Scoped to ES256 in v1; broader algorithms can be added later. The replay
-//! cache lives in `services/dpop_jti_cache.rs` and is per-process -- multi-
-//! replica deployments need a Redis-backed equivalent.
+//! Scoped to ES256 in v1; broader algorithms can be added later. Replay
+//! protection is an atomic MongoDB claim shared by every replica.
 
 use base64::Engine as _;
 use chrono::Utc;
@@ -12,7 +11,7 @@ use serde::Deserialize;
 use url::Url;
 
 use crate::errors::{AppError, AppResult};
-use crate::services::dpop_jti_cache::DpopJtiCache;
+use crate::services::dpop_jti_cache;
 
 const DPOP_ACCEPTED_TYP: &str = "dpop+jwt";
 const DPOP_IAT_WINDOW_SECS: i64 = 300;
@@ -44,12 +43,29 @@ pub fn htu_from_base_and_path(base_url: &str, path: &str) -> AppResult<String> {
 
 /// Validate a DPoP proof JWT against the request method and URI.
 /// Returns the JWK thumbprint (RFC 7638) on success.
-pub fn validate_proof(
+pub async fn validate_proof(
     dpop_header: &str,
     expected_method: &str,
     expected_htu: &str,
-    jti_cache: &DpopJtiCache,
+    db: &mongodb::Database,
 ) -> AppResult<String> {
+    let validated = validate_proof_claims(dpop_header, expected_method, expected_htu)?;
+    if !dpop_jti_cache::claim_jti(db, &validated.jti).await? {
+        return Err(AppError::Unauthorized("DPoP replay detected".to_string()));
+    }
+    Ok(validated.thumbprint)
+}
+
+struct ValidatedDpopProof {
+    thumbprint: String,
+    jti: String,
+}
+
+fn validate_proof_claims(
+    dpop_header: &str,
+    expected_method: &str,
+    expected_htu: &str,
+) -> AppResult<ValidatedDpopProof> {
     let header_segment = dpop_header
         .split('.')
         .next()
@@ -95,11 +111,10 @@ pub fn validate_proof(
             "DPoP iat outside window".to_string(),
         ));
     }
-    if !jti_cache.insert_if_absent(&claims.jti) {
-        return Err(AppError::Unauthorized("DPoP replay detected".to_string()));
-    }
-
-    Ok(jwk_thumbprint(&header.jwk))
+    Ok(ValidatedDpopProof {
+        thumbprint: jwk_thumbprint(&header.jwk),
+        jti: claims.jti,
+    })
 }
 
 /// Compute SHA-256 thumbprint of a JWK per RFC 7638.
@@ -229,11 +244,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn validate_proof_round_trip() {
+    #[tokio::test]
+    async fn validate_proof_round_trip() {
+        let Some(db) = crate::test_utils::connect_test_database("dpop_round_trip").await else {
+            return;
+        };
         let (encoding_key, jwk) = test_dpop_keypair();
         let htu = "https://auth.example.com/oauth/token";
-        let cache = DpopJtiCache::new(16, std::time::Duration::from_secs(600));
         let proof = sign_test_proof(
             &encoding_key,
             &jwk,
@@ -243,15 +260,19 @@ mod tests {
             &Uuid::new_v4().to_string(),
         );
 
-        let thumbprint = validate_proof(&proof, "POST", htu, &cache).expect("valid DPoP");
+        let thumbprint = validate_proof(&proof, "POST", htu, &db)
+            .await
+            .expect("valid DPoP");
         assert_eq!(thumbprint, jwk_thumbprint(&jwk));
     }
 
-    #[test]
-    fn validate_proof_rejects_replay() {
+    #[tokio::test]
+    async fn validate_proof_rejects_replay_across_callers() {
+        let Some(db) = crate::test_utils::connect_test_database("dpop_replay").await else {
+            return;
+        };
         let (encoding_key, jwk) = test_dpop_keypair();
         let htu = "https://auth.example.com/oauth/token";
-        let cache = DpopJtiCache::new(16, std::time::Duration::from_secs(600));
         let proof = sign_test_proof(
             &encoding_key,
             &jwk,
@@ -261,15 +282,16 @@ mod tests {
             "jti-replay",
         );
 
-        validate_proof(&proof, "POST", htu, &cache).expect("first proof");
-        assert!(validate_proof(&proof, "POST", htu, &cache).is_err());
+        validate_proof(&proof, "POST", htu, &db)
+            .await
+            .expect("first proof");
+        assert!(validate_proof(&proof, "POST", htu, &db).await.is_err());
     }
 
     #[test]
     fn validate_proof_rejects_stale_iat() {
         let (encoding_key, jwk) = test_dpop_keypair();
         let htu = "https://auth.example.com/oauth/token";
-        let cache = DpopJtiCache::new(16, std::time::Duration::from_secs(600));
         let proof = sign_test_proof(
             &encoding_key,
             &jwk,
@@ -279,14 +301,13 @@ mod tests {
             &Uuid::new_v4().to_string(),
         );
 
-        assert!(validate_proof(&proof, "POST", htu, &cache).is_err());
+        assert!(validate_proof_claims(&proof, "POST", htu).is_err());
     }
 
     #[test]
     fn validate_proof_rejects_htm_mismatch() {
         let (encoding_key, jwk) = test_dpop_keypair();
         let htu = "https://auth.example.com/oauth/token";
-        let cache = DpopJtiCache::new(16, std::time::Duration::from_secs(600));
         let proof = sign_test_proof(
             &encoding_key,
             &jwk,
@@ -296,7 +317,7 @@ mod tests {
             &Uuid::new_v4().to_string(),
         );
 
-        assert!(validate_proof(&proof, "POST", htu, &cache).is_err());
+        assert!(validate_proof_claims(&proof, "POST", htu).is_err());
     }
 
     #[test]
@@ -347,7 +368,6 @@ mod tests {
     #[test]
     fn validate_proof_rejects_htu_mismatch() {
         let (encoding_key, jwk) = test_dpop_keypair();
-        let cache = DpopJtiCache::new(16, std::time::Duration::from_secs(600));
         let proof = sign_test_proof(
             &encoding_key,
             &jwk,
@@ -356,6 +376,6 @@ mod tests {
             Utc::now().timestamp(),
             &Uuid::new_v4().to_string(),
         );
-        assert!(validate_proof(&proof, "POST", "https://right.com/token", &cache).is_err());
+        assert!(validate_proof_claims(&proof, "POST", "https://right.com/token").is_err());
     }
 }

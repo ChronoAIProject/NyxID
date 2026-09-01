@@ -406,10 +406,14 @@ pub fn build_dispatch_info(node: &Node, ws_manager: &NodeWsManager) -> NodeDispa
             reason: "node_status_not_online".to_string(),
         };
     }
-    if !ws_manager.is_connected(&node.id) {
+    if !crate::services::node_owner_service::is_connected_somewhere(
+        node,
+        ws_manager.is_connected(&node.id),
+        chrono::Utc::now(),
+    ) {
         return NodeDispatchInfo {
             dispatchable: false,
-            reason: "no_websocket_session_on_this_backend".to_string(),
+            reason: "no_websocket_session".to_string(),
         };
     }
     NodeDispatchInfo {
@@ -424,7 +428,7 @@ fn node_info_from_model(
     binding_count: u64,
     ws_manager: &NodeWsManager,
 ) -> NodeInfo {
-    let session = ws_manager.session_info(&node.id);
+    let session = node_session_info(node, ws_manager);
     NodeInfo {
         id: node.id.clone(),
         name: node.name.clone(),
@@ -440,6 +444,27 @@ fn node_info_from_model(
         dispatch: build_dispatch_info(node, ws_manager),
         binding_count,
         created_at: node.created_at.to_rfc3339(),
+    }
+}
+
+fn node_session_info(
+    node: &Node,
+    ws_manager: &NodeWsManager,
+) -> crate::services::node_ws_manager::NodeSessionInfo {
+    if let Some(owner) = crate::services::node_owner_service::live_owner(node, chrono::Utc::now()) {
+        crate::services::node_ws_manager::NodeSessionInfo {
+            is_connected: true,
+            capabilities_resolved: owner.capabilities_resolved,
+            capabilities: crate::services::node_ws_manager::NodeCapabilitiesFlags {
+                credential_ack_correlation: owner.credential_ack_correlation,
+                remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
+                proxy_max_body_size: owner.proxy_max_body_size,
+            },
+        }
+    } else if node.connection_owner.is_none() {
+        ws_manager.session_info(&node.id)
+    } else {
+        crate::services::node_ws_manager::NodeSessionInfo::disconnected()
     }
 }
 
@@ -735,7 +760,7 @@ fn validate_fan_out_ciphertext_request(
     )
 }
 
-fn send_pending_ciphertext_to_node(
+async fn send_pending_ciphertext_to_node(
     state: &AppState,
     node_id: &str,
     pending: &NodePendingCredential,
@@ -762,11 +787,12 @@ fn send_pending_ciphertext_to_node(
         ciphertext: &ciphertext_b64,
     };
     state
-        .node_ws_manager
+        .node_dispatch
         .send_pending_credential_ciphertext(node_id, &params)
+        .await
 }
 
-fn send_fan_out_ciphertext_to_node(
+async fn send_fan_out_ciphertext_to_node(
     state: &AppState,
     pending: &NodePendingCredential,
     target: &FanOutNodeState,
@@ -795,8 +821,9 @@ fn send_fan_out_ciphertext_to_node(
         ciphertext: &ciphertext_b64,
     };
     state
-        .node_ws_manager
+        .node_dispatch
         .send_pending_credential_ciphertext(&target.node_id, &params)
+        .await
 }
 
 fn pending_ciphertext_state(pending: &NodePendingCredential, fallback: &'static str) -> String {
@@ -1148,14 +1175,10 @@ pub async fn delete_node(
     let node = node_service::get_node(&state.db, &user_id_str, &node_id).await?;
 
     node_service::delete_node(&state.db, &user_id_str, &node_id).await?;
-
-    // Disconnect WebSocket if connected
-    if state.node_ws_manager.is_connected(&node_id) {
-        state
-            .node_ws_manager
-            .disconnect_connection(&node_id, 4006, "node deleted")
-            .await;
-    }
+    let _ = state
+        .node_dispatch
+        .disconnect(&node_id, 4006, "node deleted")
+        .await?;
 
     audit_service::log_for_user(
         state.db.clone(),
@@ -1197,11 +1220,11 @@ pub async fn rotate_token(
             .await?;
 
     // Disconnect the node since its old token is now invalid
-    if state.node_ws_manager.is_connected(&node_id) {
-        state
-            .node_ws_manager
-            .disconnect_connection(&node_id, 4002, "node credentials rotated")
-            .await;
+    if state
+        .node_dispatch
+        .disconnect(&node_id, 4002, "node credentials rotated")
+        .await?
+    {
         node_service::set_node_status(
             &state.db,
             &node_id,
@@ -1318,10 +1341,10 @@ pub async fn push_pending_credential(
         })),
     );
 
-    if state.node_ws_manager.is_connected(&node_id)
-        && let Err(err) = state
-            .node_ws_manager
-            .send_pending_credentials_available(&node_id)
+    if let Err(err) = state
+        .node_dispatch
+        .send_pending_credentials_available(&node_id)
+        .await
     {
         tracing::warn!(
             node_id = %node_id,
@@ -1365,10 +1388,10 @@ pub async fn push_pending_credential_fan_out(
     );
 
     for target in &result.targets {
-        if state.node_ws_manager.is_connected(&target.node_id)
-            && let Err(err) = state
-                .node_ws_manager
-                .send_pending_credentials_available(&target.node_id)
+        if let Err(err) = state
+            .node_dispatch
+            .send_pending_credentials_available(&target.node_id)
+            .await
         {
             tracing::warn!(
                 node_id = %target.node_id,
@@ -1448,17 +1471,14 @@ pub async fn post_fan_out_pending_credential_ciphertexts(
             now,
         )
         .await?;
-    input.online_node_ids = input
-        .items
-        .iter()
-        .filter(|item| {
-            state.node_ws_manager.is_connected(&item.node_id)
-                && state
-                    .node_ws_manager
-                    .supports_remote_credential_crypto(&item.node_id)
-        })
-        .map(|item| item.node_id.clone())
-        .collect::<HashSet<_>>();
+    let mut online_node_ids = HashSet::new();
+    for item in &input.items {
+        let session = state.node_dispatch.session_info(&item.node_id).await;
+        if session.is_connected && session.capabilities.remote_credential_crypto_v1 {
+            online_node_ids.insert(item.node_id.clone());
+        }
+    }
+    input.online_node_ids = online_node_ids;
 
     let outcome = node_pending_credential_service::store_fan_out_ciphertexts_revision_guard(
         &state.db,
@@ -1484,7 +1504,7 @@ pub async fn post_fan_out_pending_credential_ciphertexts(
             Some(RemoteCryptoState::CiphertextReceived)
         )
     }) {
-        match send_fan_out_ciphertext_to_node(&state, &outcome.pending, target) {
+        match send_fan_out_ciphertext_to_node(&state, &outcome.pending, target).await {
             Ok(()) => {
                 log_rci_for_pending_fan_out_target(
                     &state,
@@ -1552,10 +1572,10 @@ pub async fn retry_failed_fan_out_pending_credential(
     );
 
     for target in &result.targets {
-        if state.node_ws_manager.is_connected(&target.node_id)
-            && let Err(err) = state
-                .node_ws_manager
-                .send_pending_credentials_available(&target.node_id)
+        if let Err(err) = state
+            .node_dispatch
+            .send_pending_credentials_available(&target.node_id)
+            .await
         {
             tracing::warn!(
                 node_id = %target.node_id,
@@ -1658,10 +1678,10 @@ pub async fn init_pending_credential_remote_crypto(
     )
     .await?;
 
-    if state.node_ws_manager.is_connected(&node_id)
-        && let Err(err) = state
-            .node_ws_manager
-            .send_pending_credentials_available(&node_id)
+    if let Err(err) = state
+        .node_dispatch
+        .send_pending_credentials_available(&node_id)
+        .await
     {
         tracing::warn!(
             node_id = %node_id,
@@ -1716,10 +1736,9 @@ pub async fn post_pending_credential_ciphertext(
             now,
         )
         .await?;
-    let node_can_receive_now = state.node_ws_manager.is_connected(&node_id)
-        && state
-            .node_ws_manager
-            .supports_remote_credential_crypto(&node_id);
+    let session = state.node_dispatch.session_info(&node_id).await;
+    let node_can_receive_now =
+        session.is_connected && session.capabilities.remote_credential_crypto_v1;
 
     let outcome = node_pending_credential_service::store_pending_ciphertext_first_writer_wins(
         &state.db,
@@ -1791,7 +1810,7 @@ pub async fn post_pending_credential_ciphertext(
                 &pending,
                 RciAuditEventKind::CiphertextReceived,
             );
-            match send_pending_ciphertext_to_node(&state, &node_id, &pending) {
+            match send_pending_ciphertext_to_node(&state, &node_id, &pending).await {
                 Ok(()) => {
                     log_rci_for_pending_user(
                         &state,
@@ -2113,6 +2132,7 @@ mod tests {
             connected_at: None,
             metadata: None,
             metrics: NodeMetrics::default(),
+            connection_owner: None,
             is_active: true,
             created_at: now,
             updated_at: now,
@@ -2740,7 +2760,7 @@ mod tests {
 
         let state = test_app_state(db.clone());
         let (tx, mut rx) = mpsc::channel(1);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let token = access_token(&state, &actor_id);
         let app = api_app(state);
 
@@ -2851,7 +2871,7 @@ mod tests {
 
         let state = test_app_state(db.clone());
         let (tx, mut rx) = mpsc::channel(1);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         let token = access_token(&state, &actor_id);
         let app = api_app(state);
 
@@ -2942,12 +2962,8 @@ mod tests {
             fan_out_route_fixture("pending_route_fanout_push_success").await;
         let (first_tx, mut first_rx) = mpsc::channel(2);
         let (second_tx, mut second_rx) = mpsc::channel(2);
-        state
-            .node_ws_manager
-            .register_connection(&first.id, first_tx);
-        state
-            .node_ws_manager
-            .register_connection(&second.id, second_tx);
+        crate::test_utils::register_test_node_connection(&state, &first.id, first_tx).await;
+        crate::test_utils::register_test_node_connection(&state, &second.id, second_tx).await;
         let created_audit = audit_service::notify_on_audit_write_for_user(
             "node_credential_rci_fan_out_created",
             actor_id.clone(),
@@ -3120,9 +3136,7 @@ mod tests {
         let pending = record_all_fan_out_pubkeys(&db, &fanout_id, &first.id, &second.id).await;
 
         let (first_tx, mut first_rx) = mpsc::channel(4);
-        state
-            .node_ws_manager
-            .register_connection(&first.id, first_tx);
+        crate::test_utils::register_test_node_connection(&state, &first.id, first_tx).await;
         state.node_ws_manager.record_capabilities(
             &first.id,
             &NodeCapabilitiesMsg {
@@ -3344,9 +3358,7 @@ mod tests {
             Some(RemoteCryptoState::PartialDecrypted)
         );
         let (second_tx, mut second_rx) = mpsc::channel(2);
-        state
-            .node_ws_manager
-            .register_connection(&second.id, second_tx);
+        crate::test_utils::register_test_node_connection(&state, &second.id, second_tx).await;
         let retry_audit = audit_service::notify_on_audit_write(
             "node_credential_rci_fan_out_retry_started",
             Some(fanout_id.clone()),
@@ -3528,7 +3540,7 @@ mod tests {
         let (db, state, app, token, node, pending) =
             pending_route_fixture("pending_route_post_sent", "sent-node", "openclaw", true).await;
         let (tx, mut rx) = mpsc::channel(4);
-        state.node_ws_manager.register_connection(&node.id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
         state.node_ws_manager.record_capabilities(
             &node.id,
             &NodeCapabilitiesMsg {
@@ -3804,11 +3816,11 @@ mod tests {
             match case {
                 "unsupported" => {
                     let (tx, _rx) = mpsc::channel(4);
-                    state.node_ws_manager.register_connection(&node.id, tx);
+                    crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
                 }
                 "send-failure" => {
                     let (tx, _rx) = mpsc::channel(1);
-                    state.node_ws_manager.register_connection(&node.id, tx);
+                    crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
                     state.node_ws_manager.record_capabilities(
                         &node.id,
                         &NodeCapabilitiesMsg {

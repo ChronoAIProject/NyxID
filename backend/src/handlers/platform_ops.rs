@@ -54,7 +54,7 @@ pub async fn x_search(
 ) -> AppResult<Response> {
     require_platform_ops_enabled(&state, &auth_user).await?;
     ensure_platform_operation_caller(&state, &auth_user).await?;
-    enforce_agent_rate_limit(&state, &auth_user)?;
+    enforce_agent_rate_limit(&state, &auth_user).await?;
 
     let started = Instant::now();
     let query_chars = request.query.chars().count();
@@ -88,7 +88,7 @@ pub async fn speak(
 ) -> AppResult<Response> {
     require_platform_ops_enabled(&state, &auth_user).await?;
     ensure_platform_operation_caller(&state, &auth_user).await?;
-    enforce_agent_rate_limit(&state, &auth_user)?;
+    enforce_agent_rate_limit(&state, &auth_user).await?;
 
     let started = Instant::now();
     let text_chars = request.text.chars().count();
@@ -133,7 +133,7 @@ pub async fn call_and_say(
 ) -> AppResult<Response> {
     require_platform_ops_enabled(&state, &auth_user).await?;
     ensure_platform_operation_caller(&state, &auth_user).await?;
-    enforce_agent_rate_limit(&state, &auth_user)?;
+    enforce_agent_rate_limit(&state, &auth_user).await?;
 
     let started = Instant::now();
     let message_chars = request.message.chars().count();
@@ -201,13 +201,14 @@ async fn ensure_platform_operation_caller(state: &AppState, auth_user: &AuthUser
     }
 }
 
-fn enforce_agent_rate_limit(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
+async fn enforce_agent_rate_limit(state: &AppState, auth_user: &AuthUser) -> AppResult<()> {
     crate::mw::rate_limit::check_agent_rate_limit_raw(
         &state.per_agent_limiter,
         auth_user.api_key_id.as_deref(),
         auth_user.rate_limit_per_second,
         auth_user.rate_limit_burst,
     )
+    .await
 }
 
 fn audit_operation<T>(

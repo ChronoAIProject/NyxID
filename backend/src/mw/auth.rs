@@ -496,7 +496,7 @@ fn ensure_delegated_claim_consistency(claims: &jwt::Claims) -> Result<(), AppErr
     Ok(())
 }
 
-fn validate_dpop_bound_access(
+async fn validate_dpop_bound_access(
     parts: &Parts,
     state: &AppState,
     expected_jkt: &str,
@@ -509,12 +509,9 @@ fn validate_dpop_bound_access(
         .map_err(|_| AppError::Unauthorized("invalid DPoP proof".to_string()))?;
     let expected_htu =
         crate::crypto::dpop::htu_from_base_and_path(&state.config.base_url, parts.uri.path())?;
-    let proof_jkt = crate::crypto::dpop::validate_proof(
-        proof,
-        parts.method.as_str(),
-        &expected_htu,
-        &state.dpop_jti_cache,
-    )?;
+    let proof_jkt =
+        crate::crypto::dpop::validate_proof(proof, parts.method.as_str(), &expected_htu, &state.db)
+            .await?;
     if proof_jkt != expected_jkt {
         return Err(AppError::Unauthorized("DPoP cnf mismatch".to_string()));
     }
@@ -666,7 +663,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     }
 
                     if let Some(claims_jkt) = claims.cnf.as_ref().and_then(|c| c.jkt.as_deref()) {
-                        validate_dpop_bound_access(parts, state, claims_jkt)?;
+                        validate_dpop_bound_access(parts, state, claims_jkt).await?;
                     }
                     if let Some(claims_x5t) =
                         claims.cnf.as_ref().and_then(|c| c.x5t_s256.as_deref())
@@ -2034,6 +2031,7 @@ mod tests {
             connected_at: None,
             metadata: None,
             metrics: Default::default(),
+            connection_owner: None,
             is_active: true,
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -2711,8 +2709,9 @@ mod tests {
         let state = crate::test_utils::test_app_state(db);
         let parts = request_parts_with_headers(&[]);
 
-        let err =
-            validate_dpop_bound_access(&parts, &state, "expected-jkt").expect_err("missing DPoP");
+        let err = validate_dpop_bound_access(&parts, &state, "expected-jkt")
+            .await
+            .expect_err("missing DPoP");
 
         assert!(matches!(err, AppError::Unauthorized(message) if message == "DPoP proof required"));
     }

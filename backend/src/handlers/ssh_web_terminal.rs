@@ -106,7 +106,8 @@ pub async fn ssh_web_terminal(
 
     let session_guard = state
         .ssh_session_manager
-        .try_acquire(&auth_user.user_id.to_string())?;
+        .try_acquire(&auth_user.user_id.to_string())
+        .await?;
 
     let client_meta = (
         Some(addr.ip().to_string()),
@@ -173,6 +174,7 @@ async fn handle_web_terminal(
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) {
     let _ = &session_guard;
+    let slot_cancel = session_guard.cancellation_token();
     let user_id = auth_user.user_id.to_string();
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -237,6 +239,7 @@ async fn handle_web_terminal(
             resource_owner_id,
             billing_resolution_user_id,
             billing_egress_permit,
+            slot_cancel,
         )
         .await;
     } else {
@@ -285,6 +288,7 @@ async fn handle_node_web_terminal(
     resource_owner_id: String,
     billing_resolution_user_id: String,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    slot_cancel: tokio_util::sync::CancellationToken,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
@@ -379,7 +383,7 @@ async fn handle_node_web_terminal(
         };
 
         match state
-            .node_ws_manager
+            .node_dispatch
             .open_web_terminal(
                 node_id,
                 crate::services::node_ws_manager::NodeWebTerminalRequest {
@@ -530,6 +534,9 @@ async fn handle_node_web_terminal(
 
     let disconnect_reason = loop {
         tokio::select! {
+            () = slot_cancel.cancelled() => {
+                break "capacity_slot_lost";
+            }
             _ = &mut max_timer => {
                 let _ = socket.send(Message::Text(server_error_msg("Session reached maximum duration").into())).await;
                 break "max_duration_exceeded";
@@ -543,7 +550,7 @@ async fn handle_node_web_terminal(
                 match ws_msg {
                     Some(Ok(Message::Binary(data))) => {
                         from_client_bytes += data.len() as u64;
-                        if state.node_ws_manager.send_web_terminal_data(&node_id, &session_id, &data).is_err() {
+                        if state.node_dispatch.send_web_terminal_data(&node_id, &session_id, &data).is_err() {
                             break "node_terminal_send_failed";
                         }
                     }
@@ -551,7 +558,7 @@ async fn handle_node_web_terminal(
                         if let Ok(ClientControl::Resize { cols: c, rows: r }) =
                             serde_json::from_str::<ClientControl>(&text)
                         {
-                            let _ = state.node_ws_manager.send_web_terminal_resize(
+                            let _ = state.node_dispatch.send_web_terminal_resize(
                                 &node_id,
                                 &session_id,
                                 c.clamp(10, 500),
@@ -644,10 +651,7 @@ async fn handle_node_web_terminal(
 }
 
 fn close_node_web_terminal(state: &AppState, node_id: &str, session_id: &str, reason: &str) {
-    if let Err(error) = state
-        .node_ws_manager
-        .close_web_terminal(node_id, session_id)
-    {
+    if let Err(error) = state.node_dispatch.close_web_terminal(node_id, session_id) {
         tracing::warn!(
             node_id,
             session_id,

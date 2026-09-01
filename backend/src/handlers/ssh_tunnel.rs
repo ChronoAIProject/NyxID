@@ -188,7 +188,8 @@ pub async fn ssh_tunnel_ws(
     validate_runtime_ssh_target(&service_id, &ssh_service).await?;
     let session_guard = state
         .ssh_session_manager
-        .try_acquire(&auth_user.user_id.to_string())?;
+        .try_acquire(&auth_user.user_id.to_string())
+        .await?;
     let client_meta = TunnelClientMeta {
         ip_address: Some(addr.ip().to_string()),
         user_agent: headers
@@ -245,6 +246,7 @@ async fn handle_ssh_socket(
 ) {
     // Held for Drop-based session count cleanup for the tunnel lifetime.
     let _ = &session_guard;
+    let slot_cancel = session_guard.cancellation_token();
     let user_id = auth_user.user_id.to_string();
     let billing_resolution_user_id = auth_user.proxy_resolution_user_id();
     let session_id = uuid::Uuid::new_v4().to_string();
@@ -344,6 +346,7 @@ async fn handle_ssh_socket(
             tele,
             metered,
             billing_egress_permit,
+            slot_cancel,
         )
         .await;
         return;
@@ -525,6 +528,9 @@ async fn handle_ssh_socket(
 
     let disconnect_reason = loop {
         tokio::select! {
+            () = slot_cancel.cancelled() => {
+                break Some("capacity_slot_lost");
+            }
             _ = &mut tunnel_timeout => {
                 let _ = socket
                     .send(Message::Close(Some(axum::extract::ws::CloseFrame {
@@ -641,6 +647,7 @@ async fn handle_node_ssh_socket(
     tele: TelemetryContext,
     metered: crate::services::billing::MeteredProxyContext,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+    slot_cancel: tokio_util::sync::CancellationToken,
 ) {
     let all_node_ids: Vec<&str> = std::iter::once(node_route.node_id.as_str())
         .chain(node_route.fallback_node_ids.iter().map(|id| id.as_str()))
@@ -673,7 +680,7 @@ async fn handle_node_ssh_socket(
             None
         };
         match state
-            .node_ws_manager
+            .node_dispatch
             .open_ssh_tunnel(
                 node_id,
                 crate::services::node_ws_manager::NodeSshTunnelRequest {
@@ -883,6 +890,9 @@ async fn handle_node_ssh_socket(
 
     let disconnect_reason = loop {
         tokio::select! {
+            () = slot_cancel.cancelled() => {
+                break Some("capacity_slot_lost");
+            }
             _ = &mut tunnel_timeout => {
                 let _ = socket
                     .send(Message::Close(Some(axum::extract::ws::CloseFrame {
@@ -896,7 +906,7 @@ async fn handle_node_ssh_socket(
                 match ws_message {
                     Some(Ok(Message::Binary(bytes))) => {
                         from_client_bytes += bytes.len() as u64;
-                        if state.node_ws_manager.send_ssh_tunnel_data(&node_id, &session_id, &bytes).is_err() {
+                        if state.node_dispatch.send_ssh_tunnel_data(&node_id, &session_id, &bytes).is_err() {
                             break Some("node_tunnel_send_failed");
                         }
                     }
@@ -1281,7 +1291,7 @@ fn close_node_ssh_tunnel(
     session_id: &str,
     reason: &str,
 ) {
-    if let Err(error) = state.node_ws_manager.close_ssh_tunnel(node_id, session_id) {
+    if let Err(error) = state.node_dispatch.close_ssh_tunnel(node_id, session_id) {
         tracing::warn!(
             service_id,
             node_id,

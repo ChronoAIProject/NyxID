@@ -1,12 +1,17 @@
-use mongodb::bson::{self, doc};
+use std::time::Duration;
+
+use mongodb::bson::{self, Bson, doc};
 
 use crate::AppState;
 use crate::errors::AppError;
+use crate::models::coordination::CoordinationHolder;
 use crate::models::notification_channel::{COLLECTION_NAME as CHANNELS, NotificationChannel};
+use crate::services::coordination_service::{ClusterLeaseRuntime, LeaseStore};
 use crate::services::{approval_service, audit_service, notification_service, telegram_service};
 
 const TELEGRAM_LINKED_APPROVAL_ACTIVE_MESSAGE: &str = "Your Telegram account has been linked to NyxID. Approval protection is now active and approval requests will be delivered here.";
 const TELEGRAM_LINKED_APPROVAL_OFF_MESSAGE: &str = "Your Telegram account has been linked to NyxID. Approval protection is off — enable it in NyxID notification settings when you want requests delivered here.";
+const TELEGRAM_POLLER_LEASE_NAME: &str = "telegram-poller";
 
 /// Run the Telegram long polling loop (development mode fallback).
 ///
@@ -19,30 +24,91 @@ pub async fn run_polling_loop(state: AppState) {
         None => return,
     };
 
-    // Delete any existing webhook so getUpdates works
-    match telegram_service::delete_webhook(&state.http_client, &bot_token).await {
-        Ok(()) => tracing::info!("Telegram webhook cleared for polling mode"),
-        Err(e) => {
-            tracing::error!("Failed to clear Telegram webhook: {e}");
-            return;
-        }
-    }
-
-    tracing::info!("Telegram polling mode active (development fallback)");
-
-    let mut offset: Option<i64> = None;
+    let runtime = ClusterLeaseRuntime::new(
+        CoordinationHolder {
+            instance_id: state.replica_identity.instance_name.clone(),
+            generation_id: state.replica_identity.generation_id.clone(),
+        },
+        Duration::from_secs(state.config.cluster_lease_ttl_secs),
+        Duration::from_secs(state.config.cluster_lease_renew_secs),
+    );
 
     loop {
-        match telegram_service::get_updates(&state.http_client, &bot_token, offset, 30).await {
-            Ok(updates) => {
-                for update in updates {
-                    offset = Some(update.update_id + 1);
-                    process_update(&state, update).await;
+        match runtime.acquire(&state.db, TELEGRAM_POLLER_LEASE_NAME).await {
+            Ok(Some(lease)) => {
+                let result = runtime
+                    .run_while_renewed(
+                        &state.db,
+                        &lease,
+                        run_as_polling_leader(&state, &bot_token, &lease, &runtime),
+                    )
+                    .await;
+                if let Err(error) = LeaseStore::release(&state.db, &lease).await {
+                    tracing::warn!(error = %error, "Failed to release Telegram polling lease");
+                }
+                match result {
+                    None => {
+                        tracing::warn!("Telegram polling leadership lost; cancelling long poll")
+                    }
+                    Some(Ok(())) => tracing::warn!("Telegram polling leadership ended"),
+                    Some(Err(error)) => {
+                        tracing::warn!(error = %error, "Telegram polling leader failed")
+                    }
                 }
             }
-            Err(e) => {
-                tracing::warn!("Telegram getUpdates error: {e}");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "Failed to acquire Telegram polling lease");
+            }
+        }
+        tokio::time::sleep(runtime.contender_wait()).await;
+    }
+}
+
+async fn run_as_polling_leader(
+    state: &AppState,
+    bot_token: &str,
+    lease: &crate::services::coordination_service::LeaseToken,
+    runtime: &ClusterLeaseRuntime,
+) -> Result<(), AppError> {
+    telegram_service::delete_webhook(&state.http_client, bot_token).await?;
+    tracing::info!("Telegram polling mode active on elected replica");
+
+    let mut offset = match LeaseStore::load_checkpoint(&state.db, lease).await? {
+        Some(Bson::Int64(value)) => Some(value),
+        Some(Bson::Int32(value)) => Some(i64::from(value)),
+        Some(_) => {
+            tracing::warn!("Ignoring invalid Telegram polling checkpoint");
+            None
+        }
+        None => None,
+    };
+    let poll_timeout_secs = u32::try_from(runtime.ttl.as_secs()).unwrap_or(u32::MAX);
+
+    loop {
+        match telegram_service::get_updates(
+            &state.http_client,
+            bot_token,
+            offset,
+            poll_timeout_secs,
+        )
+        .await
+        {
+            Ok(updates) => {
+                for update in updates {
+                    let next_offset = update.update_id.saturating_add(1);
+                    process_update(state, update).await;
+                    if !LeaseStore::store_checkpoint(&state.db, lease, Bson::Int64(next_offset))
+                        .await?
+                    {
+                        return Ok(());
+                    }
+                    offset = Some(next_offset);
+                }
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "Telegram getUpdates error");
+                tokio::time::sleep(runtime.contender_wait()).await;
             }
         }
     }

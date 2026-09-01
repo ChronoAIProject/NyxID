@@ -528,6 +528,10 @@ pub async fn rotate_node_token(
                 .resource_access_revision
                 .is_some_and(|revision| current.access_revision > revision);
             if committed {
+                state
+                    .node_dispatch
+                    .disconnect(&node_id, 4002, "node credentials rotated")
+                    .await?;
                 assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
                 return Ok(Json(node_material_replay_response(&receipt)));
             }
@@ -538,22 +542,20 @@ pub async fn rotate_node_token(
     let (raw_token, signing_secret) =
         node_service::rotate_auth_token(&state.db, &state.encryption_keys, &actor, &node_id)
             .await?;
-    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-    if state.node_ws_manager.is_connected(&node_id) {
-        state
-            .node_ws_manager
-            .disconnect_connection(&node_id, 4002, "node credentials rotated")
-            .await;
-        if let Err(error) = node_service::set_node_status(
+    if state
+        .node_dispatch
+        .disconnect(&node_id, 4002, "node credentials rotated")
+        .await?
+        && let Err(error) = node_service::set_node_status(
             &state.db,
             &node_id,
             crate::models::node::NodeStatus::Offline,
         )
         .await
-        {
-            tracing::warn!(node_id = %node_id, error = %error, "failed to persist rotated node disconnect status");
-        }
+    {
+        tracing::warn!(node_id = %node_id, error = %error, "failed to persist rotated node disconnect status");
     }
+    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -639,13 +641,14 @@ pub async fn delete_node(
         }
         return Err(error);
     }
-    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-    if state.node_ws_manager.is_connected(&node_id) {
-        state
-            .node_ws_manager
-            .disconnect_connection(&node_id, 4006, "node deleted")
-            .await;
+    if let Err(error) = state
+        .node_dispatch
+        .disconnect(&node_id, 4006, "node deleted")
+        .await
+    {
+        tracing::warn!(node_id = %node_id, %error, "Failed to close deleted node connection");
     }
+    assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -769,11 +772,9 @@ async fn create_pending_credential_effect(
     let target_url = normalize_optional(body.target_url);
     let label = normalize_optional(body.label);
     node_service::ensure_node_writable_by_actor(&state.db, &actor, &node_id).await?;
+    let session = state.node_dispatch.session_info(&node_id).await;
     if require_online
-        && (!state.node_ws_manager.is_connected(&node_id)
-            || !state
-                .node_ws_manager
-                .supports_remote_credential_crypto(&node_id))
+        && (!session.is_connected || !session.capabilities.remote_credential_crypto_v1)
     {
         return Err(AppError::NodeOffline(
             "Node must be online with remote credential encryption support".to_string(),
@@ -829,10 +830,10 @@ async fn create_pending_credential_effect(
                 }
             };
             assistant_action_receipts::mark_completed(&state.db, &receipt).await?;
-            if state.node_ws_manager.is_connected(&node_id)
-                && let Err(error) = state
-                    .node_ws_manager
-                    .send_pending_credentials_available(&node_id)
+            if let Err(error) = state
+                .node_dispatch
+                .send_pending_credentials_available(&node_id)
+                .await
             {
                 tracing::warn!(node_id = %node_id, error = %error, "failed to notify node about assistant credential push");
             }
@@ -1113,6 +1114,7 @@ mod tests {
             connected_at: None,
             metadata: None,
             metrics: NodeMetrics::default(),
+            connection_owner: None,
             is_active: true,
             created_at: now,
             updated_at: now,
@@ -1188,6 +1190,7 @@ mod tests {
             connected_at: None,
             metadata: None,
             metrics: NodeMetrics::default(),
+            connection_owner: None,
             is_active: true,
             created_at: now,
             updated_at: now,
@@ -1899,7 +1902,7 @@ mod tests {
 
         let state = test_app_state(db.clone());
         let (tx, _rx) = tokio::sync::mpsc::channel(16);
-        state.node_ws_manager.register_connection(&node_id, tx);
+        crate::test_utils::register_test_node_connection(&state, &node_id, tx).await;
         state.node_ws_manager.record_capabilities(
             &node_id,
             &crate::services::node_ws_manager::NodeCapabilitiesMsg {

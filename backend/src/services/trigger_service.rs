@@ -27,7 +27,6 @@ use crate::models::trigger_delivery::{
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::mw::rate_limit::PerChannelEventLimiter;
 use crate::services::channel_event_service::{self, EventEnvelope};
-use crate::services::event_dedup_cache::EventDedupCache;
 use crate::services::push_service::{ApnsAuth, FcmAuth};
 use crate::services::webhook_delivery_service::{self, DeliveryFailure, SignatureContract};
 use crate::services::{audit_service, notification_service};
@@ -457,7 +456,6 @@ pub async fn deliver_event(
     config: &AppConfig,
     jwt_keys: &JwtKeys,
     channel_limiter: &PerChannelEventLimiter,
-    channel_dedup: &Arc<EventDedupCache>,
     fcm_auth: Option<&FcmAuth>,
     apns_auth: Option<&ApnsAuth>,
     trigger: &Trigger,
@@ -503,7 +501,6 @@ pub async fn deliver_event(
                 config,
                 jwt_keys,
                 channel_limiter,
-                channel_dedup,
                 &trigger.user_id,
                 conversation_id,
                 &agent_envelope,

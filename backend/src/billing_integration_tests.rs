@@ -392,7 +392,7 @@ async fn billing_route_coverage_smoke() {
     )
     .await;
     let (node_tx, node_rx) = mpsc::channel(256);
-    state.node_ws_manager.register_connection(&node.id, node_tx);
+    crate::test_utils::register_test_node_connection(&state, &node.id, node_tx).await;
     let node_responder = spawn_node_http_responder(&state, &node.id, node_rx, 3);
 
     call_mounted_route(
@@ -778,9 +778,7 @@ async fn billing_route_coverage_smoke() {
     )
     .await;
     let (node_ws_tx, node_ws_rx) = mpsc::channel(256);
-    state
-        .node_ws_manager
-        .register_connection(&node.id, node_ws_tx);
+    crate::test_utils::register_test_node_connection(&state, &node.id, node_ws_tx).await;
     let node_ws_responder = spawn_node_ws_responder(&state, &node.id, node_ws_rx);
     exercise_mounted_websocket(
         &route_address,
@@ -823,9 +821,7 @@ async fn billing_route_coverage_smoke() {
     )
     .await;
     let (node_tunnel_tx, node_tunnel_rx) = mpsc::channel(256);
-    state
-        .node_ws_manager
-        .register_connection(&node.id, node_tunnel_tx);
+    crate::test_utils::register_test_node_connection(&state, &node.id, node_tunnel_tx).await;
     let node_tunnel_responder = spawn_node_ssh_tunnel_responder(&state, &node.id, node_tunnel_rx);
     exercise_mounted_ssh_websocket(
         &route_address,
@@ -849,9 +845,7 @@ async fn billing_route_coverage_smoke() {
     )
     .await;
     let (node_exec_tx, node_exec_rx) = mpsc::channel(256);
-    state
-        .node_ws_manager
-        .register_connection(&node.id, node_exec_tx);
+    crate::test_utils::register_test_node_connection(&state, &node.id, node_exec_tx).await;
     let node_exec_responder = spawn_node_ssh_exec_responder(&state, &node.id, node_exec_rx);
     let exec_response = reqwest::Client::new()
         .post(format!(
@@ -890,9 +884,7 @@ async fn billing_route_coverage_smoke() {
     )
     .await;
     let (mcp_ssh_tx, mcp_ssh_rx) = mpsc::channel(256);
-    state
-        .node_ws_manager
-        .register_connection(&node.id, mcp_ssh_tx);
+    crate::test_utils::register_test_node_connection(&state, &node.id, mcp_ssh_tx).await;
     let mcp_ssh_responder = spawn_node_ssh_cert_exec_responder(&state, &node.id, mcp_ssh_rx);
     let mcp_ssh_body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -927,9 +919,7 @@ async fn billing_route_coverage_smoke() {
     assert_route_settled(&db, &mcp_ssh_binding.slug, BillingMetric::Requests).await;
 
     let (node_terminal_tx, node_terminal_rx) = mpsc::channel(256);
-    state
-        .node_ws_manager
-        .register_connection(&node.id, node_terminal_tx);
+    crate::test_utils::register_test_node_connection(&state, &node.id, node_terminal_tx).await;
     let node_terminal_responder = spawn_node_terminal_responder(&state, &node.id, node_terminal_rx);
     exercise_mounted_ssh_websocket(
         &route_address,
@@ -1738,6 +1728,7 @@ async fn insert_route_node(state: &crate::AppState, owner_id: &str, name: &str) 
         connected_at: Some(now),
         metadata: None,
         metrics: NodeMetrics::default(),
+        connection_owner: None,
         is_active: true,
         created_at: now,
         updated_at: now,

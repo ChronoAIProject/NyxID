@@ -6,7 +6,7 @@ The HTTP Event Gateway lets external devices, analyzers, and services push event
 
 A camera analyzer detects a person entering the living room, a thermostat reports a spike, an ESP32 sensor fires an alert — all land as a `CallbackPayload` on the agent's webhook and are delivered end-to-end through the same channel relay pipeline already used for Telegram, Discord, Lark, and Feishu bots.
 
-NyxID is a **pure passthrough gateway** for events (see [ADR-013](#adr-013-pure-passthrough)): it authenticates, rate-limits, deduplicates best-effort, and forwards once. It never retries, never queues, and never stores event payload content. The agent receives the event, acts on it, and optionally replies through the existing async reply endpoint.
+NyxID is a **pure passthrough gateway** for events (see [ADR-013](#adr-013-pure-passthrough)): it authenticates, applies cluster-wide rate limits and deduplication, and forwards once. It never retries, never queues, and never stores event payload content. The agent receives the event, acts on it, and optionally replies through the existing async reply endpoint.
 
 ```mermaid
 graph LR
@@ -47,8 +47,8 @@ Every design choice on this path follows a single rule: **NyxID is a gateway, no
 | No retry | Forward once; on failure, return the error to the client and let them decide |
 | No cache / queue | No in-memory buffer, no fan-out, no ordering guarantees |
 | Metadata only | `channel_event_logs` stores `event_id`, `source`, `type`, `timestamp`, `status_code`, `latency_ms`, `outcome` — never payload content |
-| Client-side retry | Producers reuse the same `event_id` on retry; dedup is best-effort, failure unlocks retries |
-| Stateless | NyxID can restart without losing any data (there's nothing to lose) |
+| Client-side retry | Producers reuse the same `event_id` on retry; a failed forward releases its fenced Mongo claim so a retry can proceed |
+| Shared coordination | MongoDB stores only expiring limiter and dedup metadata; any replica can handle the retry |
 
 The same principle applies retroactively to `channel_messages`: the bot relay collection was refactored in this shipment to store metadata only, matching the event path.
 
@@ -60,8 +60,8 @@ The same principle applies retroactively to `channel_messages`: the bot relay co
 sequenceDiagram
     participant Analyzer as Analyzer / Device
     participant NyxID as NyxID Gateway
-    participant Dedup as Dedup LRU
-    participant ChanRL as Per-Channel Limiter
+    participant Dedup as Mongo Dedup Claim
+    participant ChanRL as Mongo Token Bucket
     participant DB as MongoDB
     participant Agent as Agent Callback URL
 
@@ -77,7 +77,7 @@ sequenceDiagram
         ChanRL->>DB: write ChannelEventLog (outcome=rate_limited)
         ChanRL-->>Analyzer: 429 Too Many Requests
     end
-    NyxID->>Dedup: contains?(conversation_id, event_id)
+    NyxID->>Dedup: atomically claim(conversation_id, event_id)
     alt duplicate within TTL
         Dedup->>DB: write ChannelEventLog (outcome=deduped)
         Dedup-->>Analyzer: 200 OK (idempotent no-op)
@@ -89,16 +89,18 @@ sequenceDiagram
     NyxID->>Agent: POST callback_url<br/>X-NyxID-Signature (HMAC-SHA256)
     alt HTTP 202
         Agent-->>NyxID: 202 Accepted
-        NyxID->>Dedup: insert_if_absent (mark as seen)
+        NyxID->>Dedup: commit exact claim with dedup TTL
         NyxID->>DB: update callback_status=delivered<br/>touch conversation last_message_at<br/>write ChannelEventLog (outcome=delivered)
         NyxID-->>Analyzer: 200 OK
     else HTTP 200 (legacy)
         Agent-->>NyxID: 200 OK + body
         NyxID->>NyxID: log warning, discard body
+        NyxID->>Dedup: commit exact claim with dedup TTL
         NyxID->>DB: update callback_status=delivered<br/>write ChannelEventLog (outcome=delivered, upstream_status=200)
         NyxID-->>Analyzer: 200 OK
     else non-2xx / transport
         Agent--xNyxID: error
+        NyxID->>Dedup: release exact claim
         NyxID->>DB: update callback_status=failed<br/>write ChannelEventLog (outcome=callback_failed)
         NyxID-->>Analyzer: 502 Bad Gateway
     end
@@ -118,9 +120,9 @@ flowchart LR
         DED[services/event_dedup_cache.rs]
     end
 
-    subgraph State["AppState"]
-        LRU[EventDedupCache<br/>LRU + TTL]
-        PCL[PerChannelEventLimiter<br/>token bucket / conversation_id]
+    subgraph State["Shared MongoDB Coordination"]
+        DSTORE[(coordination_event_dedup<br/>claim + commit + TTL)]
+        PCL[(coordination_token_buckets<br/>conversation token bucket)]
     end
 
     subgraph Models["Collections"]
@@ -131,7 +133,8 @@ flowchart LR
     end
 
     H --> ES
-    ES --> LRU
+    ES --> DED
+    DED --> DSTORE
     ES --> PCL
     ES --> CC
     ES --> AK
@@ -193,21 +196,17 @@ Execution order matters — each step is ordered to minimize wasted work on the 
 2. **Scoped conversation lookup** — `find_one({_id, is_active, agent_api_key_id})`. Unknown / inactive / foreign → single 401. The rate-limit bucket is only consumable by legitimate owners.
 3. **Wildcard reject** — `platform_conversation_id == "*"` rows are default-agent catch-all routes; async replies cannot round-trip through them. Rejected with 400 `wildcard_conversation_not_supported`. Only surfaces to owners (not a leak).
 4. **Per-channel rate limit** — token bucket keyed by `conversation_id`, default 100/s burst 200.
-5. **Dedup check** (read-only) — `contains(conv, event)` probes the LRU without mutating it. Hits short-circuit as `outcome=deduped`. The cache is written only after a **successful** forward, so transient failures don't lock out client retries for the full TTL.
+5. **Dedup claim** - `claim(namespace, conversation, event)` uses an atomic MongoDB upsert. Exactly one replica receives the fenced claim; concurrent callers return `outcome=deduped`. Failed preparation or forwarding releases the exact claim so a retry can proceed.
 6. **API key load** — fetch the agent key for `callback_url` + `key_hash`. Reject if `callback_url` is unset.
 7. **Inherit thread_id** — `lookup_recent_inbound_thread_id()` finds the most recent webhook-driven inbound in the conversation with a non-null `thread_id`. Interaction tokens have a 2-minute age cap; Telegram topic ids have no TTL.
 8. **Persist metadata** — `store_device_event_message()` writes a `ChannelMessage` row with the inherited thread_id. The stored message's UUID becomes the callback's `message_id` so async replies can look it up.
 9. **Build payload** — `CallbackPayload` with `platform = "device"`, `content.text` = full envelope JSON, `conversation.type = "device"`, `sender.platform_id = envelope.source`, timestamp in RFC 3339.
 10. **Forward and measure** — `channel_relay_service::forward_to_agent()` returns a `CallbackDelivery { http_status: Option<u16>, result }`. Latency captured around the call.
-11. **Record outcome** — on success: insert dedup entry, touch conversation `last_message_at`, update `callback_status = "delivered"`, write `ChannelEventLog` with the real upstream status. On failure: update `callback_status = "failed"`, write log with `outcome = "callback_failed"` and the actual HTTP status (or `0` for transport errors).
+11. **Record outcome** - on success: commit the fenced dedup claim with the configured TTL, touch conversation `last_message_at`, update `callback_status = "delivered"`, and write `ChannelEventLog` with the real upstream status. On failure: release the claim, update `callback_status = "failed"`, and write the failure log.
 
 ### event_dedup_cache (`backend/src/services/event_dedup_cache.rs`)
 
-Per-process LRU with per-entry TTL, keyed by `(conversation_id, event_id)`. Bounded-capacity FIFO eviction plus opportunistic TTL cleanup on insert plus a periodic background cleanup task (60s interval).
-
-Two-phase API: `contains()` is read-only and `insert_if_absent()` is the commit. The service uses `contains()` before forwarding and `insert_if_absent()` only after success, so failed forwards don't lock out client retries.
-
-**Known limitation:** per-process. Multi-replica deployments will see duplicates across instances. Sticky routing or Redis-backed dedup is future work; out of scope for this shipment.
+Thin namespace wrapper around `coordination_service::EventDedupStore`. Records are keyed by a hash of `(namespace, scope, event_id)` in `coordination_event_dedup`. `claim()` is an atomic first-writer-wins upsert, `commit()` requires the exact unexpired claim fence, and `release()` deletes only the caller's claim. A TTL index removes expired claims and committed dedup records. Channel events and trigger events use separate namespaces.
 
 ### channel_relay_service (`backend/src/services/channel_relay_service.rs`)
 
@@ -252,9 +251,7 @@ The `decrypt_bot_token()` call that fed the deleted sync path was also removed.
 
 ### PerChannelEventLimiter (`backend/src/mw/rate_limit.rs`)
 
-Token bucket keyed by `conversation_id`, distinct from the existing `PerAgentRateLimiter` which is keyed by API key. Rate and burst are static per instance, loaded from config at construction.
-
-Default: 100 events/s, burst 200. Entries idle for more than 120 seconds are swept by a periodic cleanup task.
+Mongo-backed token bucket keyed by `conversation_id`, distinct from the `PerAgentRateLimiter` keyed by API key. Rate and burst are loaded from config, but admission state is shared by every replica through atomic updates in `coordination_token_buckets`. Default: 100 events/s, burst 200. A TTL index removes buckets after enough idle time to refill to capacity.
 
 ## Frontend Changes
 
@@ -316,17 +313,16 @@ Nested under `api_v1_delegated` so the existing API-key auth middleware is appli
 
 ## AppState Integration
 
-Three new fields on `AppState`:
+The event gateway uses the shared database and one configured limiter in `AppState`:
 
 ```rust
 pub struct AppState {
     // ... existing fields ...
     pub per_channel_event_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
-    pub event_dedup_cache: Arc<EventDedupCache>,
 }
 ```
 
-Constructed in `main.rs` from config (`channel_event_rate_limit_per_second`, `channel_event_rate_limit_burst`, `channel_event_dedup_capacity`, `channel_event_dedup_ttl_secs`). Two background cleanup tasks (60s interval) sweep idle buckets and expired dedup entries.
+`PerChannelEventLimiter` is constructed in `main.rs` with the MongoDB database and rate settings. The dedup service receives the same database per request. MongoDB TTL indexes handle cleanup; there are no process-local event limiter or dedup maps in production.
 
 ## Environment Variables
 
@@ -334,11 +330,8 @@ Constructed in `main.rs` from config (`channel_event_rate_limit_per_second`, `ch
 # HTTP Event Gateway (NyxID#221, ADR-013)
 CHANNEL_EVENT_RATE_LIMIT_PER_SECOND=100  # per-conversation events/sec
 CHANNEL_EVENT_RATE_LIMIT_BURST=200       # per-conversation burst capacity
-CHANNEL_EVENT_DEDUP_CAPACITY=32768       # LRU dedup cache size
 CHANNEL_EVENT_DEDUP_TTL_SECS=300         # dedup entry TTL (5 minutes)
 ```
-
-The dedup capacity default is sized to honor the 5-minute TTL window at the default rate: 100 events/s × 300 s = 30,000 entries, rounded up to 32,768 (2¹⁵). Operators with many concurrent high-throughput channels should tune this up; the cache exposes `hit_count()` and `eviction_count()` for monitoring.
 
 ## API Contract
 
