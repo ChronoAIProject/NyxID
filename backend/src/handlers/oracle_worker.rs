@@ -267,6 +267,8 @@ pub struct WorkerTranscriptRequest {
     pub chatgpt_url: Option<String>,
     #[serde(default)]
     pub instance_id: Option<String>,
+    #[serde(default)]
+    pub dispatch_attempt_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -297,14 +299,17 @@ pub async fn submit_transcript(
             text: turn.text,
         })
         .collect();
-    let outcome = oracle_task_service::worker_submit_transcript(
+    let outcome = oracle_task_service::worker_submit_transcript_fenced(
         &state.db,
         &pool,
         &body.worker,
         &body.task_id,
-        &turns,
-        body.chatgpt_url.as_deref(),
-        state.config.oracle_task_retention_days,
+        oracle_task_service::WorkerTranscriptInput {
+            turns: &turns,
+            chatgpt_url: body.chatgpt_url.as_deref(),
+            retention_days: state.config.oracle_task_retention_days,
+            dispatch_attempt_id: body.dispatch_attempt_id.as_deref(),
+        },
     )
     .await?;
 
@@ -332,6 +337,8 @@ pub struct PinConvUrlRequest {
     pub chatgpt_url: String,
     #[serde(default)]
     pub instance_id: Option<String>,
+    #[serde(default)]
+    pub dispatch_attempt_id: Option<String>,
 }
 
 pub async fn pin_conv_url(
@@ -347,12 +354,13 @@ pub async fn pin_conv_url(
         body.instance_id.as_deref(),
     )
     .await?;
-    oracle_task_service::pin_conversation_url(
+    oracle_task_service::pin_conversation_url_fenced(
         &state.db,
         &pool,
         &body.worker,
         &body.task_id,
         &body.chatgpt_url,
+        body.dispatch_attempt_id.as_deref(),
     )
     .await?;
     Ok(Json(serde_json::json!({ "status": "pinned" })))
