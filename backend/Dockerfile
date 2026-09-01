@@ -50,6 +50,9 @@ COPY backend/prompts backend/prompts
 COPY backend/specs backend/specs
 COPY cloud-auth/src cloud-auth/src
 COPY docs/AI_AGENT_PLAYBOOK.md docs/AI_AGENT_PLAYBOOK.md
+# The oracle worker bundle is embedded via include_str! and served from
+# /api/v1/oracle/worker-bundle so installs stay in sync with the server.
+COPY integrations/oracle/cdp-worker/worker.mjs integrations/oracle/cdp-worker/worker.mjs
 
 # Touch entry points so cargo sees them as newer than the cached dummies.
 RUN touch backend/src/main.rs cloud-auth/src/lib.rs
