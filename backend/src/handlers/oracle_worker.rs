@@ -66,12 +66,13 @@ pub async fn poll_task(
     Query(query): Query<PollTaskQuery>,
 ) -> AppResult<Json<PollTaskResponse>> {
     let pool = authenticate_worker(&state, &headers).await?;
-    let claimed = oracle_task_service::claim_task(
+    let claimed = oracle_task_service::claim_task_with_retention(
         &state.db,
         &pool,
         &query.worker,
         query.script_version.as_deref(),
         query.page_url.as_deref(),
+        state.config.oracle_task_retention_days,
     )
     .await?;
     Ok(Json(match claimed {
@@ -94,6 +95,8 @@ pub struct WorkerAckRequest {
     pub script_version: Option<String>,
     #[serde(default)]
     pub page_url: Option<String>,
+    #[serde(default)]
+    pub dispatch_attempt_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -108,15 +111,18 @@ pub async fn ack(
     Json(body): Json<WorkerAckRequest>,
 ) -> AppResult<Json<WorkerAckResponse>> {
     let pool = authenticate_worker(&state, &headers).await?;
-    let outcome = oracle_task_service::worker_ack(
+    let outcome = oracle_task_service::worker_ack_fenced(
         &state.db,
         &pool,
         &body.worker,
         &body.task_id,
-        body.phase.as_deref(),
-        body.phase_detail.as_deref(),
-        body.script_version.as_deref(),
-        body.page_url.as_deref(),
+        oracle_task_service::WorkerAckInput {
+            phase: body.phase.as_deref(),
+            phase_detail: body.phase_detail.as_deref(),
+            script_version: body.script_version.as_deref(),
+            page_url: body.page_url.as_deref(),
+            dispatch_attempt_id: body.dispatch_attempt_id.as_deref(),
+        },
     )
     .await?;
     Ok(Json(WorkerAckResponse {
@@ -151,6 +157,8 @@ pub struct WorkerResultRequest {
     pub model: Option<String>,
     #[serde(default)]
     pub script_version: Option<String>,
+    #[serde(default)]
+    pub dispatch_attempt_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -176,17 +184,20 @@ pub async fn submit_result(
             name: i.name,
         })
         .collect();
-    let outcome = oracle_task_service::worker_submit_result(
+    let outcome = oracle_task_service::worker_submit_result_fenced(
         &state.db,
         &pool,
         &body.worker,
         &body.task_id,
-        &body.response,
-        images,
-        body.chatgpt_url.as_deref(),
-        body.model.as_deref(),
-        body.script_version.as_deref(),
-        state.config.oracle_task_retention_days,
+        oracle_task_service::WorkerResultInput {
+            response: &body.response,
+            images,
+            chatgpt_url: body.chatgpt_url.as_deref(),
+            model: body.model.as_deref(),
+            script_version: body.script_version.as_deref(),
+            retention_days: state.config.oracle_task_retention_days,
+            dispatch_attempt_id: body.dispatch_attempt_id.as_deref(),
+        },
     )
     .await?;
 
@@ -319,6 +330,10 @@ mod tests {
         let task = PollTaskResponse::Task {
             task: oracle_task_service::WorkerTaskPayload {
                 task_id: "t1".to_string(),
+                attempts: 1,
+                retry_count: 0,
+                max_retries: 3,
+                dispatch_attempt_id: Some("attempt-1".to_string()),
                 kind: "prompt".to_string(),
                 prompt: "p".to_string(),
                 target_url: None,

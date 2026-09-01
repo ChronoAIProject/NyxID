@@ -58,6 +58,9 @@ pub struct SubmitOracleTaskRequest {
 pub struct SubmitOracleTaskResponse {
     pub task_id: String,
     pub status: String,
+    pub attempts: u32,
+    pub retry_count: u32,
+    pub max_retries: u32,
     pub queue_position: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
@@ -105,6 +108,9 @@ pub struct OracleTaskInfo {
     pub task_id: String,
     pub pool_id: String,
     pub status: String,
+    pub attempts: u32,
+    pub retry_count: u32,
+    pub max_retries: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -194,6 +200,9 @@ fn task_info(task: &OracleTask, queue_position: u64) -> OracleTaskInfo {
         task_id: task.id.clone(),
         pool_id: task.pool_id.clone(),
         status: task.status.as_str().to_string(),
+        attempts: task.attempt_count,
+        retry_count: task.retry_count,
+        max_retries: task.max_retries,
         phase: task.phase.clone(),
         phase_detail: task.phase_detail.clone(),
         conversation_id: task.conversation_id.clone(),
@@ -296,6 +305,9 @@ pub async fn submit_task(
         Json(SubmitOracleTaskResponse {
             task_id: outcome.task.id.clone(),
             status: outcome.task.status.as_str().to_string(),
+            attempts: outcome.task.attempt_count,
+            retry_count: outcome.task.retry_count,
+            max_retries: outcome.task.max_retries,
             queue_position: outcome.queue_position,
             conversation_id: outcome.task.conversation_id.clone(),
             deduplicated: outcome.deduplicated,
@@ -434,7 +446,12 @@ pub async fn pool_status(
     let actor = auth_user.user_id.to_string();
     let pool = oracle_pool_service::get_pool(&state.db, &pool_id_or_slug).await?;
     oracle_pool_service::ensure_can_view(&state.db, &actor, &pool).await?;
-    let status = oracle_task_service::pool_status(&state.db, &pool).await?;
+    let status = oracle_task_service::pool_status_with_retention(
+        &state.db,
+        &pool,
+        state.config.oracle_task_retention_days,
+    )
+    .await?;
     Ok(Json(status))
 }
 
@@ -546,6 +563,10 @@ mod tests {
             assigned_worker_id: None,
             dispatched_at: None,
             lease_expires_at: None,
+            retry_count: 0,
+            max_retries: crate::models::oracle_task::DEFAULT_ORACLE_TASK_MAX_RETRIES,
+            attempt_count: 0,
+            dispatch_attempt_id: None,
             response: None,
             response_chars: None,
             images: None,
