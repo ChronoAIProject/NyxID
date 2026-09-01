@@ -52,6 +52,14 @@ fn valid_metadata(value: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
 }
 
+pub(crate) fn valid_script_version(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_METADATA_LEN
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+'))
+}
+
 fn normalize_capabilities(values: Vec<String>) -> AppResult<Vec<String>> {
     if values.len() > MAX_CAPABILITIES {
         return Err(AppError::ValidationError(format!(
@@ -132,7 +140,18 @@ pub async fn report_presence(
     input: WorkerPresenceInput,
 ) -> AppResult<OracleWorker> {
     let capabilities = normalize_capabilities(input.capabilities)?;
-    let script_version = optional_metadata(input.script_version, "script_version")?;
+    let script_version = input
+        .script_version
+        .map(|value| {
+            if valid_script_version(&value) {
+                Ok(value)
+            } else {
+                Err(AppError::ValidationError(
+                    "script_version contains unsupported characters".to_string(),
+                ))
+            }
+        })
+        .transpose()?;
     let instance_id = optional_metadata(input.instance_id, "instance_id")?;
     let platform = optional_metadata(input.platform, "platform")?;
     let last_error = optional_metadata(input.last_error, "last_error")?;

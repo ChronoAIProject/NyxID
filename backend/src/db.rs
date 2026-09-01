@@ -2662,11 +2662,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+    // Replace the legacy sparse index. Sparse compound indexes still include
+    // documents where only worker_label exists, collapsing snapshot-less
+    // commands onto the same (null, label) key.
+    let _ = oracle_worker_commands
+        .drop_index("snapshot_id_1_worker_label_1")
+        .await;
     oracle_worker_commands
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "snapshot_id": 1, "worker_label": 1 })
-                .options(IndexOptions::builder().sparse(true).unique(true).build())
+                .options(
+                    IndexOptions::builder()
+                        .name("oracle_worker_snapshot_target_unique".to_string())
+                        .unique(true)
+                        .partial_filter_expression(doc! { "snapshot_id": { "$type": "string" } })
+                        .build(),
+                )
                 .build(),
         )
         .await?;
@@ -4642,6 +4654,61 @@ mod tests {
             Some(&doc! {
                 "exact_service.effect_idempotency_key": { "$type": "string" },
             })
+        );
+
+        let worker_commands =
+            db.collection::<Document>(crate::models::oracle_worker_command::COLLECTION_NAME);
+        let command_indexes: Vec<IndexModel> = worker_commands
+            .list_indexes()
+            .await
+            .expect("list Oracle worker command indexes")
+            .try_collect()
+            .await
+            .expect("collect Oracle worker command indexes");
+        let snapshot_target = command_indexes
+            .iter()
+            .find(|index| {
+                index
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.name.as_deref())
+                    == Some("oracle_worker_snapshot_target_unique")
+            })
+            .expect("Oracle login snapshot target index");
+        let snapshot_options = snapshot_target.options.as_ref().unwrap();
+        assert_eq!(snapshot_options.unique, Some(true));
+        assert_eq!(
+            snapshot_options.partial_filter_expression.as_ref(),
+            Some(&doc! { "snapshot_id": { "$type": "string" } })
+        );
+
+        worker_commands
+            .insert_many([
+                doc! { "_id": "ordinary-a", "pool_id": "pool-a", "worker_label": "worker-1" },
+                doc! { "_id": "ordinary-b", "pool_id": "pool-b", "worker_label": "worker-1" },
+            ])
+            .await
+            .expect("snapshot-less commands must not collide");
+        worker_commands
+            .insert_one(doc! {
+                "_id": "snapshot-a",
+                "pool_id": "pool-a",
+                "worker_label": "worker-1",
+                "snapshot_id": "snapshot-1",
+            })
+            .await
+            .expect("insert snapshot command");
+        assert!(
+            worker_commands
+                .insert_one(doc! {
+                    "_id": "snapshot-b",
+                    "pool_id": "pool-b",
+                    "worker_label": "worker-1",
+                    "snapshot_id": "snapshot-1",
+                })
+                .await
+                .is_err(),
+            "one snapshot may target a worker label only once"
         );
     }
 

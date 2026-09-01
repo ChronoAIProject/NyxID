@@ -37,4 +37,12 @@ mod tests {
         assert!(bundle.version.ends_with(&bundle.sha256[..12]));
         assert!(bundle.source.contains("connectOverCDP"));
     }
+
+    #[test]
+    fn embedded_bundle_version_is_valid_worker_metadata() {
+        let bundle = current_bundle();
+        assert!(super::super::oracle_worker_service::valid_script_version(
+            bundle.version
+        ));
+    }
 }
