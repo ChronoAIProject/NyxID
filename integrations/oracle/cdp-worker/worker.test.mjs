@@ -84,6 +84,7 @@ test("recovery preserves a live conversation when only the project root was pers
   assert.deepEqual(
     choosePromptNavigation({
       recovering: true,
+      phase: "send_attempted",
       isFollowup: false,
       currentUrl: "https://chatgpt.com/c/12345678-abcd",
       persistedUrl: "https://chatgpt.com/g/g-project/example/project",
@@ -94,10 +95,47 @@ test("recovery preserves a live conversation when only the project root was pers
   );
 });
 
+test("pre-send recovery leaves an unrelated conversation before sending", () => {
+  assert.deepEqual(
+    choosePromptNavigation({
+      recovering: true,
+      phase: "page_ready",
+      isFollowup: false,
+      currentUrl: "https://chatgpt.com/c/12345678-abcd",
+      persistedUrl: "https://chatgpt.com/g/g-project/example/project",
+      taskConversationUrl: null,
+      requiredProjectUrl: "https://chatgpt.com/g/g-project/example/project",
+    }),
+    {
+      error: null,
+      target: "https://chatgpt.com/g/g-project/example/project",
+    }
+  );
+});
+
+test("pre-send recovery without a conversation safely returns to the project", () => {
+  assert.deepEqual(
+    choosePromptNavigation({
+      recovering: true,
+      phase: "claimed",
+      isFollowup: false,
+      currentUrl: "https://chatgpt.com/",
+      persistedUrl: null,
+      taskConversationUrl: null,
+      requiredProjectUrl: "https://chatgpt.com/g/g-project/example/project",
+    }),
+    {
+      error: null,
+      target: "https://chatgpt.com/g/g-project/example/project",
+    }
+  );
+});
+
 test("recovery navigates to a known conversation instead of an unrelated live tab", () => {
   assert.deepEqual(
     choosePromptNavigation({
       recovering: true,
+      phase: "sent",
       isFollowup: true,
       currentUrl: "https://chatgpt.com/c/aaaaaaaa-bbbb",
       persistedUrl: "https://chatgpt.com/c/cccccccc-dddd",
@@ -112,6 +150,7 @@ test("a server-pinned conversation outranks a persisted project root", () => {
   assert.deepEqual(
     choosePromptNavigation({
       recovering: true,
+      phase: "waiting_response",
       isFollowup: true,
       currentUrl: "https://chatgpt.com/",
       persistedUrl: "https://chatgpt.com/g/g-project/example/project",
@@ -126,6 +165,7 @@ test("recovery fails closed when neither state nor the live tab identifies a con
   assert.deepEqual(
     choosePromptNavigation({
       recovering: true,
+      phase: "send_attempted",
       isFollowup: false,
       currentUrl: "https://chatgpt.com/",
       persistedUrl: null,

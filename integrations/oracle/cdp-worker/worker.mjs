@@ -158,6 +158,7 @@ export function decidePromptResume({ phase, prompt, turns, generating, transcrip
 
 export function choosePromptNavigation({
   recovering,
+  phase = "claimed",
   isFollowup,
   currentUrl,
   persistedUrl,
@@ -166,7 +167,14 @@ export function choosePromptNavigation({
 }) {
   const currentConversationId = convId(currentUrl);
   const onConvPage = Boolean(currentConversationId);
-  if (recovering && !persistedUrl && !taskConversationUrl && !onConvPage) {
+  const preSend = ["claimed", "page_ready", "ready_to_send"].includes(phase);
+  if (
+    recovering &&
+    !preSend &&
+    !persistedUrl &&
+    !taskConversationUrl &&
+    !onConvPage
+  ) {
     return { error: "recovery_conversation_unknown", target: null };
   }
   const persistedConversationId = convId(persistedUrl);
@@ -177,7 +185,7 @@ export function choosePromptNavigation({
       ? taskConversationUrl
       : persistedUrl || taskConversationUrl;
   const resumeConversationId = persistedConversationId || taskConversationId;
-  if (recovering && onConvPage && !resumeConversationId) {
+  if (recovering && !preSend && onConvPage && !resumeConversationId) {
     return { error: null, target: null };
   }
   if ((isFollowup || recovering) && resumeUrl) {
@@ -1125,6 +1133,7 @@ async function handlePrompt(runtime, page, task, recovering) {
   const priorPhase = runtime.state.current_task?.phase || "claimed";
   const navigation = choosePromptNavigation({
     recovering,
+    phase: priorPhase,
     isFollowup: task.is_followup,
     currentUrl: page.url(),
     persistedUrl,
