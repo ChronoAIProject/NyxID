@@ -2300,6 +2300,102 @@ mod tests {
     use clap::Parser;
 
     #[test]
+    fn oracle_worker_install_accepts_pool_and_profile() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "oracle",
+            "worker",
+            "install",
+            "--pool",
+            "chatgpt-pro",
+            "--worker-token-file",
+            "/tmp/oracle-token",
+            "--profile",
+            "team-a",
+        ])
+        .expect("oracle worker install should parse");
+
+        match cli.command {
+            Commands::Oracle {
+                command:
+                    OracleCommands::Worker {
+                        command:
+                            OracleWorkerCommands::Install {
+                                pool,
+                                worker_token_file,
+                                auth,
+                                ..
+                            },
+                    },
+            } => {
+                assert_eq!(pool, "chatgpt-pro");
+                assert_eq!(worker_token_file.as_deref(), Some("/tmp/oracle-token"));
+                assert_eq!(auth.profile.as_deref(), Some("team-a"));
+            }
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
+    fn oracle_login_accepts_token_file_and_bounded_wait() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "oracle",
+            "login",
+            "chatgpt-pro",
+            "--worker-token-file",
+            "/tmp/oracle-token",
+            "--wait",
+            "1200",
+        ])
+        .expect("oracle login should parse");
+
+        match cli.command {
+            Commands::Oracle {
+                command:
+                    OracleCommands::Login {
+                        pool,
+                        worker_token_file,
+                        wait,
+                        ..
+                    },
+            } => {
+                assert_eq!(pool, "chatgpt-pro");
+                assert_eq!(worker_token_file.as_deref(), Some("/tmp/oracle-token"));
+                assert_eq!(wait, 1200);
+            }
+            _ => panic!("unexpected parse result"),
+        }
+
+        assert!(
+            Cli::try_parse_from(["nyxid", "oracle", "login", "chatgpt-pro", "--wait", "0",])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn oracle_worker_control_commands_accept_expected_names() {
+        for command in [
+            "drain",
+            "resume",
+            "restart",
+            "relaunch-browser",
+            "relaunch_browser",
+            "relogin",
+        ] {
+            let cli = Cli::try_parse_from([
+                "nyxid",
+                "oracle",
+                "worker",
+                command,
+                "chatgpt-pro",
+                "worker-1",
+            ]);
+            assert!(cli.is_ok(), "oracle worker {command} should parse");
+        }
+    }
+
+    #[test]
     fn daemon_subcommands_accept_config_after_subcommand() {
         let cli = Cli::try_parse_from(["nyxid", "node", "daemon", "install", "--config", "/tmp"])
             .expect("daemon install should accept --config after the subcommand");
@@ -4683,6 +4779,28 @@ pub enum OracleCommands {
         #[command(subcommand)]
         command: OraclePoolCommands,
     },
+    /// Manage installed and connected oracle workers
+    Worker {
+        #[command(subcommand)]
+        command: OracleWorkerCommands,
+    },
+    /// Capture a local ChatGPT login and propagate it end-to-end encrypted
+    Login {
+        /// Pool slug or id
+        pool: String,
+        /// Read the raw pool worker token from this file
+        #[arg(long, value_name = "PATH")]
+        worker_token_file: Option<String>,
+        /// Max seconds to wait for local login and worker verification
+        #[arg(
+            long,
+            default_value_t = 900,
+            value_parser = clap::value_parser!(u64).range(1..=3600)
+        )]
+        wait: u64,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// List your multi-turn conversations
     Sessions {
         /// Filter to a single pool (slug or id)
@@ -4705,6 +4823,121 @@ pub enum OracleCommands {
     CloseSession {
         /// Conversation id (conv_...)
         conversation_id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OracleWorkerCommands {
+    /// List worker presence for a pool
+    List {
+        pool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Show one worker and its recent commands
+    Show {
+        pool: String,
+        label: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Install and start a worker on this machine
+    Install {
+        #[arg(long)]
+        pool: String,
+        /// Read the raw pool worker token from this file
+        #[arg(long, value_name = "PATH")]
+        worker_token_file: Option<String>,
+        /// Replace an existing installation for this pool/profile
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Start the local worker daemon
+    Start {
+        #[arg(long)]
+        pool: String,
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
+    },
+    /// Stop the local worker daemon
+    Stop {
+        #[arg(long)]
+        pool: String,
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
+    },
+    /// Show local worker daemon status
+    Status {
+        #[arg(long)]
+        pool: String,
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
+    },
+    /// Show local worker daemon logs
+    Logs {
+        #[arg(long)]
+        pool: String,
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
+        #[arg(short, long)]
+        follow: bool,
+        #[arg(short = 'n', long, default_value_t = 100)]
+        lines: usize,
+    },
+    /// Remove the local worker daemon; installation files remain
+    Uninstall {
+        #[arg(long)]
+        pool: String,
+        #[arg(long, env = "NYXID_PROFILE")]
+        profile: Option<String>,
+    },
+    /// Finish the current task, install the verified bundle, and restart
+    Upgrade {
+        #[arg(long)]
+        pool: String,
+        /// Target worker label; defaults to this machine's installed worker
+        #[arg(long)]
+        label: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Finish the current task and stop claiming new work
+    Drain {
+        pool: String,
+        label: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Resume claiming work
+    Resume {
+        pool: String,
+        label: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Restart the worker process through its supervisor
+    Restart {
+        pool: String,
+        label: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Relaunch the worker's dedicated Chrome instance
+    #[command(alias = "relaunch_browser")]
+    RelaunchBrowser {
+        pool: String,
+        label: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Open the ChatGPT login page on a worker
+    Relogin {
+        pool: String,
+        label: String,
         #[command(flatten)]
         auth: AuthArgs,
     },

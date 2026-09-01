@@ -53,6 +53,7 @@ toml = "1.0"
 base64 = "0.22"
 sha2 = "0.10"
 hmac = "0.12"
+hkdf = "0.12"
 aes-gcm = "0.10"
 zeroize = { version = "1", features = ["derive"] }
 

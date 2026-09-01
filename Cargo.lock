@@ -4069,6 +4069,7 @@ dependencies = [
  "flate2",
  "futures",
  "hex",
+ "hkdf",
  "hmac",
  "is-terminal",
  "keyring",
