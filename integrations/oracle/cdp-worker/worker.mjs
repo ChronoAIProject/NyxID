@@ -88,6 +88,7 @@ const SESSION_INFO = Buffer.from("nyxid-oracle-session-v1", "utf8");
 const SESSION_AAD = SESSION_INFO;
 const SESSION_FORMAT_VERSION = 1;
 const MAX_SESSION_SNAPSHOT_BYTES = 512 * 1024;
+const MAX_SESSION_PLAINTEXT_BYTES = 350 * 1024;
 const CAPABILITIES = ["commands_v1", "upgrade_v1", "session_import_v1", "attempt_fencing_v1"];
 // Result-image caps (the server re-validates and caps lower-or-equal). Kept
 // below the 16 MiB worker body cap once base64-inflated (~33%).
@@ -1676,7 +1677,7 @@ export function decryptSessionEnvelope(sealedBytes, token) {
     decipher.setAAD(SESSION_AAD);
     decipher.setAuthTag(tag);
     const plaintext = Buffer.concat([decipher.update(body), decipher.final()]);
-    if (plaintext.length > MAX_SESSION_SNAPSHOT_BYTES) {
+    if (plaintext.length > MAX_SESSION_PLAINTEXT_BYTES) {
       throw new TaskFailure("session_plaintext_too_large");
     }
     return JSON.parse(plaintext.toString("utf8"));
@@ -1804,6 +1805,7 @@ async function processPendingCommand(runtime, allowSessionImportDuringLoggedOutT
         throw new TaskFailure("command_unsupported");
     }
     runtime.state.draining = command.command === "restart" || command.command === "upgrade";
+    runtime.lastError = null;
     addCommandReport(runtime.state, command, true, resultCode);
     await heartbeat(runtime);
     if (shouldExit) {
@@ -1899,7 +1901,7 @@ async function captureSession(outputPath) {
       JSON.stringify({ version: SESSION_FORMAT_VERSION, captured_at: new Date().toISOString(), cookies, origins }),
       "utf8"
     );
-    if (!cookies.length || snapshot.length > MAX_SESSION_SNAPSHOT_BYTES) {
+    if (!cookies.length || snapshot.length > MAX_SESSION_PLAINTEXT_BYTES) {
       throw new TaskFailure(!cookies.length ? "login_capture_no_cookies" : "login_capture_too_large");
     }
     mkdirSync(dirname(outputPath), { recursive: true, mode: 0o700 });
