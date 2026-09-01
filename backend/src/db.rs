@@ -2629,6 +2629,43 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── oracle_worker_commands ──
+    let oracle_worker_commands =
+        db.collection::<Document>(crate::models::oracle_worker_command::COLLECTION_NAME);
+    oracle_worker_commands
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "worker_label": 1, "created_at": 1 })
+                .build(),
+        )
+        .await?;
+    oracle_worker_commands
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "worker_label": 1, "status": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .name("oracle_worker_one_delivered_command".to_string())
+                        .unique(true)
+                        .partial_filter_expression(doc! { "status": "delivered" })
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    oracle_worker_commands
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     backfill_downstream_service_types(db).await?;
     migrate_legacy_ssh_auth_mode(db).await?;
     backfill_org_scope_sources(db).await?;

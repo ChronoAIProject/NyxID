@@ -1,0 +1,257 @@
+use axum::{
+    Json,
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+
+use crate::AppState;
+use crate::errors::{AppError, AppResult};
+use crate::models::oracle_pool::OraclePool;
+use crate::models::oracle_worker::{OracleWorker, OracleWorkerDesiredState};
+use crate::models::oracle_worker_command::{
+    OracleWorkerCommand, OracleWorkerCommandKind, OracleWorkerCommandStatus,
+};
+use crate::mw::auth::AuthUser;
+use crate::services::{audit_service, oracle_pool_service, oracle_worker_service};
+
+const ONLINE_WINDOW_SECS: i64 = 90;
+
+#[derive(Serialize)]
+pub struct OracleWorkerInfo {
+    pub label: String,
+    pub online: bool,
+    pub last_seen_at: String,
+    pub last_seen_secs_ago: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logged_in: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_task_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chrome_alive: Option<bool>,
+    pub desired_state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provisioned_at: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ListOracleWorkersResponse {
+    pub workers: Vec<OracleWorkerInfo>,
+}
+
+#[derive(Serialize)]
+pub struct AllocateOracleWorkerResponse {
+    pub label: String,
+}
+
+#[derive(Deserialize)]
+pub struct EnqueueWorkerCommandRequest {
+    pub command: String,
+}
+
+#[derive(Serialize)]
+pub struct OracleWorkerCommandInfo {
+    pub id: String,
+    pub worker_label: String,
+    pub command: String,
+    pub status: String,
+    pub delivery_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_version: Option<String>,
+    pub created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct ListOracleWorkerCommandsResponse {
+    pub commands: Vec<OracleWorkerCommandInfo>,
+}
+
+fn worker_info(worker: OracleWorker) -> OracleWorkerInfo {
+    let last_seen_secs_ago = (Utc::now() - worker.last_seen_at).num_seconds().max(0);
+    OracleWorkerInfo {
+        label: worker.worker_label,
+        online: last_seen_secs_ago <= ONLINE_WINDOW_SECS,
+        last_seen_at: worker.last_seen_at.to_rfc3339(),
+        last_seen_secs_ago,
+        version: worker.script_version,
+        platform: worker.platform,
+        logged_in: worker.logged_in,
+        current_task_id: worker.current_task_id,
+        chrome_alive: worker.chrome_alive,
+        desired_state: match worker.desired_state {
+            OracleWorkerDesiredState::Active => "active",
+            OracleWorkerDesiredState::Draining => "draining",
+        }
+        .to_string(),
+        last_error: worker.last_error,
+        capabilities: worker.capabilities,
+        provisioned_at: worker.provisioned_at.map(|value| value.to_rfc3339()),
+    }
+}
+
+fn command_info(command: OracleWorkerCommand) -> OracleWorkerCommandInfo {
+    OracleWorkerCommandInfo {
+        id: command.id,
+        worker_label: command.worker_label,
+        command: command.kind.as_str().to_string(),
+        status: match command.status {
+            OracleWorkerCommandStatus::Queued => "queued",
+            OracleWorkerCommandStatus::Delivered => "delivered",
+            OracleWorkerCommandStatus::Succeeded => "succeeded",
+            OracleWorkerCommandStatus::Failed => "failed",
+            OracleWorkerCommandStatus::Expired => "expired",
+        }
+        .to_string(),
+        delivery_count: command.delivery_count,
+        result_code: command.result_code,
+        snapshot_id: command.snapshot_id,
+        bundle_version: command.bundle_version,
+        created_at: command.created_at.to_rfc3339(),
+        completed_at: command.completed_at.map(|value| value.to_rfc3339()),
+    }
+}
+
+fn parse_command(value: &str) -> AppResult<OracleWorkerCommandKind> {
+    match value {
+        "drain" => Ok(OracleWorkerCommandKind::Drain),
+        "resume" => Ok(OracleWorkerCommandKind::Resume),
+        "restart" => Ok(OracleWorkerCommandKind::Restart),
+        "relaunch_browser" => Ok(OracleWorkerCommandKind::RelaunchBrowser),
+        "relogin" => Ok(OracleWorkerCommandKind::Relogin),
+        "upgrade" => Ok(OracleWorkerCommandKind::Upgrade),
+        _ => Err(AppError::ValidationError(
+            "command must be drain|resume|restart|relaunch_browser|relogin|upgrade".to_string(),
+        )),
+    }
+}
+
+async fn managed_pool(
+    state: &AppState,
+    actor_user_id: &str,
+    id_or_slug: &str,
+) -> AppResult<OraclePool> {
+    let pool = oracle_pool_service::get_pool(&state.db, id_or_slug).await?;
+    oracle_pool_service::ensure_can_manage(&state.db, actor_user_id, &pool).await?;
+    Ok(pool)
+}
+
+pub async fn allocate_worker(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id_or_slug): Path<String>,
+) -> AppResult<impl IntoResponse> {
+    let actor = auth_user.user_id.to_string();
+    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
+    let worker = oracle_worker_service::allocate_worker(&state.db, &pool).await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "oracle_worker_allocated",
+        Some(serde_json::json!({
+            "pool_id": &pool.id,
+            "worker_label": &worker.worker_label,
+        })),
+    );
+    Ok((
+        StatusCode::CREATED,
+        Json(AllocateOracleWorkerResponse {
+            label: worker.worker_label,
+        }),
+    ))
+}
+
+pub async fn list_workers(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id_or_slug): Path<String>,
+) -> AppResult<Json<ListOracleWorkersResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
+    let workers = oracle_worker_service::list_workers(&state.db, &pool.id)
+        .await?
+        .into_iter()
+        .map(worker_info)
+        .collect();
+    Ok(Json(ListOracleWorkersResponse { workers }))
+}
+
+pub async fn show_worker(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((id_or_slug, label)): Path<(String, String)>,
+) -> AppResult<Json<OracleWorkerInfo>> {
+    let actor = auth_user.user_id.to_string();
+    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
+    let worker = oracle_worker_service::get_worker(&state.db, &pool.id, &label).await?;
+    Ok(Json(worker_info(worker)))
+}
+
+pub async fn enqueue_command(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((id_or_slug, label)): Path<(String, String)>,
+    Json(body): Json<EnqueueWorkerCommandRequest>,
+) -> AppResult<impl IntoResponse> {
+    let actor = auth_user.user_id.to_string();
+    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
+    let kind = parse_command(&body.command)?;
+    let command = oracle_worker_service::enqueue_command(
+        &state.db, &pool.id, &actor, &label, kind, None, None,
+    )
+    .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "oracle_worker_command_queued",
+        Some(serde_json::json!({
+            "pool_id": &pool.id,
+            "worker_label": &label,
+            "command_id": &command.id,
+            "command": command.kind.as_str(),
+        })),
+    );
+    Ok((StatusCode::ACCEPTED, Json(command_info(command))))
+}
+
+pub async fn list_commands(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((id_or_slug, label)): Path<(String, String)>,
+) -> AppResult<Json<ListOracleWorkerCommandsResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
+    oracle_worker_service::get_worker(&state.db, &pool.id, &label).await?;
+    let commands = oracle_worker_service::list_commands(&state.db, &pool.id, Some(&label))
+        .await?
+        .into_iter()
+        .map(command_info)
+        .collect();
+    Ok(Json(ListOracleWorkerCommandsResponse { commands }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manager_command_parser_rejects_internal_session_import() {
+        assert!(parse_command("drain").is_ok());
+        assert!(parse_command("session_import").is_err());
+        assert!(parse_command("unknown").is_err());
+    }
+}

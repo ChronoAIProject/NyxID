@@ -766,7 +766,7 @@ fn terminal_expiry(retention_days: u32) -> chrono::DateTime<Utc> {
     Utc::now() + Duration::days(i64::from(retention_days))
 }
 
-fn validate_worker_label(label: &str) -> AppResult<()> {
+pub(crate) fn validate_worker_label(label: &str) -> AppResult<()> {
     let ok = !label.is_empty()
         && label.len() <= MAX_WORKER_LABEL_LEN
         && label
@@ -817,7 +817,7 @@ async fn upsert_worker_presence(
             doc! { "_id": worker_doc_id(&pool.id, worker_label) },
             doc! {
                 "$set": set,
-                "$setOnInsert": { "first_seen_at": now },
+                "$setOnInsert": { "first_seen_at": now, "desired_state": "active" },
             },
         )
         .upsert(true)
@@ -1087,6 +1087,9 @@ pub async fn claim_task_with_retention(
     }
 
     upsert_worker_presence(db, pool, worker_label, None, script_version, page_url).await?;
+    if !super::oracle_worker_service::accepts_new_tasks(db, &pool.id, worker_label).await? {
+        return Ok(None);
+    }
 
     // Soft capacity gate (concurrent claims may briefly overshoot by one;
     // the cap is a fairness knob, not an invariant).

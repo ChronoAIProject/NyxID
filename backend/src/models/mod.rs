@@ -58,6 +58,7 @@ pub mod oracle_pool;
 pub mod oracle_session;
 pub mod oracle_task;
 pub mod oracle_worker;
+pub mod oracle_worker_command;
 pub mod org_invite;
 pub mod org_membership;
 pub mod org_role_scope;

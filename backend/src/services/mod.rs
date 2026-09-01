@@ -89,6 +89,7 @@ pub mod operation_descriptor;
 pub mod oracle_pool_service;
 pub mod oracle_session_service;
 pub mod oracle_task_service;
+pub mod oracle_worker_service;
 pub mod org_invite_service;
 pub mod org_role_scope_service;
 pub mod org_service;

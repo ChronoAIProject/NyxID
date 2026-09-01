@@ -1592,6 +1592,23 @@ fn build_router_internal(
                 "/pools/{id_or_slug}/rotate-token",
                 post(handlers::oracle_pools::rotate_token),
             )
+            .route(
+                "/pools/{id_or_slug}/workers",
+                get(handlers::oracle_workers::list_workers),
+            )
+            .route(
+                "/pools/{id_or_slug}/workers/allocate",
+                post(handlers::oracle_workers::allocate_worker),
+            )
+            .route(
+                "/pools/{id_or_slug}/workers/{label}",
+                get(handlers::oracle_workers::show_worker),
+            )
+            .route(
+                "/pools/{id_or_slug}/workers/{label}/commands",
+                get(handlers::oracle_workers::list_commands)
+                    .post(handlers::oracle_workers::enqueue_command),
+            )
     )
     .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
 
@@ -1868,10 +1885,15 @@ fn build_router_internal(
             "/api/v1/oracle/worker",
             Router::new()
                 .route("/task", get(handlers::oracle_worker::poll_task))
+                .route("/heartbeat", post(handlers::oracle_worker::heartbeat))
                 .route("/ack", post(handlers::oracle_worker::ack))
                 .route("/result", post(handlers::oracle_worker::submit_result))
                 .route(
                     "/transcript",
+                    post(handlers::oracle_worker::submit_transcript),
+                )
+                .route(
+                    "/worker/transcript",
                     post(handlers::oracle_worker::submit_transcript),
                 )
                 .route("/pin-conv-url", post(handlers::oracle_worker::pin_conv_url))

@@ -497,6 +497,18 @@ pub enum AppError {
     #[error("Oracle extract disabled: {0}")]
     OracleExtractDisabled(String),
 
+    #[error("Oracle worker not found: {0}")]
+    OracleWorkerNotFound(String),
+
+    #[error("Oracle worker capability unsupported: {0}")]
+    OracleWorkerCapabilityUnsupported(String),
+
+    #[error("Oracle worker command not found: {0}")]
+    OracleWorkerCommandNotFound(String),
+
+    #[error("Oracle worker label unavailable: {0}")]
+    OracleWorkerLabelUnavailable(String),
+
     #[error("Service pool not found: {0}")]
     ServicePoolNotFound(String),
 
@@ -668,6 +680,10 @@ impl AppError {
             Self::OracleSessionClosed(_) => StatusCode::CONFLICT,
             Self::OraclePayloadTooLarge(_) => StatusCode::PAYLOAD_TOO_LARGE,
             Self::OracleExtractDisabled(_) => StatusCode::FORBIDDEN,
+            Self::OracleWorkerNotFound(_) => StatusCode::NOT_FOUND,
+            Self::OracleWorkerCapabilityUnsupported(_) => StatusCode::CONFLICT,
+            Self::OracleWorkerCommandNotFound(_) => StatusCode::NOT_FOUND,
+            Self::OracleWorkerLabelUnavailable(_) => StatusCode::CONFLICT,
             Self::ServicePoolNotFound(_) => StatusCode::NOT_FOUND,
             Self::ServicePoolSlugTaken(_) => StatusCode::CONFLICT,
             Self::ServicePoolMemberInvalid(_) => StatusCode::BAD_REQUEST,
@@ -828,6 +844,10 @@ impl AppError {
             Self::OracleSessionClosed(_) => 11008,
             Self::OraclePayloadTooLarge(_) => 11009,
             Self::OracleExtractDisabled(_) => 11010,
+            Self::OracleWorkerNotFound(_) => 11011,
+            Self::OracleWorkerCapabilityUnsupported(_) => 11012,
+            Self::OracleWorkerCommandNotFound(_) => 11013,
+            Self::OracleWorkerLabelUnavailable(_) => 11014,
             Self::ServicePoolNotFound(_) => 11400,
             Self::ServicePoolSlugTaken(_) => 11401,
             Self::ServicePoolMemberInvalid(_) => 11402,
@@ -1024,6 +1044,10 @@ impl AppError {
             Self::OracleSessionClosed(_) => "oracle_session_closed",
             Self::OraclePayloadTooLarge(_) => "oracle_payload_too_large",
             Self::OracleExtractDisabled(_) => "oracle_extract_disabled",
+            Self::OracleWorkerNotFound(_) => "oracle_worker_not_found",
+            Self::OracleWorkerCapabilityUnsupported(_) => "oracle_worker_capability_unsupported",
+            Self::OracleWorkerCommandNotFound(_) => "oracle_worker_command_not_found",
+            Self::OracleWorkerLabelUnavailable(_) => "oracle_worker_label_unavailable",
             Self::ServicePoolNotFound(_) => "service_pool_not_found",
             Self::ServicePoolSlugTaken(_) => "service_pool_slug_taken",
             Self::ServicePoolMemberInvalid(_) => "service_pool_member_invalid",
@@ -1539,6 +1563,10 @@ mod tests {
             AppError::OracleSessionClosed("".into()).error_code(),
             AppError::OraclePayloadTooLarge("".into()).error_code(),
             AppError::OracleExtractDisabled("".into()).error_code(),
+            AppError::OracleWorkerNotFound("".into()).error_code(),
+            AppError::OracleWorkerCapabilityUnsupported("".into()).error_code(),
+            AppError::OracleWorkerCommandNotFound("".into()).error_code(),
+            AppError::OracleWorkerLabelUnavailable("".into()).error_code(),
             AppError::GrantCascadeConfirmationRequired(Box::new(GrantCascadePayload {
                 provider_slug: "github".into(),
                 provider_name: "GitHub".into(),

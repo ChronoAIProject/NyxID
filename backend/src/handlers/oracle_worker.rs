@@ -21,7 +21,8 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::oracle_pool::OraclePool;
-use crate::services::{oracle_pool_service, oracle_task_service};
+use crate::models::oracle_worker_command::OracleWorkerCommand;
+use crate::services::{oracle_pool_service, oracle_task_service, oracle_worker_service};
 
 async fn authenticate_worker(state: &AppState, headers: &HeaderMap) -> AppResult<OraclePool> {
     let token = headers
@@ -40,6 +41,8 @@ pub struct PollTaskQuery {
     pub script_version: Option<String>,
     #[serde(default)]
     pub page_url: Option<String>,
+    #[serde(default)]
+    pub instance_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -66,6 +69,13 @@ pub async fn poll_task(
     Query(query): Query<PollTaskQuery>,
 ) -> AppResult<Json<PollTaskResponse>> {
     let pool = authenticate_worker(&state, &headers).await?;
+    oracle_worker_service::ensure_instance_matches(
+        &state.db,
+        &pool,
+        &query.worker,
+        query.instance_id.as_deref(),
+    )
+    .await?;
     let claimed = oracle_task_service::claim_task_with_retention(
         &state.db,
         &pool,
@@ -97,6 +107,8 @@ pub struct WorkerAckRequest {
     pub page_url: Option<String>,
     #[serde(default)]
     pub dispatch_attempt_id: Option<String>,
+    #[serde(default)]
+    pub instance_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -111,6 +123,13 @@ pub async fn ack(
     Json(body): Json<WorkerAckRequest>,
 ) -> AppResult<Json<WorkerAckResponse>> {
     let pool = authenticate_worker(&state, &headers).await?;
+    oracle_worker_service::ensure_instance_matches(
+        &state.db,
+        &pool,
+        &body.worker,
+        body.instance_id.as_deref(),
+    )
+    .await?;
     let outcome = oracle_task_service::worker_ack_fenced(
         &state.db,
         &pool,
@@ -159,6 +178,8 @@ pub struct WorkerResultRequest {
     pub script_version: Option<String>,
     #[serde(default)]
     pub dispatch_attempt_id: Option<String>,
+    #[serde(default)]
+    pub instance_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -173,6 +194,13 @@ pub async fn submit_result(
     Json(body): Json<WorkerResultRequest>,
 ) -> AppResult<Json<WorkerResultResponse>> {
     let pool = authenticate_worker(&state, &headers).await?;
+    oracle_worker_service::ensure_instance_matches(
+        &state.db,
+        &pool,
+        &body.worker,
+        body.instance_id.as_deref(),
+    )
+    .await?;
     let req_images = body.images.unwrap_or_default();
     let image_count = req_images.len();
     let image_base64_chars: usize = req_images.iter().map(|i| i.data_base64.len()).sum();
@@ -234,6 +262,8 @@ pub struct WorkerTranscriptRequest {
     pub turns: Vec<TranscriptTurnDto>,
     #[serde(default)]
     pub chatgpt_url: Option<String>,
+    #[serde(default)]
+    pub instance_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -249,6 +279,13 @@ pub async fn submit_transcript(
     Json(body): Json<WorkerTranscriptRequest>,
 ) -> AppResult<Json<WorkerTranscriptResponse>> {
     let pool = authenticate_worker(&state, &headers).await?;
+    oracle_worker_service::ensure_instance_matches(
+        &state.db,
+        &pool,
+        &body.worker,
+        body.instance_id.as_deref(),
+    )
+    .await?;
     let turns: Vec<oracle_task_service::TranscriptTurn> = body
         .turns
         .into_iter()
@@ -290,6 +327,8 @@ pub struct PinConvUrlRequest {
     pub task_id: String,
     pub worker: String,
     pub chatgpt_url: String,
+    #[serde(default)]
+    pub instance_id: Option<String>,
 }
 
 pub async fn pin_conv_url(
@@ -298,6 +337,13 @@ pub async fn pin_conv_url(
     Json(body): Json<PinConvUrlRequest>,
 ) -> AppResult<impl IntoResponse> {
     let pool = authenticate_worker(&state, &headers).await?;
+    oracle_worker_service::ensure_instance_matches(
+        &state.db,
+        &pool,
+        &body.worker,
+        body.instance_id.as_deref(),
+    )
+    .await?;
     oracle_task_service::pin_conversation_url(
         &state.db,
         &pool,
@@ -307,6 +353,120 @@ pub async fn pin_conv_url(
     )
     .await?;
     Ok(Json(serde_json::json!({ "status": "pinned" })))
+}
+
+#[derive(Deserialize)]
+pub struct WorkerCommandReportDto {
+    pub command_id: String,
+    pub succeeded: bool,
+    #[serde(default)]
+    pub result_code: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct WorkerHeartbeatRequest {
+    pub worker: String,
+    pub instance_id: String,
+    #[serde(default)]
+    pub script_version: Option<String>,
+    #[serde(default)]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub logged_in: Option<bool>,
+    #[serde(default)]
+    pub current_task_id: Option<String>,
+    #[serde(default)]
+    pub chrome_alive: Option<bool>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub command_reports: Vec<WorkerCommandReportDto>,
+}
+
+#[derive(Serialize)]
+pub struct WorkerCommandDto {
+    pub id: String,
+    pub command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bundle_sha256: Option<String>,
+    pub deadline_at: String,
+}
+
+impl From<OracleWorkerCommand> for WorkerCommandDto {
+    fn from(command: OracleWorkerCommand) -> Self {
+        Self {
+            id: command.id,
+            command: command.kind.as_str().to_string(),
+            snapshot_id: command.snapshot_id,
+            bundle_version: command.bundle_version,
+            bundle_sha256: command.bundle_sha256,
+            deadline_at: command.deadline_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub struct WorkerHeartbeatResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<WorkerCommandDto>,
+}
+
+pub async fn heartbeat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<WorkerHeartbeatRequest>,
+) -> AppResult<Json<WorkerHeartbeatResponse>> {
+    let pool = authenticate_worker(&state, &headers).await?;
+    let capabilities = body.capabilities.clone();
+    oracle_worker_service::report_presence(
+        &state.db,
+        &pool,
+        oracle_worker_service::WorkerPresenceInput {
+            worker_label: body.worker.clone(),
+            current_task_id: body.current_task_id,
+            script_version: body.script_version,
+            instance_id: Some(body.instance_id),
+            platform: body.platform,
+            capabilities: capabilities.clone(),
+            logged_in: body.logged_in,
+            chrome_alive: body.chrome_alive,
+            last_error: body.last_error,
+        },
+    )
+    .await?;
+    oracle_worker_service::apply_command_reports(
+        &state.db,
+        &pool.id,
+        &body.worker,
+        body.command_reports
+            .into_iter()
+            .map(|report| oracle_worker_service::CommandReport {
+                command_id: report.command_id,
+                succeeded: report.succeeded,
+                result_code: report.result_code,
+            })
+            .collect(),
+    )
+    .await?;
+    let command = oracle_worker_service::deliver_next_command(
+        &state.db,
+        &pool.id,
+        &body.worker,
+        &capabilities,
+    )
+    .await?
+    .map(WorkerCommandDto::from);
+    Ok(Json(WorkerHeartbeatResponse {
+        status: "ok".to_string(),
+        command,
+    }))
 }
 
 #[cfg(test)]
