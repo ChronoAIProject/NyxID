@@ -1157,32 +1157,15 @@ pub enum AckOutcome {
     Cancelled,
 }
 
-#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 pub async fn worker_ack(
     db: &mongodb::Database,
     pool: &OraclePool,
     worker_label: &str,
     task_id: &str,
-    phase: Option<&str>,
-    phase_detail: Option<&str>,
-    script_version: Option<&str>,
-    page_url: Option<&str>,
+    input: WorkerAckInput<'_>,
 ) -> AppResult<AckOutcome> {
-    worker_ack_fenced(
-        db,
-        pool,
-        worker_label,
-        task_id,
-        WorkerAckInput {
-            phase,
-            phase_detail,
-            script_version,
-            page_url,
-            dispatch_attempt_id: None,
-        },
-    )
-    .await
+    worker_ack_fenced(db, pool, worker_label, task_id, input).await
 }
 
 pub struct WorkerAckInput<'a> {
@@ -1303,36 +1286,15 @@ fn decode_result_images(images: Vec<ResultImage>) -> Vec<OracleImage> {
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 pub async fn worker_submit_result(
     db: &mongodb::Database,
     pool: &OraclePool,
     worker_label: &str,
     task_id: &str,
-    response: &str,
-    images: Vec<ResultImage>,
-    chatgpt_url: Option<&str>,
-    model: Option<&str>,
-    script_version: Option<&str>,
-    retention_days: u32,
+    input: WorkerResultInput<'_>,
 ) -> AppResult<ResultOutcome> {
-    worker_submit_result_fenced(
-        db,
-        pool,
-        worker_label,
-        task_id,
-        WorkerResultInput {
-            response,
-            images,
-            chatgpt_url,
-            model,
-            script_version,
-            retention_days,
-            dispatch_attempt_id: None,
-        },
-    )
-    .await
+    worker_submit_result_fenced(db, pool, worker_label, task_id, input).await
 }
 
 pub struct WorkerResultInput<'a> {
@@ -2121,10 +2083,13 @@ mod tests {
             &pool,
             "tab_1",
             &first.task.id,
-            Some("waiting_response"),
-            Some("elapsed=60s"),
-            Some("v1"),
-            None,
+            WorkerAckInput {
+                phase: Some("waiting_response"),
+                phase_detail: Some("elapsed=60s"),
+                script_version: Some("v1"),
+                page_url: None,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2147,12 +2112,15 @@ mod tests {
             &pool,
             "tab_1",
             &first.task.id,
-            "The answer is 42.",
-            vec![],
-            Some("https://chatgpt.com/c/abc"),
-            Some("chatgpt-5.5-pro"),
-            Some("v1"),
-            30,
+            WorkerResultInput {
+                response: "The answer is 42.",
+                images: vec![],
+                chatgpt_url: Some("https://chatgpt.com/c/abc"),
+                model: Some("chatgpt-5.5-pro"),
+                script_version: Some("v1"),
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2170,12 +2138,15 @@ mod tests {
             &pool,
             "tab_2",
             &second.task.id,
-            "ERROR: Response too short or empty",
-            vec![],
-            None,
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "ERROR: Response too short or empty",
+                images: vec![],
+                chatgpt_url: None,
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2192,12 +2163,15 @@ mod tests {
             &pool,
             "tab_1",
             &first.task.id,
-            "stale",
-            vec![],
-            None,
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "stale",
+                images: vec![],
+                chatgpt_url: None,
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2340,9 +2314,21 @@ mod tests {
         assert_eq!(reclaimed.retry_count, 1);
 
         // The original worker's stale heartbeat now reports Cancelled.
-        let stale_ack = worker_ack(&db, &pool, "tab_1", &old.task.id, None, None, None, None)
-            .await
-            .unwrap();
+        let stale_ack = worker_ack(
+            &db,
+            &pool,
+            "tab_1",
+            &old.task.id,
+            WorkerAckInput {
+                phase: None,
+                phase_detail: None,
+                script_version: None,
+                page_url: None,
+                dispatch_attempt_id: None,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(stale_ack, AckOutcome::Cancelled);
 
         // And its stale result is dropped.
@@ -2351,12 +2337,15 @@ mod tests {
             &pool,
             "tab_1",
             &old.task.id,
-            "from dead tab",
-            vec![],
-            None,
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "from dead tab",
+                images: vec![],
+                chatgpt_url: None,
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2569,12 +2558,15 @@ mod tests {
             &pool,
             "tab_1",
             &t1.task.id,
-            "turn one answer",
-            vec![],
-            Some("https://chatgpt.com/c/xyz"),
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "turn one answer",
+                images: vec![],
+                chatgpt_url: Some("https://chatgpt.com/c/xyz"),
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2735,12 +2727,15 @@ mod tests {
             &pool,
             "tab_1",
             &t1.task.id,
-            "turn one answer",
-            vec![],
-            Some("https://chatgpt.com/c/xyz"),
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "turn one answer",
+                images: vec![],
+                chatgpt_url: Some("https://chatgpt.com/c/xyz"),
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2828,12 +2823,15 @@ mod tests {
             &pool,
             "tab_1",
             &t1.task.id,
-            "turn one answer",
-            vec![],
-            Some("https://chatgpt.com/c/xyz"),
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "turn one answer",
+                images: vec![],
+                chatgpt_url: Some("https://chatgpt.com/c/xyz"),
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2919,12 +2917,15 @@ mod tests {
             &pool,
             "tab_1",
             &t1.task.id,
-            "ERROR: extraction failed",
-            vec![],
-            Some("https://chatgpt.com/c/xyz"),
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "ERROR: extraction failed",
+                images: vec![],
+                chatgpt_url: Some("https://chatgpt.com/c/xyz"),
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -3303,10 +3304,13 @@ mod tests {
             &pool,
             "tab_1",
             &submitted.task.id,
-            None,
-            None,
-            None,
-            None,
+            WorkerAckInput {
+                phase: None,
+                phase_detail: None,
+                script_version: None,
+                page_url: None,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
