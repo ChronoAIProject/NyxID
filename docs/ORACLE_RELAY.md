@@ -1,16 +1,16 @@
-# Oracle Relay — Call ChatGPT Pro (and other browser LLMs) through NyxID
+# Oracle Relay: call browser LLMs through NyxID
 
-The oracle relay turns a logged-in ChatGPT Pro browser tab into shared
-capacity that any NyxID user or agent can call. A **pool** is one such
-capacity unit; its owner runs the NyxID oracle userscript in one or more
-ChatGPT tabs (the **workers**). Consumers submit prompts through the NyxID
-API and poll for answers — they never touch the browser, the ChatGPT
-account, or any credential.
+The oracle relay turns a logged-in ChatGPT Pro browser into shared capacity
+that any NyxID user or agent can call. A **pool** is one capacity unit. Its
+owner runs the supervised CDP worker or the NyxID userscript in one or more
+ChatGPT tabs. These clients are the **workers**. Consumers submit prompts
+through the NyxID API and poll for answers. They never touch the browser, the
+ChatGPT account, or any credential.
 
-NyxID itself stays a **neutral async task relay**: nothing in the backend
-is specific to ChatGPT. All browser/LLM-specific behavior (prompt
-injection, completion detection, answer extraction) lives in the
-userscript. The pool's `chatgpt_project_url` and `default_model_label` are
+NyxID stays a **neutral async task relay**. Nothing in the backend is specific
+to ChatGPT. All browser-specific behavior, including prompt injection,
+completion detection, answer extraction, and crash recovery, lives in the
+worker clients. The pool's `chatgpt_project_url` and `default_model_label` are
 opaque hints relayed verbatim to workers.
 
 ```
@@ -20,10 +20,10 @@ consumer (any NyxID user / nyxid_ag_ agent key)
    ▼
 NyxID backend — MongoDB-backed FIFO queue (no in-memory state, any
    ▲              instance serves any request)
-   │  GET  /api/v1/oracle/worker/task?worker=tab_1   (30s poll, Bearer nyx_owk_…)
-   │  POST /api/v1/oracle/worker/{ack,result,pin-conv-url}
+   │  GET  /api/v1/oracle/worker/task?worker=worker_1
+   │  POST /api/v1/oracle/worker/{ack,heartbeat,result,pin-conv-url}
    ▼
-ChatGPT Pro tab + NyxID oracle userscript
+CDP worker + dedicated Chrome, or ChatGPT tab + userscript
 ```
 
 Why route a browser LLM through NyxID instead of an API key: ChatGPT Pro
@@ -39,10 +39,11 @@ for free.
 | Term | Meaning |
 |---|---|
 | **Pool** | A capacity unit owned by a user or org (`OraclePool`). Holds the worker token, visibility, quotas, and optional project/model hints. |
-| **Worker** | A ChatGPT tab running the userscript, identified by a per-tab label (`tab_1`, `tab_2`, …). Authenticates with the pool worker token. |
+| **Worker** | A CDP daemon or userscript tab, identified by a label unique within its pool. New CDP installations also bind the label to a stable installation ID. |
 | **Task** | One prompt → one answer (`OracleTask`). Async: submit returns a `task_id`; the answer arrives later. |
 | **Session** | A multi-turn conversation (`OracleSession`), addressed by `conversation_id` (`conv_…`). |
 | **Worker token** | `nyx_owk_<64 hex>`. Minted at pool creation, rotatable, SHA-256-hashed at rest, shown once. Sent as `Authorization: Bearer`. |
+| **Command** | A manager request delivered through the next capable-worker heartbeat. Commands have delivery leases, bounded redelivery, and a terminal result code. |
 
 ### Visibility
 
@@ -75,37 +76,48 @@ You have ChatGPT Pro and want to share it.
    Optional: pin workers to a ChatGPT Project (carries system instructions
    / attached files) with `--project-url https://chatgpt.com/g/g-p-…/project`.
 
-2. **Connect a ChatGPT browser** — two options, same pool:
-
-   **Option A — CDP worker (recommended, lower friction).** Drives your
-   real logged-in Chrome over the DevTools protocol as a background daemon;
-   no extension, no tab to babysit. See
-   `integrations/oracle/cdp-worker/README.md`:
+2. **Join a worker machine.** Log in to the NyxID CLI on that machine, then
+   run:
 
    ```bash
-   cd integrations/oracle/cdp-worker && npm install
-   ./start-chrome.sh                       # launches Chrome on a debug port; log into ChatGPT once
-   NYXID_BASE_URL=https://auth.nyxid.dev \
-   NYXID_WORKER_TOKEN=nyx_owk_… \
-   node worker.mjs
+   nyxid oracle worker install --pool chatgpt-pro
    ```
 
-   **Option B — userscript (zero local process).** Install
-   `integrations/oracle/nyxid_oracle.user.js` in Tampermonkey, open
-   chatgpt.com (logged into Pro), click ⚙ in the NyxID Oracle panel, set
-   the NyxID base URL + worker token + label (`tab_1`, or open with
-   `?nyx=1`), and click **Start**. Open more tabs with `?nyx=2`, `?nyx=3`,
-   … (up to `max_workers`) for capacity.
+   The command asks for the one-time pool worker token with hidden input. You
+   can also pass `--worker-token-file`. It verifies Node 18 or newer, npm, and
+   Chrome or Chromium. It then allocates a unique worker label, verifies the
+   server-embedded bundle checksum, installs `playwright-core`, writes private
+   local files, installs a launchd or systemd user service, starts a dedicated
+   Chrome profile, and starts the worker. Use `--profile <name>` for a second
+   installation of the same pool on one machine.
 
-   Both speak the same worker API; pick whichever fits. The CDP worker
-   drives your real Chrome session (lowest setup friction, low detection);
-   the userscript needs nothing installed locally.
+   The installed service uses KeepAlive on macOS or `Restart=always` on Linux.
+   Its token stays in a mode `0600` file. The service environment contains only
+   the token file path.
 
-4. **Verify** the tab is seen:
+3. **Log every worker in from one machine.** Run this on a machine where you
+   can complete the ChatGPT login:
 
    ```bash
-   nyxid oracle status chatgpt-pro
+   nyxid oracle login chatgpt-pro
    ```
+
+   The command opens a local dedicated Chrome profile for password, OTP, SSO,
+   and Cloudflare checks. After login, the CLI captures and encrypts the
+   session locally, then waits for each capable worker to import and verify it.
+   See [Pool-wide ChatGPT login](#pool-wide-chatgpt-login) for the security
+   model and device-binding limitation.
+
+4. **Verify** worker presence:
+
+   ```bash
+   nyxid oracle worker list chatgpt-pro
+   ```
+
+The Tampermonkey userscript remains supported without changes. Install
+`integrations/oracle/nyxid_oracle.user.js`, then configure a distinct label and
+the same pool token. Userscript workers submit tasks but do not receive manager
+commands or login snapshots.
 
 ### Rotating the token
 
@@ -113,8 +125,12 @@ You have ChatGPT Pro and want to share it.
 nyxid oracle pool rotate-token chatgpt-pro
 ```
 
-Invalidates the old token immediately; re-paste the new one into every
-tab's settings.
+This invalidates the old token immediately. Replace every installed worker
+token file and re-paste the token into every userscript. Worker install and
+`oracle login` never rotate the token implicitly. The server stores only its
+SHA-256 hash, so an existing raw token must come from an installed token file,
+`--worker-token-file`, `NYXID_WORKER_TOKEN_FILE`, `NYXID_WORKER_TOKEN`, or the
+hidden prompt.
 
 ---
 
@@ -187,6 +203,12 @@ has a 16 MiB body cap.
 | `GET /pools/{id_or_slug}` | Pool detail (`can_manage` reflects the caller). |
 | `PATCH /pools/{id_or_slug}` | Update settings (owner / org admin only). |
 | `POST /pools/{id_or_slug}/rotate-token` | New worker token, shown once. |
+| `GET /pools/{id_or_slug}/workers` | Manager-only worker presence list. |
+| `POST /pools/{id_or_slug}/workers/allocate` | Manager-only unique worker label allocation. |
+| `GET /pools/{id_or_slug}/workers/{label}` | Manager-only worker detail. |
+| `GET, POST /pools/{id_or_slug}/workers/{label}/commands` | Manager-only command history and enqueue. |
+| `POST /pools/{id_or_slug}/login-snapshots` | Validate and fan out an opaque encrypted login snapshot. |
+| `GET /worker-bundle` | Authenticated embedded worker source, version, and SHA-256. |
 | `POST /pools/{id_or_slug}/tasks` | Submit a task. Returns `task_id` + `queue_position`. |
 | `POST /pools/{id_or_slug}/attach` | Attach an existing conversation by `{chatgpt_url, tag?}`. Returns `conversation_id` + `task_id` (a `scrape` task). |
 | `GET /pools/{id_or_slug}/status` | Queue depth + active workers. |
@@ -211,25 +233,30 @@ has a 16 MiB body cap.
 ```
 
 **Task poll** (`GET /tasks/{id}`): `status` is one of `queued`,
-`dispatched`, `completed`, `failed`, `cancelled`. While `queued`,
-`queue_position` is 1-based. `completed` carries `response`; `failed`
-carries `failure_reason` (`extraction_failure` / `empty_response`).
+`dispatched`, `completed`, `failed`, or `cancelled`. While queued,
+`queue_position` is 1-based. Every response carries `attempts`, `retry_count`,
+and `max_retries`. A completed task carries `response`. A failed task carries
+`failure_reason`, such as `extraction_failure`, `empty_response`, or
+`infrastructure_retry_exhausted`.
 
 ### Worker endpoints (pool worker token)
 
-Under `/api/v1/oracle/worker`, authenticated by `Authorization: Bearer
-nyx_owk_…` **inside each handler** — these mount outside the JWT
-middleware (like `/api/v1/node-agent`). Results can carry multi-MB
-answers: 16 MiB body cap. The wire format mirrors the local oracle servers
-the relay replaces, so porting their userscript is a thin diff.
+Under `/api/v1/oracle/worker`, each handler authenticates
+`Authorization: Bearer nyx_owk_...`. These routes mount outside the JWT
+middleware, like `/api/v1/node-agent`. Results can carry multi-megabyte
+answers, so this router has a 16 MiB body cap. Existing request and response
+fields remain valid. New fields are additive.
 
 | Method · Path | Body / Query | Response |
 |---|---|---|
-| `GET /task` | `?worker=tab_1&script_version=&page_url=` | `{status:"idle", required_project_url?}` or `{status:"task", task_id, prompt, conversation_id?, conversation_url?, is_followup, model?, tag?, pdf_base64?, pdf_name?, required_project_url?, assigned_worker, submitted_at}` |
-| `POST /ack` | `{task_id, worker, phase?, phase_detail?, script_version?, page_url?}` | `{status:"ok"}` or `{status:"cancelled"}` |
-| `POST /result` | `{task_id, worker, response, chatgpt_url?, model?, script_version?}` | `{status:"saved"\|"saved_failed"\|"ignored"}` |
-| `POST /pin-conv-url` | `{task_id, worker, chatgpt_url}` | `{status:"pinned"}` |
-| `POST /transcript` | `{task_id, worker, turns:[{role,text}], chatgpt_url?}` | `{status:"imported"\|"ignored", imported_pairs}` |
+| `GET /task` | `?worker=worker_1&script_version=&page_url=&instance_id=` | Idle response, or a task with retry counters, optional `dispatch_attempt_id`, prompt, attachment, conversation URL, and project hint. |
+| `POST /heartbeat` | Presence, capabilities, health, current task, and command reports | `{status:"ok", command?}`. The server leases at most one capability-compatible command. |
+| `POST /ack` | Task identity, phase, optional `instance_id` and `dispatch_attempt_id` | `{status:"ok"}` or `{status:"cancelled"}`. |
+| `POST /result` | Task identity, response, optional images and attempt fences | `{status:"saved"\|"saved_failed"\|"ignored"}`. |
+| `POST /pin-conv-url` | Task identity, URL, optional attempt fences | `{status:"pinned"}`. |
+| `POST /transcript` | Task identity, turns, URL, optional attempt fences | `{status:"imported"\|"ignored", imported_pairs}`. |
+| `GET /bundle` | None | Worker-token-authenticated embedded worker source, version, and SHA-256. |
+| `GET /login-snapshots/{snapshot_id}` | None | The still end-to-end-sealed login envelope for the authenticated pool. |
 
 A `task` poll carries `kind` (`"prompt"`, `"scrape"`, or `"extract"`): on
 `"scrape"` the worker navigates to `conversation_url`, extracts the full
@@ -237,25 +264,40 @@ transcript, and POSTs `/transcript` instead of injecting a prompt; on
 `"extract"` it navigates to an arbitrary `target_url` and POSTs the page's
 readable main text back as the `/result` (see the SSRF note under Security).
 
-`ack` doubles as the cancellation back-channel: a heartbeat for a task
-that's been cancelled or reclaimed returns `{status:"cancelled"}`, telling
-the worker to abandon it and re-poll.
+`ack` doubles as the cancellation back-channel. An acknowledgement for a task
+that was cancelled or replaced returns `{status:"cancelled"}`. The worker then
+abandons that attempt and polls again.
+
+Legacy userscripts omit `instance_id`, `dispatch_attempt_id`, capabilities,
+and heartbeats. The server preserves their old claim, acknowledgement, result,
+pin, and transcript behavior. It sends commands only to workers that advertise
+the command's required capability, so legacy and unknown clients never receive
+a protocol shape they cannot parse.
 
 ---
 
 ## Queue semantics
 
-- **FIFO per pool**, backed by MongoDB (`find_one_and_update` with a
-  `created_at` sort) — no in-memory queue, so any backend instance serves
-  any poll and there's no sticky routing.
-- **Lease + heartbeat**: a claimed task gets a lease of
-  `task_timeout_secs` (default 4 h — browser deep-reasoning is slow).
-  `ack` heartbeats refresh it. A lease that expires (dead tab) is requeued
-  **to the front** on the next claim (preserved `created_at`), the Mongo
-  analogue of the local servers' `appendleft`.
-- **Idempotent re-claim**: a worker polling while it already holds a task
-  gets the same task back — this is what lets a tab survive ChatGPT's
-  mid-task full-page reload.
+- **FIFO per pool** uses MongoDB `find_one_and_update` with a `created_at`
+  sort. There is no in-memory queue, so any backend instance can serve a poll.
+- **Lease and heartbeat** give a claimed task a `task_timeout_secs` lease.
+  The default is four hours. `ack` refreshes the lease.
+- **Bounded infrastructure retry** requeues an expired lease at the front by
+  preserving `created_at`. The lease expiry increments `retry_count`. New and
+  legacy task rows default to `max_retries = 3`; older rows deserialize without
+  a migration. If the next expiry would exceed the budget, the server marks the
+  task failed with `infrastructure_retry_exhausted` and starts its retention
+  TTL. Model failures and content failures do not use this retry budget.
+- **Visible attempts** increment `attempt_count` on each fresh dispatch.
+  Idempotent reclaims by the current worker do not increment it.
+- **Idempotent reclaim** returns a worker's current leased task, including the
+  known ChatGPT conversation URL. This lets the CDP worker recover after a
+  process restart, Chrome restart, or tab replacement.
+- **Attempt fencing** gives each fresh dispatch a `dispatch_attempt_id`.
+  Capable workers echo it on acknowledgements, results, conversation pinning,
+  and transcript settlement. Traffic from a replaced attempt is ignored.
+  Stable installation IDs also stop two new CDP installations from sharing one
+  label. Legacy clients omit both fences and retain the previous behavior.
 - **Quotas**: `max_queue_length` caps queued tasks per pool (`429`
   `oracle_queue_full`); `per_user_max_inflight` caps queued+dispatched per
   submitter (`429` `oracle_quota_exceeded`); `max_workers` caps concurrent
@@ -268,6 +310,129 @@ the worker to abandon it and re-poll.
 - **Retention**: terminal tasks (prompt + response bodies) are TTL-expired
   after `ORACLE_TASK_RETENTION_DAYS` (default 30). Queued/dispatched tasks
   are never auto-expired.
+
+---
+
+## Worker recovery
+
+The CDP worker keeps a mode `0600` JSON state file. It contains the stable
+installation ID, current task ID, dispatch attempt ID, conversation URL,
+phase, and transcript baseline. It never contains a prompt, response,
+transcript, cookie, storage value, or signed image URL.
+
+HTTP failures use capped exponential backoff with jitter. Transient fetch,
+timeout, rate-limit, and server failures do not terminate the process. The
+worker tracks consecutive HTTP, CDP, and tab failures. It reconnects over CDP,
+replaces a crashed or navigated-away tab, restores the project URL, and
+relaunches Chrome with the configured executable, debug port, and profile after
+repeated CDP failures.
+
+Prompt delivery uses a conservative recovery rule:
+
+1. Before clicking Send, the worker records the transcript baseline and writes
+   `send_attempted` to disk.
+2. After recovery, it reclaims the same task and opens the known conversation.
+3. If the matching user turn has a completed assistant turn, the worker
+   extracts and submits that answer.
+4. If the matching user turn is present but still running, the worker waits.
+5. If the task was still in a pre-send phase, the worker sends it once.
+6. If `send_attempted` was durable but the transcript cannot prove delivery,
+   the worker fails with `prompt_delivery_uncertain`. It never guesses by
+   sending the prompt again.
+
+This rule prefers an explicit failed task over a duplicate user message in an
+existing conversation. The server's bounded lease retry handles a worker that
+does not recover before its lease expires.
+
+## Worker presence and control
+
+`nyxid oracle worker list <pool>` shows the worker label, bundle version,
+online or last-seen status, login state, current task, Chrome state, and desired
+state. `worker show <pool> <label>` also shows the sanitized last error,
+platform, and recent command results.
+
+Managers can queue these commands:
+
+| CLI command | Worker behavior |
+|---|---|
+| `worker drain <pool> <label>` | Finish the current task, then stop claiming. |
+| `worker resume <pool> <label>` | Resume claims. |
+| `worker restart <pool> <label>` | Finish the current task, report, then exit for supervisor restart. |
+| `worker relaunch-browser <pool> <label>` | Recreate the dedicated Chrome process and tab. |
+| `worker relogin <pool> <label>` | Open the ChatGPT login page. Pool-wide login normally uses `oracle login` instead. |
+| `worker upgrade --pool <pool> [--label <label>]` | Drain, verify and atomically replace the embedded worker bundle, then exit for supervisor restart. |
+
+The server audits the actor, pool ID, worker label, command ID, command kind,
+and result metadata. It never audits command payload bodies or session
+material. A command has a 60-second delivery lease, at most 10 deliveries, a
+24-hour deadline, and seven-day terminal retention. The worker journals command
+IDs before side effects, so redelivery returns the stored result.
+
+Local service controls mirror `nyxid node daemon`:
+
+```bash
+nyxid oracle worker start|stop|status|logs|uninstall --pool <pool> [--profile <name>]
+```
+
+The default install is under `~/.nyxid-oracle/<pool>/`. Named CLI profiles use
+`~/.nyxid-oracle/<pool>/profiles/<profile>/`. `uninstall` removes the launchd
+or systemd service but retains the worker files, Chrome profile, and token.
+
+## Pool-wide ChatGPT login
+
+`nyxid oracle login <pool>` performs the human login only on the CLI machine.
+It does not ask the user to visit each worker.
+
+1. The CLI obtains the existing raw pool worker token from a local install,
+   `--worker-token-file`, an environment variable, or hidden input. It never
+   rotates the shared token.
+2. The CLI installs the checksummed capture worker and opens a dedicated local
+   Chrome profile. Password, OTP, SSO, and Cloudflare interaction stay local.
+3. After the DOM verifies authentication, the capture worker collects cookies
+   for ChatGPT and OpenAI domains plus allowlisted local and session storage for
+   `https://chatgpt.com` and `https://auth.openai.com`.
+4. The CLI derives a 256-bit key with HKDF-SHA256 from the raw worker token and
+   a random 32-byte salt. It encrypts the capture with AES-256-GCM and protocol
+   AAD. Plaintext is capped at 350 KiB; the sealed envelope is capped at 512
+   KiB.
+5. The manager endpoint compares the supplied token SHA-256 with the pool hash,
+   then stores only the sealed envelope. `EncryptionKeys` adds the normal
+   server-side envelope encryption. The row expires after one hour.
+6. The server queues `session_import` only for workers that advertise both
+   `commands_v1` and `session_import_v1`.
+7. A worker with an active task defers the import until settlement. If the task
+   cannot proceed because the worker is logged out, it imports immediately and
+   then reclaims the task. The worker decrypts locally, injects only allowlisted
+   cookies and storage through CDP, reloads ChatGPT, and reports a stable result
+   code after DOM verification.
+8. The CLI polls each command and prints one result per worker. The command
+   exits unsuccessfully if any target does not verify, expires, or times out.
+
+The server's persisted state cannot derive the session key because it stores
+only the worker-token hash. The backend does see the raw bearer token while it
+authenticates live worker requests, so this design does not protect against a
+malicious live backend process. It protects session plaintext at rest, in
+MongoDB, in audit records, and in logs.
+
+ChatGPT can bind a session cookie to device or risk context. An import that the
+site rejects reports `session_import_verification_failed`; it never reports a
+successful login based only on cookie injection. The worker list continues to
+show that worker as logged out.
+
+## Bundle distribution and trust
+
+The backend embeds `integrations/oracle/cdp-worker/worker.mjs` at compile time.
+Its version is the backend package version plus the first 12 characters of the
+source SHA-256. Both the manager and worker-token endpoints return the source,
+version, and full SHA-256.
+
+The CLI trusts its authenticated NyxID base URL and TLS connection to select
+the bundle, then verifies the returned bytes against the returned SHA-256. It
+also checks that the manager and worker-token endpoints agree. A pushed upgrade
+downloads through the worker-token endpoint, verifies SHA-256, writes a sibling
+temporary file, renames it over `worker.mjs`, and exits. The supervisor starts
+the new source. The bundle checksum detects transport or storage corruption; it
+is not an independent code-signing authority beyond the NyxID backend and TLS.
 
 ---
 
@@ -284,6 +449,12 @@ the worker to abandon it and re-poll.
   TTL-expired). Audit events and tracing are **metadata-only** — task id,
   pool id, sizes, outcomes — never the prompt or the answer, matching the
   WS-frame-injection logging discipline.
+- Login captures exist as plaintext only in a mode `0600` temporary file on
+  the CLI machine and in zeroizing CLI memory. The server accepts only the
+  end-to-end-sealed envelope. Audit and tracing record the snapshot ID, byte
+  count, target count, and outcome codes. They never record the sealed blob,
+  cookies, storage, raw token, prompt, response, transcript, conversation URL,
+  or signed image URL.
 - The browser side runs under the operator's own logged-in session with
   the default User-Agent; the userscript does not spoof or evade. Routing a
   browser-automation bridge through a shared service changes the *consumer*
@@ -325,8 +496,25 @@ Oracle errors occupy the **11000–11099** block (see
 | 11008 | `oracle_session_closed` | 409 |
 | 11009 | `oracle_payload_too_large` | 413 |
 | 11010 | `oracle_extract_disabled` | 403 |
+| 11011 | `oracle_worker_not_found` | 404 |
+| 11012 | `oracle_worker_capability_unsupported` | 409 |
+| 11013 | `oracle_worker_command_not_found` | 404 |
+| 11014 | `oracle_worker_label_unavailable` | 409 |
+| 11015 | `oracle_login_snapshot_not_found` | 404 |
 
 ---
+
+## Compatibility
+
+All added MongoDB fields use serde defaults or optional fields. Existing
+`oracle_pool`, `oracle_task`, `oracle_session`, and `oracle_worker` rows remain
+valid. The new `oracle_worker_commands` and `oracle_login_snapshots` collections
+use UUID-string `_id` values and TTL indexes for terminal or expired rows.
+
+The deployed userscript remains unchanged. The server accepts requests without
+installation IDs or attempt IDs, preserves the legacy acknowledgement shape,
+and omits commands unless the worker advertises a matching capability. The CDP
+worker and userscript can continue to share one pool.
 
 ## Relationship to the local oracle servers
 
@@ -336,6 +524,8 @@ hosted, multi-tenant, authenticated service. The userscript at
 `integrations/oracle/nyxid_oracle.user.js` is a direct fork of the
 bedc-deep bridge: the DOM-automation core is verbatim; only the config +
 networking layer was retargeted from `http://localhost:8767` (no auth) to
-the NyxID worker API over HTTPS with a Bearer worker token. Existing local
-pipelines can migrate by pointing their consumer at `/api/v1/oracle`
-instead of the local server — the submit/poll shapes are nearly identical.
+the NyxID worker API over HTTPS with a Bearer worker token. The CDP worker uses
+the same extraction rules but adds durable recovery, supervised Chrome, health
+presence, commands, upgrades, and login import. Existing local pipelines can
+migrate by pointing their consumer at `/api/v1/oracle` instead of the local
+server. The submit and poll shapes remain close to the local servers.

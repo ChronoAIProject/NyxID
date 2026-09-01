@@ -1,108 +1,192 @@
 # NyxID Oracle CDP worker
 
-A lower-friction alternative to the [Tampermonkey userscript](../nyxid_oracle.user.js):
-instead of installing a browser extension and keeping a tab babysat, this
-attaches to your **already-running, already-logged-in Chrome** over the Chrome
-DevTools Protocol and drives the ChatGPT tab for you, as a background daemon.
+The CDP worker drives a dedicated, logged-in Chrome profile through the Chrome
+DevTools Protocol. It implements the same NyxID worker API as the unchanged
+[Tampermonkey userscript](../nyxid_oracle.user.js), with process supervision,
+crash recovery, manager commands, verified upgrades, and pool-wide login
+import.
 
-It speaks the exact same NyxID worker API (`/api/v1/oracle/worker/*`) and reuses
-the same proven answer extraction (KaTeX→LaTeX, Pro-reasoning completion
-detection, full-transcript scrape), so **no NyxID backend change is needed** —
-it's a drop-in replacement for the userscript's browser side.
+## Install with the CLI
 
-Because it drives your **real** Chrome (your real session and TLS fingerprint,
-the Cloudflare clearance you already earned by logging in normally), it's far
-less bot-detectable than a fresh headless browser.
-
-## Setup (two commands)
-
-Prereqs: Node 18+ and a NyxID oracle pool worker token
-(`nyxid oracle pool create … --output json` prints `worker_token`).
+Install Node 18 or newer, npm, and Chrome or Chromium. Log in to the NyxID CLI,
+then run:
 
 ```bash
-cd integrations/oracle/cdp-worker
-npm install            # installs playwright-core only (no bundled browser)
+nyxid oracle worker install --pool <pool-slug>
+```
 
-# 1. Launch Chrome with a debug port + a dedicated profile, then log into
-#    ChatGPT once in the window that opens (the login persists):
+The command asks for the raw pool worker token with hidden input. Pass
+`--worker-token-file <path>` to read it from a file instead. The server cannot
+return an existing token because it stores only the SHA-256 hash.
+
+Install performs these actions:
+
+1. Allocates a label that is unique within the pool.
+2. Downloads the worker source embedded in the NyxID backend and verifies its
+   SHA-256.
+3. Installs `playwright-core` without a bundled browser.
+4. Writes config, a mode `0600` token file, a stable installation ID, and a
+   state-file path under `~/.nyxid-oracle/<pool>/`.
+5. Installs a launchd LaunchAgent on macOS or a systemd user unit on Linux.
+6. Starts a dedicated Chrome profile and the supervised worker.
+
+Named NyxID CLI profiles install under
+`~/.nyxid-oracle/<pool>/profiles/<profile>/`. Use the same `--profile` value on
+later local commands.
+
+Manage the service with:
+
+```bash
+nyxid oracle worker start --pool <pool>
+nyxid oracle worker stop --pool <pool>
+nyxid oracle worker status --pool <pool>
+nyxid oracle worker logs --pool <pool> --follow
+nyxid oracle worker uninstall --pool <pool>
+```
+
+`uninstall` removes the service definition but retains the installation files,
+Chrome profile, and token.
+
+## Log in every worker remotely
+
+Run this command on one machine where you can complete the ChatGPT login:
+
+```bash
+nyxid oracle login <pool> [--worker-token-file <path>]
+```
+
+The CLI opens a local dedicated Chrome profile. Password, OTP, SSO, and
+Cloudflare steps happen in that local window. After ChatGPT reports an
+authenticated DOM, the CLI captures allowlisted ChatGPT and OpenAI cookies and
+storage. It encrypts the capture locally with AES-256-GCM and a key derived by
+HKDF-SHA256 from the raw pool worker token.
+
+The backend stores only the encrypted envelope, wraps it with its normal
+at-rest encryption, and expires it after one hour. It queues `session_import`
+only for workers that advertise support. Each worker decrypts locally, imports
+through CDP after its current task, reloads ChatGPT, and verifies the DOM. The
+CLI prints a result for every target worker and fails if any import does not
+verify.
+
+ChatGPT may bind a session to device or risk context. A rejected import reports
+`session_import_verification_failed`; it does not claim success after cookie
+injection alone.
+
+## Inspect and control workers
+
+```bash
+nyxid oracle worker list <pool>
+nyxid oracle worker show <pool> <label>
+nyxid oracle worker drain <pool> <label>
+nyxid oracle worker resume <pool> <label>
+nyxid oracle worker restart <pool> <label>
+nyxid oracle worker relaunch-browser <pool> <label>
+nyxid oracle worker relogin <pool> <label>
+nyxid oracle worker upgrade --pool <pool> [--label <label>]
+```
+
+Commands travel through worker heartbeats. The worker has no inbound listener.
+Drain, restart, browser relaunch, session import, and upgrade wait for the
+current task unless a logged-out task needs an immediate session import to
+continue. Command IDs and terminal results persist locally, so a delivery lease
+retry does not repeat a completed side effect.
+
+Upgrade downloads the backend-embedded source through the worker-token
+endpoint, verifies SHA-256, atomically replaces `worker.mjs`, and exits. launchd
+or systemd starts the new bundle.
+
+## Recovery behavior
+
+The worker treats NyxID network failures, Chrome failure, and tab failure as
+recoverable conditions:
+
+- HTTP timeouts, rate limits, and server errors retry with capped exponential
+  backoff and jitter. A transient fetch failure does not exit the worker.
+- A CDP disconnect triggers reconnect. Repeated failures relaunch Chrome with
+  the configured executable, profile, and debug port.
+- A closed, crashed, or navigated-away tab is replaced with `chatgpt.com`. The
+  worker restores the server-provided project URL.
+- The mode `0600` state file records only the task ID, attempt ID, conversation
+  URL, phase, and transcript baseline. It never stores prompts, responses,
+  transcripts, cookies, storage, or signed image URLs.
+- Before clicking Send, the worker persists `send_attempted`. After recovery it
+  checks the transcript after the saved baseline. It extracts a completed
+  answer, waits for an existing pending turn, or sends only from a known
+  pre-send phase. An uncertain post-send state fails with
+  `prompt_delivery_uncertain` and never resends the prompt.
+
+The server requeues an expired lease to the FIFO front while the task has
+infrastructure retries left. New tasks default to three retries. Task status
+reports both fresh dispatch attempts and retries.
+
+## Manual setup
+
+The CLI install is the supported path. For development, run the worker from this
+directory:
+
+```bash
+npm install
 ./start-chrome.sh
 
-# 2. Store the worker token in a file (keeps this long-lived credential out of
-#    your shell history and the process environment), then run the worker:
-umask 077 && printf '%s' 'nyx_owk_xxxxxxxx' > ~/.nyxid-oracle-token
+umask 077
+printf '%s' 'nyx_owk_xxxxxxxx' > ~/.nyxid-oracle-token
 NYXID_BASE_URL=https://auth.nyxid.dev \
-NYXID_WORKER_TOKEN_FILE=~/.nyxid-oracle-token \
-NYXID_WORKER_LABEL=tab_1 \
+NYXID_WORKER_TOKEN_FILE="$HOME/.nyxid-oracle-token" \
+NYXID_WORKER_LABEL=dev-worker-1 \
+NYXID_CHROME_EXECUTABLE="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
 node worker.mjs
 ```
 
-(For a quick test you may still pass `NYXID_WORKER_TOKEN=nyx_owk_…` inline, but
-that lands in shell history and `ps e` / `/proc/<pid>/environ` — prefer the file.)
+Use a different worker label, debug port, and Chrome profile for each concurrent
+worker.
 
-That's it. The worker polls NyxID for tasks, types prompts into ChatGPT, waits
-for the answer (including long Pro reasoning), and posts results back. Consumers
-call it exactly as before:
+## Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `NYXID_BASE_URL` | required | NyxID server base URL. |
+| `NYXID_WORKER_TOKEN_FILE` | none | Preferred path to the pool token file. |
+| `NYXID_WORKER_TOKEN` | none | Inline token fallback. This can appear in shell history and process environments. |
+| `NYXID_WORKER_LABEL` | `tab_1` | Worker identity within the pool. CLI installs allocate this value. |
+| `NYXID_WORKER_STATE_FILE` | `~/.nyxid-oracle/worker-state.json` | Durable recovery and command journal. |
+| `NYXID_INSTALLATION_ID_FILE` | beside the state file | Stable installation identity used to bind an allocated label. |
+| `NYXID_BUNDLE_VERSION_FILE` | beside `worker.mjs` | Installed bundle version. The worker accepts it only when its hash suffix matches the running source. |
+| `CHROME_CDP_URL` | `http://localhost:9222` | Chrome DevTools endpoint. |
+| `CHROME_DEBUG_PORT` | CDP URL port or `9222` | Port used when the worker relaunches Chrome. |
+| `CHROME_PROFILE_DIR` | `~/.nyxid-oracle/chrome-profile` | Dedicated Chrome profile. |
+| `NYXID_CHROME_EXECUTABLE` | none | Chrome or Chromium executable used for recovery. Without it the worker can reconnect but cannot relaunch Chrome. |
+| `NYXID_CHROME_ARGS_JSON` | none | JSON string array of extra Chrome arguments. |
+| `NYXID_POLL_MS` | `5000` | Idle task-poll interval. |
+| `NYXID_PRESENCE_MS` | `20000` | Presence heartbeat interval. |
+| `NYXID_HTTP_TIMEOUT_MS` | `30000` | Per-request timeout. |
+| `NYXID_MAX_HTTP_BACKOFF_MS` | `60000` | Maximum network retry delay. |
+| `NYXID_MAX_CDP_FAILURES_BEFORE_RELAUNCH` | `3` | CDP failures before a full Chrome relaunch. |
+| `NYXID_MAX_WAIT_MS` | `7200000` | Maximum answer wait. |
+| `NYXID_NO_OUTPUT_IDLE_MS` | `420000` | Non-generating wait before an empty answer fails. |
+
+## Security boundaries
+
+- The Chrome debug port is an unauthenticated local control channel. Keep it on
+  loopback and use a dedicated Chrome profile. Do not reuse that profile for
+  unrelated sensitive logins.
+- Treat the worker token as a long-lived pool credential. Prefer a mode `0600`
+  token file. Rotate the pool token if it leaks, then update every installed
+  worker and userscript.
+- The state file contains no session or task bodies. Worker logs use stable
+  error codes and task metadata. They do not print prompts, responses,
+  transcripts, cookies, storage, raw tokens, conversation URLs, or signed image
+  URLs.
+- The backend sees a raw bearer token while authenticating a live worker
+  request. The login-envelope claim applies to persisted server state: the
+  stored worker-token hash cannot derive the HKDF key.
+- The `extract` task kind drives the real logged-in browser. The server and
+  worker reject loopback, private, link-local, metadata, and rebinding targets.
+  Keep `allow_extract` disabled unless every pool submitter may read from that
+  browser's network position.
+
+## Tests
 
 ```bash
-nyxid oracle ask <pool> "your question"
-nyxid oracle attach <pool> https://chatgpt.com/c/<uuid>
+node --check worker.mjs
+node --test worker.test.mjs
 ```
-
-## Configuration (env vars)
-
-| Var | Default | Meaning |
-|-----|---------|---------|
-| `NYXID_BASE_URL` | — (required) | NyxID server, e.g. `https://auth.nyxid.dev` |
-| `NYXID_WORKER_TOKEN_FILE` | — | Path to a file holding the pool worker token (`nyx_owk_…`). **Preferred** over the inline var — keeps the credential out of shell history and the process environment. |
-| `NYXID_WORKER_TOKEN` | — | Pool worker token, passed inline. Used only if `NYXID_WORKER_TOKEN_FILE` is unset. One of the two is required. |
-| `NYXID_WORKER_LABEL` | `tab_1` | Per-worker identity; run several with **distinct** labels for more capacity. Two workers sharing one label on the same pool will steal each other's task leases — keep labels unique per pool. |
-| `CHROME_CDP_URL` | `http://localhost:9222` | Where Chrome's DevTools endpoint is |
-| `NYXID_POLL_MS` | `5000` | Poll interval |
-| `NYXID_MAX_WAIT_MS` | `7200000` | Max wait per answer (2h) |
-
-Multiple workers = more throughput: launch one Chrome debug instance and run
-several `worker.mjs` with `NYXID_WORKER_LABEL=tab_1`, `tab_2`, … (up to the
-pool's `max_workers`). Each can target a different Chrome window/profile via
-`CHROME_CDP_URL` if you want true parallelism.
-
-## How it compares
-
-| | Userscript | **CDP worker** |
-|---|---|---|
-| Install | Tampermonkey + script | `npm install` (playwright-core) |
-| Browser | any logged-in tab | your real Chrome on a debug port |
-| Babysitting | keep a tab open & active | runs as a daemon |
-| Detection risk | lowest (in-page) | low (real session, CDP-driven) |
-| Backend change | none | none |
-
-The userscript remains the zero-dependency option (nothing to run locally). The
-CDP worker is the low-friction option once you're willing to run a small Node
-process. Both can serve the same pool.
-
-## Security & trust boundaries
-
-- **The Chrome debug port is an unauthenticated control channel.**
-  `--remote-debugging-port` exposes a DevTools endpoint that gives *any local
-  process which can reach it* full control of this Chrome profile (its ChatGPT
-  session and cookies). `start-chrome.sh` binds it to localhost (it does **not**
-  pass `--remote-debugging-address=0.0.0.0`) and uses a dedicated
-  `--user-data-dir`, which are the right mitigations — **do not** widen the bind
-  address and **do not** reuse this profile for other sensitive logins. On a
-  shared host, consider `--remote-debugging-pipe` instead of a TCP port.
-- **Worker token = a long-lived pool credential.** Prefer
-  `NYXID_WORKER_TOKEN_FILE` (chmod 600) over the inline env var; rotate it with
-  `nyxid oracle pool rotate-token` if it leaks.
-- **`extract` (read any web page) is opt-in per pool and off by default.** It
-  drives this real logged-in browser, so the server blocks
-  loopback/private/link-local/cloud-metadata targets and the worker re-checks at
-  navigation time (DNS-rebinding defense). Enable it only on pools you trust the
-  submitters of: `nyxid oracle pool update <slug> --allow-extract true`. See
-  `docs/ORACLE_RELAY.md` for the full blast-radius discussion.
-
-## Limitations (v1)
-
-- PDF attachments aren't handled yet (text prompts + transcript scrape are).
-- Designed for one ChatGPT account per Chrome profile; use separate
-  `CHROME_PROFILE_DIR` + `CHROME_CDP_URL` for multiple accounts.
-- ChatGPT DOM changes can still break extraction; the heuristics mirror the
-  userscript's and are updated there first.
