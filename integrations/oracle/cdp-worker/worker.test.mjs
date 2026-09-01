@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createCipheriv, hkdfSync, randomBytes } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -9,6 +8,13 @@ import {
   decryptSessionEnvelope,
   taskRecoveryDecision,
 } from "./worker.mjs";
+
+// Produced by Rust encrypt_login_snapshot for LOGIN_SNAPSHOT_FIXTURE_TOKEN.
+// This cross-language wire fixture must never be regenerated silently.
+const LOGIN_SNAPSHOT_FIXTURE_TOKEN = "nyx_owk_test-token-material";
+const LOGIN_SNAPSHOT_FIXTURE = Buffer.from(
+  '{"ciphertext_base64":"Wze5nFAvcqWAmAeGSzUc4agtvr4N9FH7L7CuwOTGynfBLTEV8ylIUuJ9gw7jJezU93XwSp8L6Q==","nonce_base64":"eo6ntLWmG/Ff7bVJ","salt_base64":"vJWSgK3y0bixEBTVH63n9xBLbUrXYY29SrxSWrZGg+c=","version":1}'
+);
 
 test("backoff is capped and jitter remains within the selected window", () => {
   assert.equal(backoffDelay(0, 100, 1000, () => 0), 50);
@@ -240,31 +246,15 @@ test("post-send recovery exhaustion never authorizes a prompt retry", () => {
   );
 });
 
-test("session envelope decrypts with the pool token and rejects another token", () => {
-  const token = "nyx_owk_test-token-material";
-  const salt = randomBytes(32);
-  const nonce = randomBytes(12);
-  const info = Buffer.from("nyxid-oracle-session-v1");
-  const key = Buffer.from(hkdfSync("sha256", Buffer.from(token), salt, info, 32));
-  const cipher = createCipheriv("aes-256-gcm", key, nonce);
-  cipher.setAAD(info);
+test("a Rust login snapshot fixture decrypts with only its pool token", () => {
   const expected = { version: 1, cookies: [], origins: [] };
-  const body = Buffer.concat([
-    cipher.update(Buffer.from(JSON.stringify(expected))),
-    cipher.final(),
-  ]);
-  const envelope = Buffer.from(
-    JSON.stringify({
-      version: 1,
-      salt_base64: salt.toString("base64"),
-      nonce_base64: nonce.toString("base64"),
-      ciphertext_base64: Buffer.concat([body, cipher.getAuthTag()]).toString("base64"),
-    })
-  );
 
-  assert.deepEqual(decryptSessionEnvelope(envelope, token), expected);
+  assert.deepEqual(
+    decryptSessionEnvelope(LOGIN_SNAPSHOT_FIXTURE, LOGIN_SNAPSHOT_FIXTURE_TOKEN),
+    expected
+  );
   assert.throws(
-    () => decryptSessionEnvelope(envelope, "nyx_owk_wrong"),
+    () => decryptSessionEnvelope(LOGIN_SNAPSHOT_FIXTURE, "nyx_owk_wrong"),
     /session_decrypt_failed/
   );
 });
