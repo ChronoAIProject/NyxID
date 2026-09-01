@@ -7,6 +7,7 @@ import {
   choosePromptNavigation,
   decidePromptResume,
   decryptSessionEnvelope,
+  taskRecoveryDecision,
 } from "./worker.mjs";
 
 test("backoff is capped and jitter remains within the selected window", () => {
@@ -190,6 +191,52 @@ test("the transcript baseline ignores an identical prompt from an older turn", (
       baselineTurnCount: 2,
     }),
     { action: "uncertain" }
+  );
+});
+
+test("task recovery relaunches Chrome and then stops at a bounded threshold", () => {
+  assert.deepEqual(
+    taskRecoveryDecision({
+      kind: "prompt",
+      phase: "page_ready",
+      failureCount: 3,
+      maxFailures: 6,
+      relaunchEvery: 3,
+    }),
+    { action: "recover", forceRelaunch: true }
+  );
+  assert.deepEqual(
+    taskRecoveryDecision({
+      kind: "prompt",
+      phase: "page_ready",
+      failureCount: 6,
+      maxFailures: 6,
+      relaunchEvery: 3,
+    }),
+    { action: "fail", code: "browser_recovery_exhausted" }
+  );
+});
+
+test("post-send recovery exhaustion never authorizes a prompt retry", () => {
+  assert.deepEqual(
+    taskRecoveryDecision({
+      kind: "prompt",
+      phase: "send_attempted",
+      failureCount: 6,
+      maxFailures: 6,
+      relaunchEvery: 3,
+    }),
+    { action: "fail", code: "prompt_delivery_uncertain" }
+  );
+  assert.deepEqual(
+    taskRecoveryDecision({
+      kind: "scrape",
+      phase: "extracting",
+      failureCount: 6,
+      maxFailures: 6,
+      relaunchEvery: 3,
+    }),
+    { action: "fail", code: "browser_recovery_exhausted" }
   );
 });
 

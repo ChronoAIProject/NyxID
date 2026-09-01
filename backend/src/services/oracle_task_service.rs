@@ -57,6 +57,7 @@ const MAX_PHASE_LEN: usize = 80;
 const MAX_PHASE_DETAIL_LEN: usize = 500;
 const MAX_URL_LEN: usize = 2048;
 const MAX_WORKER_LABEL_LEN: usize = 64;
+const WORKER_INFRASTRUCTURE_FAILURES: &[&str] = &["browser_recovery_exhausted"];
 
 /// Workers polling within this window count as "active" in pool status.
 pub const WORKER_RECENT_SECS: i64 = 120;
@@ -1236,6 +1237,7 @@ pub async fn worker_ack_fenced(
 pub enum ResultOutcome {
     Completed,
     Failed,
+    Requeued,
     /// The task was no longer this worker's live dispatch; result dropped.
     Ignored,
 }
@@ -1307,6 +1309,16 @@ pub struct WorkerResultInput<'a> {
     pub dispatch_attempt_id: Option<&'a str>,
 }
 
+fn worker_error_code(response: &str) -> Option<&str> {
+    let code = response.strip_prefix("ERROR:")?.trim();
+    (!code.is_empty()
+        && code.len() <= MAX_PHASE_LEN
+        && code.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        }))
+    .then_some(code)
+}
+
 /// Stores a fenced worker result. Empty or `ERROR:` text fails unless valid
 /// images make the turn a successful image-only response.
 pub async fn worker_submit_result_fenced(
@@ -1323,8 +1335,108 @@ pub async fn worker_submit_result_fenced(
     let has_images = !stored_images.is_empty();
     // An image-only turn has empty text but is NOT a failure.
     let is_failure = (trimmed.is_empty() && !has_images) || trimmed.starts_with("ERROR:");
+    let worker_error = worker_error_code(trimmed);
     let stored_response = truncate_chars(input.response, MAX_RESPONSE_CHARS);
     let response_chars = stored_response.chars().count() as u64;
+
+    let mut live_dispatch = doc! {
+        "_id": task_id,
+        "pool_id": &pool.id,
+        "status": "dispatched",
+        "assigned_worker_id": worker_label,
+    };
+    if let Some(attempt_id) = input.dispatch_attempt_id {
+        live_dispatch.insert("dispatch_attempt_id", attempt_id);
+    }
+
+    if worker_error.is_some_and(|code| WORKER_INFRASTRUCTURE_FAILURES.contains(&code)) {
+        let tasks = db.collection::<OracleTask>(ORACLE_TASKS);
+        let mut retryable_filter = live_dispatch.clone();
+        retryable_filter.insert(
+            "$expr",
+            doc! {
+                "$lt": [
+                    { "$ifNull": ["$retry_count", 0] },
+                    { "$ifNull": ["$max_retries", DEFAULT_ORACLE_TASK_MAX_RETRIES as i64] },
+                ]
+            },
+        );
+        let requeued = tasks
+            .find_one_and_update(
+                retryable_filter,
+                doc! {
+                    "$set": {
+                        "status": "queued",
+                        "phase": "requeued_after_browser_failure",
+                        "updated_at": bson::DateTime::from_chrono(now),
+                    },
+                    "$inc": { "retry_count": 1_i64 },
+                    "$unset": {
+                        "assigned_worker_id": "",
+                        "dispatched_at": "",
+                        "lease_expires_at": "",
+                        "dispatch_attempt_id": "",
+                    },
+                },
+            )
+            .with_options(
+                FindOneAndUpdateOptions::builder()
+                    .return_document(ReturnDocument::After)
+                    .build(),
+            )
+            .await?;
+        if requeued.is_some() {
+            upsert_worker_presence(db, pool, worker_label, None, input.script_version, None)
+                .await?;
+            return Ok(ResultOutcome::Requeued);
+        }
+
+        let mut exhausted_filter = live_dispatch;
+        exhausted_filter.insert(
+            "$expr",
+            doc! {
+                "$gte": [
+                    { "$ifNull": ["$retry_count", 0] },
+                    { "$ifNull": ["$max_retries", DEFAULT_ORACLE_TASK_MAX_RETRIES as i64] },
+                ]
+            },
+        );
+        let exhausted_response = "ERROR: infrastructure_retry_exhausted";
+        let exhausted = tasks
+            .find_one_and_update(
+                exhausted_filter,
+                doc! {
+                    "$set": {
+                        "status": "failed",
+                        "phase": "infrastructure_retry_exhausted",
+                        "failure_reason": "infrastructure_retry_exhausted",
+                        "response": exhausted_response,
+                        "response_chars": exhausted_response.len() as i64,
+                        "completed_at": bson::DateTime::from_chrono(now),
+                        "expires_at": bson::DateTime::from_chrono(terminal_expiry(input.retention_days)),
+                        "updated_at": bson::DateTime::from_chrono(now),
+                    },
+                    "$unset": {
+                        "assigned_worker_id": "",
+                        "dispatched_at": "",
+                        "lease_expires_at": "",
+                        "dispatch_attempt_id": "",
+                    },
+                },
+            )
+            .with_options(
+                FindOneAndUpdateOptions::builder()
+                    .return_document(ReturnDocument::After)
+                    .build(),
+            )
+            .await?;
+        upsert_worker_presence(db, pool, worker_label, None, input.script_version, None).await?;
+        return Ok(if exhausted.is_some() {
+            ResultOutcome::Failed
+        } else {
+            ResultOutcome::Ignored
+        });
+    }
 
     let mut set = doc! {
         "status": if is_failure { "failed" } else { "completed" },
@@ -1360,7 +1472,7 @@ pub async fn worker_submit_result_fenced(
             if trimmed.is_empty() {
                 "empty_response".to_string()
             } else {
-                "extraction_failure".to_string()
+                worker_error.unwrap_or("extraction_failure").to_string()
             },
         );
     }
@@ -1374,19 +1486,9 @@ pub async fn worker_submit_result_fenced(
         set.insert("worker_script_version", truncate_chars(v, 64));
     }
 
-    let mut filter = doc! {
-        "_id": task_id,
-        "pool_id": &pool.id,
-        "status": "dispatched",
-        "assigned_worker_id": worker_label,
-    };
-    if let Some(attempt_id) = input.dispatch_attempt_id {
-        filter.insert("dispatch_attempt_id", attempt_id);
-    }
-
     let updated = db
         .collection::<OracleTask>(ORACLE_TASKS)
-        .find_one_and_update(filter, doc! { "$set": set })
+        .find_one_and_update(live_dispatch, doc! { "$set": set })
         .with_options(
             FindOneAndUpdateOptions::builder()
                 .return_document(ReturnDocument::After)
@@ -2419,6 +2521,95 @@ mod tests {
         assert_eq!(failed.retry_count, 1);
         assert_eq!(failed.attempt_count, 2);
         assert!(failed.expires_at.is_some());
+
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn reported_browser_failure_consumes_infrastructure_retry_budget() {
+        let Some(db) = connect_test_database("oracle_task_reported_infra_failure").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+
+        let submitted = submit_task(
+            &db,
+            &pool,
+            &submitter(&owner),
+            prompt_input("recover browser"),
+        )
+        .await
+        .unwrap();
+        db.collection::<OracleTask>(ORACLE_TASKS)
+            .update_one(
+                doc! { "_id": &submitted.task.id },
+                doc! { "$set": { "max_retries": 1_i64 } },
+            )
+            .await
+            .unwrap();
+
+        let first = claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("first attempt");
+        let requeued = worker_submit_result(
+            &db,
+            &pool,
+            "tab_1",
+            &submitted.task.id,
+            WorkerResultInput {
+                response: "ERROR: browser_recovery_exhausted",
+                images: vec![],
+                chatgpt_url: None,
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: first.dispatch_attempt_id.as_deref(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(requeued, ResultOutcome::Requeued);
+        let (retrying, _) = get_task_for_consumer(&db, &owner, &submitted.task.id)
+            .await
+            .unwrap();
+        assert_eq!(retrying.status, OracleTaskStatus::Queued);
+        assert_eq!(retrying.retry_count, 1);
+
+        let second = claim_task(&db, &pool, "tab_2", None, None)
+            .await
+            .unwrap()
+            .expect("second attempt");
+        let exhausted = worker_submit_result(
+            &db,
+            &pool,
+            "tab_2",
+            &submitted.task.id,
+            WorkerResultInput {
+                response: "ERROR: browser_recovery_exhausted",
+                images: vec![],
+                chatgpt_url: None,
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: second.dispatch_attempt_id.as_deref(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(exhausted, ResultOutcome::Failed);
+        let (failed, _) = get_task_for_consumer(&db, &owner, &submitted.task.id)
+            .await
+            .unwrap();
+        assert_eq!(failed.status, OracleTaskStatus::Failed);
+        assert_eq!(failed.attempt_count, 2);
+        assert_eq!(failed.retry_count, 1);
+        assert_eq!(
+            failed.failure_reason.as_deref(),
+            Some("infrastructure_retry_exhausted")
+        );
 
         db.drop().await.ok();
     }

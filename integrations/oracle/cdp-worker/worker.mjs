@@ -89,6 +89,9 @@ const MAX_HTTP_BACKOFF_MS = Number(process.env.NYXID_MAX_HTTP_BACKOFF_MS || 6000
 const MAX_CDP_FAILURES_BEFORE_RELAUNCH = Number(
   process.env.NYXID_MAX_CDP_FAILURES_BEFORE_RELAUNCH || 3
 );
+const MAX_TASK_RECOVERY_FAILURES = Number(
+  process.env.NYXID_MAX_TASK_RECOVERY_FAILURES || 6
+);
 const STATE_FILE =
   process.env.NYXID_WORKER_STATE_FILE ||
   resolve(homedir(), ".nyxid-oracle", "worker-state.json");
@@ -197,6 +200,29 @@ export function choosePromptNavigation({
   }
   const base = requiredProjectUrl || "https://chatgpt.com/";
   return { error: null, target: onConvPage || !currentUrl.startsWith(base) ? base : null };
+}
+
+export function taskRecoveryDecision({
+  kind,
+  phase,
+  failureCount,
+  maxFailures = MAX_TASK_RECOVERY_FAILURES,
+  relaunchEvery = MAX_CDP_FAILURES_BEFORE_RELAUNCH,
+}) {
+  const preSend = ["claimed", "page_ready", "ready_to_send"].includes(phase || "claimed");
+  if (failureCount >= maxFailures) {
+    return {
+      action: "fail",
+      code:
+        kind === "prompt" && !preSend
+          ? "prompt_delivery_uncertain"
+          : "browser_recovery_exhausted",
+    };
+  }
+  return {
+    action: "recover",
+    forceRelaunch: relaunchEvery > 0 && failureCount % relaunchEvery === 0,
+  };
 }
 
 function defaultState() {
@@ -1181,7 +1207,7 @@ async function handlePrompt(runtime, page, task, recovering) {
       return;
     }
     if (decision.action === "uncertain") {
-      throw new TaskFailure("recovery_uncertain_prompt_delivery");
+      throw new TaskFailure("prompt_delivery_uncertain");
     }
   }
 
@@ -1926,11 +1952,24 @@ async function executeTask(runtime, task, recovering) {
         clearTaskState(runtime.state);
         return;
       }
-      runtime.health.cdp += 1;
+      const failureCount = (runtime.state.current_task?.recovery_failures || 0) + 1;
+      updateTaskState(runtime.state, { recovery_failures: failureCount });
+      const recovery = taskRecoveryDecision({
+        kind: task.kind,
+        phase: runtime.state.current_task?.phase,
+        failureCount,
+      });
       runtime.chromeAlive = false;
       runtime.lastError = stableErrorCode(error);
+      if (recovery.action === "fail") {
+        runtime.lastError = recovery.code;
+        await settleTaskFailure(runtime, task, recovery.code);
+        clearTaskState(runtime.state);
+        return;
+      }
+      runtime.health.cdp += 1;
       log(`task ${task.task_id} paused for browser recovery (${runtime.lastError})`);
-      await recoverChrome(runtime);
+      await recoverChrome(runtime, recovery.forceRelaunch);
       recovering = true;
     }
   }

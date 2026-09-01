@@ -247,6 +247,7 @@ pub async fn submit_result(
         status: match outcome {
             oracle_task_service::ResultOutcome::Completed => "saved".to_string(),
             oracle_task_service::ResultOutcome::Failed => "saved_failed".to_string(),
+            oracle_task_service::ResultOutcome::Requeued => "requeued".to_string(),
             oracle_task_service::ResultOutcome::Ignored => "ignored".to_string(),
         },
     }))
