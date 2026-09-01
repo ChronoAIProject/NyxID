@@ -13,7 +13,7 @@ pub fn default_session_origin() -> String {
 /// themselves (query `oracle_tasks` by `conversation_id`); the session
 /// carries only routing state — most importantly the browser-side
 /// conversation URL workers navigate back to for follow-ups.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OracleSession {
     /// Conversation id (`conv_<hex16>`), minted at session open.
     #[serde(rename = "_id")]
@@ -59,6 +59,24 @@ pub struct OracleSession {
     pub updated_at: DateTime<Utc>,
 }
 
+impl std::fmt::Debug for OracleSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OracleSession")
+            .field("id", &self.id)
+            .field("pool_id", &self.pool_id)
+            .field("owner_user_id", &self.owner_user_id)
+            .field("origin", &self.origin)
+            .field("api_key_id", &self.api_key_id)
+            .field("owner_worker_label", &self.owner_worker_label)
+            .field("turn_count", &self.turn_count)
+            .field("last_task_id", &self.last_task_id)
+            .field("closed_at", &self.closed_at)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,9 +86,8 @@ mod tests {
         assert_eq!(COLLECTION_NAME, "oracle_sessions");
     }
 
-    #[test]
-    fn bson_roundtrip() {
-        let session = OracleSession {
+    fn make_session() -> OracleSession {
+        OracleSession {
             id: "conv_0123456789abcdef".to_string(),
             pool_id: uuid::Uuid::new_v4().to_string(),
             owner_user_id: uuid::Uuid::new_v4().to_string(),
@@ -84,7 +101,22 @@ mod tests {
             closed_at: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
-        };
+        }
+    }
+
+    #[test]
+    fn debug_redacts_browser_url_and_tag() {
+        let mut session = make_session();
+        session.chatgpt_url = Some("https://chatgpt.com/c/private-conversation".to_string());
+        session.tag = Some("sensitive tag".to_string());
+        let debug = format!("{session:?}");
+        assert!(!debug.contains("private-conversation"));
+        assert!(!debug.contains("sensitive tag"));
+    }
+
+    #[test]
+    fn bson_roundtrip() {
+        let session = make_session();
         let doc = bson::to_document(&session).expect("serialize");
         let restored: OracleSession = bson::from_document(doc).expect("deserialize");
         assert_eq!(session.id, restored.id);

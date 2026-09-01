@@ -33,7 +33,7 @@ impl OraclePoolVisibility {
 /// NyxID itself stays a generic async task relay: nothing in this model is
 /// specific to ChatGPT — `chatgpt_project_url` and `default_model_label`
 /// are opaque hints forwarded to workers.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OraclePool {
     #[serde(rename = "_id")]
     pub id: String,
@@ -76,6 +76,26 @@ pub struct OraclePool {
     pub updated_at: DateTime<Utc>,
 }
 
+impl std::fmt::Debug for OraclePool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OraclePool")
+            .field("id", &self.id)
+            .field("user_id", &self.user_id)
+            .field("slug", &self.slug)
+            .field("name", &self.name)
+            .field("visibility", &self.visibility)
+            .field("allow_extract", &self.allow_extract)
+            .field("max_workers", &self.max_workers)
+            .field("max_queue_length", &self.max_queue_length)
+            .field("per_user_max_inflight", &self.per_user_max_inflight)
+            .field("task_timeout_secs", &self.task_timeout_secs)
+            .field("is_active", &self.is_active)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
 pub const DEFAULT_MAX_WORKERS: u32 = 3;
 pub const DEFAULT_MAX_QUEUE_LENGTH: u32 = 50;
 pub const DEFAULT_PER_USER_MAX_INFLIGHT: u32 = 2;
@@ -88,6 +108,18 @@ mod tests {
     #[test]
     fn collection_name() {
         assert_eq!(COLLECTION_NAME, "oracle_pools");
+    }
+
+    #[test]
+    fn debug_redacts_token_hash_and_browser_hints() {
+        let mut pool = make_pool();
+        pool.worker_token_hash = "sensitive-token-hash".to_string();
+        pool.chatgpt_project_url = Some("https://chatgpt.com/g/private-project".to_string());
+        pool.description = Some("sensitive description".to_string());
+        let debug = format!("{pool:?}");
+        assert!(!debug.contains("sensitive-token-hash"));
+        assert!(!debug.contains("private-project"));
+        assert!(!debug.contains("sensitive description"));
     }
 
     fn make_pool() -> OraclePool {

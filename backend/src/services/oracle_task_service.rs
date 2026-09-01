@@ -29,7 +29,8 @@ use crate::errors::{AppError, AppResult};
 use crate::models::oracle_pool::OraclePool;
 use crate::models::oracle_session::{COLLECTION_NAME as ORACLE_SESSIONS, OracleSession};
 use crate::models::oracle_task::{
-    COLLECTION_NAME as ORACLE_TASKS, OracleImage, OracleTask, OracleTaskStatus,
+    COLLECTION_NAME as ORACLE_TASKS, DEFAULT_ORACLE_TASK_MAX_RETRIES, OracleImage, OracleTask,
+    OracleTaskStatus,
 };
 use crate::models::oracle_worker::{
     COLLECTION_NAME as ORACLE_WORKERS, OracleWorker, worker_doc_id,
@@ -56,6 +57,7 @@ const MAX_PHASE_LEN: usize = 80;
 const MAX_PHASE_DETAIL_LEN: usize = 500;
 const MAX_URL_LEN: usize = 2048;
 const MAX_WORKER_LABEL_LEN: usize = 64;
+const WORKER_INFRASTRUCTURE_FAILURES: &[&str] = &["browser_recovery_exhausted"];
 
 /// Workers polling within this window count as "active" in pool status.
 pub const WORKER_RECENT_SECS: i64 = 120;
@@ -71,7 +73,7 @@ pub struct SubmitterIdentity {
     pub api_key_name: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct SubmitTaskInput {
     pub prompt: String,
     pub model_label: Option<String>,
@@ -90,7 +92,6 @@ pub struct SubmitTaskInput {
     pub client_ref: Option<String>,
 }
 
-#[derive(Debug)]
 pub struct SubmitOutcome {
     pub task: OracleTask,
     pub queue_position: u64,
@@ -98,7 +99,7 @@ pub struct SubmitOutcome {
     pub deduplicated: bool,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 pub struct TranscriptTurn {
     pub role: String,
     pub text: String,
@@ -310,6 +311,10 @@ pub async fn submit_task(
         assigned_worker_id: None,
         dispatched_at: None,
         lease_expires_at: None,
+        retry_count: 0,
+        max_retries: DEFAULT_ORACLE_TASK_MAX_RETRIES,
+        attempt_count: 0,
+        dispatch_attempt_id: None,
         response: None,
         response_chars: None,
         images: None,
@@ -565,6 +570,10 @@ pub async fn extract_url(
         assigned_worker_id: None,
         dispatched_at: None,
         lease_expires_at: None,
+        retry_count: 0,
+        max_retries: DEFAULT_ORACLE_TASK_MAX_RETRIES,
+        attempt_count: 0,
+        dispatch_attempt_id: None,
         response: None,
         response_chars: None,
         images: None,
@@ -645,6 +654,10 @@ pub async fn attach_conversation(
         assigned_worker_id: None,
         dispatched_at: None,
         lease_expires_at: None,
+        retry_count: 0,
+        max_retries: DEFAULT_ORACLE_TASK_MAX_RETRIES,
+        attempt_count: 0,
+        dispatch_attempt_id: None,
         response: None,
         response_chars: None,
         images: None,
@@ -754,7 +767,7 @@ fn terminal_expiry(retention_days: u32) -> chrono::DateTime<Utc> {
     Utc::now() + Duration::days(i64::from(retention_days))
 }
 
-fn validate_worker_label(label: &str) -> AppResult<()> {
+pub(crate) fn validate_worker_label(label: &str) -> AppResult<()> {
     let ok = !label.is_empty()
         && label.len() <= MAX_WORKER_LABEL_LEN
         && label
@@ -805,7 +818,7 @@ async fn upsert_worker_presence(
             doc! { "_id": worker_doc_id(&pool.id, worker_label) },
             doc! {
                 "$set": set,
-                "$setOnInsert": { "first_seen_at": now },
+                "$setOnInsert": { "first_seen_at": now, "desired_state": "active" },
             },
         )
         .upsert(true)
@@ -813,17 +826,28 @@ async fn upsert_worker_presence(
     Ok(())
 }
 
-/// Requeue dispatched tasks whose lease expired (worker died mid-task).
-/// The preserved `created_at` puts them back at the FIFO front.
-async fn requeue_expired_leases(db: &mongodb::Database, pool_id: &str) -> AppResult<u64> {
-    let now = bson::DateTime::from_chrono(Utc::now());
-    let result = db
+/// Requeue expired dispatches at the FIFO front while retry budget remains,
+/// then fail exhausted tasks with a retention TTL.
+async fn requeue_expired_leases(
+    db: &mongodb::Database,
+    pool_id: &str,
+    retention_days: u32,
+) -> AppResult<u64> {
+    let now_chrono = Utc::now();
+    let now = bson::DateTime::from_chrono(now_chrono);
+    let retryable = db
         .collection::<OracleTask>(ORACLE_TASKS)
         .update_many(
             doc! {
                 "pool_id": pool_id,
                 "status": "dispatched",
                 "lease_expires_at": { "$lt": now },
+                "$expr": {
+                    "$lt": [
+                        { "$ifNull": ["$retry_count", 0] },
+                        { "$ifNull": ["$max_retries", DEFAULT_ORACLE_TASK_MAX_RETRIES as i64] },
+                    ]
+                },
             },
             doc! {
                 "$set": {
@@ -831,15 +855,53 @@ async fn requeue_expired_leases(db: &mongodb::Database, pool_id: &str) -> AppRes
                     "phase": "requeued_after_lease_expiry",
                     "updated_at": now,
                 },
+                "$inc": { "retry_count": 1_i64 },
                 "$unset": {
                     "assigned_worker_id": "",
                     "dispatched_at": "",
                     "lease_expires_at": "",
+                    "dispatch_attempt_id": "",
                 },
             },
         )
         .await?;
-    Ok(result.modified_count)
+
+    let exhausted = db
+        .collection::<OracleTask>(ORACLE_TASKS)
+        .update_many(
+            doc! {
+                "pool_id": pool_id,
+                "status": "dispatched",
+                "lease_expires_at": { "$lt": now },
+                "$expr": {
+                    "$gte": [
+                        { "$ifNull": ["$retry_count", 0] },
+                        { "$ifNull": ["$max_retries", DEFAULT_ORACLE_TASK_MAX_RETRIES as i64] },
+                    ]
+                },
+            },
+            doc! {
+                "$set": {
+                    "status": "failed",
+                    "phase": "infrastructure_retry_exhausted",
+                    "failure_reason": "infrastructure_retry_exhausted",
+                    "completed_at": now,
+                    "expires_at": bson::DateTime::from_chrono(
+                        now_chrono + Duration::days(i64::from(retention_days))
+                    ),
+                    "updated_at": now,
+                },
+                "$unset": {
+                    "assigned_worker_id": "",
+                    "dispatched_at": "",
+                    "lease_expires_at": "",
+                    "dispatch_attempt_id": "",
+                },
+            },
+        )
+        .await?;
+
+    Ok(retryable.modified_count + exhausted.modified_count)
 }
 
 /// Affinity escape hatch — the "lease/age fallback" the issue deferred.
@@ -882,9 +944,14 @@ async fn release_stale_affinity(db: &mongodb::Database, pool: &OraclePool) -> Ap
 /// The payload a worker receives for a claimed task. Field names mirror
 /// the local oracle servers' task dicts so the userscript port stays a
 /// thin diff.
-#[derive(Debug, serde::Serialize)]
+#[derive(serde::Serialize)]
 pub struct WorkerTaskPayload {
     pub task_id: String,
+    pub attempts: u32,
+    pub retry_count: u32,
+    pub max_retries: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dispatch_attempt_id: Option<String>,
     pub kind: String,
     pub prompt: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -925,10 +992,14 @@ async fn worker_payload(
             .find_one(doc! { "_id": conv_id })
             .await?
             .and_then(|s| s.chatgpt_url),
-        None => None,
+        None => task.chatgpt_url.clone(),
     };
     Ok(WorkerTaskPayload {
         task_id: task.id.clone(),
+        attempts: task.attempt_count,
+        retry_count: task.retry_count,
+        max_retries: task.max_retries,
+        dispatch_attempt_id: task.dispatch_attempt_id.clone(),
         kind: task.kind.clone(),
         prompt: task.prompt.clone(),
         target_url: task.target_url.clone(),
@@ -950,13 +1021,7 @@ async fn worker_payload(
     })
 }
 
-/// Worker poll: requeue expired leases, release follow-ups whose owning
-/// worker is long gone (affinity grace fallback), resume the worker's own
-/// in-flight task if any (idempotent re-claim — this is what lets a tab
-/// survive a mid-task page reload), then atomically claim the oldest queued
-/// task if the pool has dispatch capacity. `None` = idle. Because every
-/// live worker polls here continuously, the stale-affinity sweep runs as
-/// long as any worker in the pool is alive.
+#[cfg(test)]
 pub async fn claim_task(
     db: &mongodb::Database,
     pool: &OraclePool,
@@ -964,8 +1029,22 @@ pub async fn claim_task(
     script_version: Option<&str>,
     page_url: Option<&str>,
 ) -> AppResult<Option<WorkerTaskPayload>> {
+    claim_task_with_retention(db, pool, worker_label, script_version, page_url, 30).await
+}
+
+/// Requeues expired leases, releases stale affinity, idempotently returns the
+/// worker's live dispatch, or atomically claims the oldest eligible task.
+/// `None` means the worker is idle.
+pub async fn claim_task_with_retention(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    worker_label: &str,
+    script_version: Option<&str>,
+    page_url: Option<&str>,
+    retention_days: u32,
+) -> AppResult<Option<WorkerTaskPayload>> {
     validate_worker_label(worker_label)?;
-    requeue_expired_leases(db, &pool.id).await?;
+    requeue_expired_leases(db, &pool.id, retention_days).await?;
     release_stale_affinity(db, pool).await?;
 
     let now = Utc::now();
@@ -1005,6 +1084,9 @@ pub async fn claim_task(
     }
 
     upsert_worker_presence(db, pool, worker_label, None, script_version, page_url).await?;
+    if !super::oracle_worker_service::accepts_new_tasks(db, &pool.id, worker_label).await? {
+        return Ok(None);
+    }
 
     // Soft capacity gate (concurrent claims may briefly overshoot by one;
     // the cap is a fairness knob, not an invariant).
@@ -1017,6 +1099,7 @@ pub async fn claim_task(
     // matches both) are claimable by any worker; a follow-up pinned to a
     // specific account is claimable only by that account's worker, so
     // multi-turn lands back on the account that owns the conversation.
+    let dispatch_attempt_id = uuid::Uuid::new_v4().to_string();
     let claimed = db
         .collection::<OracleTask>(ORACLE_TASKS)
         .find_one_and_update(
@@ -1028,15 +1111,19 @@ pub async fn claim_task(
                     { "required_worker_label": worker_label },
                 ],
             },
-            doc! { "$set": {
-                "status": "dispatched",
-                "assigned_worker_id": worker_label,
-                "dispatched_at": bson::DateTime::from_chrono(now),
-                "lease_expires_at": bson::DateTime::from_chrono(lease),
-                "phase": "dispatched",
-                "phase_at": bson::DateTime::from_chrono(now),
-                "updated_at": bson::DateTime::from_chrono(now),
-            } },
+            doc! {
+                "$set": {
+                    "status": "dispatched",
+                    "assigned_worker_id": worker_label,
+                    "dispatch_attempt_id": &dispatch_attempt_id,
+                    "dispatched_at": bson::DateTime::from_chrono(now),
+                    "lease_expires_at": bson::DateTime::from_chrono(lease),
+                    "phase": "dispatched",
+                    "phase_at": bson::DateTime::from_chrono(now),
+                    "updated_at": bson::DateTime::from_chrono(now),
+                },
+                "$inc": { "attempt_count": 1_i64 },
+            },
         )
         .with_options(
             FindOneAndUpdateOptions::builder()
@@ -1071,19 +1158,33 @@ pub enum AckOutcome {
     Cancelled,
 }
 
-/// Heartbeat: refresh the lease and record progress. Returns `Cancelled`
-/// when the task is no longer this worker's live dispatch (cancelled by
-/// the submitter, expired-and-reclaimed, or unknown).
-#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub async fn worker_ack(
     db: &mongodb::Database,
     pool: &OraclePool,
     worker_label: &str,
     task_id: &str,
-    phase: Option<&str>,
-    phase_detail: Option<&str>,
-    script_version: Option<&str>,
-    page_url: Option<&str>,
+    input: WorkerAckInput<'_>,
+) -> AppResult<AckOutcome> {
+    worker_ack_fenced(db, pool, worker_label, task_id, input).await
+}
+
+pub struct WorkerAckInput<'a> {
+    pub phase: Option<&'a str>,
+    pub phase_detail: Option<&'a str>,
+    pub script_version: Option<&'a str>,
+    pub page_url: Option<&'a str>,
+    pub dispatch_attempt_id: Option<&'a str>,
+}
+
+/// Refreshes the lease and records progress. Returns `Cancelled` when the
+/// optional attempt fence or worker assignment is no longer live.
+pub async fn worker_ack_fenced(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    worker_label: &str,
+    task_id: &str,
+    input: WorkerAckInput<'_>,
 ) -> AppResult<AckOutcome> {
     validate_worker_label(worker_label)?;
     let now = Utc::now();
@@ -1093,25 +1194,27 @@ pub async fn worker_ack(
         "lease_expires_at": bson::DateTime::from_chrono(lease),
         "updated_at": bson::DateTime::from_chrono(now),
     };
-    if let Some(phase) = phase {
+    if let Some(phase) = input.phase {
         set.insert("phase", truncate_chars(phase, MAX_PHASE_LEN));
         set.insert("phase_at", bson::DateTime::from_chrono(now));
     }
-    if let Some(detail) = phase_detail {
+    if let Some(detail) = input.phase_detail {
         set.insert("phase_detail", truncate_chars(detail, MAX_PHASE_DETAIL_LEN));
+    }
+
+    let mut filter = doc! {
+        "_id": task_id,
+        "pool_id": &pool.id,
+        "status": "dispatched",
+        "assigned_worker_id": worker_label,
+    };
+    if let Some(attempt_id) = input.dispatch_attempt_id {
+        filter.insert("dispatch_attempt_id", attempt_id);
     }
 
     let updated = db
         .collection::<OracleTask>(ORACLE_TASKS)
-        .update_one(
-            doc! {
-                "_id": task_id,
-                "pool_id": &pool.id,
-                "status": "dispatched",
-                "assigned_worker_id": worker_label,
-            },
-            doc! { "$set": set },
-        )
+        .update_one(filter, doc! { "$set": set })
         .await?;
 
     upsert_worker_presence(
@@ -1119,8 +1222,8 @@ pub async fn worker_ack(
         pool,
         worker_label,
         (updated.matched_count > 0).then_some(task_id),
-        script_version,
-        page_url,
+        input.script_version,
+        input.page_url,
     )
     .await?;
 
@@ -1134,6 +1237,7 @@ pub async fn worker_ack(
 pub enum ResultOutcome {
     Completed,
     Failed,
+    Requeued,
     /// The task was no longer this worker's live dispatch; result dropped.
     Ignored,
 }
@@ -1184,39 +1288,162 @@ fn decode_result_images(images: Vec<ResultImage>) -> Vec<OracleImage> {
     out
 }
 
-/// Store a worker's result. Empty/`ERROR:`-prefixed responses mark the task
-/// `failed` (extraction failure), mirroring the local oracle servers — but an
-/// image-generation turn legitimately has empty text, so a result carrying at
-/// least one valid image is treated as a success.
-#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 pub async fn worker_submit_result(
     db: &mongodb::Database,
     pool: &OraclePool,
     worker_label: &str,
     task_id: &str,
-    response: &str,
-    images: Vec<ResultImage>,
-    chatgpt_url: Option<&str>,
-    model: Option<&str>,
-    script_version: Option<&str>,
-    retention_days: u32,
+    input: WorkerResultInput<'_>,
+) -> AppResult<ResultOutcome> {
+    worker_submit_result_fenced(db, pool, worker_label, task_id, input).await
+}
+
+pub struct WorkerResultInput<'a> {
+    pub response: &'a str,
+    pub images: Vec<ResultImage>,
+    pub chatgpt_url: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub script_version: Option<&'a str>,
+    pub retention_days: u32,
+    pub dispatch_attempt_id: Option<&'a str>,
+}
+
+fn worker_error_code(response: &str) -> Option<&str> {
+    let code = response.strip_prefix("ERROR:")?.trim();
+    (!code.is_empty()
+        && code.len() <= MAX_PHASE_LEN
+        && code.chars().all(|character| {
+            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
+        }))
+    .then_some(code)
+}
+
+/// Stores a fenced worker result. Empty or `ERROR:` text fails unless valid
+/// images make the turn a successful image-only response.
+pub async fn worker_submit_result_fenced(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    worker_label: &str,
+    task_id: &str,
+    input: WorkerResultInput<'_>,
 ) -> AppResult<ResultOutcome> {
     validate_worker_label(worker_label)?;
     let now = Utc::now();
-    let trimmed = response.trim();
-    let stored_images = decode_result_images(images);
+    let trimmed = input.response.trim();
+    let stored_images = decode_result_images(input.images);
     let has_images = !stored_images.is_empty();
     // An image-only turn has empty text but is NOT a failure.
     let is_failure = (trimmed.is_empty() && !has_images) || trimmed.starts_with("ERROR:");
-    let stored_response = truncate_chars(response, MAX_RESPONSE_CHARS);
+    let worker_error = worker_error_code(trimmed);
+    let stored_response = truncate_chars(input.response, MAX_RESPONSE_CHARS);
     let response_chars = stored_response.chars().count() as u64;
+
+    let mut live_dispatch = doc! {
+        "_id": task_id,
+        "pool_id": &pool.id,
+        "status": "dispatched",
+        "assigned_worker_id": worker_label,
+    };
+    if let Some(attempt_id) = input.dispatch_attempt_id {
+        live_dispatch.insert("dispatch_attempt_id", attempt_id);
+    }
+
+    if worker_error.is_some_and(|code| WORKER_INFRASTRUCTURE_FAILURES.contains(&code)) {
+        let tasks = db.collection::<OracleTask>(ORACLE_TASKS);
+        let mut retryable_filter = live_dispatch.clone();
+        retryable_filter.insert(
+            "$expr",
+            doc! {
+                "$lt": [
+                    { "$ifNull": ["$retry_count", 0] },
+                    { "$ifNull": ["$max_retries", DEFAULT_ORACLE_TASK_MAX_RETRIES as i64] },
+                ]
+            },
+        );
+        let requeued = tasks
+            .find_one_and_update(
+                retryable_filter,
+                doc! {
+                    "$set": {
+                        "status": "queued",
+                        "phase": "requeued_after_browser_failure",
+                        "updated_at": bson::DateTime::from_chrono(now),
+                    },
+                    "$inc": { "retry_count": 1_i64 },
+                    "$unset": {
+                        "assigned_worker_id": "",
+                        "dispatched_at": "",
+                        "lease_expires_at": "",
+                        "dispatch_attempt_id": "",
+                    },
+                },
+            )
+            .with_options(
+                FindOneAndUpdateOptions::builder()
+                    .return_document(ReturnDocument::After)
+                    .build(),
+            )
+            .await?;
+        if requeued.is_some() {
+            upsert_worker_presence(db, pool, worker_label, None, input.script_version, None)
+                .await?;
+            return Ok(ResultOutcome::Requeued);
+        }
+
+        let mut exhausted_filter = live_dispatch;
+        exhausted_filter.insert(
+            "$expr",
+            doc! {
+                "$gte": [
+                    { "$ifNull": ["$retry_count", 0] },
+                    { "$ifNull": ["$max_retries", DEFAULT_ORACLE_TASK_MAX_RETRIES as i64] },
+                ]
+            },
+        );
+        let exhausted_response = "ERROR: infrastructure_retry_exhausted";
+        let exhausted = tasks
+            .find_one_and_update(
+                exhausted_filter,
+                doc! {
+                    "$set": {
+                        "status": "failed",
+                        "phase": "infrastructure_retry_exhausted",
+                        "failure_reason": "infrastructure_retry_exhausted",
+                        "response": exhausted_response,
+                        "response_chars": exhausted_response.len() as i64,
+                        "completed_at": bson::DateTime::from_chrono(now),
+                        "expires_at": bson::DateTime::from_chrono(terminal_expiry(input.retention_days)),
+                        "updated_at": bson::DateTime::from_chrono(now),
+                    },
+                    "$unset": {
+                        "assigned_worker_id": "",
+                        "dispatched_at": "",
+                        "lease_expires_at": "",
+                        "dispatch_attempt_id": "",
+                    },
+                },
+            )
+            .with_options(
+                FindOneAndUpdateOptions::builder()
+                    .return_document(ReturnDocument::After)
+                    .build(),
+            )
+            .await?;
+        upsert_worker_presence(db, pool, worker_label, None, input.script_version, None).await?;
+        return Ok(if exhausted.is_some() {
+            ResultOutcome::Failed
+        } else {
+            ResultOutcome::Ignored
+        });
+    }
 
     let mut set = doc! {
         "status": if is_failure { "failed" } else { "completed" },
         "response": &stored_response,
         "response_chars": response_chars as i64,
         "completed_at": bson::DateTime::from_chrono(now),
-        "expires_at": bson::DateTime::from_chrono(terminal_expiry(retention_days)),
+        "expires_at": bson::DateTime::from_chrono(terminal_expiry(input.retention_days)),
         "updated_at": bson::DateTime::from_chrono(now),
     };
     if has_images {
@@ -1245,31 +1472,23 @@ pub async fn worker_submit_result(
             if trimmed.is_empty() {
                 "empty_response".to_string()
             } else {
-                "extraction_failure".to_string()
+                worker_error.unwrap_or("extraction_failure").to_string()
             },
         );
     }
-    if let Some(url) = chatgpt_url {
+    if let Some(url) = input.chatgpt_url {
         set.insert("chatgpt_url", truncate_chars(url, MAX_URL_LEN));
     }
-    if let Some(model) = model {
+    if let Some(model) = input.model {
         set.insert("model_label", truncate_chars(model, MAX_MODEL_LABEL_LEN));
     }
-    if let Some(v) = script_version {
+    if let Some(v) = input.script_version {
         set.insert("worker_script_version", truncate_chars(v, 64));
     }
 
     let updated = db
         .collection::<OracleTask>(ORACLE_TASKS)
-        .find_one_and_update(
-            doc! {
-                "_id": task_id,
-                "pool_id": &pool.id,
-                "status": "dispatched",
-                "assigned_worker_id": worker_label,
-            },
-            doc! { "$set": set },
-        )
+        .find_one_and_update(live_dispatch, doc! { "$set": set })
         .with_options(
             FindOneAndUpdateOptions::builder()
                 .return_document(ReturnDocument::After)
@@ -1277,7 +1496,7 @@ pub async fn worker_submit_result(
         )
         .await?;
 
-    upsert_worker_presence(db, pool, worker_label, None, script_version, None).await?;
+    upsert_worker_presence(db, pool, worker_label, None, input.script_version, None).await?;
 
     let Some(task) = updated else {
         return Ok(ResultOutcome::Ignored);
@@ -1289,7 +1508,7 @@ pub async fn worker_submit_result(
             "last_task_id": &task.id,
             "updated_at": bson::DateTime::from_chrono(now),
         };
-        if let Some(url) = chatgpt_url.filter(|u| !u.is_empty()) {
+        if let Some(url) = input.chatgpt_url.filter(|u| !u.is_empty()) {
             session_set.insert("chatgpt_url", truncate_chars(url, MAX_URL_LEN));
         }
         db.collection::<OracleSession>(ORACLE_SESSIONS)
@@ -1352,6 +1571,7 @@ fn transcript_pairs(turns: &[TranscriptTurn]) -> (Vec<(String, String)>, usize, 
     (pairs, ignored_leading_assistant, ignored_trailing_user)
 }
 
+#[cfg(test)]
 pub async fn worker_submit_transcript(
     db: &mongodb::Database,
     pool: &OraclePool,
@@ -1361,13 +1581,42 @@ pub async fn worker_submit_transcript(
     chatgpt_url: Option<&str>,
     retention_days: u32,
 ) -> AppResult<TranscriptOutcome> {
+    worker_submit_transcript_fenced(
+        db,
+        pool,
+        worker_label,
+        task_id,
+        WorkerTranscriptInput {
+            turns,
+            chatgpt_url,
+            retention_days,
+            dispatch_attempt_id: None,
+        },
+    )
+    .await
+}
+
+pub struct WorkerTranscriptInput<'a> {
+    pub turns: &'a [TranscriptTurn],
+    pub chatgpt_url: Option<&'a str>,
+    pub retention_days: u32,
+    pub dispatch_attempt_id: Option<&'a str>,
+}
+
+pub async fn worker_submit_transcript_fenced(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    worker_label: &str,
+    task_id: &str,
+    input: WorkerTranscriptInput<'_>,
+) -> AppResult<TranscriptOutcome> {
     validate_worker_label(worker_label)?;
-    if let Some(url) = chatgpt_url.filter(|u| !u.is_empty()) {
+    if let Some(url) = input.chatgpt_url.filter(|u| !u.is_empty()) {
         validate_attach_url(url)?;
     }
 
     let now = Utc::now();
-    let (pairs, ignored_leading_assistant, ignored_trailing_user) = transcript_pairs(turns);
+    let (pairs, ignored_leading_assistant, ignored_trailing_user) = transcript_pairs(input.turns);
     tracing::debug!(
         task_id = %task_id,
         pool_id = %pool.id,
@@ -1378,17 +1627,21 @@ pub async fn worker_submit_transcript(
     );
 
     let response = format!("[imported {} pairs]", pairs.len());
-    let expires_at = terminal_expiry(retention_days);
+    let expires_at = terminal_expiry(input.retention_days);
+    let mut claim_filter = doc! {
+        "_id": task_id,
+        "pool_id": &pool.id,
+        "status": "dispatched",
+        "assigned_worker_id": worker_label,
+        "kind": "scrape",
+    };
+    if let Some(attempt_id) = input.dispatch_attempt_id {
+        claim_filter.insert("dispatch_attempt_id", attempt_id);
+    }
     let updated = db
         .collection::<OracleTask>(ORACLE_TASKS)
         .find_one_and_update(
-            doc! {
-                "_id": task_id,
-                "pool_id": &pool.id,
-                "status": "dispatched",
-                "assigned_worker_id": worker_label,
-                "kind": "scrape",
-            },
+            claim_filter,
             doc! { "$set": {
                 "status": "completed",
                 "response": &response,
@@ -1405,7 +1658,7 @@ pub async fn worker_submit_transcript(
         )
         .await?;
 
-    upsert_worker_presence(db, pool, worker_label, None, None, chatgpt_url).await?;
+    upsert_worker_presence(db, pool, worker_label, None, None, input.chatgpt_url).await?;
 
     let Some(scrape_task) = updated else {
         return Ok(TranscriptOutcome::Ignored);
@@ -1416,7 +1669,7 @@ pub async fn worker_submit_transcript(
 
     let task_collection = db.collection::<OracleTask>(ORACLE_TASKS);
     let pair_count = pairs.len();
-    let imported_expires_at = terminal_expiry(retention_days);
+    let imported_expires_at = terminal_expiry(input.retention_days);
     let imported_tasks: Vec<OracleTask> = pairs
         .into_iter()
         .enumerate()
@@ -1450,10 +1703,15 @@ pub async fn worker_submit_transcript(
                 assigned_worker_id: Some(worker_label.to_string()),
                 dispatched_at: scrape_task.dispatched_at,
                 lease_expires_at: None,
+                retry_count: 0,
+                max_retries: DEFAULT_ORACLE_TASK_MAX_RETRIES,
+                attempt_count: 0,
+                dispatch_attempt_id: None,
                 response: Some(assistant_text),
                 response_chars: Some(response_chars),
                 images: None,
-                chatgpt_url: chatgpt_url
+                chatgpt_url: input
+                    .chatgpt_url
                     .filter(|u| !u.is_empty())
                     .map(|u| truncate_chars(u, MAX_URL_LEN))
                     .or_else(|| scrape_task.chatgpt_url.clone()),
@@ -1474,7 +1732,7 @@ pub async fn worker_submit_transcript(
         "last_task_id": &scrape_task.id,
         "updated_at": bson::DateTime::from_chrono(now),
     };
-    if let Some(url) = chatgpt_url.filter(|u| !u.is_empty()) {
+    if let Some(url) = input.chatgpt_url.filter(|u| !u.is_empty()) {
         session_set.insert("chatgpt_url", truncate_chars(url, MAX_URL_LEN));
     }
     db.collection::<OracleSession>(ORACLE_SESSIONS)
@@ -1502,6 +1760,7 @@ pub async fn worker_submit_transcript(
 /// Pin the browser-side conversation URL mid-task (the worker calls this
 /// as soon as the chat URL is known, before the result lands, so a
 /// follow-up submitted concurrently can already navigate).
+#[cfg(test)]
 pub async fn pin_conversation_url(
     db: &mongodb::Database,
     pool: &OraclePool,
@@ -1509,29 +1768,46 @@ pub async fn pin_conversation_url(
     task_id: &str,
     chatgpt_url: &str,
 ) -> AppResult<()> {
+    pin_conversation_url_fenced(db, pool, worker_label, task_id, chatgpt_url, None).await
+}
+
+pub async fn pin_conversation_url_fenced(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    worker_label: &str,
+    task_id: &str,
+    chatgpt_url: &str,
+    dispatch_attempt_id: Option<&str>,
+) -> AppResult<()> {
     validate_worker_label(worker_label)?;
     if chatgpt_url.is_empty() || chatgpt_url.len() > MAX_URL_LEN {
         return Err(AppError::ValidationError(
             "chatgpt_url must be 1-2048 chars".to_string(),
         ));
     }
+    let mut claim_filter = doc! {
+        "_id": task_id,
+        "pool_id": &pool.id,
+        "status": "dispatched",
+        "assigned_worker_id": worker_label,
+    };
+    if let Some(attempt_id) = dispatch_attempt_id {
+        claim_filter.insert("dispatch_attempt_id", attempt_id);
+    }
+    let now = bson::DateTime::from_chrono(Utc::now());
     let task = db
         .collection::<OracleTask>(ORACLE_TASKS)
-        .find_one(doc! {
-            "_id": task_id,
-            "pool_id": &pool.id,
-            "assigned_worker_id": worker_label,
-        })
-        .await?
-        .ok_or_else(|| AppError::OracleTaskNotFound(task_id.to_string()))?;
-
-    let now = bson::DateTime::from_chrono(Utc::now());
-    db.collection::<OracleTask>(ORACLE_TASKS)
-        .update_one(
-            doc! { "_id": &task.id },
+        .find_one_and_update(
+            claim_filter,
             doc! { "$set": { "chatgpt_url": chatgpt_url, "updated_at": now } },
         )
-        .await?;
+        .with_options(
+            FindOneAndUpdateOptions::builder()
+                .return_document(ReturnDocument::After)
+                .build(),
+        )
+        .await?
+        .ok_or_else(|| AppError::OracleTaskNotFound(task_id.to_string()))?;
     if let Some(conv_id) = &task.conversation_id {
         db.collection::<OracleSession>(ORACLE_SESSIONS)
             .update_one(
@@ -1563,9 +1839,18 @@ pub struct WorkerStatus {
     pub script_version: Option<String>,
 }
 
-/// Queue/worker overview for a pool (consumer-facing; no prompt bodies).
+#[cfg(test)]
 pub async fn pool_status(db: &mongodb::Database, pool: &OraclePool) -> AppResult<PoolStatus> {
-    requeue_expired_leases(db, &pool.id).await?;
+    pool_status_with_retention(db, pool, 30).await
+}
+
+/// Returns consumer-facing queue and worker metadata without task bodies.
+pub async fn pool_status_with_retention(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    retention_days: u32,
+) -> AppResult<PoolStatus> {
+    requeue_expired_leases(db, &pool.id, retention_days).await?;
     let queued = count_tasks(db, doc! { "pool_id": &pool.id, "status": "queued" }).await?;
     let dispatched = count_tasks(db, doc! { "pool_id": &pool.id, "status": "dispatched" }).await?;
 
@@ -1900,10 +2185,13 @@ mod tests {
             &pool,
             "tab_1",
             &first.task.id,
-            Some("waiting_response"),
-            Some("elapsed=60s"),
-            Some("v1"),
-            None,
+            WorkerAckInput {
+                phase: Some("waiting_response"),
+                phase_detail: Some("elapsed=60s"),
+                script_version: Some("v1"),
+                page_url: None,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -1926,12 +2214,15 @@ mod tests {
             &pool,
             "tab_1",
             &first.task.id,
-            "The answer is 42.",
-            vec![],
-            Some("https://chatgpt.com/c/abc"),
-            Some("chatgpt-5.5-pro"),
-            Some("v1"),
-            30,
+            WorkerResultInput {
+                response: "The answer is 42.",
+                images: vec![],
+                chatgpt_url: Some("https://chatgpt.com/c/abc"),
+                model: Some("chatgpt-5.5-pro"),
+                script_version: Some("v1"),
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -1949,12 +2240,15 @@ mod tests {
             &pool,
             "tab_2",
             &second.task.id,
-            "ERROR: Response too short or empty",
-            vec![],
-            None,
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "ERROR: Response too short or empty",
+                images: vec![],
+                chatgpt_url: None,
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -1971,12 +2265,15 @@ mod tests {
             &pool,
             "tab_1",
             &first.task.id,
-            "stale",
-            vec![],
-            None,
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "stale",
+                images: vec![],
+                chatgpt_url: None,
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2096,6 +2393,8 @@ mod tests {
             .unwrap()
             .expect("claim old");
         assert_eq!(claimed.task_id, old.task.id);
+        assert_eq!(claimed.attempts, 1);
+        assert_eq!(claimed.retry_count, 0);
 
         // Force the lease into the past (simulates a dead tab).
         db.collection::<OracleTask>(ORACLE_TASKS)
@@ -2113,11 +2412,25 @@ mod tests {
             .unwrap()
             .expect("reclaim");
         assert_eq!(reclaimed.task_id, old.task.id);
+        assert_eq!(reclaimed.attempts, 2);
+        assert_eq!(reclaimed.retry_count, 1);
 
         // The original worker's stale heartbeat now reports Cancelled.
-        let stale_ack = worker_ack(&db, &pool, "tab_1", &old.task.id, None, None, None, None)
-            .await
-            .unwrap();
+        let stale_ack = worker_ack(
+            &db,
+            &pool,
+            "tab_1",
+            &old.task.id,
+            WorkerAckInput {
+                phase: None,
+                phase_detail: None,
+                script_version: None,
+                page_url: None,
+                dispatch_attempt_id: None,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(stale_ack, AckOutcome::Cancelled);
 
         // And its stale result is dropped.
@@ -2126,12 +2439,15 @@ mod tests {
             &pool,
             "tab_1",
             &old.task.id,
-            "from dead tab",
-            vec![],
-            None,
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "from dead tab",
+                images: vec![],
+                chatgpt_url: None,
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2143,6 +2459,245 @@ mod tests {
             .unwrap();
         assert_eq!(newer_task.status, OracleTaskStatus::Queued);
         assert_eq!(pos, 1);
+
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn lease_expiry_stops_after_retry_budget() {
+        let Some(db) = connect_test_database("oracle_task_retry_budget").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+
+        let submitted = submit_task(&db, &pool, &submitter(&owner), prompt_input("bounded"))
+            .await
+            .unwrap();
+        db.collection::<OracleTask>(ORACLE_TASKS)
+            .update_one(
+                doc! { "_id": &submitted.task.id },
+                doc! { "$set": { "max_retries": 1_i64 } },
+            )
+            .await
+            .unwrap();
+
+        let first = claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("first attempt");
+        assert_eq!(first.attempts, 1);
+
+        for worker in ["tab_2", "tab_3"] {
+            db.collection::<OracleTask>(ORACLE_TASKS)
+                .update_one(
+                    doc! { "_id": &submitted.task.id },
+                    doc! { "$set": { "lease_expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(5)) } },
+                )
+                .await
+                .unwrap();
+            let claimed = claim_task(&db, &pool, worker, None, None).await.unwrap();
+            if worker == "tab_2" {
+                let retry = claimed.expect("one retry remains");
+                assert_eq!(retry.attempts, 2);
+                assert_eq!(retry.retry_count, 1);
+            } else {
+                assert!(
+                    claimed.is_none(),
+                    "retry exhaustion must not dispatch again"
+                );
+            }
+        }
+
+        let (failed, _) = get_task_for_consumer(&db, &owner, &submitted.task.id)
+            .await
+            .unwrap();
+        assert_eq!(failed.status, OracleTaskStatus::Failed);
+        assert_eq!(
+            failed.failure_reason.as_deref(),
+            Some("infrastructure_retry_exhausted")
+        );
+        assert_eq!(failed.retry_count, 1);
+        assert_eq!(failed.attempt_count, 2);
+        assert!(failed.expires_at.is_some());
+
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn reported_browser_failure_consumes_infrastructure_retry_budget() {
+        let Some(db) = connect_test_database("oracle_task_reported_infra_failure").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+
+        let submitted = submit_task(
+            &db,
+            &pool,
+            &submitter(&owner),
+            prompt_input("recover browser"),
+        )
+        .await
+        .unwrap();
+        db.collection::<OracleTask>(ORACLE_TASKS)
+            .update_one(
+                doc! { "_id": &submitted.task.id },
+                doc! { "$set": { "max_retries": 1_i64 } },
+            )
+            .await
+            .unwrap();
+
+        let first = claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("first attempt");
+        let requeued = worker_submit_result(
+            &db,
+            &pool,
+            "tab_1",
+            &submitted.task.id,
+            WorkerResultInput {
+                response: "ERROR: browser_recovery_exhausted",
+                images: vec![],
+                chatgpt_url: None,
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: first.dispatch_attempt_id.as_deref(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(requeued, ResultOutcome::Requeued);
+        let (retrying, _) = get_task_for_consumer(&db, &owner, &submitted.task.id)
+            .await
+            .unwrap();
+        assert_eq!(retrying.status, OracleTaskStatus::Queued);
+        assert_eq!(retrying.retry_count, 1);
+
+        let second = claim_task(&db, &pool, "tab_2", None, None)
+            .await
+            .unwrap()
+            .expect("second attempt");
+        let exhausted = worker_submit_result(
+            &db,
+            &pool,
+            "tab_2",
+            &submitted.task.id,
+            WorkerResultInput {
+                response: "ERROR: browser_recovery_exhausted",
+                images: vec![],
+                chatgpt_url: None,
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: second.dispatch_attempt_id.as_deref(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(exhausted, ResultOutcome::Failed);
+        let (failed, _) = get_task_for_consumer(&db, &owner, &submitted.task.id)
+            .await
+            .unwrap();
+        assert_eq!(failed.status, OracleTaskStatus::Failed);
+        assert_eq!(failed.attempt_count, 2);
+        assert_eq!(failed.retry_count, 1);
+        assert_eq!(
+            failed.failure_reason.as_deref(),
+            Some("infrastructure_retry_exhausted")
+        );
+
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn attempt_id_fences_stale_same_label_ack_and_result() {
+        let Some(db) = connect_test_database("oracle_task_attempt_fence").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+
+        let submitted = submit_task(&db, &pool, &submitter(&owner), prompt_input("fenced"))
+            .await
+            .unwrap();
+        let first = claim_task(&db, &pool, "stable-label", None, None)
+            .await
+            .unwrap()
+            .expect("first attempt");
+        let first_attempt = first.dispatch_attempt_id.expect("attempt fence");
+
+        db.collection::<OracleTask>(ORACLE_TASKS)
+            .update_one(
+                doc! { "_id": &submitted.task.id },
+                doc! { "$set": { "lease_expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(5)) } },
+            )
+            .await
+            .unwrap();
+        let second = claim_task(&db, &pool, "stable-label", None, None)
+            .await
+            .unwrap()
+            .expect("replacement attempt");
+        let second_attempt = second.dispatch_attempt_id.expect("new attempt fence");
+        assert_ne!(first_attempt, second_attempt);
+
+        let stale_ack = worker_ack_fenced(
+            &db,
+            &pool,
+            "stable-label",
+            &submitted.task.id,
+            WorkerAckInput {
+                phase: None,
+                phase_detail: None,
+                script_version: None,
+                page_url: None,
+                dispatch_attempt_id: Some(&first_attempt),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stale_ack, AckOutcome::Cancelled);
+
+        let stale_result = worker_submit_result_fenced(
+            &db,
+            &pool,
+            "stable-label",
+            &submitted.task.id,
+            WorkerResultInput {
+                response: "stale answer",
+                images: vec![],
+                chatgpt_url: None,
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: Some(&first_attempt),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stale_result, ResultOutcome::Ignored);
+
+        let current_ack = worker_ack_fenced(
+            &db,
+            &pool,
+            "stable-label",
+            &submitted.task.id,
+            WorkerAckInput {
+                phase: None,
+                phase_detail: None,
+                script_version: None,
+                page_url: None,
+                dispatch_attempt_id: Some(&second_attempt),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(current_ack, AckOutcome::Ok);
 
         db.drop().await.ok();
     }
@@ -2194,12 +2749,15 @@ mod tests {
             &pool,
             "tab_1",
             &t1.task.id,
-            "turn one answer",
-            vec![],
-            Some("https://chatgpt.com/c/xyz"),
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "turn one answer",
+                images: vec![],
+                chatgpt_url: Some("https://chatgpt.com/c/xyz"),
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2257,6 +2815,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn single_shot_reclaim_carries_pinned_url_and_rejects_stale_pin() {
+        let Some(db) = connect_test_database("oracle_task_single_shot_resume_url").await else {
+            return;
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let pool = test_pool(&owner);
+        seed_pool(&db, &pool).await;
+        let submitted = submit_task(&db, &pool, &submitter(&owner), prompt_input("resume me"))
+            .await
+            .unwrap();
+        let first = claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("first claim");
+        let first_attempt = first.dispatch_attempt_id.expect("first attempt");
+        pin_conversation_url_fenced(
+            &db,
+            &pool,
+            "tab_1",
+            &submitted.task.id,
+            "https://chatgpt.com/c/resume-one-shot",
+            Some(&first_attempt),
+        )
+        .await
+        .unwrap();
+        let reclaimed = claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("idempotent reclaim");
+        assert_eq!(
+            reclaimed.conversation_url.as_deref(),
+            Some("https://chatgpt.com/c/resume-one-shot")
+        );
+
+        db.collection::<OracleTask>(ORACLE_TASKS)
+            .update_one(
+                doc! { "_id": &submitted.task.id },
+                doc! { "$set": {
+                    "lease_expires_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1))
+                } },
+            )
+            .await
+            .unwrap();
+        let replacement = claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("replacement claim");
+        assert_ne!(
+            replacement.dispatch_attempt_id.as_deref(),
+            Some(first_attempt.as_str())
+        );
+        let stale = pin_conversation_url_fenced(
+            &db,
+            &pool,
+            "tab_1",
+            &submitted.task.id,
+            "https://chatgpt.com/c/stale",
+            Some(&first_attempt),
+        )
+        .await;
+        assert!(matches!(stale, Err(AppError::OracleTaskNotFound(_))));
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
     async fn followup_pins_to_owning_worker() {
         let Some(db) = connect_test_database("oracle_task_affinity").await else {
             return;
@@ -2295,12 +2918,15 @@ mod tests {
             &pool,
             "tab_1",
             &t1.task.id,
-            "turn one answer",
-            vec![],
-            Some("https://chatgpt.com/c/xyz"),
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "turn one answer",
+                images: vec![],
+                chatgpt_url: Some("https://chatgpt.com/c/xyz"),
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2388,12 +3014,15 @@ mod tests {
             &pool,
             "tab_1",
             &t1.task.id,
-            "turn one answer",
-            vec![],
-            Some("https://chatgpt.com/c/xyz"),
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "turn one answer",
+                images: vec![],
+                chatgpt_url: Some("https://chatgpt.com/c/xyz"),
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2479,12 +3108,15 @@ mod tests {
             &pool,
             "tab_1",
             &t1.task.id,
-            "ERROR: extraction failed",
-            vec![],
-            Some("https://chatgpt.com/c/xyz"),
-            None,
-            None,
-            30,
+            WorkerResultInput {
+                response: "ERROR: extraction failed",
+                images: vec![],
+                chatgpt_url: Some("https://chatgpt.com/c/xyz"),
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();
@@ -2568,39 +3200,58 @@ mod tests {
             Some("https://chatgpt.com/c/abc")
         );
 
-        let outcome = worker_submit_transcript(
+        let stale = worker_submit_transcript_fenced(
             &db,
             &pool,
             "tab_1",
             &scrape_task.id,
-            &[
-                TranscriptTurn {
-                    role: "assistant".to_string(),
-                    text: "ignored intro".to_string(),
-                },
-                TranscriptTurn {
-                    role: "user".to_string(),
-                    text: "first question".to_string(),
-                },
-                TranscriptTurn {
-                    role: "assistant".to_string(),
-                    text: "first answer".to_string(),
-                },
-                TranscriptTurn {
-                    role: "user".to_string(),
-                    text: "second question".to_string(),
-                },
-                TranscriptTurn {
-                    role: "assistant".to_string(),
-                    text: "second answer".to_string(),
-                },
-                TranscriptTurn {
-                    role: "user".to_string(),
-                    text: "trailing".to_string(),
-                },
-            ],
-            Some("https://chatgpt.com/c/abc"),
-            30,
+            WorkerTranscriptInput {
+                turns: &[],
+                chatgpt_url: Some("https://chatgpt.com/c/abc"),
+                retention_days: 30,
+                dispatch_attempt_id: Some("stale-attempt"),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(stale, TranscriptOutcome::Ignored);
+
+        let outcome = worker_submit_transcript_fenced(
+            &db,
+            &pool,
+            "tab_1",
+            &scrape_task.id,
+            WorkerTranscriptInput {
+                turns: &[
+                    TranscriptTurn {
+                        role: "assistant".to_string(),
+                        text: "ignored intro".to_string(),
+                    },
+                    TranscriptTurn {
+                        role: "user".to_string(),
+                        text: "first question".to_string(),
+                    },
+                    TranscriptTurn {
+                        role: "assistant".to_string(),
+                        text: "first answer".to_string(),
+                    },
+                    TranscriptTurn {
+                        role: "user".to_string(),
+                        text: "second question".to_string(),
+                    },
+                    TranscriptTurn {
+                        role: "assistant".to_string(),
+                        text: "second answer".to_string(),
+                    },
+                    TranscriptTurn {
+                        role: "user".to_string(),
+                        text: "trailing".to_string(),
+                    },
+                ],
+                chatgpt_url: Some("https://chatgpt.com/c/abc"),
+                retention_days: 30,
+                dispatch_attempt_id: claimed.dispatch_attempt_id.as_deref(),
+            },
         )
         .await
         .unwrap();
@@ -2844,10 +3495,13 @@ mod tests {
             &pool,
             "tab_1",
             &submitted.task.id,
-            None,
-            None,
-            None,
-            None,
+            WorkerAckInput {
+                phase: None,
+                phase_detail: None,
+                script_version: None,
+                page_url: None,
+                dispatch_attempt_id: None,
+            },
         )
         .await
         .unwrap();

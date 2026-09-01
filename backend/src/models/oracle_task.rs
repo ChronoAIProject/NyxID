@@ -5,6 +5,11 @@ use super::bson_bytes;
 use super::bson_datetime;
 
 pub const COLLECTION_NAME: &str = "oracle_tasks";
+pub const DEFAULT_ORACLE_TASK_MAX_RETRIES: u32 = 3;
+
+pub fn default_oracle_task_max_retries() -> u32 {
+    DEFAULT_ORACLE_TASK_MAX_RETRIES
+}
 
 /// One image produced by the worker on an image-generation turn.
 ///
@@ -27,7 +32,6 @@ impl std::fmt::Debug for OracleImage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OracleImage")
             .field("mime", &self.mime)
-            .field("name", &self.name)
             .field("bytes", &self.data.len())
             .finish()
     }
@@ -73,7 +77,7 @@ impl OracleTaskStatus {
 /// terminal status. Prompt/response bodies live only in this collection
 /// (and are TTL-expired via `expires_at`); audit/tracing record metadata
 /// only.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OracleTask {
     #[serde(rename = "_id")]
     pub id: String,
@@ -146,6 +150,17 @@ pub struct OracleTask {
     /// Expired leases are requeued to the front on the next claim.
     #[serde(default, with = "bson_datetime::optional")]
     pub lease_expires_at: Option<DateTime<Utc>>,
+    /// Infrastructure retries already consumed. The initial dispatch is not a retry.
+    #[serde(default)]
+    pub retry_count: u32,
+    #[serde(default = "default_oracle_task_max_retries")]
+    pub max_retries: u32,
+    /// Fresh dispatches started. Idempotent reclaims do not increment this value.
+    #[serde(default)]
+    pub attempt_count: u32,
+    /// Fences stale acknowledgements and results when a worker echoes this value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dispatch_attempt_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,6 +226,10 @@ mod tests {
             assigned_worker_id: None,
             dispatched_at: None,
             lease_expires_at: None,
+            retry_count: 0,
+            max_retries: DEFAULT_ORACLE_TASK_MAX_RETRIES,
+            attempt_count: 0,
+            dispatch_attempt_id: None,
             response: None,
             response_chars: None,
             images: None,
@@ -243,6 +262,39 @@ mod tests {
         doc.remove("kind");
         let restored: OracleTask = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.kind, "prompt");
+    }
+
+    #[test]
+    fn missing_reliability_fields_use_legacy_safe_defaults() {
+        let task = make_task();
+        let mut doc = bson::to_document(&task).expect("serialize");
+        for field in [
+            "retry_count",
+            "max_retries",
+            "attempt_count",
+            "dispatch_attempt_id",
+        ] {
+            doc.remove(field);
+        }
+
+        let restored: OracleTask = bson::from_document(doc).expect("deserialize legacy task");
+        assert_eq!(restored.retry_count, 0);
+        assert_eq!(restored.max_retries, DEFAULT_ORACLE_TASK_MAX_RETRIES);
+        assert_eq!(restored.attempt_count, 0);
+        assert!(restored.dispatch_attempt_id.is_none());
+    }
+
+    #[test]
+    fn image_debug_redacts_bytes_and_filename() {
+        let image = OracleImage {
+            mime: "image/png".to_string(),
+            data: vec![1, 2, 3, 4],
+            name: Some("sensitive-customer-name.png".to_string()),
+        };
+        let debug = format!("{image:?}");
+        assert!(debug.contains("bytes: 4"));
+        assert!(!debug.contains("sensitive-customer-name"));
+        assert!(!debug.contains("[1, 2, 3, 4]"));
     }
 
     #[test]

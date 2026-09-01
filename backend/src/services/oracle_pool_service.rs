@@ -35,7 +35,7 @@ const PER_USER_MAX_INFLIGHT_CAP: u32 = 100;
 const TASK_TIMEOUT_SECS_MIN: u64 = 60;
 const TASK_TIMEOUT_SECS_MAX: u64 = 86_400;
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct CreatePoolInput {
     pub slug: String,
     pub name: String,
@@ -51,7 +51,7 @@ pub struct CreatePoolInput {
 }
 
 /// Fields a pool owner may update. `None` = leave unchanged.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct UpdatePoolInput {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -258,11 +258,13 @@ pub async fn create_pool(
 }
 
 pub(crate) fn is_duplicate_key(err: &mongodb::error::Error) -> bool {
-    matches!(
-        err.kind.as_ref(),
-        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(we))
-            if we.code == 11000
-    )
+    match err.kind.as_ref() {
+        mongodb::error::ErrorKind::Command(command) => command.code == 11000,
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write)) => {
+            write.code == 11000
+        }
+        _ => false,
+    }
 }
 
 /// Look up a pool by id or slug.

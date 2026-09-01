@@ -23,6 +23,7 @@ pub mod notification;
 pub mod oauth;
 pub mod openclaw;
 pub mod oracle;
+pub mod oracle_worker_daemon;
 pub mod org;
 pub mod pairing;
 pub mod pool;

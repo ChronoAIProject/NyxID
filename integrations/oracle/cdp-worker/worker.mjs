@@ -24,9 +24,26 @@
 // Requires: Node 18+ (built-in fetch) and `npm i` (playwright-core only).
 
 import { chromium } from "playwright-core";
+import {
+  createDecipheriv,
+  createHash,
+  hkdfSync,
+  randomUUID,
+} from "node:crypto";
 import { lookup } from "node:dns/promises";
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { isIP } from "node:net";
-import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, resolve } from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const BASE_URL = (process.env.NYXID_BASE_URL || "").replace(/\/$/, "");
 // Prefer a token file (NYXID_WORKER_TOKEN_FILE) so the long-lived worker token
@@ -39,7 +56,24 @@ const TOKEN = (() => {
 })();
 const LABEL = process.env.NYXID_WORKER_LABEL || "tab_1";
 const CDP_URL = process.env.CHROME_CDP_URL || "http://localhost:9222";
-const SCRIPT_VERSION = "cdp-1.3-image";
+const BUNDLE_VERSION_FILE =
+  process.env.NYXID_BUNDLE_VERSION_FILE ||
+  resolve(dirname(fileURLToPath(import.meta.url)), "bundle-version");
+const SOURCE_SHA256 = createHash("sha256")
+  .update(readFileSync(fileURLToPath(import.meta.url)))
+  .digest("hex");
+const SCRIPT_VERSION = (() => {
+  try {
+    const version = readFileSync(BUNDLE_VERSION_FILE, "utf8").trim();
+    if (
+      /^[A-Za-z0-9._+-]{1,128}$/.test(version) &&
+      version.endsWith(SOURCE_SHA256.slice(0, 12))
+    ) {
+      return version;
+    }
+  } catch {}
+  return `cdp+${SOURCE_SHA256.slice(0, 12)}`;
+})();
 const POLL_MS = Number(process.env.NYXID_POLL_MS || 5000);
 const STABLE_INTERVAL_MS = 8000;
 const MAX_WAIT_MS = Number(process.env.NYXID_MAX_WAIT_MS || 2 * 60 * 60 * 1000); // 2h
@@ -49,19 +83,42 @@ const MAX_WAIT_MS = Number(process.env.NYXID_MAX_WAIT_MS || 2 * 60 * 60 * 1000);
 // NO_OUTPUT_IDLE_TIMEOUT (420s).
 const NO_OUTPUT_IDLE_MS = Number(process.env.NYXID_NO_OUTPUT_IDLE_MS || 7 * 60 * 1000);
 const HEARTBEAT_MS = 60000;
+const PRESENCE_MS = Number(process.env.NYXID_PRESENCE_MS || 20000);
+const HTTP_TIMEOUT_MS = Number(process.env.NYXID_HTTP_TIMEOUT_MS || 30000);
+const MAX_HTTP_BACKOFF_MS = Number(process.env.NYXID_MAX_HTTP_BACKOFF_MS || 60000);
+const MAX_CDP_FAILURES_BEFORE_RELAUNCH = Number(
+  process.env.NYXID_MAX_CDP_FAILURES_BEFORE_RELAUNCH || 3
+);
+const MAX_TASK_RECOVERY_FAILURES = Number(
+  process.env.NYXID_MAX_TASK_RECOVERY_FAILURES || 6
+);
+const STATE_FILE =
+  process.env.NYXID_WORKER_STATE_FILE ||
+  resolve(homedir(), ".nyxid-oracle", "worker-state.json");
+const INSTALLATION_ID_FILE =
+  process.env.NYXID_INSTALLATION_ID_FILE ||
+  resolve(dirname(STATE_FILE), "installation-id");
+const CHROME_PROFILE_DIR =
+  process.env.CHROME_PROFILE_DIR || resolve(homedir(), ".nyxid-oracle", "chrome-profile");
+const CHROME_EXECUTABLE = process.env.NYXID_CHROME_EXECUTABLE || "";
+const CHROME_DEBUG_PORT = Number(
+  process.env.CHROME_DEBUG_PORT || new URL(CDP_URL).port || 9222
+);
+const SESSION_INFO = Buffer.from("nyxid-oracle-session-v1", "utf8");
+const SESSION_AAD = SESSION_INFO;
+const SESSION_FORMAT_VERSION = 1;
+const MAX_SESSION_SNAPSHOT_BYTES = 512 * 1024;
+const MAX_SESSION_PLAINTEXT_BYTES = 350 * 1024;
+const NPM_EXECUTABLE = process.env.NYXID_NPM_EXECUTABLE || "npm";
+const NPM_INSTALL_TIMEOUT_MS = Number(
+  process.env.NYXID_NPM_INSTALL_TIMEOUT_MS || 5 * 60 * 1000
+);
+const CAPABILITIES = ["commands_v1", "upgrade_v1", "session_import_v1", "attempt_fencing_v1"];
 // Result-image caps (the server re-validates and caps lower-or-equal). Kept
 // below the 16 MiB worker body cap once base64-inflated (~33%).
 const MAX_IMAGES = Number(process.env.NYXID_MAX_IMAGES || 4);
 const MAX_IMAGE_BYTES = Number(process.env.NYXID_MAX_IMAGE_BYTES || 6 * 1024 * 1024);
 const MAX_IMAGES_TOTAL_BYTES = Number(process.env.NYXID_MAX_IMAGES_TOTAL_BYTES || 9 * 1024 * 1024);
-
-if (!BASE_URL || !TOKEN) {
-  console.error(
-    "Missing config. Set NYXID_BASE_URL and the pool worker token (nyx_owk_...) " +
-      "via NYXID_WORKER_TOKEN_FILE (preferred) or NYXID_WORKER_TOKEN."
-  );
-  process.exit(1);
-}
 
 const API = `${BASE_URL}/api/v1/oracle/worker`;
 
@@ -70,31 +127,231 @@ function log(msg) {
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+export function backoffDelay(attempt, baseMs = 500, capMs = MAX_HTTP_BACKOFF_MS, random = Math.random) {
+  const ceiling = Math.min(capMs, baseMs * 2 ** Math.min(Math.max(attempt, 0), 16));
+  return Math.max(1, Math.floor(ceiling * (0.5 + random() * 0.5)));
+}
+
+export function normalizePromptText(value) {
+  return (value || "").replace(/\s+/g, " ").trim();
+}
+
+export function decidePromptResume({ phase, prompt, turns, generating, transcriptReady, baselineTurnCount = 0 }) {
+  if (!transcriptReady) return { action: "wait" };
+  const wanted = normalizePromptText(prompt);
+  const candidates = (turns || []).slice(Math.max(0, baselineTurnCount));
+  let userIndex = -1;
+  for (let i = candidates.length - 1; i >= 0; i -= 1) {
+    if (
+      candidates[i]?.role === "user" &&
+      normalizePromptText(candidates[i]?.text) === wanted
+    ) {
+      userIndex = i;
+      break;
+    }
+  }
+  if (userIndex >= 0) {
+    const answer = candidates
+      .slice(userIndex + 1)
+      .find((turn) => turn?.role === "assistant" && normalizePromptText(turn?.text));
+    if (answer && !generating) return { action: "complete", response: answer.text };
+    return { action: "wait" };
+  }
+  if (["claimed", "page_ready", "ready_to_send"].includes(phase || "claimed")) {
+    return { action: "send" };
+  }
+  return { action: "uncertain" };
+}
+
+export function choosePromptNavigation({
+  recovering,
+  phase = "claimed",
+  isFollowup,
+  currentUrl,
+  persistedUrl,
+  taskConversationUrl,
+  requiredProjectUrl,
+}) {
+  const currentConversationId = convId(currentUrl);
+  const onConvPage = Boolean(currentConversationId);
+  const preSend = ["claimed", "page_ready", "ready_to_send"].includes(phase);
+  if (
+    recovering &&
+    !preSend &&
+    !persistedUrl &&
+    !taskConversationUrl &&
+    !onConvPage
+  ) {
+    return { error: "recovery_conversation_unknown", target: null };
+  }
+  const persistedConversationId = convId(persistedUrl);
+  const taskConversationId = convId(taskConversationUrl);
+  const resumeUrl = persistedConversationId
+    ? persistedUrl
+    : taskConversationId
+      ? taskConversationUrl
+      : persistedUrl || taskConversationUrl;
+  const resumeConversationId = persistedConversationId || taskConversationId;
+  if (recovering && !preSend && onConvPage && !resumeConversationId) {
+    return { error: null, target: null };
+  }
+  if ((isFollowup || recovering) && resumeUrl) {
+    return {
+      error: null,
+      target:
+        !resumeConversationId || currentConversationId !== resumeConversationId ? resumeUrl : null,
+    };
+  }
+  const base = requiredProjectUrl || "https://chatgpt.com/";
+  return { error: null, target: onConvPage || !currentUrl.startsWith(base) ? base : null };
+}
+
+export function taskRecoveryDecision({
+  kind,
+  phase,
+  failureCount,
+  maxFailures = MAX_TASK_RECOVERY_FAILURES,
+  relaunchEvery = MAX_CDP_FAILURES_BEFORE_RELAUNCH,
+}) {
+  const preSend = ["claimed", "page_ready", "ready_to_send"].includes(phase || "claimed");
+  if (failureCount >= maxFailures) {
+    return {
+      action: "fail",
+      code:
+        kind === "prompt" && !preSend
+          ? "prompt_delivery_uncertain"
+          : "browser_recovery_exhausted",
+    };
+  }
+  return {
+    action: "recover",
+    forceRelaunch: relaunchEvery > 0 && failureCount % relaunchEvery === 0,
+  };
+}
+
+function defaultState() {
+  return {
+    format_version: 1,
+    instance_id: loadInstallationId(),
+    draining: false,
+    current_task: null,
+    pending_command: null,
+    pending_reports: [],
+    command_results: [],
+  };
+}
+
+function loadInstallationId() {
+  const configured = process.env.NYXID_INSTALLATION_ID;
+  if (configured && /^[A-Za-z0-9._:-]{1,128}$/.test(configured)) return configured;
+  try {
+    const existing = readFileSync(INSTALLATION_ID_FILE, "utf8").trim();
+    if (/^[A-Za-z0-9._:-]{1,128}$/.test(existing)) return existing;
+  } catch (error) {
+    if (error?.code !== "ENOENT") log("installation identity file was invalid; replacing it");
+  }
+  const id = randomUUID();
+  mkdirSync(dirname(INSTALLATION_ID_FILE), { recursive: true, mode: 0o700 });
+  writeFileSync(INSTALLATION_ID_FILE, `${id}\n`, { mode: 0o600 });
+  chmodSync(INSTALLATION_ID_FILE, 0o600);
+  return id;
+}
+
+function loadState(path = STATE_FILE) {
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    if (parsed?.format_version !== 1 || typeof parsed.instance_id !== "string") {
+      throw new Error("unsupported state format");
+    }
+    return { ...defaultState(), ...parsed };
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      log("state file was invalid; starting with a fresh installation identity");
+    }
+    return defaultState();
+  }
+}
+
+function saveState(state, path = STATE_FILE) {
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const temp = `${path}.tmp-${process.pid}`;
+  writeFileSync(temp, `${JSON.stringify(state)}\n`, { mode: 0o600 });
+  chmodSync(temp, 0o600);
+  renameSync(temp, path);
+}
+
+function updateTaskState(state, patch) {
+  state.current_task = { ...(state.current_task || {}), ...patch };
+  saveState(state);
+}
+
+function clearTaskState(state) {
+  state.current_task = null;
+  saveState(state);
+}
+
+function stableErrorCode(error) {
+  if (error?.code && /^[a-z0-9_]{1,64}$/.test(error.code)) return error.code;
+  if (error?.status) return `http_${error.status}`;
+  const message = String(error?.message || "").toLowerCase();
+  if (/target page|browser.*closed|session closed|cdp|econnrefused/.test(message)) {
+    return "cdp_disconnected";
+  }
+  if (/timeout/.test(message)) return "operation_timeout";
+  if (/fetch|network|socket|econnreset|enotfound/.test(message)) return "network_error";
+  return "worker_error";
+}
+
 // ── NyxID worker API (Bearer worker token) ───────────────────────────────
 function httpError(method, path, status) {
-  const err = new Error(`${method} ${path} → ${status}`);
+  const err = new Error(`${method} ${path} returned HTTP ${status}`);
   err.status = status;
   return err;
 }
-async function apiGet(path) {
-  const res = await fetch(`${API}${path}`, {
-    headers: { Authorization: `Bearer ${TOKEN}` },
-  });
-  if (!res.ok) throw httpError("GET", path, res.status);
-  return res.json();
+
+function transientHttpStatus(status) {
+  return status === 408 || status === 425 || status === 429 || status >= 500;
 }
-async function apiPost(path, body) {
-  const res = await fetch(`${API}${path}`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${TOKEN}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ ...body, script_version: SCRIPT_VERSION }),
-  });
-  if (!res.ok) throw httpError("POST", path, res.status);
-  return res.json();
+
+async function apiRequest(method, path, body) {
+  let attempt = 0;
+  for (;;) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${API}${path}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${TOKEN}`,
+          ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+        },
+        body:
+          body === undefined
+            ? undefined
+            : JSON.stringify({ ...body, script_version: SCRIPT_VERSION }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const error = httpError(method, path, res.status);
+        if (!transientHttpStatus(res.status)) throw error;
+        throw Object.assign(error, { transient: true });
+      }
+      return await res.json();
+    } catch (error) {
+      if (error?.status && !error.transient) throw error;
+      const delay = backoffDelay(attempt++);
+      if (attempt === 1 || attempt % 5 === 0) {
+        log(`NyxID unavailable (${stableErrorCode(error)}); retrying in ${delay}ms`);
+      }
+      await sleep(delay);
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
 }
+
+const apiGet = (path) => apiRequest("GET", path);
+const apiPost = (path, body) => apiRequest("POST", path, body);
 
 // ── SSRF defense for `extract` (defense-in-depth with the server-side
 // `validate_extract_url` guard) ──────────────────────────────────────────
@@ -371,6 +628,175 @@ async function getChatPage(context) {
   return page;
 }
 
+async function detectLoggedIn(page) {
+  if (!page || page.isClosed() || !isChatGptUrl(page.url())) return false;
+  try {
+    return await page.evaluate(() => {
+      const composer = document.querySelector(
+        "#prompt-textarea, div[contenteditable='true'][role='textbox'], textarea[data-testid='prompt-textarea']"
+      );
+      const loginLink = Array.from(document.querySelectorAll("a,button")).some((element) => {
+        const text = (element.textContent || "").trim();
+        return /^(log in|sign up|登录|注册)$/i.test(text);
+      });
+      return Boolean(composer) && !loginLink;
+    });
+  } catch {
+    return false;
+  }
+}
+
+function chromeArgs() {
+  let extra = [];
+  if (process.env.NYXID_CHROME_ARGS_JSON) {
+    try {
+      const parsed = JSON.parse(process.env.NYXID_CHROME_ARGS_JSON);
+      if (Array.isArray(parsed) && parsed.every((value) => typeof value === "string")) {
+        extra = parsed;
+      }
+    } catch {
+      throw Object.assign(new Error("NYXID_CHROME_ARGS_JSON must be a JSON string array"), {
+        code: "chrome_args_invalid",
+      });
+    }
+  }
+  return [
+    `--remote-debugging-port=${CHROME_DEBUG_PORT}`,
+    `--user-data-dir=${CHROME_PROFILE_DIR}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    ...extra,
+    "https://chatgpt.com/",
+  ];
+}
+
+function launchChrome() {
+  if (!CHROME_EXECUTABLE) {
+    throw Object.assign(new Error("no Chrome executable configured"), {
+      code: "chrome_launch_unconfigured",
+    });
+  }
+  mkdirSync(CHROME_PROFILE_DIR, { recursive: true, mode: 0o700 });
+  const child = spawn(CHROME_EXECUTABLE, chromeArgs(), {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.once("error", (error) => {
+    log(`Chrome launch failed (${stableErrorCode(error)})`);
+  });
+  child.unref();
+  return child;
+}
+
+export function markChatPageRecovered(runtime) {
+  runtime.health.tab = 0;
+  runtime.chromeAlive = true;
+  if (!runtime.state?.current_task) runtime.lastError = null;
+}
+
+async function connectChrome(runtime) {
+  const browser = await chromium.connectOverCDP(CDP_URL);
+  browser.on("disconnected", () => {
+    if (runtime.browser === browser) {
+      runtime.browser = null;
+      runtime.context = null;
+      runtime.page = null;
+    }
+  });
+  runtime.browser = browser;
+  runtime.context = browser.contexts()[0] || (await browser.newContext());
+  runtime.page = await getChatPage(runtime.context);
+  runtime.health.cdp = 0;
+  markChatPageRecovered(runtime);
+  return runtime.page;
+}
+
+async function recoverChrome(runtime, forceRelaunch = false) {
+  let launched = false;
+  for (;;) {
+    try {
+      if (forceRelaunch || runtime.health.cdp >= MAX_CDP_FAILURES_BEFORE_RELAUNCH) {
+        forceRelaunch = false;
+        runtime.health.cdp = 0;
+        try {
+          await runtime.browser?.close();
+        } catch {}
+        runtime.browser = null;
+        runtime.context = null;
+        runtime.page = null;
+        launchChrome();
+        launched = true;
+        await sleep(1500);
+      }
+      return await connectChrome(runtime);
+    } catch (error) {
+      runtime.chromeAlive = false;
+      runtime.lastError = stableErrorCode(error);
+      runtime.health.cdp += 1;
+      if (!launched && runtime.health.cdp >= MAX_CDP_FAILURES_BEFORE_RELAUNCH) {
+        continue;
+      }
+      const delay = backoffDelay(runtime.health.cdp, 1000, 30000);
+      log(`Chrome unavailable (${runtime.lastError}); retrying in ${delay}ms`);
+      if (BASE_URL && TOKEN && Date.now() - runtime.lastPresenceAt >= PRESENCE_MS) {
+        await heartbeat(runtime).catch(() => {});
+      }
+      await sleep(delay);
+    }
+  }
+}
+
+async function ensureChatPage(runtime, targetUrl) {
+  if (!runtime.browser || !runtime.context || runtime.page?.isClosed()) {
+    await recoverChrome(runtime);
+  }
+  try {
+    if (!runtime.page || runtime.page.isClosed()) {
+      runtime.page = await getChatPage(runtime.context);
+    }
+    if (targetUrl) {
+      const targetConversation = convId(targetUrl);
+      const currentConversation = convId(runtime.page.url());
+      if (
+        (targetConversation && targetConversation !== currentConversation) ||
+        (!targetConversation && !runtime.page.url().startsWith(targetUrl))
+      ) {
+        await runtime.page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
+        await installDomCore(runtime.page);
+      }
+    } else if (!isChatGptUrl(runtime.page.url())) {
+      await runtime.page.goto("https://chatgpt.com/", {
+        waitUntil: "domcontentloaded",
+        timeout: 60000,
+      });
+      await installDomCore(runtime.page);
+    }
+    markChatPageRecovered(runtime);
+    return runtime.page;
+  } catch (error) {
+    runtime.health.tab += 1;
+    runtime.lastError = stableErrorCode(error);
+    if (runtime.health.tab >= 3) {
+      runtime.health.cdp += 1;
+      return recoverChrome(runtime, runtime.health.tab >= 5);
+    }
+    try {
+      runtime.page = await runtime.context.newPage();
+      await runtime.page.goto(targetUrl || "https://chatgpt.com/", {
+        waitUntil: "domcontentloaded",
+        timeout: 60000,
+      });
+      await installDomCore(runtime.page);
+      markChatPageRecovered(runtime);
+      return runtime.page;
+    } catch (replacementError) {
+      runtime.health.cdp += 1;
+      runtime.lastError = stableErrorCode(replacementError);
+      return recoverChrome(runtime);
+    }
+  }
+}
+
 // ── Prompt flow ──────────────────────────────────────────────────────────
 function normalizeModelLabel(label) {
   return (label || "")
@@ -552,7 +978,7 @@ async function selectModel(page, modelLabel) {
     try {
       await page.keyboard.press("Escape");
     } catch (e) {}
-    log(`model "${modelLabel}" selection failed: ${err.message}; using current`);
+    log(`model "${modelLabel}" selection failed (${stableErrorCode(err)}); using current`);
   }
 }
 
@@ -583,12 +1009,12 @@ function fileMime(name) {
 // first turn so the model can answer questions about it. Mime is derived from
 // the filename extension. Parallels uploadPdf; same file-input + attachment-chip
 // detection. (uploadPdf is kept for the legacy pdf_base64 field.)
-async function uploadAttachment(page, task_id, task) {
+async function uploadAttachment(runtime, page, task) {
   if (!task.attachment_base64) return false;
   const buffer = Buffer.from(task.attachment_base64, "base64");
   const name = task.attachment_name || "attachment.bin";
   const mime = fileMime(name);
-  log(`uploading attachment ${name} (${(buffer.length / 1024).toFixed(0)} KB, ${mime})`);
+  log(`uploading attachment (${(buffer.length / 1024).toFixed(0)} KB, ${mime})`);
   let fileInput = page.locator("input[type='file']").first();
   if ((await fileInput.count()) === 0) {
     const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button'], button[aria-haspopup='menu']").first();
@@ -597,14 +1023,16 @@ async function uploadAttachment(page, task_id, task) {
   }
   try {
     await fileInput.setInputFiles({ name, mimeType: mime, buffer }, { timeout: 30000 });
-  } catch (e) { log(`attachment setInputFiles failed: ${e.message}`); return false; }
+  } catch (e) { log(`attachment upload failed (${stableErrorCode(e)})`); return false; }
   const start = Date.now();
   let lastHeartbeat = start;
   while (Date.now() - start < 120000) {
     await sleep(1500);
     if (Date.now() - lastHeartbeat >= HEARTBEAT_MS) {
       lastHeartbeat = Date.now();
-      if (await ack(task_id, "uploading_attachment")) throw new Error("cancelled by server");
+      if (await ack(runtime, task, "uploading_attachment")) {
+        throw new TaskFailure("cancelled");
+      }
     }
     const { attached, uploading } = await page.evaluate((fname) => {
       const txt = document.body.innerText || "";
@@ -620,11 +1048,11 @@ async function uploadAttachment(page, task_id, task) {
   return false;
 }
 
-async function uploadPdf(page, task_id, task) {
+async function uploadPdf(runtime, page, task) {
   if (!task.pdf_base64) return false;
   const buffer = Buffer.from(task.pdf_base64, "base64");
   const name = task.pdf_name || "attachment.pdf";
-  log(`uploading PDF ${name} (${(buffer.length / 1024).toFixed(0)} KB)`);
+  log(`uploading PDF (${(buffer.length / 1024).toFixed(0)} KB)`);
   let fileInput = page.locator("input[type='file']").first();
   if ((await fileInput.count()) === 0) {
     const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button'], button[aria-haspopup='menu']").first();
@@ -633,7 +1061,7 @@ async function uploadPdf(page, task_id, task) {
   }
   try {
     await fileInput.setInputFiles({ name, mimeType: "application/pdf", buffer }, { timeout: 30000 });
-  } catch (e) { log(`PDF setInputFiles failed: ${e.message}`); return false; }
+  } catch (e) { log(`PDF upload failed (${stableErrorCode(e)})`); return false; }
   const start = Date.now();
   let lastHeartbeat = start;
   while (Date.now() - start < 120000) {
@@ -642,7 +1070,7 @@ async function uploadPdf(page, task_id, task) {
     // (matches the heartbeat discipline in waitForResponse).
     if (Date.now() - lastHeartbeat >= HEARTBEAT_MS) {
       lastHeartbeat = Date.now();
-      if (await ack(task_id, "uploading_pdf")) throw new Error("cancelled by server");
+      if (await ack(runtime, task, "uploading_pdf")) throw new TaskFailure("cancelled");
     }
     // Primary signal: the filename rendered in the composer attachment chip
     // (verified against the live ChatGPT DOM). The data-testid*='file' / class
@@ -662,7 +1090,76 @@ async function uploadPdf(page, task_id, task) {
   return false;
 }
 
-async function handlePrompt(page, task) {
+class TaskFailure extends Error {
+  constructor(code) {
+    super(code);
+    this.code = code;
+  }
+}
+
+class TaskRestart extends Error {}
+
+function taskIdentity(runtime, task, extra = {}) {
+  return {
+    task_id: task.task_id,
+    worker: LABEL,
+    instance_id: runtime.state.instance_id,
+    dispatch_attempt_id: task.dispatch_attempt_id,
+    ...extra,
+  };
+}
+
+async function pinCurrentConversation(runtime, page, task) {
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const url = page.url();
+    if (convId(url)) {
+      updateTaskState(runtime.state, { conversation_url: url });
+      await apiPost("/pin-conv-url", taskIdentity(runtime, task, { chatgpt_url: url }));
+      return url;
+    }
+    await sleep(500);
+  }
+  return null;
+}
+
+async function transcriptSnapshot(page) {
+  return page.evaluate(() => {
+    const main = document.querySelector("main");
+    const composer = document.querySelector(
+      "#prompt-textarea, div[contenteditable='true'][role='textbox'], textarea[data-testid='prompt-textarea']"
+    );
+    return {
+      ready: Boolean(main && composer && window.__nyx),
+      generating: Boolean(window.__nyx?.isStillGenerating()),
+      turns: window.__nyx?.extractTranscript() || [],
+      assistantCount: window.__nyx?.assistantCount() || 0,
+      images: window.__nyx?.extractImages() || [],
+    };
+  });
+}
+
+async function submitPromptResult(runtime, page, task, text, imageSources = []) {
+  updateTaskState(runtime.state, { phase: "settling", conversation_url: page.url() });
+  const downloaded = await downloadImages(page, imageSources);
+  const response = text || "";
+  if (!response.trim() && downloaded.length === 0) {
+    throw new TaskFailure("empty_extraction");
+  }
+  const result = await apiPost(
+    "/result",
+    taskIdentity(runtime, task, {
+      response,
+      images: downloaded,
+      chatgpt_url: page.url(),
+      model: task.model,
+    })
+  );
+  log(
+    `prompt ${task.task_id} -> ${result.status} (${response.length} chars, ${downloaded.length} image(s))`
+  );
+}
+
+async function handlePrompt(runtime, page, task, recovering) {
   const { task_id } = task;
   log(`prompt task ${task_id} (followup=${!!task.is_followup})`);
   await page.bringToFront().catch(() => {});
@@ -670,15 +1167,19 @@ async function handlePrompt(page, task) {
   // Navigate: continue an existing conversation, or start a FRESH chat.
   // For a fresh prompt we must leave any /c/<uuid> page we're parked on,
   // otherwise we'd type into the previous conversation.
-  let navTarget = null;
-  const onConvPage = /\/c\/[a-f0-9-]{6,}/.test(page.url());
-  if (task.is_followup && task.conversation_url) {
-    const cid = convId(task.conversation_url);
-    if (!cid || !page.url().includes(cid)) navTarget = task.conversation_url;
-  } else {
-    const base = task.required_project_url || "https://chatgpt.com/";
-    if (onConvPage || !page.url().startsWith(base)) navTarget = base;
-  }
+  const persistedUrl = runtime.state.current_task?.conversation_url;
+  const priorPhase = runtime.state.current_task?.phase || "claimed";
+  const navigation = choosePromptNavigation({
+    recovering,
+    phase: priorPhase,
+    isFollowup: task.is_followup,
+    currentUrl: page.url(),
+    persistedUrl,
+    taskConversationUrl: task.conversation_url,
+    requiredProjectUrl: task.required_project_url,
+  });
+  if (navigation.error) throw new TaskFailure(navigation.error);
+  const navTarget = navigation.target;
   if (navTarget) {
     await page.goto(navTarget, { waitUntil: "domcontentloaded" });
     await installDomCore(page);
@@ -686,10 +1187,44 @@ async function handlePrompt(page, task) {
     await sleep(2500);
   }
 
-  await ack(task_id, "page_ready");
+  updateTaskState(runtime.state, {
+    phase: ["claimed", "page_ready", "ready_to_send"].includes(priorPhase)
+      ? "page_ready"
+      : priorPhase,
+    conversation_url: page.url(),
+  });
+  await ack(runtime, task, "page_ready");
+
+  if (recovering && !["claimed", "page_ready", "ready_to_send"].includes(priorPhase)) {
+    await sleep(1500);
+    const snapshot = await transcriptSnapshot(page);
+    const decision = decidePromptResume({
+      phase: priorPhase,
+      prompt: task.prompt,
+      turns: snapshot.turns,
+      generating: snapshot.generating,
+      transcriptReady: snapshot.ready,
+      baselineTurnCount: runtime.state.current_task?.baseline_turn_count || 0,
+    });
+    if (decision.action === "complete") {
+      await submitPromptResult(runtime, page, task, decision.response, snapshot.images);
+      return;
+    }
+    if (decision.action === "wait") {
+      const beforeCount = snapshot.turns
+        .slice(0, runtime.state.current_task?.baseline_turn_count || 0)
+        .filter((turn) => turn.role === "assistant").length;
+      const answer = await waitForResponse(runtime, page, task, beforeCount);
+      await submitPromptResult(runtime, page, task, answer.text, answer.images);
+      return;
+    }
+    if (decision.action === "uncertain") {
+      throw new TaskFailure("prompt_delivery_uncertain");
+    }
+  }
 
   if (task.model && task.model !== "unknown") {
-    await ack(task_id, "selecting_model");
+    await ack(runtime, task, "selecting_model");
     await selectModel(page, task.model);
   }
 
@@ -701,39 +1236,34 @@ async function handlePrompt(page, task) {
   await input.waitFor({ state: "visible", timeout: 60000 });
   await input.click();
   await input.fill(task.prompt);
+  const baseline = await page.evaluate(() => window.__nyx?.extractTranscript()?.length || 0);
+  updateTaskState(runtime.state, { phase: "ready_to_send", baseline_turn_count: baseline });
   await sleep(300);
   // Only attach a PDF on the FIRST turn of a conversation — never re-upload it
   // into an existing chat if the server ever resends pdf_base64 on a follow-up
   // (mirrors the userscript's `!is_followup && pdf_base64` guard).
   if (!task.is_followup && task.pdf_base64) {
-    await ack(task_id, "uploading_pdf");
-    await uploadPdf(page, task_id, task);
+    await ack(runtime, task, "uploading_pdf");
+    await uploadPdf(runtime, page, task);
   }
   // Same first-turn-only guard for a general attachment (image / pdf / ...).
   if (!task.is_followup && task.attachment_base64) {
-    await ack(task_id, "uploading_attachment");
-    await uploadAttachment(page, task_id, task);
+    await ack(runtime, task, "uploading_attachment");
+    await uploadAttachment(runtime, page, task);
   }
 
   const beforeCount = await page.evaluate(() => window.__nyx.assistantCount());
   const sendBtn = page
     .locator("button[data-testid='send-button'], button[aria-label='Send prompt'], button[aria-label='发送提示']")
     .first();
+  updateTaskState(runtime.state, { phase: "send_attempted", baseline_turn_count: baseline });
   await sendBtn.click({ timeout: 30000 });
-  await ack(task_id, "sent");
+  updateTaskState(runtime.state, { phase: "sent" });
+  await ack(runtime, task, "sent");
+  await pinCurrentConversation(runtime, page, task);
 
-  const { text, images } = await waitForResponse(page, task_id, beforeCount);
-  const chatgpt_url = page.url();
-  const downloaded = await downloadImages(page, images);
-  // Image-only turns settle with empty text but a non-empty image list — still
-  // a success. Only an empty text AND no images is an extraction failure.
-  if ((!text || !text.trim()) && downloaded.length === 0) {
-    await apiPost("/result", { task_id, worker: LABEL, response: "ERROR: empty extraction", chatgpt_url, model: task.model });
-    log(`prompt ${task_id} → empty`);
-    return;
-  }
-  const res = await apiPost("/result", { task_id, worker: LABEL, response: text || "", images: downloaded, chatgpt_url, model: task.model });
-  log(`prompt ${task_id} → ${res.status} (${(text || "").length} chars, ${downloaded.length} image(s))`);
+  const { text, images } = await waitForResponse(runtime, page, task, beforeCount);
+  await submitPromptResult(runtime, page, task, text, images);
 }
 
 function convId(url) {
@@ -745,7 +1275,7 @@ function convId(url) {
 // for the latest assistant turn. An image-generation turn settles with empty
 // text but a non-empty images list; the stability key spans both so the turn
 // terminates once text AND image srcs stop changing.
-async function waitForResponse(page, task_id, beforeCount) {
+async function waitForResponse(runtime, page, task, beforeCount) {
   const start = Date.now();
   let lastHeartbeat = start;
   let lastKey = "";
@@ -754,8 +1284,17 @@ async function waitForResponse(page, task_id, beforeCount) {
     await sleep(STABLE_INTERVAL_MS);
     if (Date.now() - lastHeartbeat >= HEARTBEAT_MS) {
       lastHeartbeat = Date.now();
-      const cancelled = await ack(task_id, "waiting_response");
-      if (cancelled) throw new Error("cancelled by server");
+      updateTaskState(runtime.state, { phase: "waiting_response", conversation_url: page.url() });
+      const cancelled = await ack(runtime, task, "waiting_response");
+      if (cancelled) throw new TaskFailure("cancelled");
+      await heartbeat(runtime);
+      if (
+        runtime.state.pending_command?.command === "session_import" &&
+        runtime.loggedIn === false
+      ) {
+        await processPendingCommand(runtime, true);
+        throw new TaskRestart();
+      }
     }
     const [generating, count, text, images] = await page.evaluate(() => [
       window.__nyx.isStillGenerating(),
@@ -843,7 +1382,7 @@ async function downloadImages(page, srcs) {
       } else {
         const resp = await page.request.get(src, { timeout: 30000 });
         if (!resp.ok()) {
-          log(`image fetch ${resp.status()} for ${src.slice(0, 80)}`);
+          log(`image fetch returned HTTP ${resp.status()}`);
           continue;
         }
         buffer = await resp.body();
@@ -863,7 +1402,7 @@ async function downloadImages(page, srcs) {
       const ext = (mime.split("/")[1] || "png").replace(/[^a-z0-9]/gi, "") || "png";
       out.push({ mime, name: `image_${out.length + 1}.${ext}`, data_base64: buffer.toString("base64") });
     } catch (e) {
-      log(`image download failed: ${e.message}`);
+      log(`image download failed (${stableErrorCode(e)})`);
     }
   }
   return out;
@@ -977,21 +1516,24 @@ async function loadFullTranscript(page) {
   return turns;
 }
 
-async function handleScrape(page, task) {
+async function handleScrape(runtime, page, task) {
   const { task_id, conversation_url } = task;
-  log(`scrape task ${task_id} → ${conversation_url}`);
+  log(`scrape task ${task_id}`);
   await page.bringToFront().catch(() => {});
   if (!conversation_url) {
-    await apiPost("/transcript", { task_id, worker: LABEL, turns: [], chatgpt_url: page.url() });
-    return;
+    throw new TaskFailure("conversation_url_missing");
   }
   await page.goto(conversation_url, { waitUntil: "domcontentloaded" });
   await installDomCore(page);
   await page.bringToFront().catch(() => {});
-  await ack(task_id, "scraping");
+  updateTaskState(runtime.state, { phase: "scraping", conversation_url: page.url() });
+  await ack(runtime, task, "scraping");
 
   const turns = await loadFullTranscript(page);
-  const res = await apiPost("/transcript", { task_id, worker: LABEL, turns, chatgpt_url: page.url() });
+  const res = await apiPost(
+    "/transcript",
+    taskIdentity(runtime, task, { turns, chatgpt_url: page.url() })
+  );
   log(`scrape ${task_id} → ${res.status} (${turns.length} turns, ${res.imported_pairs} pairs)`);
 }
 
@@ -1075,7 +1617,7 @@ async function expandCollapsibles(page) {
   } catch (e) {}
 }
 
-async function handleExtract(page, task) {
+async function handleExtract(runtime, page, task) {
   const { task_id } = task;
   let targetHost = "-";
   try {
@@ -1093,7 +1635,8 @@ async function handleExtract(page, task) {
     });
     await page.bringToFront().catch(() => {});
     await page.waitForLoadState("networkidle", { timeout: 8000 }).catch(() => {});
-    await ack(task_id, "extracting");
+    updateTaskState(runtime.state, { phase: "extracting", conversation_url: page.url() });
+    await ack(runtime, task, "extracting");
     await scrollLazyPage(page);
     await expandCollapsibles(page);
     const content = await page.evaluate(() => {
@@ -1101,84 +1644,523 @@ async function handleExtract(page, task) {
       return ((root && root.innerText) || "").trim().slice(0, 200000);
     });
     const response = content || "ERROR: empty extraction";
-    const res = await apiPost("/result", {
-      task_id,
-      worker: LABEL,
+    const res = await apiPost("/result", taskIdentity(runtime, task, {
       response,
       chatgpt_url: page.url(),
       model: task.model,
-    });
+    }));
     log(`extract ${task_id} → ${res.status} (${content.length} chars)`);
   } catch (err) {
-    await apiPost("/result", {
-      task_id,
-      worker: LABEL,
-      response: `ERROR: ${err.message}`,
+    await apiPost("/result", taskIdentity(runtime, task, {
+      response: `ERROR: ${stableErrorCode(err)}`,
       chatgpt_url: page.url(),
       model: task.model,
-    });
+    }));
   }
 }
 
-async function ack(task_id, phase) {
+async function ack(runtime, task, phase) {
+  const response = await apiPost("/ack", taskIdentity(runtime, task, {
+    phase,
+    page_url: runtime.page?.url(),
+  }));
+  return response.status === "cancelled";
+}
+
+function addCommandReport(state, command, succeeded, resultCode) {
+  const report = {
+    command_id: command.id,
+    succeeded,
+    result_code: resultCode,
+  };
+  state.pending_reports = [
+    ...(state.pending_reports || []).filter((item) => item.command_id !== command.id),
+    report,
+  ].slice(-16);
+  state.command_results = [
+    ...(state.command_results || []).filter((item) => item.command_id !== command.id),
+    report,
+  ].slice(-64);
+  state.pending_command = null;
+  saveState(state);
+}
+
+function acceptCommand(runtime, command) {
+  if (!command?.id || !command.command) return;
+  const completed = (runtime.state.command_results || []).find(
+    (item) => item.command_id === command.id
+  );
+  if (completed) {
+    runtime.state.pending_reports = [
+      ...(runtime.state.pending_reports || []).filter(
+        (item) => item.command_id !== command.id
+      ),
+      completed,
+    ].slice(-16);
+    saveState(runtime.state);
+    return;
+  }
+  if (runtime.state.pending_command?.id === command.id) return;
+  if (command.command === "drain" || command.command === "resume") {
+    runtime.state.draining = command.command === "drain";
+    addCommandReport(
+      runtime.state,
+      command,
+      true,
+      command.command === "drain" ? "draining" : "resumed"
+    );
+    return;
+  }
+  runtime.state.draining = true;
+  runtime.state.pending_command = command;
+  saveState(runtime.state);
+}
+
+async function heartbeat(runtime) {
+  let loggedIn = null;
+  if (runtime.chromeAlive && runtime.page && !runtime.page.isClosed()) {
+    loggedIn = await detectLoggedIn(runtime.page);
+  }
+  runtime.loggedIn = loggedIn;
+  const reports = [...(runtime.state.pending_reports || [])].slice(0, 16);
+  const response = await apiPost("/heartbeat", {
+    worker: LABEL,
+    instance_id: runtime.state.instance_id,
+    platform: `${process.platform}-${process.arch}`,
+    capabilities: CAPABILITIES,
+    logged_in: loggedIn,
+    current_task_id: runtime.state.current_task?.task_id || null,
+    chrome_alive: runtime.chromeAlive,
+    last_error: runtime.lastError || null,
+    command_reports: reports,
+  });
+  if (reports.length) {
+    const sent = new Set(reports.map((report) => report.command_id));
+    runtime.state.pending_reports = (runtime.state.pending_reports || []).filter(
+      (report) => !sent.has(report.command_id)
+    );
+    saveState(runtime.state);
+  }
+  acceptCommand(runtime, response.command);
+  runtime.lastPresenceAt = Date.now();
+  return response;
+}
+
+export function decryptSessionEnvelope(sealedBytes, token) {
+  if (!Buffer.isBuffer(sealedBytes)) sealedBytes = Buffer.from(sealedBytes);
+  if (!sealedBytes.length || sealedBytes.length > MAX_SESSION_SNAPSHOT_BYTES) {
+    throw new TaskFailure("session_envelope_size_invalid");
+  }
+  let envelope;
   try {
-    const r = await apiPost("/ack", { task_id, worker: LABEL, phase });
-    return r.status === "cancelled";
-  } catch (e) {
+    envelope = JSON.parse(sealedBytes.toString("utf8"));
+  } catch {
+    throw new TaskFailure("session_envelope_invalid");
+  }
+  if (envelope?.version !== SESSION_FORMAT_VERSION) {
+    throw new TaskFailure("session_envelope_version_unsupported");
+  }
+  const salt = Buffer.from(envelope.salt_base64 || "", "base64");
+  const nonce = Buffer.from(envelope.nonce_base64 || "", "base64");
+  const ciphertext = Buffer.from(envelope.ciphertext_base64 || "", "base64");
+  if (salt.length !== 32 || nonce.length !== 12 || ciphertext.length < 16) {
+    throw new TaskFailure("session_envelope_invalid");
+  }
+  try {
+    const key = Buffer.from(hkdfSync("sha256", Buffer.from(token), salt, SESSION_INFO, 32));
+    const body = ciphertext.subarray(0, ciphertext.length - 16);
+    const tag = ciphertext.subarray(ciphertext.length - 16);
+    const decipher = createDecipheriv("aes-256-gcm", key, nonce);
+    decipher.setAAD(SESSION_AAD);
+    decipher.setAuthTag(tag);
+    const plaintext = Buffer.concat([decipher.update(body), decipher.final()]);
+    if (plaintext.length > MAX_SESSION_PLAINTEXT_BYTES) {
+      throw new TaskFailure("session_plaintext_too_large");
+    }
+    return JSON.parse(plaintext.toString("utf8"));
+  } catch (error) {
+    if (error instanceof TaskFailure) throw error;
+    throw new TaskFailure("session_decrypt_failed");
+  }
+}
+
+function allowedSessionCookie(cookie) {
+  const domain = String(cookie?.domain || "").replace(/^\./, "").toLowerCase();
+  return (
+    (domain === "chatgpt.com" || domain.endsWith(".chatgpt.com") ||
+      domain === "openai.com" || domain.endsWith(".openai.com")) &&
+    typeof cookie.name === "string" &&
+    typeof cookie.value === "string" &&
+    cookie.name.length <= 256 &&
+    cookie.value.length <= 16384
+  );
+}
+
+function allowedSessionOrigin(origin) {
+  return ["https://chatgpt.com", "https://auth.openai.com"].includes(origin);
+}
+
+async function importLoginSnapshot(runtime, command) {
+  const payload = await apiGet(`/login-snapshots/${encodeURIComponent(command.snapshot_id || "")}`);
+  if (payload.format_version !== SESSION_FORMAT_VERSION) {
+    throw new TaskFailure("session_snapshot_version_unsupported");
+  }
+  const snapshot = decryptSessionEnvelope(
+    Buffer.from(payload.sealed_blob_base64 || "", "base64"),
+    TOKEN
+  );
+  if (snapshot?.version !== SESSION_FORMAT_VERSION || !Array.isArray(snapshot.cookies)) {
+    throw new TaskFailure("session_snapshot_invalid");
+  }
+  await ensureChatPage(runtime);
+  await runtime.context.clearCookies({ domain: /(^|\.)chatgpt\.com$/ }).catch(() => {});
+  await runtime.context.clearCookies({ domain: /(^|\.)openai\.com$/ }).catch(() => {});
+  const cookies = snapshot.cookies.filter(allowedSessionCookie).slice(0, 512);
+  if (!cookies.length) throw new TaskFailure("session_snapshot_no_cookies");
+  await runtime.context.addCookies(cookies);
+  for (const storage of (snapshot.origins || []).filter((entry) => allowedSessionOrigin(entry?.origin))) {
+    await runtime.page.goto(storage.origin, { waitUntil: "domcontentloaded", timeout: 60000 });
+    if (new URL(runtime.page.url()).origin !== storage.origin) continue;
+    await runtime.page.evaluate((entry) => {
+      for (const item of entry.local_storage || []) {
+        if (typeof item.name === "string" && typeof item.value === "string") {
+          localStorage.setItem(item.name, item.value);
+        }
+      }
+      for (const item of entry.session_storage || []) {
+        if (typeof item.name === "string" && typeof item.value === "string") {
+          sessionStorage.setItem(item.name, item.value);
+        }
+      }
+    }, storage);
+  }
+  await runtime.page.goto("https://chatgpt.com/", {
+    waitUntil: "domcontentloaded",
+    timeout: 60000,
+  });
+  await installDomCore(runtime.page);
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    if (await detectLoggedIn(runtime.page)) return "session_import_verified";
+    await sleep(2000);
+  }
+  throw new TaskFailure("session_import_verification_failed");
+}
+
+async function installBundle(command) {
+  const response = await apiGet("/bundle");
+  const source = response.bundle || "";
+  const actual = createHash("sha256").update(source).digest("hex");
+  const version = String(response.version || "");
+  const playwrightVersion = String(response.playwright_core_version || "1.62.1");
+  if (
+    !/^[a-f0-9]{64}$/.test(response.sha256 || "") ||
+    response.sha256 !== actual ||
+    (command.bundle_sha256 && command.bundle_sha256 !== actual) ||
+    !/^[A-Za-z0-9._+-]{1,128}$/.test(version) ||
+    !version.endsWith(actual.slice(0, 12)) ||
+    (command.bundle_version && command.bundle_version !== version) ||
+    !/^\d+\.\d+\.\d+$/.test(playwrightVersion)
+  ) {
+    throw new TaskFailure("bundle_checksum_mismatch");
+  }
+  const target = resolve(process.argv[1]);
+  const installDir = dirname(target);
+  const packagePath = resolve(installDir, "package.json");
+  const packageTemp = `${packagePath}.upgrade-${process.pid}`;
+  const packageBody = {
+    name: "nyxid-oracle-worker-install",
+    private: true,
+    type: "module",
+    dependencies: { "playwright-core": playwrightVersion },
+    nyxid_bundle_version: version,
+  };
+  writeFileSync(packageTemp, `${JSON.stringify(packageBody, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(packageTemp, 0o600);
+  renameSync(packageTemp, packagePath);
+  await new Promise((resolveInstall, rejectInstall) => {
+    const child = spawn(
+      NPM_EXECUTABLE,
+      ["install", "--omit=dev", "--no-audit", "--no-fund", "--save-exact"],
+      { cwd: installDir, stdio: "inherit" }
+    );
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      rejectInstall(Object.assign(new Error("npm install timed out"), {
+        code: "upgrade_dependency_install_timeout",
+      }));
+    }, NPM_INSTALL_TIMEOUT_MS);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      rejectInstall(error);
+    });
+    child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
+      if (code === 0) resolveInstall();
+      else rejectInstall(Object.assign(new Error(`npm install failed (${code ?? signal})`), {
+        code: "upgrade_dependency_install_failed",
+      }));
+    });
+  });
+  const mode = statSync(target).mode & 0o777;
+  const temp = `${target}.upgrade-${process.pid}`;
+  const versionTemp = `${BUNDLE_VERSION_FILE}.upgrade-${process.pid}`;
+  writeFileSync(temp, source, { mode });
+  chmodSync(temp, mode);
+  writeFileSync(versionTemp, `${version}\n`, { mode: 0o644 });
+  chmodSync(versionTemp, 0o644);
+  renameSync(temp, target);
+  renameSync(versionTemp, BUNDLE_VERSION_FILE);
+  return "upgrade_installed";
+}
+
+async function processPendingCommand(runtime, allowSessionImportDuringLoggedOutTask = false) {
+  const command = runtime.state.pending_command;
+  if (
+    !command ||
+    (runtime.state.current_task &&
+      !(allowSessionImportDuringLoggedOutTask && command.command === "session_import"))
+  ) {
     return false;
+  }
+  try {
+    let resultCode;
+    let shouldExit = false;
+    switch (command.command) {
+      case "restart":
+        resultCode = "restarting";
+        shouldExit = true;
+        break;
+      case "relaunch_browser":
+        await recoverChrome(runtime, true);
+        resultCode = "browser_relaunched";
+        break;
+      case "relogin":
+        await ensureChatPage(runtime, "https://chatgpt.com/auth/login");
+        resultCode = "login_page_opened";
+        break;
+      case "session_import":
+        resultCode = await importLoginSnapshot(runtime, command);
+        break;
+      case "upgrade":
+        resultCode = await installBundle(command);
+        shouldExit = true;
+        break;
+      default:
+        throw new TaskFailure("command_unsupported");
+    }
+    runtime.state.draining = command.command === "restart" || command.command === "upgrade";
+    runtime.lastError = null;
+    addCommandReport(runtime.state, command, true, resultCode);
+    await heartbeat(runtime);
+    if (shouldExit) {
+      runtime.state.draining = false;
+      saveState(runtime.state);
+    }
+    return shouldExit;
+  } catch (error) {
+    const code = stableErrorCode(error);
+    runtime.lastError = code;
+    runtime.state.draining = false;
+    addCommandReport(runtime.state, command, false, code);
+    await heartbeat(runtime);
+    return false;
+  }
+}
+
+async function settleTaskFailure(runtime, task, code) {
+  if (code === "cancelled") return;
+  await apiPost(
+    "/result",
+    taskIdentity(runtime, task, {
+      response: `ERROR: ${code}`,
+      chatgpt_url: runtime.page?.url(),
+      model: task.model,
+    })
+  );
+}
+
+async function executeTask(runtime, task, recovering) {
+  for (;;) {
+    try {
+      const resumeUrl =
+        runtime.state.current_task?.conversation_url || task.conversation_url || undefined;
+      const page = await ensureChatPage(runtime, resumeUrl);
+      if (task.kind === "scrape") await handleScrape(runtime, page, task);
+      else if (task.kind === "extract") await handleExtract(runtime, page, task);
+      else await handlePrompt(runtime, page, task, recovering);
+      clearTaskState(runtime.state);
+      runtime.lastError = null;
+      return;
+    } catch (error) {
+      if (error instanceof TaskRestart) {
+        recovering = true;
+        continue;
+      }
+      if (error instanceof TaskFailure) {
+        const code = stableErrorCode(error);
+        runtime.lastError = code === "cancelled" ? null : code;
+        await settleTaskFailure(runtime, task, code);
+        clearTaskState(runtime.state);
+        return;
+      }
+      const failureCount = (runtime.state.current_task?.recovery_failures || 0) + 1;
+      updateTaskState(runtime.state, { recovery_failures: failureCount });
+      const recovery = taskRecoveryDecision({
+        kind: task.kind,
+        phase: runtime.state.current_task?.phase,
+        failureCount,
+      });
+      runtime.chromeAlive = false;
+      runtime.lastError = stableErrorCode(error);
+      if (recovery.action === "fail") {
+        runtime.lastError = recovery.code;
+        await settleTaskFailure(runtime, task, recovery.code);
+        clearTaskState(runtime.state);
+        return;
+      }
+      runtime.health.cdp += 1;
+      log(`task ${task.task_id} paused for browser recovery (${runtime.lastError})`);
+      await recoverChrome(runtime, recovery.forceRelaunch);
+      recovering = true;
+    }
+  }
+}
+
+async function captureStorage(page) {
+  const origin = new URL(page.url()).origin;
+  if (!allowedSessionOrigin(origin)) return null;
+  return page.evaluate(() => ({
+    origin: location.origin,
+    local_storage: Object.keys(localStorage).map((name) => ({ name, value: localStorage.getItem(name) || "" })),
+    session_storage: Object.keys(sessionStorage).map((name) => ({ name, value: sessionStorage.getItem(name) || "" })),
+  }));
+}
+
+async function captureSession(outputPath) {
+  const browser = await chromium.connectOverCDP(CDP_URL);
+  try {
+    const context = browser.contexts()[0] || (await browser.newContext());
+    const page = await getChatPage(context);
+    const timeoutMs = Number(process.env.NYXID_LOGIN_CAPTURE_TIMEOUT_MS || 15 * 60 * 1000);
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline && !(await detectLoggedIn(page))) await sleep(1000);
+    if (!(await detectLoggedIn(page))) throw new TaskFailure("login_capture_timeout");
+    const cookies = (await context.cookies([
+      "https://chatgpt.com/",
+      "https://auth.openai.com/",
+    ])).filter(allowedSessionCookie);
+    const origins = [];
+    for (const candidate of context.pages()) {
+      const storage = await captureStorage(candidate).catch(() => null);
+      if (storage && !origins.some((item) => item.origin === storage.origin)) origins.push(storage);
+    }
+    const snapshot = Buffer.from(
+      JSON.stringify({ version: SESSION_FORMAT_VERSION, captured_at: new Date().toISOString(), cookies, origins }),
+      "utf8"
+    );
+    if (!cookies.length || snapshot.length > MAX_SESSION_PLAINTEXT_BYTES) {
+      throw new TaskFailure(!cookies.length ? "login_capture_no_cookies" : "login_capture_too_large");
+    }
+    mkdirSync(dirname(outputPath), { recursive: true, mode: 0o700 });
+    writeFileSync(outputPath, snapshot, { mode: 0o600 });
+    chmodSync(outputPath, 0o600);
+  } finally {
+    await browser.close().catch(() => {});
   }
 }
 
 // ── Main loop ────────────────────────────────────────────────────────────
 async function main() {
-  log(`connecting to Chrome at ${CDP_URL} …`);
-  const browser = await chromium.connectOverCDP(CDP_URL);
-  const context = browser.contexts()[0] || (await browser.newContext());
-  let page = await getChatPage(context);
-  log(`attached. worker=${LABEL} pool=${BASE_URL}. polling…`);
+  const captureIndex = process.argv.indexOf("--capture-session");
+  if (captureIndex >= 0) {
+    const output = process.argv[captureIndex + 1];
+    if (!output) throw new Error("--capture-session requires an output path");
+    await captureSession(resolve(output));
+    return;
+  }
+  if (!BASE_URL || !TOKEN) {
+    throw new Error(
+      "Set NYXID_BASE_URL and NYXID_WORKER_TOKEN_FILE (preferred) or NYXID_WORKER_TOKEN"
+    );
+  }
+
+  const state = loadState();
+  saveState(state);
+  const runtime = {
+    state,
+    browser: null,
+    context: null,
+    page: null,
+    chromeAlive: false,
+    lastError: null,
+    loggedIn: null,
+    lastPresenceAt: 0,
+    health: { http: 0, cdp: 0, tab: 0 },
+  };
+  log(`starting worker=${LABEL} version=${SCRIPT_VERSION}`);
+  await recoverChrome(runtime);
 
   for (;;) {
     try {
-      if (page.isClosed()) page = await getChatPage(context);
-      const resp = await apiGet(
-        `/task?worker=${encodeURIComponent(LABEL)}&script_version=${SCRIPT_VERSION}&page_url=${encodeURIComponent(page.url())}`
-      );
-      if (resp.status === "task" && resp.task_id) {
-        try {
-          if (resp.kind === "scrape") await handleScrape(page, resp);
-          else if (resp.kind === "extract") await handleExtract(page, resp);
-          else await handlePrompt(page, resp);
-        } catch (err) {
-          log(`task ${resp.task_id} errored: ${err.message}`);
-          // Report the failure so the task doesn't hang until lease expiry.
-          try {
-            if (resp.kind === "scrape") {
-              await apiPost("/transcript", { task_id: resp.task_id, worker: LABEL, turns: [], chatgpt_url: page.url() });
-            } else {
-              await apiPost("/result", { task_id: resp.task_id, worker: LABEL, response: `ERROR: ${err.message}`, chatgpt_url: page.url(), model: resp.model });
-            }
-          } catch (e) {}
-        }
-      }
-    } catch (err) {
-      if (err.status === 401 || err.status === 403) {
-        // Distinct, loud signal: a revoked/invalid worker token (or an
-        // inactive pool) otherwise loops quietly forever. Back off hard so
-        // we don't hammer the server while still recovering if the token is
-        // rotated back.
-        log(
-          `AUTH FAILED (HTTP ${err.status}): worker token rejected. Verify NYXID_WORKER_TOKEN and that the pool is active. Backing off…`
-        );
-        await sleep(Math.max(POLL_MS, 30000));
+      if (Date.now() - runtime.lastPresenceAt >= PRESENCE_MS) await heartbeat(runtime);
+      if (await processPendingCommand(runtime)) process.exit(75);
+      if (runtime.state.draining && !runtime.state.current_task) {
+        await sleep(POLL_MS);
         continue;
       }
-      log(`poll error: ${err.message}`);
+      const page = await ensureChatPage(runtime);
+      const response = await apiGet(
+        `/task?worker=${encodeURIComponent(LABEL)}` +
+          `&script_version=${encodeURIComponent(SCRIPT_VERSION)}` +
+          `&instance_id=${encodeURIComponent(state.instance_id)}` +
+          `&page_url=${encodeURIComponent(page.url())}`
+      );
+      if (response.status === "idle") {
+        if (state.current_task) clearTaskState(state);
+        if (
+          response.required_project_url &&
+          !page.url().startsWith(response.required_project_url)
+        ) {
+          await ensureChatPage(runtime, response.required_project_url);
+        }
+      } else if (response.status === "task" && response.task_id) {
+        const recovering = state.current_task?.task_id === response.task_id;
+        if (!recovering) {
+          state.current_task = {
+            task_id: response.task_id,
+            dispatch_attempt_id: response.dispatch_attempt_id || null,
+            conversation_url: response.conversation_url || null,
+            phase: "claimed",
+            baseline_turn_count: 0,
+          };
+          saveState(state);
+        } else {
+          updateTaskState(state, {
+            dispatch_attempt_id: response.dispatch_attempt_id || null,
+            conversation_url:
+              state.current_task.conversation_url || response.conversation_url || null,
+          });
+        }
+        await executeTask(runtime, response, recovering);
+      }
+    } catch (error) {
+      runtime.lastError = stableErrorCode(error);
+      if (error?.status === 401 || error?.status === 403) {
+        log(`worker authentication rejected (HTTP ${error.status}); retrying after 30s`);
+        await sleep(30000);
+      } else {
+        log(`worker loop paused (${runtime.lastError})`);
+        await sleep(backoffDelay(1, POLL_MS, 30000));
+      }
     }
     await sleep(POLL_MS);
   }
 }
 
-main().catch((e) => {
-  console.error("fatal:", e);
-  process.exit(1);
-});
+const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  main().catch((error) => {
+    console.error(`fatal: ${stableErrorCode(error)}`);
+    process.exit(1);
+  });
+}

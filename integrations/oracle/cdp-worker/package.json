@@ -7,10 +7,11 @@
   "bin": { "nyxid-oracle-cdp-worker": "worker.mjs" },
   "scripts": {
     "start": "node worker.mjs",
-    "check": "node --check worker.mjs"
+    "check": "node --check worker.mjs",
+    "test": "node --test worker.test.mjs"
   },
   "engines": { "node": ">=18" },
   "dependencies": {
-    "playwright-core": "^1.49.0"
+    "playwright-core": "1.62.1"
   }
 }
