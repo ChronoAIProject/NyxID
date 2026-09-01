@@ -54,6 +54,7 @@ pub mod oauth_broker_binding;
 pub mod oauth_client;
 pub mod oauth_flow_kind;
 pub mod oauth_state;
+pub mod oracle_login_snapshot;
 pub mod oracle_pool;
 pub mod oracle_session;
 pub mod oracle_task;

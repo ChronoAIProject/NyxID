@@ -12,17 +12,20 @@
 
 use axum::{
     Json,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, header},
     response::IntoResponse,
 };
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::models::oracle_pool::OraclePool;
 use crate::models::oracle_worker_command::OracleWorkerCommand;
-use crate::services::{oracle_pool_service, oracle_task_service, oracle_worker_service};
+use crate::services::{
+    oracle_login_snapshot_service, oracle_pool_service, oracle_task_service, oracle_worker_service,
+};
 
 async fn authenticate_worker(state: &AppState, headers: &HeaderMap) -> AppResult<OraclePool> {
     let token = headers
@@ -467,6 +470,40 @@ pub async fn heartbeat(
         status: "ok".to_string(),
         command,
     }))
+}
+
+#[derive(Serialize)]
+pub struct WorkerLoginSnapshotResponse {
+    pub format_version: u32,
+    pub sealed_blob_base64: String,
+}
+
+pub async fn fetch_login_snapshot(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(snapshot_id): Path<String>,
+) -> AppResult<Json<WorkerLoginSnapshotResponse>> {
+    let pool = authenticate_worker(&state, &headers).await?;
+    let payload = oracle_login_snapshot_service::fetch_for_worker(
+        &state.db,
+        &state.encryption_keys,
+        &pool.id,
+        &snapshot_id,
+    )
+    .await?;
+    Ok(Json(WorkerLoginSnapshotResponse {
+        format_version: payload.format_version,
+        sealed_blob_base64: base64::engine::general_purpose::STANDARD
+            .encode(payload.sealed_envelope.as_slice()),
+    }))
+}
+
+pub async fn fetch_bundle(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<super::oracle_worker_bundle::OracleWorkerBundleResponse>> {
+    authenticate_worker(&state, &headers).await?;
+    Ok(Json(super::oracle_worker_bundle::bundle_response()))
 }
 
 #[cfg(test)]

@@ -4,8 +4,10 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use base64::Engine;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
@@ -15,7 +17,9 @@ use crate::models::oracle_worker_command::{
     OracleWorkerCommand, OracleWorkerCommandKind, OracleWorkerCommandStatus,
 };
 use crate::mw::auth::AuthUser;
-use crate::services::{audit_service, oracle_pool_service, oracle_worker_service};
+use crate::services::{
+    audit_service, oracle_login_snapshot_service, oracle_pool_service, oracle_worker_service,
+};
 
 const ONLINE_WINDOW_SECS: i64 = 90;
 
@@ -79,6 +83,28 @@ pub struct OracleWorkerCommandInfo {
 #[derive(Serialize)]
 pub struct ListOracleWorkerCommandsResponse {
     pub commands: Vec<OracleWorkerCommandInfo>,
+}
+
+#[derive(Deserialize)]
+pub struct UploadLoginSnapshotRequest {
+    pub format_version: u32,
+    pub worker_token_sha256: String,
+    pub sealed_blob_base64: String,
+}
+
+#[derive(Serialize)]
+pub struct LoginSnapshotTargetInfo {
+    pub worker_label: String,
+    pub command_id: String,
+}
+
+#[derive(Serialize)]
+pub struct UploadLoginSnapshotResponse {
+    pub snapshot_id: String,
+    pub envelope_size: u64,
+    pub expires_at: String,
+    pub queued_workers: Vec<LoginSnapshotTargetInfo>,
+    pub skipped_workers: Vec<String>,
 }
 
 fn worker_info(worker: OracleWorker) -> OracleWorkerInfo {
@@ -242,6 +268,64 @@ pub async fn list_commands(
         .map(command_info)
         .collect();
     Ok(Json(ListOracleWorkerCommandsResponse { commands }))
+}
+
+pub async fn upload_login_snapshot(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id_or_slug): Path<String>,
+    Json(body): Json<UploadLoginSnapshotRequest>,
+) -> AppResult<impl IntoResponse> {
+    let actor = auth_user.user_id.to_string();
+    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
+    let sealed_envelope = base64::engine::general_purpose::STANDARD
+        .decode(body.sealed_blob_base64.as_bytes())
+        .map_err(|_| {
+            AppError::ValidationError("sealed_blob_base64 must be valid base64".to_string())
+        })?;
+    let fanout = oracle_login_snapshot_service::create_and_fanout(
+        &state.db,
+        &state.encryption_keys,
+        &pool,
+        &actor,
+        oracle_login_snapshot_service::CreateLoginSnapshotInput {
+            format_version: body.format_version,
+            worker_token_sha256: Zeroizing::new(body.worker_token_sha256),
+            sealed_envelope: Zeroizing::new(sealed_envelope),
+        },
+    )
+    .await?;
+
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "oracle_login_snapshot_queued",
+        Some(serde_json::json!({
+            "pool_id": &pool.id,
+            "snapshot_id": &fanout.snapshot_id,
+            "envelope_size": fanout.envelope_size,
+            "queued_worker_count": fanout.queued_workers.len(),
+            "skipped_worker_count": fanout.skipped_workers.len(),
+        })),
+    );
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(UploadLoginSnapshotResponse {
+            snapshot_id: fanout.snapshot_id,
+            envelope_size: fanout.envelope_size,
+            expires_at: fanout.expires_at.to_rfc3339(),
+            queued_workers: fanout
+                .queued_workers
+                .into_iter()
+                .map(|(worker_label, command_id)| LoginSnapshotTargetInfo {
+                    worker_label,
+                    command_id,
+                })
+                .collect(),
+            skipped_workers: fanout.skipped_workers,
+        }),
+    ))
 }
 
 #[cfg(test)]

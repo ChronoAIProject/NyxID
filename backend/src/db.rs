@@ -2629,6 +2629,29 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // ── oracle_login_snapshots ──
+    let oracle_login_snapshots =
+        db.collection::<Document>(crate::models::oracle_login_snapshot::COLLECTION_NAME);
+    oracle_login_snapshots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "pool_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    oracle_login_snapshots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+
     // ── oracle_worker_commands ──
     let oracle_worker_commands =
         db.collection::<Document>(crate::models::oracle_worker_command::COLLECTION_NAME);
@@ -2636,6 +2659,14 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "pool_id": 1, "worker_label": 1, "created_at": 1 })
+                .build(),
+        )
+        .await?;
+    oracle_worker_commands
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "snapshot_id": 1, "worker_label": 1 })
+                .options(IndexOptions::builder().sparse(true).unique(true).build())
                 .build(),
         )
         .await?;

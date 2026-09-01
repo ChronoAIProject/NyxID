@@ -509,6 +509,9 @@ pub enum AppError {
     #[error("Oracle worker label unavailable: {0}")]
     OracleWorkerLabelUnavailable(String),
 
+    #[error("Oracle login snapshot not found: {0}")]
+    OracleLoginSnapshotNotFound(String),
+
     #[error("Service pool not found: {0}")]
     ServicePoolNotFound(String),
 
@@ -684,6 +687,7 @@ impl AppError {
             Self::OracleWorkerCapabilityUnsupported(_) => StatusCode::CONFLICT,
             Self::OracleWorkerCommandNotFound(_) => StatusCode::NOT_FOUND,
             Self::OracleWorkerLabelUnavailable(_) => StatusCode::CONFLICT,
+            Self::OracleLoginSnapshotNotFound(_) => StatusCode::NOT_FOUND,
             Self::ServicePoolNotFound(_) => StatusCode::NOT_FOUND,
             Self::ServicePoolSlugTaken(_) => StatusCode::CONFLICT,
             Self::ServicePoolMemberInvalid(_) => StatusCode::BAD_REQUEST,
@@ -848,6 +852,7 @@ impl AppError {
             Self::OracleWorkerCapabilityUnsupported(_) => 11012,
             Self::OracleWorkerCommandNotFound(_) => 11013,
             Self::OracleWorkerLabelUnavailable(_) => 11014,
+            Self::OracleLoginSnapshotNotFound(_) => 11015,
             Self::ServicePoolNotFound(_) => 11400,
             Self::ServicePoolSlugTaken(_) => 11401,
             Self::ServicePoolMemberInvalid(_) => 11402,
@@ -1048,6 +1053,7 @@ impl AppError {
             Self::OracleWorkerCapabilityUnsupported(_) => "oracle_worker_capability_unsupported",
             Self::OracleWorkerCommandNotFound(_) => "oracle_worker_command_not_found",
             Self::OracleWorkerLabelUnavailable(_) => "oracle_worker_label_unavailable",
+            Self::OracleLoginSnapshotNotFound(_) => "oracle_login_snapshot_not_found",
             Self::ServicePoolNotFound(_) => "service_pool_not_found",
             Self::ServicePoolSlugTaken(_) => "service_pool_slug_taken",
             Self::ServicePoolMemberInvalid(_) => "service_pool_member_invalid",
@@ -1567,6 +1573,7 @@ mod tests {
             AppError::OracleWorkerCapabilityUnsupported("".into()).error_code(),
             AppError::OracleWorkerCommandNotFound("".into()).error_code(),
             AppError::OracleWorkerLabelUnavailable("".into()).error_code(),
+            AppError::OracleLoginSnapshotNotFound("".into()).error_code(),
             AppError::GrantCascadeConfirmationRequired(Box::new(GrantCascadePayload {
                 provider_slug: "github".into(),
                 provider_name: "GitHub".into(),
@@ -1891,6 +1898,26 @@ mod tests {
             AppError::OracleExtractDisabled("".into()).error_code(),
             11010
         );
+        assert_eq!(
+            AppError::OracleWorkerNotFound("".into()).error_code(),
+            11011
+        );
+        assert_eq!(
+            AppError::OracleWorkerCapabilityUnsupported("".into()).error_code(),
+            11012
+        );
+        assert_eq!(
+            AppError::OracleWorkerCommandNotFound("".into()).error_code(),
+            11013
+        );
+        assert_eq!(
+            AppError::OracleWorkerLabelUnavailable("".into()).error_code(),
+            11014
+        );
+        assert_eq!(
+            AppError::OracleLoginSnapshotNotFound("".into()).error_code(),
+            11015
+        );
 
         assert_eq!(
             AppError::OraclePoolNotFound("".into()).status_code(),
@@ -1928,6 +1955,14 @@ mod tests {
             AppError::OracleExtractDisabled("".into()).status_code(),
             StatusCode::FORBIDDEN
         );
+        assert_eq!(
+            AppError::OracleWorkerCapabilityUnsupported("".into()).status_code(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            AppError::OracleLoginSnapshotNotFound("".into()).status_code(),
+            StatusCode::NOT_FOUND
+        );
 
         assert_eq!(
             AppError::OracleWorkerTokenInvalid.error_key(),
@@ -1944,6 +1979,14 @@ mod tests {
         assert_eq!(
             AppError::OracleExtractDisabled("".into()).error_key(),
             "oracle_extract_disabled"
+        );
+        assert_eq!(
+            AppError::OracleWorkerLabelUnavailable("".into()).error_key(),
+            "oracle_worker_label_unavailable"
+        );
+        assert_eq!(
+            AppError::OracleLoginSnapshotNotFound("".into()).error_key(),
+            "oracle_login_snapshot_not_found"
         );
     }
 
