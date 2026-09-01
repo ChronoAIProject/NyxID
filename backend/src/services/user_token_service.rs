@@ -2251,6 +2251,57 @@ async fn load_user_api_key(db: &mongodb::Database, api_key_id: &str) -> AppResul
         .ok_or_else(|| AppError::NotFound("OAuth credential no longer exists".to_string()))
 }
 
+/// Wait for a lease holder to change the credential revision or release its
+/// lease. Acquiring the released lease proves that an unchanged row is the
+/// outcome of a completed or expired refresh attempt, not an active winner.
+async fn wait_for_concurrent_refresh<T, Load, LoadFuture, SameRevision>(
+    db: &mongodb::Database,
+    lease_name: &str,
+    expected: &T,
+    runtime: &ClusterLeaseRuntime,
+    mut load: Load,
+    same_revision: SameRevision,
+) -> AppResult<T>
+where
+    Load: FnMut() -> LoadFuture,
+    LoadFuture: std::future::Future<Output = AppResult<T>>,
+    SameRevision: Fn(&T, &T) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + runtime.ttl.saturating_add(runtime.renew_interval);
+    let poll_interval = runtime
+        .contender_wait()
+        .max(std::time::Duration::from_millis(1));
+    let mut observed_initial_revision = false;
+
+    loop {
+        let current = load().await?;
+        if !same_revision(expected, &current) {
+            return Ok(current);
+        }
+        if !observed_initial_revision {
+            runtime.notify_contender_observed();
+            observed_initial_revision = true;
+        }
+
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(AppError::Conflict(
+                "OAuth credential refresh is still in progress".to_string(),
+            ));
+        }
+
+        if let Some(lease) = runtime.acquire(db, lease_name).await? {
+            let outcome = load().await;
+            if let Err(error) = LeaseStore::release(db, &lease).await {
+                tracing::warn!(lease_name = %lease.name, error = %error, "Failed to release OAuth refresh outcome lease");
+            }
+            return outcome;
+        }
+
+        tokio::time::sleep(poll_interval.min(deadline.saturating_duration_since(now))).await;
+    }
+}
+
 async fn refresh_user_api_key_with_runtime(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -2260,8 +2311,15 @@ async fn refresh_user_api_key_with_runtime(
 ) -> AppResult<UserApiKey> {
     let lease_name = user_api_key_refresh_lease_name(&api_key.id);
     let Some(lease) = runtime.acquire(db, &lease_name).await? else {
-        tokio::time::sleep(runtime.contender_wait()).await;
-        return load_user_api_key(db, &api_key.id).await;
+        return wait_for_concurrent_refresh(
+            db,
+            &lease_name,
+            api_key,
+            runtime,
+            || load_user_api_key(db, &api_key.id),
+            same_user_api_key_refresh_revision,
+        )
+        .await;
     };
 
     let current = load_user_api_key(db, &api_key.id).await?;
@@ -2738,8 +2796,15 @@ async fn refresh_provider_token_with_runtime(
 ) -> AppResult<String> {
     let lease_name = provider_token_refresh_lease_name(&token.id);
     let Some(lease) = runtime.acquire(db, &lease_name).await? else {
-        tokio::time::sleep(runtime.contender_wait()).await;
-        let current = load_provider_token(db, &token.id).await?;
+        let current = wait_for_concurrent_refresh(
+            db,
+            &lease_name,
+            token,
+            runtime,
+            || load_provider_token(db, &token.id),
+            same_provider_token_refresh_revision,
+        )
+        .await?;
         return decrypt_provider_access_token(encryption_keys, &current).await;
     };
 
@@ -2843,6 +2908,7 @@ pub async fn get_active_token(
                             api_key: None,
                         });
                     }
+                    Err(error @ AppError::Conflict(_)) => return Err(error),
                     Err(e) => {
                         if let Err(transition_error) =
                             transition_legacy_keys_from_stored_token_state(db, &token, notifier)
@@ -3084,6 +3150,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::sync::Notify;
 
     #[test]
     fn chat_state_discriminator_requires_canonical_uuid_v4() {
@@ -3701,17 +3768,30 @@ mod tests {
 
     async fn spawn_counting_token_server(
         response: serde_json::Value,
-    ) -> (String, tokio::task::JoinHandle<()>, Arc<AtomicUsize>) {
+    ) -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        Arc<AtomicUsize>,
+        Arc<Notify>,
+        Arc<Notify>,
+    ) {
         let requests = Arc::new(AtomicUsize::new(0));
         let handler_requests = requests.clone();
+        let request_started = Arc::new(Notify::new());
+        let handler_request_started = request_started.clone();
+        let release_response = Arc::new(Notify::new());
+        let handler_release_response = release_response.clone();
         let app = axum::Router::new().route(
             "/token",
             axum::routing::post(move || {
                 let response = response.clone();
                 let requests = handler_requests.clone();
+                let request_started = handler_request_started.clone();
+                let release_response = handler_release_response.clone();
                 async move {
                     requests.fetch_add(1, Ordering::SeqCst);
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    request_started.notify_one();
+                    release_response.notified().await;
                     axum::Json(response)
                 }
             }),
@@ -3721,7 +3801,13 @@ mod tests {
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
-        (format!("http://{addr}/token"), handle, requests)
+        (
+            format!("http://{addr}/token"),
+            handle,
+            requests,
+            request_started,
+            release_response,
+        )
     }
 
     fn make_test_provider(
@@ -3841,13 +3927,14 @@ mod tests {
             eprintln!("skipping OAuth single-flight test: no local MongoDB available");
             return;
         };
-        let encryption_keys = test_encryption_keys();
-        let (token_url, _server, requests) = spawn_counting_token_server(serde_json::json!({
-            "access_token": "fresh-access",
-            "refresh_token": "rotated-refresh",
-            "expires_in": 3600,
-        }))
-        .await;
+        let encryption_keys = Arc::new(test_encryption_keys());
+        let (token_url, _server, requests, request_started, release_response) =
+            spawn_counting_token_server(serde_json::json!({
+                "access_token": "fresh-access",
+                "refresh_token": "rotated-refresh",
+                "expires_in": 3600,
+            }))
+            .await;
         let provider_id = Uuid::new_v4().to_string();
         let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
         db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
@@ -3862,24 +3949,43 @@ mod tests {
         let key =
             insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
         let first_runtime = refresh_runtime("pod-a");
-        let second_runtime = refresh_runtime("pod-b");
+        let contender_observed = Arc::new(Notify::new());
+        let second_runtime =
+            refresh_runtime("pod-b").with_contender_observer(contender_observed.clone());
 
-        let (first, second) = tokio::join!(
+        let first_db = db.clone();
+        let first_encryption_keys = encryption_keys.clone();
+        let first_key = key.clone();
+        let first = tokio::spawn(async move {
             super::refresh_user_api_key_with_runtime(
-                &db,
-                &encryption_keys,
-                &key,
+                &first_db,
+                &first_encryption_keys,
+                &first_key,
                 None,
                 &first_runtime,
-            ),
+            )
+            .await
+        });
+        request_started.notified().await;
+
+        let second_db = db.clone();
+        let second_encryption_keys = encryption_keys.clone();
+        let second_key = key.clone();
+        let second = tokio::spawn(async move {
             super::refresh_user_api_key_with_runtime(
-                &db,
-                &encryption_keys,
-                &key,
+                &second_db,
+                &second_encryption_keys,
+                &second_key,
                 None,
                 &second_runtime,
-            ),
-        );
+            )
+            .await
+        });
+        contender_observed.notified().await;
+        release_response.notify_one();
+        let (first, second) = tokio::join!(first, second);
+        let first = first.expect("winner task");
+        let second = second.expect("contender task");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         for refreshed in [first.unwrap(), second.unwrap()] {
             let access = encryption_keys
@@ -4913,13 +5019,14 @@ mod tests {
             eprintln!("skipping legacy OAuth single-flight test: no local MongoDB available");
             return;
         };
-        let encryption_keys = test_encryption_keys();
-        let (token_url, _server, requests) = spawn_counting_token_server(serde_json::json!({
-            "access_token": "fresh-legacy-access",
-            "refresh_token": "rotated-legacy-refresh",
-            "expires_in": 3600,
-        }))
-        .await;
+        let encryption_keys = Arc::new(test_encryption_keys());
+        let (token_url, _server, requests, request_started, release_response) =
+            spawn_counting_token_server(serde_json::json!({
+                "access_token": "fresh-legacy-access",
+                "refresh_token": "rotated-legacy-refresh",
+                "expires_in": 3600,
+            }))
+            .await;
         let provider_id = Uuid::new_v4().to_string();
         let client_id = encryption_keys.encrypt(b"client-id").await.unwrap();
         let client_secret = encryption_keys.encrypt(b"client-secret").await.unwrap();
@@ -4950,24 +5057,43 @@ mod tests {
         );
         insert_test_token(&db, &token).await;
         let first_runtime = refresh_runtime("pod-a");
-        let second_runtime = refresh_runtime("pod-b");
+        let contender_observed = Arc::new(Notify::new());
+        let second_runtime =
+            refresh_runtime("pod-b").with_contender_observer(contender_observed.clone());
 
-        let (first, second) = tokio::join!(
+        let first_db = db.clone();
+        let first_encryption_keys = encryption_keys.clone();
+        let first_token = token.clone();
+        let first = tokio::spawn(async move {
             super::refresh_provider_token_with_runtime(
-                &db,
-                &encryption_keys,
-                &token,
+                &first_db,
+                &first_encryption_keys,
+                &first_token,
                 &first_runtime,
-            ),
+            )
+            .await
+        });
+        request_started.notified().await;
+
+        let second_db = db.clone();
+        let second_encryption_keys = encryption_keys.clone();
+        let second_token = token.clone();
+        let second = tokio::spawn(async move {
             super::refresh_provider_token_with_runtime(
-                &db,
-                &encryption_keys,
-                &token,
+                &second_db,
+                &second_encryption_keys,
+                &second_token,
                 &second_runtime,
-            ),
-        );
-        let first = first.expect("first replica refresh");
-        let second = second.expect("second replica refresh");
+            )
+            .await
+        });
+        contender_observed.notified().await;
+        release_response.notify_one();
+        let (first, second) = tokio::join!(first, second);
+        let first = first.expect("winner task").expect("first replica refresh");
+        let second = second
+            .expect("contender task")
+            .expect("second replica refresh");
         assert_eq!(requests.load(Ordering::SeqCst), 1);
         assert_eq!(first, "fresh-legacy-access");
         assert_eq!(second, "fresh-legacy-access");

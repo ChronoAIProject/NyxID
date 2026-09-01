@@ -242,12 +242,14 @@ mod tests {
     fn signature_binds_method_path_timestamp_nonce_and_body() {
         let key = [0x42_u8; 32];
         let body_digest = sha256_hex(br#"{"node_id":"node-a"}"#);
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let other_nonce = uuid::Uuid::new_v4().to_string();
         let signature = sign(
             &key,
             "POST",
             "/internal/v1/nodes/node-a/proxy",
             "1725100000",
-            "nonce-a",
+            &nonce,
             &body_digest,
         );
 
@@ -256,7 +258,7 @@ mod tests {
             "POST",
             "/internal/v1/nodes/node-a/proxy",
             "1725100000",
-            "nonce-a",
+            &nonce,
             &body_digest,
             &signature,
         ));
@@ -265,7 +267,7 @@ mod tests {
             "POST",
             "/internal/v1/nodes/node-b/proxy",
             "1725100000",
-            "nonce-a",
+            &nonce,
             &body_digest,
             &signature,
         ));
@@ -274,8 +276,17 @@ mod tests {
             "POST",
             "/internal/v1/nodes/node-a/proxy",
             "1725100000",
-            "nonce-a",
+            &nonce,
             &sha256_hex(b"different"),
+            &signature,
+        ));
+        assert!(!verify(
+            &key,
+            "POST",
+            "/internal/v1/nodes/node-a/proxy",
+            "1725100000",
+            &other_nonce,
+            &body_digest,
             &signature,
         ));
     }
@@ -284,12 +295,13 @@ mod tests {
     fn signature_verification_accepts_mixed_case_hex() {
         let key = [0x42_u8; 32];
         let body_digest = sha256_hex(br#"{"node_id":"node-a"}"#);
+        let nonce = uuid::Uuid::new_v4().to_string();
         let signature = sign(
             &key,
             "POST",
             "/internal/v1/nodes/node-a/proxy",
             "1725100000",
-            "nonce-a",
+            &nonce,
             &body_digest,
         );
         let mixed_case_signature: String = signature
@@ -310,7 +322,7 @@ mod tests {
             "POST",
             "/internal/v1/nodes/node-a/proxy",
             "1725100000",
-            "nonce-a",
+            &nonce,
             &body_digest,
             &mixed_case_signature,
         ));

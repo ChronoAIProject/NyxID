@@ -77,7 +77,6 @@ deunicode = "1.6"
 nyxid-cloud-auth = { path = "../cloud-auth" }
 http = "1.4"
 http-body-util = "0.1"
-libc = "0.2"
 # Direct rustls dep so we can install a default CryptoProvider at startup.
 # Feature unification picks up BOTH `ring` (via google-cloud-kms ->
 # google-cloud-auth -> jsonwebtoken 9.x and via the transitively-enabled
@@ -95,6 +94,10 @@ tempfile = "3.27.0"
 axum-extra = { version = "0.12.6", features = ["form", "query"] }
 
 [dev-dependencies]
+# Used only by `test_utils` (compiled under `#[cfg(test)]`) to register an
+# `atexit` hook that drops the per-test databases at process exit. Already in
+# the dependency tree transitively, so this adds no new compilation.
+libc = "0.2"
 nyxid-node-proxy-test = { package = "nyxid-cli", path = "../cli", features = ["node-proxy-test"] }
 
 [features]

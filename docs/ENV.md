@@ -82,8 +82,9 @@ Kubernetes also injects `POD_NAME` and `POD_IP` through the downward API. The
 manifest copies `POD_NAME` to `INSTANCE_NAME` and builds
 `INTERNAL_ADVERTISE_URL` from `POD_IP`. Platforms without downward API support
 can omit `POD_IP` and `INTERNAL_ADVERTISE_URL` when `INTERNAL_BIND_ADDR` uses a
-peer-reachable interface. NyxID then discovers the local IP from the host route
-or its network interfaces.
+peer-reachable interface. NyxID then discovers the local IP selected by the
+host route. If route detection fails, NyxID falls back to `HOSTNAME` and then
+`127.0.0.1`.
 
 ## Assistant Diagnostics
 

@@ -3063,12 +3063,10 @@ async fn maybe_refresh_provider_backed_api_key(
     // place so a per-key revocation / expiry never disturbs sibling
     // connections under the same `(user, provider)` pair.
     //
-    // Concurrency: `refresh_user_api_key_in_place` is read-modify-write
-    // without a row lock (see its rustdoc). Two simultaneous proxy
-    // requests for the same expiring key can race; last-write-wins on
-    // the response, and a rotated refresh_token from response A may be
-    // overwritten by B's now-invalidated value. Self-healing on the
-    // next refresh attempt; acceptable for v1.
+    // A per-key Mongo lease serializes refreshes across replicas. A contender
+    // waits for the credential revision or lease outcome and returns the
+    // winner's row. If the wait bound expires while the lease remains held,
+    // the conflict propagates instead of falling back to this stale row.
     if api_key.connection_id.is_some() {
         return match user_token_service::refresh_user_api_key_in_place(
             db,

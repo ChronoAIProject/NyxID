@@ -131,6 +131,8 @@ pub struct ClusterLeaseRuntime {
     pub holder: CoordinationHolder,
     pub ttl: Duration,
     pub renew_interval: Duration,
+    #[cfg(test)]
+    contender_observed: Option<std::sync::Arc<tokio::sync::Notify>>,
 }
 
 impl ClusterLeaseRuntime {
@@ -139,6 +141,24 @@ impl ClusterLeaseRuntime {
             holder,
             ttl,
             renew_interval,
+            #[cfg(test)]
+            contender_observed: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub fn with_contender_observer(
+        mut self,
+        observer: std::sync::Arc<tokio::sync::Notify>,
+    ) -> Self {
+        self.contender_observed = Some(observer);
+        self
+    }
+
+    pub(crate) fn notify_contender_observed(&self) {
+        #[cfg(test)]
+        if let Some(observer) = &self.contender_observed {
+            observer.notify_one();
         }
     }
 

@@ -38,11 +38,6 @@ fn internal_http_url(host: &str, port: u16) -> String {
 }
 
 fn detect_internal_advertise_ip() -> Option<IpAddr> {
-    detect_internal_advertise_ip_from_udp_route()
-        .or_else(detect_internal_advertise_ip_from_interfaces)
-}
-
-fn detect_internal_advertise_ip_from_udp_route() -> Option<IpAddr> {
     for target in [
         SocketAddr::from(([10, 255, 255, 255], 1)),
         SocketAddr::from(([8, 8, 8, 8], 80)),
@@ -61,65 +56,6 @@ fn detect_internal_advertise_ip_from_udp_route() -> Option<IpAddr> {
         }
     }
     None
-}
-
-fn detect_internal_advertise_ip_from_interfaces() -> Option<IpAddr> {
-    struct InterfaceAddresses(*mut libc::ifaddrs);
-
-    impl Drop for InterfaceAddresses {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                // SAFETY: `getifaddrs` initialized this list, and this guard owns it.
-                unsafe { libc::freeifaddrs(self.0) };
-            }
-        }
-    }
-
-    let mut head = std::ptr::null_mut();
-    // SAFETY: `head` is a valid out-pointer and the guard below frees a successful result.
-    if unsafe { libc::getifaddrs(&mut head) } != 0 {
-        return None;
-    }
-    let addresses = InterfaceAddresses(head);
-    let mut current = addresses.0;
-    let mut ipv6_candidate = None;
-
-    while !current.is_null() {
-        // SAFETY: every node in the list returned by `getifaddrs` remains valid
-        // until `addresses` is dropped after this traversal.
-        let interface = unsafe { &*current };
-        if !interface.ifa_addr.is_null()
-            && interface.ifa_flags & libc::IFF_UP as libc::c_uint != 0
-            && interface.ifa_flags & libc::IFF_LOOPBACK as libc::c_uint == 0
-        {
-            // SAFETY: the address family selects the matching sockaddr layout.
-            let address = unsafe {
-                match i32::from((*interface.ifa_addr).sa_family) {
-                    libc::AF_INET => {
-                        let socket_address = &*interface.ifa_addr.cast::<libc::sockaddr_in>();
-                        Some(IpAddr::V4(Ipv4Addr::from(
-                            socket_address.sin_addr.s_addr.to_ne_bytes(),
-                        )))
-                    }
-                    libc::AF_INET6 => {
-                        let socket_address = &*interface.ifa_addr.cast::<libc::sockaddr_in6>();
-                        Some(IpAddr::V6(Ipv6Addr::from(socket_address.sin6_addr.s6_addr)))
-                    }
-                    _ => None,
-                }
-            };
-            match address.filter(|address| is_advertisable_ip(*address)) {
-                Some(address @ IpAddr::V4(_)) => return Some(address),
-                Some(address @ IpAddr::V6(_)) => {
-                    ipv6_candidate.get_or_insert(address);
-                }
-                None => {}
-            }
-        }
-        current = interface.ifa_next;
-    }
-
-    ipv6_candidate
 }
 
 fn is_advertisable_ip(address: IpAddr) -> bool {
