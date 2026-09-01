@@ -1,4 +1,144 @@
-use std::{env, net::IpAddr};
+use std::{
+    env,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
+};
+
+const DEFAULT_INTERNAL_BIND_ADDR: &str = "127.0.0.1:3002";
+
+fn resolve_internal_advertise_url(
+    explicit_url: Option<&str>,
+    pod_ip: Option<&str>,
+    internal_bind_addr: &str,
+    hostname: Option<&str>,
+    detect_ip: impl FnOnce() -> Option<IpAddr>,
+) -> String {
+    if let Some(explicit_url) = explicit_url {
+        return explicit_url.to_string();
+    }
+
+    let bind_addr = internal_bind_addr.parse::<SocketAddr>().ok();
+    let port = bind_addr.map(|address| address.port()).unwrap_or_default();
+    if let Some(pod_ip) = pod_ip {
+        return internal_http_url(pod_ip, port);
+    }
+    if bind_addr.is_some_and(|address| !address.ip().is_loopback())
+        && let Some(detected_ip) = detect_ip()
+    {
+        return internal_http_url(&detected_ip.to_string(), port);
+    }
+    internal_http_url(hostname.unwrap_or("127.0.0.1"), port)
+}
+
+fn internal_http_url(host: &str, port: u16) -> String {
+    if host.parse::<Ipv6Addr>().is_ok() {
+        format!("http://[{host}]:{port}")
+    } else {
+        format!("http://{host}:{port}")
+    }
+}
+
+fn detect_internal_advertise_ip() -> Option<IpAddr> {
+    detect_internal_advertise_ip_from_udp_route()
+        .or_else(detect_internal_advertise_ip_from_interfaces)
+}
+
+fn detect_internal_advertise_ip_from_udp_route() -> Option<IpAddr> {
+    for target in [
+        SocketAddr::from(([10, 255, 255, 255], 1)),
+        SocketAddr::from(([8, 8, 8, 8], 80)),
+    ] {
+        let Ok(socket) = UdpSocket::bind(SocketAddr::from(([0, 0, 0, 0], 0))) else {
+            continue;
+        };
+        if socket.connect(target).is_err() {
+            continue;
+        }
+        let Some(address) = socket.local_addr().ok().map(|address| address.ip()) else {
+            continue;
+        };
+        if is_advertisable_ip(address) {
+            return Some(address);
+        }
+    }
+    None
+}
+
+fn detect_internal_advertise_ip_from_interfaces() -> Option<IpAddr> {
+    struct InterfaceAddresses(*mut libc::ifaddrs);
+
+    impl Drop for InterfaceAddresses {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: `getifaddrs` initialized this list, and this guard owns it.
+                unsafe { libc::freeifaddrs(self.0) };
+            }
+        }
+    }
+
+    let mut head = std::ptr::null_mut();
+    // SAFETY: `head` is a valid out-pointer and the guard below frees a successful result.
+    if unsafe { libc::getifaddrs(&mut head) } != 0 {
+        return None;
+    }
+    let addresses = InterfaceAddresses(head);
+    let mut current = addresses.0;
+    let mut ipv6_candidate = None;
+
+    while !current.is_null() {
+        // SAFETY: every node in the list returned by `getifaddrs` remains valid
+        // until `addresses` is dropped after this traversal.
+        let interface = unsafe { &*current };
+        if !interface.ifa_addr.is_null()
+            && interface.ifa_flags & libc::IFF_UP as libc::c_uint != 0
+            && interface.ifa_flags & libc::IFF_LOOPBACK as libc::c_uint == 0
+        {
+            // SAFETY: the address family selects the matching sockaddr layout.
+            let address = unsafe {
+                match i32::from((*interface.ifa_addr).sa_family) {
+                    libc::AF_INET => {
+                        let socket_address = &*interface.ifa_addr.cast::<libc::sockaddr_in>();
+                        Some(IpAddr::V4(Ipv4Addr::from(
+                            socket_address.sin_addr.s_addr.to_ne_bytes(),
+                        )))
+                    }
+                    libc::AF_INET6 => {
+                        let socket_address = &*interface.ifa_addr.cast::<libc::sockaddr_in6>();
+                        Some(IpAddr::V6(Ipv6Addr::from(socket_address.sin6_addr.s6_addr)))
+                    }
+                    _ => None,
+                }
+            };
+            match address.filter(|address| is_advertisable_ip(*address)) {
+                Some(address @ IpAddr::V4(_)) => return Some(address),
+                Some(address @ IpAddr::V6(_)) => {
+                    ipv6_candidate.get_or_insert(address);
+                }
+                None => {}
+            }
+        }
+        current = interface.ifa_next;
+    }
+
+    ipv6_candidate
+}
+
+fn is_advertisable_ip(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(address) => {
+            !address.is_unspecified()
+                && !address.is_loopback()
+                && !address.is_link_local()
+                && !address.is_multicast()
+                && address != Ipv4Addr::BROADCAST
+        }
+        IpAddr::V6(address) => {
+            !address.is_unspecified()
+                && !address.is_loopback()
+                && !address.is_unicast_link_local()
+                && !address.is_multicast()
+        }
+    }
+}
 
 /// Canonicalize IPv4-mapped IPv6 addresses so trust and rate-limit decisions
 /// cannot split one endpoint across two address-family representations.
@@ -921,6 +1061,18 @@ impl AppConfig {
         let is_dev = environment == "development" || environment == "dev";
 
         let base_url = env::var("BASE_URL").unwrap_or_else(|_| "http://localhost:3001".to_string());
+        let internal_bind_addr = env::var("INTERNAL_BIND_ADDR")
+            .unwrap_or_else(|_| DEFAULT_INTERNAL_BIND_ADDR.to_string());
+        let explicit_internal_advertise_url = env::var("INTERNAL_ADVERTISE_URL").ok();
+        let pod_ip = env::var("POD_IP").ok();
+        let hostname = env::var("HOSTNAME").ok();
+        let internal_advertise_url = resolve_internal_advertise_url(
+            explicit_internal_advertise_url.as_deref(),
+            pod_ip.as_deref(),
+            &internal_bind_addr,
+            hostname.as_deref(),
+            detect_internal_advertise_ip,
+        );
 
         Self {
             port: env::var("PORT")
@@ -1146,14 +1298,8 @@ impl AppConfig {
                 .or_else(|_| env::var("POD_NAME"))
                 .or_else(|_| env::var("HOSTNAME"))
                 .unwrap_or_else(|_| "nyxid-backend".to_string()),
-            internal_bind_addr: env::var("INTERNAL_BIND_ADDR")
-                .unwrap_or_else(|_| "127.0.0.1:3002".to_string()),
-            internal_advertise_url: env::var("INTERNAL_ADVERTISE_URL").unwrap_or_else(|_| {
-                let host = env::var("POD_IP")
-                    .or_else(|_| env::var("HOSTNAME"))
-                    .unwrap_or_else(|_| "127.0.0.1".to_string());
-                format!("http://{host}:3002")
-            }),
+            internal_bind_addr,
+            internal_advertise_url,
             internal_dispatch_hmac_key: env::var("INTERNAL_DISPATCH_HMAC_KEY")
                 .ok()
                 .filter(|value| !value.trim().is_empty()),
@@ -1690,6 +1836,78 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn internal_advertise_url_prefers_explicit_url() {
+        let resolved = resolve_internal_advertise_url(
+            Some("https://backend-1.internal:9443"),
+            Some("10.42.0.12"),
+            "0.0.0.0:4123",
+            Some("backend-1"),
+            || panic!("detection must not run when an explicit URL is configured"),
+        );
+
+        assert_eq!(resolved, "https://backend-1.internal:9443");
+    }
+
+    #[test]
+    fn internal_advertise_url_prefers_pod_ip_and_uses_bind_port() {
+        let resolved = resolve_internal_advertise_url(
+            None,
+            Some("10.42.0.12"),
+            "0.0.0.0:4123",
+            Some("backend-1"),
+            || panic!("detection must not run when POD_IP is configured"),
+        );
+
+        assert_eq!(resolved, "http://10.42.0.12:4123");
+    }
+
+    #[test]
+    fn internal_advertise_url_uses_detected_ip_before_hostname() {
+        let resolved = resolve_internal_advertise_url(
+            None,
+            None,
+            "0.0.0.0:4123",
+            Some("unresolvable-pod-name"),
+            || Some("10.42.0.27".parse().unwrap()),
+        );
+
+        assert_eq!(resolved, "http://10.42.0.27:4123");
+    }
+
+    #[test]
+    fn internal_advertise_url_skips_detection_for_loopback_bind() {
+        let resolved = resolve_internal_advertise_url(
+            None,
+            None,
+            "127.0.0.1:4123",
+            Some("backend.local"),
+            || panic!("detection must not run for a loopback-only listener"),
+        );
+
+        assert_eq!(resolved, "http://backend.local:4123");
+    }
+
+    #[test]
+    fn internal_advertise_url_uses_hostname_after_detection_failure() {
+        let resolved = resolve_internal_advertise_url(
+            None,
+            None,
+            "0.0.0.0:4123",
+            Some("backend.local"),
+            || None,
+        );
+
+        assert_eq!(resolved, "http://backend.local:4123");
+    }
+
+    #[test]
+    fn internal_advertise_url_falls_back_to_loopback() {
+        let resolved = resolve_internal_advertise_url(None, None, "0.0.0.0:4123", None, || None);
+
+        assert_eq!(resolved, "http://127.0.0.1:4123");
+    }
 
     /// Create a minimal AppConfig for testing pure methods.
     fn make_config(base_url: &str, environment: &str, encryption_key: &str) -> AppConfig {

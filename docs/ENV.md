@@ -64,7 +64,7 @@ listener through a public Service, ingress, or load balancer.
 |----------|---------|-------------|
 | `INSTANCE_NAME` | `POD_NAME`, then `HOSTNAME` | Stable name for one pod or host. A random process generation fences restarts that reuse this name. Kubernetes sets this from `metadata.name`. |
 | `INTERNAL_BIND_ADDR` | `127.0.0.1:3002` | Bind address for the private authenticated listener. Multi-replica deployments must bind it to a peer-reachable interface, such as `0.0.0.0:3002` inside a pod network. |
-| `INTERNAL_ADVERTISE_URL` | `http://{POD_IP}:3002`, then `http://{HOSTNAME}:3002` | Peer-reachable base URL stored in ownership records. Set an internal pod IP or private DNS URL. Never set the public ingress URL. |
+| `INTERNAL_ADVERTISE_URL` | `POD_IP`, detected local IP, `HOSTNAME`, then `127.0.0.1` | Peer-reachable base URL stored in ownership records. NyxID detects a local routable IP when `POD_IP` is unset and `INTERNAL_BIND_ADDR` is non-loopback. Every generated URL uses the port from `INTERNAL_BIND_ADDR`. Set this variable to override detection with an internal pod IP or private DNS URL. Never set the public ingress URL. |
 | `INTERNAL_DISPATCH_HMAC_KEY` | derived from `ENCRYPTION_KEY` | Optional 32-byte HMAC key as 64 hex characters. All replicas must use the same value. Set it explicitly when the local encryption key is unavailable, such as with a KMS key provider. |
 | `INTERNAL_AUTH_MAX_SKEW_SECS` | `30` | Maximum clock skew accepted by the internal request signature verifier. |
 | `INTERNAL_NONCE_TTL_SECS` | `120` | MongoDB replay-record lifetime for internal request nonces. This must exceed twice `INTERNAL_AUTH_MAX_SKEW_SECS`. |
@@ -80,8 +80,10 @@ listener through a public Service, ingress, or load balancer.
 
 Kubernetes also injects `POD_NAME` and `POD_IP` through the downward API. The
 manifest copies `POD_NAME` to `INSTANCE_NAME` and builds
-`INTERNAL_ADVERTISE_URL` from `POD_IP`. These two downward API variables are
-deployment inputs, not standalone NyxID settings.
+`INTERNAL_ADVERTISE_URL` from `POD_IP`. Platforms without downward API support
+can omit `POD_IP` and `INTERNAL_ADVERTISE_URL` when `INTERNAL_BIND_ADDR` uses a
+peer-reachable interface. NyxID then discovers the local IP from the host route
+or its network interfaces.
 
 ## Assistant Diagnostics
 

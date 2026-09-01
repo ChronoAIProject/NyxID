@@ -1243,6 +1243,7 @@ async fn main() {
     tracing::info!("Listening on {addr}");
     tracing::info!(
         bind = %config.internal_bind_addr,
+        advertise_url = %config.internal_advertise_url,
         "Internal replica listener started"
     );
 
