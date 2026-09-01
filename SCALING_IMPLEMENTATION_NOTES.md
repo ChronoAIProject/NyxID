@@ -26,7 +26,7 @@ The implementation is complete when all ten audit findings have code, tests, and
 | Item | Status | Implementation | Evidence |
 | --- | --- | --- | --- |
 | 1. Node WebSocket registry | Done | `466336d1`, `f1e42614`, `af57274a`, and `31dc6dd6`: fenced Mongo owner leases, ownership-aware status/routing/sweeps, authenticated private forwarding, remote revocation, streamed HTTP and duplex forwarding, exact-connection capability reads, reconnect fencing, delete-before-disconnect ordering, pre-header cancellation, and large-frame support for every node-bound operation. | `remote_proxy_cancellation_before_headers_clears_owner_work`, `remote_ws_passthrough_preserves_large_binary_frames`, `reconnect_in_same_generation_fences_old_connection`, `inactive_node_cannot_renew_connection_owner`, `proxy_cancel_arriving_before_dispatch_prevents_socket_enqueue`, the mounted billing route test, and the full 5,708-test run pass. |
-| 2. OAuth refresh sweep | Done | `7481e34a`, `e7c031f5`, `992676f9`, and `8e3ac6f2`: per-credential Mongo leases cover proactive sweep and both modern and legacy proxy refresh paths; renewable lease loss cancels provider work and stale results are fenced. | Both `*_refresh_is_single_flight_across_replicas` tests, both `refresh_sweep_*` tests, `stale_legacy_refresh_cannot_overwrite_reauthorized_token`, all 89 `user_token_service` tests, and the full suite pass. |
+| 2. OAuth refresh sweep | Done | `7481e34a`, `e7c031f5`, `992676f9`, `8e3ac6f2`, and `e4f7fe6d`: per-credential Mongo leases cover proactive sweep and both proxy refresh paths. A losing replica polls for the credential revision or lease outcome and cannot return stale data while the winner still holds the lease. Renewable lease loss cancels provider work, and stale results are fenced. | Both deterministic `*_refresh_is_single_flight_across_replicas` tests return the fresh token on both replicas with one provider request. Both `refresh_sweep_*` tests, `stale_legacy_refresh_cannot_overwrite_reauthorized_token`, all 89 `user_token_service` tests, and the full suite pass. |
 | 3. DPoP replay cache | Done | `02026c57` and `d7894cbf`: Mongo first-writer insert with a unique identity and server-time TTL expiry is authoritative across replicas. | `validate_proof_rejects_replay_across_callers`, `replay_insert_is_first_writer_wins_across_callers`, TTL-index coverage, and the full suite pass. |
 | 4. Event dedup cache | Done | `02026c57`, `4f37443f`, and `bb2af0dd`: fenced Mongo claim/commit/release state machine with unique event identity, server-time expiry, and TTL cleanup. | `event_dedup_claim_commit_and_release_are_atomic_and_fenced`, `expired_event_claim_cannot_be_committed`, TTL-index coverage, and the full suite pass. |
 | 5. Telegram polling | Done | `7481e34a` and `e297a1e0`: one renewable Mongo leader lease owns polling; the offset checkpoint is fenced, durable, and survives takeover. | `named_lease_is_exclusive_and_release_is_fenced`, `expired_named_lease_can_be_taken_over`, `checkpoint_is_fenced_and_survives_lease_handoff`, renewal-loss coverage, and the full suite pass. |
@@ -82,6 +82,8 @@ The full runtime contract is in `docs/HORIZONTAL_SCALING_ARCHITECTURE.md`.
 | Two-replica node forwarding tests | Pass | 5 passed, 0 failed: complete HTTP, early streaming + cancellation, SSH exec/tunnel, terminal, WS passthrough, credential ack, and remote disconnect |
 | Mixed-case internal HMAC regression before fix | Expected failure | `signature_verification_accepts_mixed_case_hex` rejected a case-equivalent hex encoding because `verify()` compared the encoded strings |
 | Internal HMAC tests | Pass | 4 passed, 0 failed against `rs0`, including mixed-case hex acceptance and Mongo-backed shared nonce replay rejection |
+| Deterministic OAuth loser regressions before fix | Expected failure | Both modern and legacy contenders read the unchanged token while the provider response was held at a rendezvous. Each returned stale access with exactly one provider request. |
+| Deterministic OAuth loser regressions after fix | Pass | Both `*_refresh_is_single_flight_across_replicas` tests return fresh access on the winner and contender with exactly one provider request |
 | Node routing tests | Pass | 13 passed, 0 failed against the replica set |
 | Kubernetes schemas | Pass | `kubeconform -strict -summary k8s`: 17 resources valid, 0 invalid, 0 errors, 0 skipped |
 | Kubernetes YAML | Pass | `yq eval-all '.' k8s/*.yaml`: all documents parsed |
@@ -92,11 +94,13 @@ The full runtime contract is in `docs/HORIZONTAL_SCALING_ARCHITECTURE.md`.
 | Mongo coordination regressions | Pass | 15 tests pass for leases, checkpoints, replay, fixed windows, token buckets, renewable slots, event dedup, expiry fencing, and TTL indexes |
 | Rate limiter tests | Pass | 50 tests pass; production constructors use Mongo-backed stores |
 | MCP replica-safety tests | Pass | 17 tests pass for read-through validation, durable ordered notifications, deletion, recovery, and shared admission |
-| OAuth refresh tests | Pass | 89 `user_token_service` tests pass, including modern and legacy cross-replica single-flight, proactive sweeps, and stale-write fencing |
-| Final `cargo fmt --all --check` | Pass | Clean after the internal HMAC fix and decision-log consolidation |
+| PR CI touched modules against `rs0` | Pass | 4 `internal_auth`, 66 config-related, and 15 Mongo coordination tests pass with no failures |
+| OAuth refresh tests | Pass | 89 `user_token_service` tests pass against `rs0`, including deterministic modern and legacy cross-replica single-flight, proactive sweeps, provider failures, and stale-write fencing |
+| PR CI source audit | Pass | `backend/src/config.rs` has no unsafe or `libc` access; `internal_auth.rs` has no fixed test nonce; `libc` is dev-only |
+| Final `cargo fmt --all --check` | Pass | Clean after the PR CI fixes |
 | Final `cargo build -p nyxid` | Pass | Finished in 45.13s; only the known macOS compact-unwind linker warning and upstream `proc-macro-error2` notice |
 | Final replica-set `cargo test -p nyxid` | Pass | 5,708 passed, 0 failed in 430.23s (483.57s wall) using `mongodb://127.0.0.1:27019/?replicaSet=rs0&directConnection=true&retryWrites=true` |
-| Final `cargo clippy -p nyxid --all-targets -- -D warnings` | Pass | Finished in 32.89s with no clippy warnings; only the upstream future-incompatibility notice |
+| Final `cargo clippy -p nyxid --all-targets -- -D warnings` | Pass | Finished in 1m44s with no clippy warnings; only the upstream future-incompatibility notice. The code commit hook passed clippy again. |
 | Final deployment syntax | Pass | Current Kubernetes YAML parses with `yq`; merged production Compose passes with its required env-file shape and validation-only password |
 
 Final Mongo-backed verification uses an isolated local replica-set deployment
