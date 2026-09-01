@@ -688,6 +688,12 @@ function launchChrome() {
   return child;
 }
 
+export function markChatPageRecovered(runtime) {
+  runtime.health.tab = 0;
+  runtime.chromeAlive = true;
+  if (!runtime.state?.current_task) runtime.lastError = null;
+}
+
 async function connectChrome(runtime) {
   const browser = await chromium.connectOverCDP(CDP_URL);
   browser.on("disconnected", () => {
@@ -701,8 +707,7 @@ async function connectChrome(runtime) {
   runtime.context = browser.contexts()[0] || (await browser.newContext());
   runtime.page = await getChatPage(runtime.context);
   runtime.health.cdp = 0;
-  runtime.health.tab = 0;
-  runtime.chromeAlive = true;
+  markChatPageRecovered(runtime);
   return runtime.page;
 }
 
@@ -766,8 +771,7 @@ async function ensureChatPage(runtime, targetUrl) {
       });
       await installDomCore(runtime.page);
     }
-    runtime.health.tab = 0;
-    runtime.chromeAlive = true;
+    markChatPageRecovered(runtime);
     return runtime.page;
   } catch (error) {
     runtime.health.tab += 1;
@@ -783,6 +787,7 @@ async function ensureChatPage(runtime, targetUrl) {
         timeout: 60000,
       });
       await installDomCore(runtime.page);
+      markChatPageRecovered(runtime);
       return runtime.page;
     } catch (replacementError) {
       runtime.health.cdp += 1;

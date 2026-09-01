@@ -352,6 +352,18 @@ This rule prefers an explicit failed task over a duplicate user message in an
 existing conversation. The server's bounded lease retry handles a worker that
 does not recover before its lease expires.
 
+The supervised worker keeps the Chrome debug port fixed because launchd or
+systemd pins both `CHROME_CDP_URL` and `CHROME_DEBUG_PORT`. Silently probing a
+fallback inside the worker would split runtime state from persisted supervisor
+configuration and could attach to an unrelated local browser. A later port
+collision appears as `Chrome: no` in `nyxid oracle worker list <pool>` and as a
+sanitized connection error in `worker show`. Close the dedicated Chrome window
+if it is still running without CDP, then run
+`nyxid oracle worker install --force --pool <pool>` with the original CLI
+`--profile` when applicable. Forced installation retains the label, token, and
+browser profile, selects a new free port, rewrites the paired settings, and
+restarts supervision.
+
 ## Worker presence and control
 
 `nyxid oracle worker list <pool>` shows the worker label, bundle version,

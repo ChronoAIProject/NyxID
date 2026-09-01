@@ -850,10 +850,10 @@ async fn install_worker(
     let node = resolve_node()?;
     let npm = resolve_program(&["npm"])?;
     let chrome = resolve_chrome()?;
-    let port = existing
-        .as_ref()
-        .map(|config| config.chrome_debug_port)
-        .unwrap_or(find_free_debug_port()?);
+    let port = select_install_debug_port(
+        existing.as_ref().map(|config| config.chrome_debug_port),
+        force,
+    )?;
     let bundle_path = install_dir.join("worker.mjs");
     install_bundle_runtime(&install_dir, &bundle, &npm)?;
     let token_file = install_dir.join("worker-token");
@@ -1101,6 +1101,13 @@ fn find_free_debug_port() -> Result<u16> {
         }
     }
     bail!("No free Chrome debugging port found in 9222-9321")
+}
+
+fn select_install_debug_port(existing: Option<u16>, force: bool) -> Result<u16> {
+    match (existing, force) {
+        (Some(port), false) => Ok(port),
+        _ => find_free_debug_port(),
+    }
 }
 
 fn launch_chrome(executable: &Path, profile: &Path, port: u16) -> Result<Child> {
@@ -1845,6 +1852,23 @@ mod tests {
                     },
                 )
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn forced_install_replaces_the_persisted_debug_port() {
+        let occupied = (9222..9322)
+            .find_map(|port| std::net::TcpListener::bind(("127.0.0.1", port)).ok())
+            .expect("a debug port should be available for the test");
+        let occupied_port = occupied.local_addr().unwrap().port();
+
+        assert_eq!(
+            select_install_debug_port(Some(occupied_port), false).unwrap(),
+            occupied_port
+        );
+        assert_ne!(
+            select_install_debug_port(Some(occupied_port), true).unwrap(),
+            occupied_port
         );
     }
 

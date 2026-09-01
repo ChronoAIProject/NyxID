@@ -6,6 +6,7 @@ import {
   choosePromptNavigation,
   decidePromptResume,
   decryptSessionEnvelope,
+  markChatPageRecovered,
   taskRecoveryDecision,
 } from "./worker.mjs";
 
@@ -257,4 +258,26 @@ test("a Rust login snapshot fixture decrypts with only its pool token", () => {
     () => decryptSessionEnvelope(LOGIN_SNAPSHOT_FIXTURE, "nyx_owk_wrong"),
     /session_decrypt_failed/
   );
+});
+
+test("idle Chrome recovery clears stale health errors", () => {
+  const idle = {
+    state: { current_task: null },
+    health: { tab: 2 },
+    chromeAlive: false,
+    lastError: "cdp_connection_refused",
+  };
+  markChatPageRecovered(idle);
+  assert.equal(idle.health.tab, 0);
+  assert.equal(idle.chromeAlive, true);
+  assert.equal(idle.lastError, null);
+
+  const active = {
+    state: { current_task: { task_id: "task-1" } },
+    health: { tab: 2 },
+    chromeAlive: false,
+    lastError: "cdp_connection_refused",
+  };
+  markChatPageRecovered(active);
+  assert.equal(active.lastError, "cdp_connection_refused");
 });

@@ -130,6 +130,27 @@ The server requeues an expired lease to the FIFO front while the task has
 infrastructure retries left. New tasks default to three retries. Task status
 reports both fresh dispatch attempts and retries.
 
+### Debug-port collisions
+
+The supervised worker deliberately keeps one debug port in its persisted
+configuration. It does not probe and attach to another local CDP endpoint
+because that would diverge from the launchd or systemd environment and could
+connect the worker to an unrelated browser profile.
+
+If another process later takes that port, `nyxid oracle worker list <pool>`
+shows `Chrome` as `no`; `nyxid oracle worker show <pool> <label>` shows the
+sanitized connection error. Close the dedicated NyxID Chrome window if it is
+still open without CDP, then run:
+
+```sh
+nyxid oracle worker install --force --pool <pool>
+```
+
+Add the same `--profile <name>` used for the original installation. Forced
+installation retains the worker label, token, and Chrome profile, probes a new
+free port, rewrites `CHROME_CDP_URL` and `CHROME_DEBUG_PORT` together, and
+restarts the supervisor.
+
 ## Manual setup
 
 The CLI install is the supported path. For development, run the worker from this
