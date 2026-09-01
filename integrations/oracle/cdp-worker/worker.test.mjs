@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {
   backoffDelay,
+  choosePromptNavigation,
   decidePromptResume,
   decryptSessionEnvelope,
 } from "./worker.mjs";
@@ -76,6 +77,62 @@ test("a persisted send attempt with no matching turn is never resent", () => {
       transcriptReady: true,
     }),
     { action: "uncertain" }
+  );
+});
+
+test("recovery preserves a live conversation when only the project root was persisted", () => {
+  assert.deepEqual(
+    choosePromptNavigation({
+      recovering: true,
+      isFollowup: false,
+      currentUrl: "https://chatgpt.com/c/12345678-abcd",
+      persistedUrl: "https://chatgpt.com/g/g-project/example/project",
+      taskConversationUrl: null,
+      requiredProjectUrl: "https://chatgpt.com/g/g-project/example/project",
+    }),
+    { error: null, target: null }
+  );
+});
+
+test("recovery navigates to a known conversation instead of an unrelated live tab", () => {
+  assert.deepEqual(
+    choosePromptNavigation({
+      recovering: true,
+      isFollowup: true,
+      currentUrl: "https://chatgpt.com/c/aaaaaaaa-bbbb",
+      persistedUrl: "https://chatgpt.com/c/cccccccc-dddd",
+      taskConversationUrl: "https://chatgpt.com/c/cccccccc-dddd",
+      requiredProjectUrl: null,
+    }),
+    { error: null, target: "https://chatgpt.com/c/cccccccc-dddd" }
+  );
+});
+
+test("a server-pinned conversation outranks a persisted project root", () => {
+  assert.deepEqual(
+    choosePromptNavigation({
+      recovering: true,
+      isFollowup: true,
+      currentUrl: "https://chatgpt.com/",
+      persistedUrl: "https://chatgpt.com/g/g-project/example/project",
+      taskConversationUrl: "https://chatgpt.com/c/cccccccc-dddd",
+      requiredProjectUrl: "https://chatgpt.com/g/g-project/example/project",
+    }),
+    { error: null, target: "https://chatgpt.com/c/cccccccc-dddd" }
+  );
+});
+
+test("recovery fails closed when neither state nor the live tab identifies a conversation", () => {
+  assert.deepEqual(
+    choosePromptNavigation({
+      recovering: true,
+      isFollowup: false,
+      currentUrl: "https://chatgpt.com/",
+      persistedUrl: null,
+      taskConversationUrl: null,
+      requiredProjectUrl: null,
+    }),
+    { error: "recovery_conversation_unknown", target: null }
   );
 });
 

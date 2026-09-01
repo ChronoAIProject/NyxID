@@ -156,6 +156,41 @@ export function decidePromptResume({ phase, prompt, turns, generating, transcrip
   return { action: "uncertain" };
 }
 
+export function choosePromptNavigation({
+  recovering,
+  isFollowup,
+  currentUrl,
+  persistedUrl,
+  taskConversationUrl,
+  requiredProjectUrl,
+}) {
+  const currentConversationId = convId(currentUrl);
+  const onConvPage = Boolean(currentConversationId);
+  if (recovering && !persistedUrl && !taskConversationUrl && !onConvPage) {
+    return { error: "recovery_conversation_unknown", target: null };
+  }
+  const persistedConversationId = convId(persistedUrl);
+  const taskConversationId = convId(taskConversationUrl);
+  const resumeUrl = persistedConversationId
+    ? persistedUrl
+    : taskConversationId
+      ? taskConversationUrl
+      : persistedUrl || taskConversationUrl;
+  const resumeConversationId = persistedConversationId || taskConversationId;
+  if (recovering && onConvPage && !resumeConversationId) {
+    return { error: null, target: null };
+  }
+  if ((isFollowup || recovering) && resumeUrl) {
+    return {
+      error: null,
+      target:
+        !resumeConversationId || currentConversationId !== resumeConversationId ? resumeUrl : null,
+    };
+  }
+  const base = requiredProjectUrl || "https://chatgpt.com/";
+  return { error: null, target: onConvPage || !currentUrl.startsWith(base) ? base : null };
+}
+
 function defaultState() {
   return {
     format_version: 1,
@@ -1086,20 +1121,18 @@ async function handlePrompt(runtime, page, task, recovering) {
   // Navigate: continue an existing conversation, or start a FRESH chat.
   // For a fresh prompt we must leave any /c/<uuid> page we're parked on,
   // otherwise we'd type into the previous conversation.
-  let navTarget = null;
-  const onConvPage = /\/c\/[a-f0-9-]{6,}/.test(page.url());
   const persistedUrl = runtime.state.current_task?.conversation_url;
   const priorPhase = runtime.state.current_task?.phase || "claimed";
-  if (recovering && !persistedUrl && !task.conversation_url && !onConvPage) {
-    throw new TaskFailure("recovery_conversation_unknown");
-  } else if ((task.is_followup || recovering) && (persistedUrl || task.conversation_url)) {
-    const resumeUrl = persistedUrl || task.conversation_url;
-    const cid = convId(resumeUrl);
-    if (!cid || !page.url().includes(cid)) navTarget = resumeUrl;
-  } else {
-    const base = task.required_project_url || "https://chatgpt.com/";
-    if (onConvPage || !page.url().startsWith(base)) navTarget = base;
-  }
+  const navigation = choosePromptNavigation({
+    recovering,
+    isFollowup: task.is_followup,
+    currentUrl: page.url(),
+    persistedUrl,
+    taskConversationUrl: task.conversation_url,
+    requiredProjectUrl: task.required_project_url,
+  });
+  if (navigation.error) throw new TaskFailure(navigation.error);
+  const navTarget = navigation.target;
   if (navTarget) {
     await page.goto(navTarget, { waitUntil: "domcontentloaded" });
     await installDomCore(page);
