@@ -53,7 +53,17 @@ pub fn save_config(config: &OracleWorkerConfig, profile: Option<&str>) -> Result
     let path = config_path(&config.pool, profile)?;
     let parent = path.parent().context("Invalid worker config path")?;
     fs::create_dir_all(parent)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+    }
     fs::write(&path, toml::to_string_pretty(config)?)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
     Ok(path)
 }
 
@@ -123,10 +133,14 @@ pub fn logs(pool: &str, profile: Option<&str>, follow: bool, lines: usize) -> Re
             command.args(["-n", &lines.to_string()]);
         }
         if stdout.exists() {
-            command.arg(stdout);
+            command.arg(&stdout);
         }
         if stderr.exists() {
-            command.arg(stderr);
+            command.arg(&stderr);
+        }
+        if !stdout.exists() && !stderr.exists() {
+            println!("No worker logs have been written under {}.", dir.display());
+            return Ok(());
         }
         let status = command.status()?;
         if !status.success() {
