@@ -110,6 +110,9 @@ const SESSION_FORMAT_VERSION = 1;
 const MAX_SESSION_SNAPSHOT_BYTES = 512 * 1024;
 const MAX_SESSION_PLAINTEXT_BYTES = 350 * 1024;
 const NPM_EXECUTABLE = process.env.NYXID_NPM_EXECUTABLE || "npm";
+const NPM_INSTALL_TIMEOUT_MS = Number(
+  process.env.NYXID_NPM_INSTALL_TIMEOUT_MS || 5 * 60 * 1000
+);
 const CAPABILITIES = ["commands_v1", "upgrade_v1", "session_import_v1", "attempt_fencing_v1"];
 // Result-image caps (the server re-validates and caps lower-or-equal). Kept
 // below the 16 MiB worker body cap once base64-inflated (~33%).
@@ -677,6 +680,9 @@ function launchChrome() {
   const child = spawn(CHROME_EXECUTABLE, chromeArgs(), {
     detached: true,
     stdio: "ignore",
+  });
+  child.once("error", (error) => {
+    log(`Chrome launch failed (${stableErrorCode(error)})`);
   });
   child.unref();
   return child;
@@ -1872,8 +1878,18 @@ async function installBundle(command) {
       ["install", "--omit=dev", "--no-audit", "--no-fund", "--save-exact"],
       { cwd: installDir, stdio: "inherit" }
     );
-    child.once("error", rejectInstall);
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      rejectInstall(Object.assign(new Error("npm install timed out"), {
+        code: "upgrade_dependency_install_timeout",
+      }));
+    }, NPM_INSTALL_TIMEOUT_MS);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      rejectInstall(error);
+    });
     child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
       if (code === 0) resolveInstall();
       else rejectInstall(Object.assign(new Error(`npm install failed (${code ?? signal})`), {
         code: "upgrade_dependency_install_failed",
