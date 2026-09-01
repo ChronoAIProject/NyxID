@@ -4899,7 +4899,7 @@ pub enum OracleWorkerCommands {
     Upgrade {
         #[arg(long)]
         pool: String,
-        /// Target worker label; defaults to this machine's installed worker
+        /// Queue an asynchronous remote upgrade instead of upgrading the local install
         #[arg(long)]
         label: Option<String>,
         #[command(flatten)]

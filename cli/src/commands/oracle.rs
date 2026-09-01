@@ -33,6 +33,7 @@ const POLL_INTERVAL_SECS: u64 = 3;
 const SESSION_FORMAT_VERSION: u32 = 1;
 const SESSION_INFO: &[u8] = b"nyxid-oracle-session-v1";
 const DEFAULT_PLAYWRIGHT_CORE_VERSION: &str = "1.62.1";
+const LOCAL_UPGRADE_WAIT_SECS: u64 = 4 * 60 * 60;
 
 pub async fn run(command: OracleCommands) -> Result<()> {
     match command {
@@ -517,11 +518,11 @@ async fn run_worker(command: OracleWorkerCommands) -> Result<()> {
             oracle_worker_daemon::uninstall(&pool, profile.as_deref())
         }
         OracleWorkerCommands::Upgrade { pool, label, auth } => {
-            let target = match label {
-                Some(value) => value,
-                None => oracle_worker_daemon::load_config(&pool, auth.profile.as_deref())?.label,
-            };
-            queue_worker_command(&pool, &target, "upgrade", auth).await
+            if let Some(target) = label {
+                queue_worker_command(&pool, &target, "upgrade", auth).await
+            } else {
+                upgrade_local_worker(pool, auth).await
+            }
         }
         OracleWorkerCommands::Drain { pool, label, auth } => {
             queue_worker_command(&pool, &label, "drain", auth).await
@@ -557,12 +558,7 @@ async fn queue_worker_command(
 ) -> Result<()> {
     let output = auth.output;
     let mut api = ApiClient::from_auth_checked(&auth).await?;
-    let response: Value = api
-        .post(
-            &format!("{}/commands", worker_path(pool, label)),
-            &serde_json::json!({ "command": command }),
-        )
-        .await?;
+    let response = enqueue_worker_command(&mut api, pool, label, command).await?;
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&response)?),
         OutputFormat::Table => eprintln!(
@@ -571,6 +567,133 @@ async fn queue_worker_command(
         ),
     }
     Ok(())
+}
+
+async fn enqueue_worker_command(
+    api: &mut ApiClient,
+    pool: &str,
+    label: &str,
+    command: &str,
+) -> Result<Value> {
+    api.post(
+        &format!("{}/commands", worker_path(pool, label)),
+        &serde_json::json!({ "command": command }),
+    )
+    .await
+}
+
+async fn upgrade_local_worker(pool: String, auth: crate::cli::AuthArgs) -> Result<()> {
+    let output = auth.output;
+    let profile = auth.profile.clone();
+    let config = oracle_worker_daemon::load_config(&pool, profile.as_deref())?;
+    let mut api = ApiClient::from_auth_checked(&auth).await?;
+    let bundle = fetch_manager_bundle(&mut api).await?;
+    if installed_bundle_matches(&config, &bundle) {
+        match output {
+            OutputFormat::Json => println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status": "current",
+                    "worker": config.label,
+                    "version": bundle.version,
+                }))?
+            ),
+            OutputFormat::Table => {
+                eprintln!("Local worker '{}' is already current.", config.label)
+            }
+        }
+        return Ok(());
+    }
+
+    let command = enqueue_worker_command(&mut api, &pool, &config.label, "upgrade").await?;
+    let command_id = command["id"]
+        .as_str()
+        .context("server did not return an upgrade command id")?
+        .to_string();
+    eprintln!(
+        "Queued local upgrade for worker '{}'; waiting for its current task to finish.",
+        config.label
+    );
+    let deadline = std::time::Instant::now() + Duration::from_secs(LOCAL_UPGRADE_WAIT_SECS);
+    loop {
+        let commands: Value = api
+            .get(&format!("{}/commands", worker_path(&pool, &config.label)))
+            .await?;
+        let command = commands["commands"].as_array().and_then(|items| {
+            items
+                .iter()
+                .find(|item| item["id"].as_str() == Some(command_id.as_str()))
+        });
+        if let Some(command) = command
+            && matches!(command["status"].as_str(), Some("failed" | "expired"))
+        {
+            bail!(
+                "Local worker upgrade {}: {}",
+                command["status"].as_str().unwrap_or("failed"),
+                command["result_code"].as_str().unwrap_or("unknown_error")
+            )
+        }
+
+        if installed_bundle_matches(&config, &bundle) {
+            let worker: Value = api.get(&worker_path(&pool, &config.label)).await?;
+            if worker["online"].as_bool() == Some(true)
+                && worker["version"].as_str() == Some(bundle.version.as_str())
+            {
+                match output {
+                    OutputFormat::Json => println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "status": "upgraded",
+                            "worker": config.label,
+                            "version": bundle.version,
+                            "command_id": command_id,
+                        }))?
+                    ),
+                    OutputFormat::Table => eprintln!(
+                        "Local worker '{}' restarted on version {}.",
+                        config.label, bundle.version
+                    ),
+                }
+                return Ok(());
+            }
+        }
+
+        if std::time::Instant::now() >= deadline {
+            bail!(
+                "Timed out waiting for local worker '{}'; the queued upgrade remains active",
+                config.label
+            )
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+fn installed_bundle_matches(config: &OracleWorkerConfig, bundle: &WorkerBundle) -> bool {
+    let Ok(source) = fs::read(&config.bundle_path) else {
+        return false;
+    };
+    let actual = hex::encode(Sha256::digest(&source));
+    let version_path = config
+        .bundle_path
+        .parent()
+        .map(|directory| directory.join("bundle-version"));
+    let version = version_path
+        .and_then(|path| fs::read_to_string(path).ok())
+        .unwrap_or_default();
+    let playwright_version = config
+        .bundle_path
+        .parent()
+        .and_then(|directory| fs::read_to_string(directory.join("package.json")).ok())
+        .and_then(|body| serde_json::from_str::<Value>(&body).ok())
+        .and_then(|package| {
+            package["dependencies"]["playwright-core"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    actual == bundle.sha256
+        && version.trim() == bundle.version
+        && playwright_version == bundle.playwright_core_version
 }
 
 fn print_workers(output: OutputFormat, response: &Value) -> Result<()> {
@@ -1731,6 +1854,50 @@ mod tests {
         let sha = hex::encode(Sha256::digest(source.as_bytes()));
         assert!(verify_bundle(source, &sha).is_ok());
         assert!(verify_bundle("changed", &sha).is_err());
+    }
+
+    #[test]
+    fn local_upgrade_verifies_source_and_version_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = "export const installed = true;\n";
+        let sha256 = hex::encode(Sha256::digest(source.as_bytes()));
+        let bundle_path = temp.path().join("worker.mjs");
+        fs::write(&bundle_path, source).unwrap();
+        fs::write(temp.path().join("bundle-version"), "0.10.0+testhash\n").unwrap();
+        fs::write(
+            temp.path().join("package.json"),
+            r#"{"dependencies":{"playwright-core":"1.62.1"}}"#,
+        )
+        .unwrap();
+        let config = OracleWorkerConfig {
+            pool: "pool-1".to_string(),
+            label: "worker-1".to_string(),
+            base_url: "https://nyxid.example".to_string(),
+            node_binary: PathBuf::from("node"),
+            bundle_path,
+            token_file: temp.path().join("token"),
+            state_file: temp.path().join("state.json"),
+            installation_id_file: temp.path().join("installation-id"),
+            chrome_executable: PathBuf::from("chrome"),
+            chrome_profile_dir: temp.path().join("chrome-profile"),
+            chrome_debug_port: 9222,
+        };
+        let bundle = WorkerBundle {
+            version: "0.10.0+testhash".to_string(),
+            sha256,
+            source: source.to_string(),
+            playwright_core_version: "1.62.1".to_string(),
+        };
+        assert!(installed_bundle_matches(&config, &bundle));
+        fs::write(temp.path().join("bundle-version"), "old-version\n").unwrap();
+        assert!(!installed_bundle_matches(&config, &bundle));
+    }
+
+    #[test]
+    fn playwright_runtime_version_must_be_exact() {
+        assert!(validate_playwright_version("1.62.1").is_ok());
+        assert!(validate_playwright_version("^1.62.1").is_err());
+        assert!(validate_playwright_version("1.62.1;touch-x").is_err());
     }
 
     #[test]
