@@ -58,3 +58,6 @@ docs/STREAMLINE_SERVICES_PROPOSAL.md
 /.refactor-loop/
 /.worktrees/
 /.config/consensus-rnd/host.env
+
+# ─── Deployment ───
+k8s/
