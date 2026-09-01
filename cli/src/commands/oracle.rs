@@ -10,7 +10,7 @@ use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use aes_gcm::aead::{Aead, Payload};
@@ -760,7 +760,7 @@ async fn install_worker(
         let _ = oracle_worker_daemon::stop(&pool, profile.as_deref());
     }
     oracle_worker_daemon::install_service(&config, profile.as_deref(), force)?;
-    launch_chrome(&config.chrome_executable, &config.chrome_profile_dir, port)?;
+    let _ = launch_chrome(&config.chrome_executable, &config.chrome_profile_dir, port)?;
     oracle_worker_daemon::start(&pool, profile.as_deref())?;
 
     eprintln!("Installed oracle worker '{label}' for pool '{pool}'.");
@@ -961,7 +961,7 @@ fn find_free_debug_port() -> Result<u16> {
     bail!("No free Chrome debugging port found in 9222-9321")
 }
 
-fn launch_chrome(executable: &Path, profile: &Path, port: u16) -> Result<()> {
+fn launch_chrome(executable: &Path, profile: &Path, port: u16) -> Result<Child> {
     fs::create_dir_all(profile)?;
     Command::new(executable)
         .arg(format!("--remote-debugging-port={port}"))
@@ -974,8 +974,36 @@ fn launch_chrome(executable: &Path, profile: &Path, port: u16) -> Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("Failed to launch Chrome")?;
-    Ok(())
+        .context("Failed to launch Chrome")
+}
+
+struct CaptureChrome(Option<Child>);
+
+impl CaptureChrome {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn stop(&mut self) -> Result<()> {
+        let Some(mut child) = self.0.take() else {
+            return Ok(());
+        };
+        if child.try_wait()?.is_none() {
+            child
+                .kill()
+                .context("Could not stop login-capture Chrome")?;
+        }
+        child
+            .wait()
+            .context("Could not reap login-capture Chrome")?;
+        Ok(())
+    }
+}
+
+impl Drop for CaptureChrome {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -1033,24 +1061,23 @@ async fn run_login(
         None,
     )?;
     let bundle = fetch_manager_bundle(&mut api).await?;
-    let base = oracle_worker_daemon::install_dir(&pool, profile.as_deref())?;
-    let capture_dir = base.join("login-capture");
-    fs::create_dir_all(&capture_dir)?;
-    set_private_dir(&capture_dir)?;
+    let capture_workspace =
+        tempfile::tempdir().context("Could not create private login capture directory")?;
+    set_private_dir(capture_workspace.path())?;
+    let capture_dir = capture_workspace.path().to_path_buf();
     let node = resolve_node()?;
     let npm = resolve_program(&["npm"])?;
-    let chrome = resolve_chrome()?;
+    let chrome_executable = resolve_chrome()?;
     install_bundle_runtime(&capture_dir, &bundle, &npm)?;
     let port = find_free_debug_port()?;
     let chrome_profile = capture_dir.join("chrome-profile");
-    launch_chrome(&chrome, &chrome_profile, port)?;
+    let mut capture_browser =
+        CaptureChrome::new(launch_chrome(&chrome_executable, &chrome_profile, port)?);
     wait_for_cdp(port, Duration::from_secs(30))?;
 
     eprintln!("Complete ChatGPT login in the Chrome window that opened.");
     eprintln!("The session is captured locally after authenticated ChatGPT is verified.");
-    let temp = tempfile::tempdir().context("Could not create private login capture directory")?;
-    set_private_dir(temp.path())?;
-    let capture_file = temp.path().join("session.json");
+    let capture_file = capture_dir.join("session.json");
     let status = Command::new(&node)
         .arg(capture_dir.join("worker.mjs"))
         .args(["--capture-session", &capture_file.display().to_string()])
@@ -1067,10 +1094,12 @@ async fn run_login(
     if !status.success() {
         bail!("Local ChatGPT login capture did not complete")
     }
-    let plaintext = Zeroizing::new(
-        fs::read(&capture_file).context("Local login capture did not produce session state")?,
-    );
-    let sealed = encrypt_login_snapshot(plaintext.as_slice(), token.as_bytes())?;
+    let sealed = Zeroizing::new({
+        let plaintext = Zeroizing::new(
+            fs::read(&capture_file).context("Local login capture did not produce session state")?,
+        );
+        encrypt_login_snapshot(plaintext.as_slice(), token.as_bytes())?
+    });
     let verifier = hex::encode(Sha256::digest(token.as_bytes()));
     let response: Value = api
         .post(
@@ -1081,10 +1110,15 @@ async fn run_login(
             &serde_json::json!({
                 "format_version": SESSION_FORMAT_VERSION,
                 "worker_token_sha256": verifier,
-                "sealed_blob_base64": base64::engine::general_purpose::STANDARD.encode(&sealed),
+                "sealed_blob_base64": base64::engine::general_purpose::STANDARD.encode(sealed.as_slice()),
             }),
         )
         .await?;
+    drop(sealed);
+    capture_browser.stop()?;
+    capture_workspace
+        .close()
+        .context("Could not remove the temporary login-capture profile")?;
     let outcomes = wait_for_login_imports(&mut api, &pool, &response, wait_secs).await?;
     let all_verified = !outcomes.is_empty()
         && outcomes.iter().all(|result| {

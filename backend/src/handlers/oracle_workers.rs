@@ -108,6 +108,21 @@ pub struct UploadLoginSnapshotResponse {
     pub skipped_workers: Vec<String>,
 }
 
+fn decode_login_snapshot_envelope(encoded: &str) -> AppResult<Zeroizing<Vec<u8>>> {
+    if encoded.len() > oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS {
+        return Err(AppError::OraclePayloadTooLarge(format!(
+            "login snapshot must be at most {} base64 characters",
+            oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS
+        )));
+    }
+    let sealed_envelope = base64::engine::general_purpose::STANDARD
+        .decode(encoded.as_bytes())
+        .map_err(|_| {
+            AppError::ValidationError("sealed_blob_base64 must be valid base64".to_string())
+        })?;
+    Ok(Zeroizing::new(sealed_envelope))
+}
+
 fn worker_info(worker: OracleWorker) -> OracleWorkerInfo {
     let last_seen_secs_ago = (Utc::now() - worker.last_seen_at).num_seconds().max(0);
     OracleWorkerInfo {
@@ -285,11 +300,7 @@ pub async fn upload_login_snapshot(
 ) -> AppResult<impl IntoResponse> {
     let actor = auth_user.user_id.to_string();
     let pool = managed_pool(&state, &actor, &id_or_slug).await?;
-    let sealed_envelope = base64::engine::general_purpose::STANDARD
-        .decode(body.sealed_blob_base64.as_bytes())
-        .map_err(|_| {
-            AppError::ValidationError("sealed_blob_base64 must be valid base64".to_string())
-        })?;
+    let sealed_envelope = decode_login_snapshot_envelope(&body.sealed_blob_base64)?;
     let fanout = oracle_login_snapshot_service::create_and_fanout(
         &state.db,
         &state.encryption_keys,
@@ -298,7 +309,7 @@ pub async fn upload_login_snapshot(
         oracle_login_snapshot_service::CreateLoginSnapshotInput {
             format_version: body.format_version,
             worker_token_sha256: Zeroizing::new(body.worker_token_sha256),
-            sealed_envelope: Zeroizing::new(sealed_envelope),
+            sealed_envelope,
         },
     )
     .await?;
@@ -344,5 +355,19 @@ mod tests {
         assert!(parse_command("drain").is_ok());
         assert!(parse_command("session_import").is_err());
         assert!(parse_command("unknown").is_err());
+    }
+
+    #[test]
+    fn login_snapshot_rejects_oversized_base64_before_decoding() {
+        let oversized =
+            "!".repeat(oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS + 1);
+        assert!(matches!(
+            decode_login_snapshot_envelope(&oversized),
+            Err(AppError::OraclePayloadTooLarge(_))
+        ));
+        assert!(matches!(
+            decode_login_snapshot_envelope("not base64"),
+            Err(AppError::ValidationError(_))
+        ));
     }
 }

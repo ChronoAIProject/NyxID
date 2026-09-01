@@ -15,6 +15,7 @@ use crate::services::oracle_worker_service;
 
 pub const LOGIN_SNAPSHOT_FORMAT_VERSION: u32 = 1;
 pub const MAX_LOGIN_SNAPSHOT_BYTES: usize = 512 * 1024;
+pub const MAX_LOGIN_SNAPSHOT_BASE64_CHARS: usize = MAX_LOGIN_SNAPSHOT_BYTES.div_ceil(3) * 4;
 pub const LOGIN_SNAPSHOT_TTL_SECS: i64 = 60 * 60;
 
 pub struct CreateLoginSnapshotInput {
