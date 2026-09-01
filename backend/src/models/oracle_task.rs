@@ -32,7 +32,6 @@ impl std::fmt::Debug for OracleImage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OracleImage")
             .field("mime", &self.mime)
-            .field("name", &self.name)
             .field("bytes", &self.data.len())
             .finish()
     }
@@ -283,6 +282,19 @@ mod tests {
         assert_eq!(restored.max_retries, DEFAULT_ORACLE_TASK_MAX_RETRIES);
         assert_eq!(restored.attempt_count, 0);
         assert!(restored.dispatch_attempt_id.is_none());
+    }
+
+    #[test]
+    fn image_debug_redacts_bytes_and_filename() {
+        let image = OracleImage {
+            mime: "image/png".to_string(),
+            data: vec![1, 2, 3, 4],
+            name: Some("sensitive-customer-name.png".to_string()),
+        };
+        let debug = format!("{image:?}");
+        assert!(debug.contains("bytes: 4"));
+        assert!(!debug.contains("sensitive-customer-name"));
+        assert!(!debug.contains("[1, 2, 3, 4]"));
     }
 
     #[test]
