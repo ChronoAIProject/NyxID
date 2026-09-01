@@ -18,7 +18,8 @@ use crate::models::oracle_worker_command::{
 };
 use crate::mw::auth::AuthUser;
 use crate::services::{
-    audit_service, oracle_login_snapshot_service, oracle_pool_service, oracle_worker_service,
+    audit_service, oracle_login_snapshot_service, oracle_pool_service,
+    oracle_worker_bundle_service, oracle_worker_service,
 };
 
 const ONLINE_WINDOW_SECS: i64 = 90;
@@ -236,8 +237,14 @@ pub async fn enqueue_command(
     let actor = auth_user.user_id.to_string();
     let pool = managed_pool(&state, &actor, &id_or_slug).await?;
     let kind = parse_command(&body.command)?;
+    let bundle = if kind == OracleWorkerCommandKind::Upgrade {
+        let current = oracle_worker_bundle_service::current_bundle();
+        Some((current.version.to_string(), current.sha256.to_string()))
+    } else {
+        None
+    };
     let command = oracle_worker_service::enqueue_command(
-        &state.db, &pool.id, &actor, &label, kind, None, None,
+        &state.db, &pool.id, &actor, &label, kind, None, bundle,
     )
     .await?;
     audit_service::log_for_user(

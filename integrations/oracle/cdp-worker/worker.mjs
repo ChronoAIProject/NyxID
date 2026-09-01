@@ -56,7 +56,24 @@ const TOKEN = (() => {
 })();
 const LABEL = process.env.NYXID_WORKER_LABEL || "tab_1";
 const CDP_URL = process.env.CHROME_CDP_URL || "http://localhost:9222";
-const SCRIPT_VERSION = "cdp-2.0-reliable";
+const BUNDLE_VERSION_FILE =
+  process.env.NYXID_BUNDLE_VERSION_FILE ||
+  resolve(dirname(fileURLToPath(import.meta.url)), "bundle-version");
+const SOURCE_SHA256 = createHash("sha256")
+  .update(readFileSync(fileURLToPath(import.meta.url)))
+  .digest("hex");
+const SCRIPT_VERSION = (() => {
+  try {
+    const version = readFileSync(BUNDLE_VERSION_FILE, "utf8").trim();
+    if (
+      /^[A-Za-z0-9._+-]{1,128}$/.test(version) &&
+      version.endsWith(SOURCE_SHA256.slice(0, 12))
+    ) {
+      return version;
+    }
+  } catch {}
+  return `cdp+${SOURCE_SHA256.slice(0, 12)}`;
+})();
 const POLL_MS = Number(process.env.NYXID_POLL_MS || 5000);
 const STABLE_INTERVAL_MS = 8000;
 const MAX_WAIT_MS = Number(process.env.NYXID_MAX_WAIT_MS || 2 * 60 * 60 * 1000); // 2h
@@ -1753,18 +1770,26 @@ async function installBundle(command) {
   const response = await apiGet("/bundle");
   const source = response.bundle || "";
   const actual = createHash("sha256").update(source).digest("hex");
+  const version = String(response.version || "");
   if (
     !/^[a-f0-9]{64}$/.test(response.sha256 || "") ||
     response.sha256 !== actual ||
-    (command.bundle_sha256 && command.bundle_sha256 !== actual)
+    (command.bundle_sha256 && command.bundle_sha256 !== actual) ||
+    !/^[A-Za-z0-9._+-]{1,128}$/.test(version) ||
+    !version.endsWith(actual.slice(0, 12)) ||
+    (command.bundle_version && command.bundle_version !== version)
   ) {
     throw new TaskFailure("bundle_checksum_mismatch");
   }
   const target = resolve(process.argv[1]);
   const mode = statSync(target).mode & 0o777;
   const temp = `${target}.upgrade-${process.pid}`;
+  const versionTemp = `${BUNDLE_VERSION_FILE}.upgrade-${process.pid}`;
   writeFileSync(temp, source, { mode });
   chmodSync(temp, mode);
+  writeFileSync(versionTemp, `${version}\n`, { mode: 0o644 });
+  chmodSync(versionTemp, 0o644);
+  renameSync(versionTemp, BUNDLE_VERSION_FILE);
   renameSync(temp, target);
   return "upgrade_installed";
 }

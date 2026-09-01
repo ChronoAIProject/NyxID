@@ -834,6 +834,11 @@ async fn verify_worker_token(base_url: &str, token: &str, expected_sha: &str) ->
 fn install_bundle_runtime(dir: &Path, bundle: &WorkerBundle, npm: &Path) -> Result<()> {
     verify_bundle(&bundle.source, &bundle.sha256)?;
     atomic_write(&dir.join("worker.mjs"), bundle.source.as_bytes(), 0o755)?;
+    atomic_write(
+        &dir.join("bundle-version"),
+        format!("{}\n", bundle.version).as_bytes(),
+        0o644,
+    )?;
     let package = serde_json::json!({
         "name": "nyxid-oracle-worker-install",
         "private": true,
