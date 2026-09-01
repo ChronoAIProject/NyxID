@@ -86,9 +86,10 @@ You have ChatGPT Pro and want to share it.
    The command asks for the one-time pool worker token with hidden input. You
    can also pass `--worker-token-file`. It verifies Node 18 or newer, npm, and
    Chrome or Chromium. It then allocates a unique worker label, verifies the
-   server-embedded bundle checksum, installs `playwright-core`, writes private
-   local files, installs a launchd or systemd user service, starts a dedicated
-   Chrome profile, and starts the worker. Use `--profile <name>` for a second
+   server-embedded bundle checksum, installs the exact `playwright-core`
+   version from the bundle manifest, writes mode `0600` config and token files,
+   installs a launchd or systemd user service, starts a dedicated Chrome
+   profile, and starts the worker. Use `--profile <name>` for a second
    installation of the same pool on one machine.
 
    The installed service uses KeepAlive on macOS or `Restart=always` on Linux.
@@ -104,9 +105,10 @@ You have ChatGPT Pro and want to share it.
 
    The command opens a local dedicated Chrome profile for password, OTP, SSO,
    and Cloudflare checks. After login, the CLI captures and encrypts the
-   session locally, then waits for each capable worker to import and verify it.
-   See [Pool-wide ChatGPT login](#pool-wide-chatgpt-login) for the security
-   model and device-binding limitation.
+   session locally, uploads the sealed envelope, terminates the capture Chrome,
+   deletes the temporary profile, then waits for each capable worker to import
+   and verify it. See [Pool-wide ChatGPT login](#pool-wide-chatgpt-login) for
+   the security model and device-binding limitation.
 
 4. **Verify** worker presence:
 
@@ -194,7 +196,8 @@ nyxid oracle ask chatgpt-pro --file q.md | tee answer.md
 ### Consumer endpoints (JWT or `nyxid_ag_` API key)
 
 All under `/api/v1/oracle`. Submits accept a base64 PDF, so this router
-has a 16 MiB body cap.
+has a 16 MiB body cap. The login-snapshot route overrides that limit with a
+bound based on the 512 KiB decoded envelope cap.
 
 | Method · Path | Purpose |
 |---|---|
@@ -208,7 +211,7 @@ has a 16 MiB body cap.
 | `GET /pools/{id_or_slug}/workers/{label}` | Manager-only worker detail. |
 | `GET, POST /pools/{id_or_slug}/workers/{label}/commands` | Manager-only command history and enqueue. |
 | `POST /pools/{id_or_slug}/login-snapshots` | Validate and fan out an opaque encrypted login snapshot. |
-| `GET /worker-bundle` | Authenticated embedded worker source, version, and SHA-256. |
+| `GET /worker-bundle` | Authenticated embedded worker source, version, SHA-256, and exact `playwright-core` version. |
 | `POST /pools/{id_or_slug}/tasks` | Submit a task. Returns `task_id` + `queue_position`. |
 | `POST /pools/{id_or_slug}/attach` | Attach an existing conversation by `{chatgpt_url, tag?}`. Returns `conversation_id` + `task_id` (a `scrape` task). |
 | `GET /pools/{id_or_slug}/status` | Queue depth + active workers. |
@@ -236,8 +239,8 @@ has a 16 MiB body cap.
 `dispatched`, `completed`, `failed`, or `cancelled`. While queued,
 `queue_position` is 1-based. Every response carries `attempts`, `retry_count`,
 and `max_retries`. A completed task carries `response`. A failed task carries
-`failure_reason`, such as `extraction_failure`, `empty_response`, or
-`infrastructure_retry_exhausted`.
+`failure_reason`, such as `extraction_failure`, `empty_response`,
+`prompt_delivery_uncertain`, or `infrastructure_retry_exhausted`.
 
 ### Worker endpoints (pool worker token)
 
@@ -252,10 +255,10 @@ fields remain valid. New fields are additive.
 | `GET /task` | `?worker=worker_1&script_version=&page_url=&instance_id=` | Idle response, or a task with retry counters, optional `dispatch_attempt_id`, prompt, attachment, conversation URL, and project hint. |
 | `POST /heartbeat` | Presence, capabilities, health, current task, and command reports | `{status:"ok", command?}`. The server leases at most one capability-compatible command. |
 | `POST /ack` | Task identity, phase, optional `instance_id` and `dispatch_attempt_id` | `{status:"ok"}` or `{status:"cancelled"}`. |
-| `POST /result` | Task identity, response, optional images and attempt fences | `{status:"saved"\|"saved_failed"\|"ignored"}`. |
+| `POST /result` | Task identity, response, optional images and attempt fences | `{status:"saved"\|"saved_failed"\|"requeued"\|"ignored"}`. `requeued` means a pre-send browser failure consumed an infrastructure retry. |
 | `POST /pin-conv-url` | Task identity, URL, optional attempt fences | `{status:"pinned"}`. |
 | `POST /transcript` | Task identity, turns, URL, optional attempt fences | `{status:"imported"\|"ignored", imported_pairs}`. |
-| `GET /bundle` | None | Worker-token-authenticated embedded worker source, version, and SHA-256. |
+| `GET /bundle` | None | Worker-token-authenticated embedded worker source, version, SHA-256, and exact `playwright-core` version. |
 | `GET /login-snapshots/{snapshot_id}` | None | The still end-to-end-sealed login envelope for the authenticated pool. |
 
 A `task` poll carries `kind` (`"prompt"`, `"scrape"`, or `"extract"`): on
@@ -285,9 +288,11 @@ a protocol shape they cannot parse.
 - **Bounded infrastructure retry** requeues an expired lease at the front by
   preserving `created_at`. The lease expiry increments `retry_count`. New and
   legacy task rows default to `max_retries = 3`; older rows deserialize without
-  a migration. If the next expiry would exceed the budget, the server marks the
-  task failed with `infrastructure_retry_exhausted` and starts its retention
-  TTL. Model failures and content failures do not use this retry budget.
+  a migration. A worker can also report `browser_recovery_exhausted` before it
+  attempts prompt delivery. The server requeues that task immediately and uses
+  the same retry budget. If the next retry would exceed the budget, the server
+  marks the task failed with `infrastructure_retry_exhausted` and starts its
+  retention TTL. Model failures and content failures do not use this budget.
 - **Visible attempts** increment `attempt_count` on each fresh dispatch.
   Idempotent reclaims by the current worker do not increment it.
 - **Idempotent reclaim** returns a worker's current leased task, including the
@@ -322,10 +327,13 @@ transcript, cookie, storage value, or signed image URL.
 
 HTTP failures use capped exponential backoff with jitter. Transient fetch,
 timeout, rate-limit, and server failures do not terminate the process. The
-worker tracks consecutive HTTP, CDP, and tab failures. It reconnects over CDP,
-replaces a crashed or navigated-away tab, restores the project URL, and
-relaunches Chrome with the configured executable, debug port, and profile after
-repeated CDP failures.
+worker tracks consecutive HTTP, CDP, tab, and task-recovery failures. It
+reconnects over CDP, replaces a crashed or navigated-away tab, restores the
+project URL, and relaunches Chrome with the configured executable, debug port,
+and profile after repeated failures. Task recovery stops after a bounded count.
+A pre-send failure reports `browser_recovery_exhausted` for server retry. A
+post-send failure reports `prompt_delivery_uncertain` and cannot trigger a
+prompt replay.
 
 Prompt delivery uses a conservative recovery rule:
 
@@ -360,7 +368,8 @@ Managers can queue these commands:
 | `worker restart <pool> <label>` | Finish the current task, report, then exit for supervisor restart. |
 | `worker relaunch-browser <pool> <label>` | Recreate the dedicated Chrome process and tab. |
 | `worker relogin <pool> <label>` | Open the ChatGPT login page. Pool-wide login normally uses `oracle login` instead. |
-| `worker upgrade --pool <pool> [--label <label>]` | Drain, verify and atomically replace the embedded worker bundle, then exit for supervisor restart. |
+| `worker upgrade --pool <pool>` | Upgrade the installed local profile. The CLI waits for task drain, verifies the local source, version, dependency manifest, and restarted worker presence. |
+| `worker upgrade --pool <pool> --label <label>` | Queue an asynchronous remote upgrade. The worker drains, verifies, replaces the bundle, and exits for supervisor restart. |
 
 The server audits the actor, pool ID, worker label, command ID, command kind,
 and result metadata. It never audits command payload bodies or session
@@ -408,6 +417,10 @@ It does not ask the user to visit each worker.
 8. The CLI polls each command and prints one result per worker. The command
    exits unsuccessfully if any target does not verify, expires, or times out.
 
+After the upload, the CLI terminates the capture Chrome and deletes its entire
+temporary workspace, including the profile and plaintext capture file. Error
+paths use the same cleanup guard.
+
 The server's persisted state cannot derive the session key because it stores
 only the worker-token hash. The backend does see the raw bearer token while it
 authenticates live worker requests, so this design does not protect against a
@@ -424,15 +437,17 @@ show that worker as logged out.
 The backend embeds `integrations/oracle/cdp-worker/worker.mjs` at compile time.
 Its version is the backend package version plus the first 12 characters of the
 source SHA-256. Both the manager and worker-token endpoints return the source,
-version, and full SHA-256.
+version, full SHA-256, and an exact `playwright-core` version.
 
 The CLI trusts its authenticated NyxID base URL and TLS connection to select
 the bundle, then verifies the returned bytes against the returned SHA-256. It
 also checks that the manager and worker-token endpoints agree. A pushed upgrade
-downloads through the worker-token endpoint, verifies SHA-256, writes a sibling
-temporary file, renames it over `worker.mjs`, and exits. The supervisor starts
-the new source. The bundle checksum detects transport or storage corruption; it
-is not an independent code-signing authority beyond the NyxID backend and TLS.
+downloads through the worker-token endpoint and verifies SHA-256. It then
+installs the exact dependency from the npm registry with a five-minute timeout,
+replaces `worker.mjs`, and exits. The supervisor starts the new source. npm
+validates the registry package integrity. The bundle checksum detects transport
+or storage corruption. Neither check is an independent code-signing authority
+beyond the NyxID backend, the npm registry, and TLS.
 
 ---
 
@@ -450,11 +465,12 @@ is not an independent code-signing authority beyond the NyxID backend and TLS.
   pool id, sizes, outcomes — never the prompt or the answer, matching the
   WS-frame-injection logging discipline.
 - Login captures exist as plaintext only in a mode `0600` temporary file on
-  the CLI machine and in zeroizing CLI memory. The server accepts only the
-  end-to-end-sealed envelope. Audit and tracing record the snapshot ID, byte
+  the CLI machine and in zeroizing CLI memory. The CLI deletes the temporary
+  profile and file after upload, including on error paths. The server accepts
+  only the end-to-end-sealed envelope. Audit and tracing record the snapshot ID, byte
   count, target count, and outcome codes. They never record the sealed blob,
   cookies, storage, raw token, prompt, response, transcript, conversation URL,
-  or signed image URL.
+  attachment filename, or signed image URL.
 - The browser side runs under the operator's own logged-in session with
   the default User-Agent; the userscript does not spoof or evade. Routing a
   browser-automation bridge through a shared service changes the *consumer*

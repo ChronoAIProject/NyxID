@@ -24,8 +24,9 @@ Install performs these actions:
 1. Allocates a label that is unique within the pool.
 2. Downloads the worker source embedded in the NyxID backend and verifies its
    SHA-256.
-3. Installs `playwright-core` without a bundled browser.
-4. Writes config, a mode `0600` token file, a stable installation ID, and a
+3. Installs the exact `playwright-core` version from the bundle manifest without
+   a bundled browser.
+4. Writes mode `0600` config and token files, a stable installation ID, and a
    state-file path under `~/.nyxid-oracle/<pool>/`.
 5. Installs a launchd LaunchAgent on macOS or a systemd user unit on Linux.
 6. Starts a dedicated Chrome profile and the supervised worker.
@@ -61,6 +62,10 @@ authenticated DOM, the CLI captures allowlisted ChatGPT and OpenAI cookies and
 storage. It encrypts the capture locally with AES-256-GCM and a key derived by
 HKDF-SHA256 from the raw pool worker token.
 
+After upload, the CLI stops the capture Chrome and deletes its temporary
+profile, worker files, and plaintext capture. The cleanup guard also runs when
+capture or upload fails.
+
 The backend stores only the encrypted envelope, wraps it with its normal
 at-rest encryption, and expires it after one hour. It queues `session_import`
 only for workers that advertise support. Each worker decrypts locally, imports
@@ -91,9 +96,12 @@ current task unless a logged-out task needs an immediate session import to
 continue. Command IDs and terminal results persist locally, so a delivery lease
 retry does not repeat a completed side effect.
 
-Upgrade downloads the backend-embedded source through the worker-token
-endpoint, verifies SHA-256, atomically replaces `worker.mjs`, and exits. launchd
-or systemd starts the new bundle.
+Without `--label`, upgrade targets the installed local profile and waits until
+the local files and restarted worker report the expected version. With
+`--label`, the CLI queues the same upgrade asynchronously for a remote worker.
+The worker installs the exact `playwright-core` version with a five-minute
+timeout, verifies the backend-embedded source SHA-256, replaces `worker.mjs`,
+and exits. launchd or systemd starts the new bundle.
 
 ## Recovery behavior
 
@@ -104,6 +112,9 @@ recoverable conditions:
   backoff and jitter. A transient fetch failure does not exit the worker.
 - A CDP disconnect triggers reconnect. Repeated failures relaunch Chrome with
   the configured executable, profile, and debug port.
+- Repeated task-level browser failures stop after a bounded count. A known
+  pre-send failure consumes a server infrastructure retry. A post-send failure
+  returns `prompt_delivery_uncertain` and never replays the prompt.
 - A closed, crashed, or navigated-away tab is replaced with `chatgpt.com`. The
   worker restores the server-provided project URL.
 - The mode `0600` state file records only the task ID, attempt ID, conversation
@@ -161,6 +172,9 @@ worker.
 | `NYXID_HTTP_TIMEOUT_MS` | `30000` | Per-request timeout. |
 | `NYXID_MAX_HTTP_BACKOFF_MS` | `60000` | Maximum network retry delay. |
 | `NYXID_MAX_CDP_FAILURES_BEFORE_RELAUNCH` | `3` | CDP failures before a full Chrome relaunch. |
+| `NYXID_MAX_TASK_RECOVERY_FAILURES` | `6` | Task-level browser failures before the worker reports a bounded failure. |
+| `NYXID_NPM_EXECUTABLE` | `npm` | npm executable used by pushed upgrades. |
+| `NYXID_NPM_INSTALL_TIMEOUT_MS` | `300000` | Maximum dependency-install time during a pushed upgrade. |
 | `NYXID_MAX_WAIT_MS` | `7200000` | Maximum answer wait. |
 | `NYXID_NO_OUTPUT_IDLE_MS` | `420000` | Non-generating wait before an empty answer fails. |
 
@@ -174,8 +188,8 @@ worker.
   worker and userscript.
 - The state file contains no session or task bodies. Worker logs use stable
   error codes and task metadata. They do not print prompts, responses,
-  transcripts, cookies, storage, raw tokens, conversation URLs, or signed image
-  URLs.
+  transcripts, cookies, storage, raw tokens, conversation URLs, attachment
+  filenames, or signed image URLs.
 - The backend sees a raw bearer token while authenticating a live worker
   request. The login-envelope claim applies to persisted server state: the
   stored worker-token hash cannot derive the HKDF key.
