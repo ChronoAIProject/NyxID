@@ -440,14 +440,35 @@ async fn expire_stale_commands(
             } },
         )
         .await?;
-    if let Some(label) = worker_label
-        && let Some(latest) = db
+    if let Some(label) = worker_label {
+        if let Some(latest) = db
             .collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
             .find_one(doc! { "pool_id": pool_id, "worker_label": label })
             .sort(doc! { "created_at": -1 })
             .await?
-    {
-        reconcile_desired_state(db, &latest).await?;
+        {
+            reconcile_desired_state(db, &latest).await?;
+        }
+    } else {
+        let draining_workers: Vec<OracleWorker> = db
+            .collection::<OracleWorker>(ORACLE_WORKERS)
+            .find(doc! { "pool_id": pool_id, "desired_state": "draining" })
+            .await?
+            .try_collect()
+            .await?;
+        for worker in draining_workers {
+            if let Some(latest) = db
+                .collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
+                .find_one(doc! {
+                    "pool_id": pool_id,
+                    "worker_label": &worker.worker_label,
+                })
+                .sort(doc! { "created_at": -1 })
+                .await?
+            {
+                reconcile_desired_state(db, &latest).await?;
+            }
+        }
     }
     Ok(())
 }
@@ -561,14 +582,16 @@ pub async fn apply_command_reports(
         let result_code = optional_metadata(report.result_code, "result_code")?;
         let now = Utc::now();
         let commands = db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS);
-        let existing = commands
+        let Some(existing) = commands
             .find_one(doc! {
                 "_id": &report.command_id,
                 "pool_id": pool_id,
                 "worker_label": worker_label,
             })
             .await?
-            .ok_or_else(|| AppError::OracleWorkerCommandNotFound(report.command_id.clone()))?;
+        else {
+            continue;
+        };
         if matches!(
             existing.status,
             OracleWorkerCommandStatus::Succeeded
@@ -600,9 +623,9 @@ pub async fn apply_command_reports(
                     .build(),
             )
             .await?;
-        let updated =
-            updated.ok_or_else(|| AppError::OracleWorkerCommandNotFound(report.command_id))?;
-        reconcile_desired_state(db, &updated).await?;
+        if let Some(updated) = updated {
+            reconcile_desired_state(db, &updated).await?;
+        }
     }
     Ok(())
 }
@@ -779,11 +802,18 @@ mod tests {
             &db,
             &pool.id,
             &first.worker_label,
-            vec![CommandReport {
-                command_id: resume.id,
-                succeeded: true,
-                result_code: Some("resumed".to_string()),
-            }],
+            vec![
+                CommandReport {
+                    command_id: uuid::Uuid::new_v4().to_string(),
+                    succeeded: true,
+                    result_code: Some("stale_report".to_string()),
+                },
+                CommandReport {
+                    command_id: resume.id,
+                    succeeded: true,
+                    result_code: Some("resumed".to_string()),
+                },
+            ],
         )
         .await
         .unwrap();
@@ -818,6 +848,55 @@ mod tests {
             error,
             AppError::OracleWorkerCapabilityUnsupported(_)
         ));
+        db.drop().await.ok();
+    }
+
+    #[tokio::test]
+    async fn pool_wide_expiry_reconciles_worker_desired_state() {
+        let Some(db) = connect_test_database("oracle_worker_pool_expiry").await else {
+            return;
+        };
+        let pool = pool();
+        let worker = allocate_worker(&db, &pool).await.unwrap();
+        report_presence(
+            &db,
+            &pool,
+            WorkerPresenceInput {
+                worker_label: worker.worker_label.clone(),
+                capabilities: vec!["commands_v1".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let command = enqueue_command(
+            &db,
+            &pool.id,
+            &pool.user_id,
+            &worker.worker_label,
+            OracleWorkerCommandKind::Restart,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        db.collection::<Document>(ORACLE_WORKER_COMMANDS)
+            .update_one(
+                doc! { "_id": &command.id },
+                doc! { "$set": {
+                    "deadline_at": bson::DateTime::from_chrono(Utc::now() - Duration::seconds(1)),
+                } },
+            )
+            .await
+            .unwrap();
+
+        list_commands(&db, &pool.id, None).await.unwrap();
+
+        assert!(
+            accepts_new_tasks(&db, &pool.id, &worker.worker_label)
+                .await
+                .unwrap()
+        );
         db.drop().await.ok();
     }
 
