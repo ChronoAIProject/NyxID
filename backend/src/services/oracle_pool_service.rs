@@ -35,7 +35,7 @@ const PER_USER_MAX_INFLIGHT_CAP: u32 = 100;
 const TASK_TIMEOUT_SECS_MIN: u64 = 60;
 const TASK_TIMEOUT_SECS_MAX: u64 = 86_400;
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct CreatePoolInput {
     pub slug: String,
     pub name: String,
@@ -51,7 +51,7 @@ pub struct CreatePoolInput {
 }
 
 /// Fields a pool owner may update. `None` = leave unchanged.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct UpdatePoolInput {
     pub name: Option<String>,
     pub description: Option<String>,
