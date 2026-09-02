@@ -63,22 +63,22 @@ pub async fn resolve_admin_service_by_slug(
     Ok(service)
 }
 
-/// Surface the one row misconfiguration that silently 401s the entire chat
-/// surface, instead of waiting for a user to report it.
+/// Report the row misconfiguration that causes every typed chat request to
+/// return 401.
 ///
-/// Deployed Aevatar authenticates only `Authorization: Bearer <NyxID JWT>`.
-/// The bridge that supplies it (`handlers/assistant.rs::needs_forward_token_bridge`)
-/// is gated on `Session && forward_access_token`, so clearing that flag both
-/// stops the bearer forward and disarms the mint: NyxID then sends no
-/// `Authorization` at all and every Aevatar surface answers 401. This exact
-/// flip took production chat down on 2026-08-12, and nothing in the system
-/// said so — the only signal was a user seeing a failed chat.
+/// Deployed Aevatar authenticates caller identity from `X-NyxID-Identity-Token`.
+/// Workflow execution separately selects `Authorization: Bearer <NyxID JWT>`
+/// first, then `X-NyxID-Delegation-Token` when Bearer is absent. The bridge that
+/// supplies the Bearer (`handlers/assistant.rs::needs_forward_token_bridge`) is
+/// gated on `Session && forward_access_token`, so clearing that flag stops the
+/// forward and disarms the mint. NyxID still sends identity, but typed streaming
+/// has no execution capability and answers 401. This exact flip took production
+/// chat down on 2026-08-12, and the only signal was a user seeing a failed chat.
 ///
-/// Deliberately a warning, not a hard failure: `false` becomes the CORRECT
-/// value once Aevatar validates `X-NyxID-Identity-Token` (the TD-3 cutover),
-/// and failing closed here would turn that rollout into an outage of its own.
-/// Fires once per process — the condition is process-lifetime config, so
-/// per-request logging would only add noise.
+/// This is a warning, not a hard failure. `false` becomes the correct value once
+/// a proven replacement supplies both identity and execution capability.
+/// Failing closed here would turn that rollout into an outage. The warning fires
+/// once per process because the condition is process-lifetime configuration.
 fn warn_if_bridge_disarmed(service: &DownstreamService) {
     if service.forward_access_token {
         return;
