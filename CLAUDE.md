@@ -322,7 +322,11 @@ JWT_PRIVATE_KEY_PATH=keys/private.pem
 JWT_PUBLIC_KEY_PATH=keys/public.pem
 JWT_ISSUER=nyxid
 JWT_ACCESS_TTL_SECS=900             # 15 min
-JWT_REFRESH_TTL_SECS=604800         # 7 days
+JWT_REFRESH_TTL_SECS=604800         # 7 days, ROLLING: every refresh rotates the token and restarts the TTL,
+                                    # so an active CLI never needs a browser re-login. Reuse of a rotated
+                                    # token more than 120s after rotation (a stale copy in another tool
+                                    # or profile) revokes the whole session; the CLI locks + re-reads the
+                                    # profile's token files across processes to avoid that.
 JWT_RELAY_REPLY_TTL_SECS=1800       # Per-callback reply token TTL
 JWT_RELAY_CALLBACK_TTL_SECS=300     # Callback authentication JWT TTL
 JWT_RELAY_ACCESS_TTL_SECS=300       # X-NyxID-User-Token relay access token TTL. Relay tokens are
@@ -428,6 +432,7 @@ source "$HOME/.cargo/env" 2>/dev/null   # Ensure cargo is available
 cargo build -p nyxid-cli                # Build CLI binary (includes node subcommand)
 cargo test -p nyxid-cli                 # CLI tests (includes node agent tests)
 cargo install --path cli                # Install as `nyxid`
+nyxid session refresh                   # Renew the saved session now (rotates the refresh token); exit 3 = must `nyxid login`, 4 = retry later
 nyxid login --device                    # Headless browser-assisted login;
                                         # NYXID_LOGIN_NO_DEVICE_FALLBACK=1 disables auto-fallback from plain `nyxid login`
 

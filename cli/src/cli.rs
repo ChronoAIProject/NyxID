@@ -643,6 +643,14 @@ pub enum SessionCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Renew the saved session now (rotates the refresh token) without a
+    /// browser. Exit 0 = renewed; 3 = a human must `nyxid login`
+    /// (refresh token expired/revoked/unknown); 4 = could not reach the
+    /// server, retry later.
+    Refresh {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
 }
 
 // ---- Telemetry ----

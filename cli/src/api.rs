@@ -343,6 +343,15 @@ impl ApiClient {
             return false;
         }
         let profile = self.profile.as_deref();
+        // Same cross-process discipline as the preflight: lock, then prefer a
+        // token another process already rotated over presenting a stale one.
+        let _lock = crate::auth::acquire_refresh_lock(profile).ok();
+        if let Some(access_token) = crate::auth::fresh_access_token_on_disk(profile)
+            && access_token != self.access_token
+        {
+            self.access_token = access_token;
+            return true;
+        }
         let refresh_token = match crate::auth::read_saved_refresh_token_for(profile) {
             Some(rt) => rt,
             None => return false,
@@ -367,7 +376,7 @@ impl ApiClient {
                 self.access_token = access_token;
                 true
             }
-            crate::auth::RefreshExchange::Unauthorized
+            crate::auth::RefreshExchange::Rejected(_)
             | crate::auth::RefreshExchange::Network(_) => false,
         }
     }
