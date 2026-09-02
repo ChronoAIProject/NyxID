@@ -666,13 +666,11 @@ fn synthetic_request(
     Ok(request)
 }
 
-/// Whether this call needs the TD-3 forward-token bridge: cookie sessions
-/// carry no bearer for `forward_access_token` to forward, so Aevatar —
-/// which today authenticates only `Authorization: Bearer <NyxID JWT>` —
-/// answers 401 for exactly the browser. Minting is gated on the row still
-/// being in Bearer-forwarding mode: when the TD-3 rollout flips
-/// `forward_access_token` off (Aevatar validates the identity token
-/// instead), the bridge retires itself with no code change.
+/// Whether this call needs the forward-token bridge. Cookie sessions carry no
+/// bearer for `forward_access_token` to forward. Aevatar validates the
+/// identity assertion separately, but typed execution still requires an
+/// Authorization Bearer or a delegation-header capability. The live row keeps
+/// this bridge enabled until deployment evidence proves the replacement path.
 fn needs_forward_token_bridge(auth_method: &AuthMethod, forward_access_token: bool) -> bool {
     *auth_method == AuthMethod::Session && forward_access_token
 }

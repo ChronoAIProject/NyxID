@@ -1,7 +1,7 @@
 # Assistant Chat Architecture
 
-Last verified against Aevatar `0a86713671fcf551dc19ad86b1b6aa8ae6cb980b` and the
-production typed-chat probe (2026-08-11).
+Last verified against Aevatar `e5bba2e9719ad5132004b882744caa3875db1123` and the
+AC-2 authority probe (2026-09-02).
 
 ## System boundary
 
@@ -105,13 +105,38 @@ forward_access_token:         true    <-- REQUIRED. Setting this false takes cha
 
 Identity and delegated-capability construction live in `backend/src/handlers/proxy.rs`; assistant-specific forwarding and fallback scope selection live in `backend/src/handlers/assistant.rs:resolve_forward_scope` and `build_forward_authorization`.
 
-### Authorization is not caller passthrough
+### Transport authentication and capability selection
 
-`forward_access_token` must be `true` on the live row. That flag does not mean "copy the browser's inbound Authorization value" — it never does that. It is the enable switch for the bridge in `backend/src/handlers/assistant.rs:needs_forward_token_bridge`, which for a cookie-authenticated session mints a NyxID delegated token server-side and *overwrites* the upstream `Authorization` header. A verified bearer caller keeps its own verified bearer; the assistant route policy excludes API keys, service accounts, delegated tokens, and relay tokens before the handler runs.
+`forward_access_token` must be `true` on the live row. That flag never copies the
+browser's inbound Authorization value. It enables the bridge in
+`backend/src/handlers/assistant.rs:needs_forward_token_bridge`. For a
+cookie-authenticated session, the bridge mints a NyxID delegated token and
+overwrites the upstream `Authorization` header. A verified Bearer caller keeps
+the verified Bearer. The assistant route policy excludes API keys, service
+accounts, delegated tokens, and relay tokens before the handler runs.
 
-Deployed Aevatar authenticates **only** `Authorization: Bearer <NyxID JWT>`. It does not yet validate the `X-NyxID-Identity-Token` or `X-NyxID-Delegation-Token` headers that NyxID also sends. Because the bridge is gated on `Session && forward_access_token`, setting the flag to `false` both stops the bearer forward *and* disarms the mint, so NyxID sends no `Authorization` at all and **every** Aevatar surface returns 401 `authentication_required` — the typed `/api/chat`, `/api/chat/conversations`, and legacy `v1/chat/completions` alike. This is not a theoretical failure mode: it took production chat down on 2026-08-12 and was resolved only by setting the flag back to `true`.
+Aevatar authenticates caller identity and selects tool capability separately. If
+`X-NyxID-Identity-Token` is present, its dedicated authentication scheme
+validates signature, issuer, audience, lifetime, subject, `iat`, and single-use
+`jti`. The signed subject is authoritative for the Aevatar scope. The
+`Authorization` header remains on the request for execution. A valid Bearer has
+precedence as the execution credential and a delegated Bearer is classified as
+`ProxyDelegation`. If Bearer is absent, `X-NyxID-Delegation-Token` can supply
+that proxy-delegation capability. Identity alone is insufficient: typed
+streaming returns 401 when neither execution credential is present.
 
-`forward_access_token: false` becomes correct **only after** Aevatar ships identity-assertion validation (the TD-3 cutover). Until that is verified live against the deployed Aevatar, do not set it. The bridge is designed to retire itself with no code change on that day; flipping the flag ahead of the upstream capability is what breaks it.
+The pinned sources are
+`src/Aevatar.Mainnet.Host.Api/Responses/NyxIdIdentityAssertionAuthentication.cs`,
+`NyxIdIdentityAssertionValidator.cs`,
+`agents/Aevatar.GAgents.NyxidChat/NyxIdChatEndpoints.Streaming.cs`, and
+`NyxIdChatEndpoints.cs` at Aevatar
+`e5bba2e9719ad5132004b882744caa3875db1123`.
+
+Keep `forward_access_token: true` until a deployed probe proves Aevatar receives
+both a valid identity assertion and a usable capability through the replacement
+path. Source support for the delegation header is necessary but is not a live
+deployment receipt. Turning the bridge off before that proof can leave Aevatar
+with caller identity but no authority to run tools.
 
 `JWT_ASSISTANT_FORWARD_TTL_SECS`, `crypto/jwt.rs:generate_assistant_forward_access_token`, and the `assistant_forward` claim are compatibility tombstones. They preserve rejection behavior for a prior token shape and do not control live assistant authentication. New code must not depend on them.
 
