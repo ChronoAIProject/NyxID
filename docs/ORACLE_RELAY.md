@@ -375,8 +375,10 @@ sanitized connection error in `worker show`. Close the dedicated Chrome window
 if it is still running without CDP, then run
 `nyxid oracle worker install --force --pool <pool>` with the original CLI
 `--profile` when applicable. Forced installation retains the label, token, and
-browser profile, selects a new free port, rewrites the paired settings, and
-restarts supervision.
+browser profile; it keeps the existing port when a live Chrome still serves
+CDP there (so a running, logged-in Chrome is never stranded) and selects a new
+free port only when the endpoint is dead or squatted, then rewrites the paired
+settings and restarts supervision.
 
 ## Worker presence and control
 
