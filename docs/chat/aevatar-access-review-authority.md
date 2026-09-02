@@ -1,13 +1,15 @@
 # Aevatar access-review authority decision
 
 **Status.** Use consent-derived delegated restrictions as the AC-3 authority
-model. Service access review is not reachable from the current assistant
-bridge, so preserve unrestricted forwarding until AC-3 passes its security and
-deployment gates.
+model, with the live-grant-backed REST read, the exact platform-callback
+exemption, and the validated Aevatar client link. Service access review remains
+unreachable today because the current bridge is both route-denied and
+unrestricted. Keep `forward_access_token=true` and unrestricted forwarding in
+production until AC-3 lands; AC-3 proceeds under its own security review gate.
 
 This record is the AC-2 probe and authority decision. It changes no product
 behavior. NyxID evidence was collected from local SHA
-`3fbae40a7b9526afdc97b3fdc005c1a543dabaaf`. Aevatar source evidence is pinned
+`28f26d85b00ca00e23dfeb50c38251e184e95d06`. Aevatar source evidence is pinned
 to `e5bba2e9719ad5132004b882744caa3875db1123`. Runtime Aevatar rows are marked
 source-proven because this environment has no .NET runtime and Aevatar accepts
 only production-JWKS tokens.
@@ -50,12 +52,18 @@ where pinned source does not establish an HTTP observation.
 | Identity plus capability Bearer | Pinned Aevatar source `e5bba2e` | n/a | n/a | delegated; actor present; `allow_all_services=false`; 1 allowed service; 0 resources; `proxy`; 300 seconds | Authorization Bearer is selected as `ProxyDelegation`; source-proven, not runtime-observed |
 | Identity plus delegation header | Pinned Aevatar source `e5bba2e` | n/a | n/a | delegated; actor present; `allow_all_services=true`; 0 allowed services and 0 resources; `proxy:*`; 300 seconds | Delegation header supplies `ProxyDelegation` when Bearer is absent; source-proven, not runtime-observed |
 | Replayed identity `jti` | Pinned Aevatar source `e5bba2e` | 401 | `identity_assertion_replayed` | non-delegated identity assertion; 60 seconds | Replay rejected; source-proven, not runtime-observed |
-| Bridge Bearer reads REST MCP config | Local NyxID `3fbae40a` | 403 | none exposed | delegated; actor present; `allow_all_services=true`; 0 allowed services and 0 resources; `proxy:*`; 300 seconds | Route denied before catalog filtering |
-| Restricted Bearer uses LLM gateway | Local NyxID `3fbae40a` | 200 | none | delegated; actor present; `allow_all_services=false`; 1 allowed service; 0 resources; `proxy`; 300 seconds | Pinned gateway callback is reachable |
-| Restricted Bearer uses platform proxy slug | Local NyxID `3fbae40a` | 403 | none exposed | same restricted summary | Legacy platform-row scope gate denies the callback |
+| Bridge Bearer reads REST MCP config | Local NyxID `28f26d85` | 403 | `1002` | delegated; actor present; `allow_all_services=true`; 0 allowed services and 0 resources; `proxy:*`; 300 seconds | Route denied before catalog filtering; runtime-observed |
+| Restricted Bearer uses LLM gateway | Local NyxID `28f26d85` | 200 | none | delegated; actor present; `allow_all_services=false`; 1 allowed service; 0 resources; `proxy`; 300 seconds | Gateway control reaches its upstream; runtime-observed |
+| Restricted Bearer uses platform proxy slug | Local NyxID `28f26d85` | 403 | `9000` | same restricted summary | Legacy platform-row scope gate denies Aevatar's default callback; runtime-observed |
 
 The machine receipt is `/tmp/ac2-evidence/seven-row-receipt.json`. Local setup
-statuses are in `/tmp/ac2-evidence/local-runtime-setup.json`.
+statuses are in `/tmp/ac2-evidence/local-runtime-setup.json`. The three local
+rows were rerun through a real `cargo run` NyxID backend at the recorded SHA.
+The only stub was a loopback OpenAI-compatible downstream behind NyxID. It
+returned one fixed, successful chat-completion response so the gateway row
+could prove that NyxID forwarded the request; it did not replace NyxID or
+Aevatar. The gateway row is a control, not Aevatar's default route. Raw response
+logs are under `/tmp/ac2-evidence/runtime/`.
 
 ## What the transport authenticates
 
@@ -121,13 +129,23 @@ catalog authority is online and revocable: a signed `mcp:catalog:read` token
 must match an unexpired, unrevoked `CatalogDelegationGrant`, active clients,
 current consent, service ownership, and canonical resources
 (`backend/src/services/catalog_delegation_service.rs:38-42,81-172`). Aevatar
-does not call this transport for either access check.
+does not call this transport for either access check. The current bridge Bearer
+can already read the same operation catalog through `POST /mcp` `tools/list`
+(`backend/src/handlers/mcp_transport.rs:455-470,709-739,1248-1266`). The REST
+allowance therefore exposes no new catalog data class to that bearer; its new
+security surface is the live-grant check on the additional route.
+
+Restricted catalog projection has a deliberate limitation. `ServiceScope::Allowed`
+keeps user-service rows only and drops every platform row
+(`backend/src/services/mcp_service.rs:676-709`); JSON-RPC applies the same rule
+(`backend/src/handlers/mcp_transport.rs:709-739`). Consent contains user-service
+IDs, so it cannot restore a platform row to a restricted catalog.
 
 ## Authority candidates
 
 | Candidate | Threat model | Revocation and retry | Deployment | Rollback |
 | --- | --- | --- | --- | --- |
-| Consent-derived delegated restrictions | Least authority can exclude unapproved user services. It is safe only with a live grant bound to `jti`, subject, actor client, receiving client, service IDs, resources, and expiry. A bare scope claim is insufficient. | Consent revocation must invalidate the online grant and the next minted capability. Confirmation retry must atomically merge the same service without replacing existing scopes or IDs. | Requires the live-grant-backed REST read and the validated Aevatar client link. The pinned gateway survives restriction. The platform proxy slug does not, but no receipt shows that Aevatar calls it. | Disable the access-review action and effect first. Then stop restricted minting, restore unrestricted bridge minting, verify both auth inputs, and remove the REST exception and client link. Keep old grants deny-by-default until expiry. |
+| Consent-derived delegated restrictions | Least authority can exclude unapproved user services. It is safe only with a live grant bound to `jti`, subject, actor client, receiving client, service IDs, resources, and expiry. A bare scope claim is insufficient. | Consent revocation must invalidate the online grant and the next minted capability. Confirmation retry must atomically merge the same service without replacing existing scopes or IDs. | Requires the live-grant-backed REST read, an exact platform-callback exemption, and the validated Aevatar client link. The gateway control survives restriction, but Aevatar's default slug callback does not without the exemption. | Disable the access-review action and effect first. Revoke grants, restore unrestricted bridge minting, verify both auth inputs and default chat, then remove the slug and REST exceptions before clearing the client link. |
 | Complete OAuth browser round trip with NyxID return channel | OAuth authorization code, PKCE, `state`, redirect ownership, tab and session binding, and return-channel replay become part of chat's security boundary. It duplicates an identity and capability transport that already exists. | Standard OAuth revocation is clear, but assistant retry must resume across redirects and distinguish user cancellation, callback replay, stale conversations, and completed-but-unobserved consent. | Requires new browser navigation, a callback and return protocol, Aevatar continuation state, and two-system rollout. No such return channel exists in the pinned contract. | Disable the new browser entry and return to the bridge. In-flight OAuth state must expire without resuming a chat action. |
 | Preserve unrestricted forwarding with an upstream reachability explanation | Aevatar retains broad service authority for the session, so it cannot represent per-service approval. The UI must not claim that it can. Existing route denials still protect management surfaces. | Five-minute capabilities expire normally. Consent and service review cannot revoke a subset because no subset is minted. Ordinary chat retry behavior is unchanged. | No product change. Keep the live row's `forward_access_token=true` as the deployed posture until AC-3 is proven. | This is the rollback posture. A restricted rollout must disable its access-review action before restoring this bridge, then verify identity plus capability delivery. |
 
@@ -144,32 +162,49 @@ does not call this transport for either access check.
    `catalog_read_scope_alone_grants_no_proxy_or_management_route` must change
    from unconditional denial to two cases: no live grant remains denied, while
    the exact route plus a matching live grant reaches the handler. Every other
-   proxy and management route remains denied.
-2. **Restricted platform callback.** The configured gateway already suffices.
-   `llm_gateway::gateway_request` starts with only
-   `ensure_llm_proxy_access` (`backend/src/handlers/llm_gateway.rs:557-575`),
-   and the local restricted receipt is 200. The ordinary platform proxy fails.
-   `execute_proxy_inner` returns `ApiKeyScopeForbidden` on any legacy
-   `DownstreamService` when `allow_all_services=false`
-   (`backend/src/handlers/proxy.rs:2011-2033`). If
-   `/proxy/s/chrono-llm-public` remains a supported callback, add an exemption
-   bound to the exact platform row, verified Aevatar actor and receiving
-   client, and live catalog grant. Do not broadly bypass the gate. The
-   server-chosen assistant ingress already uses `execute_admin_proxy`, which
-   intentionally skips this caller-addressed gate
-   (`backend/src/handlers/proxy.rs:1439-1481`). This exemption is not required
-   for AC-3 unless an Aevatar receipt shows a call to the proxy-slug path.
+   proxy and management route remains denied. The handler itself calls
+   `ensure_rest_proxy_access` (`backend/src/handlers/mcp.rs:88-92`), so the
+   assistant capability's exact scope string must be
+   `proxy:* mcp:catalog:read`. Do not add `mcp:catalog:read` to
+   `SERVICE_DELEGATION_SCOPES`: that list feeds ordinary
+   `inject_delegation_token` minting, which has no matching online-grant
+   persistence (`backend/src/mw/auth.rs:271-279` and
+   `backend/src/handlers/proxy.rs:2493-2507`).
+2. **Restricted platform callback.** Aevatar's default chat path is
+   `/api/v1/proxy/s/chrono-llm-public`. `LlmDefaults.NyxIdRoute` supplies the
+   slug when `Aevatar:NyxId:DefaultRoute` is unset, as it is in the pinned
+   mainnet settings; `NyxIdLLMProvider` then normalizes it to the proxy path
+   (`LlmDefaults.cs:21`, `ServiceCollectionExtensions.cs:1167-1170`,
+   `NyxIdLLMProvider.cs:365-379`, and `NyxIdChatEndpoints.cs:272`). NyxID's own
+   bridge documentation names the same route
+   (`backend/src/handlers/assistant.rs:691-699,811-820`). The gateway control
+   reaches the stub, but it is not the default callback.
+
+   The default path currently fails because `execute_proxy_inner` returns
+   `ApiKeyScopeForbidden` for every legacy `DownstreamService` when
+   `allow_all_services=false` (`backend/src/handlers/proxy.rs:2011-2033`). Add a
+   narrow exemption for the exact active `chrono-llm-public` platform row. It
+   must require verified delegated assistant authority, actor equal to the
+   Aevatar row's linked client, receiving client equal to that same link, and a
+   valid live catalog grant. Do not bypass the gate for any other platform row
+   or delegated caller. The server-chosen assistant ingress is different: it
+   uses `execute_admin_proxy`, which already skips this caller-addressed gate
+   (`backend/src/handlers/proxy.rs:1439-1481`).
 3. **Durable Aevatar client link.** Add an admin-managed
    `delegated_authority_client_id` field to the `aevatar`
-   `DownstreamService`, and validate that it references an active OAuth client
-   on create and update. Do not reuse `oauth_client_id`. That field means the OIDC
-   client used when `auth_method="oidc"`
+   `DownstreamService`. On create or change, resolve an active OAuth client and
+   call `catalog_delegation_service::ensure_client_can_delegate_catalog`; emit a
+   metadata-only audit event for the link change. Resolve and validate the row
+   and client again for every mint. Do not reuse `oauth_client_id`. That field
+   means the OIDC client used when `auth_method="oidc"`
    (`backend/src/models/downstream_service.rs:220-222`). A row field is
    preferable to environment configuration because the row already owns the
    integration's base URL, identity audience, token forwarding, and delegation
    policy. It can be inspected, validated, audited, and rolled back with the
-   integration. A process setting would permit row/config drift and make
-   multiple Aevatar rows ambiguous. The pinned upstream client is
+   integration. A process setting would permit row/config drift and split one
+   integration's policy across deployment state. NyxID already prevents active
+   row ambiguity with a partial unique index on `slug` for `is_active=true`
+   (`backend/src/db.rs:335-352`). The pinned upstream client is
    `a6ff2946-f02f-4c35-8203-1ec46132b660`
    (`src/Aevatar.Mainnet.Host.Api/appsettings.json:41-44`), but the current
    NyxID row has no field that resolves that identity.
@@ -178,14 +213,15 @@ does not call this transport for either access check.
 
 | Condition | Current system | Candidate design | Evidence and AC-3 proof |
 | --- | --- | --- | --- |
-| Restricted chat bootstrap still works | **Pass on the configured path.** The restricted local request to `/api/v1/llm/gateway/v1` returned 200. The proxy-slug request returned 403, but the pinned Aevatar configuration names the gateway path. | **Pass.** Keep `handlers/llm_gateway.rs:gateway_request` as the callback. Do not add a proxy-slug exemption unless an Aevatar receipt establishes that dependency. | Seven-row restricted callback rows; pinned `GatewayEndpoint` at `appsettings.json:16-20` |
-| Exact Aevatar OAuth client resolves without guessing | **Not linked.** Aevatar and the registered NyxID client agree on `a6ff2946-f02f-4c35-8203-1ec46132b660`, but `DownstreamService` cannot express that relationship today. | **Pass.** Add the validated admin-managed `delegated_authority_client_id` field to the `aevatar` row. The field must resolve the registered active client before minting. | Pinned `BackendConsole.OidcClientId`; production client observation; `DownstreamService` field audit; AC-3 validation tests |
+| Restricted chat bootstrap still works | **Fail.** The restricted gateway control reaches its upstream, but the default `/api/v1/proxy/s/chrono-llm-public` callback returns 403 at the legacy platform-row gate. | **Pass only with change 2.** The exact live-grant-bound `chrono-llm-public` exemption admits the default callback without admitting another platform row. | Seven-row restricted callback rows; pinned default-route selection in `LlmDefaults.cs:21`, `ServiceCollectionExtensions.cs:1167-1170`, `NyxIdLLMProvider.cs:365-379`, and `NyxIdChatEndpoints.cs:272` |
+| Exact Aevatar OAuth client resolves without guessing | **Not linked.** Aevatar and the registered NyxID client agree on `a6ff2946-f02f-4c35-8203-1ec46132b660`, but `DownstreamService` cannot express that relationship today. | **Pass.** Add the admin-managed `delegated_authority_client_id` field, validate catalog delegation at link time, and re-resolve it before every mint. | Pinned `BackendConsole.OidcClientId`; production client observation; `DownstreamService` field and audit tests |
 | Approving a service changes the next minted capability | **Not implemented.** Revoking consent changed the consent read but left the next current-bridge summary unrestricted. | **Pass.** Mint each assistant capability from current consent for the linked client. An atomic approval merge must therefore change the next minted service list, while revocation must remove that authority. | Negative-case consent receipt; AC-3 before, apply, retry, next-mint, and revoke tests |
 
-The current bridge fails the last two conditions by construction. Those results
-explain why access review is unreachable today. They do not falsify the
-candidate that adds the missing client link and derives every new capability
-from current consent.
+The current system fails all three conditions: restriction breaks the default
+callback, the bridge has no client link, and consent cannot change its minted
+authority. Those results explain why access review is unreachable today. They
+do not falsify the candidate, whose three enabling changes supply the missing
+authorities.
 
 The consent-derived candidate satisfies the predicate and is accepted for
 AC-3. A complete OAuth round trip is rejected because it adds a browser return
@@ -197,14 +233,13 @@ remains the deployed and rollback posture until AC-3 proves the replacement.
 AC-3 may implement consent-derived delegated restrictions under its own
 security review. It must add the exact GET-only `/api/v1/mcp/config` allowance
 backed by a verified live `CatalogDelegationGrant`, while every other route in
-the `mcp` class remains denied. It must also add the validated
-`delegated_authority_client_id` link and mint each assistant capability from the
-linked client's current consent. AC-3 must split the existing route-policy test
-into no-grant denial and matching-live-grant success cases.
-
-Do not add a `/proxy/s/chrono-llm-public` exemption unless a new receipt proves
-that Aevatar uses that callback. The pinned Aevatar deployment configures the
-gateway path, and that path passed the restricted-token probe.
+the `mcp` class remains denied. It must add the exact live-grant-bound
+`chrono-llm-public` exemption required by Aevatar's default chat route, plus the
+validated `delegated_authority_client_id` link, and mint each assistant
+capability from the linked client's current consent with scope
+`proxy:* mcp:catalog:read`. AC-3 must split the existing route-policy test into
+no-grant denial and matching-live-grant success cases, and it remains subject to
+an independent security review before implementation begins.
 
 Until AC-3 lands and proves that Aevatar receives both caller identity and the
 restricted capability, keep `forward_access_token=true` and preserve the
@@ -218,20 +253,24 @@ AC-3 remains subject to its own security review gate.
 
 | Responsibility | Symbols |
 | --- | --- |
-| Atomic consent merge | Add `consent_service::merge_consent_services_atomic` in `backend/src/services/consent_service.rs`. Use one atomic aggregation-pipeline `find_one_and_update` keyed by `(user_id, client_id)`. Union the requested service ID and required scopes while preserving all existing scopes, IDs, `allow_all_services`, grant identity, and unrelated fields. Never call `grant_consent_with_services`. `grant_consent_internal` replaces the full row at lines 71-100. The unique `(user_id, client_id)` index is at `backend/src/db.rs:911-920`. |
-| HTTP effect | Add the confirmed `service.access_review` effect in `backend/src/handlers/assistant_action_effects_services.rs` and mount only its typed route in `backend/src/routes.rs`. Resolve actor, client link, and user-owned service server-side; reject cross-user IDs before the merge. |
-| Authority mint | Replace the session projection in `backend/src/handlers/assistant.rs:build_forward_authorization`. Resolve `delegated_authority_client_id`, read current consent, derive `CatalogAuthority`, call `generate_delegated_access_token_for_client` so `client_id` is present, then persist the matching online grant with `catalog_delegation_service::persist_grant`. Do not derive service restrictions from session `AuthUser`. |
+| Atomic consent merge | Add `consent_service::merge_consent_services_atomic` in `backend/src/services/consent_service.rs`. Use one atomic aggregation-pipeline `find_one_and_update` upsert keyed by `(user_id, client_id)`. Set-union the requested service ID and required scopes while preserving all existing scopes, IDs, `allow_all_services`, grant identity, and unrelated fields. On a concurrent first-approval E11000, retry as a non-upserting merge against the winning row. Never call `grant_consent_with_services`. `grant_consent_internal` replaces the full row at lines 71-100, and the OAuth consent page in `backend/src/handlers/oauth.rs:807-836` still calls that replacement path; treat it as a known concurrent-writer hazard. The unique `(user_id, client_id)` index is at `backend/src/db.rs:911-920`. |
+| HTTP effect | Add the confirmed `service.access_review` effect in `backend/src/handlers/assistant_action_effects_services.rs` and mount only its typed route in `backend/src/routes.rs`. Call `assistant_action_receipts::reserve_or_replay` before mutation. Resolve actor, client link, and user-owned service server-side; reject cross-user IDs before the merge. |
+| Authority mint | Replace the session projection in `backend/src/handlers/assistant.rs:build_forward_authorization`. Re-resolve the active `aevatar` row and `delegated_authority_client_id`, read current consent, derive `CatalogAuthority`, and call `generate_delegated_access_token_for_client` with exact scope `proxy:* mcp:catalog:read` so `client_id` is present. Use the linked client as both actor and receiver unless AC-3 introduces and validates a separate actor client. Persist the matching online grant with `catalog_delegation_service::persist_grant` before forwarding. Do not derive service restrictions from session `AuthUser`. |
 | REST catalog guard | Change `mw/auth.rs:delegated_request_allowed`, `reject_delegated_tokens`, and their route tests; add verified live-grant enforcement before `handlers/mcp.rs:get_mcp_config` publishes `mcp_service::ServiceScope`. |
-| Platform callback | Keep `handlers/llm_gateway.rs:gateway_request` as the proven path. No proxy-slug exemption is required. If a later Aevatar receipt shows that callback, narrow the legacy gate in `handlers/proxy.rs:execute_proxy_inner` to the exact live-grant-bound Aevatar platform callback. |
-| Client link | Extend `models/downstream_service.rs`, the admin service request and response DTOs in `handlers/services.rs`, and admin validation so `delegated_authority_client_id` always names an active OAuth client. No environment variable is added. |
-| Audit | Append metadata-only events `assistant_service_access_review_requested`, `assistant_service_access_grant_merged`, `assistant_service_access_grant_replayed`, `assistant_service_access_grant_denied`, and `assistant_delegated_authority_minted`. Include actor ID, owner ID, service ID, client ID, action request ID, outcome, and online-grant ID where applicable; never include a token, credential, cookie, or authorization value. Preserve the existing `oauth_consent_revoked` event and make grant invalidation observable. |
+| Platform callback | Narrow the legacy `DownstreamService` gate in `handlers/proxy.rs:execute_proxy_inner` for the exact active `chrono-llm-public` row. Require delegated assistant authority, actor and receiving client equal to the current Aevatar row link, and a valid live grant. Keep `handlers/llm_gateway.rs:gateway_request` as a control path; it is not Aevatar's default route. |
+| Client link | Extend `models/downstream_service.rs`, the admin service request and response DTOs in `handlers/services.rs`, and admin validation. At link create or change, require an active OAuth client and call `catalog_delegation_service::ensure_client_can_delegate_catalog`; append a metadata-only audit event. Re-resolve the link at mint time. No environment variable is added. |
+| Consent revocation | Extend `consent_service::revoke_consent` and `handlers/consent.rs::revoke_my_consent` to mark all outstanding catalog grants for the user and linked client revoked before consent deletion completes. Regranting consent within the old token's TTL must not reactivate that token. |
+| Audit | Append metadata-only events `assistant_delegated_authority_client_link_changed`, `assistant_service_access_review_requested`, `assistant_service_access_grant_merged`, `assistant_service_access_grant_replayed`, `assistant_service_access_grant_denied`, and `assistant_delegated_authority_minted`. Include actor ID, owner ID, service ID, client ID, action request ID, outcome, and online-grant ID where applicable; never include a token, credential, cookie, or authorization value. Preserve the existing `oauth_consent_revoked` event and make grant invalidation observable. |
 
 Required tests include database cases for the state before the merge, the first
 apply, an idempotent retry, revocation, and a cross-user request. They also
 include concurrent merges of different service IDs, live-grant expiry and
-revocation, a missing/inactive/mismatched client link, exact-route denial
-without a grant, catalog filtering, gateway bootstrap, continued proxy-slug
-denial unless a dependency is observed, and audit metadata redaction.
+revocation, revoke then regrant within one token TTL with the old token still
+denied, a missing/inactive/mismatched client link, exact-route denial without a
+grant, and audit metadata redaction. Catalog tests must prove that a restricted
+mint drops every platform row and that consent cannot restore one. Bootstrap
+tests must cover both the gateway control and the default proxy-slug callback,
+including denial for the wrong row, actor, receiver, or grant.
 
 ## Negative cases
 
@@ -256,10 +295,11 @@ For a future restricted rollout, use this rollback order:
 
 1. Disable the access-review action and effect so no new confirmation can
    promise a per-service grant.
-2. Stop issuing restricted assistant grants and restore the current
-   unrestricted session bridge.
+2. Stop issuing restricted assistant grants, mark their outstanding
+   `CatalogDelegationGrant` rows revoked, and restore the current unrestricted
+   session bridge.
 3. Verify typed chat, identity assertion receipt, and capability receipt using
-   the pinned gateway.
+   Aevatar's default proxy-slug route; keep the gateway as a control.
 4. Remove the proxy-slug exemption, then the REST MCP exception.
 5. Remove or clear the authority-client link only after no minted grant depends
    on it; leave online grants revoked or let them expire.
@@ -282,11 +322,16 @@ observation, not a runtime claim about Aevatar.
 
 - **Model the Domain.** The receipt is a discriminated, fixed seven-row record,
   not generic request and response logging.
+- **Laziness Protocol.** The authority link lives on the existing Aevatar row;
+  AC-3 adds no process configuration or second integration registry.
 - **Boundary Discipline.** Tokens stay inside the probe process. The probe
   reconstructs output field by field and applies a final secret-shape barrier.
+- **Make Operations Idempotent.** The access-review effect reserves or replays
+  its request before one atomic set-union merge, including an E11000 retry for
+  simultaneous first approvals.
 - **Fix Root Causes.** The accepted design addresses the route denial and the
-  unrestricted bridge claims as separate authorities. It does not add a
-  proxy-slug exemption without evidence that Aevatar uses that path.
+  unrestricted bridge claims as separate authorities, and binds the required
+  proxy-slug exception to the same live grant instead of opening platform rows.
 - **Prove It Works.** The record labels source-only Aevatar rows separately from
   runtime NyxID rows. It reports the missing .NET runtime and the expired
   production token instead of inventing observations.
