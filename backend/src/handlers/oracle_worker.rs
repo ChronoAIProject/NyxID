@@ -164,6 +164,13 @@ pub struct WorkerImageDto {
 }
 
 #[derive(Deserialize)]
+pub struct WorkerFileDto {
+    pub name: String,
+    pub mime: String,
+    pub data_base64: String,
+}
+
+#[derive(Deserialize)]
 pub struct WorkerResultRequest {
     pub task_id: String,
     pub worker: String,
@@ -173,6 +180,10 @@ pub struct WorkerResultRequest {
     /// `response` and a non-empty `images` list.
     #[serde(default)]
     pub images: Option<Vec<WorkerImageDto>>,
+    /// Generic files linked from the assistant's final turn. Optional so old
+    /// workers and the deployed userscript retain their existing wire shape.
+    #[serde(default)]
+    pub files: Option<Vec<WorkerFileDto>>,
     #[serde(default)]
     pub chatgpt_url: Option<String>,
     #[serde(default)]
@@ -215,6 +226,17 @@ pub async fn submit_result(
             name: i.name,
         })
         .collect();
+    let req_files = body.files.unwrap_or_default();
+    let file_count = req_files.len();
+    let file_base64_chars: usize = req_files.iter().map(|file| file.data_base64.len()).sum();
+    let files = req_files
+        .into_iter()
+        .map(|file| oracle_task_service::ResultFile {
+            name: file.name,
+            mime: file.mime,
+            data_base64: file.data_base64,
+        })
+        .collect();
     let outcome = oracle_task_service::worker_submit_result_fenced(
         &state.db,
         &pool,
@@ -223,6 +245,7 @@ pub async fn submit_result(
         oracle_task_service::WorkerResultInput {
             response: &body.response,
             images,
+            files,
             chatgpt_url: body.chatgpt_url.as_deref(),
             model: body.model.as_deref(),
             script_version: body.script_version.as_deref(),
@@ -240,6 +263,8 @@ pub async fn submit_result(
         response_chars = body.response.chars().count(),
         image_count,
         image_base64_chars,
+        file_count,
+        file_base64_chars,
         "Oracle worker result received"
     );
 

@@ -52,6 +52,7 @@ pub async fn run(command: OracleCommands) -> Result<()> {
             wait,
             no_wait,
             out,
+            artifacts,
             auth,
         } => {
             let output = auth.output;
@@ -112,18 +113,33 @@ pub async fn run(command: OracleCommands) -> Result<()> {
             }
             let task = poll_until_terminal(&mut api, &task_id, wait).await?;
             // Non-fatal: a failed image write must not swallow the text answer.
-            if let Err(e) = save_result_images(output, &task, out.as_deref()) {
+            if (artifacts.is_none() || out.is_some())
+                && let Err(e) = save_result_images(output, &task, out.as_deref())
+            {
                 eprintln!("warning: could not save image(s): {e:#}");
+            }
+            if let Some(directory) = artifacts.as_deref() {
+                save_result_artifacts(&task, directory)?;
             }
             print_result(output, &task)
         }
-        OracleCommands::Result { task_id, out, auth } => {
+        OracleCommands::Result {
+            task_id,
+            out,
+            artifacts,
+            auth,
+        } => {
             let output = auth.output;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let task: Value = api.get(&format!("/oracle/tasks/{task_id}")).await?;
             // Non-fatal: a failed image write must not swallow the text answer.
-            if let Err(e) = save_result_images(output, &task, out.as_deref()) {
+            if (artifacts.is_none() || out.is_some())
+                && let Err(e) = save_result_images(output, &task, out.as_deref())
+            {
                 eprintln!("warning: could not save image(s): {e:#}");
+            }
+            if let Some(directory) = artifacts.as_deref() {
+                save_result_artifacts(&task, directory)?;
             }
             print_result(output, &task)
         }
@@ -1750,6 +1766,160 @@ fn save_result_images(output: OutputFormat, task: &Value, out: Option<&str>) -> 
     Ok(())
 }
 
+fn safe_artifact_basename(name: &str, fallback: &str) -> String {
+    let mut safe: String = name
+        .trim()
+        .chars()
+        .take(128)
+        .map(|character| {
+            if character == '/'
+                || character == '\\'
+                || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+                || character.is_control()
+            {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    safe = safe
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' '])
+        .trim()
+        .to_string();
+    if safe.is_empty() {
+        fallback.to_string()
+    } else {
+        safe
+    }
+}
+
+fn suffixed_artifact_name(name: &str, ordinal: usize) -> String {
+    if ordinal <= 1 {
+        return name.to_string();
+    }
+    let path = Path::new(name);
+    let stem = path
+        .file_stem()
+        .and_then(|part| part.to_str())
+        .unwrap_or(name);
+    match path.extension().and_then(|part| part.to_str()) {
+        Some(extension) if !extension.is_empty() => format!("{stem}-{ordinal}.{extension}"),
+        _ => format!("{name}-{ordinal}"),
+    }
+}
+
+fn create_collision_safe_artifact(
+    directory: &Path,
+    requested_name: &str,
+    fallback_name: &str,
+) -> Result<(PathBuf, std::fs::File)> {
+    let basename = safe_artifact_basename(requested_name, fallback_name);
+    for ordinal in 1.. {
+        let path = directory.join(suffixed_artifact_name(&basename, ordinal));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((path, file)),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to create artifact in {}", directory.display())
+                });
+            }
+        }
+    }
+    unreachable!("unbounded collision suffix search")
+}
+
+fn write_result_artifact(
+    directory: &Path,
+    requested_name: &str,
+    fallback_name: &str,
+    data_base64: &str,
+) -> Result<()> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .context("server returned undecodable artifact data")?;
+    let (path, mut file) =
+        create_collision_safe_artifact(directory, requested_name, fallback_name)?;
+    file.write_all(&bytes)
+        .with_context(|| format!("failed to write artifact to {}", path.display()))?;
+    eprintln!(
+        "Saved artifact to {} ({} bytes)",
+        path.display(),
+        bytes.len()
+    );
+    Ok(())
+}
+
+fn save_result_artifacts(task: &Value, directory: &Path) -> Result<()> {
+    fs::create_dir_all(directory).with_context(|| {
+        format!(
+            "failed to create artifact directory {}",
+            directory.display()
+        )
+    })?;
+
+    if let Some(files) = task["files"].as_array() {
+        for (index, file) in files.iter().enumerate() {
+            let fallback = format!("file_{}", index + 1);
+            let name = file["name"].as_str().unwrap_or(&fallback);
+            let data_base64 = file["data_base64"].as_str().unwrap_or("");
+            if !data_base64.is_empty() {
+                write_result_artifact(directory, name, &fallback, data_base64)?;
+            }
+        }
+    }
+
+    if let Some(images) = task["images"].as_array() {
+        for (index, image) in images.iter().enumerate() {
+            let extension = mime_ext(image["mime"].as_str().unwrap_or("image/png"));
+            let fallback = format!("image_{}.{extension}", index + 1);
+            let name = image["name"].as_str().unwrap_or(&fallback);
+            let data_base64 = image["data_base64"].as_str().unwrap_or("");
+            if !data_base64.is_empty() {
+                write_result_artifact(directory, name, &fallback, data_base64)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_artifact_inventory(task: &Value) {
+    let mut rows = Vec::new();
+    if let Some(files) = task["files"].as_array() {
+        for (index, file) in files.iter().enumerate() {
+            let fallback = format!("file_{}", index + 1);
+            rows.push(vec![
+                safe_artifact_basename(file["name"].as_str().unwrap_or(&fallback), &fallback),
+                file["mime"].as_str().unwrap_or("-").to_string(),
+                file["bytes"].as_u64().unwrap_or(0).to_string(),
+            ]);
+        }
+    }
+    if let Some(images) = task["images"].as_array() {
+        for (index, image) in images.iter().enumerate() {
+            let extension = mime_ext(image["mime"].as_str().unwrap_or("image/png"));
+            let fallback = format!("image_{}.{extension}", index + 1);
+            rows.push(vec![
+                safe_artifact_basename(image["name"].as_str().unwrap_or(&fallback), &fallback),
+                image["mime"].as_str().unwrap_or("-").to_string(),
+                image["bytes"].as_u64().unwrap_or(0).to_string(),
+            ]);
+        }
+    }
+    if rows.is_empty() {
+        return;
+    }
+    let mut table = Table::new();
+    table.load_preset(UTF8_FULL_CONDENSED);
+    table.set_header(["Name", "MIME", "Bytes"]);
+    for row in rows {
+        table.add_row(row);
+    }
+    eprintln!("Artifacts:\n{table}");
+}
+
 fn print_result(output: OutputFormat, task: &Value) -> Result<()> {
     match output {
         OutputFormat::Json => println!("{}", serde_json::to_string_pretty(task)?),
@@ -1768,6 +1938,7 @@ fn print_result(output: OutputFormat, task: &Value) -> Result<()> {
                         // The answer goes to stdout so it can be piped.
                         println!("{resp}");
                     }
+                    print_artifact_inventory(task);
                 }
                 "failed" => {
                     let reason = task["failure_reason"].as_str().unwrap_or("unknown");
@@ -2122,6 +2293,34 @@ mod tests {
     }
 
     #[test]
+    fn artifact_paths_are_sanitized_and_collision_safe() {
+        let temp = tempfile::tempdir().unwrap();
+        let unsafe_name = safe_artifact_basename("../../private/result.json", "file_1");
+        assert!(!unsafe_name.contains('/'));
+        assert!(!unsafe_name.contains('\\'));
+        assert_eq!(Path::new(&unsafe_name).components().count(), 1);
+        assert_eq!(suffixed_artifact_name("result.json", 2), "result-2.json");
+        assert_eq!(
+            suffixed_artifact_name("archive.tar.gz", 3),
+            "archive.tar-3.gz"
+        );
+
+        fs::write(temp.path().join("result.json"), b"original").unwrap();
+        let (second_path, second_file) =
+            create_collision_safe_artifact(temp.path(), "result.json", "file_1").unwrap();
+        assert_eq!(second_path, temp.path().join("result-2.json"));
+        drop(second_file);
+        let (third_path, third_file) =
+            create_collision_safe_artifact(temp.path(), "result.json", "file_1").unwrap();
+        assert_eq!(third_path, temp.path().join("result-3.json"));
+        drop(third_file);
+        assert_eq!(
+            fs::read(temp.path().join("result.json")).unwrap(),
+            b"original"
+        );
+    }
+
+    #[test]
     fn insert_opt_helpers_skip_none() {
         let mut body = serde_json::json!({});
         insert_opt_str(&mut body, "a", None);
@@ -2174,6 +2373,7 @@ mod tests {
             wait: 3600,
             no_wait: true,
             out: None,
+            artifacts: None,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
         })
         .await;
@@ -2216,6 +2416,7 @@ mod tests {
             wait: 3600,
             no_wait: true,
             out: None,
+            artifacts: None,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
         })
         .await
@@ -2256,6 +2457,7 @@ mod tests {
             wait: 3600,
             no_wait: true,
             out: None,
+            artifacts: None,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
         })
         .await
@@ -2307,6 +2509,7 @@ mod tests {
             wait: 30,
             no_wait: false,
             out: None,
+            artifacts: None,
             auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
         })
         .await
@@ -2459,11 +2662,63 @@ mod tests {
         let result = run(OracleCommands::Result {
             task_id: "task-x".to_string(),
             out: None,
+            artifacts: None,
             // Table output is where failed status maps to an error exit.
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
         .await;
         assert!(result.is_err(), "a failed task should surface as an error");
+    }
+
+    #[tokio::test]
+    async fn result_saves_all_artifacts_with_collision_suffixes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/oracle/tasks/task-artifacts"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "task_id": "task-artifacts",
+                "pool_id": "p1",
+                "status": "completed",
+                "is_followup": false,
+                "queue_position": 0,
+                "response": "Artifacts ready.",
+                "files": [{
+                    "name": "result.json",
+                    "mime": "application/json",
+                    "bytes": 11,
+                    "data_base64": "eyJvayI6dHJ1ZX0=",
+                }],
+                "images": [{
+                    "name": "result.json",
+                    "mime": "image/png",
+                    "bytes": 4,
+                    "data_base64": "iVBORw==",
+                }],
+                "created_at": "2026-06-11T00:00:00Z",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("new-artifact-directory");
+        run(OracleCommands::Result {
+            task_id: "task-artifacts".to_string(),
+            out: None,
+            artifacts: Some(directory.clone()),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .expect("result artifacts should save");
+
+        assert_eq!(
+            fs::read(directory.join("result.json")).unwrap(),
+            br#"{"ok":true}"#
+        );
+        assert_eq!(
+            fs::read(directory.join("result-2.json")).unwrap(),
+            b"\x89PNG"
+        );
     }
 
     #[tokio::test]

@@ -29,8 +29,8 @@ use crate::errors::{AppError, AppResult};
 use crate::models::oracle_pool::OraclePool;
 use crate::models::oracle_session::{COLLECTION_NAME as ORACLE_SESSIONS, OracleSession};
 use crate::models::oracle_task::{
-    COLLECTION_NAME as ORACLE_TASKS, DEFAULT_ORACLE_TASK_MAX_RETRIES, OracleImage, OracleTask,
-    OracleTaskStatus,
+    COLLECTION_NAME as ORACLE_TASKS, DEFAULT_ORACLE_TASK_MAX_RETRIES, OracleFile, OracleImage,
+    OracleTask, OracleTaskStatus,
 };
 use crate::models::oracle_worker::{
     COLLECTION_NAME as ORACLE_WORKERS, OracleWorker, worker_doc_id,
@@ -45,9 +45,15 @@ pub const MAX_RESPONSE_CHARS: usize = 2_000_000;
 /// cap (base64 inflates ~33%) and the 16 MB MongoDB document ceiling.
 pub const MAX_RESULT_IMAGES: usize = 8;
 pub const MAX_RESULT_IMAGE_BYTES: usize = 8_000_000;
-pub const MAX_RESULT_IMAGES_TOTAL_BYTES: usize = 10_000_000;
+pub const MAX_RESULT_IMAGES_TOTAL_BYTES: usize = 9 * 1024 * 1024;
+pub const MAX_RESULT_FILES: usize = 8;
+pub const MAX_RESULT_FILE_BYTES: usize = 8_000_000;
+pub const MAX_RESULT_FILES_TOTAL_BYTES: usize = 9 * 1024 * 1024;
+pub const MAX_RESULT_ARTIFACTS_TOTAL_BYTES: usize = 9 * 1024 * 1024;
 const MAX_IMAGE_MIME_LEN: usize = 128;
 const MAX_IMAGE_NAME_LEN: usize = 256;
+const MAX_FILE_MIME_LEN: usize = 256;
+const MAX_FILE_NAME_LEN: usize = 128;
 const MAX_TAG_LEN: usize = 128;
 const MAX_MODEL_LABEL_LEN: usize = 128;
 const MAX_CLIENT_REF_LEN: usize = 128;
@@ -318,6 +324,7 @@ pub async fn submit_task(
         response: None,
         response_chars: None,
         images: None,
+        files: None,
         chatgpt_url: None,
         failure_reason: None,
         worker_script_version: None,
@@ -577,6 +584,7 @@ pub async fn extract_url(
         response: None,
         response_chars: None,
         images: None,
+        files: None,
         chatgpt_url: None,
         failure_reason: None,
         worker_script_version: None,
@@ -661,6 +669,7 @@ pub async fn attach_conversation(
         response: None,
         response_chars: None,
         images: None,
+        files: None,
         chatgpt_url: Some(chatgpt_url.to_string()),
         failure_reason: None,
         worker_script_version: None,
@@ -1250,14 +1259,22 @@ pub struct ResultImage {
     pub name: Option<String>,
 }
 
+/// Worker-reported generic file payload (base64 over the wire), validated and
+/// decoded before storage. Names are mandatory and sanitized server-side.
+pub struct ResultFile {
+    pub name: String,
+    pub mime: String,
+    pub data_base64: String,
+}
+
 /// Validate + decode worker images: drop non-`image/*` and undecodable entries,
 /// enforce the count cap and the per-image / aggregate decoded-byte caps.
 /// Best-effort — one malformed image is skipped, never fatal, so a bad entry
 /// can't fail an otherwise-good turn.
-fn decode_result_images(images: Vec<ResultImage>) -> Vec<OracleImage> {
+fn decode_result_images(images: Vec<ResultImage>, artifact_total: &mut usize) -> Vec<OracleImage> {
     use base64::Engine;
     let mut out: Vec<OracleImage> = Vec::new();
-    let mut total = 0usize;
+    let mut image_total = 0usize;
     for img in images.into_iter().take(MAX_RESULT_IMAGES) {
         let mime = img.mime.trim();
         if !mime.starts_with("image/") || mime.len() > MAX_IMAGE_MIME_LEN {
@@ -1271,10 +1288,13 @@ fn decode_result_images(images: Vec<ResultImage>) -> Vec<OracleImage> {
         if bytes.is_empty() || bytes.len() > MAX_RESULT_IMAGE_BYTES {
             continue;
         }
-        if total + bytes.len() > MAX_RESULT_IMAGES_TOTAL_BYTES {
+        if image_total + bytes.len() > MAX_RESULT_IMAGES_TOTAL_BYTES
+            || *artifact_total + bytes.len() > MAX_RESULT_ARTIFACTS_TOTAL_BYTES
+        {
             break;
         }
-        total += bytes.len();
+        image_total += bytes.len();
+        *artifact_total += bytes.len();
         let name = img
             .name
             .map(|n| truncate_chars(&n, MAX_IMAGE_NAME_LEN))
@@ -1283,6 +1303,70 @@ fn decode_result_images(images: Vec<ResultImage>) -> Vec<OracleImage> {
             mime: mime.to_string(),
             data: bytes,
             name,
+        });
+    }
+    out
+}
+
+fn sanitize_result_file_name(name: &str, fallback_index: usize) -> String {
+    let mut safe: String = name
+        .trim()
+        .chars()
+        .take(MAX_FILE_NAME_LEN)
+        .map(|character| {
+            if character == '/'
+                || character == '\\'
+                || matches!(character, '<' | '>' | ':' | '"' | '|' | '?' | '*')
+                || character.is_control()
+            {
+                '_'
+            } else {
+                character
+            }
+        })
+        .collect();
+    safe = safe
+        .trim_start_matches('.')
+        .trim_end_matches(['.', ' '])
+        .trim()
+        .to_string();
+    if safe.is_empty() {
+        format!("file_{fallback_index}")
+    } else {
+        safe
+    }
+}
+
+/// Validate + decode generic result files. MIME values are opaque but bounded
+/// and free of control characters; malformed entries are skipped independently.
+fn decode_result_files(files: Vec<ResultFile>, artifact_total: &mut usize) -> Vec<OracleFile> {
+    use base64::Engine;
+    let mut out = Vec::new();
+    let mut file_total = 0usize;
+    for (index, file) in files.into_iter().take(MAX_RESULT_FILES).enumerate() {
+        let mime = file.mime.trim();
+        if mime.is_empty() || mime.len() > MAX_FILE_MIME_LEN || mime.chars().any(char::is_control) {
+            continue;
+        }
+        let Ok(bytes) =
+            base64::engine::general_purpose::STANDARD.decode(file.data_base64.as_bytes())
+        else {
+            continue;
+        };
+        if bytes.is_empty() || bytes.len() > MAX_RESULT_FILE_BYTES {
+            continue;
+        }
+        if file_total + bytes.len() > MAX_RESULT_FILES_TOTAL_BYTES
+            || *artifact_total + bytes.len() > MAX_RESULT_ARTIFACTS_TOTAL_BYTES
+        {
+            break;
+        }
+        file_total += bytes.len();
+        *artifact_total += bytes.len();
+        out.push(OracleFile {
+            name: sanitize_result_file_name(&file.name, index + 1),
+            mime: mime.to_string(),
+            data: bytes,
         });
     }
     out
@@ -1302,6 +1386,7 @@ pub async fn worker_submit_result(
 pub struct WorkerResultInput<'a> {
     pub response: &'a str,
     pub images: Vec<ResultImage>,
+    pub files: Vec<ResultFile>,
     pub chatgpt_url: Option<&'a str>,
     pub model: Option<&'a str>,
     pub script_version: Option<&'a str>,
@@ -1320,7 +1405,7 @@ fn worker_error_code(response: &str) -> Option<&str> {
 }
 
 /// Stores a fenced worker result. Empty or `ERROR:` text fails unless valid
-/// images make the turn a successful image-only response.
+/// images or files make the turn a successful artifact-only response.
 pub async fn worker_submit_result_fenced(
     db: &mongodb::Database,
     pool: &OraclePool,
@@ -1331,10 +1416,13 @@ pub async fn worker_submit_result_fenced(
     validate_worker_label(worker_label)?;
     let now = Utc::now();
     let trimmed = input.response.trim();
-    let stored_images = decode_result_images(input.images);
+    let mut artifact_total = 0usize;
+    let stored_images = decode_result_images(input.images, &mut artifact_total);
+    let stored_files = decode_result_files(input.files, &mut artifact_total);
     let has_images = !stored_images.is_empty();
-    // An image-only turn has empty text but is NOT a failure.
-    let is_failure = (trimmed.is_empty() && !has_images) || trimmed.starts_with("ERROR:");
+    let has_files = !stored_files.is_empty();
+    let is_failure =
+        (trimmed.is_empty() && !has_images && !has_files) || trimmed.starts_with("ERROR:");
     let worker_error = worker_error_code(trimmed);
     let stored_response = truncate_chars(input.response, MAX_RESPONSE_CHARS);
     let response_chars = stored_response.chars().count() as u64;
@@ -1465,6 +1553,22 @@ pub async fn worker_submit_result_fenced(
             })
             .collect();
         set.insert("images", arr);
+    }
+    if has_files {
+        let arr: Vec<bson::Bson> = stored_files
+            .iter()
+            .map(|file| {
+                bson::Bson::Document(doc! {
+                    "name": &file.name,
+                    "mime": &file.mime,
+                    "data": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: file.data.clone(),
+                    },
+                })
+            })
+            .collect();
+        set.insert("files", arr);
     }
     if is_failure {
         set.insert(
@@ -1710,6 +1814,7 @@ pub async fn worker_submit_transcript_fenced(
                 response: Some(assistant_text),
                 response_chars: Some(response_chars),
                 images: None,
+                files: None,
                 chatgpt_url: input
                     .chatgpt_url
                     .filter(|u| !u.is_empty())
@@ -2045,7 +2150,8 @@ mod tests {
                 name: None,
             },
         ];
-        let out = decode_result_images(imgs);
+        let mut artifact_total = 0;
+        let out = decode_result_images(imgs, &mut artifact_total);
         assert_eq!(out.len(), 1, "only the one valid image survives");
         assert_eq!(out[0].mime, "image/png");
         assert_eq!(out[0].data, b"\x89PNGabc");
@@ -2063,9 +2169,13 @@ mod tests {
                 name: None,
             })
             .collect();
-        assert_eq!(decode_result_images(many).len(), MAX_RESULT_IMAGES);
+        let mut artifact_total = 0;
+        assert_eq!(
+            decode_result_images(many, &mut artifact_total).len(),
+            MAX_RESULT_IMAGES
+        );
 
-        // Total-bytes cap: two ~6MB images, total cap 10MB → second dropped.
+        // Total-bytes cap: two large images exceed 9 MiB, so the second drops.
         let half = MAX_RESULT_IMAGES_TOTAL_BYTES / 2 + 1_000_000;
         let big: Vec<ResultImage> = (0..2)
             .map(|_| ResultImage {
@@ -2074,7 +2184,77 @@ mod tests {
                 name: None,
             })
             .collect();
-        assert_eq!(decode_result_images(big).len(), 1);
+        let mut artifact_total = 0;
+        assert_eq!(decode_result_images(big, &mut artifact_total).len(), 1);
+    }
+
+    #[test]
+    fn decode_result_files_validates_and_sanitizes() {
+        use base64::Engine;
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let files = vec![
+            ResultFile {
+                name: "../private/result.json".to_string(),
+                mime: "application/json".to_string(),
+                data_base64: encode(br#"{"ok":true}"#),
+            },
+            ResultFile {
+                name: "bad.bin".to_string(),
+                mime: "application/octet-stream\nspoofed".to_string(),
+                data_base64: encode(b"bad"),
+            },
+            ResultFile {
+                name: "bad.bin".to_string(),
+                mime: "application/octet-stream".to_string(),
+                data_base64: "not%%%base64".to_string(),
+            },
+        ];
+        let mut artifact_total = 0;
+        let decoded = decode_result_files(files, &mut artifact_total);
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].name, "_private_result.json");
+        assert_eq!(decoded[0].mime, "application/json");
+        assert_eq!(decoded[0].data, br#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn result_files_enforce_count_and_combined_artifact_caps() {
+        use base64::Engine;
+        let many = (0..(MAX_RESULT_FILES + 3))
+            .map(|index| ResultFile {
+                name: format!("file_{index}"),
+                mime: "custom/result".to_string(),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(b"x"),
+            })
+            .collect();
+        let mut artifact_total = 0;
+        assert_eq!(
+            decode_result_files(many, &mut artifact_total).len(),
+            MAX_RESULT_FILES
+        );
+
+        let image_bytes = MAX_RESULT_ARTIFACTS_TOTAL_BYTES / 2 + 1;
+        let mut artifact_total = 0;
+        let images = decode_result_images(
+            vec![ResultImage {
+                mime: "image/png".to_string(),
+                data_base64: base64::engine::general_purpose::STANDARD
+                    .encode(vec![0u8; image_bytes]),
+                name: None,
+            }],
+            &mut artifact_total,
+        );
+        let files = decode_result_files(
+            vec![ResultFile {
+                name: "result.bin".to_string(),
+                mime: "application/octet-stream".to_string(),
+                data_base64: base64::engine::general_purpose::STANDARD
+                    .encode(vec![0u8; image_bytes]),
+            }],
+            &mut artifact_total,
+        );
+        assert_eq!(images.len(), 1);
+        assert!(files.is_empty(), "files share the image byte budget");
     }
 
     #[test]
@@ -2217,6 +2397,7 @@ mod tests {
             WorkerResultInput {
                 response: "The answer is 42.",
                 images: vec![],
+                files: vec![],
                 chatgpt_url: Some("https://chatgpt.com/c/abc"),
                 model: Some("chatgpt-5.5-pro"),
                 script_version: Some("v1"),
@@ -2243,6 +2424,7 @@ mod tests {
             WorkerResultInput {
                 response: "ERROR: Response too short or empty",
                 images: vec![],
+                files: vec![],
                 chatgpt_url: None,
                 model: None,
                 script_version: None,
@@ -2268,6 +2450,7 @@ mod tests {
             WorkerResultInput {
                 response: "stale",
                 images: vec![],
+                files: vec![],
                 chatgpt_url: None,
                 model: None,
                 script_version: None,
@@ -2278,6 +2461,52 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(late, ResultOutcome::Ignored);
+
+        // A valid file is sufficient to complete an otherwise empty turn.
+        use base64::Engine;
+        let file_task = submit_task(
+            &db,
+            &pool,
+            &submitter(&owner),
+            prompt_input("write a result file"),
+        )
+        .await
+        .unwrap();
+        claim_task(&db, &pool, "tab_1", None, None)
+            .await
+            .unwrap()
+            .expect("file task claim");
+        let file_outcome = worker_submit_result(
+            &db,
+            &pool,
+            "tab_1",
+            &file_task.task.id,
+            WorkerResultInput {
+                response: "",
+                images: vec![],
+                files: vec![ResultFile {
+                    name: "result.json".to_string(),
+                    mime: "application/json".to_string(),
+                    data_base64: base64::engine::general_purpose::STANDARD
+                        .encode(br#"{"verdict":"reject"}"#),
+                }],
+                chatgpt_url: None,
+                model: None,
+                script_version: None,
+                retention_days: 30,
+                dispatch_attempt_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(file_outcome, ResultOutcome::Completed);
+        let (file_done, _) = get_task_for_consumer(&db, &owner, &file_task.task.id)
+            .await
+            .unwrap();
+        let stored_files = file_done.files.expect("stored files");
+        assert_eq!(stored_files.len(), 1);
+        assert_eq!(stored_files[0].name, "result.json");
+        assert_eq!(stored_files[0].data, br#"{"verdict":"reject"}"#);
 
         db.drop().await.ok();
     }
@@ -2442,6 +2671,7 @@ mod tests {
             WorkerResultInput {
                 response: "from dead tab",
                 images: vec![],
+                files: vec![],
                 chatgpt_url: None,
                 model: None,
                 script_version: None,
@@ -2562,6 +2792,7 @@ mod tests {
             WorkerResultInput {
                 response: "ERROR: browser_recovery_exhausted",
                 images: vec![],
+                files: vec![],
                 chatgpt_url: None,
                 model: None,
                 script_version: None,
@@ -2590,6 +2821,7 @@ mod tests {
             WorkerResultInput {
                 response: "ERROR: browser_recovery_exhausted",
                 images: vec![],
+                files: vec![],
                 chatgpt_url: None,
                 model: None,
                 script_version: None,
@@ -2671,6 +2903,7 @@ mod tests {
             WorkerResultInput {
                 response: "stale answer",
                 images: vec![],
+                files: vec![],
                 chatgpt_url: None,
                 model: None,
                 script_version: None,
@@ -2752,6 +2985,7 @@ mod tests {
             WorkerResultInput {
                 response: "turn one answer",
                 images: vec![],
+                files: vec![],
                 chatgpt_url: Some("https://chatgpt.com/c/xyz"),
                 model: None,
                 script_version: None,
@@ -2921,6 +3155,7 @@ mod tests {
             WorkerResultInput {
                 response: "turn one answer",
                 images: vec![],
+                files: vec![],
                 chatgpt_url: Some("https://chatgpt.com/c/xyz"),
                 model: None,
                 script_version: None,
@@ -3017,6 +3252,7 @@ mod tests {
             WorkerResultInput {
                 response: "turn one answer",
                 images: vec![],
+                files: vec![],
                 chatgpt_url: Some("https://chatgpt.com/c/xyz"),
                 model: None,
                 script_version: None,
@@ -3111,6 +3347,7 @@ mod tests {
             WorkerResultInput {
                 response: "ERROR: extraction failed",
                 images: vec![],
+                files: vec![],
                 chatgpt_url: Some("https://chatgpt.com/c/xyz"),
                 model: None,
                 script_version: None,

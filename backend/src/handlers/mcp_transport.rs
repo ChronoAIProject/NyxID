@@ -2624,6 +2624,44 @@ async fn poll_oracle_task(
     }
 }
 
+/// Inventory of generated files and images on a completed task. The MCP text
+/// channel cannot carry bytes, so list name, MIME, and size and point at the
+/// retrieval paths (base64 in `GET /api/v1/oracle/tasks/{id}`, or
+/// `nyxid oracle result <id> --artifacts <dir>`). Never inlines bodies.
+fn render_oracle_artifacts(task: &crate::models::oracle_task::OracleTask) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for file in task.files.iter().flatten() {
+        lines.push(format!(
+            "- {} ({}, {} bytes)",
+            file.name,
+            file.mime,
+            file.data.len()
+        ));
+    }
+    for (index, image) in task.images.iter().flatten().enumerate() {
+        let name = image
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("image_{}", index + 1));
+        lines.push(format!(
+            "- {} ({}, {} bytes)",
+            name,
+            image.mime,
+            image.data.len()
+        ));
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Artifacts ({}):\n{}\nRetrieve them with `nyxid oracle result {} --artifacts <dir>` or as base64 `files`/`images` in GET /api/v1/oracle/tasks/{}.",
+        lines.len(),
+        lines.join("\n"),
+        task.id,
+        task.id
+    )
+}
+
 fn render_oracle_task_result(
     task: &crate::models::oracle_task::OracleTask,
     queue_position: u64,
@@ -2632,8 +2670,20 @@ fn render_oracle_task_result(
     match task.status {
         crate::models::oracle_task::OracleTaskStatus::Completed => {
             let mut text = task.response.clone().unwrap_or_default();
+            let artifacts = render_oracle_artifacts(task);
             if text.is_empty() {
-                text = format!("Task {} completed with an empty response.", task.id);
+                text = if artifacts.is_empty() {
+                    format!("Task {} completed with an empty response.", task.id)
+                } else {
+                    format!(
+                        "Task {} completed with no text; see artifacts below.",
+                        task.id
+                    )
+                };
+            }
+            if !artifacts.is_empty() {
+                text.push_str("\n\n");
+                text.push_str(&artifacts);
             }
             (text, false)
         }
@@ -4968,5 +5018,72 @@ mod tests {
     #[test]
     fn mcp_protocol_version_is_set() {
         assert!(!MCP_PROTOCOL_VERSION.is_empty());
+    }
+    #[test]
+    fn oracle_result_lists_artifacts_instead_of_claiming_empty_response() {
+        use crate::models::oracle_task::{OracleFile, OracleTask, OracleTaskStatus};
+        let now = chrono::Utc::now();
+        let mut task = OracleTask {
+            id: "task-1".to_string(),
+            pool_id: "pool-1".to_string(),
+            submitter_user_id: "user-1".to_string(),
+            kind: "prompt".to_string(),
+            target_url: None,
+            api_key_id: None,
+            api_key_name: None,
+            prompt: "p".to_string(),
+            model_label: None,
+            project_url: None,
+            tag: None,
+            pdf_base64: None,
+            pdf_name: None,
+            attachment_base64: None,
+            attachment_name: None,
+            conversation_id: None,
+            is_followup: false,
+            required_worker_label: None,
+            client_ref: None,
+            status: OracleTaskStatus::Completed,
+            phase: None,
+            phase_detail: None,
+            phase_at: None,
+            assigned_worker_id: None,
+            dispatched_at: None,
+            lease_expires_at: None,
+            retry_count: 0,
+            max_retries: 0,
+            attempt_count: 0,
+            dispatch_attempt_id: None,
+            response: None,
+            response_chars: None,
+            images: None,
+            files: Some(vec![OracleFile {
+                name: "result.json".to_string(),
+                mime: "application/json".to_string(),
+                data: b"{\"verdict\":\"reject\"}".to_vec(),
+            }]),
+            chatgpt_url: None,
+            failure_reason: None,
+            worker_script_version: None,
+            completed_at: None,
+            expires_at: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let (text, is_error) = render_oracle_task_result(&task, 0, "pending");
+        assert!(!is_error);
+        assert!(!text.contains("empty response"), "{text}");
+        assert!(
+            text.contains("result.json (application/json, 20 bytes)"),
+            "{text}"
+        );
+        assert!(text.contains("--artifacts"), "{text}");
+        // The body itself is never inlined into the MCP text.
+        assert!(!text.contains("verdict"), "{text}");
+
+        task.response = Some("Summary only.".to_string());
+        let (text, _) = render_oracle_task_result(&task, 0, "pending");
+        assert!(text.starts_with("Summary only."));
+        assert!(text.contains("Artifacts (1)"));
     }
 }
