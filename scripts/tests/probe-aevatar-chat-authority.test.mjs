@@ -5,6 +5,7 @@ import {
   decodeJwtClaimSummary,
   extractSafeUpstreamCode,
   runProductionChatProbe,
+  runProductionReadProbe,
   runSevenRowProbe,
   sanitizeReceipt,
   serializeReceipts,
@@ -19,6 +20,8 @@ const ROW_IDS = [
   "restricted_bearer_llm_gateway",
   "restricted_bearer_proxy_slug",
 ];
+const TEST_PRODUCTION_USER_ID = "11111111-1111-4111-8111-111111111111";
+const TEST_AEVATAR_CLIENT_ID = "22222222-2222-4222-8222-222222222222";
 
 function jwtWithPayload(payload) {
   const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" }))
@@ -273,13 +276,68 @@ test("production chat requires an explicit one-write acknowledgement", async () 
   assert.equal(fetchCalls, 0);
 });
 
-test("production chat verifies the fixed operator before any write", async () => {
+test("production modes require the expected user before any request", async () => {
+  for (const [name, run] of [
+    ["read", runProductionReadProbe],
+    ["chat", runProductionChatProbe],
+  ]) {
+    let fetchCalls = 0;
+    const env = name === "chat"
+      ? { AC2_ACK_PRODUCTION_CHAT: "post-one-chat-and-delete" }
+      : {};
+    await assert.rejects(
+      run({
+        token: jwtWithPayload({ iat: 100, exp: 160 }),
+        env,
+        fetchImpl: async () => {
+          fetchCalls += 1;
+          throw new Error("must not run");
+        },
+      }),
+      { message: "production_user_id_missing" },
+    );
+    assert.equal(fetchCalls, 0, name);
+  }
+});
+
+test("production configuration controls read destinations and identity", async () => {
+  const observedUrls = [];
+  const result = await runProductionReadProbe({
+    token: jwtWithPayload({ iat: 100, exp: 160 }),
+    env: productionEnv({
+      AC2_PRODUCTION_BASE_URL: "https://nyxid.example.test",
+      AC2_AEVATAR_CLIENT_ID: TEST_AEVATAR_CLIENT_ID,
+    }),
+    fetchImpl: async (url) => {
+      observedUrls.push(url);
+      return jsonResponse(
+        200,
+        url.pathname === "/api/v1/users/me" ? { id: TEST_PRODUCTION_USER_ID } : {},
+      );
+    },
+  });
+
+  assert.equal(observedUrls.length, 8);
+  assert.equal(observedUrls.every((url) => url.origin === "https://nyxid.example.test"), true);
+  assert.equal(
+    observedUrls.some(
+      (url) =>
+        url.pathname ===
+        `/api/v1/users/me/consents/${TEST_AEVATAR_CLIENT_ID}/authorization`,
+    ),
+    true,
+  );
+  assert.equal(result.nyxid_base, "https://nyxid.example.test");
+  assert.equal(result.expected_user_matched, true);
+});
+
+test("production chat verifies the configured operator before any write", async () => {
   const writeMethods = [];
 
   await assert.rejects(
     runProductionChatProbe({
       token: jwtWithPayload({ iat: 100, exp: 160 }),
-      env: { AC2_ACK_PRODUCTION_CHAT: "post-one-chat-and-delete" },
+      env: productionEnv(),
       fetchImpl: async (_url, init) => {
         if (init.method !== "GET") {
           writeMethods.push(init.method);
@@ -299,12 +357,10 @@ test("production chat never deletes an id that existed before the turn", async (
   await assert.rejects(
     runProductionChatProbe({
       token: jwtWithPayload({ iat: 100, exp: 160 }),
-      env: { AC2_ACK_PRODUCTION_CHAT: "post-one-chat-and-delete" },
+      env: productionEnv(),
       fetchImpl: async (url, init) => {
         if (url.pathname === "/api/v1/users/me") {
-          return jsonResponse(200, {
-            id: "10ddeeb3-9e40-4ee7-b58c-dbd9af615c3b",
-          });
+          return jsonResponse(200, { id: TEST_PRODUCTION_USER_ID });
         }
         if (url.pathname === "/api/v1/keys") {
           return jsonResponse(200, {
@@ -340,13 +396,11 @@ test("production chat cleans up its new conversation after a body read failure",
   await assert.rejects(
     runProductionChatProbe({
       token: jwtWithPayload({ iat: 100, exp: 160 }),
-      env: { AC2_ACK_PRODUCTION_CHAT: "post-one-chat-and-delete" },
+      env: productionEnv(),
       fetchImpl: async (url, init) => {
         observedPaths.push(`${init.method} ${url.pathname}`);
         if (url.pathname === "/api/v1/users/me") {
-          return jsonResponse(200, {
-            id: "10ddeeb3-9e40-4ee7-b58c-dbd9af615c3b",
-          });
+          return jsonResponse(200, { id: TEST_PRODUCTION_USER_ID });
         }
         if (url.pathname === "/api/v1/keys") {
           return jsonResponse(200, {
@@ -401,12 +455,10 @@ test("production chat reports a fixed error when cleanup is not confirmed", asyn
   await assert.rejects(
     runProductionChatProbe({
       token: jwtWithPayload({ iat: 100, exp: 160 }),
-      env: { AC2_ACK_PRODUCTION_CHAT: "post-one-chat-and-delete" },
+      env: productionEnv(),
       fetchImpl: async (url, init) => {
         if (url.pathname === "/api/v1/users/me") {
-          return jsonResponse(200, {
-            id: "10ddeeb3-9e40-4ee7-b58c-dbd9af615c3b",
-          });
+          return jsonResponse(200, { id: TEST_PRODUCTION_USER_ID });
         }
         if (url.pathname === "/api/v1/keys") {
           return jsonResponse(200, {
@@ -463,6 +515,14 @@ function localEnv(overrides = {}) {
     AC2_RESTRICTED_DELEGATED_BEARER: restricted,
     AC2_GATEWAY_MODEL: "local-probe-model",
     AC2_ACK_LOCAL_POSTS: "ac2-local-only",
+    ...overrides,
+  };
+}
+
+function productionEnv(overrides = {}) {
+  return {
+    AC2_PRODUCTION_USER_ID: TEST_PRODUCTION_USER_ID,
+    AC2_ACK_PRODUCTION_CHAT: "post-one-chat-and-delete",
     ...overrides,
   };
 }

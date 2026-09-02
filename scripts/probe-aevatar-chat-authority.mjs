@@ -8,9 +8,15 @@
  *   AC2_RESTRICTED_DELEGATED_BEARER are secrets.
  * - AC2_GATEWAY_MODEL must be a public label.
  * - AC2_ACK_LOCAL_POSTS must equal "ac2-local-only".
+ * - AC2_PRODUCTION_USER_ID is the required expected operator UUID for both
+ *   production commands. It has no committed default.
+ * - AC2_PRODUCTION_BASE_URL defaults to https://nyx-api.chrono-ai.fun and may
+ *   override that target with another HTTPS origin.
+ * - AC2_AEVATAR_CLIENT_ID defaults to the registered production Aevatar client
+ *   UUID and may override the client used for the consent read.
  * - Stdout contains allowlisted receipt JSON only. Redirect it to the evidence file.
  * - `production-read <token-file>` performs the fixed allowlisted GETs against
- *   the production pair and checks the fixed operator user.
+ *   the configured production origin and checks the configured operator user.
  * - `production-chat <token-file>` additionally requires
  *   AC2_ACK_PRODUCTION_CHAT="post-one-chat-and-delete". The command posts one
  *   typed turn, deletes only its new conversation, and confirms deletion.
@@ -25,11 +31,11 @@ const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
 const LOCAL_ACKNOWLEDGEMENT = "ac2-local-only";
 const PRODUCTION_CHAT_ACKNOWLEDGEMENT = "post-one-chat-and-delete";
-const PRODUCTION_BASE_URL = "https://nyx-api.chrono-ai.fun";
-const PRODUCTION_USER_ID = "10ddeeb3-9e40-4ee7-b58c-dbd9af615c3b";
-const AEVATAR_CLIENT_ID = "a6ff2946-f02f-4c35-8203-1ec46132b660";
+const DEFAULT_PRODUCTION_BASE_URL = "https://nyx-api.chrono-ai.fun";
+const DEFAULT_AEVATAR_CLIENT_ID = "a6ff2946-f02f-4c35-8203-1ec46132b660";
 const SAFE_PUBLIC_LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const SAFE_CODE = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SECRET_PATTERNS = [
   /eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}/i,
   /nyx_[A-Za-z0-9_-]+/i,
@@ -148,15 +154,21 @@ export async function runSevenRowProbe({
   return [...sourceRows, ...localRows];
 }
 
-export async function runProductionReadProbe({ token, fetchImpl = globalThis.fetch } = {}) {
+export async function runProductionReadProbe({
+  token,
+  env = process.env,
+  fetchImpl = globalThis.fetch,
+} = {}) {
+  const config = loadProductionProbeConfig(env);
   requireSecret(token);
   const tokenSummary = decodeJwtClaimSummary(token);
+  const context = { config, token, fetchImpl };
   const specs = [
     ["me", "/api/v1/users/me"],
     ["consents", "/api/v1/users/me/consents"],
     [
       "aevatar_consent_authorization",
-      `/api/v1/users/me/consents/${AEVATAR_CLIENT_ID}/authorization`,
+      `/api/v1/users/me/consents/${config.aevatarClientId}/authorization`,
     ],
     ["keys", "/api/v1/keys"],
     ["assistant_actions", "/api/v1/assistant/actions"],
@@ -167,7 +179,7 @@ export async function runProductionReadProbe({ token, fetchImpl = globalThis.fet
   const observations = {};
   const bodies = {};
   for (const [name, path] of specs) {
-    const { response, body } = await productionJsonRequest(path, token, fetchImpl);
+    const { response, body } = await productionJsonRequest(context, path);
     observations[name] = {
       status: response.status,
       upstream_code: extractSafeUpstreamCode(body),
@@ -180,9 +192,9 @@ export async function runProductionReadProbe({ token, fetchImpl = globalThis.fet
   const authorization = bodies.aevatar_consent_authorization;
   return {
     surface: "production-read-only",
-    nyxid_base: "production-pair",
+    nyxid_base: config.baseUrl.origin,
     aevatar_source_version: AEVATAR_PINNED_VERSION,
-    expected_user_matched: meId === PRODUCTION_USER_ID,
+    expected_user_matched: meId === config.expectedUserId,
     token_claim_summary: tokenSummary,
     aevatar_authorized_service_count: countNamedArray(authorization, [
       "allowed_service_ids",
@@ -201,50 +213,43 @@ export async function runProductionChatProbe({
   if (env.AC2_ACK_PRODUCTION_CHAT !== PRODUCTION_CHAT_ACKNOWLEDGEMENT) {
     throw new Error("production_chat_not_acknowledged");
   }
+  const config = loadProductionProbeConfig(env);
   requireSecret(token);
+  const context = { config, token, fetchImpl };
 
-  const meRead = await productionJsonRequest("/api/v1/users/me", token, fetchImpl);
+  const meRead = await productionJsonRequest(context, "/api/v1/users/me");
   if (
     meRead.response.status !== 200 ||
     !isPlainObject(meRead.body) ||
-    meRead.body.id !== PRODUCTION_USER_ID
+    meRead.body.id !== config.expectedUserId
   ) {
     throw new Error("production_user_mismatch");
   }
 
-  const keysRead = await productionJsonRequest("/api/v1/keys", token, fetchImpl);
+  const keysRead = await productionJsonRequest(context, "/api/v1/keys");
   if (keysRead.response.status !== 200) {
     throw new Error("production_keys_unavailable");
   }
   const selectedService = selectConnectedService(keysRead.body);
-  const beforeRead = await productionJsonRequest(
-    "/api/v1/assistant/conversations",
-    token,
-    fetchImpl,
-  );
+  const beforeRead = await productionJsonRequest(context, "/api/v1/assistant/conversations");
   if (beforeRead.response.status !== 200) {
     throw new Error("production_conversations_unavailable");
   }
   const beforeIds = collectConversationIds(beforeRead.body);
 
-  const chatResponse = await productionFetch(
-    "/api/v1/assistant/chat",
-    token,
-    {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "text/event-stream",
-        "x-nyxid-debug-upstream": "1",
-      },
-      body: JSON.stringify({
-        type: "text",
-        prompt: `Use the already connected service ${selectedService.slug} and report whether it is available.`,
-        clientRequestId: `ac2-production-${Date.now()}`,
-      }),
+  const chatResponse = await productionFetch(context, "/api/v1/assistant/chat", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      accept: "text/event-stream",
+      "x-nyxid-debug-upstream": "1",
     },
-    fetchImpl,
-  );
+    body: JSON.stringify({
+      type: "text",
+      prompt: `Use the already connected service ${selectedService.slug} and report whether it is available.`,
+      clientRequestId: `ac2-production-${Date.now()}`,
+    }),
+  });
   let chatBytes = Buffer.alloc(0);
   let chatReadError = null;
   try {
@@ -254,11 +259,7 @@ export async function runProductionChatProbe({
   }
   const chatText = chatBytes.toString("utf8");
 
-  const afterRead = await productionJsonRequest(
-    "/api/v1/assistant/conversations",
-    token,
-    fetchImpl,
-  );
+  const afterRead = await productionJsonRequest(context, "/api/v1/assistant/conversations");
   if (afterRead.response.status !== 200) {
     throw new Error("production_conversations_unavailable");
   }
@@ -282,10 +283,9 @@ export async function runProductionChatProbe({
   let stateConfirmation;
   try {
     deleteResponse = await productionFetch(
+      context,
       `/api/v1/assistant/conversations/${conversationId}`,
-      token,
       { method: "DELETE" },
-      fetchImpl,
     );
     try {
       await readBoundedBytes(deleteResponse, 256 * 1024);
@@ -293,14 +293,12 @@ export async function runProductionChatProbe({
       // The typed reads below are the authoritative deletion confirmation.
     }
     historyConfirmation = await productionJsonRequest(
+      context,
       `/api/v1/assistant/conversations/${conversationId}`,
-      token,
-      fetchImpl,
     );
     stateConfirmation = await productionJsonRequest(
+      context,
       `/api/v1/assistant/conversations/${conversationId}/state`,
-      token,
-      fetchImpl,
     );
   } catch {
     throw new Error("production_conversation_cleanup_failed");
@@ -393,6 +391,46 @@ function assertLoopbackTarget(rawUrl) {
   }
   url.pathname = url.pathname.replace(/\/$/, "");
   return url;
+}
+
+function loadProductionProbeConfig(env) {
+  const expectedUserId = requireUuid(
+    env.AC2_PRODUCTION_USER_ID,
+    "production_user_id_missing",
+    "production_user_id_invalid",
+  );
+  const aevatarClientId = requireUuid(
+    env.AC2_AEVATAR_CLIENT_ID ?? DEFAULT_AEVATAR_CLIENT_ID,
+    "aevatar_client_id_missing",
+    "aevatar_client_id_invalid",
+  );
+  let baseUrl;
+  try {
+    baseUrl = new URL(env.AC2_PRODUCTION_BASE_URL ?? DEFAULT_PRODUCTION_BASE_URL);
+  } catch {
+    throw new Error("production_base_url_invalid");
+  }
+  if (
+    baseUrl.protocol !== "https:" ||
+    baseUrl.username !== "" ||
+    baseUrl.password !== "" ||
+    baseUrl.pathname !== "/" ||
+    baseUrl.search !== "" ||
+    baseUrl.hash !== ""
+  ) {
+    throw new Error("production_base_url_invalid");
+  }
+  return Object.freeze({ baseUrl, expectedUserId, aevatarClientId });
+}
+
+function requireUuid(value, missingCode, invalidCode) {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(missingCode);
+  }
+  if (!UUID.test(value)) {
+    throw new Error(invalidCode);
+  }
+  return value;
 }
 
 function buildSourceRows(inputs) {
@@ -557,8 +595,8 @@ async function readBoundedJson(response) {
   }
 }
 
-async function productionJsonRequest(path, token, fetchImpl) {
-  const response = await productionFetch(path, token, { method: "GET" }, fetchImpl);
+async function productionJsonRequest(context, path) {
+  const response = await productionFetch(context, path, { method: "GET" });
   const bytes = await readBoundedBytes(response, 4 * 1024 * 1024);
   let body = null;
   if (bytes.length > 0) {
@@ -571,14 +609,14 @@ async function productionJsonRequest(path, token, fetchImpl) {
   return { response, body };
 }
 
-async function productionFetch(path, token, init, fetchImpl) {
+async function productionFetch(context, path, init) {
   let response;
   try {
-    response = await fetchImpl(new URL(path, PRODUCTION_BASE_URL), {
+    response = await context.fetchImpl(new URL(path, context.config.baseUrl), {
       ...init,
       headers: {
         ...init.headers,
-        authorization: `Bearer ${token}`,
+        authorization: `Bearer ${context.token}`,
       },
       redirect: "manual",
     });
@@ -848,6 +886,9 @@ if (isMainModule()) {
         "local_posts_not_acknowledged",
         "missing_probe_secret",
         "network_failure",
+        "aevatar_client_id_invalid",
+        "aevatar_client_id_missing",
+        "production_base_url_invalid",
         "production_chat_not_acknowledged",
         "production_connected_service_missing",
         "production_conversation_cleanup_failed",
@@ -857,6 +898,8 @@ if (isMainModule()) {
         "production_token_file_missing",
         "production_token_file_unreadable",
         "production_user_mismatch",
+        "production_user_id_invalid",
+        "production_user_id_missing",
         "response_read_failed",
         "response_too_large",
         "secret_barrier_triggered",
