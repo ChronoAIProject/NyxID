@@ -496,9 +496,10 @@ async fn run_worker(command: OracleWorkerCommands) -> Result<()> {
         OracleWorkerCommands::Install {
             pool,
             worker_token_file,
+            label,
             force,
             auth,
-        } => install_worker(pool, worker_token_file, force, auth).await,
+        } => install_worker(pool, worker_token_file, label, force, auth).await,
         OracleWorkerCommands::Start { pool, profile } => {
             oracle_worker_daemon::start(&pool, profile.as_deref())
         }
@@ -804,6 +805,7 @@ fn bool_state(value: Option<bool>) -> String {
 async fn install_worker(
     pool: String,
     worker_token_file: Option<String>,
+    requested_label: Option<String>,
     force: bool,
     auth: crate::cli::AuthArgs,
 ) -> Result<()> {
@@ -821,22 +823,34 @@ async fn install_worker(
             install_dir.display()
         )
     }
-    let label = match &existing {
-        Some(config) => config.label.clone(),
-        None => {
+    let label = match (&existing, requested_label.as_deref()) {
+        // Keep the existing identity unless the operator explicitly renames.
+        (Some(config), None) => config.label.clone(),
+        (_, requested) => {
+            let body = match requested {
+                Some(label) => serde_json::json!({ "label": label }),
+                None => Value::Null,
+            };
             let allocated: Value = api
                 .post(
                     &format!(
                         "/oracle/pools/{}/workers/allocate",
                         urlencoding::encode(&pool)
                     ),
-                    &Value::Null,
+                    &body,
                 )
                 .await?;
-            allocated["label"]
+            let label = allocated["label"]
                 .as_str()
                 .context("server did not return a worker label")?
-                .to_string()
+                .to_string();
+            if allocated["adopted"].as_bool() == Some(true) {
+                eprintln!(
+                    "Adopted existing worker label '{label}'. Any legacy worker still using it \
+                     will be rejected once this installation connects; unload that legacy worker."
+                );
+            }
+            label
         }
     };
     let token = read_worker_token(

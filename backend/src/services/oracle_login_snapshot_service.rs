@@ -224,9 +224,10 @@ mod tests {
             return;
         };
         let pool = pool();
-        let capable = oracle_worker_service::allocate_worker(&db, &pool)
+        let capable = oracle_worker_service::allocate_worker(&db, &pool, None)
             .await
-            .unwrap();
+            .unwrap()
+            .worker;
         oracle_worker_service::report_presence(
             &db,
             &pool,
@@ -238,9 +239,10 @@ mod tests {
         )
         .await
         .unwrap();
-        let legacy = oracle_worker_service::allocate_worker(&db, &pool)
+        let legacy = oracle_worker_service::allocate_worker(&db, &pool, None)
             .await
-            .unwrap();
+            .unwrap()
+            .worker;
         let keys = test_encryption_keys();
         let fanout = create_and_fanout(
             &db,

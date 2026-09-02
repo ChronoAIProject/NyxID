@@ -2310,6 +2310,8 @@ mod tests {
             "chatgpt-pro",
             "--worker-token-file",
             "/tmp/oracle-token",
+            "--label",
+            "share-account-8",
             "--profile",
             "team-a",
         ])
@@ -2323,6 +2325,7 @@ mod tests {
                             OracleWorkerCommands::Install {
                                 pool,
                                 worker_token_file,
+                                label,
                                 auth,
                                 ..
                             },
@@ -2330,6 +2333,7 @@ mod tests {
             } => {
                 assert_eq!(pool, "chatgpt-pro");
                 assert_eq!(worker_token_file.as_deref(), Some("/tmp/oracle-token"));
+                assert_eq!(label.as_deref(), Some("share-account-8"));
                 assert_eq!(auth.profile.as_deref(), Some("team-a"));
             }
             _ => panic!("unexpected parse result"),
@@ -4850,6 +4854,11 @@ pub enum OracleWorkerCommands {
         /// Read the raw pool worker token from this file
         #[arg(long, value_name = "PATH")]
         worker_token_file: Option<String>,
+        /// Choose the worker label (letters, digits, '-', '_'; default: server-generated).
+        /// An existing legacy worker's label is adopted; a label bound to another
+        /// managed installation is refused.
+        #[arg(long)]
+        label: Option<String>,
         /// Replace an existing installation for this pool/profile
         #[arg(long)]
         force: bool,

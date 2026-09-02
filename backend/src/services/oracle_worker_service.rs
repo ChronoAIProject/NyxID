@@ -97,34 +97,101 @@ fn optional_metadata(value: Option<String>, field: &str) -> AppResult<Option<Str
         .transpose()
 }
 
-pub async fn allocate_worker(db: &mongodb::Database, pool: &OraclePool) -> AppResult<OracleWorker> {
+#[derive(Debug)]
+pub struct AllocatedWorker {
+    pub worker: OracleWorker,
+    /// True when an existing unbound (legacy) presence row was taken over
+    /// instead of creating a fresh label.
+    pub adopted: bool,
+}
+
+fn provisioned_worker(pool: &OraclePool, label: &str, now: chrono::DateTime<Utc>) -> OracleWorker {
+    OracleWorker {
+        id: worker_doc_id(&pool.id, label),
+        pool_id: pool.id.clone(),
+        worker_label: label.to_string(),
+        last_seen_at: now - Duration::days(365),
+        current_task_id: None,
+        script_version: None,
+        page_url: None,
+        first_seen_at: None,
+        provisioned_at: Some(now),
+        instance_id: None,
+        platform: None,
+        capabilities: Vec::new(),
+        desired_state: OracleWorkerDesiredState::Active,
+        logged_in: None,
+        chrome_alive: None,
+        last_error: None,
+    }
+}
+
+/// Reserve a worker label for a managed installation.
+///
+/// With `requested_label`, the label is validated and either created, adopted
+/// (an existing row with no installation binding, i.e. a legacy worker, is
+/// taken over; the legacy process is rejected on its next poll once the new
+/// installation binds), or refused with `OracleWorkerLabelUnavailable` when it
+/// is bound to another installation. Without a request a unique random label
+/// is generated.
+pub async fn allocate_worker(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    requested_label: Option<&str>,
+) -> AppResult<AllocatedWorker> {
+    let workers = db.collection::<OracleWorker>(ORACLE_WORKERS);
+    if let Some(label) = requested_label {
+        super::oracle_task_service::validate_worker_label(label)?;
+        let now = Utc::now();
+        let adopted = workers
+            .find_one_and_update(
+                doc! {
+                    "_id": worker_doc_id(&pool.id, label),
+                    "pool_id": &pool.id,
+                    "$or": [
+                        { "instance_id": null },
+                        { "instance_id": { "$exists": false } },
+                    ],
+                },
+                doc! { "$set": { "provisioned_at": bson::DateTime::from_chrono(now) } },
+            )
+            .with_options(
+                FindOneAndUpdateOptions::builder()
+                    .return_document(ReturnDocument::After)
+                    .build(),
+            )
+            .await?;
+        if let Some(worker) = adopted {
+            return Ok(AllocatedWorker {
+                worker,
+                adopted: true,
+            });
+        }
+        let worker = provisioned_worker(pool, label, now);
+        return match workers.insert_one(&worker).await {
+            Ok(_) => Ok(AllocatedWorker {
+                worker,
+                adopted: false,
+            }),
+            Err(error) if oracle_pool_service::is_duplicate_key(&error) => {
+                Err(AppError::OracleWorkerLabelUnavailable(format!(
+                    "worker label '{label}' is bound to another installation"
+                )))
+            }
+            Err(error) => Err(error.into()),
+        };
+    }
+
     for _ in 0..LABEL_ALLOCATION_ATTEMPTS {
         let label = format!("worker-{}", hex::encode(rand::random::<[u8; 5]>()));
-        let now = Utc::now();
-        let worker = OracleWorker {
-            id: worker_doc_id(&pool.id, &label),
-            pool_id: pool.id.clone(),
-            worker_label: label,
-            last_seen_at: now - Duration::days(365),
-            current_task_id: None,
-            script_version: None,
-            page_url: None,
-            first_seen_at: None,
-            provisioned_at: Some(now),
-            instance_id: None,
-            platform: None,
-            capabilities: Vec::new(),
-            desired_state: OracleWorkerDesiredState::Active,
-            logged_in: None,
-            chrome_alive: None,
-            last_error: None,
-        };
-        match db
-            .collection::<OracleWorker>(ORACLE_WORKERS)
-            .insert_one(&worker)
-            .await
-        {
-            Ok(_) => return Ok(worker),
+        let worker = provisioned_worker(pool, &label, Utc::now());
+        match workers.insert_one(&worker).await {
+            Ok(_) => {
+                return Ok(AllocatedWorker {
+                    worker,
+                    adopted: false,
+                });
+            }
             Err(error) if oracle_pool_service::is_duplicate_key(&error) => continue,
             Err(error) => return Err(error.into()),
         }
@@ -690,8 +757,8 @@ mod tests {
             return;
         };
         let pool = pool();
-        let first = allocate_worker(&db, &pool).await.unwrap();
-        let second = allocate_worker(&db, &pool).await.unwrap();
+        let first = allocate_worker(&db, &pool, None).await.unwrap().worker;
+        let second = allocate_worker(&db, &pool, None).await.unwrap().worker;
         assert_ne!(first.worker_label, second.worker_label);
 
         let worker = report_presence(
@@ -832,7 +899,7 @@ mod tests {
             return;
         };
         let pool = pool();
-        let worker = allocate_worker(&db, &pool).await.unwrap();
+        let worker = allocate_worker(&db, &pool, None).await.unwrap().worker;
         let error = enqueue_command(
             &db,
             &pool.id,
@@ -857,7 +924,7 @@ mod tests {
             return;
         };
         let pool = pool();
-        let worker = allocate_worker(&db, &pool).await.unwrap();
+        let worker = allocate_worker(&db, &pool, None).await.unwrap().worker;
         report_presence(
             &db,
             &pool,
@@ -906,7 +973,7 @@ mod tests {
             return;
         };
         let pool = pool();
-        let worker = allocate_worker(&db, &pool).await.unwrap();
+        let worker = allocate_worker(&db, &pool, None).await.unwrap().worker;
         ensure_instance_matches(&db, &pool, &worker.worker_label, Some("install-a"))
             .await
             .unwrap();
@@ -933,7 +1000,7 @@ mod tests {
             return;
         };
         let pool = pool();
-        let worker = allocate_worker(&db, &pool).await.unwrap();
+        let worker = allocate_worker(&db, &pool, None).await.unwrap().worker;
         report_presence(
             &db,
             &pool,
@@ -1001,7 +1068,7 @@ mod tests {
             .await
             .unwrap();
         let pool = pool();
-        let worker = allocate_worker(&db, &pool).await.unwrap();
+        let worker = allocate_worker(&db, &pool, None).await.unwrap().worker;
         report_presence(
             &db,
             &pool,
@@ -1064,6 +1131,56 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(delivered.id, second.id);
+        db.drop().await.ok();
+    }
+    #[tokio::test]
+    async fn requested_label_is_created_adopted_or_refused() {
+        let Some(db) = connect_test_database("oracle_worker_requested_label").await else {
+            return;
+        };
+        let pool = pool();
+        let created = allocate_worker(&db, &pool, Some("share-account-8"))
+            .await
+            .unwrap();
+        assert_eq!(created.worker.worker_label, "share-account-8");
+        assert!(!created.adopted);
+
+        // Unbound (never heartbeated with an installation) rows can be adopted.
+        let adopted = allocate_worker(&db, &pool, Some("share-account-8"))
+            .await
+            .unwrap();
+        assert!(adopted.adopted);
+        assert!(adopted.worker.provisioned_at.is_some());
+
+        // A legacy presence row (created by polling, no instance) is adoptable too.
+        report_presence(
+            &db,
+            &pool,
+            WorkerPresenceInput {
+                worker_label: "share_account_9".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let legacy = allocate_worker(&db, &pool, Some("share_account_9"))
+            .await
+            .unwrap();
+        assert!(legacy.adopted);
+
+        // Once bound to an installation the label is refused.
+        ensure_instance_matches(&db, &pool, "share-account-8", Some("install-a"))
+            .await
+            .unwrap();
+        let refused = allocate_worker(&db, &pool, Some("share-account-8"))
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, AppError::OracleWorkerLabelUnavailable(_)));
+
+        let invalid = allocate_worker(&db, &pool, Some("bad label!"))
+            .await
+            .unwrap_err();
+        assert!(matches!(invalid, AppError::ValidationError(_)));
         db.drop().await.ok();
     }
 }
