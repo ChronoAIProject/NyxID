@@ -468,10 +468,16 @@ version, full SHA-256, and an exact `playwright-core` version.
 The CLI trusts its authenticated NyxID base URL and TLS connection to select
 the bundle, then verifies the returned bytes against the returned SHA-256. It
 also checks that the manager and worker-token endpoints agree. A pushed upgrade
-downloads through the worker-token endpoint and verifies SHA-256. It then
-installs the exact dependency from the npm registry with a five-minute timeout,
-replaces `worker.mjs`, and exits. The supervisor starts the new source. npm
-validates the registry package integrity. The bundle checksum detects transport
+downloads through the worker-token endpoint and verifies SHA-256. If the
+installed `playwright-core` already matches the manifest pin (the common,
+bundle-only upgrade) it skips npm entirely; otherwise it runs the install-time
+absolute npm (`NYXID_NPM_EXECUTABLE`, with node's directory on the daemon
+`PATH`, since launchd/systemd start the worker with a minimal one) with a
+five-minute timeout, and restores `package.json` if that fails
+(`upgrade_npm_unavailable`, `upgrade_dependency_install_failed`,
+`upgrade_dependency_install_timeout`, `upgrade_dependency_version_mismatch`).
+It then replaces `worker.mjs` and exits; the supervisor starts the new source.
+npm validates the registry package integrity when it runs. The bundle checksum detects transport
 or storage corruption. Neither check is an independent code-signing authority
 beyond the NyxID backend, the npm registry, and TLS.
 

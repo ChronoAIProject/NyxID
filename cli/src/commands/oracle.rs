@@ -893,6 +893,7 @@ async fn install_worker(
         label: label.clone(),
         base_url,
         node_binary: node,
+        npm_binary: Some(npm.clone()),
         bundle_path,
         token_file,
         state_file: install_dir.join("state.json"),
@@ -1133,8 +1134,29 @@ fn select_install_debug_port(existing: Option<u16>, force: bool) -> Result<u16> 
     }
 }
 
+/// Name a fresh Chrome profile so its avatar/profile menu and chrome://version
+/// identify the NyxID use (no-op once the profile exists).
+fn seed_chrome_profile_name(profile: &Path, name: &str) -> Result<()> {
+    let prefs = profile.join("Default").join("Preferences");
+    if prefs.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(prefs.parent().context("Invalid Chrome profile path")?)?;
+    fs::write(
+        &prefs,
+        serde_json::to_vec(&serde_json::json!({ "profile": { "name": name } }))?,
+    )?;
+    Ok(())
+}
+
 fn launch_chrome(executable: &Path, profile: &Path, port: u16) -> Result<Child> {
     fs::create_dir_all(profile)?;
+    let name = profile
+        .parent()
+        .and_then(Path::file_name)
+        .map(|value| format!("NyxID Oracle {}", value.to_string_lossy()))
+        .unwrap_or_else(|| "NyxID Oracle".to_string());
+    let _ = seed_chrome_profile_name(profile, &name);
     Command::new(executable)
         .arg(format!("--remote-debugging-port={port}"))
         .arg(format!("--user-data-dir={}", profile.display()))
@@ -1949,6 +1971,7 @@ mod tests {
             label: "worker-1".to_string(),
             base_url: "https://nyxid.example".to_string(),
             node_binary: PathBuf::from("node"),
+            npm_binary: None,
             bundle_path,
             token_file: temp.path().join("token"),
             state_file: temp.path().join("state.json"),
