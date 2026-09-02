@@ -1602,7 +1602,8 @@ fn build_router_internal(
             )
             .route(
                 "/pools/{id_or_slug}/workers/{label}",
-                get(handlers::oracle_workers::show_worker),
+                get(handlers::oracle_workers::show_worker)
+                    .delete(handlers::oracle_workers::forget_worker),
             )
             .route(
                 "/pools/{id_or_slug}/workers/{label}/commands",

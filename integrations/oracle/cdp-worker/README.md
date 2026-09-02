@@ -89,6 +89,7 @@ nyxid oracle worker resume <pool> <label>
 nyxid oracle worker restart <pool> <label>
 nyxid oracle worker relaunch-browser <pool> <label>
 nyxid oracle worker relogin <pool> <label>
+nyxid oracle worker forget <pool> <label> [--force]
 nyxid oracle worker upgrade --pool <pool> [--label <label>]
 ```
 

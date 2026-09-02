@@ -537,6 +537,32 @@ async fn run_worker(command: OracleWorkerCommands) -> Result<()> {
         OracleWorkerCommands::RelaunchBrowser { pool, label, auth } => {
             queue_worker_command(&pool, &label, "relaunch_browser", auth).await
         }
+        OracleWorkerCommands::Forget {
+            pool,
+            label,
+            force,
+            auth,
+        } => {
+            let output = auth.output;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let path = format!(
+                "{}{}",
+                worker_path(&pool, &label),
+                if force { "?force=true" } else { "" }
+            );
+            let response: Value = api.delete(&path).await?;
+            match output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                OutputFormat::Table => eprintln!(
+                    "Forgot worker '{}' (commands removed: {}, sessions released: {}, queued follow-ups released: {}).",
+                    label,
+                    response["commands_removed"].as_u64().unwrap_or(0),
+                    response["sessions_released"].as_u64().unwrap_or(0),
+                    response["tasks_released"].as_u64().unwrap_or(0)
+                ),
+            }
+            Ok(())
+        }
         OracleWorkerCommands::Relogin { pool, label, auth } => {
             let output = auth.output;
             queue_worker_command(&pool, &label, "relogin", auth).await?;

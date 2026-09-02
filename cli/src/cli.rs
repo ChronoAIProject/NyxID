@@ -2386,6 +2386,7 @@ mod tests {
             "relaunch-browser",
             "relaunch_browser",
             "relogin",
+            "forget",
         ] {
             let cli = Cli::try_parse_from([
                 "nyxid",
@@ -4941,6 +4942,17 @@ pub enum OracleWorkerCommands {
     RelaunchBrowser {
         pool: String,
         label: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Remove a stale worker from the pool (its presence row and command history).
+    /// Refuses an online worker or one with a task in flight unless --force.
+    Forget {
+        pool: String,
+        label: String,
+        /// Forget even if the worker is online or busy (it re-registers on its next heartbeat)
+        #[arg(long)]
+        force: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
