@@ -178,6 +178,27 @@ node worker.mjs
 Use a different worker label, debug port, and Chrome profile for each concurrent
 worker.
 
+## Result artifacts
+
+For prompt tasks, the worker inspects only the last assistant turn. It captures
+generated images plus download links hosted by ChatGPT's `/backend-api/`
+content endpoints or `*.oaiusercontent.com`. Page-local ChatGPT `blob:` URLs
+are also supported. Model-produced URLs remain untrusted: the allowlist is
+checked again before the cookie-bearing request and on every redirect. Links
+already represented by a generated image are deduplicated by ChatGPT file ID.
+
+File names use the `download` attribute, anchor text, or URL in that order and
+are sanitized to a safe 128-character basename. The worker downloads at most
+four images and eight files, up to 6 MiB each, under one 9 MiB decoded-byte
+budget. The server revalidates every payload. Logs report only artifact counts
+and byte sizes, never file names or bodies.
+
+Use `nyxid oracle ask --artifacts <dir>` or
+`nyxid oracle result <task-id> --artifacts <dir>` to save all artifacts. The
+server returns their base64 bodies in JSON and retains them on the task until
+its normal `ORACLE_TASK_RETENTION_DAYS` expiry. `--out` continues to save images
+only. The deployed userscript is unchanged and simply omits generic files.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -216,7 +237,7 @@ worker.
 - The state file contains no session or task bodies. Worker logs use stable
   error codes and task metadata. They do not print prompts, responses,
   transcripts, cookies, storage, raw tokens, conversation URLs, attachment
-  filenames, or signed image URLs.
+  filenames, signed image URLs, generated file bodies, or generated filenames.
 - The backend sees a raw bearer token while authenticating a live worker
   request. The login-envelope claim applies to persisted server state: the
   stored worker-token hash cannot derive the HKDF key.

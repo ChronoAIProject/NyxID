@@ -257,6 +257,37 @@ and `max_retries`. A completed task carries `response`. A failed task carries
 `failure_reason`, such as `extraction_failure`, `empty_response`,
 `prompt_delivery_uncertain`, or `infrastructure_retry_exhausted`.
 
+### Result artifacts
+
+The CDP worker captures generated images and ChatGPT-hosted download links from
+the last assistant turn. Generic links are not followed. The privileged,
+cookie-bearing fetch accepts only `chatgpt.com` / `chat.openai.com`
+`/backend-api/` paths, `*.oaiusercontent.com`, and page-local ChatGPT `blob:`
+URLs; every redirect is checked against the same allowlist. File names come
+from the link's `download` attribute, anchor text, or URL and are reduced to a
+128-character safe basename. A file already captured as an image is omitted
+from the generic file list.
+
+The worker captures at most four images and eight files, with a 6 MiB per-item
+limit and a 9 MiB decoded-byte budget shared by all artifacts. Nine decoded MiB
+base64-inflate to about 12 MiB, leaving headroom under the 16 MiB worker request
+limit. The server independently accepts at most eight images and eight files,
+caps each item at 8,000,000 bytes, and enforces the same 9 MiB combined budget.
+Malformed or over-limit entries are skipped independently. Empty response text
+is successful when at least one valid image or file remains.
+
+`nyxid oracle ask --artifacts <dir>` and
+`nyxid oracle result <task-id> --artifacts <dir>` save every returned artifact
+with collision-safe suffixes. Table output lists each artifact's name, MIME,
+and size even when it is not saved. `--output json` includes artifact bytes as
+base64. The legacy `--out` option remains image-only. Old workers omit `files`,
+and the deployed userscript remains compatible and unchanged.
+
+Artifact bytes live as BSON Binary on the task document and expire with the
+prompt and response after `ORACLE_TASK_RETENTION_DAYS`. File bodies and file
+names are private task content: logs and audit events contain counts and sizes
+only.
+
 ### Worker endpoints (pool worker token)
 
 Under `/api/v1/oracle/worker`, each handler authenticates
@@ -270,7 +301,7 @@ fields remain valid. New fields are additive.
 | `GET /task` | `?worker=worker_1&script_version=&page_url=&instance_id=` | Idle response, or a task with retry counters, optional `dispatch_attempt_id`, prompt, attachment, conversation URL, and project hint. |
 | `POST /heartbeat` | Presence, capabilities, health, current task, and command reports | `{status:"ok", command?}`. The server leases at most one capability-compatible command. |
 | `POST /ack` | Task identity, phase, optional `instance_id` and `dispatch_attempt_id` | `{status:"ok"}` or `{status:"cancelled"}`. |
-| `POST /result` | Task identity, response, optional images and attempt fences | `{status:"saved"\|"saved_failed"\|"requeued"\|"ignored"}`. `requeued` means a pre-send browser failure consumed an infrastructure retry. |
+| `POST /result` | Task identity, response, optional images/files and attempt fences | `{status:"saved"\|"saved_failed"\|"requeued"\|"ignored"}`. `requeued` means a pre-send browser failure consumed an infrastructure retry. |
 | `POST /pin-conv-url` | Task identity, URL, optional attempt fences | `{status:"pinned"}`. |
 | `POST /transcript` | Task identity, turns, URL, optional attempt fences | `{status:"imported"\|"ignored", imported_pairs}`. |
 | `GET /bundle` | None | Worker-token-authenticated embedded worker source, version, SHA-256, and exact `playwright-core` version. |
@@ -327,9 +358,10 @@ a protocol shape they cannot parse.
   duplicate.
 - **Extraction-failure detection**: an empty or `ERROR:`-prefixed worker
   result marks the task `failed`, mirroring the local oracle servers.
-- **Retention**: terminal tasks (prompt + response bodies) are TTL-expired
-  after `ORACLE_TASK_RETENTION_DAYS` (default 30). Queued/dispatched tasks
-  are never auto-expired.
+- **Retention**: terminal tasks (prompt, response, generated image, and
+  generated file bodies and filenames) are TTL-expired after
+  `ORACLE_TASK_RETENTION_DAYS` (default 30). Queued/dispatched tasks are never
+  auto-expired.
 
 ---
 
@@ -338,7 +370,8 @@ a protocol shape they cannot parse.
 The CDP worker keeps a mode `0600` JSON state file. It contains the stable
 installation ID, current task ID, dispatch attempt ID, conversation URL,
 phase, and transcript baseline. It never contains a prompt, response,
-transcript, cookie, storage value, or signed image URL.
+transcript, cookie, storage value, signed image URL, generated file body, or
+generated filename.
 
 HTTP failures use capped exponential backoff with jitter. Transient fetch,
 timeout, rate-limit, and server failures do not terminate the process. The
@@ -506,7 +539,8 @@ beyond the NyxID backend, the npm registry, and TLS.
   only the end-to-end-sealed envelope. Audit and tracing record the snapshot ID, byte
   count, target count, and outcome codes. They never record the sealed blob,
   cookies, storage, raw token, prompt, response, transcript, conversation URL,
-  attachment filename, or signed image URL.
+  attachment filename, signed image URL, generated file body, or generated
+  filename.
 - The browser side runs under the operator's own logged-in session with
   the default User-Agent; the userscript does not spoof or evade. Routing a
   browser-automation bridge through a shared service changes the *consumer*
