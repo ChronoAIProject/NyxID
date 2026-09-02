@@ -4788,7 +4788,8 @@ pub enum OracleCommands {
         #[command(subcommand)]
         command: OracleWorkerCommands,
     },
-    /// Capture a local ChatGPT login and propagate it end-to-end encrypted
+    /// Log into ChatGPT in a local Chrome window on THIS computer, then push the
+    /// session (end-to-end encrypted) to every capable worker in the pool
     Login {
         /// Pool slug or id
         pool: String,
@@ -4943,7 +4944,9 @@ pub enum OracleWorkerCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Open the ChatGPT login page on a worker
+    /// Open the ChatGPT login page on the worker's OWN screen (someone at that
+    /// machine must finish it). To log in from THIS computer and push the session
+    /// to every worker, use `nyxid oracle login <pool>` instead.
     Relogin {
         pool: String,
         label: String,

@@ -37,8 +37,7 @@ import {
   readFileSync,
   renameSync,
   statSync,
-  writeFileSync,
-} from "node:fs";
+  writeFileSync, realpathSync } from "node:fs";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -618,13 +617,41 @@ function isChatGptUrl(u) {
   return /https:\/\/(chatgpt\.com|chat\.openai\.com)\//.test(u || "");
 }
 
+// Hosts a human passes through while logging into ChatGPT (password, OTP,
+// SSO, Cloudflare). While the tab is on one of these the worker must not
+// steer it, or the login can never complete.
+const AUTH_FLOW_HOSTS =
+  /^(auth\.openai\.com|auth0\.openai\.com|accounts\.google\.com|login\.microsoftonline\.com|login\.live\.com|appleid\.apple\.com|challenges\.cloudflare\.com)$/i;
+
+export function isAuthFlowUrl(u) {
+  let url;
+  try {
+    url = new URL(u || "");
+  } catch {
+    return false;
+  }
+  if (AUTH_FLOW_HOSTS.test(url.hostname)) return true;
+  return /^(chatgpt\.com|chat\.openai\.com)$/i.test(url.hostname) && /^\/auth(\/|$)/.test(url.pathname);
+}
+
+// Decide whether the worker keeps its hands off the tab: a live page that is
+// mid-login, or a ChatGPT page the last heartbeat saw logged out, belongs to
+// the human (or a pending session import) until it is authenticated again.
+export function shouldLeaveTabAlone({ url, loggedIn, pageOpen = true }) {
+  if (!pageOpen) return false;
+  if (isAuthFlowUrl(url)) return true;
+  return loggedIn === false && isChatGptUrl(url);
+}
+
 async function getChatPage(context) {
-  let page = context.pages().find((p) => isChatGptUrl(p.url()));
+  let page =
+    context.pages().find((p) => isChatGptUrl(p.url())) ||
+    context.pages().find((p) => isAuthFlowUrl(p.url()));
   if (!page) {
     page = await context.newPage();
     await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded" });
   }
-  await installDomCore(page);
+  if (isChatGptUrl(page.url())) await installDomCore(page);
   return page;
 }
 
@@ -764,7 +791,7 @@ async function ensureChatPage(runtime, targetUrl) {
         await runtime.page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
         await installDomCore(runtime.page);
       }
-    } else if (!isChatGptUrl(runtime.page.url())) {
+    } else if (!isChatGptUrl(runtime.page.url()) && !isAuthFlowUrl(runtime.page.url())) {
       await runtime.page.goto("https://chatgpt.com/", {
         waitUntil: "domcontentloaded",
         timeout: 60000,
@@ -2094,6 +2121,7 @@ async function main() {
     chromeAlive: false,
     lastError: null,
     loggedIn: null,
+    loggedOutNoticeAt: 0,
     lastPresenceAt: 0,
     health: { http: 0, cdp: 0, tab: 0 },
   };
@@ -2108,6 +2136,25 @@ async function main() {
         await sleep(POLL_MS);
         continue;
       }
+      const handsOff =
+        !runtime.state.current_task &&
+        shouldLeaveTabAlone({
+          url: runtime.page?.url(),
+          loggedIn: runtime.loggedIn,
+          pageOpen: Boolean(runtime.page && !runtime.page.isClosed()),
+        });
+      if (handsOff) {
+        if (!runtime.loggedOutNoticeAt || Date.now() - runtime.loggedOutNoticeAt > 5 * 60 * 1000) {
+          runtime.loggedOutNoticeAt = Date.now();
+          log(
+            "ChatGPT is not logged in; leaving the tab untouched and not claiming tasks " +
+              "(log in on this screen or run: nyxid oracle login <pool>)"
+          );
+        }
+        await sleep(POLL_MS);
+        continue;
+      }
+      runtime.loggedOutNoticeAt = 0;
       const page = await ensureChatPage(runtime);
       const response = await apiGet(
         `/task?worker=${encodeURIComponent(LABEL)}` +
@@ -2119,7 +2166,8 @@ async function main() {
         if (state.current_task) clearTaskState(state);
         if (
           response.required_project_url &&
-          !page.url().startsWith(response.required_project_url)
+          !page.url().startsWith(response.required_project_url) &&
+          !shouldLeaveTabAlone({ url: page.url(), loggedIn: runtime.loggedIn })
         ) {
           await ensureChatPage(runtime, response.required_project_url);
         }
@@ -2157,7 +2205,18 @@ async function main() {
   }
 }
 
-const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+// Compare real paths: macOS temp dirs (/var -> /private/var) and other
+// symlinked install locations make a plain path comparison fail, which
+// silently skipped main() (and login capture) with exit code 0.
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+  }
+}
+const isMain = isMainModule();
 if (isMain) {
   main().catch((error) => {
     console.error(`fatal: ${stableErrorCode(error)}`);
