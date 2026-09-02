@@ -393,7 +393,7 @@ Managers can queue these commands:
 | `worker resume <pool> <label>` | Resume claims. |
 | `worker restart <pool> <label>` | Finish the current task, report, then exit for supervisor restart. |
 | `worker relaunch-browser <pool> <label>` | Recreate the dedicated Chrome process and tab. |
-| `worker relogin <pool> <label>` | Open the ChatGPT login page. Pool-wide login normally uses `oracle login` instead. |
+| `worker relogin <pool> <label>` | Open the ChatGPT login page on the worker's own screen (someone at that machine must finish it). For remote login from your computer use `oracle login`, which pushes the session to the pool. While logged out or on a login page the worker leaves its tab untouched and claims no tasks. |
 | `worker upgrade --pool <pool>` | Upgrade the installed local profile. The CLI waits for task drain, verifies the local source, version, dependency manifest, and restarted worker presence. |
 | `worker upgrade --pool <pool> --label <label>` | Queue an asynchronous remote upgrade. The worker drains, verifies, replaces the bundle, and exits for supervisor restart. |
 
