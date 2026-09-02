@@ -1,0 +1,46 @@
+# Weekly check that Aevatar feature/integrate has not moved a watched chat
+# path after the SHA pinned in
+# tests/fixtures/assistant/aevatar-chat-contract-pin.json.
+#
+# A red run means a contract-owned upstream file changed. Review the receipt
+# artifact, then re-pin only after an owner decides the new SHA. This job
+# never edits the pin.
+
+name: Aevatar Chat Drift
+
+on:
+  schedule:
+    - cron: "37 3 * * 1" # Mondays 03:37 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    name: Watched chat path drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check watched Aevatar chat paths
+        run: |
+          set -o pipefail
+          python3 scripts/check-aevatar-chat-drift.py \
+            --pin tests/fixtures/assistant/aevatar-chat-contract-pin.json \
+            --remote https://github.com/aevatarAI/aevatar.git \
+            --branch feature/integrate \
+            --json | tee aevatar-chat-drift-receipt.json
+
+      - name: Upload drift receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aevatar-chat-drift-receipt
+          path: aevatar-chat-drift-receipt.json
+          if-no-files-found: warn
