@@ -137,9 +137,116 @@ const NPM_INSTALL_TIMEOUT_MS = Number(
 const CAPABILITIES = ["commands_v1", "upgrade_v1", "session_import_v1", "attempt_fencing_v1"];
 // Result-image caps (the server re-validates and caps lower-or-equal). Kept
 // below the 16 MiB worker body cap once base64-inflated (~33%).
-const MAX_IMAGES = Number(process.env.NYXID_MAX_IMAGES || 4);
-const MAX_IMAGE_BYTES = Number(process.env.NYXID_MAX_IMAGE_BYTES || 6 * 1024 * 1024);
-const MAX_IMAGES_TOTAL_BYTES = Number(process.env.NYXID_MAX_IMAGES_TOTAL_BYTES || 9 * 1024 * 1024);
+const MAX_IMAGES = Math.min(Number(process.env.NYXID_MAX_IMAGES || 4), 8);
+const MAX_IMAGE_BYTES = Math.min(
+  Number(process.env.NYXID_MAX_IMAGE_BYTES || 6 * 1024 * 1024),
+  8_000_000
+);
+const MAX_IMAGES_TOTAL_BYTES = Math.min(
+  Number(process.env.NYXID_MAX_IMAGES_TOTAL_BYTES || 9 * 1024 * 1024),
+  9 * 1024 * 1024
+);
+const MAX_FILES = Math.min(Number(process.env.NYXID_MAX_FILES || 8), 8);
+const MAX_FILE_BYTES = Math.min(
+  Number(process.env.NYXID_MAX_FILE_BYTES || 6 * 1024 * 1024),
+  8_000_000
+);
+const MAX_FILES_TOTAL_BYTES = Math.min(
+  Number(process.env.NYXID_MAX_FILES_TOTAL_BYTES || 9 * 1024 * 1024),
+  9 * 1024 * 1024
+);
+// Nine decoded MiB base64-inflate to twelve MiB, leaving room for response
+// text and JSON framing under the worker route's 16 MiB request limit.
+const MAX_ARTIFACTS_TOTAL_BYTES = Math.min(
+  Number(process.env.NYXID_MAX_ARTIFACTS_TOTAL_BYTES || 9 * 1024 * 1024),
+  9 * 1024 * 1024
+);
+
+export function artifactFileId(value) {
+  const match = String(value || "").match(/file[-_][A-Za-z0-9]+/i);
+  return match ? match[0].toLowerCase() : null;
+}
+
+export function isTrustedArtifactUrl(value) {
+  try {
+    const raw = String(value || "");
+    if (raw.startsWith("blob:")) {
+      const inner = new URL(raw.slice("blob:".length));
+      return (
+        inner.protocol === "https:" &&
+        (inner.hostname === "chatgpt.com" || inner.hostname === "chat.openai.com")
+      );
+    }
+    const url = new URL(raw);
+    if (url.protocol !== "https:") return false;
+    const host = url.hostname.toLowerCase();
+    if (host === "oaiusercontent.com" || host.endsWith(".oaiusercontent.com")) {
+      return true;
+    }
+    return (
+      (host === "chatgpt.com" || host === "chat.openai.com") &&
+      url.pathname.startsWith("/backend-api/")
+    );
+  } catch {
+    return false;
+  }
+}
+
+export function sanitizeArtifactName(value, fallbackIndex = 1) {
+  const chars = Array.from(String(value || "").trim()).slice(0, 128);
+  let safe = chars
+    .map((char) =>
+      char === "/" ||
+      char === "\\" ||
+      /[<>:"|?*]/.test(char) ||
+      char.charCodeAt(0) < 32 ||
+      char.charCodeAt(0) === 127
+        ? "_"
+        : char
+    )
+    .join("")
+    .replace(/^\.+/, "")
+    .replace(/[. ]+$/, "")
+    .trim();
+  if (!safe) safe = `file_${fallbackIndex}`;
+  return safe;
+}
+
+export function classifyArtifactLink(link, imageSources = [], fallbackIndex = 1) {
+  const href = String(link?.href || "");
+  if (!isTrustedArtifactUrl(href)) return null;
+  const key = artifactFileId(href) || href;
+  const imageKeys = new Set(
+    (imageSources || []).map((src) => artifactFileId(src) || String(src || ""))
+  );
+  if (imageKeys.has(key)) return null;
+
+  let urlName = "";
+  try {
+    const url = href.startsWith("blob:")
+      ? new URL(href.slice("blob:".length))
+      : new URL(href);
+    const segment = url.pathname.split("/").filter(Boolean).pop() || "";
+    urlName =
+      url.searchParams.get("filename") ||
+      url.searchParams.get("name") ||
+      (segment === "content" ? artifactFileId(href) || "" : segment);
+    try {
+      urlName = decodeURIComponent(urlName);
+    } catch {}
+  } catch {}
+  const name = sanitizeArtifactName(
+    link?.download || link?.text || urlName,
+    fallbackIndex
+  );
+  return { href, name, key };
+}
+
+export function artifactBudgetDecision(used, size, perItemLimit, totalLimit) {
+  if (!Number.isSafeInteger(size) || size <= 0 || size > perItemLimit) return "skip";
+  if (used + size > totalLimit) return "stop";
+  return "accept";
+}
 
 const API = `${BASE_URL}/api/v1/oracle/worker`;
 
@@ -445,6 +552,11 @@ async function assertPublicTarget(rawUrl) {
 // extraction. Installed on window.__nyx and re-installed after navigation.
 const DOM_CORE = `
 window.__nyx = (function () {
+  const artifactFileId = ${artifactFileId.toString()};
+  const isTrustedArtifactUrl = ${isTrustedArtifactUrl.toString()};
+  const sanitizeArtifactName = ${sanitizeArtifactName.toString()};
+  const classifyArtifactLink = ${classifyArtifactLink.toString()};
+
   function extractTextWithMath(el) {
     if (!el) return "";
     const clone = el.cloneNode(true);
@@ -512,6 +624,18 @@ window.__nyx = (function () {
     return document.querySelectorAll("[data-message-author-role='assistant']").length;
   }
 
+  function latestAssistantTurn() {
+    const main = document.querySelector("main");
+    if (!main) return null;
+    const turns = main.querySelectorAll('[data-testid^="conversation-turn"]');
+    if (turns.length) {
+      const scope = turns[turns.length - 1];
+      return scope.querySelector("[data-message-author-role='user']") ? null : scope;
+    }
+    const els = main.querySelectorAll("[data-message-author-role='assistant']");
+    return els.length ? els[els.length - 1] : null;
+  }
+
   function scrollContainer() {
     const firstMessage = document.querySelector("[data-message-author-role]");
     let el = firstMessage ? firstMessage.parentElement : null;
@@ -548,18 +672,8 @@ window.__nyx = (function () {
   // small sprites/avatars are dropped. Dedupes the thumbnail/full/zoom copies
   // that share one src.
   function extractImages() {
-    const main = document.querySelector("main");
-    if (!main) return [];
-    let scope = null;
-    const turns = main.querySelectorAll('[data-testid^="conversation-turn"]');
-    if (turns.length) {
-      scope = turns[turns.length - 1];
-      if (scope.querySelector("[data-message-author-role='user']")) return [];
-    } else {
-      const els = main.querySelectorAll("[data-message-author-role='assistant']");
-      if (!els.length) return [];
-      scope = els[els.length - 1];
-    }
+    const scope = latestAssistantTurn();
+    if (!scope) return [];
     const out = [];
     const seen = new Set();
     for (const img of Array.from(scope.querySelectorAll("img"))) {
@@ -583,6 +697,32 @@ window.__nyx = (function () {
       if (seen.has(key)) continue;
       seen.add(key);
       out.push(src);
+    }
+    return out;
+  }
+
+  // Download links in the latest assistant turn. Link hrefs are untrusted
+  // model output: classification admits only ChatGPT content endpoints, and
+  // downloadFiles repeats that check immediately before every fetch.
+  function extractFiles() {
+    const scope = latestAssistantTurn();
+    if (!scope) return [];
+    const images = extractImages();
+    const out = [];
+    const seen = new Set();
+    for (const anchor of Array.from(scope.querySelectorAll("a[href]"))) {
+      const file = classifyArtifactLink(
+        {
+          href: anchor.href || anchor.getAttribute("href") || "",
+          download: anchor.getAttribute("download") || "",
+          text: (anchor.innerText || anchor.textContent || "").trim(),
+        },
+        images,
+        out.length + 1
+      );
+      if (!file || seen.has(file.key)) continue;
+      seen.add(file.key);
+      out.push({ href: file.href, name: file.name });
     }
     return out;
   }
@@ -620,7 +760,7 @@ window.__nyx = (function () {
     return { rendered: nodes.length, turns };
   }
 
-  return { isStillGenerating, assistantCount, extractResponse, extractImages, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText };
+  return { isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText };
 })();
 `;
 
@@ -1197,28 +1337,52 @@ async function transcriptSnapshot(page) {
       turns: window.__nyx?.extractTranscript() || [],
       assistantCount: window.__nyx?.assistantCount() || 0,
       images: window.__nyx?.extractImages() || [],
+      files: window.__nyx?.extractFiles() || [],
     };
   });
 }
 
-async function submitPromptResult(runtime, page, task, text, imageSources = []) {
+async function submitPromptResult(
+  runtime,
+  page,
+  task,
+  text,
+  imageSources = [],
+  fileSources = []
+) {
   updateTaskState(runtime.state, { phase: "settling", conversation_url: page.url() });
-  const downloaded = await downloadImages(page, imageSources);
+  const downloadedImages = await downloadImages(
+    page,
+    imageSources,
+    MAX_ARTIFACTS_TOTAL_BYTES
+  );
+  const downloadedFiles = await downloadFiles(
+    page,
+    fileSources,
+    MAX_ARTIFACTS_TOTAL_BYTES - downloadedImages.bytes
+  );
   const response = text || "";
-  if (!response.trim() && downloaded.length === 0) {
+  if (
+    !response.trim() &&
+    downloadedImages.items.length === 0 &&
+    downloadedFiles.items.length === 0
+  ) {
     throw new TaskFailure("empty_extraction");
   }
   const result = await apiPost(
     "/result",
     taskIdentity(runtime, task, {
       response,
-      images: downloaded,
+      images: downloadedImages.items,
+      files: downloadedFiles.items,
       chatgpt_url: page.url(),
       model: task.model,
     })
   );
   log(
-    `prompt ${task.task_id} -> ${result.status} (${response.length} chars, ${downloaded.length} image(s))`
+    `prompt ${task.task_id} -> ${result.status} (${response.length} chars, ` +
+      `${downloadedImages.items.length} image(s)/${downloadedImages.bytes}B, ` +
+      `${downloadedFiles.items.length} file(s)/${downloadedFiles.bytes}B)`
   );
 }
 
@@ -1270,7 +1434,14 @@ async function handlePrompt(runtime, page, task, recovering) {
       baselineTurnCount: runtime.state.current_task?.baseline_turn_count || 0,
     });
     if (decision.action === "complete") {
-      await submitPromptResult(runtime, page, task, decision.response, snapshot.images);
+      await submitPromptResult(
+        runtime,
+        page,
+        task,
+        decision.response,
+        snapshot.images,
+        snapshot.files
+      );
       return;
     }
     if (decision.action === "wait") {
@@ -1278,7 +1449,14 @@ async function handlePrompt(runtime, page, task, recovering) {
         .slice(0, runtime.state.current_task?.baseline_turn_count || 0)
         .filter((turn) => turn.role === "assistant").length;
       const answer = await waitForResponse(runtime, page, task, beforeCount);
-      await submitPromptResult(runtime, page, task, answer.text, answer.images);
+      await submitPromptResult(
+        runtime,
+        page,
+        task,
+        answer.text,
+        answer.images,
+        answer.files
+      );
       return;
     }
     if (decision.action === "uncertain") {
@@ -1325,8 +1503,8 @@ async function handlePrompt(runtime, page, task, recovering) {
   await ack(runtime, task, "sent");
   await pinCurrentConversation(runtime, page, task);
 
-  const { text, images } = await waitForResponse(runtime, page, task, beforeCount);
-  await submitPromptResult(runtime, page, task, text, images);
+  const { text, images, files } = await waitForResponse(runtime, page, task, beforeCount);
+  await submitPromptResult(runtime, page, task, text, images, files);
 }
 
 function convId(url) {
@@ -1334,10 +1512,8 @@ function convId(url) {
   return m ? m[1] : null;
 }
 
-// Returns { text, images } where images is an array of on-page src strings
-// for the latest assistant turn. An image-generation turn settles with empty
-// text but a non-empty images list; the stability key spans both so the turn
-// terminates once text AND image srcs stop changing.
+// Returns the latest assistant turn's text plus on-page image and file sources.
+// Artifact-only turns are valid; the stability key spans all three outputs.
 async function waitForResponse(runtime, page, task, beforeCount) {
   const start = Date.now();
   let lastHeartbeat = start;
@@ -1359,19 +1535,21 @@ async function waitForResponse(runtime, page, task, beforeCount) {
         throw new TaskRestart();
       }
     }
-    const [generating, count, text, images] = await page.evaluate(() => [
+    const [generating, count, text, images, files] = await page.evaluate(() => [
       window.__nyx.isStillGenerating(),
       window.__nyx.assistantCount(),
       window.__nyx.extractResponse(),
       window.__nyx.extractImages(),
+      window.__nyx.extractFiles(),
     ]);
     const hasText = !!(text && text.length > 0);
     const hasImages = Array.isArray(images) && images.length > 0;
+    const hasFiles = Array.isArray(files) && files.length > 0;
     // A text answer bumps the assistant-role count; an image-generation turn
     // does NOT (its <img> lives in a conversation-turn with no assistant role),
-    // so images carry that case through. Until text or an image appears there's
-    // no new answer yet — wedge guard bails fast if ChatGPT has clearly stopped.
-    if (count <= beforeCount && !hasImages) {
+    // so artifacts carry that case through. Until text or an artifact appears
+    // there's no new answer yet — wedge guard bails if ChatGPT has stopped.
+    if (count <= beforeCount && !hasImages && !hasFiles) {
       if (!generating && Date.now() - start >= NO_OUTPUT_IDLE_MS) {
         throw new Error("no assistant output (idle timeout)");
       }
@@ -1381,7 +1559,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
       stable = 0;
       continue;
     }
-    if (!hasText && !hasImages) {
+    if (!hasText && !hasImages && !hasFiles) {
       // New turn settled but produced nothing extractable (e.g. an unrenderable
       // tool turn). Don't wedge — fail fast once the idle window elapses.
       if (Date.now() - start >= NO_OUTPUT_IDLE_MS) {
@@ -1391,10 +1569,18 @@ async function waitForResponse(runtime, page, task, beforeCount) {
       continue;
     }
     const key =
-      (text || "").slice(0, 200) + "|" + (text || "").length + "|" + (images || []).join(",");
+      (text || "").slice(0, 200) +
+      "|" +
+      (text || "").length +
+      "|" +
+      (images || []).join(",") +
+      "|" +
+      JSON.stringify(files || []);
     if (key === lastKey) {
       stable += 1;
-      if (stable >= 2) return { text: text || "", images: images || [] };
+      if (stable >= 2) {
+        return { text: text || "", images: images || [], files: files || [] };
+      }
     } else {
       stable = 0;
       lastKey = key;
@@ -1404,14 +1590,64 @@ async function waitForResponse(runtime, page, task, beforeCount) {
   // since we sent the prompt; otherwise the latest message is stale (a previous
   // turn), so return empty and let the server mark the task failed instead of
   // handing back the wrong answer.
-  const [count, text, images] = await page.evaluate(() => [
+  const [count, text, images, files] = await page.evaluate(() => [
     window.__nyx.assistantCount(),
     window.__nyx.extractResponse(),
     window.__nyx.extractImages(),
+    window.__nyx.extractFiles(),
   ]);
-  return count > beforeCount
-    ? { text: text || "", images: images || [] }
-    : { text: "", images: [] };
+  return count > beforeCount || images?.length || files?.length
+    ? { text: text || "", images: images || [], files: files || [] }
+    : { text: "", images: [], files: [] };
+}
+
+async function fetchTrustedArtifact(page, source, kind) {
+  let current = source;
+  for (let redirect = 0; redirect <= 5; redirect += 1) {
+    if (!isTrustedArtifactUrl(current) || current.startsWith("blob:")) return null;
+    const response = await page.request.get(current, {
+      timeout: 30000,
+      maxRedirects: 0,
+    });
+    const status = response.status();
+    if (status >= 300 && status < 400) {
+      const location = response.headers().location;
+      if (!location) {
+        log(`${kind} fetch returned redirect without location`);
+        return null;
+      }
+      try {
+        current = new URL(location, current).href;
+      } catch {
+        return null;
+      }
+      continue;
+    }
+    if (!response.ok()) {
+      log(`${kind} fetch returned HTTP ${status}`);
+      return null;
+    }
+    return response;
+  }
+  log(`${kind} fetch exceeded redirect limit`);
+  return null;
+}
+
+async function downloadBlob(page, source, fallbackMime) {
+  const data = await page.evaluate(
+    async ({ url, defaultMime }) => {
+      const response = await fetch(url);
+      const blob = await response.blob();
+      const buffer = new Uint8Array(await blob.arrayBuffer());
+      let binary = "";
+      for (let i = 0; i < buffer.length; i += 1) {
+        binary += String.fromCharCode(buffer[i]);
+      }
+      return { b64: btoa(binary), mime: blob.type || defaultMime };
+    },
+    { url: source, defaultMime: fallbackMime }
+  );
+  return { buffer: Buffer.from(data.b64, "base64"), mime: data.mime };
 }
 
 // Download the latest turn's images through the browser's authenticated
@@ -1420,7 +1656,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
 // page fetch() would get only as an opaque (unreadable) response. blob: URLs
 // resolve only inside the page, so those are fetched there. Returns the
 // worker-API image array; caps mirror the server (which re-validates).
-async function downloadImages(page, srcs) {
+async function downloadImages(page, srcs, artifactBudget) {
   const out = [];
   let total = 0;
   for (const src of (srcs || []).slice(0, MAX_IMAGES)) {
@@ -1428,35 +1664,29 @@ async function downloadImages(page, srcs) {
     // happens, so enforce the content-host allowlist HERE — independent of
     // extractImages' heuristics (its alt-based match is model-controlled and
     // could otherwise smuggle an internal URL through). blob: is page-local.
-    if (!src.startsWith("blob:") && !/oaiusercontent|backend-api/.test(src)) continue;
+    if (!isTrustedArtifactUrl(src)) continue;
     try {
       let buffer, mime;
       if (src.startsWith("blob:")) {
-        const data = await page.evaluate(async (u) => {
-          const r = await fetch(u);
-          const b = await r.blob();
-          const buf = new Uint8Array(await b.arrayBuffer());
-          let bin = "";
-          for (let i = 0; i < buf.length; i++) bin += String.fromCharCode(buf[i]);
-          return { b64: btoa(bin), mime: b.type || "image/png" };
-        }, src);
-        buffer = Buffer.from(data.b64, "base64");
-        mime = data.mime;
+        ({ buffer, mime } = await downloadBlob(page, src, "image/png"));
       } else {
-        const resp = await page.request.get(src, { timeout: 30000 });
-        if (!resp.ok()) {
-          log(`image fetch returned HTTP ${resp.status()}`);
-          continue;
-        }
+        const resp = await fetchTrustedArtifact(page, src, "image");
+        if (!resp) continue;
         buffer = await resp.body();
         mime = (resp.headers()["content-type"] || "image/png").split(";")[0].trim();
       }
-      if (!buffer || !buffer.length) continue;
-      if (buffer.length > MAX_IMAGE_BYTES) {
+      if (!buffer?.length) continue;
+      const decision = artifactBudgetDecision(
+        total,
+        buffer?.length,
+        MAX_IMAGE_BYTES,
+        Math.min(MAX_IMAGES_TOTAL_BYTES, artifactBudget)
+      );
+      if (decision === "skip") {
         log(`image too large (${buffer.length}B), skipping`);
         continue;
       }
-      if (total + buffer.length > MAX_IMAGES_TOTAL_BYTES) {
+      if (decision === "stop") {
         log("image total cap reached, skipping remaining");
         break;
       }
@@ -1468,7 +1698,62 @@ async function downloadImages(page, srcs) {
       log(`image download failed (${stableErrorCode(e)})`);
     }
   }
-  return out;
+  return { items: out, bytes: total };
+}
+
+// Download generic files with the same cookie-bearing fetch boundary and the
+// same shared artifact budget as generated images. Names never enter logs.
+async function downloadFiles(page, sources, artifactBudget) {
+  const out = [];
+  let total = 0;
+  for (const source of (sources || []).slice(0, MAX_FILES)) {
+    const href = source?.href || "";
+    if (!isTrustedArtifactUrl(href)) continue;
+    try {
+      let buffer, mime;
+      if (href.startsWith("blob:")) {
+        ({ buffer, mime } = await downloadBlob(
+          page,
+          href,
+          "application/octet-stream"
+        ));
+      } else {
+        const response = await fetchTrustedArtifact(page, href, "file");
+        if (!response) continue;
+        buffer = await response.body();
+        mime = (response.headers()["content-type"] || "application/octet-stream")
+          .split(";")[0]
+          .trim();
+      }
+      if (!buffer?.length) continue;
+      const decision = artifactBudgetDecision(
+        total,
+        buffer?.length,
+        MAX_FILE_BYTES,
+        Math.min(MAX_FILES_TOTAL_BYTES, artifactBudget)
+      );
+      if (decision === "skip") {
+        log(`file too large (${buffer.length}B), skipping`);
+        continue;
+      }
+      if (decision === "stop") {
+        log("file total cap reached, skipping remaining");
+        break;
+      }
+      total += buffer.length;
+      if (!mime || mime.length > 256 || /[\x00-\x1f\x7f]/.test(mime)) {
+        mime = "application/octet-stream";
+      }
+      out.push({
+        name: sanitizeArtifactName(source?.name, out.length + 1),
+        mime,
+        data_base64: buffer.toString("base64"),
+      });
+    } catch (e) {
+      log(`file download failed (${stableErrorCode(e)})`);
+    }
+  }
+  return { items: out, bytes: total };
 }
 
 // ── Scrape flow (attach existing conversation) ───────────────────────────

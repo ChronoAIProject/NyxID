@@ -2,15 +2,20 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  artifactBudgetDecision,
+  artifactFileId,
   backoffDelay,
   choosePromptNavigation,
+  classifyArtifactLink,
   decidePromptResume,
   daemonPath,
   decryptSessionEnvelope,
   installedDependencyVersion,
   isAuthFlowUrl,
+  isTrustedArtifactUrl,
   markChatPageRecovered,
   resolveNpmExecutable,
+  sanitizeArtifactName,
   seedProfileName,
   shouldLeaveTabAlone,
   taskRecoveryDecision,
@@ -27,6 +32,61 @@ test("backoff is capped and jitter remains within the selected window", () => {
   assert.equal(backoffDelay(0, 100, 1000, () => 0), 50);
   assert.equal(backoffDelay(3, 100, 1000, () => 1), 800);
   assert.equal(backoffDelay(20, 100, 1000, () => 1), 1000);
+});
+
+test("artifact URLs are limited to ChatGPT content endpoints", () => {
+  for (const url of [
+    "https://chatgpt.com/backend-api/estuary/content?id=file-AbC123",
+    "https://chat.openai.com/backend-api/files/file-AbC123",
+    "https://files.oaiusercontent.com/file-AbC123/download",
+    "blob:https://chatgpt.com/1234",
+  ]) {
+    assert.equal(isTrustedArtifactUrl(url), true, url);
+  }
+  for (const url of [
+    "http://chatgpt.com/backend-api/files/file-1",
+    "https://chatgpt.com.evil.example/backend-api/files/file-1",
+    "https://example.com/?next=backend-api/file-1",
+    "https://chatgpt.com/share/file-1",
+    "blob:https://example.com/1234",
+  ]) {
+    assert.equal(isTrustedArtifactUrl(url), false, url);
+  }
+});
+
+test("artifact links choose safe names and skip captured images", () => {
+  const href = "https://chatgpt.com/backend-api/estuary/content?id=file-AbC123";
+  assert.equal(artifactFileId(href), "file-abc123");
+  assert.deepEqual(
+    classifyArtifactLink({ href, download: "result.json", text: "Download" }),
+    { href, name: "result.json", key: "file-abc123" }
+  );
+  assert.equal(
+    classifyArtifactLink({ href, text: "result.json" }, [
+      "https://files.oaiusercontent.com/file-AbC123/image.png",
+    ]),
+    null
+  );
+  assert.equal(
+    classifyArtifactLink({ href: "https://example.com/file-1", text: "secret" }),
+    null
+  );
+});
+
+test("artifact names are bounded safe basenames", () => {
+  assert.equal(sanitizeArtifactName("../private/result.json"), "_private_result.json");
+  assert.equal(sanitizeArtifactName("..\\private\\result.json"), "_private_result.json");
+  assert.equal(sanitizeArtifactName(".\u0000.", 3), "_");
+  assert.equal(sanitizeArtifactName("../", 4), "_");
+  assert.equal(Array.from(sanitizeArtifactName("x".repeat(200))).length, 128);
+  assert.equal(sanitizeArtifactName("...", 7), "file_7");
+});
+
+test("artifact byte decisions enforce per-item and shared totals", () => {
+  assert.equal(artifactBudgetDecision(0, 6, 5, 10), "skip");
+  assert.equal(artifactBudgetDecision(4, 6, 10, 10), "accept");
+  assert.equal(artifactBudgetDecision(5, 6, 10, 10), "stop");
+  assert.equal(artifactBudgetDecision(0, 0, 10, 10), "skip");
 });
 
 test("a pre-send task may send only after the transcript is ready", () => {
