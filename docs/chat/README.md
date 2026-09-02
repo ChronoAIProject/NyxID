@@ -12,6 +12,10 @@ python3 scripts/check-aevatar-chat-drift.py \
   --branch feature/integrate
 ```
 
+The JSON receipt includes `pinned_remote_head`, `observed_head`,
+`effective_chat_sha`, `fetch_timestamp`, and `changed_watched_paths`.
+A moved remote head with no watched-path change stays clean.
+
 Pin field sources at effective chat SHA `706ea7cab9d1f882e0fb0f034bb338102b6d5d2b`:
 
 - `remote`, `branch`, `remote_head`, `effective_chat_sha`, `watched_paths`: this pin
