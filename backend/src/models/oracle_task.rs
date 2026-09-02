@@ -37,6 +37,27 @@ impl std::fmt::Debug for OracleImage {
     }
 }
 
+/// One generic file linked from the assistant's final turn.
+///
+/// File bodies share the task's retention TTL. The custom `Debug` excludes
+/// both content and filename because either can contain private result data.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OracleFile {
+    pub name: String,
+    pub mime: String,
+    #[serde(with = "bson_bytes::required")]
+    pub data: Vec<u8>,
+}
+
+impl std::fmt::Debug for OracleFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OracleFile")
+            .field("mime", &self.mime)
+            .field("bytes", &self.data.len())
+            .finish()
+    }
+}
+
 pub fn default_task_kind() -> String {
     "prompt".into()
 }
@@ -170,6 +191,9 @@ pub struct OracleTask {
     /// `images` list.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<OracleImage>>,
+    /// Generated files linked from the assistant's final turn.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<OracleFile>>,
     /// Browser-side conversation URL reported by the worker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chatgpt_url: Option<String>,
@@ -233,6 +257,7 @@ mod tests {
             response: None,
             response_chars: None,
             images: None,
+            files: None,
             chatgpt_url: None,
             failure_reason: None,
             worker_script_version: None,
@@ -295,6 +320,33 @@ mod tests {
         assert!(debug.contains("bytes: 4"));
         assert!(!debug.contains("sensitive-customer-name"));
         assert!(!debug.contains("[1, 2, 3, 4]"));
+    }
+
+    #[test]
+    fn file_debug_redacts_bytes_and_filename() {
+        let file = OracleFile {
+            name: "sensitive-customer-name.json".to_string(),
+            mime: "application/json".to_string(),
+            data: vec![1, 2, 3, 4],
+        };
+        let debug = format!("{file:?}");
+        assert!(debug.contains("bytes: 4"));
+        assert!(!debug.contains("sensitive-customer-name"));
+        assert!(!debug.contains("[1, 2, 3, 4]"));
+    }
+
+    #[test]
+    fn file_bson_roundtrip_uses_binary_bytes() {
+        let file = OracleFile {
+            name: "result.json".to_string(),
+            mime: "application/json".to_string(),
+            data: br#"{"ok":true}"#.to_vec(),
+        };
+        let doc = bson::to_document(&file).expect("serialize file");
+        assert!(matches!(doc.get("data"), Some(bson::Bson::Binary(_))));
+        let restored: OracleFile = bson::from_document(doc).expect("deserialize file");
+        assert_eq!(restored.name, "result.json");
+        assert_eq!(restored.data, file.data);
     }
 
     #[test]

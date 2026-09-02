@@ -104,6 +104,14 @@ pub struct OracleImageInfo {
 }
 
 #[derive(Serialize)]
+pub struct OracleFileInfo {
+    pub name: String,
+    pub mime: String,
+    pub bytes: u64,
+    pub data_base64: String,
+}
+
+#[derive(Serialize)]
 pub struct OracleTaskInfo {
     pub task_id: String,
     pub pool_id: String,
@@ -134,6 +142,9 @@ pub struct OracleTaskInfo {
     /// base64 for JSON transport). Present only on the single-task GET.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub images: Option<Vec<OracleImageInfo>>,
+    /// Generic files produced by the assistant (base64 for JSON transport).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub files: Option<Vec<OracleFileInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chatgpt_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -220,6 +231,17 @@ fn task_info(task: &OracleTask, queue_position: u64) -> OracleTaskInfo {
                     name: im.name.clone(),
                     bytes: im.data.len() as u64,
                     data_base64: base64::engine::general_purpose::STANDARD.encode(&im.data),
+                })
+                .collect()
+        }),
+        files: task.files.as_ref().map(|files| {
+            files
+                .iter()
+                .map(|file| OracleFileInfo {
+                    name: file.name.clone(),
+                    mime: file.mime.clone(),
+                    bytes: file.data.len() as u64,
+                    data_base64: base64::engine::general_purpose::STANDARD.encode(&file.data),
                 })
                 .collect()
         }),
@@ -532,7 +554,7 @@ pub async fn close_session(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::oracle_task::OracleTaskStatus;
+    use crate::models::oracle_task::{OracleFile, OracleTaskStatus};
     use chrono::Utc;
 
     fn sample_task() -> OracleTask {
@@ -570,6 +592,7 @@ mod tests {
             response: None,
             response_chars: None,
             images: None,
+            files: None,
             chatgpt_url: None,
             failure_reason: None,
             worker_script_version: None,
@@ -590,6 +613,22 @@ mod tests {
         assert!(!json.contains("submitter"));
         assert!(json.contains("\"queue_position\":1"));
         assert!(json.contains("\"status\":\"queued\""));
+    }
+
+    #[test]
+    fn poll_response_inlines_result_files() {
+        let mut task = sample_task();
+        task.files = Some(vec![OracleFile {
+            name: "result.json".to_string(),
+            mime: "application/json".to_string(),
+            data: b"reason".to_vec(),
+        }]);
+        let info = task_info(&task, 0);
+        let files = info.files.expect("file info");
+        assert_eq!(files[0].name, "result.json");
+        assert_eq!(files[0].mime, "application/json");
+        assert_eq!(files[0].bytes, 6);
+        assert_eq!(files[0].data_base64, "cmVhc29u");
     }
 
     #[test]
