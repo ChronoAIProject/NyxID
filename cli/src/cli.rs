@@ -2378,6 +2378,29 @@ mod tests {
     }
 
     #[test]
+    fn oracle_result_accepts_artifact_directory() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "oracle",
+            "result",
+            "task-1",
+            "--artifacts",
+            "/tmp/oracle-artifacts",
+        ])
+        .expect("oracle result --artifacts should parse");
+
+        match cli.command {
+            Commands::Oracle {
+                command: OracleCommands::Result { artifacts, .. },
+            } => assert_eq!(
+                artifacts.as_deref(),
+                Some(std::path::Path::new("/tmp/oracle-artifacts"))
+            ),
+            _ => panic!("unexpected parse result"),
+        }
+    }
+
+    #[test]
     fn oracle_worker_control_commands_accept_expected_names() {
         for command in [
             "drain",
@@ -4711,11 +4734,15 @@ pub enum OracleCommands {
         /// Submit and print the task id without waiting
         #[arg(long)]
         no_wait: bool,
-        /// Save any generated image(s) to this path (or directory). With
-        /// multiple images, the name is used as a prefix. Default: auto-named
-        /// `oracle-<task_id>-<n>.<ext>` in the current directory.
+        /// Save generated images only to this path. To save every result
+        /// artifact, use `--artifacts <DIR>`. With multiple images, the name is
+        /// used as a prefix. Table output otherwise auto-names images in the
+        /// current directory; JSON output keeps them inline only.
         #[arg(long, value_name = "PATH")]
         out: Option<String>,
+        /// Save every generated file and image into this directory
+        #[arg(long, value_name = "DIR")]
+        artifacts: Option<PathBuf>,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -4723,9 +4750,14 @@ pub enum OracleCommands {
     Result {
         /// Task id returned by `oracle ask --no-wait`
         task_id: String,
-        /// Save any generated image(s) to this path (or directory)
+        /// Save generated images only to this path. To save every result
+        /// artifact, use `--artifacts <DIR>`. Table output otherwise auto-names
+        /// images in the current directory; JSON output keeps them inline only.
         #[arg(long, value_name = "PATH")]
         out: Option<String>,
+        /// Save every generated file and image into this directory
+        #[arg(long, value_name = "DIR")]
+        artifacts: Option<PathBuf>,
         #[command(flatten)]
         auth: AuthArgs,
     },
