@@ -221,6 +221,7 @@ bound based on the 512 KiB decoded envelope cap.
 | `PATCH /pools/{id_or_slug}` | Update settings (owner / org admin only). |
 | `POST /pools/{id_or_slug}/rotate-token` | New worker token, shown once. |
 | `GET /pools/{id_or_slug}/workers` | Manager-only worker presence list. |
+| `DELETE /pools/{id_or_slug}/workers/{label}?force=` | Manager-only removal of a worker's presence row and command history; releases session affinity owned by the label. Refuses an online worker or one with a task in flight unless `force=true`. |
 | `POST /pools/{id_or_slug}/workers/allocate` | Manager-only worker label allocation. Body `{"label": "..."}` requests a specific label; `null`/empty body generates one. Returns `{label, adopted}`. |
 | `GET /pools/{id_or_slug}/workers/{label}` | Manager-only worker detail. |
 | `GET, POST /pools/{id_or_slug}/workers/{label}/commands` | Manager-only command history and enqueue. |
@@ -395,6 +396,7 @@ Managers can queue these commands:
 | `worker resume <pool> <label>` | Resume claims. |
 | `worker restart <pool> <label>` | Finish the current task, report, then exit for supervisor restart. |
 | `worker relaunch-browser <pool> <label>` | Recreate the dedicated Chrome process and tab. |
+| `worker forget <pool> <label> [--force]` | Remove a stale worker from `worker list` (presence + commands; releases its session affinity). Live or busy workers are refused without `--force`; a live worker re-registers on its next heartbeat anyway. |
 | `worker relogin <pool> <label>` | Open the ChatGPT login page on the worker's own screen (someone at that machine must finish it). For remote login from your computer use `oracle login`, which pushes the session to the pool. While logged out or on a login page the worker leaves its tab untouched and claims no tasks. |
 | `worker upgrade --pool <pool>` | Upgrade the installed local profile. The CLI waits for task drain, verifies the local source, version, dependency manifest, and restarted worker presence. |
 | `worker upgrade --pool <pool> --label <label>` | Queue an asynchronous remote upgrade. The worker drains, verifies, replaces the bundle, and exits for supervisor restart. |

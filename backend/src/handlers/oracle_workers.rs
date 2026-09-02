@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -65,6 +65,20 @@ pub struct AllocateOracleWorkerResponse {
     pub label: String,
     /// True when an existing unbound (legacy) worker row was taken over.
     pub adopted: bool,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ForgetWorkerQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Serialize)]
+pub struct ForgetWorkerResponse {
+    pub label: String,
+    pub commands_removed: u64,
+    pub sessions_released: u64,
+    pub tasks_released: u64,
 }
 
 #[derive(Deserialize)]
@@ -261,6 +275,37 @@ pub async fn show_worker(
     let pool = managed_pool(&state, &actor, &id_or_slug).await?;
     let worker = oracle_worker_service::get_worker(&state.db, &pool.id, &label).await?;
     Ok(Json(worker_info(worker)))
+}
+
+pub async fn forget_worker(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((id_or_slug, label)): Path<(String, String)>,
+    Query(query): Query<ForgetWorkerQuery>,
+) -> AppResult<Json<ForgetWorkerResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
+    let outcome =
+        oracle_worker_service::forget_worker(&state.db, &pool, &label, query.force).await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "oracle_worker_forgotten",
+        Some(serde_json::json!({
+            "pool_id": &pool.id,
+            "worker_label": &label,
+            "force": query.force,
+            "commands_removed": outcome.commands_removed,
+            "sessions_released": outcome.sessions_released,
+            "tasks_released": outcome.tasks_released,
+        })),
+    );
+    Ok(Json(ForgetWorkerResponse {
+        label,
+        commands_removed: outcome.commands_removed,
+        sessions_released: outcome.sessions_released,
+        tasks_released: outcome.tasks_released,
+    }))
 }
 
 pub async fn enqueue_command(

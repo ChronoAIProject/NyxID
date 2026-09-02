@@ -7,6 +7,8 @@ use mongodb::options::{FindOneAndUpdateOptions, FindOptions, ReturnDocument};
 
 use crate::errors::{AppError, AppResult};
 use crate::models::oracle_pool::OraclePool;
+use crate::models::oracle_session::COLLECTION_NAME as ORACLE_SESSIONS;
+use crate::models::oracle_task::COLLECTION_NAME as ORACLE_TASKS;
 use crate::models::oracle_worker::{
     COLLECTION_NAME as ORACLE_WORKERS, OracleWorker, OracleWorkerDesiredState, worker_doc_id,
 };
@@ -23,6 +25,8 @@ const COMMAND_DEADLINE_HOURS: i64 = 24;
 const COMMAND_DELIVERY_LEASE_SECS: i64 = 60;
 const COMMAND_RETENTION_DAYS: i64 = 7;
 const MAX_COMMAND_DELIVERIES: u32 = 10;
+/// Presence newer than this counts as online for `forget` safety checks.
+const FORGET_ONLINE_WINDOW_SECS: i64 = 90;
 
 #[derive(Default)]
 pub struct WorkerPresenceInput {
@@ -697,6 +701,79 @@ pub async fn apply_command_reports(
     Ok(())
 }
 
+#[derive(Debug, Default)]
+pub struct ForgetOutcome {
+    pub commands_removed: u64,
+    pub sessions_released: u64,
+    pub tasks_released: u64,
+}
+
+/// Remove a worker's presence row and command history. Refuses an online
+/// worker or one with a task in flight unless `force` (a live worker would
+/// simply re-register on its next heartbeat). Session affinity owned by the
+/// label is released so follow-ups do not wait out the grace window.
+pub async fn forget_worker(
+    db: &mongodb::Database,
+    pool: &OraclePool,
+    label: &str,
+    force: bool,
+) -> AppResult<ForgetOutcome> {
+    let worker = get_worker(db, &pool.id, label).await?;
+    let now = Utc::now();
+    if !force {
+        if (now - worker.last_seen_at).num_seconds() <= FORGET_ONLINE_WINDOW_SECS {
+            return Err(AppError::Conflict(format!(
+                "worker '{label}' is online; stop it first or pass force"
+            )));
+        }
+        let inflight = db
+            .collection::<Document>(ORACLE_TASKS)
+            .count_documents(doc! {
+                "pool_id": &pool.id,
+                "status": "dispatched",
+                "assigned_worker_id": label,
+            })
+            .await?;
+        if inflight > 0 {
+            return Err(AppError::Conflict(format!(
+                "worker '{label}' has a task in flight; wait for it to settle or pass force"
+            )));
+        }
+    }
+    let commands_removed = db
+        .collection::<Document>(ORACLE_WORKER_COMMANDS)
+        .delete_many(doc! { "pool_id": &pool.id, "worker_label": label })
+        .await?
+        .deleted_count;
+    let sessions_released = db
+        .collection::<Document>(ORACLE_SESSIONS)
+        .update_many(
+            doc! { "pool_id": &pool.id, "owner_worker_label": label },
+            doc! { "$set": { "owner_worker_label": null, "updated_at": bson::DateTime::from_chrono(now) } },
+        )
+        .await?
+        .modified_count;
+    let tasks_released = db
+        .collection::<Document>(ORACLE_TASKS)
+        .update_many(
+            doc! { "pool_id": &pool.id, "status": "queued", "required_worker_label": label },
+            doc! {
+                "$set": { "phase": "affinity_released_by_forget", "updated_at": bson::DateTime::from_chrono(now) },
+                "$unset": { "required_worker_label": "" },
+            },
+        )
+        .await?
+        .modified_count;
+    db.collection::<OracleWorker>(ORACLE_WORKERS)
+        .delete_one(doc! { "_id": &worker.id })
+        .await?;
+    Ok(ForgetOutcome {
+        commands_removed,
+        sessions_released,
+        tasks_released,
+    })
+}
+
 pub async fn list_commands(
     db: &mongodb::Database,
     pool_id: &str,
@@ -1181,6 +1258,69 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(invalid, AppError::ValidationError(_)));
+        db.drop().await.ok();
+    }
+    #[tokio::test]
+    async fn forget_refuses_online_workers_unless_forced_and_cleans_up() {
+        let Some(db) = connect_test_database("oracle_worker_forget").await else {
+            return;
+        };
+        let pool = pool();
+        let worker = allocate_worker(&db, &pool, Some("stale-1"))
+            .await
+            .unwrap()
+            .worker;
+        report_presence(
+            &db,
+            &pool,
+            WorkerPresenceInput {
+                worker_label: worker.worker_label.clone(),
+                capabilities: vec!["commands_v1".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        enqueue_command(
+            &db,
+            &pool.id,
+            &pool.user_id,
+            &worker.worker_label,
+            OracleWorkerCommandKind::Drain,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let refused = forget_worker(&db, &pool, &worker.worker_label, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(refused, AppError::Conflict(_)));
+
+        let outcome = forget_worker(&db, &pool, &worker.worker_label, true)
+            .await
+            .unwrap();
+        assert_eq!(outcome.commands_removed, 1);
+        assert!(
+            list_commands(&db, &pool.id, Some(&worker.worker_label))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let gone = get_worker(&db, &pool.id, &worker.worker_label)
+            .await
+            .unwrap_err();
+        assert!(matches!(gone, AppError::OracleWorkerNotFound(_)));
+
+        // A stale (offline) worker is forgotten without force.
+        let stale = allocate_worker(&db, &pool, Some("stale-2"))
+            .await
+            .unwrap()
+            .worker;
+        forget_worker(&db, &pool, &stale.worker_label, false)
+            .await
+            .unwrap();
         db.drop().await.ok();
     }
 }
