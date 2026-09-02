@@ -85,12 +85,26 @@ You have ChatGPT Pro and want to share it.
 
    The command asks for the one-time pool worker token with hidden input. You
    can also pass `--worker-token-file`. It verifies Node 18 or newer, npm, and
-   Chrome or Chromium. It then allocates a unique worker label, verifies the
+   Chrome or Chromium. It then allocates a unique worker label (server-generated,
+   or your own with `--label share-account-8`; see below), verifies the
    server-embedded bundle checksum, installs the exact `playwright-core`
    version from the bundle manifest, writes mode `0600` config and token files,
    installs a launchd or systemd user service, starts a dedicated Chrome
    profile, and starts the worker. Use `--profile <name>` for a second
    installation of the same pool on one machine.
+
+   **Choosing labels.** Labels are how you address a worker (`worker show`,
+   `drain`, `upgrade --label`). Pass `--label <name>` (letters, digits, `-`,
+   `_`; max 64) to keep a naming convention such as `share-account-8`. The
+   server still guarantees uniqueness: a label already bound to another
+   managed installation is refused (error 11014). A label that only a
+   legacy worker uses (no installation binding) is **adopted** — the managed
+   install takes it over and the legacy process is rejected on its next poll
+   with 11014, so unload that legacy worker after the managed one reports
+   online. This is the in-place migration path for existing named workers.
+   Renaming an existing install (`install --force --label <new>`) leaves the
+   old label row bound to this installation; it shows as offline in
+   `worker list` until it ages out of interest.
 
    The installed service uses KeepAlive on macOS or `Restart=always` on Linux.
    Its token stays in a mode `0600` file. The service environment contains only
@@ -207,7 +221,7 @@ bound based on the 512 KiB decoded envelope cap.
 | `PATCH /pools/{id_or_slug}` | Update settings (owner / org admin only). |
 | `POST /pools/{id_or_slug}/rotate-token` | New worker token, shown once. |
 | `GET /pools/{id_or_slug}/workers` | Manager-only worker presence list. |
-| `POST /pools/{id_or_slug}/workers/allocate` | Manager-only unique worker label allocation. |
+| `POST /pools/{id_or_slug}/workers/allocate` | Manager-only worker label allocation. Body `{"label": "..."}` requests a specific label; `null`/empty body generates one. Returns `{label, adopted}`. |
 | `GET /pools/{id_or_slug}/workers/{label}` | Manager-only worker detail. |
 | `GET, POST /pools/{id_or_slug}/workers/{label}/commands` | Manager-only command history and enqueue. |
 | `POST /pools/{id_or_slug}/login-snapshots` | Validate and fan out an opaque encrypted login snapshot. |
@@ -379,7 +393,7 @@ Managers can queue these commands:
 | `worker resume <pool> <label>` | Resume claims. |
 | `worker restart <pool> <label>` | Finish the current task, report, then exit for supervisor restart. |
 | `worker relaunch-browser <pool> <label>` | Recreate the dedicated Chrome process and tab. |
-| `worker relogin <pool> <label>` | Open the ChatGPT login page. Pool-wide login normally uses `oracle login` instead. |
+| `worker relogin <pool> <label>` | Open the ChatGPT login page on the worker's own screen (someone at that machine must finish it). For remote login from your computer use `oracle login`, which pushes the session to the pool. While logged out or on a login page the worker leaves its tab untouched and claims no tasks. |
 | `worker upgrade --pool <pool>` | Upgrade the installed local profile. The CLI waits for task drain, verifies the local source, version, dependency manifest, and restarted worker presence. |
 | `worker upgrade --pool <pool> --label <label>` | Queue an asynchronous remote upgrade. The worker drains, verifies, replaces the bundle, and exits for supervisor restart. |
 

@@ -12,7 +12,7 @@ Install Node 18 or newer, npm, and Chrome or Chromium. Log in to the NyxID CLI,
 then run:
 
 ```bash
-nyxid oracle worker install --pool <pool-slug>
+nyxid oracle worker install --pool <pool-slug> [--label <name>]
 ```
 
 The command asks for the raw pool worker token with hidden input. Pass
@@ -21,7 +21,9 @@ return an existing token because it stores only the SHA-256 hash.
 
 Install performs these actions:
 
-1. Allocates a label that is unique within the pool.
+1. Allocates a label that is unique within the pool (server-generated, or
+   `--label <name>` to keep your own naming; an existing legacy worker's
+   label is adopted, a label bound to another managed install is refused).
 2. Downloads the worker source embedded in the NyxID backend and verifies its
    SHA-256.
 3. Installs the exact `playwright-core` version from the bundle manifest without

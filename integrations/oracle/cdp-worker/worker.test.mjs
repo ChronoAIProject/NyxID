@@ -6,7 +6,9 @@ import {
   choosePromptNavigation,
   decidePromptResume,
   decryptSessionEnvelope,
+  isAuthFlowUrl,
   markChatPageRecovered,
+  shouldLeaveTabAlone,
   taskRecoveryDecision,
 } from "./worker.mjs";
 
@@ -280,4 +282,30 @@ test("idle Chrome recovery clears stale health errors", () => {
   };
   markChatPageRecovered(active);
   assert.equal(active.lastError, "cdp_connection_refused");
+});
+
+test("login flow pages are recognised and left alone", () => {
+  for (const url of [
+    "https://auth.openai.com/authorize?x=1",
+    "https://auth0.openai.com/u/login/identifier",
+    "https://accounts.google.com/o/oauth2/v2/auth",
+    "https://chatgpt.com/auth/login",
+    "https://chatgpt.com/auth",
+  ]) {
+    assert.equal(isAuthFlowUrl(url), true, url);
+    assert.equal(shouldLeaveTabAlone({ url, loggedIn: null }), true, url);
+  }
+  for (const url of ["https://chatgpt.com/", "https://chatgpt.com/c/abc", "https://example.com/auth/login", ""]) {
+    assert.equal(isAuthFlowUrl(url), false, url);
+  }
+});
+
+test("a logged-out ChatGPT tab is left alone until authenticated", () => {
+  assert.equal(shouldLeaveTabAlone({ url: "https://chatgpt.com/", loggedIn: false }), true);
+  assert.equal(shouldLeaveTabAlone({ url: "https://chatgpt.com/", loggedIn: true }), false);
+  assert.equal(shouldLeaveTabAlone({ url: "https://chatgpt.com/", loggedIn: null }), false);
+  // A lost page must still be recreated even if the last heartbeat saw logged out.
+  assert.equal(shouldLeaveTabAlone({ url: undefined, loggedIn: false, pageOpen: false }), false);
+  // A non-ChatGPT, non-auth page is steered back regardless of login state.
+  assert.equal(shouldLeaveTabAlone({ url: "https://example.com/", loggedIn: false }), false);
 });

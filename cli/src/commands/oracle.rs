@@ -496,9 +496,10 @@ async fn run_worker(command: OracleWorkerCommands) -> Result<()> {
         OracleWorkerCommands::Install {
             pool,
             worker_token_file,
+            label,
             force,
             auth,
-        } => install_worker(pool, worker_token_file, force, auth).await,
+        } => install_worker(pool, worker_token_file, label, force, auth).await,
         OracleWorkerCommands::Start { pool, profile } => {
             oracle_worker_daemon::start(&pool, profile.as_deref())
         }
@@ -537,7 +538,16 @@ async fn run_worker(command: OracleWorkerCommands) -> Result<()> {
             queue_worker_command(&pool, &label, "relaunch_browser", auth).await
         }
         OracleWorkerCommands::Relogin { pool, label, auth } => {
-            queue_worker_command(&pool, &label, "relogin", auth).await
+            let output = auth.output;
+            queue_worker_command(&pool, &label, "relogin", auth).await?;
+            if matches!(output, OutputFormat::Table) {
+                eprintln!(
+                    "Note: relogin only opens the login page on the worker's own screen. To log in \
+                     from this computer and push the session to the whole pool, run: \
+                     nyxid oracle login {pool}"
+                );
+            }
+            Ok(())
         }
     }
 }
@@ -804,6 +814,7 @@ fn bool_state(value: Option<bool>) -> String {
 async fn install_worker(
     pool: String,
     worker_token_file: Option<String>,
+    requested_label: Option<String>,
     force: bool,
     auth: crate::cli::AuthArgs,
 ) -> Result<()> {
@@ -821,22 +832,34 @@ async fn install_worker(
             install_dir.display()
         )
     }
-    let label = match &existing {
-        Some(config) => config.label.clone(),
-        None => {
+    let label = match (&existing, requested_label.as_deref()) {
+        // Keep the existing identity unless the operator explicitly renames.
+        (Some(config), None) => config.label.clone(),
+        (_, requested) => {
+            let body = match requested {
+                Some(label) => serde_json::json!({ "label": label }),
+                None => Value::Null,
+            };
             let allocated: Value = api
                 .post(
                     &format!(
                         "/oracle/pools/{}/workers/allocate",
                         urlencoding::encode(&pool)
                     ),
-                    &Value::Null,
+                    &body,
                 )
                 .await?;
-            allocated["label"]
+            let label = allocated["label"]
                 .as_str()
                 .context("server did not return a worker label")?
-                .to_string()
+                .to_string();
+            if allocated["adopted"].as_bool() == Some(true) {
+                eprintln!(
+                    "Adopted existing worker label '{label}'. Any legacy worker still using it \
+                     will be rejected once this installation connects; unload that legacy worker."
+                );
+            }
+            label
         }
     };
     let token = read_worker_token(
@@ -1209,6 +1232,7 @@ async fn run_login(
         worker_token_file.as_deref(),
         None,
     )?;
+    eprintln!("Preparing a local login capture (downloading the verified worker runtime)...");
     let bundle = fetch_manager_bundle(&mut api).await?;
     let capture_workspace =
         tempfile::tempdir().context("Could not create private login capture directory")?;
@@ -1217,15 +1241,22 @@ async fn run_login(
     let node = resolve_node()?;
     let npm = resolve_program(&["npm"])?;
     let chrome_executable = resolve_chrome()?;
+    eprintln!(
+        "Installing the runtime dependency into a temporary profile (this can take a minute)..."
+    );
     install_bundle_runtime(&capture_dir, &bundle, &npm)?;
     let port = find_free_debug_port()?;
     let chrome_profile = capture_dir.join("chrome-profile");
+    eprintln!("Opening a fresh Chrome window for the ChatGPT login...");
     let mut capture_browser =
         CaptureChrome::new(launch_chrome(&chrome_executable, &chrome_profile, port)?);
     wait_for_cdp(port, Duration::from_secs(30))?;
 
-    eprintln!("Complete ChatGPT login in the Chrome window that opened.");
-    eprintln!("The session is captured locally after authenticated ChatGPT is verified.");
+    eprintln!("Complete the ChatGPT login in the Chrome window that just opened.");
+    eprintln!(
+        "The session is captured locally once ChatGPT shows as logged in, then pushed to the pool \
+         (up to {wait_secs}s)."
+    );
     let capture_file = capture_dir.join("session.json");
     let status = Command::new(&node)
         .arg(capture_dir.join("worker.mjs"))
@@ -1242,6 +1273,13 @@ async fn run_login(
         .context("Local ChatGPT login capture failed to start")?;
     if !status.success() {
         bail!("Local ChatGPT login capture did not complete")
+    }
+    if !capture_file.exists() {
+        bail!(
+            "The login capture helper exited without producing session state (it may not have \
+             run at all); re-run with NYXID_ORACLE_DEBUG=1 or upgrade the backend so `oracle login` \
+             fetches a worker bundle with the realpath main-module fix"
+        )
     }
     let sealed = Zeroizing::new({
         let plaintext = Zeroizing::new(

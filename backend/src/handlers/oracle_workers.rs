@@ -53,9 +53,18 @@ pub struct ListOracleWorkersResponse {
     pub workers: Vec<OracleWorkerInfo>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct AllocateOracleWorkerRequest {
+    /// Optional operator-chosen label; omitted = server-generated.
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
 #[derive(Serialize)]
 pub struct AllocateOracleWorkerResponse {
     pub label: String,
+    /// True when an existing unbound (legacy) worker row was taken over.
+    pub adopted: bool,
 }
 
 #[derive(Deserialize)]
@@ -196,23 +205,34 @@ pub async fn allocate_worker(
     State(state): State<AppState>,
     auth_user: AuthUser,
     Path(id_or_slug): Path<String>,
+    // Older CLIs post a JSON `null` body; absent bodies are accepted too.
+    body: Option<Json<Option<AllocateOracleWorkerRequest>>>,
 ) -> AppResult<impl IntoResponse> {
     let actor = auth_user.user_id.to_string();
     let pool = managed_pool(&state, &actor, &id_or_slug).await?;
-    let worker = oracle_worker_service::allocate_worker(&state.db, &pool).await?;
+    let requested = body
+        .and_then(|Json(inner)| inner)
+        .and_then(|request| request.label)
+        .map(|label| label.trim().to_string())
+        .filter(|label| !label.is_empty());
+    let allocated =
+        oracle_worker_service::allocate_worker(&state.db, &pool, requested.as_deref()).await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
         "oracle_worker_allocated",
         Some(serde_json::json!({
             "pool_id": &pool.id,
-            "worker_label": &worker.worker_label,
+            "worker_label": &allocated.worker.worker_label,
+            "requested": requested.is_some(),
+            "adopted": allocated.adopted,
         })),
     );
     Ok((
         StatusCode::CREATED,
         Json(AllocateOracleWorkerResponse {
-            label: worker.worker_label,
+            label: allocated.worker.worker_label,
+            adopted: allocated.adopted,
         }),
     ))
 }
