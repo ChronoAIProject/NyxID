@@ -29,14 +29,20 @@ def git(repo: Path, *args: str) -> str:
     return subprocess.check_output(
         ["git", "-C", str(repo), *args],
         text=True,
+        stderr=subprocess.DEVNULL,
     ).strip()
 
 
-def write_pin(path: Path, remote: str, effective_chat_sha: str) -> None:
+def write_pin(
+    path: Path,
+    remote: str,
+    effective_chat_sha: str,
+    remote_head: str | None = None,
+) -> None:
     payload = {
         "remote": remote,
         "branch": BRANCH,
-        "remote_head": effective_chat_sha,
+        "remote_head": remote_head or effective_chat_sha,
         "effective_chat_sha": effective_chat_sha,
         "watched_paths": [WATCHED_PATH],
         "public_commands": [],
@@ -114,6 +120,7 @@ class CheckAevatarChatDriftTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             receipt = json.loads(result.stdout)
             self.assertEqual(receipt["observed_head"], pin_sha)
+            self.assertEqual(receipt["pinned_remote_head"], pin_sha)
             self.assertEqual(receipt["effective_chat_sha"], pin_sha)
             self.assertEqual(receipt["changed_watched_paths"], [])
             self.assertRegex(receipt["fetch_timestamp"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -138,9 +145,56 @@ class CheckAevatarChatDriftTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1, result.stderr)
             receipt = json.loads(result.stdout)
             self.assertEqual(receipt["observed_head"], head)
+            self.assertEqual(receipt["pinned_remote_head"], pin_sha)
             self.assertEqual(receipt["effective_chat_sha"], pin_sha)
             self.assertEqual(receipt["changed_watched_paths"], [WATCHED_PATH])
             self.assertNotIn(UNWATCHED_PATH, receipt["changed_watched_paths"])
+            self.assertIn("differs from observed_head", result.stderr)
+
+    def test_receipt_carries_pinned_and_observed_heads(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ac0-heads-") as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            init_repo(repo)
+            pin_sha = commit_file(repo, WATCHED_PATH, "pinned\n", "pin")
+            commit_file(repo, UNWATCHED_PATH, "noise\n", "unwatched")
+            head = git(repo, "rev-parse", "HEAD")
+            pin_path = root / "pin.json"
+            write_pin(pin_path, str(repo), pin_sha, remote_head=pin_sha)
+
+            result = run_checker(pin=pin_path, repo=repo)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            receipt = json.loads(result.stdout)
+            self.assertEqual(receipt["pinned_remote_head"], pin_sha)
+            self.assertEqual(receipt["observed_head"], head)
+            self.assertNotEqual(receipt["pinned_remote_head"], receipt["observed_head"])
+            self.assertEqual(receipt["changed_watched_paths"], [])
+            self.assertIn("differs from observed_head", result.stderr)
+
+    def test_non_ancestor_pin_exits_two(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ac0-orphan-") as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            init_repo(repo)
+            pin_sha = commit_file(repo, WATCHED_PATH, "pinned\n", "pin")
+            git(repo, "checkout", "--orphan", "unrelated")
+            git(repo, "commit", "--allow-empty", "-m", "unrelated root")
+            unrelated_head = git(repo, "rev-parse", "HEAD")
+            git(repo, "branch", "-f", BRANCH, unrelated_head)
+            git(repo, "checkout", BRANCH)
+            pin_path = root / "pin.json"
+            write_pin(pin_path, str(repo), pin_sha)
+
+            before = nyxid_status()
+            result = run_checker(pin=pin_path, repo=repo)
+            after = nyxid_status()
+
+            self.assertEqual(before, after)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            combined = result.stdout + result.stderr
+            self.assertIn(pin_sha, combined)
+            self.assertIn(unrelated_head, combined)
+            self.assertIn("not an ancestor", combined)
 
 
 if __name__ == "__main__":

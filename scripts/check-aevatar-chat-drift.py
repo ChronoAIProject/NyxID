@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Compare Aevatar watched chat paths from a pinned SHA to the live branch head."""
+"""Compare Aevatar watched chat paths from a pinned SHA to the live branch head.
+
+Receipt fields are pinned_remote_head, observed_head, effective_chat_sha,
+fetch_timestamp, and changed_watched_paths. Exit 0 when the watched-path
+list is empty, 1 when it is not, and 2 on tool or ancestry failure. A moved
+remote head with no watched-path change is still clean.
+"""
 
 from __future__ import annotations
 
@@ -36,6 +42,7 @@ class ContractPin:
 @dataclass(frozen=True)
 class DriftReceipt:
     effective_chat_sha: str
+    pinned_remote_head: str
     observed_head: str
     fetch_timestamp: str
     changed_watched_paths: tuple[str, ...]
@@ -43,6 +50,7 @@ class DriftReceipt:
     def to_json(self) -> dict[str, object]:
         return {
             "effective_chat_sha": self.effective_chat_sha,
+            "pinned_remote_head": self.pinned_remote_head,
             "observed_head": self.observed_head,
             "fetch_timestamp": self.fetch_timestamp,
             "changed_watched_paths": list(self.changed_watched_paths),
@@ -142,6 +150,17 @@ def fetch_branch(repo: str, remote: str, branch: str, pin_sha: str) -> str:
         still_missing = git(repo, "cat-file", "-e", f"{pin_sha}^{{commit}}")
         if still_missing.returncode != 0:
             raise ToolError(f"pin SHA {pin_sha} is not in {remote}")
+    ancestry = git(repo, "merge-base", "--is-ancestor", pin_sha, observed_head)
+    if ancestry.returncode == 1:
+        raise ToolError(
+            f"effective_chat_sha {pin_sha} is not an ancestor of observed_head {observed_head}"
+        )
+    if ancestry.returncode != 0:
+        detail = (ancestry.stderr or ancestry.stdout or "").strip()
+        raise ToolError(
+            detail
+            or f"failed to verify ancestry of {pin_sha} against {observed_head}"
+        )
     return observed_head
 
 
@@ -173,6 +192,7 @@ def run_check(pin: ContractPin, remote: str, branch: str, reuse_repo: str | None
         )
         return DriftReceipt(
             effective_chat_sha=pin.effective_chat_sha,
+            pinned_remote_head=pin.remote_head,
             observed_head=observed_head,
             fetch_timestamp=fetch_timestamp,
             changed_watched_paths=changed,
@@ -200,6 +220,7 @@ def run_check(pin: ContractPin, remote: str, branch: str, reuse_repo: str | None
         )
         return DriftReceipt(
             effective_chat_sha=pin.effective_chat_sha,
+            pinned_remote_head=pin.remote_head,
             observed_head=observed_head,
             fetch_timestamp=fetch_timestamp,
             changed_watched_paths=changed,
@@ -211,6 +232,7 @@ def emit(receipt: DriftReceipt, as_json: bool) -> None:
         json.dump(receipt.to_json(), sys.stdout, indent=2)
         sys.stdout.write("\n")
         return
+    sys.stdout.write(f"pinned_remote_head: {receipt.pinned_remote_head}\n")
     sys.stdout.write(f"observed_head: {receipt.observed_head}\n")
     sys.stdout.write(f"fetch_timestamp: {receipt.fetch_timestamp}\n")
     sys.stdout.write("changed_watched_paths:\n")
@@ -259,6 +281,12 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_TOOL
 
     emit(receipt, args.json)
+    if receipt.pinned_remote_head != receipt.observed_head:
+        sys.stderr.write(
+            "notice: pinned_remote_head "
+            f"{receipt.pinned_remote_head} differs from observed_head "
+            f"{receipt.observed_head}\n"
+        )
     if receipt.changed_watched_paths:
         return EXIT_DRIFT
     return EXIT_CLEAN
