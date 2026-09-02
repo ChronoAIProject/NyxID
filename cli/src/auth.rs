@@ -35,6 +35,7 @@ const TOKEN_DIR_NAME: &str = ".nyxid";
 const PROFILES_DIR_NAME: &str = "profiles";
 const TOKEN_FILE_NAME: &str = "access_token";
 const REFRESH_TOKEN_FILE_NAME: &str = "refresh_token";
+const REFRESH_LOCK_FILE_NAME: &str = ".refresh.lock";
 const BASE_URL_FILE_NAME: &str = "base_url";
 const USER_ID_FILE_NAME: &str = "user_id";
 const CALLBACK_TIMEOUT_SECS: u64 = 120;
@@ -191,14 +192,26 @@ fn write_token_file(path: &std::path::Path, token: &str) -> Result<()> {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
-    std::fs::write(path, token)
-        .with_context(|| format!("Failed to write token to {}", path.display()))?;
+    // Write-then-rename so a concurrent reader never sees a truncated or
+    // half-written token (which would look like a corrupt/unknown token and
+    // send that process down the re-login path).
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "token".to_string());
+    let temp = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
+    std::fs::write(&temp, token)
+        .with_context(|| format!("Failed to write token to {}", temp.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("Failed to set permissions on {}", path.display()))?;
+        std::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to set permissions on {}", temp.display()))?;
     }
+    std::fs::rename(&temp, path).with_context(|| {
+        let _ = std::fs::remove_file(&temp);
+        format!("Failed to move token into {}", path.display())
+    })?;
     Ok(())
 }
 
@@ -343,20 +356,27 @@ pub fn resolve_access_token(auth: &AuthArgs) -> Result<String> {
 // ---- Session preflight ----
 
 /// Why a saved session can't be used without re-authenticating.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum DeadSessionReason {
     /// No saved access token for this profile (never logged in / logged out).
     NoToken,
-    /// Access token expired and the refresh token could not renew it
-    /// (missing, expired, revoked, or rejected by the server).
-    Expired,
+    /// Access token expired and the refresh token could not renew it; carries
+    /// the classified reason (missing, expired, revoked, or rejected).
+    Rejected(RefreshRejection),
 }
 
 impl DeadSessionReason {
-    fn headline(self) -> &'static str {
+    fn headline(&self) -> String {
         match self {
-            DeadSessionReason::NoToken => "You are not logged in.",
-            DeadSessionReason::Expired => "Your session has expired.",
+            DeadSessionReason::NoToken => "You are not logged in.".to_string(),
+            DeadSessionReason::Rejected(rejection) => rejection.headline(),
+        }
+    }
+
+    fn code(&self) -> &'static str {
+        match self {
+            DeadSessionReason::NoToken => "not_logged_in",
+            DeadSessionReason::Rejected(rejection) => rejection.code(),
         }
     }
 }
@@ -367,7 +387,7 @@ enum SessionRefresh {
     Refreshed,
     /// The server (or local state) says this session is done; caller should
     /// fall through to the dead-session path (prompt or error).
-    Unauthorized,
+    Rejected(RefreshRejection),
     /// Could not reach the server to find out; caller should hard-fail with a
     /// connectivity message rather than prompt for a login that also needs
     /// the network.
@@ -414,11 +434,13 @@ pub async fn ensure_session(auth: &AuthArgs) -> Result<()> {
     // Access token expired -> one silent refresh attempt.
     match refresh_saved_session(auth).await {
         SessionRefresh::Refreshed => Ok(()),
-        SessionRefresh::Unauthorized => handle_dead_session(auth, DeadSessionReason::Expired).await,
-        SessionRefresh::Network(e) => Err(anyhow!(
+        SessionRefresh::Rejected(rejection) => {
+            handle_dead_session(auth, DeadSessionReason::Rejected(rejection)).await
+        }
+        SessionRefresh::Network(e) => Err(anyhow::Error::new(RefreshUnavailable(format!(
             "Couldn't reach NyxID to refresh your session ({e}). \
              Check your connection and try again."
-        )),
+        )))),
     }
 }
 
@@ -432,10 +454,124 @@ pub(crate) enum RefreshExchange {
         refresh_token: String,
     },
     /// Server rejected the refresh token (4xx) -- the session is not renewable.
-    Unauthorized,
+    /// Carries the classified reason so callers can tell "log in again" apart
+    /// from "retry later" and explain WHY (expired vs revoked by reuse
+    /// detection vs unknown token).
+    Rejected(RefreshRejection),
     /// Could not determine the outcome (network error, 5xx, malformed body).
     Network(anyhow::Error),
 }
+
+/// Why the server refused to renew the session. Distinguishable so automation
+/// can react: `Expired` and `NotFound` mean a human must `nyxid login`;
+/// `Revoked` means reuse detection fired (a stale copy of the refresh token was
+/// presented, or the session was logged out elsewhere) -- also a re-login, but
+/// worth surfacing because it points at a token-sharing problem.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefreshRejectionReason {
+    Expired,
+    Revoked,
+    NotFound,
+    Other,
+}
+
+#[derive(Clone, Debug)]
+pub struct RefreshRejection {
+    pub reason: RefreshRejectionReason,
+    pub message: String,
+}
+
+impl RefreshRejection {
+    pub fn local(reason: RefreshRejectionReason, message: &str) -> Self {
+        Self {
+            reason,
+            message: message.to_string(),
+        }
+    }
+
+    /// Stable machine-readable code for `--output json` and exit-code docs.
+    pub fn code(&self) -> &'static str {
+        match self.reason {
+            RefreshRejectionReason::Expired => "refresh_token_expired",
+            RefreshRejectionReason::Revoked => "refresh_token_revoked",
+            RefreshRejectionReason::NotFound => "refresh_token_not_found",
+            RefreshRejectionReason::Other => "refresh_rejected",
+        }
+    }
+
+    pub fn headline(&self) -> String {
+        match self.reason {
+            RefreshRejectionReason::Expired => {
+                "Your session has expired (the refresh token reached its lifetime).".to_string()
+            }
+            RefreshRejectionReason::Revoked => "Your session was revoked: the refresh token was \
+                 reused after rotation (a stale copy in another tool or profile) or the session \
+                 was logged out elsewhere."
+                .to_string(),
+            RefreshRejectionReason::NotFound => {
+                "Your session has expired and no usable refresh token is saved.".to_string()
+            }
+            RefreshRejectionReason::Other => {
+                format!("Your session could not be renewed ({}).", self.message)
+            }
+        }
+    }
+
+    /// Classify a 4xx `/auth/refresh` response from its error envelope.
+    pub(crate) fn classify(body: Option<&serde_json::Value>) -> Self {
+        let error_key = body
+            .and_then(|b| b.get("error"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let message = body
+            .and_then(|b| b.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("refresh rejected")
+            .to_string();
+        let lower = message.to_ascii_lowercase();
+        let reason = if error_key == "token_expired" || lower.contains("expired") {
+            RefreshRejectionReason::Expired
+        } else if lower.contains("revoked") {
+            RefreshRejectionReason::Revoked
+        } else if lower.contains("not found") {
+            RefreshRejectionReason::NotFound
+        } else {
+            RefreshRejectionReason::Other
+        };
+        Self { reason, message }
+    }
+}
+
+/// The session cannot be renewed locally: a human must run `nyxid login`.
+/// `main` maps this to exit code 3 so automation can tell it apart from
+/// ordinary failures (1) and transient refresh trouble (4).
+#[derive(Debug)]
+pub struct ReauthRequired {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl std::fmt::Display for ReauthRequired {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ReauthRequired {}
+
+/// The renewal outcome is unknown (network, 5xx, rate limit): retrying later
+/// is the right move, not re-login. `main` maps this to exit code 4.
+#[derive(Debug)]
+pub struct RefreshUnavailable(pub String);
+
+impl std::fmt::Display for RefreshUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RefreshUnavailable {}
 
 /// Canonical `POST /api/v1/auth/refresh` exchange, shared by the session
 /// preflight ([`refresh_saved_session`]), the in-flight 401 retry
@@ -476,7 +612,9 @@ pub(crate) async fn exchange_refresh_token(
     }
     if status.is_client_error() {
         // 401/403/400 etc. -> the refresh token is genuinely not renewable.
-        return RefreshExchange::Unauthorized;
+        // Read the error envelope so the caller can say why.
+        let body = resp.json::<serde_json::Value>().await.ok();
+        return RefreshExchange::Rejected(RefreshRejection::classify(body.as_ref()));
     }
     if !status.is_success() {
         return RefreshExchange::Network(anyhow!("refresh failed (HTTP {status})"));
@@ -502,8 +640,22 @@ pub(crate) async fn exchange_refresh_token(
 async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
     let profile = auth.profile.as_deref();
 
+    // Serialise concurrent refreshes across nyxid processes sharing this
+    // profile (parallel agent tasks are the norm). Whoever holds the lock
+    // first rotates; everyone else finds the fresh access token already on
+    // disk and never presents the now-stale refresh token to the server,
+    // which would otherwise trip reuse detection and revoke the session.
+    let _lock = acquire_refresh_lock(profile).ok();
+    if let Some(access_token) = fresh_access_token_on_disk(profile) {
+        let _ = access_token;
+        return SessionRefresh::Refreshed;
+    }
+
     let Some(refresh_token) = read_saved_refresh_token_for(profile) else {
-        return SessionRefresh::Unauthorized;
+        return SessionRefresh::Rejected(RefreshRejection::local(
+            RefreshRejectionReason::NotFound,
+            "no refresh token is saved for this profile",
+        ));
     };
 
     // If the refresh token itself is already expired, skip the round trip --
@@ -512,7 +664,10 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
     if let Some(exp) = jwt_exp_from_token(&refresh_token)
         && exp <= Utc::now()
     {
-        return SessionRefresh::Unauthorized;
+        return SessionRefresh::Rejected(RefreshRejection::local(
+            RefreshRejectionReason::Expired,
+            "the saved refresh token has passed its expiry",
+        ));
     }
 
     let base_url = match auth.resolved_base_url() {
@@ -534,21 +689,112 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
             }
             SessionRefresh::Refreshed
         }
-        RefreshExchange::Unauthorized => SessionRefresh::Unauthorized,
+        RefreshExchange::Rejected(rejection) => SessionRefresh::Rejected(rejection),
         RefreshExchange::Network(e) => SessionRefresh::Network(e),
     }
+}
+
+/// Explicit renewal for automation (`nyxid session refresh`): always performs
+/// the exchange (extending the rolling refresh-token window), persists the
+/// rotated pair, and reports the new expiries. Errors are typed so callers can
+/// branch on the exit code: `ReauthRequired` (3) vs `RefreshUnavailable` (4).
+pub async fn force_refresh_session(auth: &AuthArgs) -> Result<RefreshReport> {
+    let profile = auth.profile.as_deref();
+    let _lock = acquire_refresh_lock(profile).ok();
+    let Some(refresh_token) = read_saved_refresh_token_for(profile) else {
+        return Err(anyhow::Error::new(ReauthRequired {
+            code: "refresh_token_not_found",
+            message: "No refresh token is saved for this profile. Run `nyxid login` to continue."
+                .to_string(),
+        }));
+    };
+    if let Some(exp) = jwt_exp_from_token(&refresh_token)
+        && exp <= Utc::now()
+    {
+        return Err(anyhow::Error::new(ReauthRequired {
+            code: "refresh_token_expired",
+            message: "The saved refresh token has expired. Run `nyxid login` to continue."
+                .to_string(),
+        }));
+    }
+    let base_url = auth.resolved_base_url()?;
+    let client = build_cli_http_client(profile)?;
+    match exchange_refresh_token(&client, &base_url, &refresh_token).await {
+        RefreshExchange::Renewed {
+            access_token,
+            refresh_token,
+        } => {
+            save_tokens_for(profile, &access_token, Some(&refresh_token))
+                .context("failed to persist refreshed tokens")?;
+            Ok(RefreshReport {
+                access_expires_at: jwt_exp_from_token(&access_token),
+                refresh_expires_at: jwt_exp_from_token(&refresh_token),
+            })
+        }
+        RefreshExchange::Rejected(rejection) => Err(anyhow::Error::new(ReauthRequired {
+            code: rejection.code(),
+            message: format!("{} Run `nyxid login` to continue.", rejection.headline()),
+        })),
+        RefreshExchange::Network(e) => Err(anyhow::Error::new(RefreshUnavailable(format!(
+            "Couldn't reach NyxID to refresh your session ({e}). Retry later."
+        )))),
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RefreshReport {
+    pub access_expires_at: Option<chrono::DateTime<Utc>>,
+    pub refresh_expires_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// Cross-process advisory lock for token rotation on one profile.
+pub(crate) struct RefreshLock(#[allow(dead_code)] std::fs::File);
+
+pub(crate) fn acquire_refresh_lock(profile: Option<&str>) -> Result<RefreshLock> {
+    let dir = token_dir_for_profile(profile)?;
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(REFRESH_LOCK_FILE_NAME);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::io::AsRawFd;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        // SAFETY: flock on a valid, open file descriptor we own.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
+            bail!("Failed to lock {}", path.display());
+        }
+    }
+    Ok(RefreshLock(file))
+}
+
+/// The access token another process may have just written: usable as-is when
+/// it still has more than the skew margin left.
+pub(crate) fn fresh_access_token_on_disk(profile: Option<&str>) -> Option<String> {
+    let token = read_saved_token_for(profile)?;
+    let exp = jwt_exp_from_token(&token)?;
+    (exp > Utc::now() + Duration::seconds(SESSION_SKEW_SECS)).then_some(token)
 }
 
 /// Handle a session that can't be used: prompt for re-login when interactive,
 /// otherwise return a clean error. Never hangs in a non-TTY context.
 async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Result<()> {
     let headline = reason.headline();
+    let code = reason.code();
 
     // Only prompt when we can actually read an answer AND surface the prompt.
     let interactive = std::io::IsTerminal::is_terminal(&std::io::stdin())
         && std::io::IsTerminal::is_terminal(&std::io::stderr());
     if !interactive {
-        bail!("{headline} Run `nyxid login` to continue.");
+        return Err(anyhow::Error::new(ReauthRequired {
+            code,
+            message: format!("{headline} Run `nyxid login` to continue."),
+        }));
     }
 
     eprint!("{headline} Log in again now? [Y/n] ");
@@ -560,7 +806,10 @@ async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Resu
         .context("Failed to read response")?;
     let answer = answer.trim().to_ascii_lowercase();
     if !(answer.is_empty() || answer == "y" || answer == "yes") {
-        bail!("{headline} Run `nyxid login` when you're ready.");
+        return Err(anyhow::Error::new(ReauthRequired {
+            code,
+            message: format!("{headline} Run `nyxid login` when you're ready."),
+        }));
     }
 
     // No auto-login: only after explicit consent do we open the login flow.
@@ -1596,11 +1845,61 @@ mod tests {
     }
 
     #[test]
+    fn refresh_rejection_classifies_server_envelopes() {
+        use super::{RefreshRejection, RefreshRejectionReason};
+        let revoked = RefreshRejection::classify(Some(&serde_json::json!({
+            "error": "unauthorized", "error_code": 1001,
+            "message": "Refresh token has been revoked"
+        })));
+        assert_eq!(revoked.reason, RefreshRejectionReason::Revoked);
+        assert_eq!(revoked.code(), "refresh_token_revoked");
+        let expired = RefreshRejection::classify(Some(&serde_json::json!({
+            "error": "token_expired", "message": "Token expired"
+        })));
+        assert_eq!(expired.reason, RefreshRejectionReason::Expired);
+        let missing = RefreshRejection::classify(Some(&serde_json::json!({
+            "error": "unauthorized", "message": "Refresh token not found"
+        })));
+        assert_eq!(missing.reason, RefreshRejectionReason::NotFound);
+        assert!(missing.headline().contains("session has expired"));
+        assert_eq!(
+            RefreshRejection::classify(None).reason,
+            RefreshRejectionReason::Other
+        );
+    }
+
+    #[tokio::test]
+    async fn exchange_refresh_token_reports_rejection_reason() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/auth/refresh"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(serde_json::json!({
+                "error": "unauthorized",
+                "error_code": 1001,
+                "message": "Refresh token has been revoked"
+            })))
+            .mount(&server)
+            .await;
+        let client = reqwest::Client::new();
+        match super::exchange_refresh_token(&client, &server.uri(), "stale").await {
+            super::RefreshExchange::Rejected(rejection) => {
+                assert_eq!(rejection.reason, super::RefreshRejectionReason::Revoked);
+            }
+            _ => panic!("expected a classified rejection"),
+        }
+    }
+
+    #[test]
     fn dead_session_reason_headline_expired() {
         assert!(
-            super::DeadSessionReason::Expired
-                .headline()
-                .contains("expired")
+            super::DeadSessionReason::Rejected(super::RefreshRejection::local(
+                super::RefreshRejectionReason::Expired,
+                "expired"
+            ))
+            .headline()
+            .contains("expired")
         );
     }
 
@@ -1817,6 +2116,46 @@ mod tests {
             super::read_saved_refresh_token_for(auth.profile.as_deref()).as_deref(),
             Some("new-refresh-token"),
             "preflight should persist the rotated refresh token"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn refresh_reuses_a_fresh_access_token_written_by_another_process() {
+        // Another nyxid process already rotated the pair: the fresh access
+        // token on disk is adopted and the (now stale) refresh token is never
+        // presented to the server, so reuse detection cannot fire.
+        let _home = PreflightHome::set();
+        let mut auth = preflight_auth_args();
+        auth.base_url = Some("http://127.0.0.1:9".to_string()); // unreachable: any exchange would fail
+        let fresh = build_jwt(&serde_json::json!({
+            "sub": "11111111-2222-3333-4444-555555555555",
+            "exp": (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp(),
+        }));
+        super::write_token_file(
+            &super::token_file_path_for(auth.profile.as_deref()).expect("path"),
+            &fresh,
+        )
+        .expect("write access token");
+        super::write_token_file(
+            &super::refresh_token_file_path_for(auth.profile.as_deref()).expect("path"),
+            "stale-refresh-token",
+        )
+        .expect("write refresh token");
+        assert!(matches!(
+            super::refresh_saved_session(&auth).await,
+            super::SessionRefresh::Refreshed
+        ));
+        // Token files are written atomically: no temp file is left behind.
+        let dir = super::token_dir_for_profile(auth.profile.as_deref()).expect("dir");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp-"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "temp token files left behind: {leftovers:?}"
         );
     }
 

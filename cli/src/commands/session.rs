@@ -7,6 +7,32 @@ use crate::cli::{OutputFormat, SessionCommands};
 
 pub async fn run(command: SessionCommands) -> Result<()> {
     match command {
+        SessionCommands::Refresh { auth } => {
+            let report = crate::auth::force_refresh_session(&auth).await?;
+            match auth.output {
+                OutputFormat::Json => println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "status": "refreshed",
+                        "access_expires_at": report.access_expires_at,
+                        "refresh_expires_at": report.refresh_expires_at,
+                    }))?
+                ),
+                OutputFormat::Table => {
+                    eprintln!("Session renewed.");
+                    if let Some(exp) = report.access_expires_at {
+                        eprintln!("Access token valid until:  {}", exp.to_rfc3339());
+                    }
+                    if let Some(exp) = report.refresh_expires_at {
+                        eprintln!(
+                            "Refresh token valid until: {} (rolls forward on every renewal)",
+                            exp.to_rfc3339()
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
         SessionCommands::List { auth } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let sessions: Value = api.get("/sessions").await?;

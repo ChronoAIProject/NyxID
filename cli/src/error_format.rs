@@ -16,6 +16,25 @@ pub fn render_error(err: &anyhow::Error, json: bool) -> String {
         return format!("Error: {message}");
     }
 
+    if let Some(reauth) = err.downcast_ref::<crate::auth::ReauthRequired>() {
+        return json!({
+            "error": reauth.code,
+            "message": reauth.message,
+            "exit_code": 3,
+            "action": "login",
+        })
+        .to_string();
+    }
+    if let Some(unavailable) = err.downcast_ref::<crate::auth::RefreshUnavailable>() {
+        return json!({
+            "error": "refresh_unavailable",
+            "message": unavailable.0,
+            "exit_code": 4,
+            "action": "retry",
+        })
+        .to_string();
+    }
+
     if let Some(api_error) = err.downcast_ref::<crate::api::ApiError>()
         && api_error.response().map(|response| response.error_code) == Some(11500)
         && let Some(body) = api_error.body_json()

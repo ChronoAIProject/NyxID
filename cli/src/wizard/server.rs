@@ -1640,7 +1640,7 @@ async fn try_refresh_access_token(state: &ServerState) -> Option<String> {
             eprintln!("  [wizard] refreshed expired access token for profile {profile:?}");
             Some(access_token)
         }
-        crate::auth::RefreshExchange::Unauthorized | crate::auth::RefreshExchange::Network(_) => {
+        crate::auth::RefreshExchange::Rejected(_) | crate::auth::RefreshExchange::Network(_) => {
             None
         }
     }

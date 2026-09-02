@@ -106,7 +106,15 @@ async fn main() {
 
     if let Err(e) = result {
         eprintln!("{}", error_format::render_error(&e, json_output_from_argv));
-        std::process::exit(1);
+        // 3: a human must log in again; 4: renewal outcome unknown, retry later.
+        let code = if e.downcast_ref::<auth::ReauthRequired>().is_some() {
+            3
+        } else if e.downcast_ref::<auth::RefreshUnavailable>().is_some() {
+            4
+        } else {
+            1
+        };
+        std::process::exit(code);
     }
 }
 
