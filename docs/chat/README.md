@@ -1,6 +1,26 @@
 # Assistant Chat
 
-Last verified against Aevatar console and SDK commit `e7ba2e6eb` (2026-08-25).
+The Aevatar chat contract is pinned in
+`tests/fixtures/assistant/aevatar-chat-contract-pin.json`.
+Compare watched paths from the effective chat SHA to the live
+`feature/integrate` head with:
+
+```bash
+python3 scripts/check-aevatar-chat-drift.py \
+  --pin tests/fixtures/assistant/aevatar-chat-contract-pin.json \
+  --remote https://github.com/aevatarAI/aevatar.git \
+  --branch feature/integrate
+```
+
+Pin field sources at effective chat SHA `706ea7cab9d1f882e0fb0f034bb338102b6d5d2b`:
+
+- `remote`, `branch`, `remote_head`, `effective_chat_sha`, `watched_paths`: this pin
+- `public_commands`: `agents/Aevatar.GAgents.NyxidChat/NyxIdChatPublicEndpoints.cs`
+- `internal_actions`: `agents/Aevatar.GAgents.NyxidChat/NyxIdAssistantActionRegistry.cs` (`ResolveServiceAccessReview`)
+- `context_attachments`: `agents/Aevatar.GAgents.NyxidChat/ConversationContextAttachmentAdmission.cs`, `NyxIdChatEndpoints.Streaming.cs` (`NyxIdChatContextAttachmentDto`, `ToAttachmentAdmissionWireName`), `NyxIdChatLifecycleFacade.cs` (create-only admission)
+- `delete`: `agents/Aevatar.GAgents.NyxidChat/NyxIdChatPublicEndpoints.cs` (`HandlePublicDeleteConversationAsync`)
+- `keepalive_seconds`: `agents/Aevatar.GAgents.NyxidChat/NyxIdChatEndpoints.Streaming.cs` (`StreamKeepAliveInterval`)
+- `action_registry`: `agents/Aevatar.GAgents.NyxidChat/NyxIdAssistantActionRegistry.cs` (`SupportedSchemaVersion`, per-action skip on unknown or divergent descriptors)
 
 This directory is the canonical specification for the browser assistant chat surface. It describes the contract implemented by NyxID's `/api/v1/assistant/**` routes, the React assistant client, and the upstream chat endpoints those routes call. The default surface uses Aevatar's durable typed actor. A default-off feature flag can instead select the implemented stateless Direct Chrono-LLM engine for internal testing.
 
@@ -68,7 +88,8 @@ The normative implementation anchors are:
 - `frontend/src/components/assistant/**`: visible behavior and accessibility semantics.
 - `frontend/e2e/**` and assistant unit tests: executable browser and transport contracts.
 
-Upstream claims in this set are verified against Aevatar commit `e7ba2e6eb`.
+Upstream claims in this set are verified against
+`tests/fixtures/assistant/aevatar-chat-contract-pin.json`.
 The primary anchors are the console's chat page/API, SSE normalizer, runtime
 event accumulator, actor-state reducer, history decoders, and the typed actor's
 `NyxIdChatSseWriter`, `NyxIdChatProjectionSession`, and
