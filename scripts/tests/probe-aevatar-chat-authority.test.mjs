@@ -184,6 +184,7 @@ test("serialization rejects secret-shaped content in allowed string fields", () 
 
 test("safe upstream-code parsing never returns response prose", () => {
   assert.equal(extractSafeUpstreamCode({ code: 8001 }), 8001);
+  assert.equal(extractSafeUpstreamCode({ error_code: 1002 }), 1002);
   assert.equal(
     extractSafeUpstreamCode({ error: { code: "identity_assertion_replayed" } }),
     "identity_assertion_replayed",

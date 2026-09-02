@@ -133,6 +133,10 @@ export function extractSafeUpstreamCode(value) {
   if (direct !== null) {
     return direct;
   }
+  const errorCode = nullableSafeCodeOrNull(value.error_code);
+  if (errorCode !== null) {
+    return errorCode;
+  }
   if (isPlainObject(value.error)) {
     return nullableSafeCodeOrNull(value.error.code);
   }
