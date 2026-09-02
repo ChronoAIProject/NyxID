@@ -893,6 +893,7 @@ async fn install_worker(
         label: label.clone(),
         base_url,
         node_binary: node,
+        npm_binary: Some(npm.clone()),
         bundle_path,
         token_file,
         state_file: install_dir.join("state.json"),
@@ -1126,15 +1127,66 @@ fn find_free_debug_port() -> Result<u16> {
     bail!("No free Chrome debugging port found in 9222-9321")
 }
 
+/// True when a Chrome DevTools endpoint answers on the port (our dedicated
+/// Chrome is still running there), as opposed to the port being free or
+/// squatted by an unrelated process.
+fn cdp_alive(port: u16) -> bool {
+    use std::io::{Read, Write};
+    let Ok(mut stream) = TcpStream::connect_timeout(
+        &format!("127.0.0.1:{port}")
+            .parse()
+            .expect("loopback address"),
+        Duration::from_millis(500),
+    ) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
+    if stream
+        .write_all(b"GET /json/version HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+        .is_err()
+    {
+        return false;
+    }
+    let mut body = Vec::new();
+    let _ = stream.take(64 * 1024).read_to_end(&mut body);
+    String::from_utf8_lossy(&body).contains("webSocketDebuggerUrl")
+}
+
+/// Keep an existing install's debug port whenever its Chrome is still
+/// serving CDP there (a forced reinstall must not strand a running,
+/// logged-in Chrome); pick a fresh port only when the endpoint is dead or
+/// squatted, which is the port-collision remediation case.
 fn select_install_debug_port(existing: Option<u16>, force: bool) -> Result<u16> {
     match (existing, force) {
         (Some(port), false) => Ok(port),
+        (Some(port), true) if cdp_alive(port) => Ok(port),
         _ => find_free_debug_port(),
     }
 }
 
+/// Name a fresh Chrome profile so its avatar/profile menu and chrome://version
+/// identify the NyxID use (no-op once the profile exists).
+fn seed_chrome_profile_name(profile: &Path, name: &str) -> Result<()> {
+    let prefs = profile.join("Default").join("Preferences");
+    if prefs.exists() {
+        return Ok(());
+    }
+    fs::create_dir_all(prefs.parent().context("Invalid Chrome profile path")?)?;
+    fs::write(
+        &prefs,
+        serde_json::to_vec(&serde_json::json!({ "profile": { "name": name } }))?,
+    )?;
+    Ok(())
+}
+
 fn launch_chrome(executable: &Path, profile: &Path, port: u16) -> Result<Child> {
     fs::create_dir_all(profile)?;
+    let name = profile
+        .parent()
+        .and_then(Path::file_name)
+        .map(|value| format!("NyxID Oracle {}", value.to_string_lossy()))
+        .unwrap_or_else(|| "NyxID Oracle".to_string());
+    let _ = seed_chrome_profile_name(profile, &name);
     Command::new(executable)
         .arg(format!("--remote-debugging-port={port}"))
         .arg(format!("--user-data-dir={}", profile.display()))
@@ -1917,10 +1969,30 @@ mod tests {
             select_install_debug_port(Some(occupied_port), false).unwrap(),
             occupied_port
         );
+        // Squatted by a non-CDP process: a forced reinstall re-picks.
         assert_ne!(
             select_install_debug_port(Some(occupied_port), true).unwrap(),
             occupied_port
         );
+        drop(occupied);
+    }
+
+    #[test]
+    fn forced_install_keeps_the_port_of_a_live_cdp_endpoint() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0_u8; 512];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(
+                    b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\n\r\n{\"Browser\":\"Chrome/1\",\"webSocketDebuggerUrl\":\"ws://127.0.0.1/devtools/browser/x\"}",
+                );
+            }
+        });
+        assert_eq!(select_install_debug_port(Some(port), true).unwrap(), port);
+        server.join().unwrap();
     }
 
     #[test]
@@ -1949,6 +2021,7 @@ mod tests {
             label: "worker-1".to_string(),
             base_url: "https://nyxid.example".to_string(),
             node_binary: PathBuf::from("node"),
+            npm_binary: None,
             bundle_path,
             token_file: temp.path().join("token"),
             state_file: temp.path().join("state.json"),

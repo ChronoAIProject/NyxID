@@ -149,9 +149,12 @@ nyxid oracle worker install --force --pool <pool>
 ```
 
 Add the same `--profile <name>` used for the original installation. Forced
-installation retains the worker label, token, and Chrome profile, probes a new
-free port, rewrites `CHROME_CDP_URL` and `CHROME_DEBUG_PORT` together, and
-restarts the supervisor.
+installation retains the worker label, token, and Chrome profile; it keeps the
+port when a live Chrome still answers CDP there and probes a new free port only
+when it does not, rewrites `CHROME_CDP_URL` and `CHROME_DEBUG_PORT` together,
+and restarts the supervisor. Running `install --force` is therefore also the
+safe way to refresh an existing install's service environment without
+disturbing its logged-in Chrome.
 
 ## Manual setup
 
@@ -227,3 +230,12 @@ worker.
 node --check worker.mjs
 node --test worker.test.mjs
 ```
+
+## Identifying the dedicated Chrome
+
+Each install (and each `--profile`) drives its own Chrome user-data-dir under
+`~/.nyxid-oracle/<pool>/…/chrome-profile`. The profile is named
+`NyxID Oracle <pool>` (CLI launches) / `NyxID Oracle <label>` (worker
+relaunches) so the window's profile avatar menu and `chrome://version`
+(Profile Path) show which pool/worker it serves. `nyxid oracle worker status
+--pool <pool>` prints the same paths and the CDP port.

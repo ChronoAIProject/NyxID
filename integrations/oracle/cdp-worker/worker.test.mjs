@@ -5,9 +5,13 @@ import {
   backoffDelay,
   choosePromptNavigation,
   decidePromptResume,
+  daemonPath,
   decryptSessionEnvelope,
+  installedDependencyVersion,
   isAuthFlowUrl,
   markChatPageRecovered,
+  resolveNpmExecutable,
+  seedProfileName,
   shouldLeaveTabAlone,
   taskRecoveryDecision,
 } from "./worker.mjs";
@@ -308,4 +312,36 @@ test("a logged-out ChatGPT tab is left alone until authenticated", () => {
   assert.equal(shouldLeaveTabAlone({ url: undefined, loggedIn: false, pageOpen: false }), false);
   // A non-ChatGPT, non-auth page is steered back regardless of login state.
   assert.equal(shouldLeaveTabAlone({ url: "https://example.com/", loggedIn: false }), false);
+});
+
+test("npm resolves to the configured path, then node's sibling, then PATH", () => {
+  assert.equal(resolveNpmExecutable({ configured: "/opt/npm", execPath: "/x/bin/node" }), "/opt/npm");
+  assert.equal(
+    resolveNpmExecutable({ execPath: "/x/bin/node", exists: (p) => p === "/x/bin/npm" }),
+    "/x/bin/npm"
+  );
+  assert.equal(resolveNpmExecutable({ execPath: "/x/bin/node", exists: () => false }), "npm");
+});
+
+test("daemon PATH gains node's directory once", () => {
+  assert.equal(daemonPath({ execPath: "/x/bin/node", envPath: "/usr/bin:/bin" }), "/x/bin:/usr/bin:/bin");
+  assert.equal(daemonPath({ execPath: "/x/bin/node", envPath: "/x/bin:/usr/bin" }), "/x/bin:/usr/bin");
+  assert.equal(daemonPath({ execPath: "/x/bin/node", envPath: "" }), "/x/bin:/usr/local/bin:/usr/bin:/bin");
+});
+
+test("installed dependency version is read from node_modules or null", () => {
+  assert.equal(installedDependencyVersion("/i", () => JSON.stringify({ version: "1.62.1" })), "1.62.1");
+  assert.equal(installedDependencyVersion("/i", () => { throw new Error("ENOENT"); }), null);
+});
+
+test("profile name is seeded only for a fresh profile", () => {
+  const writes = [];
+  const fs = {
+    existsSync: () => false,
+    mkdirSync: () => {},
+    writeFileSync: (path, body) => writes.push([path, JSON.parse(body)]),
+  };
+  assert.equal(seedProfileName("/p", "NyxID Oracle w1", fs), true);
+  assert.deepEqual(writes[0][1], { profile: { name: "NyxID Oracle w1" } });
+  assert.equal(seedProfileName("/p", "x", { ...fs, existsSync: () => true }), false);
 });

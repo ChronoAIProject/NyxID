@@ -14,6 +14,10 @@ pub struct OracleWorkerConfig {
     pub label: String,
     pub base_url: String,
     pub node_binary: PathBuf,
+    /// Absolute npm path resolved at install time; the supervised daemon has a
+    /// minimal PATH, so bare "npm" is not reliable there. Older configs omit it.
+    #[serde(default)]
+    pub npm_binary: Option<PathBuf>,
     pub bundle_path: PathBuf,
     pub token_file: PathBuf,
     pub state_file: PathBuf,
@@ -495,8 +499,32 @@ fn status_systemd(pool: &str, profile: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+fn daemon_path(config: &OracleWorkerConfig) -> String {
+    let mut dirs: Vec<String> = Vec::new();
+    for binary in [Some(&config.node_binary), config.npm_binary.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(parent) = binary.parent() {
+            let parent = parent.display().to_string();
+            if !parent.is_empty() && !dirs.contains(&parent) {
+                dirs.push(parent);
+            }
+        }
+    }
+    for standard in ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
+        if !dirs.iter().any(|dir| dir == standard) {
+            dirs.push(standard.to_string());
+        }
+    }
+    dirs.join(":")
+}
+
 fn worker_environment(config: &OracleWorkerConfig) -> Vec<(String, String)> {
-    vec![
+    let mut env = vec![
+        // launchd/systemd start the worker with a minimal PATH; npm (a node
+        // script with a `/usr/bin/env node` shebang) needs node's directory.
+        ("PATH".into(), daemon_path(config)),
         ("NYXID_BASE_URL".into(), config.base_url.clone()),
         (
             "NYXID_WORKER_TOKEN_FILE".into(),
@@ -527,7 +555,11 @@ fn worker_environment(config: &OracleWorkerConfig) -> Vec<(String, String)> {
             "NYXID_CHROME_EXECUTABLE".into(),
             config.chrome_executable.display().to_string(),
         ),
-    ]
+    ];
+    if let Some(npm) = &config.npm_binary {
+        env.push(("NYXID_NPM_EXECUTABLE".into(), npm.display().to_string()));
+    }
+    env
 }
 
 fn xml_escape(value: &str) -> String {
@@ -568,12 +600,41 @@ mod tests {
     }
 
     #[test]
+    fn daemon_path_prepends_node_and_npm_dirs_once() {
+        let config = OracleWorkerConfig {
+            pool: "p".into(),
+            label: "l".into(),
+            base_url: "https://example.test".into(),
+            node_binary: PathBuf::from("/opt/node/bin/node"),
+            npm_binary: Some(PathBuf::from("/opt/node/bin/npm")),
+            bundle_path: PathBuf::from("/i/worker.mjs"),
+            token_file: PathBuf::from("/i/worker-token"),
+            state_file: PathBuf::from("/i/state.json"),
+            installation_id_file: PathBuf::from("/i/installation-id"),
+            chrome_executable: PathBuf::from("/Applications/Chrome"),
+            chrome_profile_dir: PathBuf::from("/i/chrome-profile"),
+            chrome_debug_port: 9222,
+        };
+        let path = daemon_path(&config);
+        assert!(path.starts_with("/opt/node/bin:/usr/local/bin:"));
+        assert_eq!(path.matches("/opt/node/bin").count(), 1);
+        assert!(path.ends_with(":/sbin"));
+        let env = worker_environment(&config);
+        assert!(env.iter().any(|(k, v)| k == "PATH" && v == &path));
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "NYXID_NPM_EXECUTABLE" && v == "/opt/node/bin/npm")
+        );
+    }
+
+    #[test]
     fn systemd_service_keeps_arguments_and_token_out_of_the_unit() {
         let config = OracleWorkerConfig {
             pool: "pool-1".to_string(),
             label: "worker-1".to_string(),
             base_url: "https://nyxid.example".to_string(),
             node_binary: PathBuf::from("/opt/Node JS/bin/node"),
+            npm_binary: None,
             bundle_path: PathBuf::from("/home/user/My Worker/worker.mjs"),
             token_file: PathBuf::from("/home/user/private/worker-token"),
             state_file: PathBuf::from("/home/user/private/state.json"),

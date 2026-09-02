@@ -37,7 +37,7 @@ import {
   readFileSync,
   renameSync,
   statSync,
-  writeFileSync, realpathSync } from "node:fs";
+  writeFileSync, realpathSync, existsSync } from "node:fs";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -108,7 +108,29 @@ const SESSION_AAD = SESSION_INFO;
 const SESSION_FORMAT_VERSION = 1;
 const MAX_SESSION_SNAPSHOT_BYTES = 512 * 1024;
 const MAX_SESSION_PLAINTEXT_BYTES = 350 * 1024;
-const NPM_EXECUTABLE = process.env.NYXID_NPM_EXECUTABLE || "npm";
+// The daemon runs under launchd/systemd with a minimal PATH, so bare "npm"
+// (and npm's own `#!/usr/bin/env node` shebang) can fail with ENOENT. Prefer
+// an explicitly configured npm, then the npm that ships beside this node
+// binary, then PATH lookup with node's directory prepended.
+export function resolveNpmExecutable({ configured, execPath, exists = existsSync } = {}) {
+  if (configured) return configured;
+  const sibling = resolve(dirname(execPath || process.execPath), "npm");
+  if (exists(sibling)) return sibling;
+  return "npm";
+}
+export function daemonPath({ execPath, envPath } = {}) {
+  const nodeDir = dirname(execPath || process.execPath);
+  const base = envPath || "/usr/local/bin:/usr/bin:/bin";
+  return base.split(":").includes(nodeDir) ? base : `${nodeDir}:${base}`;
+}
+export function installedDependencyVersion(installDir, read = readFileSync) {
+  try {
+    return JSON.parse(read(resolve(installDir, "node_modules/playwright-core/package.json"), "utf8")).version || null;
+  } catch {
+    return null;
+  }
+}
+const NPM_EXECUTABLE = resolveNpmExecutable({ configured: process.env.NYXID_NPM_EXECUTABLE });
 const NPM_INSTALL_TIMEOUT_MS = Number(
   process.env.NYXID_NPM_INSTALL_TIMEOUT_MS || 5 * 60 * 1000
 );
@@ -291,6 +313,7 @@ function clearTaskState(state) {
 
 function stableErrorCode(error) {
   if (error?.code && /^[a-z0-9_]{1,64}$/.test(error.code)) return error.code;
+  if (error?.code && /^[A-Z][A-Z0-9_]{1,63}$/.test(error.code)) return error.code.toLowerCase();
   if (error?.status) return `http_${error.status}`;
   const message = String(error?.message || "").toLowerCase();
   if (/target page|browser.*closed|session closed|cdp|econnrefused/.test(message)) {
@@ -697,6 +720,16 @@ function chromeArgs() {
   ];
 }
 
+// Name the Chrome profile so the window's avatar/profile menu (and
+// chrome://version) identify which pool/worker it belongs to.
+export function seedProfileName(profileDir, name, fs = { existsSync, mkdirSync, writeFileSync }) {
+  const prefs = resolve(profileDir, "Default", "Preferences");
+  if (fs.existsSync(prefs)) return false;
+  fs.mkdirSync(dirname(prefs), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(prefs, JSON.stringify({ profile: { name } }), { mode: 0o600 });
+  return true;
+}
+
 function launchChrome() {
   if (!CHROME_EXECUTABLE) {
     throw Object.assign(new Error("no Chrome executable configured"), {
@@ -704,6 +737,9 @@ function launchChrome() {
     });
   }
   mkdirSync(CHROME_PROFILE_DIR, { recursive: true, mode: 0o700 });
+  try {
+    seedProfileName(CHROME_PROFILE_DIR, `NyxID Oracle ${LABEL}`);
+  } catch {}
   const child = spawn(CHROME_EXECUTABLE, chromeArgs(), {
     detached: true,
     stdio: "ignore",
@@ -1901,33 +1937,70 @@ async function installBundle(command) {
     dependencies: { "playwright-core": playwrightVersion },
     nyxid_bundle_version: version,
   };
+  let previousPackage = null;
+  try {
+    previousPackage = readFileSync(packagePath, "utf8");
+  } catch {}
   writeFileSync(packageTemp, `${JSON.stringify(packageBody, null, 2)}\n`, { mode: 0o600 });
   chmodSync(packageTemp, 0o600);
   renameSync(packageTemp, packagePath);
-  await new Promise((resolveInstall, rejectInstall) => {
-    const child = spawn(
-      NPM_EXECUTABLE,
-      ["install", "--omit=dev", "--no-audit", "--no-fund", "--save-exact"],
-      { cwd: installDir, stdio: "inherit" }
-    );
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      rejectInstall(Object.assign(new Error("npm install timed out"), {
-        code: "upgrade_dependency_install_timeout",
-      }));
-    }, NPM_INSTALL_TIMEOUT_MS);
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      rejectInstall(error);
-    });
-    child.once("exit", (code, signal) => {
-      clearTimeout(timeout);
-      if (code === 0) resolveInstall();
-      else rejectInstall(Object.assign(new Error(`npm install failed (${code ?? signal})`), {
-        code: "upgrade_dependency_install_failed",
-      }));
-    });
-  });
+  const restorePackage = () => {
+    if (previousPackage !== null) {
+      try {
+        writeFileSync(packagePath, previousPackage, { mode: 0o600 });
+      } catch {}
+    }
+  };
+  if (installedDependencyVersion(installDir) === playwrightVersion) {
+    log(`upgrade: playwright-core ${playwrightVersion} already installed; skipping npm`);
+  } else {
+    log(`upgrade: installing playwright-core ${playwrightVersion} via ${NPM_EXECUTABLE}`);
+    try {
+      await new Promise((resolveInstall, rejectInstall) => {
+        const child = spawn(
+          NPM_EXECUTABLE,
+          ["install", "--omit=dev", "--no-audit", "--no-fund", "--save-exact"],
+          {
+            cwd: installDir,
+            stdio: "inherit",
+            env: { ...process.env, PATH: daemonPath({ envPath: process.env.PATH }) },
+          }
+        );
+        const timeout = setTimeout(() => {
+          child.kill("SIGTERM");
+          rejectInstall(Object.assign(new Error("npm install timed out"), {
+            code: "upgrade_dependency_install_timeout",
+          }));
+        }, NPM_INSTALL_TIMEOUT_MS);
+        child.once("error", (error) => {
+          clearTimeout(timeout);
+          rejectInstall(
+            error?.code === "ENOENT"
+              ? Object.assign(new Error(`npm not found at ${NPM_EXECUTABLE}`), {
+                  code: "upgrade_npm_unavailable",
+                })
+              : error
+          );
+        });
+        child.once("exit", (code, signal) => {
+          clearTimeout(timeout);
+          if (code === 0) resolveInstall();
+          else rejectInstall(Object.assign(new Error(`npm install failed (${code ?? signal})`), {
+            code: "upgrade_dependency_install_failed",
+          }));
+        });
+      });
+    } catch (error) {
+      restorePackage();
+      throw error;
+    }
+    if (installedDependencyVersion(installDir) !== playwrightVersion) {
+      restorePackage();
+      throw Object.assign(new Error("npm install did not produce the pinned dependency"), {
+        code: "upgrade_dependency_version_mismatch",
+      });
+    }
+  }
   const mode = statSync(target).mode & 0o777;
   const temp = `${target}.upgrade-${process.pid}`;
   const versionTemp = `${BUNDLE_VERSION_FILE}.upgrade-${process.pid}`;
