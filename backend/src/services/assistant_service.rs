@@ -21,6 +21,8 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
+use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+use crate::services::{audit_service, catalog_delegation_service, token_exchange_service};
 use chrono::{DateTime, FixedOffset};
 use mongodb::bson::doc;
 use regex::Regex;
@@ -29,6 +31,82 @@ use std::sync::LazyLock;
 
 /// Catalog slug of the admin-seeded Aevatar service.
 pub const AEVATAR_SLUG: &str = "aevatar";
+pub const ASSISTANT_DELEGATED_SCOPE: &str = "proxy:* mcp:catalog:read";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DelegatedAuthorityDeploymentState {
+    LegacyUnlinked,
+    Linked { client_id: String },
+}
+
+pub async fn validate_delegated_authority_client_link(
+    db: &mongodb::Database,
+    service_slug: &str,
+    service_is_active: bool,
+    client_id: Option<&str>,
+) -> AppResult<()> {
+    let Some(client_id) = client_id else {
+        return Ok(());
+    };
+    if service_slug != AEVATAR_SLUG || !service_is_active {
+        return Err(AppError::ValidationError(
+            "delegated_authority_client_id is only valid on the active aevatar service"
+                .to_string(),
+        ));
+    }
+
+    let client = db
+        .collection::<OauthClient>(OAUTH_CLIENTS)
+        .find_one(doc! { "_id": client_id, "is_active": true })
+        .await?
+        .ok_or_else(|| {
+            AppError::ValidationError(
+                "delegated_authority_client_id must reference an active OAuth client".to_string(),
+            )
+        })?;
+    catalog_delegation_service::ensure_client_can_delegate_catalog(db, client_id).await?;
+    token_exchange_service::validate_delegation_scope(
+        ASSISTANT_DELEGATED_SCOPE,
+        &client.delegation_scopes,
+    )?;
+    Ok(())
+}
+
+pub async fn verify_delegated_authority_deployment_precondition(
+    db: &mongodb::Database,
+) -> AppResult<DelegatedAuthorityDeploymentState> {
+    let service = resolve_admin_service_by_slug(db, AEVATAR_SLUG).await?;
+    let Some(client_id) = service.delegated_authority_client_id.as_deref() else {
+        return Ok(DelegatedAuthorityDeploymentState::LegacyUnlinked);
+    };
+
+    validate_delegated_authority_client_link(db, AEVATAR_SLUG, true, Some(client_id)).await?;
+    Ok(DelegatedAuthorityDeploymentState::Linked {
+        client_id: client_id.to_string(),
+    })
+}
+
+pub async fn audit_delegated_authority_client_link_changed(
+    db: mongodb::Database,
+    actor: &audit_service::AuditActor,
+    service_id: &str,
+    client_id: Option<&str>,
+) {
+    if let Err(error) = audit_service::log_actor_event(
+        db,
+        actor,
+        "assistant_delegated_authority_client_link_changed",
+        Some(serde_json::json!({
+            "service_id": service_id,
+            "client_id": client_id,
+            "linked": client_id.is_some(),
+        })),
+    )
+    .await
+    {
+        tracing::error!(%error, service_id, "Failed to append assistant authority link audit");
+    }
+}
 
 /// Resolve an active admin-managed service by its platform catalog slug.
 ///
@@ -1360,12 +1438,40 @@ pub fn prepare_assistant_chat_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::oauth_client::ScopeProvenance;
     use serde_json::json;
 
     const USER: &str = "add69059-bece-4f0e-9559-99cfd10b47eb";
     const CONV: &str = "nyxid-chat-f8369965a444433f92ec50e67ad8ee52";
 
     const WORKFLOW_CONV: &str = "chatc-650906f30cc985fa341477281303b6de";
+
+    fn authority_client(id: &str, delegation_scopes: &str, is_active: bool) -> OauthClient {
+        let now = chrono::Utc::now();
+        OauthClient {
+            id: id.to_string(),
+            client_name: "Assistant authority".to_string(),
+            client_secret_hash: String::new(),
+            redirect_uris: vec!["https://example.test/callback".to_string()],
+            allowed_scopes: "openid".to_string(),
+            scope_provenance: ScopeProvenance::Explicit,
+            grant_types: "authorization_code".to_string(),
+            client_type: "confidential".to_string(),
+            is_active,
+            delegation_scopes: delegation_scopes.to_string(),
+            default_service_catalog_slugs: Vec::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
+            connection_webhook_enabled: false,
+            created_by: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
 
     fn parse_command(value: serde_json::Value) -> AssistantChatCommand {
         parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).unwrap()
@@ -1426,6 +1532,168 @@ mod tests {
                 .id,
             active.id
         );
+    }
+
+    #[tokio::test]
+    async fn authority_link_requires_active_aevatar_and_complete_client_scope() {
+        let Some(db) = crate::test_utils::connect_test_database("assistant_authority_link").await
+        else {
+            return;
+        };
+        let clients = db.collection::<OauthClient>(OAUTH_CLIENTS);
+        clients
+            .insert_many([
+                authority_client("valid", ASSISTANT_DELEGATED_SCOPE, true),
+                authority_client("missing-proxy", "mcp:catalog:read", true),
+                authority_client("missing-catalog", "proxy:*", true),
+                authority_client("inactive", ASSISTANT_DELEGATED_SCOPE, false),
+            ])
+            .await
+            .unwrap();
+
+        validate_delegated_authority_client_link(&db, AEVATAR_SLUG, true, Some("valid"))
+            .await
+            .expect("complete active client scope");
+        validate_delegated_authority_client_link(&db, "another-service", true, None)
+            .await
+            .expect("unlinked services remain valid");
+        for (slug, active, client_id) in [
+            ("another-service", true, "valid"),
+            (AEVATAR_SLUG, false, "valid"),
+            (AEVATAR_SLUG, true, "missing-proxy"),
+            (AEVATAR_SLUG, true, "missing-catalog"),
+            (AEVATAR_SLUG, true, "inactive"),
+            (AEVATAR_SLUG, true, "missing"),
+        ] {
+            assert!(
+                validate_delegated_authority_client_link(&db, slug, active, Some(client_id))
+                    .await
+                    .is_err(),
+                "{slug}/{active}/{client_id} must fail closed"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn deployment_precondition_distinguishes_unlinked_and_valid_linked_rows() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_authority_precondition").await
+        else {
+            return;
+        };
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.slug = AEVATAR_SLUG.to_string();
+        service.requires_user_credential = false;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            verify_delegated_authority_deployment_precondition(&db)
+                .await
+                .unwrap(),
+            DelegatedAuthorityDeploymentState::LegacyUnlinked
+        );
+
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(authority_client(
+                "linked-client",
+                ASSISTANT_DELEGATED_SCOPE,
+                true,
+            ))
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": { "delegated_authority_client_id": "linked-client" } },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            verify_delegated_authority_deployment_precondition(&db)
+                .await
+                .unwrap(),
+            DelegatedAuthorityDeploymentState::Linked {
+                client_id: "linked-client".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn deployment_precondition_rejects_under_scoped_linked_client() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_authority_precondition_denied").await
+        else {
+            return;
+        };
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.slug = AEVATAR_SLUG.to_string();
+        service.requires_user_credential = false;
+        service.delegated_authority_client_id = Some("under-scoped".to_string());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(service)
+            .await
+            .unwrap();
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(authority_client("under-scoped", "mcp:catalog:read", true))
+            .await
+            .unwrap();
+
+        assert!(
+            verify_delegated_authority_deployment_precondition(&db)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn authority_link_audit_contains_metadata_only() {
+        let Some(db) = crate::test_utils::connect_test_database("assistant_authority_audit").await
+        else {
+            return;
+        };
+        let actor = audit_service::AuditActor {
+            user_id: "admin-user".to_string(),
+            ip_address: None,
+            user_agent: None,
+            api_key_id: None,
+            api_key_name: None,
+        };
+        audit_delegated_authority_client_link_changed(
+            db.clone(),
+            &actor,
+            "aevatar-row",
+            Some("assistant-client"),
+        )
+        .await;
+
+        let entry = db
+            .collection::<crate::models::audit_log::AuditLog>(
+                crate::models::audit_log::COLLECTION_NAME,
+            )
+            .find_one(doc! {
+                "event_type": "assistant_delegated_authority_client_link_changed"
+            })
+            .await
+            .unwrap()
+            .expect("link audit");
+        assert_eq!(
+            entry.event_data,
+            Some(serde_json::json!({
+                "service_id": "aevatar-row",
+                "client_id": "assistant-client",
+                "linked": true,
+            }))
+        );
+        let serialized = serde_json::to_string(&entry.event_data).unwrap();
+        for forbidden in ["token", "credential", "cookie", "authorization", "secret"] {
+            assert!(!serialized.to_ascii_lowercase().contains(forbidden));
+        }
     }
 
     command_contract_test!(

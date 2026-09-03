@@ -3810,6 +3810,7 @@ pub async fn seed_default_services(
             streaming_supported,
             ssh_config: None,
             oauth_client_id: None,
+            delegated_authority_client_id: None,
             service_category: seed.service_category.to_string(),
             requires_user_credential: seed.requires_user_credential,
             is_active: true,

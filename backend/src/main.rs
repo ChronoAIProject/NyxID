@@ -591,6 +591,25 @@ async fn main() {
         tracing::warn!("Unified collection migration encountered errors: {e}");
     }
 
+    match services::assistant_service::verify_delegated_authority_deployment_precondition(&db)
+        .await
+        .expect("Invalid assistant delegated authority configuration")
+    {
+        services::assistant_service::DelegatedAuthorityDeploymentState::LegacyUnlinked => {
+            tracing::warn!(
+                service_slug = services::assistant_service::AEVATAR_SLUG,
+                "Assistant delegated authority is not linked; restricted minting is inactive and the legacy session bridge remains enabled"
+            );
+        }
+        services::assistant_service::DelegatedAuthorityDeploymentState::Linked { client_id } => {
+            tracing::info!(
+                service_slug = services::assistant_service::AEVATAR_SLUG,
+                client_id,
+                "Assistant delegated authority deployment precondition passed"
+            );
+        }
+    }
+
     // --- Server startup ---
     tracing::info!("Starting NyxID authentication server");
     tracing::info!(port = config.port, issuer = %config.jwt_issuer, "Configuration loaded");

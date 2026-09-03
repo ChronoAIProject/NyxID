@@ -512,6 +512,7 @@ mod tests {
             streaming_supported: false,
             ssh_config: None,
             oauth_client_id: None,
+            delegated_authority_client_id: None,
             service_category: "internal".to_string(),
             requires_user_credential: false,
             is_active: true,

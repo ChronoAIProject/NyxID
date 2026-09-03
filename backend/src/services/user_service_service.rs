@@ -2225,6 +2225,7 @@ mod tests {
                 ca_public_key: None,
             }),
             oauth_client_id: None,
+            delegated_authority_client_id: None,
             service_category: "connection".to_string(),
             requires_user_credential: false,
             is_active: true,

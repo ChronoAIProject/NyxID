@@ -252,6 +252,7 @@ pub fn service_to_response_with_viewer(
         auth_key_name: s.auth_key_name,
         is_active: s.is_active,
         oauth_client_id: s.oauth_client_id,
+        delegated_authority_client_id: s.delegated_authority_client_id,
         openapi_spec_url: s.openapi_spec_url.clone(),
         api_spec_url: s.openapi_spec_url,
         asyncapi_spec_url: s.asyncapi_spec_url,
@@ -373,7 +374,9 @@ pub struct DeleteServiceResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{ResolvedService, resolve_service_or_user_service};
+    use super::{
+        ResolvedService, resolve_service_or_user_service, service_to_response_with_viewer,
+    };
     use crate::errors::AppError;
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
@@ -394,6 +397,18 @@ mod tests {
         service.name = "Catalog Service".to_string();
         service.base_url = "https://api.example.com".to_string();
         service
+    }
+
+    #[test]
+    fn service_response_exposes_delegated_authority_client_link() {
+        let mut service = custom_catalog_service("catalog-linked");
+        service.delegated_authority_client_id = Some("assistant-client".to_string());
+
+        let response = service_to_response_with_viewer(service, None);
+        assert_eq!(
+            response.delegated_authority_client_id.as_deref(),
+            Some("assistant-client")
+        );
     }
 
     #[tokio::test]

@@ -23,8 +23,9 @@ use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::mw::auth::{AuthUser, SERVICE_DELEGATION_SCOPES};
 use crate::services::url_validation::{validate_base_url, validate_optional_spec_url};
 use crate::services::{
-    anonymous_endpoint_service, api_docs_service, audit_service, catalog_identity_service,
-    catalog_spec_sync, oauth_client_service, ssh_service, user_service_service,
+    anonymous_endpoint_service, api_docs_service, assistant_service, audit_service,
+    catalog_identity_service, catalog_spec_sync, oauth_client_service, ssh_service,
+    user_service_service,
 };
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -67,6 +68,7 @@ pub struct CreateServiceRequest {
     /// Only relevant for private services -- users who consent to any of these
     /// apps will have the service auto-provisioned in their AI Services.
     pub developer_app_ids: Option<Vec<String>>,
+    pub delegated_authority_client_id: Option<String>,
     /// Forward the caller's NyxID access token as Authorization: Bearer to downstream
     #[serde(default)]
     pub forward_access_token: bool,
@@ -150,6 +152,7 @@ pub struct ServiceResponse {
     pub auth_key_name: String,
     pub is_active: bool,
     pub oauth_client_id: Option<String>,
+    pub delegated_authority_client_id: Option<String>,
     pub openapi_spec_url: Option<String>,
     pub api_spec_url: Option<String>,
     pub asyncapi_spec_url: Option<String>,
@@ -266,6 +269,11 @@ pub struct UpdateServiceRequest {
     pub forward_access_token: Option<bool>,
     pub inject_delegation_token: Option<bool>,
     pub delegation_token_scope: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub delegated_authority_client_id: Option<Option<String>>,
     pub ssh_config: Option<SshServiceConfigRequest>,
     // Rich metadata for AI agent discovery
     pub homepage_url: Option<String>,
@@ -1092,6 +1100,13 @@ pub async fn create_service(
         }
         validate_developer_app_ids(&state, &auth_user, app_ids).await?;
     }
+    assistant_service::validate_delegated_authority_client_link(
+        &state.db,
+        &slug,
+        true,
+        body.delegated_authority_client_id.as_deref(),
+    )
+    .await?;
 
     // Validate & normalize initial default_request_headers (NyxID#356).
     let default_request_headers = match body.default_request_headers.clone() {
@@ -1127,6 +1142,7 @@ pub async fn create_service(
         streaming_supported,
         ssh_config,
         oauth_client_id: oauth_client_id.clone(),
+        delegated_authority_client_id: body.delegated_authority_client_id.clone(),
         service_category,
         requires_user_credential,
         is_active: true,
@@ -1197,6 +1213,15 @@ pub async fn create_service(
         "service_created",
         Some(serde_json::json!({ "service_id": &id, "name": &body.name })),
     );
+    if let Some(client_id) = new_service.delegated_authority_client_id.as_deref() {
+        assistant_service::audit_delegated_authority_client_link_changed(
+            state.db.clone(),
+            &audit_service::AuditActor::from_auth_user(&auth_user),
+            &new_service.id,
+            Some(client_id),
+        )
+        .await;
+    }
 
     emit_event(
         state.telemetry.as_deref(),
@@ -1384,6 +1409,25 @@ pub async fn update_service(
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    let delegated_authority_link_changed = body
+        .delegated_authority_client_id
+        .as_ref()
+        .is_some_and(|next| next != &service.delegated_authority_client_id);
+    if delegated_authority_link_changed || body.is_active.is_some() {
+        let effective_link = body
+            .delegated_authority_client_id
+            .as_ref()
+            .map_or(service.delegated_authority_client_id.as_deref(), |value| {
+                value.as_deref()
+            });
+        assistant_service::validate_delegated_authority_client_link(
+            &state.db,
+            &service.slug,
+            body.is_active.unwrap_or(service.is_active),
+            effective_link,
+        )
+        .await?;
+    }
     let is_platform_vendor = catalog_spec_sync::is_platform_vendor_service(&service);
     if is_platform_vendor && (body.openapi_spec_url.is_some() || body.asyncapi_spec_url.is_some()) {
         return Err(AppError::BadRequest(
@@ -1934,6 +1978,12 @@ pub async fn update_service(
                 .map_err(|e| AppError::Internal(format!("BSON serialization error: {e}")))?,
         );
     }
+    if let Some(link) = body.delegated_authority_client_id.as_ref() {
+        set_doc.insert(
+            "delegated_authority_client_id",
+            link.clone().map_or(bson::Bson::Null, bson::Bson::String),
+        );
+    }
 
     anonymous_endpoint_service::validate_service_update_anonymous_compatibility(
         &service,
@@ -2108,6 +2158,15 @@ pub async fn update_service(
             "changed_fields": changed_fields,
         })),
     );
+    if delegated_authority_link_changed {
+        assistant_service::audit_delegated_authority_client_link_changed(
+            state.db.clone(),
+            &audit_service::AuditActor::from_auth_user(&auth_user),
+            &service_id,
+            committed_service.delegated_authority_client_id.as_deref(),
+        )
+        .await;
+    }
 
     // Per-change audit for default_request_headers mutations. Values are
     // deliberately *never* logged — only the set of header names — so even
@@ -2648,6 +2707,7 @@ mod tests {
             recommended_skills: None,
             developer_app_ids: None,
             forward_access_token: false,
+            delegated_authority_client_id: None,
             token_exchange_config: None,
             default_request_headers: None,
             ws_frame_injections: vec![],
@@ -3188,6 +3248,27 @@ mod tests {
             Some(Some(list)) => assert!(list.is_empty()),
             other => panic!("expected Some(Some([])), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn update_service_authority_link_tri_state_deser() {
+        let omitted: UpdateServiceRequest = serde_json::from_str("{}").expect("parse omitted");
+        assert_eq!(omitted.delegated_authority_client_id, None);
+
+        let cleared: UpdateServiceRequest = serde_json::from_str(
+            r#"{"delegated_authority_client_id":null}"#,
+        )
+        .expect("parse clear");
+        assert_eq!(cleared.delegated_authority_client_id, Some(None));
+
+        let replaced: UpdateServiceRequest = serde_json::from_str(
+            r#"{"delegated_authority_client_id":"assistant-client"}"#,
+        )
+        .expect("parse replacement");
+        assert_eq!(
+            replaced.delegated_authority_client_id,
+            Some(Some("assistant-client".to_string()))
+        );
     }
 
     #[test]

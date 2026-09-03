@@ -3303,6 +3303,7 @@ fn build_minimal_downstream_service(
         streaming_supported: true,
         ssh_config: None,
         oauth_client_id: None,
+        delegated_authority_client_id: None,
         service_category: if platform_managed_catalog_service {
             "internal".to_string()
         } else {
@@ -5318,6 +5319,7 @@ mod tests {
                 service_type: "http".to_string(),
                 visibility: "public".to_string(),
                 oauth_client_id: None,
+                delegated_authority_client_id: None,
                 service_category: "internal".to_string(),
                 requires_user_credential: false,
                 is_active: true,
@@ -6343,6 +6345,7 @@ mod tests {
                 service_type: "http".to_string(),
                 visibility: "public".to_string(),
                 oauth_client_id: None,
+                delegated_authority_client_id: None,
                 service_category: "external".to_string(),
                 requires_user_credential: true,
                 is_active: true,
@@ -6673,6 +6676,7 @@ mod tests {
                 service_type: "http".to_string(),
                 visibility: "public".to_string(),
                 oauth_client_id: None,
+                delegated_authority_client_id: None,
                 service_category: "external".to_string(),
                 requires_user_credential: true,
                 is_active: true,
@@ -6894,6 +6898,7 @@ mod tests {
                 service_type: "http".to_string(),
                 visibility: "public".to_string(),
                 oauth_client_id: None,
+                delegated_authority_client_id: None,
                 service_category: "connection".to_string(),
                 requires_user_credential: true,
                 is_active: true,
@@ -7134,6 +7139,7 @@ mod tests {
             streaming_supported: false,
             ssh_config: None,
             oauth_client_id: None,
+            delegated_authority_client_id: None,
             service_category: "connection".into(),
             requires_user_credential: false,
             is_active: true,

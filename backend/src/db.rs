@@ -4485,6 +4485,7 @@ mod tests {
             streaming_supported: false,
             ssh_config: None,
             oauth_client_id: None,
+            delegated_authority_client_id: None,
             service_category: "connection".to_string(),
             requires_user_credential: true,
             is_active: true,

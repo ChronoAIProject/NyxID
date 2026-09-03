@@ -220,6 +220,8 @@ pub struct DownstreamService {
     /// Associated OAuth client ID (set when auth_method is "oidc")
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_client_id: Option<String>,
+    #[serde(default)]
+    pub delegated_authority_client_id: Option<String>,
 
     /// "provider" | "connection" | "internal"
     /// - provider: OIDC services where NyxID is the identity provider (not user-connectable)
@@ -434,6 +436,7 @@ pub mod test_helpers {
             streaming_supported: false,
             ssh_config: None,
             oauth_client_id: None,
+            delegated_authority_client_id: None,
             service_category: "connection".to_string(),
             requires_user_credential: false,
             is_active: true,
@@ -532,6 +535,7 @@ mod tests {
             streaming_supported: false,
             ssh_config: None,
             oauth_client_id: None,
+            delegated_authority_client_id: Some("assistant-authority-client".to_string()),
             service_category: "connection".to_string(),
             requires_user_credential: true,
             is_active: true,
@@ -582,6 +586,10 @@ mod tests {
         assert_eq!(svc.slug, restored.slug);
         assert_eq!(svc.service_type, restored.service_type);
         assert_eq!(
+            svc.delegated_authority_client_id,
+            restored.delegated_authority_client_id
+        );
+        assert_eq!(
             svc.default_request_headers,
             restored.default_request_headers
         );
@@ -613,6 +621,7 @@ mod tests {
             streaming_supported: false,
             ssh_config: None,
             oauth_client_id: None,
+            delegated_authority_client_id: None,
             service_category: "connection".to_string(),
             requires_user_credential: true,
             is_active: true,
@@ -656,6 +665,7 @@ mod tests {
         doc.remove("forward_access_token");
         doc.remove("inject_delegation_token");
         doc.remove("delegation_token_scope");
+        doc.remove("delegated_authority_client_id");
         let restored: DownstreamService = bson::from_document(doc).expect("deserialize");
         assert_eq!(restored.service_type, "http");
         assert_eq!(restored.visibility, "public");
@@ -665,6 +675,7 @@ mod tests {
         assert!(!restored.forward_access_token);
         assert!(!restored.inject_delegation_token);
         assert_eq!(restored.delegation_token_scope, "llm:proxy");
+        assert!(restored.delegated_authority_client_id.is_none());
     }
 
     #[test]
