@@ -1001,25 +1001,38 @@ async function ensureChatPage(runtime, targetUrl) {
 }
 
 // ── Prompt flow ──────────────────────────────────────────────────────────
-function normalizeModelLabel(label) {
-  return (label || "")
-    .toLowerCase()
-    .trim()
-    .replace(/^(chatgpt|openai)-/, "")
-    .replace(/-(pro|extended)$/g, "")
-    .replace(/[\s.-]+/g, "");
+// Map a requested model label to the ChatGPT picker's reasoning levels. The
+// current UI exposes Instant/Medium/High/Extra High/Pro as role="menuitemradio"
+// entries; "-pro" (the pool default `chatgpt-5.5-pro`) selects the Pro level.
+// Chinese labels are kept so either localisation matches. The first entry is
+// the canonical display name.
+export function modelLevelTargets(label) {
+  const raw = String(label || "").trim();
+  if (!raw) return [];
+  const lower = raw.toLowerCase();
+  const compact = lower.replace(/^(chatgpt|openai)-/, "").replace(/[\s._-]+/g, "");
+  if (/\bpro\b|pro$|扩展|extended/.test(lower) || compact.endsWith("pro")) {
+    return ["Pro", "Pro 扩展", "扩展"];
+  }
+  if (/extra\s*high|ultra|超高/.test(lower)) return ["Extra High", "超高"];
+  if (/\bhigh\b|高级|advanced/.test(lower)) return ["High", "高级"];
+  if (/medium|balanced|均衡/.test(lower)) return ["Medium", "均衡"];
+  if (/instant|fast|极速/.test(lower)) return ["Instant", "极速"];
+  return [raw];
 }
 
-async function clickFirstVisible(locator, timeout = 5000) {
-  const count = await locator.count();
-  for (let i = 0; i < count; i++) {
-    const item = locator.nth(i);
-    try {
-      await item.click({ timeout });
-      return true;
-    } catch (e) {}
-  }
-  return false;
+function normalizeMenuText(value) {
+  return String(value || "").toLowerCase().replace(/[\s._-]+/g, "");
+}
+
+// Exact pass first so "High" never selects "Extra High"; fuzzy pass second.
+export function modelItemMatches(itemText, targets, exact) {
+  const candidate = normalizeMenuText(itemText);
+  if (!candidate) return false;
+  const wanted = (targets || []).map(normalizeMenuText).filter(Boolean);
+  return exact
+    ? wanted.some((w) => candidate === w)
+    : wanted.some((w) => candidate.includes(w) || w.includes(candidate));
 }
 
 async function waitForModelMenu(page, timeout = 5000) {
@@ -1031,157 +1044,85 @@ async function waitForModelMenu(page, timeout = 5000) {
   }
 }
 
-async function clickMatchingModelItem(page, wanted) {
-  const items = page.locator('[role="menuitem"], [role="option"]');
+async function clickMatchingLevel(page, targets) {
+  const items = page.locator('[role="menuitemradio"], [role="menuitem"], [role="option"]');
   const count = await items.count();
-  for (let i = 0; i < count; i++) {
-    const item = items.nth(i);
-    let text = "";
-    try {
-      if (!(await item.isVisible())) continue;
-      text = (await item.innerText({ timeout: 1000 })).trim();
-    } catch (e) {
-      continue;
-    }
-    const candidate = normalizeModelLabel(text);
-    if (!candidate) continue;
-    if (candidate.includes(wanted) || wanted.includes(candidate)) {
+  for (const exact of [true, false]) {
+    for (let i = 0; i < count; i++) {
+      const item = items.nth(i);
+      let text = "";
+      try {
+        if (!(await item.isVisible())) continue;
+        text = ((await item.innerText({ timeout: 1000 })) || "").trim();
+      } catch (e) {
+        continue;
+      }
+      if (!modelItemMatches(text, targets, exact)) continue;
       await item.click({ timeout: 5000 });
-      return text || candidate;
+      return text;
     }
   }
   return null;
 }
 
+// Select the reasoning level for a task. Returns the menu text that was
+// clicked (reported back as the task's model), or null when the picker was
+// unavailable or had no matching level, in which case the current level is
+// used. All clicks are REAL Playwright pointer clicks: the picker is a Radix
+// menu that ignores synthetic element.click() from page.evaluate, which is
+// exactly how the previous implementation silently left every task on the
+// default level.
 async function selectModel(page, modelLabel) {
   try {
     await page.bringToFront().catch(() => {});
-    const rawLabel = (modelLabel || "").trim();
-    const wanted = normalizeModelLabel(rawLabel);
-    if (!wanted) return;
+    const targets = modelLevelTargets(modelLabel);
+    if (!targets.length) return null;
+    log(`selecting model "${modelLabel}" -> level "${targets[0]}"`);
 
-    const target = await page.evaluate((label) => {
-      const raw = (label || "").trim();
-      const lower = raw.toLowerCase();
-      const compact = lower
-        .replace(/^(chatgpt|openai)-/, "")
-        .replace(/[\s._-]+/g, "");
-      if (lower.includes("pro")) return "Pro 扩展";
-      if (/极速|fast/.test(lower)) return "极速";
-      if (/均衡|balanced/.test(lower)) return "均衡";
-      if (/高级|advanced/.test(lower)) return "高级";
-      if (/超高|ultra/.test(lower)) return "超高";
-      if (/扩展|extended/.test(lower)) return "Pro 扩展";
-      if (/gpt[\s-]*5(\.5)?\b/.test(lower) || /\b5\.5\b/.test(lower) || compact === "gpt55" || compact === "gpt5") {
-        return "GPT-5.5";
+    let opened = false;
+    for (const selector of ['button.__composer-pill[aria-haspopup="menu"]', 'button[aria-haspopup="menu"]']) {
+      const buttons = page.locator(selector);
+      const count = await buttons.count();
+      for (let i = 0; i < count && !opened; i++) {
+        const button = buttons.nth(i);
+        try {
+          if (!(await button.isVisible())) continue;
+          const text = ((await button.innerText({ timeout: 1000 })) || "").trim();
+          if (!/instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text)) continue;
+          await button.click({ timeout: 5000 });
+          if (await waitForModelMenu(page, 5000)) opened = true;
+        } catch (e) {}
       }
-      return raw;
-    }, rawLabel);
-
-    log(`selecting model "${modelLabel}"`);
-    const opened = await page.evaluate(() => {
-      try {
-        const visible = (el) => {
-          const r = el.getBoundingClientRect();
-          const style = getComputedStyle(el);
-          return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-        };
-        let picker = document.querySelector('button.__composer-pill[aria-haspopup="menu"]');
-        if (!picker || !visible(picker)) {
-          picker = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find((btn) => {
-            if (!visible(btn)) return false;
-            const text = (btn.innerText || btn.textContent || "").trim();
-            return text.length > 0 &&
-              text.length < 30 &&
-              /pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text);
-          });
-        }
-        if (!picker) return false;
-        picker.click();
-        return true;
-      } catch (e) {
-        return false;
-      }
-    });
-
-    if (!opened || !(await waitForModelMenu(page, 5000))) {
+      if (opened) break;
+    }
+    if (!opened) {
       log(`model picker unavailable for "${modelLabel}", using current`);
-      return;
-    }
-
-    const clickMatch = async () => page.evaluate(({ label, resolvedTarget }) => {
-      try {
-        const normalize = (value) => (value || "")
-          .toLowerCase()
-          .trim()
-          .replace(/^(chatgpt|openai)-/, "")
-          .replace(/[\s._-]+/g, "");
-        const rawNeedle = (label || "").trim();
-        const rawTarget = (resolvedTarget || "").trim();
-        const wantedValues = Array.from(new Set([
-          normalize(rawNeedle),
-          normalize(rawTarget),
-        ].filter(Boolean)));
-        const directValues = [rawNeedle.toLowerCase(), rawTarget.toLowerCase()].filter(Boolean);
-        const visible = (el) => {
-          const r = el.getBoundingClientRect();
-          const style = getComputedStyle(el);
-          return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-        };
-        const items = Array.from(document.querySelectorAll('[role="menuitemradio"],[role="menuitem"],[role="option"]'));
-        for (const item of items) {
-          if (!visible(item)) continue;
-          const text = (item.innerText || item.textContent || "").trim();
-          if (!text) continue;
-          const candidate = normalize(text);
-          const direct = text.toLowerCase();
-          const matched = wantedValues.some((wanted) => candidate === wanted || candidate.includes(wanted) || wanted.includes(candidate)) ||
-            directValues.some((wanted) => direct === wanted || direct.includes(wanted) || wanted.includes(direct));
-          if (!matched) continue;
-          const role = item.getAttribute("role") || "";
-          item.click();
-          return { text, role };
-        }
-      } catch (e) {}
       return null;
-    }, { label: rawLabel, resolvedTarget: target });
-
-    let directMatch = await clickMatch();
-    if (directMatch && directMatch.role === "menuitem" && normalizeModelLabel(target) === "gpt55") {
-      await sleep(600);
-      directMatch = (await clickMatch()) || directMatch;
-    }
-    if (directMatch) {
-      log(`model set to "${target}"`);
-      return;
     }
 
-    const openedEffortSubmenu = await page.evaluate(() => {
-      try {
-        const trigger = document.querySelector('[data-testid="composer-intelligence-pro-thinking-effort-trigger"]');
-        if (!trigger) return false;
-        trigger.click();
-        return true;
-      } catch (e) {
-        return false;
-      }
-    });
-    if (openedEffortSubmenu) {
-      await sleep(600);
-      directMatch = await clickMatch();
-      if (directMatch) {
-        log(`model set to "${target}"`);
-        return;
+    let selected = await clickMatchingLevel(page, targets);
+    if (!selected) {
+      // Some layouts park Pro/effort levels behind a submenu trigger.
+      const trigger = page.locator('[data-testid="composer-intelligence-pro-thinking-effort-trigger"]').first();
+      if ((await trigger.count()) && (await trigger.isVisible().catch(() => false))) {
+        await trigger.click({ timeout: 5000 }).catch(() => {});
+        await sleep(600);
+        selected = await clickMatchingLevel(page, targets);
       }
     }
-
-    await page.keyboard.press("Escape");
+    if (selected) {
+      log(`model set to "${selected}"`);
+      return selected;
+    }
+    await page.keyboard.press("Escape").catch(() => {});
     log(`model "${modelLabel}" not found in picker, using current`);
+    return null;
   } catch (err) {
     try {
       await page.keyboard.press("Escape");
     } catch (e) {}
     log(`model "${modelLabel}" selection failed (${stableErrorCode(err)}); using current`);
+    return null;
   }
 }
 
@@ -1376,7 +1317,9 @@ async function submitPromptResult(
       images: downloadedImages.items,
       files: downloadedFiles.items,
       chatgpt_url: page.url(),
-      model: task.model,
+      // Report the level that was actually selected, so a picker regression
+      // shows up in task results instead of silently answering on Instant.
+      model: task.model_selected || task.model,
     })
   );
   log(
@@ -1466,7 +1409,8 @@ async function handlePrompt(runtime, page, task, recovering) {
 
   if (task.model && task.model !== "unknown") {
     await ack(runtime, task, "selecting_model");
-    await selectModel(page, task.model);
+    const selected = await selectModel(page, task.model);
+    if (selected) task.model_selected = selected;
   }
 
   // Type the prompt into the composer (native — more robust than the

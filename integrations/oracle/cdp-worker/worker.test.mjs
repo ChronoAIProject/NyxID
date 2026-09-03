@@ -14,6 +14,8 @@ import {
   isAuthFlowUrl,
   isTrustedArtifactUrl,
   markChatPageRecovered,
+  modelItemMatches,
+  modelLevelTargets,
   resolveNpmExecutable,
   sanitizeArtifactName,
   seedProfileName,
@@ -404,4 +406,25 @@ test("profile name is seeded only for a fresh profile", () => {
   assert.equal(seedProfileName("/p", "NyxID Oracle w1", fs), true);
   assert.deepEqual(writes[0][1], { profile: { name: "NyxID Oracle w1" } });
   assert.equal(seedProfileName("/p", "x", { ...fs, existsSync: () => true }), false);
+});
+
+test("model labels map to ChatGPT reasoning levels with Pro first", () => {
+  assert.equal(modelLevelTargets("chatgpt-5.5-pro")[0], "Pro");
+  assert.equal(modelLevelTargets("gpt-5.5-extended")[0], "Pro");
+  assert.equal(modelLevelTargets("Pro 扩展")[0], "Pro");
+  assert.equal(modelLevelTargets("extra high")[0], "Extra High");
+  assert.equal(modelLevelTargets("high")[0], "High");
+  assert.equal(modelLevelTargets("balanced")[0], "Medium");
+  assert.equal(modelLevelTargets("instant")[0], "Instant");
+  assert.deepEqual(modelLevelTargets("custom-thing"), ["custom-thing"]);
+  assert.deepEqual(modelLevelTargets(""), []);
+});
+
+test("level matching is exact before fuzzy so High never picks Extra High", () => {
+  const high = modelLevelTargets("high");
+  assert.equal(modelItemMatches("High", high, true), true);
+  assert.equal(modelItemMatches("Extra High", high, true), false);
+  assert.equal(modelItemMatches("Extra High", high, false), true);
+  assert.equal(modelItemMatches("Pro", modelLevelTargets("chatgpt-5.5-pro"), true), true);
+  assert.equal(modelItemMatches("Instant", modelLevelTargets("chatgpt-5.5-pro"), false), false);
 });
