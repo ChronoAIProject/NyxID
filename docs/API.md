@@ -3511,8 +3511,9 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 **Delegation Token Injection:** If the service has `inject_delegation_token: true`, NyxID generates a short-lived delegated access token (5-minute TTL) and injects it as the `X-NyxID-Delegation-Token` header. This allows the downstream service to call NyxID APIs on behalf of the user according to the admin-configured service scope. Proxy and LLM scopes retain their existing behavior; the service-only `account:read` scope adds GET-only management parity with explicit route-class and WebSocket exclusions. Other eligible scopes can be refreshed via `POST /api/v1/delegation/refresh` for long-running workflows, but refresh cannot re-add `account:read`; the service must receive a newly minted token from an eligible invocation. See [Token Exchange (Delegated Access)](#token-exchange-delegated-access) for details.
 
-**Assistant identity and capability transport (assistant mount only):** A browser
-session authenticates to NyxID with a cookie on the `/api/v1/assistant/*`
+##### Assistant identity and capability transport
+
+A browser session authenticates to NyxID with a cookie on the `/api/v1/assistant/*`
 pass-through. The session carries no Bearer for `forward_access_token` to
 forward. While the `aevatar` service row has `forward_access_token: true`, NyxID
 mints a delegated access token for the session user. The token has

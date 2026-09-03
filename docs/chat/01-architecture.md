@@ -13,6 +13,7 @@ React browser
   -> NyxID /api/v1/assistant/**
      -> default: admin-managed DownstreamService slug "aevatar"
         -> Aevatar /api/chat and conversation-history resources
+           -> default LLM callback: NyxID /api/v1/proxy/s/chrono-llm-public
      -> experimental: admin-managed DownstreamService slug "chrono-llm-public"
         -> Chrono LLM /v1/chat/completions (relative to the service base_url)
 ```
@@ -58,9 +59,11 @@ The route placement and rejection layers are authoritative: `backend/src/routes.
 
 Assistant handlers do not resolve a user-owned `UserService`. The default
 Aevatar handlers resolve the active admin-managed `DownstreamService` whose
-slug is `aevatar`; the Direct handler uses `chrono-llm-public`. Both require the
-row not to need a per-user credential and call the administrative proxy path.
-This has several consequences:
+slug is `aevatar`. The Direct handler uses `chrono-llm-public`. Both ingress
+handlers require their row not to need a per-user credential and call the
+administrative proxy path. Aevatar also uses the active `chrono-llm-public` row
+as its default LLM callback through the ordinary
+`/api/v1/proxy/s/chrono-llm-public` path. This has several consequences:
 
 - The caller cannot choose the upstream base URL.
 - A personal or organization service with the same slug does not override the platform target.

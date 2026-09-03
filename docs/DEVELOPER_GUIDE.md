@@ -319,7 +319,7 @@ curl -X PUT http://localhost:3001/api/v1/services/<service_id> \
 > Aevatar uses `X-NyxID-Identity-Token` for caller identity and separately
 > requires an execution capability. `Authorization: Bearer` takes precedence;
 > `X-NyxID-Delegation-Token` is the Bearer-absent fallback. See
-> [Assistant identity and capability transport](API.md#assistant-identity-and-capability-transport-assistant-mount-only).
+> [Assistant identity and capability transport](API.md#assistant-identity-and-capability-transport).
 
 ### Verifying Identity JWTs
 
