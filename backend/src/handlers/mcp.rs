@@ -104,11 +104,8 @@ pub async fn get_mcp_config(
         mcp_service::NodeScope::Allowed(auth_user.allowed_node_ids.as_slice())
     };
 
-    let service_scope = if auth_user.allow_all_services {
-        mcp_service::ServiceScope::Unrestricted
-    } else {
-        mcp_service::ServiceScope::Allowed(auth_user.allowed_service_ids.as_slice())
-    };
+    let service_scope =
+        crate::services::catalog_delegation_service::service_scope_for_rest_request(&auth_user)?;
     let catalog = mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),

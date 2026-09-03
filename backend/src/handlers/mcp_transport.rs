@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::crypto::jwt;
+use crate::errors::{AppError, AppResult};
 use crate::models::mcp_session::{MCP_SESSION_COLLECTION, McpSessionRecord};
 use crate::models::service_account::{COLLECTION_NAME as SERVICE_ACCOUNTS, ServiceAccount};
 use crate::models::user::{COLLECTION_NAME as USERS, User};
@@ -269,6 +270,9 @@ fn rpc_scope_forbidden(id: Option<serde_json::Value>, message: &str) -> Response
 struct McpAuthContext {
     user_id: String,
     auth_method: AuthMethod,
+    scope: String,
+    verified_catalog_grant:
+        Option<crate::services::catalog_delegation_service::VerifiedCatalogGrant>,
     acting_client_id: Option<String>,
     approval_owner_user_id: Option<String>,
     /// True when auth was via `x-api-key`. API-key requests are stateless: each
@@ -295,6 +299,8 @@ impl McpAuthContext {
         Self {
             user_id,
             auth_method,
+            scope: String::new(),
+            verified_catalog_grant: None,
             acting_client_id: None,
             approval_owner_user_id: None,
             is_api_key: false,
@@ -432,6 +438,8 @@ async fn authenticate_mcp(
                 return Ok(McpAuthContext {
                     user_id,
                     auth_method: AuthMethod::ApiKey,
+                    scope: api_key.scopes.clone(),
+                    verified_catalog_grant: None,
                     acting_client_id: None,
                     approval_owner_user_id: None,
                     is_api_key: true,
@@ -485,19 +493,23 @@ async fn authenticate_mcp(
                 // catalog tokens need the same live-grant check performed by
                 // the AuthUser middleware. Ordinary legacy MCP tokens do not
                 // carry this scope and retain their existing behavior.
-                if claims.act.is_some()
+                let verified_catalog_grant = if claims.act.is_some()
                     && crate::services::catalog_delegation_service::scope_has_catalog_read(
                         &claims.scope,
                     )
                 {
-                    crate::services::catalog_delegation_service::validate_live_grant(
-                        &state.db,
-                        &state.config,
-                        &claims,
+                    Some(
+                        crate::services::catalog_delegation_service::validate_live_grant(
+                            &state.db,
+                            &state.config,
+                            &claims,
+                        )
+                        .await
+                        .map_err(|_| mcp_401(&state.config.base_url))?,
                     )
-                    .await
-                    .map_err(|_| mcp_401(&state.config.base_url))?;
-                }
+                } else {
+                    None
+                };
 
                 // Service account tokens have sa=true; verify against
                 // the service_accounts collection instead of users.
@@ -520,6 +532,8 @@ async fn authenticate_mcp(
                 };
 
                 let mut ctx = McpAuthContext::user(user_id, auth_method);
+                ctx.scope = claims.scope.clone();
+                ctx.verified_catalog_grant = verified_catalog_grant;
                 if matches!(
                     ctx.auth_method,
                     AuthMethod::AccessToken | AuthMethod::Delegated
@@ -706,12 +720,31 @@ async fn platform_services_flag_enabled(state: &AppState, auth: &McpAuthContext)
     }
 }
 
-fn mcp_service_scope(auth: &McpAuthContext) -> mcp_service::ServiceScope<'_> {
-    if auth.allow_all_services {
+fn mcp_service_scope(auth: &McpAuthContext) -> AppResult<mcp_service::ServiceScope<'_>> {
+    if auth.auth_method == AuthMethod::Delegated
+        && crate::services::catalog_delegation_service::scope_has_catalog_read(&auth.scope)
+    {
+        let authority = auth
+            .verified_catalog_grant
+            .as_ref()
+            .ok_or_else(|| {
+                AppError::Unauthorized(
+                    "Delegated catalog authority is invalid or inactive".to_string(),
+                )
+            })?
+            .authority();
+        return Ok(if authority.allow_all_services {
+            mcp_service::ServiceScope::Unrestricted
+        } else {
+            mcp_service::ServiceScope::Allowed(authority.allowed_service_ids.as_slice())
+        });
+    }
+
+    Ok(if auth.allow_all_services {
         mcp_service::ServiceScope::Unrestricted
     } else {
         mcp_service::ServiceScope::Allowed(auth.allowed_service_ids.as_slice())
-    }
+    })
 }
 
 /// Names of tools that SSH-gate on agent scope.
@@ -1251,6 +1284,13 @@ async fn handle_tools_list(
     session_id: Option<&str>,
     request: &JsonRpcRequest,
 ) -> Response {
+    let service_scope = match mcp_service_scope(auth) {
+        Ok(scope) => scope,
+        Err(error) => {
+            tracing::warn!(%error, "Denied MCP catalog without verified authority");
+            return rpc_error(request.id.clone(), -32003, "Catalog authority unavailable");
+        }
+    };
     // Thread API-key node scope into the discovery chain so scoped
     // keys don't see tools whose only dispatchable routes are all out of
     // scope (seventeenth-round Codex review P2).
@@ -1259,7 +1299,7 @@ async fn handle_tools_list(
         state.node_ws_manager.as_ref(),
         &auth.user_id,
         mcp_node_scope(auth),
-        mcp_service_scope(auth),
+        service_scope,
     )
     .await
     {
@@ -1470,6 +1510,14 @@ async fn handle_tools_call(
         None => None,
     };
 
+    let service_scope = match mcp_service_scope(auth) {
+        Ok(scope) => scope,
+        Err(error) => {
+            tracing::warn!(%error, "Denied MCP tool execution without verified catalog authority");
+            return tool_result(request.id.clone(), "Catalog authority unavailable", true);
+        }
+    };
+
     // Scoped discovery so resolve_tool_call can't match tools whose
     // only dispatchable routes fall outside the caller's API-key node scope
     // (twentieth-round Codex P2).
@@ -1478,7 +1526,7 @@ async fn handle_tools_call(
         state.node_ws_manager.as_ref(),
         &auth.user_id,
         mcp_node_scope(auth),
-        mcp_service_scope(auth),
+        service_scope,
     )
     .await
     {
@@ -2046,12 +2094,19 @@ async fn handle_meta_call_tool(
     // `nyx__call_tool` can't auto-invoke a tool whose only dispatchable
     // routes are outside the caller's allow-list (twentieth-round
     // Codex P2). Service scope is still applied downstream below.
+    let service_scope = match mcp_service_scope(auth) {
+        Ok(scope) => scope,
+        Err(error) => {
+            tracing::warn!(%error, "Denied MCP call_tool without verified catalog authority");
+            return tool_result(request_id, "Catalog authority unavailable", true);
+        }
+    };
     let catalog = match mcp_service::load_operation_catalog(
         &state.db,
         state.node_ws_manager.as_ref(),
         &auth.user_id,
         mcp_node_scope(auth),
-        mcp_service_scope(auth),
+        service_scope,
     )
     .await
     {
@@ -3511,6 +3566,8 @@ mod tests {
         McpAuthContext {
             user_id: "user-1".into(),
             auth_method: AuthMethod::ApiKey,
+            scope: "proxy:*".to_string(),
+            verified_catalog_grant: None,
             acting_client_id: None,
             approval_owner_user_id: None,
             is_api_key: true,
@@ -3526,6 +3583,42 @@ mod tests {
             ip_address: None,
             user_agent: None,
         }
+    }
+
+    #[test]
+    fn delegated_catalog_scope_uses_only_verified_authority() {
+        let authority = crate::services::catalog_delegation_service::CatalogAuthority {
+            resources: Vec::new(),
+            allow_all_services: false,
+            allowed_service_ids: vec!["service-from-proof".to_string()],
+            allow_all_nodes: true,
+            allowed_node_ids: Vec::new(),
+        };
+        let mut auth = McpAuthContext::user("user-1".to_string(), AuthMethod::Delegated);
+        auth.scope = format!(
+            "proxy:* {}",
+            crate::services::catalog_delegation_service::MCP_CATALOG_READ_SCOPE
+        );
+        auth.allow_all_services = true;
+        auth.verified_catalog_grant = Some(
+            crate::services::catalog_delegation_service::VerifiedCatalogGrant::for_test(
+                "user-1",
+                "assistant-client",
+                "assistant-client",
+                &auth.scope,
+                authority,
+            ),
+        );
+
+        match mcp_service_scope(&auth).expect("verified delegated scope") {
+            mcp_service::ServiceScope::Allowed(ids) => {
+                assert_eq!(ids, ["service-from-proof"]);
+            }
+            mcp_service::ServiceScope::Unrestricted => panic!("proof restriction was ignored"),
+        }
+
+        auth.verified_catalog_grant = None;
+        assert!(mcp_service_scope(&auth).is_err());
     }
 
     #[test]
@@ -3938,6 +4031,7 @@ mod tests {
             acting_client_id: None,
             oauth_client_id: None,
             token_jti: None,
+            verified_catalog_grant: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::ApiKey,
             allow_all_services: true,

@@ -1,4 +1,4 @@
-use chrono::{TimeZone, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use mongodb::bson::{self, doc};
 
 use crate::crypto::jwt::{Claims, TokenRestrictionClaims};
@@ -7,9 +7,10 @@ use crate::models::catalog_delegation_grant::{
     COLLECTION_NAME as CATALOG_DELEGATION_GRANTS, CatalogDelegationGrant,
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+use crate::mw::auth::{AuthMethod, AuthUser};
 use crate::services::{
-    api_key_scope_service::{self, ScopeAuthorization},
-    consent_service, oauth_resource_service, token_exchange_service,
+    api_key_scope_service::{self, ScopeAuthorization}, consent_service, mcp_service,
+    oauth_resource_service, token_exchange_service,
 };
 
 pub const MCP_CATALOG_READ_SCOPE: &str = crate::mw::auth::MCP_CATALOG_READ_SCOPE;
@@ -21,6 +22,66 @@ pub struct CatalogAuthority {
     pub allowed_service_ids: Vec<String>,
     pub allow_all_nodes: bool,
     pub allowed_node_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedCatalogGrant {
+    grant_id: String,
+    subject_user_id: String,
+    actor_client_id: String,
+    receiving_client_id: String,
+    scope: String,
+    authority: CatalogAuthority,
+    expires_at: DateTime<Utc>,
+}
+
+impl VerifiedCatalogGrant {
+    pub fn grant_id(&self) -> &str {
+        &self.grant_id
+    }
+
+    pub fn subject_user_id(&self) -> &str {
+        &self.subject_user_id
+    }
+
+    pub fn actor_client_id(&self) -> &str {
+        &self.actor_client_id
+    }
+
+    pub fn receiving_client_id(&self) -> &str {
+        &self.receiving_client_id
+    }
+
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    pub fn authority(&self) -> &CatalogAuthority {
+        &self.authority
+    }
+
+    pub fn expires_at(&self) -> DateTime<Utc> {
+        self.expires_at
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        subject_user_id: &str,
+        actor_client_id: &str,
+        receiving_client_id: &str,
+        scope: &str,
+        authority: CatalogAuthority,
+    ) -> Self {
+        Self {
+            grant_id: uuid::Uuid::new_v4().to_string(),
+            subject_user_id: subject_user_id.to_string(),
+            actor_client_id: actor_client_id.to_string(),
+            receiving_client_id: receiving_client_id.to_string(),
+            scope: scope.to_string(),
+            authority,
+            expires_at: Utc::now() + chrono::Duration::minutes(5),
+        }
+    }
 }
 
 impl CatalogAuthority {
@@ -84,9 +145,9 @@ pub async fn validate_live_grant(
     db: &mongodb::Database,
     config: &crate::config::AppConfig,
     claims: &Claims,
-) -> AppResult<()> {
+) -> AppResult<VerifiedCatalogGrant> {
     if !scope_has_catalog_read(&claims.scope) {
-        return Ok(());
+        return Err(invalid_catalog_authority());
     }
 
     let actor_client_id = claims
@@ -169,7 +230,37 @@ pub async fn validate_live_grant(
         },
     )
     .await?;
-    Ok(())
+    Ok(VerifiedCatalogGrant {
+        grant_id: grant.id,
+        subject_user_id: grant.user_id,
+        actor_client_id: grant.actor_client_id,
+        receiving_client_id: grant.receiving_client_id,
+        scope: grant.scope,
+        authority,
+        expires_at: grant.expires_at,
+    })
+}
+
+pub fn service_scope_for_rest_request(
+    auth: &AuthUser,
+) -> AppResult<mcp_service::ServiceScope<'_>> {
+    if auth.auth_method == AuthMethod::Delegated && scope_has_catalog_read(&auth.scope) {
+        let authority = auth
+            .verified_catalog_grant()
+            .ok_or_else(invalid_catalog_authority)?
+            .authority();
+        return Ok(if authority.allow_all_services {
+            mcp_service::ServiceScope::Unrestricted
+        } else {
+            mcp_service::ServiceScope::Allowed(authority.allowed_service_ids.as_slice())
+        });
+    }
+
+    Ok(if auth.allow_all_services {
+        mcp_service::ServiceScope::Unrestricted
+    } else {
+        mcp_service::ServiceScope::Allowed(auth.allowed_service_ids.as_slice())
+    })
 }
 
 pub async fn revoke_for_client(
@@ -433,14 +524,21 @@ mod tests {
         )
         .await
         .expect("persist catalog grant");
-        validate_live_grant(&db, &config, &claims)
+        let proof = validate_live_grant(&db, &config, &claims)
             .await
             .expect("active catalog grant");
+        assert_eq!(proof.grant_id(), claims.jti);
+        assert_eq!(proof.subject_user_id(), claims.sub);
+        assert_eq!(proof.actor_client_id(), actor_client_id);
+        assert_eq!(proof.receiving_client_id(), receiving_client_id);
+        assert_eq!(proof.scope(), claims.scope);
+        assert_eq!(proof.authority(), &authority);
+        assert_eq!(proof.expires_at().timestamp(), claims.exp);
 
         Some((db, config, claims))
     }
 
-    fn assert_invalid(result: AppResult<()>) {
+    fn assert_invalid<T>(result: AppResult<T>) {
         assert!(matches!(
             result,
             Err(AppError::Unauthorized(message))
@@ -558,6 +656,102 @@ mod tests {
         assert!(authority.allowed_service_ids.is_empty());
         assert!(!authority.allow_all_nodes);
         assert!(authority.allowed_node_ids.is_empty());
+    }
+
+    fn verified_grant(authority: CatalogAuthority) -> VerifiedCatalogGrant {
+        VerifiedCatalogGrant::for_test(
+            "00000000-0000-4000-8000-000000000001",
+            "assistant-client",
+            "assistant-client",
+            MCP_CATALOG_READ_SCOPE,
+            authority,
+        )
+    }
+
+    #[test]
+    fn rest_service_scope_uses_verified_delegated_authority() {
+        let mut auth = crate::test_utils::test_auth_user(
+            "00000000-0000-4000-8000-000000000001",
+        );
+        auth.auth_method = AuthMethod::Delegated;
+        auth.scope = format!("proxy:* {MCP_CATALOG_READ_SCOPE}");
+        auth.allow_all_services = true;
+        auth.verified_catalog_grant = Some(verified_grant(CatalogAuthority {
+            resources: Vec::new(),
+            allow_all_services: false,
+            allowed_service_ids: vec!["service-from-proof".to_string()],
+            allow_all_nodes: true,
+            allowed_node_ids: Vec::new(),
+        }));
+
+        match service_scope_for_rest_request(&auth).expect("verified scope") {
+            mcp_service::ServiceScope::Allowed(ids) => {
+                assert_eq!(ids, ["service-from-proof"]);
+            }
+            mcp_service::ServiceScope::Unrestricted => panic!("proof restriction was ignored"),
+        }
+    }
+
+    #[test]
+    fn rest_service_scope_preserves_every_other_auth_method() {
+        for method in [
+            AuthMethod::Session,
+            AuthMethod::AccessToken,
+            AuthMethod::ApiKey,
+            AuthMethod::ServiceAccount,
+            AuthMethod::Relay,
+            AuthMethod::Delegated,
+        ] {
+            let mut auth = crate::test_utils::test_auth_user(
+                "00000000-0000-4000-8000-000000000001",
+            );
+            auth.auth_method = method.clone();
+            auth.scope = "proxy:*".to_string();
+            auth.allow_all_services = false;
+            auth.allowed_service_ids = vec!["existing-service".to_string()];
+
+            match service_scope_for_rest_request(&auth).expect("existing service scope") {
+                mcp_service::ServiceScope::Allowed(ids) => {
+                    assert_eq!(ids, ["existing-service"], "{method:?}");
+                }
+                mcp_service::ServiceScope::Unrestricted => {
+                    panic!("{method:?} lost its existing service restriction")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn delegated_catalog_scope_without_verified_grant_fails_closed() {
+        let mut auth = crate::test_utils::test_auth_user(
+            "00000000-0000-4000-8000-000000000001",
+        );
+        auth.auth_method = AuthMethod::Delegated;
+        auth.scope = format!("proxy:* {MCP_CATALOG_READ_SCOPE}");
+
+        assert!(service_scope_for_rest_request(&auth).is_err());
+    }
+
+    #[test]
+    fn unrestricted_verified_authority_remains_unrestricted() {
+        let mut auth = crate::test_utils::test_auth_user(
+            "00000000-0000-4000-8000-000000000001",
+        );
+        auth.auth_method = AuthMethod::Delegated;
+        auth.scope = format!("proxy:* {MCP_CATALOG_READ_SCOPE}");
+        auth.allow_all_services = false;
+        auth.verified_catalog_grant = Some(verified_grant(CatalogAuthority {
+            resources: Vec::new(),
+            allow_all_services: true,
+            allowed_service_ids: Vec::new(),
+            allow_all_nodes: true,
+            allowed_node_ids: Vec::new(),
+        }));
+
+        assert!(matches!(
+            service_scope_for_rest_request(&auth),
+            Ok(mcp_service::ServiceScope::Unrestricted)
+        ));
     }
 
     #[test]

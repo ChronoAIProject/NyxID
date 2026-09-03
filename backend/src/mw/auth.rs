@@ -57,6 +57,8 @@ pub struct AuthUser {
     /// JWT ID for online delegated-authority validation. `None` for non-JWT
     /// authentication contexts.
     pub token_jti: Option<String>,
+    pub verified_catalog_grant:
+        Option<crate::services::catalog_delegation_service::VerifiedCatalogGrant>,
     /// Resource-owner user ID used for approval/notification decisions.
     /// For service-account auth this points to the SA owner; otherwise `None`.
     pub approval_owner_user_id: Option<String>,
@@ -181,6 +183,12 @@ impl AuthUser {
         scope_contains(&self.scope, expected)
     }
 
+    pub fn verified_catalog_grant(
+        &self,
+    ) -> Option<&crate::services::catalog_delegation_service::VerifiedCatalogGrant> {
+        self.verified_catalog_grant.as_ref()
+    }
+
     pub fn can_use_rest_proxy(&self) -> bool {
         matches!(self.auth_method, AuthMethod::Session)
             || self.has_scope(PROXY_SCOPE)
@@ -264,8 +272,7 @@ pub const LLM_PROXY_SCOPE: &str = "llm:proxy";
 /// Scope that grants read-only access to user account management resources.
 pub const ACCOUNT_READ_SCOPE: &str = "account:read";
 
-/// Scope that is reserved for the future connected-service catalog facade.
-/// It never grants proxy or management access by itself.
+/// Scope that grants the delegated connected-service catalog read.
 pub const MCP_CATALOG_READ_SCOPE: &str = "mcp:catalog:read";
 
 /// Delegation scopes that may be configured on downstream and user services.
@@ -475,6 +482,15 @@ fn delegated_request_allowed(
         return true;
     }
 
+    if matches!(
+        api_v1_path_segments(path).as_deref(),
+        Some(["mcp", "config"])
+    ) {
+        return method == Method::GET
+            && scope_contains(scopes, MCP_CATALOG_READ_SCOPE)
+            && !is_websocket_upgrade(headers);
+    }
+
     method == Method::GET
         && scope_contains(scopes, ACCOUNT_READ_SCOPE)
         && !delegated_read_denied_path(path)
@@ -625,6 +641,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                         acting_client_id: None,
                                         oauth_client_id: None,
                                         token_jti: None,
+                                        verified_catalog_grant: None,
                                         approval_owner_user_id: None,
                                         auth_method: AuthMethod::ApiKey,
                                         allow_all_services: api_key.allow_all_services,
@@ -717,6 +734,7 @@ impl FromRequestParts<AppState> for AuthUser {
                             acting_client_id: None,
                             oauth_client_id: None,
                             token_jti: None,
+                            verified_catalog_grant: None,
                             approval_owner_user_id: Some(sa.effective_owner_user_id().to_string()),
                             auth_method: AuthMethod::ServiceAccount,
                             allow_all_services: true,
@@ -764,17 +782,24 @@ impl FromRequestParts<AppState> for AuthUser {
                         AuthMethod::AccessToken
                     };
 
-                    if auth_method == AuthMethod::Delegated {
-                        if crate::services::catalog_delegation_service::scope_has_catalog_read(
+                    // Online grant validation must complete before route admission uses the scope.
+                    let verified_catalog_grant = if auth_method == AuthMethod::Delegated
+                        && crate::services::catalog_delegation_service::scope_has_catalog_read(
                             &claims.scope,
-                        ) {
+                        )
+                    {
+                        Some(
                             crate::services::catalog_delegation_service::validate_live_grant(
                                 &state.db,
                                 &state.config,
                                 &claims,
                             )
-                            .await?;
-                        }
+                            .await?,
+                        )
+                    } else {
+                        None
+                    };
+                    if auth_method == AuthMethod::Delegated {
                         let request_path = parts
                             .extensions
                             .get::<OriginalUri>()
@@ -853,6 +878,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         acting_client_id: claims.act.map(|a| a.sub),
                         oauth_client_id: claims.client_id.clone(),
                         token_jti: Some(claims.jti.clone()),
+                        verified_catalog_grant,
                         approval_owner_user_id: None,
                         auth_method,
                         allow_all_services,
@@ -924,6 +950,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                     acting_client_id: None,
                                     oauth_client_id: None,
                                     token_jti: None,
+                                    verified_catalog_grant: None,
                                     approval_owner_user_id: None,
                                     auth_method: AuthMethod::Session,
                                     allow_all_services: true,
@@ -1003,6 +1030,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     acting_client_id: None,
                     oauth_client_id: None,
                     token_jti: None,
+                    verified_catalog_grant: None,
                     approval_owner_user_id: None,
                     auth_method: AuthMethod::ApiKey,
                     allow_all_services: key.allow_all_services,
@@ -1411,6 +1439,7 @@ mod tests {
             acting_client_id: None,
             oauth_client_id: None,
             token_jti: None,
+            verified_catalog_grant: None,
             approval_owner_user_id: None,
             auth_method,
             allow_all_services: true,
@@ -1469,6 +1498,26 @@ mod tests {
             .expect("middleware response")
     }
 
+    async fn run_human_only_rejection_layers(
+        request: Request<Body>,
+    ) -> axum::response::Response {
+        Router::new()
+            .fallback(|| async {
+                (
+                    StatusCode::IM_A_TEAPOT,
+                    [("x-handler-result", "preserved")],
+                    b"unchanged-handler-bytes".as_slice(),
+                )
+            })
+            .layer(middleware::from_fn(reject_delegated_tokens))
+            .layer(middleware::from_fn(reject_api_key_tokens))
+            .layer(middleware::from_fn(reject_service_account_tokens))
+            .layer(middleware::from_fn(reject_relay_tokens))
+            .oneshot(request)
+            .await
+            .expect("human-only middleware response")
+    }
+
     #[test]
     fn delegated_account_read_allows_expected_management_families() {
         let headers = HeaderMap::new();
@@ -1507,7 +1556,12 @@ mod tests {
     #[test]
     fn catalog_read_scope_alone_grants_no_proxy_or_management_route() {
         let headers = HeaderMap::new();
-        for path in ["/api/v1/keys", "/api/v1/orgs", "/api/v1/mcp/config"] {
+        for path in [
+            "/api/v1/keys",
+            "/api/v1/orgs",
+            "/api/v1/proxy/s/github/repos",
+            "/api/v1/mcp/tools",
+        ] {
             assert!(
                 !delegated_request_allowed(&Method::GET, path, &headers, MCP_CATALOG_READ_SCOPE),
                 "catalog read must not authorize GET {path}"
@@ -1515,6 +1569,45 @@ mod tests {
         }
         assert!(!scope_contains(MCP_CATALOG_READ_SCOPE, PROXY_SCOPE));
         assert!(!scope_allows_llm_proxy(MCP_CATALOG_READ_SCOPE));
+    }
+
+    #[test]
+    fn catalog_read_scope_allows_only_exact_catalog_route() {
+        let headers = HeaderMap::new();
+        assert!(delegated_request_allowed(
+            &Method::GET,
+            "/api/v1/mcp/config",
+            &headers,
+            MCP_CATALOG_READ_SCOPE
+        ));
+        for path in [
+            "/api/v1/mcp/config/",
+            "/api/v1/mcp//config",
+            "/api/v1/mcp/config/extra",
+            "/api/v1/mcp%2fconfig",
+            "/api/v1/mcp/config%2fextra",
+        ] {
+            assert!(
+                !delegated_request_allowed(&Method::GET, path, &headers, MCP_CATALOG_READ_SCOPE),
+                "catalog read must reject GET {path}"
+            );
+        }
+        assert!(!delegated_request_allowed(
+            &Method::POST,
+            "/api/v1/mcp/config",
+            &headers,
+            MCP_CATALOG_READ_SCOPE
+        ));
+        let websocket = HeaderMap::from_iter([
+            (header::CONNECTION, "upgrade".parse().unwrap()),
+            (header::UPGRADE, "websocket".parse().unwrap()),
+        ]);
+        assert!(!delegated_request_allowed(
+            &Method::GET,
+            "/api/v1/mcp/config",
+            &websocket,
+            MCP_CATALOG_READ_SCOPE
+        ));
     }
 
     #[test]
@@ -1846,6 +1939,71 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn human_only_layers_preserve_session_and_access_token_catalog_requests() {
+        let access = fake_jwt_from_value(serde_json::json!({ "scope": "openid profile" }));
+        for (name, value) in [
+            (
+                header::COOKIE.as_str(),
+                "nyx_session=session-token".to_string(),
+            ),
+            (header::AUTHORIZATION.as_str(), format!("Bearer {access}")),
+        ] {
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri("/api/v1/mcp/config")
+                .header(name, value)
+                .body(Body::empty())
+                .unwrap();
+            let response = run_human_only_rejection_layers(request).await;
+            assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+            assert_eq!(
+                to_bytes(response.into_body(), usize::MAX).await.unwrap(),
+                "unchanged-handler-bytes"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn human_only_layers_keep_api_key_service_account_and_relay_catalog_denials() {
+        let service_account = fake_jwt_from_value(serde_json::json!({ "sa": true }));
+        let relay = fake_jwt_from_value(serde_json::json!({ "relay": true }));
+        let requests = [
+            (
+                "api_key",
+                Request::builder()
+                    .uri("/api/v1/mcp/config")
+                    .header("x-api-key", "nyxid_ag_test-key")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+            (
+                "service_account",
+                Request::builder()
+                    .uri("/api/v1/mcp/config")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!("Bearer {service_account}"),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+            (
+                "relay",
+                Request::builder()
+                    .uri("/api/v1/mcp/config")
+                    .header(header::AUTHORIZATION, format!("Bearer {relay}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        ];
+
+        for (auth_method, request) in requests {
+            let response = run_human_only_rejection_layers(request).await;
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{auth_method}");
+        }
+    }
+
     fn sign_test_claims(state: &AppState, claims: &jwt::Claims) -> String {
         let mut jwt_header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
         jwt_header.kid = Some(state.jwt_keys.kid.clone());
@@ -1948,6 +2106,73 @@ mod tests {
             json["message"],
             format!("Forbidden: {DELEGATED_ENDPOINT_FORBIDDEN}")
         );
+    }
+
+    #[tokio::test]
+    async fn authoritative_extractor_rejects_catalog_scope_without_live_grant_before_handler() {
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let Some(db) = crate::test_utils::connect_test_database(
+            "auth_delegated_catalog_without_live_grant",
+        )
+        .await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let user_id = Uuid::new_v4();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &user_id.to_string(),
+                UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let restrictions = jwt::TokenRestrictionClaims {
+            resources: Some(Vec::new()),
+            allowed_service_ids: Some(Vec::new()),
+            allow_all_services: Some(false),
+            allowed_node_ids: Some(Vec::new()),
+            allow_all_nodes: Some(false),
+        };
+        let (token, _) = jwt::generate_delegated_access_token_for_client(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            MCP_CATALOG_READ_SCOPE,
+            "catalog-actor",
+            Some("catalog-receiver"),
+            60,
+            Some(&restrictions),
+        )
+        .unwrap();
+        let handler_reached = Arc::new(AtomicBool::new(false));
+        let handler_marker = Arc::clone(&handler_reached);
+        let app = Router::new()
+            .route(
+                "/api/v1/mcp/config",
+                get(move |_: AuthUser| {
+                    handler_marker.store(true, Ordering::SeqCst);
+                    async { StatusCode::NO_CONTENT }
+                }),
+            )
+            .with_state(state);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/mcp/config")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!handler_reached.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
@@ -2776,6 +3001,7 @@ mod tests {
             acting_client_id: None,
             oauth_client_id: None,
             token_jti: None,
+            verified_catalog_grant: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::ApiKey,
             allow_all_services: false,

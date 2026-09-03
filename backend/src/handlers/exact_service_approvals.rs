@@ -131,6 +131,7 @@ mod tests {
             acting_client_id: (method == AuthMethod::Delegated).then(|| "client-alpha".to_string()),
             oauth_client_id: None,
             token_jti: None,
+            verified_catalog_grant: None,
             approval_owner_user_id: None,
             auth_method: method,
             allow_all_services: true,

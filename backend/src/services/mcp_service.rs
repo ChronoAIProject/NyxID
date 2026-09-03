@@ -5142,7 +5142,7 @@ mod tests {
     }
 
     #[test]
-    fn service_scope_keeps_only_exact_user_service_identities() {
+    fn restricted_catalog_drops_platform_rows_and_keeps_only_exact_user_service_ids() {
         let user_service = McpToolService {
             source: McpToolSource::UserManaged {
                 user_service_id: "service-allowed".to_string(),

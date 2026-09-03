@@ -1126,6 +1126,7 @@ mod tests {
             acting_client_id: Some(TEST_ACTOR.to_string()),
             oauth_client_id: Some(TEST_RECEIVER.to_string()),
             token_jti: Some(uuid::Uuid::new_v4().to_string()),
+            verified_catalog_grant: None,
             approval_owner_user_id: None,
             auth_method: method,
             allow_all_services: false,
@@ -1593,6 +1594,7 @@ mod tests {
             acting_client_id: claims.act.map(|actor| actor.sub),
             oauth_client_id: claims.client_id,
             token_jti: Some(claims.jti),
+            verified_catalog_grant: None,
             approval_owner_user_id: None,
             auth_method: AuthMethod::Delegated,
             allow_all_services: claims.allow_all_services.unwrap_or(true),
@@ -1809,7 +1811,8 @@ mod tests {
         .await
         .expect("mint delegated token and persist live catalog grant");
         let delegated_auth = delegated_auth_from_token(&state, &exchanged.access_token);
-        crate::services::catalog_delegation_service::validate_live_grant(
+        let _verified_catalog_grant =
+            crate::services::catalog_delegation_service::validate_live_grant(
             &db,
             &state.config,
             &jwt::verify_token(&state.jwt_keys, &state.config, &exchanged.access_token).unwrap(),
