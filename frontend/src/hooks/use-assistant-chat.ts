@@ -662,7 +662,6 @@ export function useAssistantChat({
     reportAction,
     resolveApproval,
     resolveInput,
-    resolvePlan,
     steer,
     stop,
   } = useAssistantChatControls({
@@ -760,7 +759,6 @@ export function useAssistantChat({
     reportAction,
     resolveApproval,
     resolveInput,
-    resolvePlan,
     send,
     session,
     setActionOverride,

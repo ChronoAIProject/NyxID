@@ -225,7 +225,7 @@ describe("AssistantWireLogPanel", () => {
       "header",
       200,
       null,
-      "POST /assistant/completions",
+      "GET /assistant/actions",
     );
 
     renderWithTooltips(
@@ -238,7 +238,7 @@ describe("AssistantWireLogPanel", () => {
       screen.queryByText("GET /assistant/conversations/other"),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByText("POST /assistant/completions"),
+      screen.queryByText("GET /assistant/actions"),
     ).not.toBeInTheDocument();
     expect(
       screen.getByRole("switch", { name: "Show all conversations" }),
@@ -251,7 +251,7 @@ describe("AssistantWireLogPanel", () => {
     expect(
       screen.getByText("GET /assistant/conversations/other"),
     ).toBeInTheDocument();
-    expect(screen.getByText("POST /assistant/completions")).toBeInTheDocument();
+    expect(screen.getByText("GET /assistant/actions")).toBeInTheDocument();
   });
 
   it("fetches an id-backed payload only after its metadata row expands", async () => {

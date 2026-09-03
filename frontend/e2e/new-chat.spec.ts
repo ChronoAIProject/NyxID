@@ -36,7 +36,7 @@ test("a first send stays continuous through the canonical id transition", async 
     ),
   ).toBeVisible();
   expect(new URL(page.url()).searchParams.has("c")).toBe(false);
-  await expect(sidebarRows).toHaveCount(3);
+  await expect(sidebarRows).toHaveCount(4);
   for (const conversation of Object.values(SEEDED)) {
     await expect(conversationRow(page, conversation.title)).toHaveCSS(
       "font-weight",
@@ -57,7 +57,7 @@ test("a first send stays continuous through the canonical id transition", async 
   ).toBeVisible({ timeout: 5_000 });
   await expect(composerInput(page)).toBeEnabled({ timeout: 10_000 });
   await expect(echoedMessage).toHaveCount(1);
-  await expect(sidebarRows).toHaveCount(4);
+  await expect(sidebarRows).toHaveCount(5);
 
   const newRow = conversationRow(page, message);
   await expect(newRow).toHaveCount(1);

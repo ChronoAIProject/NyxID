@@ -311,14 +311,6 @@ export class AssistantHttpFixtureWorld {
       conversation.pendingApproval = null;
     } else if (type === "input.resolve") {
       conversation.pendingInput = null;
-    } else if (type === "plan.resolve" && conversation.activeTask) {
-      conversation.activeTask = {
-        ...conversation.activeTask,
-        gate: {
-          ...asRecord(conversation.activeTask.gate),
-          status: body.confirmed === true ? "satisfied" : "rejected",
-        },
-      };
     } else if (type === "task.stop") {
       conversation.activeTurn = null;
       conversation.latestTurn = { turnId: body.turnId, status: "stopped" };

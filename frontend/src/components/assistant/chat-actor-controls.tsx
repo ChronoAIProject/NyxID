@@ -11,7 +11,6 @@ import type {
   ChatPendingInput,
 } from "@/lib/assistant/chat-actor-state";
 import type { ChatInputAnswer } from "@/lib/assistant/chat-api";
-import type { ChatPlanGate } from "@/lib/assistant/chat-task-plan";
 import type { ActionReport } from "@/schemas/assistant-actions";
 import type { InputCardContentBlock } from "@/types/assistant";
 
@@ -39,7 +38,6 @@ export function ChatActorControls({
   actionOverrides,
   onResolveInput,
   onResolveApproval,
-  onResolvePlan,
   onStop,
   onControlStep,
   onActionProgress,
@@ -59,10 +57,6 @@ export function ChatActorControls({
   readonly onResolveApproval: (
     requestId: string,
     approved: boolean,
-  ) => Promise<void>;
-  readonly onResolvePlan: (
-    confirmed: boolean,
-    gate: ChatPlanGate,
   ) => Promise<void>;
   readonly onStop: () => Promise<void>;
   readonly onControlStep: (
@@ -113,10 +107,6 @@ export function ChatActorControls({
           onSkip={(stepId) => {
             const step = projection.steps.get(stepId);
             return step ? onControlStep("step.skip", step) : Promise.resolve();
-          }}
-          onResolve={(confirmed) => {
-            const gate = projection.task?.gate;
-            return gate ? onResolvePlan(confirmed, gate) : Promise.resolve();
           }}
         />
       ) : null}
