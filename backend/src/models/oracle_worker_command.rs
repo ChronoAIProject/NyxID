@@ -39,6 +39,8 @@ pub enum OracleWorkerCommandStatus {
     Succeeded,
     Failed,
     Expired,
+    /// Withdrawn by a manager before the worker executed it.
+    Cancelled,
 }
 
 #[derive(Clone, Serialize, Deserialize)]

@@ -180,6 +180,7 @@ fn command_info(command: OracleWorkerCommand) -> OracleWorkerCommandInfo {
             OracleWorkerCommandStatus::Succeeded => "succeeded",
             OracleWorkerCommandStatus::Failed => "failed",
             OracleWorkerCommandStatus::Expired => "expired",
+            OracleWorkerCommandStatus::Cancelled => "cancelled",
         }
         .to_string(),
         delivery_count: command.delivery_count,
@@ -339,6 +340,30 @@ pub async fn enqueue_command(
         })),
     );
     Ok((StatusCode::ACCEPTED, Json(command_info(command))))
+}
+
+pub async fn cancel_command(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path((id_or_slug, label, command_id)): Path<(String, String, String)>,
+) -> AppResult<Json<OracleWorkerCommandInfo>> {
+    let actor = auth_user.user_id.to_string();
+    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
+    let command =
+        oracle_worker_service::cancel_command(&state.db, &pool.id, &label, &command_id).await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "oracle_worker_command_cancelled",
+        Some(serde_json::json!({
+            "pool_id": &pool.id,
+            "worker_label": &label,
+            "command_id": &command.id,
+            "command": command.kind.as_str(),
+            "was_delivered": command.delivery_count > 0,
+        })),
+    );
+    Ok(Json(command_info(command)))
 }
 
 pub async fn list_commands(

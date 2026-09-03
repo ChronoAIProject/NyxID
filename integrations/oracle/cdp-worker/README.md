@@ -90,6 +90,7 @@ nyxid oracle worker restart <pool> <label>
 nyxid oracle worker relaunch-browser <pool> <label>
 nyxid oracle worker relogin <pool> <label>
 nyxid oracle worker forget <pool> <label> [--force]
+nyxid oracle worker cancel-command <pool> <label> <command-id>
 nyxid oracle worker upgrade --pool <pool> [--label <label>]
 ```
 
@@ -183,9 +184,13 @@ worker.
 The pool's `--model` (or a task's `model_label`) picks the ChatGPT reasoning
 level: `chatgpt-5.5-pro` selects **Pro**; `extra high`, `high`, `medium`, and
 `instant` select those levels. The worker opens the picker with real pointer
-clicks and reports the level it actually selected as the result's model, so a
-UI change that breaks selection is visible in `nyxid oracle result` instead of
-silently answering on Instant.
+clicks, verifies the picker closed and the composer pill shows the level, and
+reports the level it actually selected as the result's model, so a UI change
+that breaks selection is visible in `nyxid oracle result` instead of silently
+answering on Instant. Selection is best-effort and time-bounded: it never
+leaves a menu covering the composer and never consumes the task's retry
+budget; `worker logs` records the picker's visible labels when it cannot find
+the level.
 
 ## Result artifacts
 

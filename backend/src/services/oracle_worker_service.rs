@@ -668,6 +668,7 @@ pub async fn apply_command_reports(
             OracleWorkerCommandStatus::Succeeded
                 | OracleWorkerCommandStatus::Failed
                 | OracleWorkerCommandStatus::Expired
+                | OracleWorkerCommandStatus::Cancelled
         ) {
             reconcile_desired_state(db, &existing).await?;
             continue;
@@ -772,6 +773,93 @@ pub async fn forget_worker(
         sessions_released,
         tasks_released,
     })
+}
+
+/// Withdraw a queued or delivered-but-unexecuted command. A delivered
+/// command may already sit in the worker's journal; the worker learns of the
+/// cancellation on its next heartbeat and drops it. Commands the worker has
+/// already settled cannot be cancelled.
+pub async fn cancel_command(
+    db: &mongodb::Database,
+    pool_id: &str,
+    worker_label: &str,
+    command_id: &str,
+) -> AppResult<OracleWorkerCommand> {
+    if !valid_metadata(command_id) {
+        return Err(AppError::ValidationError(
+            "command_id contains unsupported characters".to_string(),
+        ));
+    }
+    let now = Utc::now();
+    let commands = db.collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS);
+    let cancelled = commands
+        .find_one_and_update(
+            doc! {
+                "_id": command_id,
+                "pool_id": pool_id,
+                "worker_label": worker_label,
+                "status": { "$in": ["queued", "delivered"] },
+            },
+            doc! { "$set": {
+                "status": "cancelled",
+                "result_code": "cancelled_by_manager",
+                "completed_at": bson::DateTime::from_chrono(now),
+                "expires_at": bson::DateTime::from_chrono(now + Duration::days(COMMAND_RETENTION_DAYS)),
+                "updated_at": bson::DateTime::from_chrono(now),
+            } },
+        )
+        .with_options(
+            FindOneAndUpdateOptions::builder()
+                .return_document(ReturnDocument::After)
+                .build(),
+        )
+        .await?;
+    let Some(command) = cancelled else {
+        return match commands
+            .find_one(doc! { "_id": command_id, "pool_id": pool_id, "worker_label": worker_label })
+            .await?
+        {
+            Some(existing) => Err(AppError::Conflict(format!(
+                "command {command_id} is already {}",
+                match existing.status {
+                    OracleWorkerCommandStatus::Succeeded => "succeeded",
+                    OracleWorkerCommandStatus::Failed => "failed",
+                    OracleWorkerCommandStatus::Expired => "expired",
+                    OracleWorkerCommandStatus::Cancelled => "cancelled",
+                    _ => "settled",
+                }
+            ))),
+            None => Err(AppError::OracleWorkerCommandNotFound(
+                command_id.to_string(),
+            )),
+        };
+    };
+    reconcile_desired_state(db, &command).await?;
+    Ok(command)
+}
+
+/// Recently cancelled commands that had already been delivered, so a worker
+/// still holding one can drop it. Bounded and short-lived.
+pub async fn recently_cancelled_delivered(
+    db: &mongodb::Database,
+    pool_id: &str,
+    worker_label: &str,
+) -> AppResult<Vec<String>> {
+    let since = Utc::now() - Duration::hours(COMMAND_DEADLINE_HOURS);
+    let commands: Vec<OracleWorkerCommand> = db
+        .collection::<OracleWorkerCommand>(ORACLE_WORKER_COMMANDS)
+        .find(doc! {
+            "pool_id": pool_id,
+            "worker_label": worker_label,
+            "status": "cancelled",
+            "delivery_count": { "$gt": 0 },
+            "completed_at": { "$gt": bson::DateTime::from_chrono(since) },
+        })
+        .with_options(FindOptions::builder().limit(16).build())
+        .await?
+        .try_collect()
+        .await?;
+    Ok(commands.into_iter().map(|command| command.id).collect())
 }
 
 pub async fn list_commands(
@@ -1321,6 +1409,123 @@ mod tests {
         forget_worker(&db, &pool, &stale.worker_label, false)
             .await
             .unwrap();
+        db.drop().await.ok();
+    }
+    #[tokio::test]
+    async fn cancel_withdraws_queued_and_delivered_commands() {
+        let Some(db) = connect_test_database("oracle_worker_cancel").await else {
+            return;
+        };
+        let pool = pool();
+        let worker = allocate_worker(&db, &pool, Some("cancel-1"))
+            .await
+            .unwrap()
+            .worker;
+        report_presence(
+            &db,
+            &pool,
+            WorkerPresenceInput {
+                worker_label: worker.worker_label.clone(),
+                capabilities: vec!["commands_v1".to_string(), "upgrade_v1".to_string()],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let queued = enqueue_command(
+            &db,
+            &pool.id,
+            &pool.user_id,
+            &worker.worker_label,
+            OracleWorkerCommandKind::Upgrade,
+            None,
+            Some(("v".to_string(), "a".repeat(64))),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !accepts_new_tasks(&db, &pool.id, &worker.worker_label)
+                .await
+                .unwrap()
+        );
+        let cancelled = cancel_command(&db, &pool.id, &worker.worker_label, &queued.id)
+            .await
+            .unwrap();
+        assert_eq!(cancelled.status, OracleWorkerCommandStatus::Cancelled);
+        assert!(
+            accepts_new_tasks(&db, &pool.id, &worker.worker_label)
+                .await
+                .unwrap()
+        );
+        // A cancelled queued command is never delivered.
+        let capabilities = vec!["commands_v1".to_string(), "upgrade_v1".to_string()];
+        assert!(
+            deliver_next_command(&db, &pool.id, &worker.worker_label, &capabilities)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            recently_cancelled_delivered(&db, &pool.id, &worker.worker_label)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let again = cancel_command(&db, &pool.id, &worker.worker_label, &queued.id)
+            .await
+            .unwrap_err();
+        assert!(matches!(again, AppError::Conflict(_)));
+
+        // A delivered command can still be withdrawn; the worker hears via heartbeat.
+        let delivered = enqueue_command(
+            &db,
+            &pool.id,
+            &pool.user_id,
+            &worker.worker_label,
+            OracleWorkerCommandKind::Restart,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        deliver_next_command(&db, &pool.id, &worker.worker_label, &capabilities)
+            .await
+            .unwrap()
+            .expect("delivery");
+        cancel_command(&db, &pool.id, &worker.worker_label, &delivered.id)
+            .await
+            .unwrap();
+        assert_eq!(
+            recently_cancelled_delivered(&db, &pool.id, &worker.worker_label)
+                .await
+                .unwrap(),
+            vec![delivered.id.clone()]
+        );
+        // A late success report for a cancelled command is ignored.
+        apply_command_reports(
+            &db,
+            &pool.id,
+            &worker.worker_label,
+            vec![CommandReport {
+                command_id: delivered.id.clone(),
+                succeeded: true,
+                result_code: Some("restarting".to_string()),
+            }],
+        )
+        .await
+        .unwrap();
+        let listed = list_commands(&db, &pool.id, Some(&worker.worker_label))
+            .await
+            .unwrap();
+        assert!(
+            listed
+                .iter()
+                .all(|c| c.status == OracleWorkerCommandStatus::Cancelled)
+        );
+        let missing = cancel_command(&db, &pool.id, &worker.worker_label, "nope")
+            .await
+            .unwrap_err();
+        assert!(matches!(missing, AppError::OracleWorkerCommandNotFound(_)));
         db.drop().await.ok();
     }
 }

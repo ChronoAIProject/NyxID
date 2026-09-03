@@ -553,6 +553,36 @@ async fn run_worker(command: OracleWorkerCommands) -> Result<()> {
         OracleWorkerCommands::RelaunchBrowser { pool, label, auth } => {
             queue_worker_command(&pool, &label, "relaunch_browser", auth).await
         }
+        OracleWorkerCommands::CancelCommand {
+            pool,
+            label,
+            command_id,
+            auth,
+        } => {
+            let output = auth.output;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let response: Value = api
+                .delete(&format!(
+                    "{}/commands/{}",
+                    worker_path(&pool, &label),
+                    urlencoding::encode(&command_id)
+                ))
+                .await?;
+            match output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                OutputFormat::Table => eprintln!(
+                    "Cancelled {} command {} ({}).",
+                    text_field(&response, "command"),
+                    text_field(&response, "id"),
+                    if response["delivery_count"].as_u64().unwrap_or(0) > 0 {
+                        "already delivered; the worker drops it on its next heartbeat"
+                    } else {
+                        "never delivered"
+                    }
+                ),
+            }
+            Ok(())
+        }
         OracleWorkerCommands::Forget {
             pool,
             label,
@@ -826,9 +856,10 @@ fn print_worker(output: OutputFormat, worker: &Value, commands: &Value) -> Resul
     if !recent.is_empty() {
         let mut table = Table::new();
         table.load_preset(UTF8_FULL_CONDENSED);
-        table.set_header(["Command", "Status", "Result", "Deliveries", "Created"]);
+        table.set_header(["ID", "Command", "Status", "Result", "Deliveries", "Created"]);
         for command in recent.into_iter().take(10) {
             table.add_row([
+                text_field(&command, "id"),
                 text_field(&command, "command"),
                 text_field(&command, "status"),
                 text_field(&command, "result_code"),

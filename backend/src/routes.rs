@@ -1611,6 +1611,10 @@ fn build_router_internal(
                     .post(handlers::oracle_workers::enqueue_command),
             )
             .route(
+                "/pools/{id_or_slug}/workers/{label}/commands/{command_id}",
+                delete(handlers::oracle_workers::cancel_command),
+            )
+            .route(
                 "/pools/{id_or_slug}/login-snapshots",
                 post(handlers::oracle_workers::upload_login_snapshot).layer(DefaultBodyLimit::max(
                     crate::services::oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS
