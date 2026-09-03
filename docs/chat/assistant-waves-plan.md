@@ -4,13 +4,25 @@
 - **Contract of record:** gist `ctkm-aelf/b4dd5182…`, revision `f45febb0` (verified current head, untouched since 2026-08-06)
 - **Issues:** #1400 (Wave 1 / NyxID deliverables), #1403 (Wave 2), #1401 (Wave 3), #1402 (Wave 4)
 
-**Bottom line.** NyxID's Wave-1 side is code-complete; the deploy lock is smaller than believed (Aevatar already validates an accepted-revision *set*, and the v8 pin is already merged to `feature/integrate`); the loader provably skips unknown manifest actions, so wave descriptors can merge to main continuously without touching the revision string. The four teams should ship **the revision-negotiation endpoint plus a trimmed Wave 2 (12 of 15 verbs)** — not Waves 2+3+4. Measured cost of the last two single-verb PRs is ~4.1–4.4k added LOC each; three full waves ≈ 53 verbs is not a four-team increment.
+**Bottom line.** NyxID's Wave-1 side is code-complete. Aevatar's current loader
+treats `schema_version` as the only registry-wide gate, treats `revision` as an
+observability label, and degrades unknown or divergent descriptors per action.
+Startup retries three times, then pins a disabled fallback and recovers in the
+background. Wave descriptors can merge to the default manifest without a
+revision bump. `plan.resolve` and `POST /api/v1/assistant/completions` are
+retired NyxID surfaces, not current contract. The four teams should ship a
+trimmed Wave 2 (12 of 15 verbs), not Waves 2+3+4. Measured cost of the last two
+single-verb PRs is about 4.1k to 4.4k added LOC each. Three full waves total
+about 53 verbs, which is not a four-team increment.
 
 ---
 
 ## 1. Verified state table
 
-Every claim re-verified against origin/main `c9776b49` (and Aevatar `origin/feature/integrate` / `origin/dev`, fetched 2026-08-20). Corrections are called out in bold.
+The original state table records sources fetched on 2026-08-20. AC-1 registry
+corrections were re-verified against Aevatar `feature/integrate` at
+`e5bba2e9719ad5132004b882744caa3875db1123` on 2026-09-03. Corrections are
+called out in bold.
 
 | # | Claim | Verdict | Evidence |
 |---|---|---|---|
@@ -24,8 +36,8 @@ Every claim re-verified against origin/main `c9776b49` (and Aevatar `origin/feat
 | 8 | Issues drop Wave 0; G1 undecided, G2 absent, G7 not started | **Confirmed, with G1 nuance** | No issue mentions Wave 0/G1/G2/G7. `nyx__list_api_keys` / `nyx__readiness`: zero hits in the tree. G7's trigger persists: `nyx__connect_service` still takes a raw `credential` string (`backend/src/services/mcp_service.rs:1869-1891`). G1 is **de facto decided as fork (b)** — see #9. |
 | 9 | Fork (b) chosen by construction, never written down | **Confirmed** | Wave 1 postconditions shipped as hardened REST projections + delegated `account:read` GET admission, consumed by Aevatar's REST reader; the MCP `nyx__*` G2 built-ins were never built. `docs/chat/06-actions-registry.md:188-216` documents the REST evidence reads as the operative contract. Recording this is a docs deliverable (§3). |
 | 10 | #1464 finding: detail responses unsafe as evidence | **Confirmed from code** | Reader runs a recursive secret-shape scan (`Bearer\s+\S+`, `nyxid_` prefix) over the whole document: doc comments at `handlers/keys.rs:567-587` and `handlers/api_keys.rs:351-368`, incl. the `name` irreducible remainder. Whether *every* family needs a projection is now answered per family in §6: **yes for every Wave 2/3/4 family except (marginally) notifications.** |
-| 11 | Deploy lock: Aevatar pins one string by exact equality; #3496 (v8 pin) open and blocking | **Materially corrected** | (a) Aevatar validates **set membership**, not a single string: `PinnedActionsByRevision.TryGetValue(revision, …)` with per-revision pinned + executable sets (`NyxIdAssistantActionRegistry.cs`, `feature/integrate`). `origin/dev` accepts {v4…v7}; `origin/feature/integrate` accepts {v4…v8}. (b) The v8 pin is **already merged to `feature/integrate`** as commit `418cab838` "Pin NyxID assistant registry v8 and keep service.reauthorize closed"; open PR #3496's head is *not* an ancestor of `feature/integrate` (overlapping/likely superseded content — needs an upstream disposition ask). #3497 (draft, stacked on #3496) is the step that makes reauthorize *executable*; until it lands, v8 pins reauthorize dormant. (c) "Main cannot be deployed today" is true only relative to the deployed dev-lineage composition (accepts ≤v7); the unblock is the routine `feature/integrate`→`dev` merge (last one, #3467 on 08-15, predates `418cab838`) + deploy — not #3496 per se. |
-| 12 | Manifest content additive/tolerant; string is the tripwire | **Confirmed at code level — and stronger than stated** | Loader: unknown wire action, or action not in the served revision's pinned set → `continue` (skipped, not fatal); `tier`/`risk`/schema validation and `DeepEquals` run **only for pinned actions**. Consequence (load-bearing for §5/§7): **NyxID can append fully-formed new descriptors to the live manifest under the unchanged v8 string; every current Aevatar composition skips them.** Only NyxID's own test rail (`SUPPORTED_ACTIONS`, `assistant_actions.rs:181-196`) must be extended first. |
+| 11 | Deploy lock: Aevatar pins one string by exact equality; #3496 (v8 pin) open and blocking | **Superseded by AC-0 and AC-1** | Current Aevatar `Load` does not fail the registry on revision mismatch. `schema_version` is the only registry-wide gate. `revision` is an observability label. Startup retries, then installs a disabled fallback and recovers later. |
+| 12 | Manifest content additive/tolerant; string is the tripwire | **Confirmed, and stronger** | Unknown wire actions are skipped. Known actions whose descriptors diverge are skipped per action and recorded. NyxID can append fully-formed new descriptors to the live manifest under the unchanged v8 string. |
 | 13 | Never modify a shipped verb's `params_schema`; browser may be stricter than manifest | **Confirmed** | `JsonNode.DeepEquals` pin + browser-only rules at `docs/chat/06-actions-registry.md:163-186`. History note: `key.create`'s schema did change v5→v6 (least-scope `minItems`), coordinated while the verb was not yet executable in a deployed composition — the rule binds for shipped-and-deployed verbs. |
 | 14 | (New) Allowlist arithmetic for the waves | **New finding** | Wave 2: only 1 of 15 verbs (`provider.set_app_credentials`) is in the 14-name parser allowlist; the other 14 need both the NyxID rail and Aevatar's `SupportedActions` extended. Wave 3: 4 of 8 allowlisted (`node.register_token`, `node.rotate_token`, `node.inject_credential`, `device.onboard`); `node.delete`, `node.transfer`, `pending_credential.push/.cancel` are not — the gist's "Waves 1 and 3 draw only from it" contradicts its own Wave-3 list. Allowlist extensions are upstream-parser work and must ride the consumer wave issues. |
 
@@ -39,9 +51,9 @@ The intake bot declined #1401/#1403 specifically on production canaries + deploy
 
 > ## Acceptance
 >
-> NyxID-side closure requires, per verb: grammar-safe descriptor merged **dormant** under the current registry revision (no revision bump in wave PRs); browser card + human-session journey; exactly one typed safe resource reference; an authoritative postcondition read on the family's hardened evidence projection (never the full detail response); and local integration tests proving typed read-back, exact-retry receipt replay, and the negative set (secret-shaped params, stale identity, conflicting-content replay, unauthorized scope) against a local replica-set backend. Utterance→route and honesty fixtures per contract §10 land in the matching Aevatar wave issue.
+> Each verb needs a grammar-safe descriptor published additively under the current registry revision, a browser card and human-session journey, and one typed safe resource reference. Each verb also needs an authoritative postcondition read on the family's hardened evidence projection, never the full detail response. Local replica-set integration tests must prove typed read-back, exact-retry receipt replay, and the negative cases. Those cases cover secret-shaped params, stale identity, conflicting-content replay, and unauthorized scope. Utterance-to-route and honesty fixtures per contract §10 land in the matching Aevatar wave issue.
 >
-> The registry revision bump for this wave is a separate, single-line PR gated on the cross-repo handshake (Aevatar ships acceptance of the new revision first, or the revision-negotiation endpoint is live and Aevatar fetches its pinned revision explicitly). Production rollout and verification are tracked in the handshake issue, not here; a descriptor or card mock alone is still not shipped.
+> Aevatar skips unknown descriptors and degrades divergent known descriptors per action. No registry revision bump or cross-repository revision handshake gates an additive descriptor. Production rollout and verification remain separate work. A descriptor or card mock alone is still not shipped.
 
 ### #1401 (Wave 3) — same Acceptance replacement as #1403, plus strike from **Required artifacts**:
 
@@ -56,7 +68,7 @@ The intake bot declined #1401/#1403 specifically on production canaries + deploy
 
 ### #1400 — no acceptance edits; add one clarifying comment:
 
-> NyxID side verified code-complete on main `c9776b49` (items 1–3 incl. the 2026-08-07 revision; #1405/#1406 closed). Remaining: the deploy handshake. Note the v8 pin is already on aevatar `feature/integrate` (`418cab838`); please confirm whether aevatar#3496 is superseded by it, and land the `feature/integrate`→`dev` merge + deploy before NyxID main deploys. aevatar#3497 is still required before `service.reauthorize` becomes executable (v8 pins it dormant).
+> NyxID side verified code-complete on main `c9776b49` for items 1 through 3, including the 2026-08-07 revision. #1405 and #1406 are closed. The current Aevatar loader does not gate on the revision label. Track deployment proof separately. `service.reauthorize` remains non-executable until its typed producer and postcondition path land upstream.
 
 Additionally, all three wave issues should gain one scope line: "Wave 0 is superseded for this wave: postconditions ride the fork-(b) REST evidence-projection pattern established by Wave 1 (see docs/chat/assistant-waves-plan.md §3); no MCP-client, `nyx__*` built-in, or planner-allowlist work is a prerequisite."
 
@@ -77,43 +89,41 @@ Additionally, all three wave issues should gain one scope line: "Wave 0 is super
 
 ---
 
-## 4. Revision-negotiation design
+## 4. Registry compatibility contract
 
-**What already exists (correcting the premise).** Aevatar (`feature/integrate`) validates the fetched revision by set membership over `PinnedActionsByRevision` {v4…v8}, validates schemas only for pinned actions, skips unknown actions, and keeps a per-revision executable subset (so v8 carries `service.reauthorize` dormant). Aevatar has even minted its own composition namespace (`aevatar-nyxid-actions.v1`). **The Aevatar half of negotiation is built.** What is missing:
+Aevatar fetches the bare `GET /api/v1/assistant/actions` path.
+`schema_version` is the only registry-wide compatibility gate. `revision` is
+an observability label, so a future or missing value does not reject the
+registry. The loader ignores unknown action names. It records and skips a known
+descriptor when its shape, policy, or pinned schema diverges. Every other valid
+descriptor remains loaded.
 
-- **NyxID side:** the endpoint serves only the latest composition. A deployed Aevatar that does not yet know revision N+1 hard-fails startup the moment NyxID deploys N+1. This forces "Aevatar always deploys first" as fragile choreography (exactly what broke: NyxID main hit v8 on 08-19 while the deployed lineage accepts ≤v7).
-- **Aevatar side (small consumer ask):** the startup fetch requests the bare path; it cannot ask for the revision it actually supports.
+The startup service tries the fetch three times. If all attempts fail, it pins
+a disabled fallback registry and retries in the background with capped
+exponential delay. The first valid response may replace only that fallback. A
+served registry remains pinned for the process lifetime.
 
-### Design: historical compositions on the same route
+NyxID still supports `GET /api/v1/assistant/actions?revision=<r>` for its own
+historical compositions. Aevatar does not use that query as a negotiation or
+load gate. New descriptors may ship additively under the current revision.
+They become executable only after Aevatar has the matching contract, producer,
+wire mapper, and postcondition reader.
 
-`GET /api/v1/assistant/actions?revision=<r>`:
+### Test cases
 
-- No param → latest body, byte-identical to today (zero risk to current consumers).
-- Known `<r>` → a composition with `revision: <r>` and **that revision's action-name set, serialized with the *current* schemas/descriptions**. Not historical bytes: schemas changed v5→v6, and Aevatar's `DeepEquals` compares against its single compiled constant per action — current bytes are the only ones that can pass. Note v7's set is {connect, key.create, key.rotate}: **not a prefix** of the current array (reauthorize sits at index 1), so the implementation is a static `revision → action-name set` map mirroring Aevatar's `PinnedActionsByRevision`, with per-revision bodies pre-serialized in the existing `LazyLock` pattern.
-- Unknown `<r>` → 404 with a stable error body; malformed/oversized (>128 chars, control chars) → 400.
-- Rate-limit exemption is exact-path (`mw/rate_limit.rs`); query strings don't change the path — verify with a test, no change expected.
-- Contract addition to `docs/chat/06-actions-registry.md`: published revisions are immutable (action set never edited), sets are monotone (each ⊆ the next), waves only append.
+| Name | Asserts |
+|---|---|
+| `default_manifest_action_names_match_consumer_fixture_golden` | The additive default manifest keeps every descriptor name. |
+| `default_manifest_matches_aevatar_chat_contract_pin` | The manifest uses the pinned schema version, revision semantics, and per-action degrade behavior. |
+| `known_descriptors_are_accepted_by_the_per_action_consumer` | Every descriptor name supported at the pinned Aevatar head loads from the default manifest. |
+| `unknown_descriptors_are_skipped_without_disabling_known_actions` | An additive unknown name does not change the accepted known set. |
+| `divergent_descriptors_degrade_per_action` | A divergent known descriptor is skipped while sibling actions remain loaded. |
+| `schema_version_gates_the_registry` | A schema mismatch rejects the registry, while a future revision label does not. |
 
-**Upstream consumer ask (file on aevatarAI/aevatar):** startup source appends `?revision={SupportedRegistryRevision}`; on 404 (older NyxID without the feature), fall back to the bare fetch + existing set-membership validation. One URL-builder change + fallback.
-
-**Resulting protocol — two independent deploys, permanently:** NyxID may deploy any time (history keeps serving every pinned composition); Aevatar may deploy any time (it fetches the composition it supports). Wave cadence becomes: descriptors merge dormant continuously under the current string (safe per §1 row 12); one single-line revision-bump PR per wave, mergeable the moment either the upstream fetch change is deployed or upstream ships acceptance of the new revision.
-
-**Immediate v8 unblock (process, not code, and not gated on this feature):** confirm the deployed Aevatar composition includes `418cab838` (needs a `feature/integrate`→`dev` merge later than #3467 + deploy), then NyxID main is deployable. `service.reauthorize` stays dormant until aevatar#3497.
-
-### Test cases (NyxID, concrete)
-
-| # | Name | Kind | Asserts |
-|---|---|---|---|
-| 1 | `assistant_actions_default_body_is_byte_identical_to_golden` | regression | bare GET == existing golden manifest, byte-for-byte |
-| 2 | `assistant_actions_revision_v7_serves_exact_action_set_with_current_schemas` | unit | `?revision=…v7` → revision field `v7`, actions == {connect, key.create, key.rotate}, each `params_schema` deep-equal to the current constants |
-| 3 | `assistant_actions_revision_v4_serves_service_connect_only` | unit | singleton set, current schema |
-| 4 | `assistant_actions_unknown_revision_returns_404_stable_error` | negative | `?revision=…v3` → 404, error body, no manifest content |
-| 5 | `assistant_actions_malformed_revision_param_returns_400` | negative | 129-char value; value with control chars |
-| 6 | `assistant_actions_every_published_revision_passes_parser_contract` | fixture | run `assert_manifest_conforms` over every historical body |
-| 7 | `assistant_actions_revision_sets_are_monotone_append_only` | invariant | for consecutive revisions rᵢ ⊆ rᵢ₊₁ |
-| 8 | `assistant_actions_revision_sets_match_aevatar_pinned_fixture` | drift | checked-in fixture mirroring `PinnedActionsByRevision`; diff fails the build |
-| 9 | `assistant_actions_route_with_query_remains_rate_limit_exempt` | integration | exemption unaffected by query string |
-| 10 | `assistant_actions_dormant_descriptor_is_served_but_absent_from_all_pinned_sets` | invariant | any action not in the latest revision's set is by definition dormant; guards the wave-merge protocol |
+Earlier revisions of this plan proposed a synchronized revision map and a
+consumer `?revision=` request. AC-1 removed those assumptions because a checked-in
+copy could not detect upstream drift and the pinned consumer no longer uses
+revision equality.
 
 ---
 
@@ -121,11 +131,21 @@ Additionally, all three wave issues should gain one scope line: "Wave 0 is super
 
 ### Scope decision (the numbers)
 
-Measured: ~4.1–4.4k added LOC per hardened verb (#1423; #1462+#1464). Assume 40–60% marginal savings from established receipt/evidence/journey patterns → **1.8–2.6k LOC/verb realistic**. Wave 2 (15) ≈ 27–39k; Wave 3 (8) ≈ 14–21k; Wave 4 (~30, incl. org ACLs and destructive `account.delete`) ≈ 55k+. Four teams cannot honestly ship 53 verbs in one increment. **Recommendation: this increment = negotiation + Wave 2 trimmed to 12 verbs.** Deferred from Wave 2 with reasons: `connection.revoke` and `provider.disconnect` (they mutate the *legacy* collections — `connections.rs`, `providers.rs`; re-scope after the unified-migration decision rather than build cards over surfaces slated for deletion, FI-007), and `provider.set_app_credentials` (the one already-allowlisted verb, but a secret-bearing journey of a different shape — batch it with Wave 4's `external_key.add_gcp_service_account`). Waves 3/4 are re-planned after re-measuring Wave-2 marginal cost.
+The last two hardened verbs added about 4.1k to 4.4k lines each in #1423,
+#1462, and #1464. A 40% to 60% marginal saving from the established receipt,
+evidence, and journey patterns puts each later verb at about 1.8k to 2.6k
+lines. Wave 2 has 15 verbs, Wave 3 has 8, and Wave 4 has about 30. Four teams
+cannot ship all 53 verbs in one increment. This increment should contain the
+registry contract correction and 12 Wave-2 verbs. Defer `connection.revoke`
+and `provider.disconnect` because they mutate the legacy collections in
+`connections.rs` and `providers.rs`. Revisit them after the unified migration
+decision. Defer the secret-bearing `provider.set_app_credentials` journey with
+Wave 4's `external_key.add_gcp_service_account`. Re-plan Waves 3 and 4 after
+measuring the Wave-2 cost.
 
 ### PM pre-landed shared contracts (WS-0 — merged before any team dispatches)
 
-1. **Registry descriptor block:** all 12 Wave-2 descriptors appended dormant to `assistant_actions.rs` under unchanged v8; `SUPPORTED_ACTIONS` rail extended with the 12 names; golden-manifest test updated. (Safe per §1 row 12; single hottest shared file leaves team ownership entirely.)
+1. **Registry descriptor block:** all 12 Wave-2 descriptors appended additively to `assistant_actions.rs` under unchanged v8; `SUPPORTED_ACTIONS` rail extended with the 12 names; golden-manifest test updated. Current Aevatar builds skip unsupported names per action. The single shared file stays under one team.
 2. **Zod envelope:** `frontend/src/schemas/assistant-actions.ts` extended with all 12 param/report shapes (schema only, no journeys).
 3. **Route nests:** `routes.rs` gains three one-line nests → `handlers/assistant_action_effects_keys.rs`, `_services.rs`, `_endpoints.rs`, each exporting a `router()` the owning team fills (routes.rs never touched again this increment). Confirm billing route-inventory coverage for nested routers at land time.
 4. **Receipt helper:** extract/bless the durable secret-free receipt pattern from the existing key-create/rotate effects (`handlers/assistant_action_effects.rs`) into a shared service if not already one.
@@ -133,12 +153,12 @@ Measured: ~4.1–4.4k added LOC per hardened verb (#1423; #1462+#1464). Assume 4
 
 Ground rules for every team: never `git add -A`; stage only owned files, commit atomically; no team edits `assistant_actions.rs`, `routes.rs`, or `schemas/assistant-actions.ts` (Team 1 excepted for the first); no PR bumps `ASSISTANT_ACTIONS_REVISION`; frontend gate is `npm run build` (not `tsc --noEmit`); backend tests need replica-set Mongo + `NYXID_TEST_DATABASE_URL` (~5000 failures in ~13s = connection failure); no frontend dep/lockfile changes (wizard freshness) — none of the owned files are in the wizard graph (`wizard-entry.tsx` does not import `components/assistant/`).
 
-### Team 1 — Revision negotiation (backend-only; no e2e)
+### Team 1. Registry contract correction
 
-- **Scope:** §4 in full: revision map, `?revision=` serving, tests 1–10, `docs/chat/06-actions-registry.md` negotiation + fork-(b) ADR section, drafted upstream consumer-ask issue text (PM files it).
-- **Files owned:** `backend/src/handlers/assistant_actions.rs`, `docs/chat/06-actions-registry.md`, new fixture file for the Aevatar pinned-set mirror.
-- **Interface contracts:** revision-set map is append-only and mirrors Aevatar; Teams 2–4 never depend on it (their verbs are dormant regardless).
-- **Acceptance:** tests 1–10 green; default body byte-identical; docs updated; consumer-ask text delivered.
+- **Scope.** Preserve NyxID's historical composition query, delete synchronized revision-map assertions, add a default-manifest golden, and test known, unknown, and divergent descriptors independently.
+- **Files owned.** `backend/src/handlers/assistant_actions.rs`, `docs/chat/06-actions-registry.md`, and `tests/fixtures/assistant/aevatar-pinned-actions-by-revision.json`.
+- **Interface contracts.** `schema_version` gates the registry. `revision` is an observability label. Unknown or divergent descriptors degrade per action.
+- **Acceptance.** The default manifest keeps every additive descriptor, per-action tests pass, and the docs match the pinned Aevatar source.
 
 ### Team 2 — Wave 2 keys family (4 verbs: `key.update`, `key.delete`, `key.extend_scope`, `key.bind_credential`)
 
@@ -191,25 +211,17 @@ Criterion: the postcondition reader secret-scans the entire document (`Bearer\s+
 ## 7. Sequencing
 
 ```
-[now]      #1400 handshake (ops, no NyxID code):
-           confirm deployed Aevatar ≥ 418cab838 (feature/integrate→dev merge later
-           than #3467, + deploy)  ──►  NyxID main deployable (v8)
-           upstream disposition ask: is #3496 superseded? #3497 still required
-           before service.reauthorize is executable.
+[now]      AC-0 pins the Aevatar source head, public commands, and registry
+           semantics used by every later phase.
 
-[gate 0]   WS-0 (PM): dormant descriptors + rails + zod envelope + route nests +
+[gate 0]   AC-1 removes obsolete commands and revision-map assumptions. The
+           default-manifest golden and per-action tests preserve additive load.
+
+[gate 1]   WS-0 (PM): additive descriptors + rails + zod envelope + route nests +
            receipt helper. Merges FIRST. Teams dispatch only after.
 
-[parallel] Team 1 (negotiation)  ─ merge anytime after WS-0; MUST precede any
-                                   future revision bump; file upstream fetch ask.
-           Teams 2/3/4           ─ per-verb PRs merge continuously (dormant verbs,
-                                   revision untouched — safe per §1 row 12).
-
-[gate 1]   Wave-2 revision bump (v9): one single-line PR + revision-map entry.
-           Merge ONLY after (a) upstream merges v9 acceptance for the 12 verbs
-           (incl. SupportedActions parser extension — 11 of 12 names are outside
-           the current 14), OR (b) upstream ?revision= fetch change is deployed.
-           Until then v9 must not exist on main.
+[parallel] Teams 2/3/4           per-verb PRs merge continuously. Aevatar skips
+                                  unknown names until its typed support lands.
 
 [always]   Do-not-merge-before rules:
            - no wave PR touches ASSISTANT_ACTIONS_REVISION, assistant_actions.rs,
@@ -262,10 +274,10 @@ upstream changes. Requires an upstream ask.
 
 ### Per-stream
 
-- **T1 revision negotiation — FIXED (`eb3ff7a2`).** Served v5 composition used the
-  *current* `key.create` schema, but Aevatar does per-revision schema selection
-  (`ValidatePinnedContract`): v4/v5 pin the old schema, v6/v7/v8 the least-scope one.
-  A 200 that then fails `DeepEquals` disables the whole registry at startup.
+- **T1 revision negotiation.** The earlier exact-revision design was superseded
+  by AC-1. Aevatar now uses `DeepEquals` only to decide whether one known
+  descriptor loads. A mismatch skips that action and leaves sibling actions
+  enabled.
 - **T2 keys** — state-version fence non-atomic (lost update); `expected_state_version`
   absent from fingerprint; binding evidence unmounted and unaddressable from the
   report; `bind_credential` accepted revoked credentials then confirmed the binding.
