@@ -362,6 +362,7 @@ function defaultState() {
     format_version: 1,
     instance_id: loadInstallationId(),
     draining: false,
+    drain_requested: false,
     current_task: null,
     pending_command: null,
     pending_reports: [],
@@ -1065,65 +1066,207 @@ async function clickMatchingLevel(page, targets) {
   return null;
 }
 
-// Select the reasoning level for a task. Returns the menu text that was
-// clicked (reported back as the task's model), or null when the picker was
-// unavailable or had no matching level, in which case the current level is
-// used. All clicks are REAL Playwright pointer clicks: the picker is a Radix
-// menu that ignores synthetic element.click() from page.evaluate, which is
-// exactly how the previous implementation silently left every task on the
-// default level.
-async function selectModel(page, modelLabel) {
-  try {
-    await page.bringToFront().catch(() => {});
-    const targets = modelLevelTargets(modelLabel);
-    if (!targets.length) return null;
-    log(`selecting model "${modelLabel}" -> level "${targets[0]}"`);
+const MODEL_SELECT_TIMEOUT_MS = Number(process.env.NYXID_MODEL_SELECT_TIMEOUT_MS || 25000);
 
-    let opened = false;
-    for (const selector of ['button.__composer-pill[aria-haspopup="menu"]', 'button[aria-haspopup="menu"]']) {
-      const buttons = page.locator(selector);
-      const count = await buttons.count();
-      for (let i = 0; i < count && !opened; i++) {
-        const button = buttons.nth(i);
-        try {
-          if (!(await button.isVisible())) continue;
-          const text = ((await button.innerText({ timeout: 1000 })) || "").trim();
-          if (!/instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text)) continue;
-          await button.click({ timeout: 5000 });
-          if (await waitForModelMenu(page, 5000)) opened = true;
-        } catch (e) {}
-      }
-      if (opened) break;
-    }
-    if (!opened) {
-      log(`model picker unavailable for "${modelLabel}", using current`);
+async function visibleMenuTexts(page) {
+  try {
+    return await page.evaluate(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      };
+      return Array.from(
+        document.querySelectorAll('[role="menuitemradio"], [role="menuitem"], [role="option"]')
+      )
+        .filter(visible)
+        .map((el) => (el.innerText || el.textContent || "").trim().replace(/\s+/g, " "))
+        .filter(Boolean)
+        .slice(0, 24);
+    });
+  } catch {
+    return [];
+  }
+}
+
+async function menuIsOpen(page) {
+  try {
+    return await page.locator('[role="menu"], [role="listbox"]').first().isVisible();
+  } catch {
+    return false;
+  }
+}
+
+// Text of the composer's model pill (the picker trigger), used to skip the
+// menu when the level is already right and to verify a selection took.
+async function modelPillText(page) {
+  try {
+    return await page.evaluate(() => {
+      const visible = (el) => {
+        const r = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      };
+      const pill =
+        document.querySelector('button.__composer-pill[aria-haspopup="menu"]') ||
+        Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find((btn) => {
+          const text = (btn.innerText || btn.textContent || "").trim();
+          return visible(btn) && text.length > 0 && text.length < 40 &&
+            /instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text);
+        });
+      return pill && visible(pill) ? (pill.innerText || pill.textContent || "").trim() : "";
+    });
+  } catch {
+    return "";
+  }
+}
+
+// Canonical picker levels, longest aliases first so "Extra High" is detected
+// before "High" and "Pro 扩展" before "扩展".
+const MODEL_LEVELS = [
+  ["Extra High", "超高"],
+  ["Pro", "Pro 扩展", "扩展"],
+  ["High", "高级"],
+  ["Medium", "均衡"],
+  ["Instant", "极速"],
+];
+
+// Which canonical level a pill/menu label shows, or null.
+export function detectPillLevel(text) {
+  const hay = normalizeMenuText(text);
+  if (!hay) return null;
+  for (const aliases of MODEL_LEVELS) {
+    if (aliases.some((alias) => hay.includes(normalizeMenuText(alias)))) return aliases[0];
+  }
+  return null;
+}
+
+// Whether a pill/menu label reflects the wanted level. Known levels compare
+// canonically ("Extra High" never satisfies "High"); custom labels fall back
+// to a containment check.
+export function pillShowsLevel(pillText, targets) {
+  const canonical = (targets || [])[0];
+  if (!canonical || !pillText) return false;
+  const known = MODEL_LEVELS.some((aliases) => aliases[0] === canonical);
+  if (known) return detectPillLevel(pillText) === canonical;
+  return normalizeMenuText(pillText).includes(normalizeMenuText(canonical));
+}
+
+async function closeOpenMenus(page) {
+  for (let i = 0; i < 3 && (await menuIsOpen(page)); i += 1) {
+    await page.keyboard.press("Escape").catch(() => {});
+    await sleep(250);
+  }
+}
+
+// Select the reasoning level for a task. Returns the pill text after a
+// verified selection, or null when the picker was unavailable or the level
+// could not be verified, in which case the current level is used. Selection
+// is best-effort and time-bounded: it must never leave a menu covering the
+// composer (that blocked prompt delivery and burned the task's retry budget)
+// and never throws into the task flow. All clicks are REAL Playwright pointer
+// clicks; the picker is a Radix menu that ignores synthetic element.click().
+async function selectModel(page, modelLabel) {
+  const targets = modelLevelTargets(modelLabel);
+  if (!targets.length) return null;
+  let timer;
+  const timeout = new Promise((resolveTimeout) => {
+    timer = setTimeout(() => resolveTimeout("timeout"), MODEL_SELECT_TIMEOUT_MS);
+  });
+  try {
+    const outcome = await Promise.race([selectModelInner(page, modelLabel, targets), timeout]);
+    if (outcome === "timeout") {
+      log(`model selection for "${modelLabel}" timed out after ${MODEL_SELECT_TIMEOUT_MS}ms; using current`);
+      await closeOpenMenus(page);
       return null;
     }
-
-    let selected = await clickMatchingLevel(page, targets);
-    if (!selected) {
-      // Some layouts park Pro/effort levels behind a submenu trigger.
-      const trigger = page.locator('[data-testid="composer-intelligence-pro-thinking-effort-trigger"]').first();
-      if ((await trigger.count()) && (await trigger.isVisible().catch(() => false))) {
-        await trigger.click({ timeout: 5000 }).catch(() => {});
-        await sleep(600);
-        selected = await clickMatchingLevel(page, targets);
-      }
-    }
-    if (selected) {
-      log(`model set to "${selected}"`);
-      return selected;
-    }
-    await page.keyboard.press("Escape").catch(() => {});
-    log(`model "${modelLabel}" not found in picker, using current`);
-    return null;
+    return outcome;
   } catch (err) {
-    try {
-      await page.keyboard.press("Escape");
-    } catch (e) {}
     log(`model "${modelLabel}" selection failed (${stableErrorCode(err)}); using current`);
+    await closeOpenMenus(page);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function selectModelInner(page, modelLabel, targets) {
+  await page.bringToFront().catch(() => {});
+  const before = await modelPillText(page);
+  if (pillShowsLevel(before, targets)) {
+    log(`model already "${before}" for "${modelLabel}"; no picker interaction`);
+    return before;
+  }
+  log(`selecting model "${modelLabel}" -> level "${targets[0]}" (pill: "${before || "-"}")`);
+
+  let opened = false;
+  for (const selector of ['button.__composer-pill[aria-haspopup="menu"]', 'button[aria-haspopup="menu"]']) {
+    const buttons = page.locator(selector);
+    const count = await buttons.count();
+    for (let i = 0; i < count && !opened; i++) {
+      const button = buttons.nth(i);
+      try {
+        if (!(await button.isVisible())) continue;
+        const text = ((await button.innerText({ timeout: 1000 })) || "").trim();
+        if (!/instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text)) continue;
+        await button.click({ timeout: 5000 });
+        if (await waitForModelMenu(page, 5000)) opened = true;
+      } catch (e) {}
+    }
+    if (opened) break;
+  }
+  if (!opened) {
+    log(`model picker unavailable for "${modelLabel}", using current`);
+    await closeOpenMenus(page);
     return null;
   }
+  log(`model picker items: ${JSON.stringify(await visibleMenuTexts(page))}`);
+
+  let clicked = await clickMatchingLevel(page, targets);
+  if (!clicked) {
+    // Some layouts park Pro/effort levels behind a submenu trigger.
+    const trigger = page.locator('[data-testid="composer-intelligence-pro-thinking-effort-trigger"]').first();
+    if ((await trigger.count()) && (await trigger.isVisible().catch(() => false))) {
+      await trigger.click({ timeout: 5000 }).catch(() => {});
+      await sleep(600);
+      log(`model picker submenu items: ${JSON.stringify(await visibleMenuTexts(page))}`);
+      clicked = await clickMatchingLevel(page, targets);
+    }
+  }
+  if (!clicked) {
+    await closeOpenMenus(page);
+    log(`model "${modelLabel}" not found in picker, using current`);
+    return null;
+  }
+  await sleep(500);
+
+  // Clicking a level may open a nested effort submenu that stays open over
+  // the composer. Prefer the already-checked entry, else the first entry, so
+  // the level commits; then make sure nothing is left covering the composer.
+  if (await menuIsOpen(page)) {
+    const nested = await visibleMenuTexts(page);
+    log(`model picker nested items: ${JSON.stringify(nested)}`);
+    const checked = page.locator('[role="menuitemradio"][aria-checked="true"], [role="option"][aria-selected="true"]').first();
+    const first = page.locator('[role="menuitemradio"], [role="option"], [role="menuitem"]').first();
+    for (const candidate of [checked, first]) {
+      try {
+        if ((await candidate.count()) && (await candidate.isVisible())) {
+          await candidate.click({ timeout: 3000 });
+          await sleep(400);
+          break;
+        }
+      } catch (e) {}
+    }
+    await closeOpenMenus(page);
+  }
+
+  const after = await modelPillText(page);
+  if (pillShowsLevel(after, targets)) {
+    log(`model set to "${after}"`);
+    return after;
+  }
+  log(`model pill shows "${after || "-"}" after selecting "${clicked}"; using current`);
+  return after || clicked;
 }
 
 // NOTE: keep this table in sync with `fileMime` in
@@ -1995,6 +2138,7 @@ function acceptCommand(runtime, command) {
   if (runtime.state.pending_command?.id === command.id) return;
   if (command.command === "drain" || command.command === "resume") {
     runtime.state.draining = command.command === "drain";
+    runtime.state.drain_requested = command.command === "drain";
     addCommandReport(
       runtime.state,
       command,
@@ -2006,6 +2150,19 @@ function acceptCommand(runtime, command) {
   runtime.state.draining = true;
   runtime.state.pending_command = command;
   saveState(runtime.state);
+}
+
+// A manager withdrew a command this worker is still holding (e.g. an upgrade
+// to a version that turned out to be broken): drop it before it runs and stop
+// draining unless an explicit drain is in force.
+export function dropCancelledCommand(runtime, cancelledIds) {
+  const ids = Array.isArray(cancelledIds) ? cancelledIds : [];
+  const pending = runtime.state?.pending_command;
+  if (!pending || !ids.includes(pending.id)) return false;
+  runtime.state.pending_command = null;
+  runtime.state.draining = Boolean(runtime.state.drain_requested);
+  log(`command ${pending.command} was cancelled by a manager before it ran`);
+  return true;
 }
 
 async function heartbeat(runtime) {
@@ -2033,6 +2190,7 @@ async function heartbeat(runtime) {
     );
     saveState(runtime.state);
   }
+  dropCancelledCommand(runtime, response.cancelled_command_ids);
   acceptCommand(runtime, response.command);
   runtime.lastPresenceAt = Date.now();
   return response;

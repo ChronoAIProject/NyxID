@@ -16,6 +16,9 @@ import {
   markChatPageRecovered,
   modelItemMatches,
   modelLevelTargets,
+  pillShowsLevel,
+  detectPillLevel,
+  dropCancelledCommand,
   resolveNpmExecutable,
   sanitizeArtifactName,
   seedProfileName,
@@ -427,4 +430,35 @@ test("level matching is exact before fuzzy so High never picks Extra High", () =
   assert.equal(modelItemMatches("Extra High", high, false), true);
   assert.equal(modelItemMatches("Pro", modelLevelTargets("chatgpt-5.5-pro"), true), true);
   assert.equal(modelItemMatches("Instant", modelLevelTargets("chatgpt-5.5-pro"), false), false);
+});
+
+test("pill text verifies the selected level without cross-matching", () => {
+  const pro = modelLevelTargets("chatgpt-5.5-pro");
+  assert.equal(pillShowsLevel("GPT-5.5 Pro", pro), true);
+  assert.equal(pillShowsLevel("Pro", pro), true);
+  assert.equal(pillShowsLevel("GPT-5.5 Instant", pro), false);
+  const high = modelLevelTargets("high");
+  assert.equal(pillShowsLevel("High", high), true);
+  assert.equal(pillShowsLevel("Extra High", high), false);
+  assert.equal(pillShowsLevel("", high), false);
+});
+
+test("pill level detection prefers the longest alias", () => {
+  assert.equal(detectPillLevel("GPT-5.5 Extra High"), "Extra High");
+  assert.equal(detectPillLevel("GPT-5.5 High"), "High");
+  assert.equal(detectPillLevel("Pro 扩展"), "Pro");
+  assert.equal(detectPillLevel("GPT-5.5"), null);
+});
+
+test("a cancelled pending command is dropped and draining is recomputed", () => {
+  const runtime = { state: { pending_command: { id: "c1", command: "upgrade" }, draining: true, drain_requested: false } };
+  assert.equal(dropCancelledCommand(runtime, ["c1"]), true);
+  assert.equal(runtime.state.pending_command, null);
+  assert.equal(runtime.state.draining, false);
+  const drained = { state: { pending_command: { id: "c2", command: "restart" }, draining: true, drain_requested: true } };
+  assert.equal(dropCancelledCommand(drained, ["c2"]), true);
+  assert.equal(drained.state.draining, true);
+  const untouched = { state: { pending_command: { id: "c3", command: "restart" }, draining: true } };
+  assert.equal(dropCancelledCommand(untouched, ["other"]), false);
+  assert.equal(untouched.state.pending_command.id, "c3");
 });
