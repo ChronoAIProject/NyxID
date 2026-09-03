@@ -2429,6 +2429,18 @@ mod tests {
             ]);
             assert!(cli.is_ok(), "oracle worker {command} should parse");
         }
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "oracle",
+                "worker",
+                "cancel-command",
+                "chatgpt-pro",
+                "worker-1",
+                "cmd-1",
+            ])
+            .is_ok()
+        );
     }
 
     #[test]
@@ -4982,6 +4994,15 @@ pub enum OracleWorkerCommands {
     RelaunchBrowser {
         pool: String,
         label: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Withdraw a queued or delivered-but-unexecuted worker command (e.g. an
+    /// upgrade to a version that turned out to be broken). Find ids with `worker show`.
+    CancelCommand {
+        pool: String,
+        label: String,
+        command_id: String,
         #[command(flatten)]
         auth: AuthArgs,
     },

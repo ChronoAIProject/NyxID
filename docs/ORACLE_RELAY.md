@@ -221,6 +221,7 @@ bound based on the 512 KiB decoded envelope cap.
 | `PATCH /pools/{id_or_slug}` | Update settings (owner / org admin only). |
 | `POST /pools/{id_or_slug}/rotate-token` | New worker token, shown once. |
 | `GET /pools/{id_or_slug}/workers` | Manager-only worker presence list. |
+| `DELETE /pools/{id_or_slug}/workers/{label}/commands/{command_id}` | Manager-only withdrawal of a queued or delivered-but-unexecuted command (status `cancelled`, result `cancelled_by_manager`). Settled commands return 409. |
 | `DELETE /pools/{id_or_slug}/workers/{label}?force=` | Manager-only removal of a worker's presence row and command history; releases session affinity owned by the label. Refuses an online worker or one with a task in flight unless `force=true`. |
 | `POST /pools/{id_or_slug}/workers/allocate` | Manager-only worker label allocation. Body `{"label": "..."}` requests a specific label; `null`/empty body generates one. Returns `{label, adopted}`. |
 | `GET /pools/{id_or_slug}/workers/{label}` | Manager-only worker detail. |
@@ -311,7 +312,7 @@ fields remain valid. New fields are additive.
 | Method · Path | Body / Query | Response |
 |---|---|---|
 | `GET /task` | `?worker=worker_1&script_version=&page_url=&instance_id=` | Idle response, or a task with retry counters, optional `dispatch_attempt_id`, prompt, attachment, conversation URL, and project hint. |
-| `POST /heartbeat` | Presence, capabilities, health, current task, and command reports | `{status:"ok", command?}`. The server leases at most one capability-compatible command. |
+| `POST /heartbeat` | Presence, capabilities, health, current task, and command reports | `{status:"ok", command?, cancelled_command_ids?}`. The server leases at most one capability-compatible command and lists recently cancelled delivered ones so the worker drops them. |
 | `POST /ack` | Task identity, phase, optional `instance_id` and `dispatch_attempt_id` | `{status:"ok"}` or `{status:"cancelled"}`. |
 | `POST /result` | Task identity, response, optional images/files and attempt fences | `{status:"saved"\|"saved_failed"\|"requeued"\|"ignored"}`. `requeued` means a pre-send browser failure consumed an infrastructure retry. |
 | `POST /pin-conv-url` | Task identity, URL, optional attempt fences | `{status:"pinned"}`. |
@@ -441,6 +442,7 @@ Managers can queue these commands:
 | `worker resume <pool> <label>` | Resume claims. |
 | `worker restart <pool> <label>` | Finish the current task, report, then exit for supervisor restart. |
 | `worker relaunch-browser <pool> <label>` | Recreate the dedicated Chrome process and tab. |
+| `worker cancel-command <pool> <label> <command-id>` | Withdraw a queued or delivered-but-unexecuted command (ids from `worker show`). A worker holding a delivered one drops it on its next heartbeat. Use this to stop a pushed upgrade before it runs. |
 | `worker forget <pool> <label> [--force]` | Remove a stale worker from `worker list` (presence + commands; releases its session affinity). Live or busy workers are refused without `--force`; a live worker re-registers on its next heartbeat anyway. |
 | `worker relogin <pool> <label>` | Open the ChatGPT login page on the worker's own screen (someone at that machine must finish it). For remote login from your computer use `oracle login`, which pushes the session to the pool. While logged out or on a login page the worker leaves its tab untouched and claims no tasks. |
 | `worker upgrade --pool <pool>` | Upgrade the installed local profile. The CLI waits for task drain, verifies the local source, version, dependency manifest, and restarted worker presence. |

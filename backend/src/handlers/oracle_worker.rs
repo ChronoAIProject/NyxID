@@ -453,6 +453,10 @@ pub struct WorkerHeartbeatResponse {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<WorkerCommandDto>,
+    /// Delivered commands a manager withdrew; a worker still holding one
+    /// drops it. Absent for legacy workers, which never receive commands.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cancelled_command_ids: Vec<String>,
 }
 
 pub async fn heartbeat(
@@ -500,9 +504,16 @@ pub async fn heartbeat(
     )
     .await?
     .map(WorkerCommandDto::from);
+    let cancelled_command_ids = if capabilities.iter().any(|value| value == "commands_v1") {
+        oracle_worker_service::recently_cancelled_delivered(&state.db, &pool.id, &body.worker)
+            .await?
+    } else {
+        Vec::new()
+    };
     Ok(Json(WorkerHeartbeatResponse {
         status: "ok".to_string(),
         command,
+        cancelled_command_ids,
     }))
 }
 
