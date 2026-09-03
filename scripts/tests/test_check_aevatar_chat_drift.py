@@ -292,6 +292,31 @@ class CheckAevatarChatDriftTests(unittest.TestCase):
 
             self.assert_tool_error(result, "must not contain '..' segments")
 
+    def test_invalid_watched_path_shapes_exit_two(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ac0-path-shapes-") as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            init_repo(repo)
+            pin_sha = commit_file(repo, WATCHED_PATH, "pinned\n", "pin")
+
+            cases = (
+                ("leading-slash", "/agents/contract.txt", "must not start with '/'"),
+                ("empty-segment", "agents//contract.txt", "must not contain empty segments"),
+            )
+            for name, watched_path, expected_message in cases:
+                with self.subTest(name=name):
+                    pin_path = root / f"{name}.json"
+                    write_pin(
+                        pin_path,
+                        str(repo),
+                        pin_sha,
+                        watched_paths=(watched_path,),
+                    )
+
+                    result = run_checker(pin=pin_path, repo=repo)
+
+                    self.assert_tool_error(result, expected_message)
+
     def test_nul_watched_path_exits_two(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ac0-nul-path-") as raw:
             root = Path(raw)
