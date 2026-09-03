@@ -13,6 +13,7 @@ from pathlib import Path
 NYXID_ROOT = Path(__file__).resolve().parents[2]
 CHECKER = NYXID_ROOT / "scripts" / "check-aevatar-chat-drift.py"
 WATCHED_PATH = "agents/Aevatar.GAgents.NyxidChat/contract.txt"
+WATCHED_DIRECTORY = "agents/Aevatar.GAgents.NyxidChat/"
 UNWATCHED_PATH = "unwatched/notes.txt"
 BRANCH = "feature/integrate"
 
@@ -37,14 +38,16 @@ def write_pin(
     path: Path,
     remote: str,
     effective_chat_sha: str,
+    *,
     remote_head: str | None = None,
+    watched_paths: tuple[str, ...] = (WATCHED_PATH,),
 ) -> None:
     payload = {
         "remote": remote,
         "branch": BRANCH,
         "remote_head": remote_head or effective_chat_sha,
         "effective_chat_sha": effective_chat_sha,
-        "watched_paths": [WATCHED_PATH],
+        "watched_paths": list(watched_paths),
         "public_commands": [],
         "internal_actions": [],
         "context_attachments": {},
@@ -79,7 +82,9 @@ def commit_file(repo: Path, relative: str, contents: str, message: str) -> str:
     return git(repo, "rev-parse", "HEAD")
 
 
-def run_checker(*, pin: Path, repo: Path) -> subprocess.CompletedProcess[str]:
+def run_checker(
+    *, pin: Path, repo: Path, branch: str = BRANCH
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [
             sys.executable,
@@ -90,7 +95,7 @@ def run_checker(*, pin: Path, repo: Path) -> subprocess.CompletedProcess[str]:
             "--remote",
             str(repo),
             "--branch",
-            BRANCH,
+            branch,
             "--repo",
             str(repo),
             "--json",
@@ -103,6 +108,16 @@ def run_checker(*, pin: Path, repo: Path) -> subprocess.CompletedProcess[str]:
 
 
 class CheckAevatarChatDriftTests(unittest.TestCase):
+    def assert_tool_error(
+        self,
+        result: subprocess.CompletedProcess[str],
+        expected_message: str,
+    ) -> None:
+        combined = result.stdout + result.stderr
+        self.assertEqual(result.returncode, 2, combined)
+        self.assertIn(expected_message, combined)
+        self.assertNotIn("Traceback", combined)
+
     def test_clean_case_exits_zero_with_empty_path_list(self) -> None:
         with tempfile.TemporaryDirectory(prefix="ac0-clean-") as raw:
             root = Path(raw)
@@ -195,6 +210,164 @@ class CheckAevatarChatDriftTests(unittest.TestCase):
             self.assertIn(pin_sha, combined)
             self.assertIn(unrelated_head, combined)
             self.assertIn("not an ancestor", combined)
+
+    def test_non_hex_sha_fields_exit_two(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ac0-non-hex-sha-") as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            init_repo(repo)
+            pin_sha = commit_file(repo, WATCHED_PATH, "pinned\n", "pin")
+
+            cases = (
+                ("remote_head", pin_sha, "g" * 40),
+                ("effective_chat_sha", "g" * 40, pin_sha),
+            )
+            for field, effective_chat_sha, remote_head in cases:
+                with self.subTest(field=field):
+                    pin_path = root / f"{field}.json"
+                    write_pin(
+                        pin_path,
+                        str(repo),
+                        effective_chat_sha,
+                        remote_head=remote_head,
+                    )
+
+                    result = run_checker(pin=pin_path, repo=repo)
+
+                    self.assert_tool_error(
+                        result,
+                        f"pin.{field} must be exactly 40 lowercase hexadecimal characters",
+                    )
+
+    def test_symbolic_sha_exits_two(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ac0-symbolic-sha-") as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            init_repo(repo)
+            pin_sha = commit_file(repo, WATCHED_PATH, "pinned\n", "pin")
+            pin_path = root / "pin.json"
+            write_pin(pin_path, str(repo), "FETCH_HEAD", remote_head=pin_sha)
+
+            result = run_checker(pin=pin_path, repo=repo)
+
+            self.assert_tool_error(
+                result,
+                "pin.effective_chat_sha must be exactly 40 lowercase hexadecimal characters",
+            )
+
+    def test_pathspec_exclusion_exits_two(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ac0-pathspec-") as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            init_repo(repo)
+            pin_sha = commit_file(repo, WATCHED_PATH, "pinned\n", "pin")
+            commit_file(repo, WATCHED_PATH, "moved\n", "watched drift")
+            pin_path = root / "pin.json"
+            write_pin(
+                pin_path,
+                str(repo),
+                pin_sha,
+                watched_paths=(f":(exclude){WATCHED_PATH}",),
+            )
+
+            result = run_checker(pin=pin_path, repo=repo)
+
+            self.assert_tool_error(result, "must not start with ':'")
+
+    def test_parent_path_segment_exits_two(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ac0-parent-path-") as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            init_repo(repo)
+            pin_sha = commit_file(repo, WATCHED_PATH, "pinned\n", "pin")
+            pin_path = root / "pin.json"
+            write_pin(
+                pin_path,
+                str(repo),
+                pin_sha,
+                watched_paths=("agents/../contract.txt",),
+            )
+
+            result = run_checker(pin=pin_path, repo=repo)
+
+            self.assert_tool_error(result, "must not contain '..' segments")
+
+    def test_nul_watched_path_exits_two(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ac0-nul-path-") as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            init_repo(repo)
+            pin_sha = commit_file(repo, WATCHED_PATH, "pinned\n", "pin")
+            pin_path = root / "pin.json"
+            write_pin(
+                pin_path,
+                str(repo),
+                pin_sha,
+                watched_paths=("agents/contract\0.txt",),
+            )
+
+            result = run_checker(pin=pin_path, repo=repo)
+
+            self.assert_tool_error(result, "contains unsupported characters")
+
+    def test_invalid_utf8_pin_exits_two(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ac0-invalid-utf8-") as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            init_repo(repo)
+            pin_path = root / "pin.json"
+            pin_path.write_bytes(b"\xff")
+
+            result = run_checker(pin=pin_path, repo=repo)
+
+            self.assert_tool_error(result, "pin is not valid UTF-8")
+
+    def test_branch_refspec_injection_exits_two_without_creating_ref(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ac0-branch-refspec-") as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            init_repo(repo)
+            pin_sha = commit_file(repo, WATCHED_PATH, "pinned\n", "pin")
+            pin_path = root / "pin.json"
+            write_pin(pin_path, str(repo), pin_sha)
+            injected_ref = "refs/heads/ac0-injected"
+            injected_branch = f"{BRANCH}:{injected_ref}"
+
+            before = subprocess.run(
+                ["git", "-C", str(repo), "show-ref", "--verify", injected_ref],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            result = run_checker(pin=pin_path, repo=repo, branch=injected_branch)
+            after = subprocess.run(
+                ["git", "-C", str(repo), "show-ref", "--verify", injected_ref],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+            self.assertNotEqual(before.returncode, 0)
+            self.assertNotEqual(after.returncode, 0)
+            self.assert_tool_error(result, "branch is not a valid Git branch name")
+
+    def test_trailing_slash_directory_path_is_valid(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="ac0-directory-path-") as raw:
+            root = Path(raw)
+            repo = root / "repo"
+            init_repo(repo)
+            pin_sha = commit_file(repo, WATCHED_PATH, "pinned\n", "pin")
+            pin_path = root / "pin.json"
+            write_pin(
+                pin_path,
+                str(repo),
+                pin_sha,
+                watched_paths=(WATCHED_DIRECTORY,),
+            )
+
+            result = run_checker(pin=pin_path, repo=repo)
+
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":
