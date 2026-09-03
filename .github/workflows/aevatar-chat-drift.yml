@@ -1,19 +1,12 @@
-# Weekly check that Aevatar feature/integrate has not moved a watched chat
-# path after the SHA pinned in
-# tests/fixtures/assistant/aevatar-chat-contract-pin.json.
-#
 # A red run means a contract-owned upstream file changed. Review the receipt
 # artifact, then re-pin only after an owner decides the new SHA. This job
 # never edits the pin.
-#
-# Pull requests that touch the checker, its tests, the pin, or this workflow
-# run the offline unit tests only.
 
 name: Aevatar Chat Drift
 
 on:
   schedule:
-    - cron: "37 3 * * 1" # Mondays 03:37 UTC
+    - cron: "37 3 * * 1"
   workflow_dispatch:
   pull_request:
     paths:
