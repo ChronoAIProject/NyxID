@@ -469,6 +469,8 @@ async fn authenticate_mcp(
     if let Some(token) = token {
         match jwt::verify_token(&state.jwt_keys, &state.config, token) {
             Ok(claims) if claims.token_type == "access" => {
+                auth::ensure_delegated_claim_consistency(&claims)
+                    .map_err(|_| mcp_401(&state.config.base_url))?;
                 if !auth::scope_allows_rest_proxy(&claims.scope) {
                     return Err(mcp_403_insufficient_scope());
                 }
@@ -721,30 +723,13 @@ async fn platform_services_flag_enabled(state: &AppState, auth: &McpAuthContext)
 }
 
 fn mcp_service_scope(auth: &McpAuthContext) -> AppResult<mcp_service::ServiceScope<'_>> {
-    if auth.auth_method == AuthMethod::Delegated
-        && crate::services::catalog_delegation_service::scope_has_catalog_read(&auth.scope)
-    {
-        let authority = auth
-            .verified_catalog_grant
-            .as_ref()
-            .ok_or_else(|| {
-                AppError::Unauthorized(
-                    "Delegated catalog authority is invalid or inactive".to_string(),
-                )
-            })?
-            .authority();
-        return Ok(if authority.allow_all_services {
-            mcp_service::ServiceScope::Unrestricted
-        } else {
-            mcp_service::ServiceScope::Allowed(authority.allowed_service_ids.as_slice())
-        });
-    }
-
-    Ok(if auth.allow_all_services {
-        mcp_service::ServiceScope::Unrestricted
-    } else {
-        mcp_service::ServiceScope::Allowed(auth.allowed_service_ids.as_slice())
-    })
+    crate::services::catalog_delegation_service::service_scope_for_request(
+        &auth.auth_method,
+        &auth.scope,
+        auth.allow_all_services,
+        &auth.allowed_service_ids,
+        auth.verified_catalog_grant.as_ref(),
+    )
 }
 
 /// Names of tools that SSH-gate on agent scope.
@@ -3516,7 +3501,7 @@ mod tests {
         body::Body,
         extract::{DefaultBodyLimit, Path, State},
         http::{Method, Request, StatusCode},
-        routing::{any, post},
+        routing::{any, get, post},
     };
     use tokio::net::TcpListener;
     use tower::ServiceExt;
@@ -3619,6 +3604,239 @@ mod tests {
 
         auth.verified_catalog_grant = None;
         assert!(mcp_service_scope(&auth).is_err());
+    }
+
+    #[tokio::test]
+    async fn one_delegated_token_publishes_the_same_rest_and_json_rpc_catalog() {
+        use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+
+        let Some(db) = connect_test_database("mcp_delegated_transport_parity").await else {
+            return;
+        };
+        let state = test_app_state(db.clone());
+        let user_id = uuid::Uuid::new_v4();
+        db.collection::<User>(USERS)
+            .insert_one(test_user(&user_id.to_string(), UserType::Person))
+            .await
+            .unwrap();
+        let endpoint_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &endpoint_id,
+                &user_id.to_string(),
+                "Parity service",
+                "https://parity.example",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &service_id,
+                &user_id.to_string(),
+                "parity-service",
+                &endpoint_id,
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+
+        let actor_client_id = "transport-parity-actor";
+        let receiving_client_id = "transport-parity-receiver";
+        let scope = format!(
+            "proxy:* {}",
+            crate::services::catalog_delegation_service::MCP_CATALOG_READ_SCOPE
+        );
+        let now = chrono::Utc::now();
+        for client_id in [actor_client_id, receiving_client_id] {
+            db.collection::<OauthClient>(OAUTH_CLIENTS)
+                .insert_one(OauthClient {
+                    id: client_id.to_string(),
+                    client_name: client_id.to_string(),
+                    client_secret_hash: String::new(),
+                    redirect_uris: vec!["https://client.example/callback".to_string()],
+                    allowed_scopes: "openid".to_string(),
+                    scope_provenance: Default::default(),
+                    grant_types: "authorization_code".to_string(),
+                    client_type: "confidential".to_string(),
+                    is_active: true,
+                    delegation_scopes: scope.clone(),
+                    default_service_catalog_slugs: Vec::new(),
+                    broker_capability_enabled: false,
+                    revocation_webhook_url: None,
+                    revocation_webhook_secret_encrypted: None,
+                    connection_webhook_url: None,
+                    connection_webhook_secret_encrypted: None,
+                    connection_webhook_key_id: None,
+                    connection_webhook_enabled: false,
+                    created_by: None,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .unwrap();
+            crate::services::consent_service::grant_consent_with_services(
+                &db,
+                &user_id.to_string(),
+                client_id,
+                "openid",
+                Some(vec![service_id.clone()]),
+            )
+            .await
+            .unwrap();
+        }
+        let authority = crate::services::catalog_delegation_service::CatalogAuthority {
+            resources: Vec::new(),
+            allow_all_services: false,
+            allowed_service_ids: vec![service_id.clone()],
+            allow_all_nodes: true,
+            allowed_node_ids: Vec::new(),
+        };
+        let (token, jti) = crate::crypto::jwt::generate_delegated_access_token_for_client(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            &scope,
+            actor_client_id,
+            Some(receiving_client_id),
+            300,
+            Some(&authority.restriction_claims()),
+        )
+        .unwrap();
+        let claims = crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, &token)
+            .unwrap();
+        crate::services::catalog_delegation_service::persist_grant(
+            &db,
+            &jti,
+            &user_id.to_string(),
+            actor_client_id,
+            receiving_client_id,
+            &scope,
+            &authority,
+            claims.exp,
+        )
+        .await
+        .unwrap();
+
+        let app = Router::new()
+            .route(
+                "/api/v1/mcp/config",
+                get(crate::handlers::mcp::get_mcp_config),
+            )
+            .route("/mcp", post(mcp_post))
+            .layer(Extension(
+                crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                    crate::services::billing::BillingIngress::Mcp,
+                ),
+            ))
+            .with_state(state);
+        let rest = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/v1/mcp/config")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rest.status(), StatusCode::OK);
+        let rest_body = axum::body::to_bytes(rest.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let rest_json: serde_json::Value = serde_json::from_slice(&rest_body).unwrap();
+        let mut rest_operations = rest_json["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|service| {
+                let slug = service["service_slug"].as_str().unwrap().to_string();
+                service["endpoints"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(move |endpoint| {
+                        format!("{slug}__{}", endpoint["name"].as_str().unwrap())
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        let rpc = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp")
+                    .header("authorization", format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "tools/list",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rpc.status(), StatusCode::OK);
+        let rpc_body = axum::body::to_bytes(rpc.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let rpc_json: serde_json::Value = serde_json::from_slice(&rpc_body).unwrap();
+        let mut rpc_operations = rpc_json["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .filter(|name| !name.starts_with("nyx__"))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        rest_operations.sort();
+        rpc_operations.sort();
+        assert!(!rest_operations.is_empty());
+        assert_eq!(rest_operations, rpc_operations);
+    }
+
+    #[tokio::test]
+    async fn manual_mcp_auth_rejects_malformed_delegated_claim_pairing() {
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let user_id = uuid::Uuid::new_v4();
+        let token = crate::crypto::jwt::generate_delegated_access_token(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            "proxy:*",
+            "malformed-mcp-client",
+            60,
+            None,
+        )
+        .unwrap();
+        let mut claims = crate::crypto::jwt::verify_token(
+            &state.jwt_keys,
+            &state.config,
+            &token,
+        )
+        .unwrap();
+        claims.delegated = None;
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        header.kid = Some(state.jwt_keys.kid.clone());
+        let malformed = jsonwebtoken::encode(&header, &claims, &state.jwt_keys.encoding).unwrap();
+        let headers = axum::http::HeaderMap::from_iter([(
+            axum::http::header::AUTHORIZATION,
+            format!("Bearer {malformed}").parse().unwrap(),
+        )]);
+
+        let response = authenticate_mcp(&state, &headers)
+            .await
+            .expect_err("act without delegated=true must fail before user lookup");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[test]

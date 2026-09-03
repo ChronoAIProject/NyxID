@@ -6,6 +6,7 @@ use uuid::Uuid;
 use crate::errors::{AppError, AppResult};
 use crate::models::consent::{COLLECTION_NAME as CONSENTS, Consent};
 use crate::models::refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken};
+use crate::services::catalog_delegation_service;
 
 /// Grant consent for a user to a client with specific scopes.
 /// Upserts: if consent exists for (user_id, client_id), replaces scopes.
@@ -103,6 +104,109 @@ async fn grant_consent_internal(
     }
 }
 
+fn duplicate_key(error: &mongodb::error::Error) -> bool {
+    matches!(
+        error.kind.as_ref(),
+        mongodb::error::ErrorKind::Write(mongodb::error::WriteFailure::WriteError(write_error))
+            if write_error.code == 11000
+    )
+}
+
+fn merged_scope_expression(required_scopes: &[&str]) -> bson::Bson {
+    let mut expression = bson::Bson::Document(doc! { "$ifNull": ["$scopes", ""] });
+    for scope in required_scopes {
+        expression = bson::Bson::Document(doc! {
+            "$cond": [
+                { "$in": [scope, { "$split": [expression.clone(), " "] }] },
+                expression.clone(),
+                { "$trim": { "input": { "$concat": [expression, " ", scope] } } },
+            ],
+        });
+    }
+    expression
+}
+
+async fn merge_existing_consent(
+    db: &mongodb::Database,
+    user_id: &str,
+    client_id: &str,
+    required_scopes: &[&str],
+    service_id: &str,
+) -> AppResult<Option<Consent>> {
+    let existing_services = doc! { "$ifNull": ["$allowed_service_ids", []] };
+    let result = db
+        .collection::<Consent>(CONSENTS)
+        .update_one(
+            doc! { "user_id": user_id, "client_id": client_id },
+            vec![doc! { "$set": {
+                "scopes": merged_scope_expression(required_scopes),
+                "allowed_service_ids": {
+                    "$cond": [
+                        { "$in": [service_id, existing_services.clone()] },
+                        existing_services.clone(),
+                        { "$concatArrays": [existing_services, [service_id]] },
+                    ],
+                },
+            }}],
+        )
+        .await?;
+    if result.matched_count == 0 {
+        return Ok(None);
+    }
+    Ok(db
+        .collection::<Consent>(CONSENTS)
+        .find_one(doc! { "user_id": user_id, "client_id": client_id })
+        .await?)
+}
+
+pub async fn merge_consent_services_atomic(
+    db: &mongodb::Database,
+    user_id: &str,
+    client_id: &str,
+    required_scopes: &str,
+    service_id: &str,
+) -> AppResult<Consent> {
+    let mut unique_scopes = Vec::new();
+    for scope in required_scopes.split_whitespace() {
+        if !unique_scopes.contains(&scope) {
+            unique_scopes.push(scope);
+        }
+    }
+    if unique_scopes.is_empty() {
+        return Err(AppError::ValidationError(
+            "at least one consent scope is required".to_string(),
+        ));
+    }
+
+    if let Some(consent) =
+        merge_existing_consent(db, user_id, client_id, &unique_scopes, service_id).await?
+    {
+        return Ok(consent);
+    }
+
+    let consent = Consent {
+        id: Uuid::new_v4().to_string(),
+        user_id: user_id.to_string(),
+        client_id: client_id.to_string(),
+        scopes: unique_scopes.join(" "),
+        allow_all_services: false,
+        allowed_service_ids: Some(vec![service_id.to_string()]),
+        granted_at: Utc::now(),
+        expires_at: None,
+    };
+    match db.collection::<Consent>(CONSENTS).insert_one(&consent).await {
+        Ok(_) => Ok(consent),
+        Err(error) if duplicate_key(&error) => {
+            merge_existing_consent(db, user_id, client_id, &unique_scopes, service_id)
+                .await?
+                .ok_or_else(|| {
+                    AppError::Conflict("consent merge raced without a winning row".to_string())
+                })
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Check if a user has granted consent for the requested scopes to a client.
 /// Returns Some(Consent) if all requested scopes are covered.
 pub async fn check_consent(
@@ -150,6 +254,10 @@ pub async fn revoke_consent(
     }
 
     let now = Utc::now();
+    let revoked_catalog_grants = catalog_delegation_service::revoke_for_user_client_roles(
+        db, user_id, client_id,
+    )
+    .await?;
     let revoked_refresh_tokens = if client_id == Uuid::nil().to_string() {
         0
     } else {
@@ -180,12 +288,14 @@ pub async fn revoke_consent(
 
     Ok(ConsentRevocationResult {
         revoked_refresh_tokens,
+        revoked_catalog_grants,
     })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConsentRevocationResult {
     pub revoked_refresh_tokens: u64,
+    pub revoked_catalog_grants: u64,
 }
 
 /// List all consents for a user.
@@ -218,6 +328,9 @@ pub async fn list_client_consents(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::catalog_delegation_grant::{
+        COLLECTION_NAME as CATALOG_DELEGATION_GRANTS, CatalogDelegationGrant,
+    };
     use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
     use crate::test_utils::*;
     use chrono::Duration;
@@ -325,6 +438,180 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn merge_consent_services_atomic_inserts_explicit_restricted_consent() {
+        let Some(db) = connect_test_database("consent_merge_insert").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+
+        let consent = merge_consent_services_atomic(
+            &db,
+            &user_id,
+            &client_id,
+            "openid profile",
+            &service_id,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(consent.user_id, user_id);
+        assert_eq!(consent.client_id, client_id);
+        assert_eq!(consent.scopes, "openid profile");
+        assert!(!consent.allow_all_services);
+        assert_eq!(consent.allowed_service_ids, Some(vec![service_id]));
+        assert!(Uuid::parse_str(&consent.id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn merge_consent_services_atomic_preserves_and_unions_existing_consent() {
+        let Some(db) = connect_test_database("consent_merge_existing").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = Uuid::new_v4().to_string();
+        let first_service_id = Uuid::new_v4().to_string();
+        let second_service_id = Uuid::new_v4().to_string();
+        let consent_id = Uuid::new_v4().to_string();
+        let granted_at = Utc::now() - Duration::hours(2);
+        let expires_at = Utc::now() + Duration::hours(2);
+
+        db.collection::<mongodb::bson::Document>(CONSENTS)
+            .insert_one(doc! {
+                "_id": &consent_id,
+                "user_id": &user_id,
+                "client_id": &client_id,
+                "scopes": "openid email",
+                "allow_all_services": false,
+                "allowed_service_ids": [&first_service_id],
+                "granted_at": bson::DateTime::from_chrono(granted_at),
+                "expires_at": bson::DateTime::from_chrono(expires_at),
+                "future_policy": { "mode": "preserve" },
+            })
+            .await
+            .unwrap();
+
+        let consent = merge_consent_services_atomic(
+            &db,
+            &user_id,
+            &client_id,
+            "openid profile",
+            &second_service_id,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(consent.id, consent_id);
+        assert_eq!(consent.scopes, "openid email profile");
+        assert!(!consent.allow_all_services);
+        assert_eq!(
+            consent.allowed_service_ids,
+            Some(vec![first_service_id, second_service_id])
+        );
+        assert_eq!(
+            consent.granted_at.timestamp_millis(),
+            granted_at.timestamp_millis()
+        );
+        assert_eq!(
+            consent.expires_at.unwrap().timestamp_millis(),
+            expires_at.timestamp_millis()
+        );
+
+        let stored = db
+            .collection::<mongodb::bson::Document>(CONSENTS)
+            .find_one(doc! { "_id": &consent.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.get_document("future_policy").unwrap().get_str("mode"),
+            Ok("preserve")
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_consent_services_atomic_preserves_unrestricted_consent() {
+        let Some(db) = connect_test_database("consent_merge_unrestricted").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = Uuid::new_v4().to_string();
+        let service_id = Uuid::new_v4().to_string();
+        let existing = grant_consent_with_services(
+            &db,
+            &user_id,
+            &client_id,
+            "openid email",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let merged = merge_consent_services_atomic(
+            &db,
+            &user_id,
+            &client_id,
+            "openid profile",
+            &service_id,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(merged.id, existing.id);
+        assert!(merged.allow_all_services);
+        assert_eq!(merged.scopes, "openid email profile");
+        assert_eq!(merged.allowed_service_ids, Some(vec![service_id]));
+    }
+
+    #[tokio::test]
+    async fn concurrent_consent_merges_keep_both_service_ids() {
+        let Some(db) = connect_test_database("consent_merge_concurrent").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = Uuid::new_v4().to_string();
+        let first_service_id = Uuid::new_v4().to_string();
+        let second_service_id = Uuid::new_v4().to_string();
+
+        let (first, second) = tokio::join!(
+            merge_consent_services_atomic(
+                &db,
+                &user_id,
+                &client_id,
+                "openid",
+                &first_service_id,
+            ),
+            merge_consent_services_atomic(
+                &db,
+                &user_id,
+                &client_id,
+                "openid",
+                &second_service_id,
+            ),
+        );
+        first.unwrap();
+        second.unwrap();
+
+        let stored = check_consent(&db, &user_id, &client_id, "openid")
+            .await
+            .unwrap()
+            .unwrap();
+        let mut actual = stored.allowed_service_ids.unwrap();
+        actual.sort();
+        let mut expected = vec![first_service_id, second_service_id];
+        expected.sort();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            db.collection::<Consent>(CONSENTS)
+                .count_documents(doc! { "user_id": &user_id, "client_id": &client_id })
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
     async fn test_check_consent_covers_all_scopes() {
         let Some(db) = connect_test_database("consent").await else {
             return;
@@ -365,6 +652,7 @@ mod tests {
             .unwrap();
         let result = revoke_consent(&db, &user_id, &client_id).await.unwrap();
         assert_eq!(result.revoked_refresh_tokens, 0);
+        assert_eq!(result.revoked_catalog_grants, 0);
 
         let after = check_consent(&db, &user_id, &client_id, "openid")
             .await
@@ -373,6 +661,78 @@ mod tests {
 
         let err = revoke_consent(&db, &user_id, &client_id).await;
         assert!(err.is_err());
+    }
+
+    #[tokio::test]
+    async fn revoke_consent_revokes_catalog_grants_for_either_client_role_first() {
+        let Some(db) = connect_test_database("consent_revoke_catalog").await else {
+            return;
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let other_user_id = Uuid::new_v4().to_string();
+        let client_id = Uuid::new_v4().to_string();
+        let other_client_id = Uuid::new_v4().to_string();
+        grant_consent(&db, &user_id, &client_id, "openid")
+            .await
+            .unwrap();
+        let now = Utc::now();
+
+        let grant = |user_id: &str, actor: &str, receiver: &str| CatalogDelegationGrant {
+            id: Uuid::new_v4().to_string(),
+            user_id: user_id.to_string(),
+            actor_client_id: actor.to_string(),
+            receiving_client_id: receiver.to_string(),
+            scope: "proxy:* mcp:catalog:read".to_string(),
+            resources: Vec::new(),
+            allow_all_services: false,
+            allowed_service_ids: Vec::new(),
+            allow_all_nodes: false,
+            allowed_node_ids: Vec::new(),
+            revoked: false,
+            expires_at: now + Duration::minutes(5),
+            created_at: now,
+        };
+        let actor_match = grant(&user_id, &client_id, &other_client_id);
+        let receiver_match = grant(&user_id, &other_client_id, &client_id);
+        let wrong_user = grant(&other_user_id, &client_id, &client_id);
+        let wrong_client = grant(&user_id, &other_client_id, &other_client_id);
+        db.collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+            .insert_many([
+                actor_match.clone(),
+                receiver_match.clone(),
+                wrong_user.clone(),
+                wrong_client.clone(),
+            ])
+            .await
+            .unwrap();
+
+        let result = revoke_consent(&db, &user_id, &client_id).await.unwrap();
+        assert_eq!(result.revoked_catalog_grants, 2);
+        for id in [&actor_match.id, &receiver_match.id] {
+            let stored = db
+                .collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+                .find_one(doc! { "_id": id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(stored.revoked);
+        }
+        for id in [&wrong_user.id, &wrong_client.id] {
+            let stored = db
+                .collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+                .find_one(doc! { "_id": id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!stored.revoked);
+        }
+        assert!(
+            db.collection::<Consent>(CONSENTS)
+                .find_one(doc! { "user_id": &user_id, "client_id": &client_id })
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]

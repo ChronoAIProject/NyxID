@@ -72,14 +72,35 @@ impl VerifiedCatalogGrant {
         scope: &str,
         authority: CatalogAuthority,
     ) -> Self {
+        Self::for_test_with_identity(
+            &uuid::Uuid::new_v4().to_string(),
+            subject_user_id,
+            actor_client_id,
+            receiving_client_id,
+            scope,
+            authority,
+            Utc::now() + chrono::Duration::minutes(5),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test_with_identity(
+        grant_id: &str,
+        subject_user_id: &str,
+        actor_client_id: &str,
+        receiving_client_id: &str,
+        scope: &str,
+        authority: CatalogAuthority,
+        expires_at: DateTime<Utc>,
+    ) -> Self {
         Self {
-            grant_id: uuid::Uuid::new_v4().to_string(),
+            grant_id: grant_id.to_string(),
             subject_user_id: subject_user_id.to_string(),
             actor_client_id: actor_client_id.to_string(),
             receiving_client_id: receiving_client_id.to_string(),
             scope: scope.to_string(),
             authority,
-            expires_at: Utc::now() + chrono::Duration::minutes(5),
+            expires_at,
         }
     }
 }
@@ -241,12 +262,15 @@ pub async fn validate_live_grant(
     })
 }
 
-pub fn service_scope_for_rest_request(
-    auth: &AuthUser,
-) -> AppResult<mcp_service::ServiceScope<'_>> {
-    if auth.auth_method == AuthMethod::Delegated && scope_has_catalog_read(&auth.scope) {
-        let authority = auth
-            .verified_catalog_grant()
+pub fn service_scope_for_request<'a>(
+    auth_method: &AuthMethod,
+    scope: &str,
+    allow_all_services: bool,
+    allowed_service_ids: &'a [String],
+    verified_catalog_grant: Option<&'a VerifiedCatalogGrant>,
+) -> AppResult<mcp_service::ServiceScope<'a>> {
+    if auth_method == &AuthMethod::Delegated && scope_has_catalog_read(scope) {
+        let authority = verified_catalog_grant
             .ok_or_else(invalid_catalog_authority)?
             .authority();
         return Ok(if authority.allow_all_services {
@@ -256,11 +280,23 @@ pub fn service_scope_for_rest_request(
         });
     }
 
-    Ok(if auth.allow_all_services {
+    Ok(if allow_all_services {
         mcp_service::ServiceScope::Unrestricted
     } else {
-        mcp_service::ServiceScope::Allowed(auth.allowed_service_ids.as_slice())
+        mcp_service::ServiceScope::Allowed(allowed_service_ids)
     })
+}
+
+pub fn service_scope_for_rest_request(
+    auth: &AuthUser,
+) -> AppResult<mcp_service::ServiceScope<'_>> {
+    service_scope_for_request(
+        &auth.auth_method,
+        &auth.scope,
+        auth.allow_all_services,
+        &auth.allowed_service_ids,
+        auth.verified_catalog_grant(),
+    )
 }
 
 pub async fn revoke_for_client(
@@ -275,6 +311,28 @@ pub async fn revoke_for_client(
         )
         .await?;
     Ok(())
+}
+
+pub async fn revoke_for_user_client_roles(
+    db: &mongodb::Database,
+    user_id: &str,
+    client_id: &str,
+) -> AppResult<u64> {
+    let result = db
+        .collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+        .update_many(
+            doc! {
+                "user_id": user_id,
+                "revoked": false,
+                "$or": [
+                    { "actor_client_id": client_id },
+                    { "receiving_client_id": client_id },
+                ],
+            },
+            doc! { "$set": { "revoked": true } },
+        )
+        .await?;
+    Ok(result.modified_count)
 }
 
 pub async fn ensure_client_can_delegate_catalog(
@@ -416,6 +474,7 @@ fn grant_matches_claims(
         && grant.allowed_service_ids == authority.allowed_service_ids
         && grant.allow_all_nodes == authority.allow_all_nodes
         && grant.allowed_node_ids == authority.allowed_node_ids
+        && grant.expires_at.timestamp() == claims.exp
 }
 
 fn has_duplicates(values: &[String]) -> bool {
@@ -612,6 +671,92 @@ mod tests {
         assert_invalid(validate_live_grant(&db, &config, &claims).await);
     }
 
+    #[tokio::test]
+    async fn oauth_consent_narrowing_denies_an_older_allow_all_catalog_token() {
+        let Some((db, config, mut claims)) = live_grant_fixture().await else {
+            return;
+        };
+        let actor_client_id = claims.act.as_ref().unwrap().sub.clone();
+        let receiving_client_id = claims.client_id.clone().unwrap();
+        claims.jti = uuid::Uuid::new_v4().to_string();
+        claims.allow_all_services = Some(true);
+        claims.allowed_service_ids = Some(Vec::new());
+        let authority = authority_from_claims(&claims).unwrap();
+        for client_id in [&actor_client_id, &receiving_client_id] {
+            consent_service::grant_consent_with_services(
+                &db,
+                &claims.sub,
+                client_id,
+                "openid",
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        persist_grant(
+            &db,
+            &claims.jti,
+            &claims.sub,
+            &actor_client_id,
+            &receiving_client_id,
+            &claims.scope,
+            &authority,
+            claims.exp,
+        )
+        .await
+        .unwrap();
+        validate_live_grant(&db, &config, &claims)
+            .await
+            .expect("allow-all token is initially live");
+
+        for client_id in [&actor_client_id, &receiving_client_id] {
+            consent_service::grant_consent_with_services(
+                &db,
+                &claims.sub,
+                client_id,
+                "openid",
+                Some(Vec::new()),
+            )
+            .await
+            .unwrap();
+        }
+        assert_invalid(validate_live_grant(&db, &config, &claims).await);
+    }
+
+    #[tokio::test]
+    async fn revoke_then_regrant_within_ttl_keeps_the_old_jti_denied() {
+        let Some((db, config, claims)) = live_grant_fixture().await else {
+            return;
+        };
+        let actor_client_id = claims.act.as_ref().unwrap().sub.clone();
+        validate_live_grant(&db, &config, &claims)
+            .await
+            .expect("grant is initially live");
+
+        consent_service::revoke_consent(&db, &claims.sub, &actor_client_id)
+            .await
+            .unwrap();
+        consent_service::grant_consent_with_services(
+            &db,
+            &claims.sub,
+            &actor_client_id,
+            "openid",
+            Some(Vec::new()),
+        )
+        .await
+        .unwrap();
+
+        let stored = db
+            .collection::<CatalogDelegationGrant>(CATALOG_DELEGATION_GRANTS)
+            .find_one(doc! { "_id": &claims.jti })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.revoked);
+        assert!(stored.expires_at > Utc::now());
+        assert_invalid(validate_live_grant(&db, &config, &claims).await);
+    }
+
     fn claims() -> Claims {
         Claims {
             sub: uuid::Uuid::new_v4().to_string(),
@@ -692,34 +837,55 @@ mod tests {
         }
     }
 
-    #[test]
-    fn rest_service_scope_preserves_every_other_auth_method() {
-        for method in [
-            AuthMethod::Session,
-            AuthMethod::AccessToken,
-            AuthMethod::ApiKey,
-            AuthMethod::ServiceAccount,
-            AuthMethod::Relay,
-            AuthMethod::Delegated,
-        ] {
-            let mut auth = crate::test_utils::test_auth_user(
-                "00000000-0000-4000-8000-000000000001",
-            );
-            auth.auth_method = method.clone();
-            auth.scope = "proxy:*".to_string();
-            auth.allow_all_services = false;
-            auth.allowed_service_ids = vec!["existing-service".to_string()];
-
-            match service_scope_for_rest_request(&auth).expect("existing service scope") {
-                mcp_service::ServiceScope::Allowed(ids) => {
-                    assert_eq!(ids, ["existing-service"], "{method:?}");
-                }
-                mcp_service::ServiceScope::Unrestricted => {
-                    panic!("{method:?} lost its existing service restriction")
-                }
+    fn assert_existing_auth_method_scope(method: AuthMethod) {
+        let mut auth = crate::test_utils::test_auth_user(
+            "00000000-0000-4000-8000-000000000001",
+        );
+        auth.auth_method = method.clone();
+        auth.scope = "proxy:*".to_string();
+        auth.allow_all_services = false;
+        auth.allowed_service_ids = vec!["existing-service".to_string()];
+        match service_scope_for_rest_request(&auth).expect("existing restricted scope") {
+            mcp_service::ServiceScope::Allowed(ids) => {
+                assert_eq!(ids, ["existing-service"], "{method:?}");
+            }
+            mcp_service::ServiceScope::Unrestricted => {
+                panic!("{method:?} lost its existing service restriction")
             }
         }
+
+        auth.allow_all_services = true;
+        auth.allowed_service_ids.clear();
+        assert!(
+            matches!(
+                service_scope_for_rest_request(&auth),
+                Ok(mcp_service::ServiceScope::Unrestricted)
+            ),
+            "{method:?} lost its existing allow-all scope"
+        );
     }
+
+    macro_rules! auth_method_scope_regression {
+        ($name:ident, $method:expr) => {
+            #[test]
+            fn $name() {
+                assert_existing_auth_method_scope($method);
+            }
+        };
+    }
+
+    auth_method_scope_regression!(session_catalog_scope_regression, AuthMethod::Session);
+    auth_method_scope_regression!(access_token_catalog_scope_regression, AuthMethod::AccessToken);
+    auth_method_scope_regression!(api_key_catalog_scope_regression, AuthMethod::ApiKey);
+    auth_method_scope_regression!(
+        service_account_catalog_scope_regression,
+        AuthMethod::ServiceAccount
+    );
+    auth_method_scope_regression!(relay_catalog_scope_regression, AuthMethod::Relay);
+    auth_method_scope_regression!(
+        delegated_without_catalog_read_scope_regression,
+        AuthMethod::Delegated
+    );
 
     #[test]
     fn delegated_catalog_scope_without_verified_grant_fails_closed() {
@@ -770,7 +936,7 @@ mod tests {
     fn grant_snapshot_rejects_wrong_actor_or_receiver() {
         let claims = claims();
         let authority = authority_from_claims(&claims).expect("explicit authority");
-        let grant = CatalogDelegationGrant {
+        let mut grant = CatalogDelegationGrant {
             id: claims.jti.clone(),
             user_id: claims.sub.clone(),
             actor_client_id: "nyxid-assistant".to_string(),
@@ -782,7 +948,7 @@ mod tests {
             allow_all_nodes: authority.allow_all_nodes,
             allowed_node_ids: authority.allowed_node_ids.clone(),
             revoked: false,
-            expires_at: Utc::now(),
+            expires_at: Utc.timestamp_opt(claims.exp, 0).single().unwrap(),
             created_at: Utc::now(),
         };
 
@@ -805,6 +971,17 @@ mod tests {
             &claims,
             "nyxid-assistant",
             "wrong-receiver",
+            &authority,
+        ));
+        grant.expires_at = Utc
+            .timestamp_opt(claims.exp + 1, 0)
+            .single()
+            .unwrap();
+        assert!(!grant_matches_claims(
+            &grant,
+            &claims,
+            "nyxid-assistant",
+            "aevatar",
             &authority,
         ));
     }

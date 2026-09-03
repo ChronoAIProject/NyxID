@@ -57,7 +57,7 @@ pub struct AuthUser {
     /// JWT ID for online delegated-authority validation. `None` for non-JWT
     /// authentication contexts.
     pub token_jti: Option<String>,
-    pub verified_catalog_grant:
+    pub(crate) verified_catalog_grant:
         Option<crate::services::catalog_delegation_service::VerifiedCatalogGrant>,
     /// Resource-owner user ID used for approval/notification decisions.
     /// For service-account auth this points to the SA owner; otherwise `None`.
@@ -482,10 +482,13 @@ fn delegated_request_allowed(
         return true;
     }
 
-    if matches!(
-        api_v1_path_segments(path).as_deref(),
-        Some(["mcp", "config"])
-    ) {
+    let path_without_query = path.split_once('?').map_or(path, |(path, _)| path);
+    if path_without_query == "/api/v1/mcp/config"
+        && matches!(
+            api_v1_path_segments(path).as_deref(),
+            Some(["mcp", "config"])
+        )
+    {
         return method == Method::GET
             && scope_contains(scopes, MCP_CATALOG_READ_SCOPE)
             && !is_websocket_upgrade(headers);
@@ -503,7 +506,7 @@ fn delegated_path_class(path: &str) -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-fn ensure_delegated_claim_consistency(claims: &jwt::Claims) -> Result<(), AppError> {
+pub(crate) fn ensure_delegated_claim_consistency(claims: &jwt::Claims) -> Result<(), AppError> {
     if (claims.delegated == Some(true)) != claims.act.is_some() {
         return Err(AppError::Unauthorized(
             "Invalid delegated token claims".to_string(),
@@ -1583,6 +1586,8 @@ mod tests {
         for path in [
             "/api/v1/mcp/config/",
             "/api/v1/mcp//config",
+            "/api/v1//mcp/config",
+            "//api/v1/mcp/config",
             "/api/v1/mcp/config/extra",
             "/api/v1/mcp%2fconfig",
             "/api/v1/mcp/config%2fextra",
@@ -1592,12 +1597,23 @@ mod tests {
                 "catalog read must reject GET {path}"
             );
         }
-        assert!(!delegated_request_allowed(
-            &Method::POST,
-            "/api/v1/mcp/config",
-            &headers,
-            MCP_CATALOG_READ_SCOPE
-        ));
+        for method in [
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::HEAD,
+            Method::OPTIONS,
+            Method::CONNECT,
+            Method::TRACE,
+        ] {
+            assert!(!delegated_request_allowed(
+                &method,
+                "/api/v1/mcp/config",
+                &headers,
+                MCP_CATALOG_READ_SCOPE
+            ));
+        }
         let websocket = HeaderMap::from_iter([
             (header::CONNECTION, "upgrade".parse().unwrap()),
             (header::UPGRADE, "websocket".parse().unwrap()),
@@ -2173,6 +2189,129 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         assert!(!handler_reached.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn authoritative_extractor_admits_non_aevatar_client_with_a_live_catalog_grant() {
+        use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
+        use crate::models::user::{COLLECTION_NAME as USERS, UserType};
+
+        let Some(db) = crate::test_utils::connect_test_database(
+            "auth_delegated_catalog_with_live_grant",
+        )
+        .await
+        else {
+            return;
+        };
+        let state = crate::test_utils::test_app_state(db.clone());
+        let user_id = Uuid::new_v4();
+        db.collection::<User>(USERS)
+            .insert_one(crate::test_utils::test_user(
+                &user_id.to_string(),
+                UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let actor_client_id = "catalog-reader-actor";
+        let receiving_client_id = "catalog-reader-receiver";
+        let now = chrono::Utc::now();
+        for client_id in [actor_client_id, receiving_client_id] {
+            db.collection::<OauthClient>(OAUTH_CLIENTS)
+                .insert_one(OauthClient {
+                    id: client_id.to_string(),
+                    client_name: client_id.to_string(),
+                    client_secret_hash: String::new(),
+                    redirect_uris: vec!["https://client.example/callback".to_string()],
+                    allowed_scopes: "openid".to_string(),
+                    scope_provenance: Default::default(),
+                    grant_types: "authorization_code".to_string(),
+                    client_type: "confidential".to_string(),
+                    is_active: true,
+                    delegation_scopes: format!(
+                        "{WIDE_PROXY_SCOPE} {MCP_CATALOG_READ_SCOPE}"
+                    ),
+                    default_service_catalog_slugs: Vec::new(),
+                    broker_capability_enabled: false,
+                    revocation_webhook_url: None,
+                    revocation_webhook_secret_encrypted: None,
+                    connection_webhook_url: None,
+                    connection_webhook_secret_encrypted: None,
+                    connection_webhook_key_id: None,
+                    connection_webhook_enabled: false,
+                    created_by: None,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await
+                .unwrap();
+            crate::services::consent_service::grant_consent_with_services(
+                &db,
+                &user_id.to_string(),
+                client_id,
+                "openid",
+                Some(Vec::new()),
+            )
+            .await
+            .unwrap();
+        }
+        let scope = format!("{WIDE_PROXY_SCOPE} {MCP_CATALOG_READ_SCOPE}");
+        let authority = crate::services::catalog_delegation_service::CatalogAuthority {
+            resources: Vec::new(),
+            allow_all_services: false,
+            allowed_service_ids: Vec::new(),
+            allow_all_nodes: true,
+            allowed_node_ids: Vec::new(),
+        };
+        let (token, jti) = jwt::generate_delegated_access_token_for_client(
+            &state.jwt_keys,
+            &state.config,
+            &user_id,
+            &scope,
+            actor_client_id,
+            Some(receiving_client_id),
+            60,
+            Some(&authority.restriction_claims()),
+        )
+        .unwrap();
+        let claims = jwt::verify_token(&state.jwt_keys, &state.config, &token).unwrap();
+        crate::services::catalog_delegation_service::persist_grant(
+            &db,
+            &jti,
+            &user_id.to_string(),
+            actor_client_id,
+            receiving_client_id,
+            &scope,
+            &authority,
+            claims.exp,
+        )
+        .await
+        .unwrap();
+
+        let response = Router::new()
+            .route(
+                "/api/v1/mcp/config",
+                get(|auth: AuthUser| async move {
+                    assert_eq!(auth.auth_method, AuthMethod::Delegated);
+                    assert_eq!(
+                        auth.acting_client_id.as_deref(),
+                        Some("catalog-reader-actor")
+                    );
+                    assert!(auth.verified_catalog_grant().is_some());
+                    StatusCode::NO_CONTENT
+                }),
+            )
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/mcp/config")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]

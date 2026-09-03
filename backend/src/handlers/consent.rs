@@ -147,6 +147,7 @@ pub async fn revoke_my_consent(
         Some(serde_json::json!({
             "client_id": client_id,
             "revoked_refresh_tokens": result.revoked_refresh_tokens,
+            "revoked_catalog_grants": result.revoked_catalog_grants,
             "revoked_broker_bindings": revoked_broker_bindings,
         })),
     );
