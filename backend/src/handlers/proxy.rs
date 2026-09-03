@@ -2013,7 +2013,14 @@ async fn execute_proxy_inner(
         // services. Emit a `proxy_request_denied` audit event on 403 so
         // Usage aggregation counts these failures
         // (see ChronoAIProject/NyxID#341).
-        if !auth_user.allow_all_services {
+        if !auth_user.allow_all_services
+            && !crate::services::assistant_service::allows_restricted_platform_callback(
+                &state.db,
+                auth_user,
+                service_id,
+            )
+            .await?
+        {
             let err = AppError::ApiKeyScopeForbidden(
                 "Scoped API keys must use configured services".to_string(),
             );
@@ -9635,6 +9642,120 @@ mod proxy_resolution_integration_tests {
     }
 
     #[tokio::test]
+    async fn same_slug_user_service_precedes_the_platform_callback_exemption() {
+        let Some(db) = connect_test_database("proxy_callback_user_service_precedence").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let (user_base_url, user_server) = start_downstream().await;
+        let platform_calls = Arc::new(AtomicUsize::new(0));
+        let platform_counter = platform_calls.clone();
+        let platform_app = Router::new()
+            .route(
+                "/{*path}",
+                any(move || {
+                    let platform_counter = platform_counter.clone();
+                    async move {
+                        platform_counter.fetch_add(1, Ordering::SeqCst);
+                        StatusCode::OK
+                    }
+                }),
+            );
+        let platform_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind platform callback downstream");
+        let platform_addr = platform_listener
+            .local_addr()
+            .expect("platform callback address");
+        let platform_server = tokio::spawn(async move {
+            axum::serve(platform_listener, platform_app)
+                .await
+                .expect("serve platform callback downstream");
+        });
+
+        let user_id = Uuid::new_v4().to_string();
+        let client_id = Uuid::new_v4().to_string();
+        let grant_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .expect("insert callback user");
+        let callback = insert_platform_service(
+            &db,
+            crate::services::assistant_direct::DIRECT_LLM_SLUG,
+            &format!("http://{platform_addr}"),
+        )
+        .await;
+        let mut aevatar = crate::models::downstream_service::test_helpers::dummy_service();
+        aevatar.id = Uuid::new_v4().to_string();
+        aevatar.slug = crate::services::assistant_service::AEVATAR_SLUG.to_string();
+        aevatar.requires_user_credential = false;
+        aevatar.delegated_authority_client_id = Some(client_id.clone());
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(aevatar)
+        .await
+        .expect("insert linked Aevatar row");
+        let user_service = insert_user_service(
+            &db,
+            &user_id,
+            crate::services::assistant_direct::DIRECT_LLM_SLUG,
+            &user_base_url,
+            Some(&callback.id),
+        )
+        .await;
+
+        let mut auth = access_token_auth(&user_id);
+        auth.auth_method = AuthMethod::Delegated;
+        auth.scope = crate::services::assistant_service::ASSISTANT_DELEGATED_SCOPE.to_string();
+        auth.acting_client_id = Some(client_id.clone());
+        auth.oauth_client_id = Some(client_id.clone());
+        auth.token_jti = Some(grant_id.clone());
+        auth.allow_all_services = false;
+        auth.allowed_service_ids = vec![user_service.id.clone()];
+        auth.verified_catalog_grant = Some(
+            crate::services::catalog_delegation_service::VerifiedCatalogGrant::for_test_with_identity(
+                &grant_id,
+                &user_id,
+                &client_id,
+                &client_id,
+                crate::services::assistant_service::ASSISTANT_DELEGATED_SCOPE,
+                crate::services::catalog_delegation_service::CatalogAuthority {
+                    resources: Vec::new(),
+                    allow_all_services: false,
+                    allowed_service_ids: vec![user_service.id.clone()],
+                    allow_all_nodes: true,
+                    allowed_node_ids: Vec::new(),
+                },
+                Utc::now() + chrono::Duration::minutes(5),
+            ),
+        );
+
+        let state = test_app_state(db);
+        let mut resolved_slug = String::new();
+        let response = proxy_request_by_slug_inner(
+            &state,
+            &auth,
+            crate::services::assistant_direct::DIRECT_LLM_SLUG,
+            "status",
+            proxy_request("/proxy/s/chrono-llm-public/status"),
+            &mut resolved_slug,
+        )
+        .await
+        .expect("the same-slug UserService must retain precedence");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024).await.unwrap();
+        assert_eq!(body.as_ref(), b"ok:/status");
+        assert_eq!(resolved_slug, user_service.slug);
+        assert_eq!(platform_calls.load(Ordering::SeqCst), 0);
+
+        user_server.abort();
+        platform_server.abort();
+    }
+
+    #[tokio::test]
     async fn configured_operation_policy_blocks_rest_without_forwarding() {
         let Some(db) = connect_test_database("proxy_operation_policy_rest").await else {
             panic!("MongoDB is required for proxy operation policy test");
@@ -9915,6 +10036,114 @@ mod proxy_resolution_integration_tests {
             matches!(err, AppError::Internal(_)),
             "expected a provisioning fault, got: {err}"
         );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn unlinked_aevatar_chat_keeps_the_legacy_unrestricted_session_bridge() {
+        use std::sync::Mutex as StdMutex;
+
+        let Some(db) = connect_test_database("assistant_unlinked_chat").await else {
+            eprintln!("skipping proxy integration test: no local MongoDB available");
+            return;
+        };
+
+        let captured = Arc::new(StdMutex::new(Vec::<axum::http::HeaderMap>::new()));
+        let sink = captured.clone();
+        let app = Router::new().route(
+            "/{*path}",
+            any(move |request: Request<Body>| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock().unwrap().push(request.headers().clone());
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .header(axum::http::header::CONTENT_TYPE, "text/event-stream")
+                        .body(Body::from("data: {\"type\":\"RUN_FINISHED\"}\n\n"))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind unlinked assistant downstream");
+        let addr = listener.local_addr().expect("unlinked assistant address");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve unlinked assistant downstream");
+        });
+
+        let user_id = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&user_id, UserType::Person))
+            .await
+            .expect("insert unlinked assistant user");
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = crate::services::assistant_service::AEVATAR_SLUG.to_string();
+        service.name = "Aevatar".to_string();
+        service.base_url = format!("http://{addr}");
+        service.service_category = "internal".to_string();
+        service.requires_user_credential = false;
+        service.identity_propagation_mode = "none".to_string();
+        service.forward_access_token = true;
+        service.inject_delegation_token = false;
+        service.delegation_token_scope = "proxy:*".to_string();
+        service.delegated_authority_client_id = None;
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&service)
+        .await
+        .expect("insert unlinked Aevatar row");
+
+        let state = test_app_state(db);
+        let mut auth = access_token_auth(&user_id);
+        auth.auth_method = AuthMethod::Session;
+        auth.session_id = Some(Uuid::new_v4());
+        auth.scope.clear();
+        let mut request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v1/assistant/chat")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"type":"text","prompt":"hello","clientRequestId":"unlinked-chat-1"}"#,
+            ))
+            .expect("build unlinked assistant request");
+        request.extensions_mut().insert(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        );
+
+        let response = crate::handlers::assistant::typed_chat(
+            axum::extract::State(state.clone()),
+            auth,
+            request,
+        )
+        .await
+        .expect("unlinked assistant chat must remain available");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let calls = captured.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        let forwarded = calls[0]
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .expect("unlinked chat forwards a legacy bearer");
+        let claims = crate::crypto::jwt::verify_token(&state.jwt_keys, &state.config, forwarded)
+            .expect("legacy bearer remains a valid NyxID token");
+        assert_eq!(claims.scope, "proxy:*");
+        assert_eq!(
+            claims.act.as_ref().map(|actor| actor.sub.as_str()),
+            Some(crate::services::assistant_service::AEVATAR_SLUG)
+        );
+        assert_eq!(claims.client_id, None);
+        assert_eq!(claims.allow_all_services, Some(true));
+        assert_eq!(claims.allowed_service_ids, None);
+        assert_eq!(claims.delegated, Some(true));
         server.abort();
     }
 

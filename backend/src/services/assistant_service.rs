@@ -17,12 +17,20 @@
 //!    verified `AuthUser.user_id`, never from a browser-supplied path or
 //!    body param, so a caller cannot address another user's scope.
 
+use crate::config::AppConfig;
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
 use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
-use crate::services::{audit_service, catalog_delegation_service, token_exchange_service};
+use crate::models::user_service::UserService;
+use crate::services::assistant_action_receipts::{
+    ReceiptOutcome, fingerprint_canonical, mark_completed, reserve_or_replay,
+};
+use crate::services::{
+    audit_service, catalog_delegation_service, consent_service, oauth_resource_service,
+    token_exchange_service, user_service_service,
+};
 use chrono::{DateTime, FixedOffset};
 use mongodb::bson::doc;
 use regex::Regex;
@@ -37,6 +45,259 @@ pub const ASSISTANT_DELEGATED_SCOPE: &str = "proxy:* mcp:catalog:read";
 pub enum DelegatedAuthorityDeploymentState {
     LegacyUnlinked,
     Linked { client_id: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceAccessReviewCommand {
+    pub action_request_id: String,
+    pub user_service_id: String,
+    pub service_slug: String,
+    pub resource_uri: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceAccessReviewOutcome {
+    pub user_service_id: String,
+    pub replayed: bool,
+}
+
+struct ResolvedServiceAccessReview {
+    owner_id: String,
+    client_id: String,
+    service: UserService,
+    resource_uri: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceAccessReviewFingerprint<'a> {
+    action: &'static str,
+    action_request_id: &'a str,
+    actor_id: &'a str,
+    owner_id: &'a str,
+    client_id: &'a str,
+    user_service_id: &'a str,
+    service_slug: &'a str,
+    resource_uri: &'a str,
+}
+
+const SERVICE_ACCESS_REVIEW_ACTION: &str = "service.access_review";
+
+async fn resolve_service_access_review(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    actor_id: &str,
+    command: &ServiceAccessReviewCommand,
+) -> AppResult<ResolvedServiceAccessReview> {
+    let client_id = match verify_delegated_authority_deployment_precondition(db).await? {
+        DelegatedAuthorityDeploymentState::LegacyUnlinked => {
+            return Err(AppError::Forbidden(
+                "Assistant service access review is unavailable".to_string(),
+            ));
+        }
+        DelegatedAuthorityDeploymentState::Linked { client_id } => client_id,
+    };
+    let service = user_service_service::find_user_service_by_id(db, &command.user_service_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("User service not found".to_string()))?;
+    if !oauth_resource_service::can_grant_user_service(db, actor_id, &service).await? {
+        return Err(AppError::NotFound("User service not found".to_string()));
+    }
+    if command.service_slug != service.slug {
+        return Err(AppError::ValidationError(
+            "serviceSlug does not match the resolved user service".to_string(),
+        ));
+    }
+
+    let parsed = url::Url::parse(&command.resource_uri)
+        .map_err(|_| AppError::ValidationError("resourceUri must be an absolute URI".to_string()))?;
+    let encoded_path = command.resource_uri.to_ascii_lowercase();
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || encoded_path.contains("%2f")
+        || encoded_path.contains("%5c")
+    {
+        return Err(AppError::ValidationError(
+            "resourceUri must be the exact canonical HTTPS user-service URI".to_string(),
+        ));
+    }
+    let resource_uri = oauth_resource_service::user_service_resource_uri(config, &service.slug);
+    if command.resource_uri != resource_uri {
+        return Err(AppError::ValidationError(
+            "resourceUri does not match the resolved user service".to_string(),
+        ));
+    }
+
+    Ok(ResolvedServiceAccessReview {
+        owner_id: service.user_id.clone(),
+        client_id,
+        service,
+        resource_uri,
+    })
+}
+
+async fn audit_service_access_review(
+    db: mongodb::Database,
+    actor: &audit_service::AuditActor,
+    event_type: &'static str,
+    command: &ServiceAccessReviewCommand,
+    target: Option<&ResolvedServiceAccessReview>,
+    outcome: &'static str,
+) {
+    if let Err(error) = audit_service::log_actor_event(
+        db,
+        actor,
+        event_type,
+        Some(serde_json::json!({
+            "actor_id": actor.user_id,
+            "owner_id": target.map(|value| value.owner_id.as_str()),
+            "service_id": command.user_service_id,
+            "client_id": target.map(|value| value.client_id.as_str()),
+            "action_request_id": command.action_request_id,
+            "outcome": outcome,
+        })),
+    )
+    .await
+    {
+        tracing::error!(%error, event_type, "Failed to append assistant access-review audit");
+    }
+}
+
+pub async fn apply_service_access_review(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    actor: &audit_service::AuditActor,
+    command: &ServiceAccessReviewCommand,
+) -> AppResult<ServiceAccessReviewOutcome> {
+    let target = match resolve_service_access_review(db, config, &actor.user_id, command).await {
+        Ok(target) => target,
+        Err(error) => {
+            audit_service_access_review(
+                db.clone(),
+                actor,
+                "assistant_service_access_grant_denied",
+                command,
+                None,
+                "denied",
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    audit_service_access_review(
+        db.clone(),
+        actor,
+        "assistant_service_access_review_requested",
+        command,
+        Some(&target),
+        "requested",
+    )
+    .await;
+    let fingerprint = fingerprint_canonical(&ServiceAccessReviewFingerprint {
+        action: SERVICE_ACCESS_REVIEW_ACTION,
+        action_request_id: &command.action_request_id,
+        actor_id: &actor.user_id,
+        owner_id: &target.owner_id,
+        client_id: &target.client_id,
+        user_service_id: &target.service.id,
+        service_slug: &target.service.slug,
+        resource_uri: &target.resource_uri,
+    })?;
+    let receipt = match reserve_or_replay(
+        db,
+        &actor.user_id,
+        SERVICE_ACCESS_REVIEW_ACTION,
+        &command.action_request_id,
+        &fingerprint,
+        target.service.id.clone(),
+    )
+    .await
+    {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            audit_service_access_review(
+                db.clone(),
+                actor,
+                "assistant_service_access_grant_denied",
+                command,
+                Some(&target),
+                "denied",
+            )
+            .await;
+            return Err(error);
+        }
+    };
+
+    if matches!(receipt, ReceiptOutcome::Replay(_)) {
+        audit_service_access_review(
+            db.clone(),
+            actor,
+            "assistant_service_access_grant_replayed",
+            command,
+            Some(&target),
+            "replayed",
+        )
+        .await;
+        return Ok(ServiceAccessReviewOutcome {
+            user_service_id: target.service.id,
+            replayed: true,
+        });
+    }
+
+    let (receipt, replayed) = match receipt {
+        ReceiptOutcome::Reserved(receipt) => (receipt, false),
+        ReceiptOutcome::InProgress(receipt) => (receipt, true),
+        ReceiptOutcome::Replay(_) => unreachable!("completed replay returned above"),
+    };
+    if let Err(error) = consent_service::merge_consent_services_atomic(
+        db,
+        &actor.user_id,
+        &target.client_id,
+        "openid",
+        &target.service.id,
+    )
+    .await
+    {
+        audit_service_access_review(
+            db.clone(),
+            actor,
+            "assistant_service_access_grant_denied",
+            command,
+            Some(&target),
+            "denied",
+        )
+        .await;
+        return Err(error);
+    }
+    mark_completed(db, &receipt).await?;
+    audit_service_access_review(
+        db.clone(),
+        actor,
+        "assistant_service_access_grant_merged",
+        command,
+        Some(&target),
+        "merged",
+    )
+    .await;
+    if replayed {
+        audit_service_access_review(
+            db.clone(),
+            actor,
+            "assistant_service_access_grant_replayed",
+            command,
+            Some(&target),
+            "recovered",
+        )
+        .await;
+    }
+
+    Ok(ServiceAccessReviewOutcome {
+        user_service_id: target.service.id,
+        replayed,
+    })
 }
 
 pub async fn validate_delegated_authority_client_link(
@@ -75,15 +336,158 @@ pub async fn validate_delegated_authority_client_link(
 pub async fn verify_delegated_authority_deployment_precondition(
     db: &mongodb::Database,
 ) -> AppResult<DelegatedAuthorityDeploymentState> {
+    let (_, state) = resolve_delegated_authority_deployment_state(db).await?;
+    Ok(state)
+}
+
+async fn resolve_delegated_authority_deployment_state(
+    db: &mongodb::Database,
+) -> AppResult<(DownstreamService, DelegatedAuthorityDeploymentState)> {
     let service = resolve_admin_service_by_slug(db, AEVATAR_SLUG).await?;
     let Some(client_id) = service.delegated_authority_client_id.as_deref() else {
-        return Ok(DelegatedAuthorityDeploymentState::LegacyUnlinked);
+        return Ok((
+            service,
+            DelegatedAuthorityDeploymentState::LegacyUnlinked,
+        ));
     };
 
     validate_delegated_authority_client_link(db, AEVATAR_SLUG, true, Some(client_id)).await?;
-    Ok(DelegatedAuthorityDeploymentState::Linked {
+    let state = DelegatedAuthorityDeploymentState::Linked {
         client_id: client_id.to_string(),
+    };
+    Ok((service, state))
+}
+
+/// Re-resolve the deployment link at mint time. A linked row must be the exact
+/// row that the assistant forwarder resolved immediately before minting.
+pub async fn verify_delegated_authority_deployment_precondition_for_mint(
+    db: &mongodb::Database,
+    expected_service_id: &str,
+) -> AppResult<DelegatedAuthorityDeploymentState> {
+    let (service, state) = resolve_delegated_authority_deployment_state(db).await?;
+    if matches!(state, DelegatedAuthorityDeploymentState::Linked { .. })
+        && service.id != expected_service_id
+    {
+        return Err(AppError::Internal(
+            "assistant: linked authority row changed during capability mint".to_string(),
+        ));
+    }
+    Ok(state)
+}
+
+/// Re-read OAuth consent at mint time; current consent, not session state,
+/// defines assistant catalog authority.
+pub async fn resolve_consent_catalog_authority(
+    db: &mongodb::Database,
+    actor_user_id: &str,
+    client_id: &str,
+) -> AppResult<catalog_delegation_service::CatalogAuthority> {
+    let consent = consent_service::check_consent(db, actor_user_id, client_id, "openid")
+        .await?
+        .ok_or_else(|| {
+            AppError::Forbidden("Assistant delegated authority is unavailable".to_string())
+        })?;
+
+    let (allow_all_services, allowed_service_ids) = if consent.allow_all_services {
+        (true, Vec::new())
+    } else {
+        let allowed_service_ids = consent.allowed_service_ids.ok_or_else(|| {
+            AppError::Forbidden("Assistant delegated authority is unavailable".to_string())
+        })?;
+        let unique: HashSet<&str> = allowed_service_ids.iter().map(String::as_str).collect();
+        if unique.len() != allowed_service_ids.len()
+            || !oauth_resource_service::validate_grantable_service_ids(
+                db,
+                actor_user_id,
+                &allowed_service_ids,
+            )
+            .await?
+        {
+            return Err(AppError::Forbidden(
+                "Assistant delegated authority is unavailable".to_string(),
+            ));
+        }
+        (false, allowed_service_ids)
+    };
+
+    Ok(catalog_delegation_service::CatalogAuthority {
+        resources: Vec::new(),
+        allow_all_services,
+        allowed_service_ids,
+        allow_all_nodes: true,
+        allowed_node_ids: Vec::new(),
     })
+}
+
+pub async fn audit_delegated_authority_minted(
+    db: mongodb::Database,
+    actor: &audit_service::AuditActor,
+    service_id: &str,
+    client_id: &str,
+    grant_id: &str,
+) {
+    if let Err(error) = audit_service::log_actor_event(
+        db,
+        actor,
+        "assistant_delegated_authority_minted",
+        Some(serde_json::json!({
+            "actor_id": actor.user_id,
+            "owner_id": actor.user_id,
+            "service_id": service_id,
+            "client_id": client_id,
+            "online_grant_id": grant_id,
+            "outcome": "minted",
+        })),
+    )
+    .await
+    {
+        tracing::error!(%error, service_id, "Failed to append assistant authority mint audit");
+    }
+}
+
+pub async fn allows_restricted_platform_callback(
+    db: &mongodb::Database,
+    auth: &crate::mw::auth::AuthUser,
+    service_id: &str,
+) -> AppResult<bool> {
+    let callback_service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! {
+            "slug": crate::services::assistant_direct::DIRECT_LLM_SLUG,
+            "is_active": true,
+        })
+        .await?;
+    if callback_service.as_ref().map(|service| service.id.as_str()) != Some(service_id) {
+        return Ok(false);
+    }
+    if auth.auth_method != crate::mw::auth::AuthMethod::Delegated
+        || auth.scope != ASSISTANT_DELEGATED_SCOPE
+    {
+        return Ok(false);
+    }
+
+    let aevatar_service = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "slug": AEVATAR_SLUG, "is_active": true })
+        .await?;
+    let Some(linked_client_id) = aevatar_service
+        .as_ref()
+        .and_then(|service| service.delegated_authority_client_id.as_deref())
+    else {
+        return Ok(false);
+    };
+    let Some(proof) = auth.verified_catalog_grant() else {
+        return Ok(false);
+    };
+
+    Ok(auth.token_jti.as_deref() == Some(proof.grant_id())
+        && auth.acting_client_id.as_deref() == Some(linked_client_id)
+        && auth.oauth_client_id.as_deref() == Some(linked_client_id)
+        && proof.subject_user_id() == auth.user_id.to_string()
+        && proof.scope() == ASSISTANT_DELEGATED_SCOPE
+        && proof.actor_client_id() == linked_client_id
+        && proof.receiving_client_id() == linked_client_id
+        && proof.expires_at() > chrono::Utc::now())
 }
 
 pub async fn audit_delegated_authority_client_link_changed(
@@ -1648,6 +2052,246 @@ mod tests {
             verify_delegated_authority_deployment_precondition(&db)
                 .await
                 .is_err()
+        );
+    }
+
+    fn callback_auth(
+        user_id: &str,
+        client_id: &str,
+        grant_id: &str,
+        proof_subject: &str,
+        proof_actor: &str,
+        proof_receiver: &str,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::mw::auth::AuthUser {
+        let mut auth = crate::test_utils::test_auth_user(user_id);
+        auth.auth_method = crate::mw::auth::AuthMethod::Delegated;
+        auth.scope = ASSISTANT_DELEGATED_SCOPE.to_string();
+        auth.acting_client_id = Some(client_id.to_string());
+        auth.oauth_client_id = Some(client_id.to_string());
+        auth.token_jti = Some(grant_id.to_string());
+        auth.verified_catalog_grant = Some(
+            catalog_delegation_service::VerifiedCatalogGrant::for_test_with_identity(
+                grant_id,
+                proof_subject,
+                proof_actor,
+                proof_receiver,
+                ASSISTANT_DELEGATED_SCOPE,
+                catalog_delegation_service::CatalogAuthority {
+                    resources: Vec::new(),
+                    allow_all_services: false,
+                    allowed_service_ids: Vec::new(),
+                    allow_all_nodes: true,
+                    allowed_node_ids: Vec::new(),
+                },
+                expires_at,
+            ),
+        );
+        auth
+    }
+
+    #[tokio::test]
+    async fn restricted_platform_callback_requires_every_live_authority_binding() {
+        let Some(db) =
+            crate::test_utils::connect_test_database("assistant_restricted_callback_matrix").await
+        else {
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let client_id = "assistant-callback-client";
+        let grant_id = uuid::Uuid::new_v4().to_string();
+        let mut aevatar = crate::models::downstream_service::test_helpers::dummy_service();
+        aevatar.id = uuid::Uuid::new_v4().to_string();
+        aevatar.slug = AEVATAR_SLUG.to_string();
+        aevatar.requires_user_credential = false;
+        aevatar.delegated_authority_client_id = Some(client_id.to_string());
+        let mut callback = crate::models::downstream_service::test_helpers::dummy_service();
+        callback.id = uuid::Uuid::new_v4().to_string();
+        callback.slug = crate::services::assistant_direct::DIRECT_LLM_SLUG.to_string();
+        callback.is_active = true;
+        let mut inactive_duplicate = callback.clone();
+        inactive_duplicate.id = uuid::Uuid::new_v4().to_string();
+        inactive_duplicate.is_active = false;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_many([
+                aevatar.clone(),
+                callback.clone(),
+                inactive_duplicate.clone(),
+            ])
+            .await
+            .unwrap();
+        let future = chrono::Utc::now() + chrono::Duration::minutes(5);
+        let valid = callback_auth(
+            &user_id,
+            client_id,
+            &grant_id,
+            &user_id,
+            client_id,
+            client_id,
+            future.clone(),
+        );
+
+        assert!(
+            allows_restricted_platform_callback(&db, &valid, &callback.id)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !allows_restricted_platform_callback(
+                &db,
+                &valid,
+                &inactive_duplicate.id,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !allows_restricted_platform_callback(&db, &valid, "another-platform-row")
+                .await
+                .unwrap()
+        );
+
+        for (case, auth) in [
+            (
+                "wrong-subject",
+                callback_auth(
+                    &user_id,
+                    client_id,
+                    &grant_id,
+                    &uuid::Uuid::new_v4().to_string(),
+                    client_id,
+                    client_id,
+                    future.clone(),
+                ),
+            ),
+            (
+                "wrong-actor",
+                callback_auth(
+                    &user_id,
+                    client_id,
+                    &grant_id,
+                    &user_id,
+                    "wrong-actor",
+                    client_id,
+                    future.clone(),
+                ),
+            ),
+            (
+                "wrong-receiver",
+                callback_auth(
+                    &user_id,
+                    client_id,
+                    &grant_id,
+                    &user_id,
+                    client_id,
+                    "wrong-receiver",
+                    future,
+                ),
+            ),
+            (
+                "expired-proof",
+                callback_auth(
+                    &user_id,
+                    client_id,
+                    &grant_id,
+                    &user_id,
+                    client_id,
+                    client_id,
+                    chrono::Utc::now() - chrono::Duration::seconds(1),
+                ),
+            ),
+        ] {
+            assert!(
+                !allows_restricted_platform_callback(&db, &auth, &callback.id)
+                    .await
+                    .unwrap(),
+                "{case}"
+            );
+        }
+
+        let mut wrong_jti = valid.clone();
+        wrong_jti.token_jti = Some(uuid::Uuid::new_v4().to_string());
+        assert!(
+            !allows_restricted_platform_callback(&db, &wrong_jti, &callback.id)
+                .await
+                .unwrap()
+        );
+        let mut wrong_actor_claim = valid.clone();
+        wrong_actor_claim.acting_client_id = Some("wrong-actor".to_string());
+        assert!(
+            !allows_restricted_platform_callback(&db, &wrong_actor_claim, &callback.id)
+                .await
+                .unwrap()
+        );
+        let mut wrong_receiver_claim = valid.clone();
+        wrong_receiver_claim.oauth_client_id = Some("wrong-receiver".to_string());
+        assert!(
+            !allows_restricted_platform_callback(&db, &wrong_receiver_claim, &callback.id)
+                .await
+                .unwrap()
+        );
+        let mut wrong_scope = valid.clone();
+        wrong_scope.scope = "proxy:*".to_string();
+        assert!(
+            !allows_restricted_platform_callback(&db, &wrong_scope, &callback.id)
+                .await
+                .unwrap()
+        );
+        let mut missing_proof = valid.clone();
+        missing_proof.verified_catalog_grant = None;
+        assert!(
+            !allows_restricted_platform_callback(&db, &missing_proof, &callback.id)
+                .await
+                .unwrap()
+        );
+        let mut non_delegated = valid.clone();
+        non_delegated.auth_method = crate::mw::auth::AuthMethod::AccessToken;
+        assert!(
+            !allows_restricted_platform_callback(&db, &non_delegated, &callback.id)
+                .await
+                .unwrap()
+        );
+
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! { "_id": &aevatar.id },
+                doc! { "$set": { "delegated_authority_client_id": "changed-link" } },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !allows_restricted_platform_callback(&db, &valid, &callback.id)
+                .await
+                .unwrap()
+        );
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! { "_id": &aevatar.id },
+                doc! { "$unset": { "delegated_authority_client_id": "" } },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !allows_restricted_platform_callback(&db, &valid, &callback.id)
+                .await
+                .unwrap()
+        );
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .update_one(
+                doc! { "_id": &aevatar.id },
+                doc! {
+                    "$set": {
+                        "delegated_authority_client_id": client_id,
+                        "is_active": false,
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !allows_restricted_platform_callback(&db, &valid, &callback.id)
+                .await
+                .unwrap()
         );
     }
 

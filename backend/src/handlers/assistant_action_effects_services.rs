@@ -27,8 +27,8 @@ use crate::services::assistant_action_receipts::{
 use crate::services::audit_service::AuditActor;
 use crate::services::user_endpoint_service::{OpenApiSpecUrlUpdate, RecommendedSkillsUpdate};
 use crate::services::{
-    node_service, org_service, unified_key_service, user_api_key_service, user_endpoint_service,
-    user_service_service,
+    assistant_service, node_service, org_service, unified_key_service, user_api_key_service,
+    user_endpoint_service, user_service_service,
 };
 
 const SERVICE_UPDATE_ACTION: &str = "service.update";
@@ -51,6 +51,7 @@ pub fn router() -> Router<AppState> {
         .route("/delete", post(delete_service))
         .route("/route", post(route_service))
         .route("/rotate-credential", post(rotate_credential))
+        .route("/access-review", post(access_review))
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -122,6 +123,22 @@ pub struct RotateAssistantServiceCredentialRequest {
 #[derive(Debug, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RotateAssistantServiceCredentialResponse {
+    pub resource: AssistantServiceResource,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccessReviewAssistantServiceRequest {
+    pub action_request_id: String,
+    pub user_service_id: String,
+    pub service_slug: String,
+    pub resource_uri: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessReviewAssistantServiceResponse {
     pub resource: AssistantServiceResource,
     pub replayed: bool,
 }
@@ -339,6 +356,27 @@ fn normalize_rotate(body: RotateAssistantServiceCredentialRequest) -> AppResult<
         action_request_id: normalize_action_request_id(body.action_request_id)?,
         user_service_id: parse_uuid_id(&body.user_service_id, "userServiceId")?,
         credential,
+    })
+}
+
+fn normalize_access_review(
+    body: AccessReviewAssistantServiceRequest,
+) -> AppResult<assistant_service::ServiceAccessReviewCommand> {
+    let action_request_id = normalize_action_request_id(body.action_request_id)?;
+    reject_secret_shaped("actionRequestId", &action_request_id)?;
+    let user_service_id = parse_uuid_id(&body.user_service_id, "userServiceId")?;
+    if body.service_slug.is_empty() || body.resource_uri.is_empty() {
+        return Err(AppError::ValidationError(
+            "serviceSlug and resourceUri must not be empty".to_string(),
+        ));
+    }
+    reject_secret_shaped("serviceSlug", &body.service_slug)?;
+    reject_secret_shaped("resourceUri", &body.resource_uri)?;
+    Ok(assistant_service::ServiceAccessReviewCommand {
+        action_request_id,
+        user_service_id,
+        service_slug: body.service_slug,
+        resource_uri: body.resource_uri,
     })
 }
 
@@ -1004,6 +1042,37 @@ pub async fn rotate_credential(
     }))
 }
 
+/// POST /api/v1/assistant/actions/services/access-review
+pub async fn access_review(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Json(body): Json<AccessReviewAssistantServiceRequest>,
+) -> AppResult<Json<AccessReviewAssistantServiceResponse>> {
+    if auth_user.auth_method != crate::mw::auth::AuthMethod::Session
+        || auth_user.session_id.is_none()
+    {
+        return Err(AppError::Forbidden(
+            "A browser session is required for service access review".to_string(),
+        ));
+    }
+    auth_user.ensure_write_scope()?;
+    let command = normalize_access_review(body)?;
+    let actor = AuditActor::from_auth_user(&auth_user);
+    let outcome = assistant_service::apply_service_access_review(
+        &state.db,
+        &state.config,
+        &actor,
+        &command,
+    )
+    .await?;
+    Ok(Json(AccessReviewAssistantServiceResponse {
+        resource: AssistantServiceResource {
+            user_service_id: outcome.user_service_id,
+        },
+        replayed: outcome.replayed,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
@@ -1029,7 +1098,13 @@ mod tests {
         AssistantActionReceipt, AssistantActionReceiptStatus,
         COLLECTION_NAME as ASSISTANT_ACTION_RECEIPTS,
     };
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDIT_LOGS};
+    use crate::models::consent::{COLLECTION_NAME as CONSENTS, Consent};
+    use crate::models::downstream_service::{
+        COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
+    };
     use crate::models::node::{COLLECTION_NAME as NODES, Node, NodeMetrics, NodeStatus};
+    use crate::models::oauth_client::{COLLECTION_NAME as OAUTH_CLIENTS, OauthClient};
     use crate::models::provider_config::{
         COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig, RevocationConfig,
     };
@@ -1041,8 +1116,9 @@ mod tests {
         WsFrameDirection, WsFrameInjection, WsFrameKind, WsFrameTrigger,
     };
     use crate::test_utils::{
-        connect_test_database, connect_transaction_test_database, test_app_state,
-        test_encryption_keys, test_user, test_user_endpoint, test_user_service,
+        connect_test_database, connect_transaction_test_database, test_app_config, test_app_state,
+        test_app_state_with_config, test_auth_user, test_encryption_keys, test_user,
+        test_user_endpoint, test_user_service,
     };
 
     fn access_token(state: &AppState, user_id: &str) -> String {
@@ -1242,6 +1318,83 @@ mod tests {
         (db, actor_id)
     }
 
+    fn delegated_authority_client(id: &str) -> OauthClient {
+        let now = chrono::Utc::now();
+        OauthClient {
+            id: id.to_string(),
+            client_name: "Aevatar".to_string(),
+            client_secret_hash: String::new(),
+            redirect_uris: vec!["https://aevatar.example/callback".to_string()],
+            allowed_scopes: "openid".to_string(),
+            scope_provenance: Default::default(),
+            grant_types: "authorization_code".to_string(),
+            client_type: "confidential".to_string(),
+            is_active: true,
+            delegation_scopes: crate::services::assistant_service::ASSISTANT_DELEGATED_SCOPE
+                .to_string(),
+            default_service_catalog_slugs: Vec::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
+            connection_webhook_enabled: false,
+            created_by: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn seed_delegated_authority_link(db: &mongodb::Database) -> String {
+        let client_id = Uuid::new_v4().to_string();
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .insert_one(delegated_authority_client(&client_id))
+            .await
+            .unwrap();
+        let mut service =
+            crate::models::downstream_service::test_helpers::dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.slug = crate::services::assistant_service::AEVATAR_SLUG.to_string();
+        service.delegated_authority_client_id = Some(client_id.clone());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(service)
+            .await
+            .unwrap();
+        client_id
+    }
+
+    fn session_auth(actor_id: &str) -> AuthUser {
+        let mut auth = test_auth_user(actor_id);
+        auth.session_id = Some(Uuid::new_v4());
+        auth
+    }
+
+    fn access_review_body(
+        action_request_id: &str,
+        service: &UserService,
+        resource_uri: &str,
+    ) -> AccessReviewAssistantServiceRequest {
+        AccessReviewAssistantServiceRequest {
+            action_request_id: action_request_id.to_string(),
+            user_service_id: service.id.clone(),
+            service_slug: service.slug.clone(),
+            resource_uri: resource_uri.to_string(),
+        }
+    }
+
+    async fn prepare_access_review(
+        prefix: &str,
+    ) -> Option<(AppState, String, String, UserService)> {
+        let (db, actor_id) = prepare_actor(prefix).await?;
+        let client_id = seed_delegated_authority_link(&db).await;
+        let (service, _) = seed_service_named(&db, &actor_id, "github", false, None).await;
+        let mut config = test_app_config();
+        config.base_url = "https://nyxid.test".to_string();
+        let state = test_app_state_with_config(db, config);
+        Some((state, actor_id, client_id, service))
+    }
+
     fn grant_provider_for_test() -> ProviderConfig {
         ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1415,6 +1568,598 @@ mod tests {
         assert_ne!(
             first_json["credentialFingerprint"],
             hex::encode(Sha256::digest(b"credential-a"))
+        );
+    }
+
+    #[tokio::test]
+    async fn service_access_review_merges_consent_once_and_replays_completed_receipt() {
+        let Some((state, actor_id, client_id, service)) =
+            prepare_access_review("svc_access_review_replay").await
+        else {
+            return;
+        };
+        let resource_uri = crate::services::oauth_resource_service::user_service_resource_uri(
+            &state.config,
+            &service.slug,
+        );
+        let auth = session_auth(&actor_id);
+
+        let first = access_review(
+            State(state.clone()),
+            auth.clone(),
+            Json(access_review_body("review-1", &service, &resource_uri)),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!first.replayed);
+        assert_eq!(first.resource.user_service_id, service.id);
+        let consent = state
+            .db
+            .collection::<Consent>(CONSENTS)
+            .find_one(doc! { "user_id": &actor_id, "client_id": &client_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(consent.scopes, "openid");
+        assert!(!consent.allow_all_services);
+        assert_eq!(consent.allowed_service_ids, Some(vec![service.id.clone()]));
+
+        let second = access_review(
+            State(state.clone()),
+            auth,
+            Json(access_review_body("review-1", &service, &resource_uri)),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(second.replayed);
+        let after = state
+            .db
+            .collection::<Consent>(CONSENTS)
+            .find_one(doc! { "_id": &consent.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(after, consent);
+        assert_eq!(
+            state
+                .db
+                .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+                .count_documents(doc! {
+                    "user_id": &actor_id,
+                    "action": "service.access_review",
+                    "action_request_id": "review-1",
+                })
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<AuditLog>(AUDIT_LOGS)
+                .count_documents(doc! { "event_type": "assistant_service_access_grant_merged" })
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<AuditLog>(AUDIT_LOGS)
+                .count_documents(doc! { "event_type": "assistant_service_access_grant_replayed" })
+                .await
+                .unwrap(),
+            1
+        );
+
+        for event_type in [
+            "assistant_service_access_review_requested",
+            "assistant_service_access_grant_merged",
+            "assistant_service_access_grant_replayed",
+        ] {
+            let entry = state
+                .db
+                .collection::<AuditLog>(AUDIT_LOGS)
+                .find_one(doc! { "event_type": event_type })
+                .await
+                .unwrap()
+                .unwrap();
+            let keys = entry
+                .event_data
+                .as_ref()
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<std::collections::HashSet<_>>();
+            assert_eq!(
+                keys,
+                std::collections::HashSet::from([
+                    "actor_id",
+                    "owner_id",
+                    "service_id",
+                    "client_id",
+                    "action_request_id",
+                    "outcome",
+                ]),
+                "{event_type} audit key allowlist"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn service_access_review_preserves_unrestricted_consent() {
+        let Some((state, actor_id, client_id, service)) =
+            prepare_access_review("svc_access_review_unrestricted").await
+        else {
+            return;
+        };
+        crate::services::consent_service::grant_consent_with_services(
+            &state.db,
+            &actor_id,
+            &client_id,
+            "openid email",
+            None,
+        )
+        .await
+        .unwrap();
+        let resource_uri = crate::services::oauth_resource_service::user_service_resource_uri(
+            &state.config,
+            &service.slug,
+        );
+
+        access_review(
+            State(state.clone()),
+            session_auth(&actor_id),
+            Json(access_review_body(
+                "review-unrestricted",
+                &service,
+                &resource_uri,
+            )),
+        )
+        .await
+        .unwrap();
+
+        let consent = state
+            .db
+            .collection::<Consent>(CONSENTS)
+            .find_one(doc! { "user_id": &actor_id, "client_id": &client_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(consent.allow_all_services);
+        assert_eq!(consent.scopes, "openid email");
+        assert_eq!(consent.allowed_service_ids, Some(vec![service.id]));
+    }
+
+    #[tokio::test]
+    async fn service_access_review_recovers_a_pending_receipt_idempotently() {
+        let Some((state, actor_id, client_id, service)) =
+            prepare_access_review("svc_access_review_pending").await
+        else {
+            return;
+        };
+        let resource_uri = crate::services::oauth_resource_service::user_service_resource_uri(
+            &state.config,
+            &service.slug,
+        );
+        let body = || access_review_body("review-pending", &service, &resource_uri);
+        access_review(
+            State(state.clone()),
+            session_auth(&actor_id),
+            Json(body()),
+        )
+        .await
+        .unwrap();
+        state
+            .db
+            .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+            .update_one(
+                doc! {
+                    "user_id": &actor_id,
+                    "action": "service.access_review",
+                    "action_request_id": "review-pending",
+                },
+                doc! {
+                    "$set": { "status": "pending" },
+                    "$unset": { "completed_at": "" },
+                },
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .collection::<Consent>(CONSENTS)
+            .update_one(
+                doc! { "user_id": &actor_id, "client_id": &client_id },
+                doc! { "$set": { "allowed_service_ids": [] } },
+            )
+            .await
+            .unwrap();
+
+        let recovered = access_review(
+            State(state.clone()),
+            session_auth(&actor_id),
+            Json(body()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(recovered.replayed);
+        let consent = state
+            .db
+            .collection::<Consent>(CONSENTS)
+            .find_one(doc! { "user_id": &actor_id, "client_id": &client_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(consent.allowed_service_ids, Some(vec![service.id.clone()]));
+        let receipt = state
+            .db
+            .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+            .find_one(doc! {
+                "user_id": &actor_id,
+                "action": "service.access_review",
+                "action_request_id": "review-pending",
+            })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt.status, AssistantActionReceiptStatus::Completed);
+        assert!(receipt.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn service_access_review_rejects_action_id_reuse_with_different_content() {
+        let Some((state, actor_id, client_id, first_service)) =
+            prepare_access_review("svc_access_review_conflict").await
+        else {
+            return;
+        };
+        let (second_service, _) =
+            seed_service_named(&state.db, &actor_id, "linear", false, None).await;
+        let first_uri = crate::services::oauth_resource_service::user_service_resource_uri(
+            &state.config,
+            &first_service.slug,
+        );
+        let second_uri = crate::services::oauth_resource_service::user_service_resource_uri(
+            &state.config,
+            &second_service.slug,
+        );
+        access_review(
+            State(state.clone()),
+            session_auth(&actor_id),
+            Json(access_review_body(
+                "review-conflict",
+                &first_service,
+                &first_uri,
+            )),
+        )
+        .await
+        .unwrap();
+
+        let result = access_review(
+            State(state.clone()),
+            session_auth(&actor_id),
+            Json(access_review_body(
+                "review-conflict",
+                &second_service,
+                &second_uri,
+            )),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Conflict(_))));
+        let consent = state
+            .db
+            .collection::<Consent>(CONSENTS)
+            .find_one(doc! { "user_id": &actor_id, "client_id": &client_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            consent.allowed_service_ids,
+            Some(vec![first_service.id.clone()])
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+                .count_documents(doc! {
+                    "user_id": &actor_id,
+                    "action": "service.access_review",
+                    "action_request_id": "review-conflict",
+                })
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn service_access_review_fails_closed_for_invalid_link_states() {
+        let Some((state, actor_id, client_id, service)) =
+            prepare_access_review("svc_access_review_link_states").await
+        else {
+            return;
+        };
+        let resource_uri = crate::services::oauth_resource_service::user_service_resource_uri(
+            &state.config,
+            &service.slug,
+        );
+        let downstream = state
+            .db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let clients = state.db.collection::<OauthClient>(OAUTH_CLIENTS);
+
+        downstream
+            .update_one(
+                doc! { "slug": crate::services::assistant_service::AEVATAR_SLUG },
+                doc! { "$unset": { "delegated_authority_client_id": "" } },
+            )
+            .await
+            .unwrap();
+        assert!(
+            access_review(
+                State(state.clone()),
+                session_auth(&actor_id),
+                Json(access_review_body("review-no-link", &service, &resource_uri)),
+            )
+            .await
+            .is_err()
+        );
+        downstream
+            .update_one(
+                doc! { "slug": crate::services::assistant_service::AEVATAR_SLUG },
+                doc! { "$set": { "delegated_authority_client_id": &client_id } },
+            )
+            .await
+            .unwrap();
+        for (case, scopes) in [
+            ("missing-proxy", "mcp:catalog:read"),
+            ("missing-catalog", "proxy:*"),
+        ] {
+            clients
+                .update_one(
+                    doc! { "_id": &client_id },
+                    doc! { "$set": { "delegation_scopes": scopes } },
+                )
+                .await
+                .unwrap();
+            assert!(
+                access_review(
+                    State(state.clone()),
+                    session_auth(&actor_id),
+                    Json(access_review_body(
+                        &format!("review-{case}"),
+                        &service,
+                        &resource_uri,
+                    )),
+                )
+                .await
+                .is_err(),
+                "{case}"
+            );
+        }
+        clients
+            .update_one(
+                doc! { "_id": &client_id },
+                doc! {
+                    "$set": {
+                        "delegation_scopes": crate::services::assistant_service::ASSISTANT_DELEGATED_SCOPE,
+                        "is_active": false,
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        assert!(
+            access_review(
+                State(state.clone()),
+                session_auth(&actor_id),
+                Json(access_review_body(
+                    "review-inactive-client",
+                    &service,
+                    &resource_uri,
+                )),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<Consent>(CONSENTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn service_access_review_rejects_cross_user_before_receipt_or_consent() {
+        let Some((state, actor_id, _client_id, _)) =
+            prepare_access_review("svc_access_review_cross_user").await
+        else {
+            return;
+        };
+        let other_user_id = Uuid::new_v4().to_string();
+        state
+            .db
+            .collection::<User>(USERS)
+            .insert_one(test_user(&other_user_id, UserType::Person))
+            .await
+            .unwrap();
+        let (foreign, _) =
+            seed_service_named(&state.db, &other_user_id, "foreign", false, None).await;
+        let resource_uri = crate::services::oauth_resource_service::user_service_resource_uri(
+            &state.config,
+            &foreign.slug,
+        );
+
+        let result = access_review(
+            State(state.clone()),
+            session_auth(&actor_id),
+            Json(access_review_body("review-cross-user", &foreign, &resource_uri)),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::NotFound(_))));
+        assert_eq!(
+            state
+                .db
+                .collection::<Consent>(CONSENTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn service_access_review_resource_matrix_fails_before_mutation() {
+        let Some((state, actor_id, _client_id, service)) =
+            prepare_access_review("svc_access_review_resource_matrix").await
+        else {
+            return;
+        };
+        let canonical = crate::services::oauth_resource_service::user_service_resource_uri(
+            &state.config,
+            &service.slug,
+        );
+        let cases = [
+            ("wrong-slug", "other", canonical.clone()),
+            (
+                "http",
+                service.slug.as_str(),
+                canonical.replacen("https://", "http://", 1),
+            ),
+            (
+                "userinfo",
+                service.slug.as_str(),
+                canonical.replacen("https://", "https://user@", 1),
+            ),
+            ("query", service.slug.as_str(), format!("{canonical}?admin=1")),
+            ("fragment", service.slug.as_str(), format!("{canonical}#grant")),
+            (
+                "encoded-path",
+                service.slug.as_str(),
+                canonical.replace("/proxy/s/", "/proxy%2fs/"),
+            ),
+        ];
+        for (case, slug, resource_uri) in cases {
+            let mut body = access_review_body(&format!("review-{case}"), &service, &resource_uri);
+            body.service_slug = slug.to_string();
+            assert!(
+                access_review(
+                    State(state.clone()),
+                    session_auth(&actor_id),
+                    Json(body),
+                )
+                .await
+                .is_err(),
+                "{case}"
+            );
+        }
+
+        state
+            .db
+            .collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+        assert!(
+            access_review(
+                State(state.clone()),
+                session_auth(&actor_id),
+                Json(access_review_body("review-inactive", &service, &canonical)),
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<Consent>(CONSENTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<AssistantActionReceipt>(ASSISTANT_ACTION_RECEIPTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        let denied = state
+            .db
+            .collection::<AuditLog>(AUDIT_LOGS)
+            .find_one(doc! { "event_type": "assistant_service_access_grant_denied" })
+            .await
+            .unwrap()
+            .unwrap();
+        let serialized = serde_json::to_string(&denied.event_data).unwrap();
+        for forbidden in ["resource_uri", "authorization", "cookie", "token", "credential"] {
+            assert!(!serialized.to_ascii_lowercase().contains(forbidden));
+        }
+    }
+
+    #[tokio::test]
+    async fn service_access_review_requires_browser_session() {
+        let Some((state, actor_id, _client_id, service)) =
+            prepare_access_review("svc_access_review_session_only").await
+        else {
+            return;
+        };
+        let resource_uri = crate::services::oauth_resource_service::user_service_resource_uri(
+            &state.config,
+            &service.slug,
+        );
+        let mut auth = test_auth_user(&actor_id);
+        auth.auth_method = crate::mw::auth::AuthMethod::AccessToken;
+
+        let result = access_review(
+            State(state.clone()),
+            auth,
+            Json(access_review_body("review-access-token", &service, &resource_uri)),
+        )
+        .await;
+        assert!(matches!(result, Err(AppError::Forbidden(_))));
+        assert_eq!(
+            state
+                .db
+                .collection::<Consent>(CONSENTS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
         );
     }
 

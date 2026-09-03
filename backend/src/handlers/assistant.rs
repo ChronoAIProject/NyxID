@@ -28,12 +28,16 @@ use std::collections::HashSet;
 use crate::AppState;
 use crate::crypto::jwt::{
     MCP_DELEGATION_TOKEN_TTL_SECS, TokenRestrictionClaims, generate_delegated_access_token,
+    generate_delegated_access_token_for_client, verify_token,
 };
 use crate::errors::{AppError, AppResult};
 use crate::handlers::proxy::execute_admin_proxy;
 use crate::models::downstream_service::DownstreamService;
 use crate::mw::auth::{AuthMethod, AuthUser, PROXY_SCOPE, scope_allows_rest_proxy};
-use crate::services::{assistant_service, assistant_wire_log_service, feature_flag_service};
+use crate::services::{
+    assistant_service, assistant_wire_log_service, audit_service, catalog_delegation_service,
+    feature_flag_service,
+};
 
 /// Conversation indexes carry titles, timestamps, and counts per row, so the
 /// list route gets its own buffering headroom before any merge/reshape.
@@ -717,7 +721,7 @@ fn resolve_forward_scope(service: &DownstreamService) -> &str {
     PROXY_SCOPE
 }
 
-fn build_forward_authorization(
+fn build_legacy_forward_authorization(
     state: &AppState,
     auth_user: &AuthUser,
     service: &DownstreamService,
@@ -737,6 +741,72 @@ fn build_forward_authorization(
             "assistant: failed to build the forward authorization header".to_string(),
         )
     })
+}
+
+async fn build_forward_authorization(
+    state: &AppState,
+    auth_user: &AuthUser,
+    service: &DownstreamService,
+) -> AppResult<HeaderValue> {
+    match assistant_service::verify_delegated_authority_deployment_precondition_for_mint(
+        &state.db,
+        &service.id,
+    )
+    .await?
+    {
+        assistant_service::DelegatedAuthorityDeploymentState::LegacyUnlinked => {
+            build_legacy_forward_authorization(state, auth_user, service)
+        }
+        assistant_service::DelegatedAuthorityDeploymentState::Linked { client_id } => {
+            let authority = assistant_service::resolve_consent_catalog_authority(
+                &state.db,
+                &auth_user.user_id.to_string(),
+                &client_id,
+            )
+            .await?;
+            let restrictions = authority.restriction_claims();
+            let (token, jti) = generate_delegated_access_token_for_client(
+                &state.jwt_keys,
+                &state.config,
+                &auth_user.user_id,
+                assistant_service::ASSISTANT_DELEGATED_SCOPE,
+                &client_id,
+                Some(&client_id),
+                MCP_DELEGATION_TOKEN_TTL_SECS,
+                Some(&restrictions),
+            )?;
+            let claims = verify_token(&state.jwt_keys, &state.config, &token)?;
+            if claims.jti != jti {
+                return Err(AppError::Internal(
+                    "assistant: delegated capability identity mismatch".to_string(),
+                ));
+            }
+            catalog_delegation_service::persist_grant(
+                &state.db,
+                &jti,
+                &auth_user.user_id.to_string(),
+                &client_id,
+                &client_id,
+                assistant_service::ASSISTANT_DELEGATED_SCOPE,
+                &authority,
+                claims.exp,
+            )
+            .await?;
+            assistant_service::audit_delegated_authority_minted(
+                state.db.clone(),
+                &audit_service::AuditActor::from_auth_user(auth_user),
+                &service.id,
+                &client_id,
+                &jti,
+            )
+            .await;
+            HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+                AppError::Internal(
+                    "assistant: failed to build the forward authorization header".to_string(),
+                )
+            })
+        }
+    }
 }
 
 /// Resolve the admin-managed Aevatar service and forward `path` to it.
@@ -817,13 +887,13 @@ async fn forward(
     // any existing header is not an authenticated credential. Aevatar reuses
     // this capability to reach NyxID's LLM/proxy routes, including
     // `/proxy/s/chrono-llm-public` and `/llm/*`. `reject_delegated_tokens` keeps
-    // a leaked copy off every account-management, admin, and key route. The
-    // delegated capability comes from the row's `delegation_token_scope`. The
-    // standard `inject_delegation_token` path reads the same field. Bearer
-    // callers, including CLI login JWTs, never enter this branch and keep their
-    // token byte-for-byte.
+    // a leaked copy off every account-management, admin, and key route.
+    // An unlinked deployment preserves the row-derived legacy capability.
+    // While the row is linked, the capability instead comes from current OAuth
+    // consent and a live JTI-bound grant. Bearer callers, including CLI login
+    // JWTs, never enter this branch and keep their token byte-for-byte.
     if bridge_minted {
-        let value = build_forward_authorization(state, auth_user, &service)?;
+        let value = build_forward_authorization(state, auth_user, &service).await?;
         request.headers_mut().insert(header::AUTHORIZATION, value);
         // Metadata-only: lets operators watch bridge dependence fall to
         // zero after the Aevatar identity-token rollout (TD-3 row flip).
@@ -2224,7 +2294,7 @@ mod tests {
         // ignoring the row and hardcoding a scope again.
         let service = aevatar_row("proxy:*");
 
-        let header = build_forward_authorization(&state, &auth_user, &service).unwrap();
+        let header = build_legacy_forward_authorization(&state, &auth_user, &service).unwrap();
         let token = header
             .to_str()
             .unwrap()
@@ -2271,7 +2341,7 @@ mod tests {
                 PROXY_SCOPE
             );
             let header =
-                build_forward_authorization(&state, &auth_user, &aevatar_row(insufficient))
+                build_legacy_forward_authorization(&state, &auth_user, &aevatar_row(insufficient))
                     .expect("bridge must still mint a usable token");
             let token = header.to_str().unwrap().strip_prefix("Bearer ").unwrap();
             let claims = verify_token(&state.jwt_keys, &state.config, token).unwrap();
@@ -2281,5 +2351,279 @@ mod tests {
                 claims.scope
             );
         }
+    }
+
+    fn authority_client(id: &str, delegation_scopes: &str) -> crate::models::oauth_client::OauthClient {
+        let now = chrono::Utc::now();
+        crate::models::oauth_client::OauthClient {
+            id: id.to_string(),
+            client_name: "Aevatar authority".to_string(),
+            client_secret_hash: String::new(),
+            redirect_uris: vec!["https://aevatar.example/callback".to_string()],
+            allowed_scopes: "openid".to_string(),
+            scope_provenance: crate::models::oauth_client::ScopeProvenance::Explicit,
+            grant_types: "authorization_code".to_string(),
+            client_type: "confidential".to_string(),
+            is_active: true,
+            delegation_scopes: delegation_scopes.to_string(),
+            default_service_catalog_slugs: Vec::new(),
+            broker_capability_enabled: false,
+            revocation_webhook_url: None,
+            revocation_webhook_secret_encrypted: None,
+            connection_webhook_url: None,
+            connection_webhook_secret_encrypted: None,
+            connection_webhook_key_id: None,
+            connection_webhook_enabled: false,
+            created_by: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn linked_forward_fixture(
+        database_name: &str,
+    ) -> Option<(AppState, AuthUser, DownstreamService, String)> {
+        let db = crate::test_utils::connect_test_database(database_name).await?;
+        let client_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::oauth_client::OauthClient>(
+            crate::models::oauth_client::COLLECTION_NAME,
+        )
+        .insert_one(authority_client(
+            &client_id,
+            assistant_service::ASSISTANT_DELEGATED_SCOPE,
+        ))
+        .await
+        .unwrap();
+        let mut service = aevatar_row("llm:proxy");
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.requires_user_credential = false;
+        service.delegated_authority_client_id = Some(client_id.clone());
+        db.collection::<DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&service)
+        .await
+        .unwrap();
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let auth = crate::test_utils::test_auth_user(&user_id);
+        Some((crate::test_utils::test_app_state(db), auth, service, client_id))
+    }
+
+    #[tokio::test]
+    async fn unlinked_forward_authorization_preserves_the_legacy_session_projection() {
+        let Some(db) = crate::test_utils::connect_test_database("assistant_unlinked_mint").await
+        else {
+            return;
+        };
+        let mut service = aevatar_row("proxy:*");
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.requires_user_credential = false;
+        db.collection::<DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&service)
+        .await
+        .unwrap();
+        let state = crate::test_utils::test_app_state(db);
+        let auth = crate::test_utils::test_auth_user(
+            "add69059-bece-4f0e-9559-99cfd10b47eb",
+        );
+
+        let header = build_forward_authorization(&state, &auth, &service)
+            .await
+            .expect("an absent link keeps the legacy bridge available");
+        let claims = verify_token(
+            &state.jwt_keys,
+            &state.config,
+            header.to_str().unwrap().strip_prefix("Bearer ").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claims.scope, "proxy:*");
+        assert_eq!(claims.act.unwrap().sub, assistant_service::AEVATAR_SLUG);
+        assert_eq!(claims.client_id, None);
+        assert_eq!(claims.allow_all_services, Some(true));
+    }
+
+    #[tokio::test]
+    async fn linked_forward_authorization_mints_restricted_consent_and_persists_its_grant() {
+        let Some((state, auth, service, client_id)) =
+            linked_forward_fixture("assistant_linked_restricted_mint").await
+        else {
+            return;
+        };
+        let user_service_id = uuid::Uuid::new_v4().to_string();
+        let user_service = crate::test_utils::test_user_service(
+            &user_service_id,
+            &auth.user_id.to_string(),
+            "github",
+            &uuid::Uuid::new_v4().to_string(),
+            None,
+            None,
+        );
+        state
+            .db
+            .collection::<crate::models::user_service::UserService>(
+                crate::models::user_service::COLLECTION_NAME,
+            )
+            .insert_one(user_service)
+            .await
+            .unwrap();
+        crate::services::consent_service::grant_consent_with_services(
+            &state.db,
+            &auth.user_id.to_string(),
+            &client_id,
+            "openid",
+            Some(vec![user_service_id.clone()]),
+        )
+        .await
+        .unwrap();
+
+        let header = build_forward_authorization(&state, &auth, &service)
+            .await
+            .expect("linked restricted capability");
+        let claims = verify_token(
+            &state.jwt_keys,
+            &state.config,
+            header.to_str().unwrap().strip_prefix("Bearer ").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claims.scope, assistant_service::ASSISTANT_DELEGATED_SCOPE);
+        assert_eq!(claims.act.as_ref().map(|actor| actor.sub.as_str()), Some(client_id.as_str()));
+        assert_eq!(claims.client_id.as_deref(), Some(client_id.as_str()));
+        assert_eq!(claims.allow_all_services, Some(false));
+        assert_eq!(claims.allowed_service_ids, Some(vec![user_service_id]));
+        assert_eq!(claims.resources, Some(Vec::new()));
+        assert_eq!(claims.allow_all_nodes, Some(true));
+
+        let grant = state
+            .db
+            .collection::<crate::models::catalog_delegation_grant::CatalogDelegationGrant>(
+                crate::models::catalog_delegation_grant::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! { "_id": &claims.jti })
+            .await
+            .unwrap()
+            .expect("grant is durable before the header is returned");
+        assert_eq!(grant.expires_at.timestamp(), claims.exp);
+        assert_eq!(grant.actor_client_id, client_id);
+        assert_eq!(grant.receiving_client_id, grant.actor_client_id);
+        crate::services::catalog_delegation_service::validate_live_grant(
+            &state.db,
+            &state.config,
+            &claims,
+        )
+        .await
+        .expect("minted grant is immediately live");
+        let audit = state
+            .db
+            .collection::<crate::models::audit_log::AuditLog>(
+                crate::models::audit_log::COLLECTION_NAME,
+            )
+            .find_one(mongodb::bson::doc! {
+                "event_type": "assistant_delegated_authority_minted",
+                "event_data.online_grant_id": &claims.jti,
+            })
+            .await
+            .unwrap()
+            .expect("metadata-only mint audit");
+        assert_eq!(
+            audit.event_data,
+            Some(serde_json::json!({
+                "actor_id": auth.user_id.to_string(),
+                "owner_id": auth.user_id.to_string(),
+                "service_id": service.id,
+                "client_id": grant.actor_client_id,
+                "online_grant_id": claims.jti,
+                "outcome": "minted",
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn linked_forward_authorization_mints_unrestricted_consent_as_allow_all() {
+        let Some((state, auth, service, client_id)) =
+            linked_forward_fixture("assistant_linked_unrestricted_mint").await
+        else {
+            return;
+        };
+        crate::services::consent_service::grant_consent_with_services(
+            &state.db,
+            &auth.user_id.to_string(),
+            &client_id,
+            "openid",
+            None,
+        )
+        .await
+        .unwrap();
+
+        let header = build_forward_authorization(&state, &auth, &service)
+            .await
+            .unwrap();
+        let claims = verify_token(
+            &state.jwt_keys,
+            &state.config,
+            header.to_str().unwrap().strip_prefix("Bearer ").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claims.scope, assistant_service::ASSISTANT_DELEGATED_SCOPE);
+        assert_eq!(claims.allow_all_services, Some(true));
+        assert_eq!(claims.allowed_service_ids, Some(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn linked_forward_authorization_fails_closed_on_changed_authority_state() {
+        let Some((state, auth, service, client_id)) =
+            linked_forward_fixture("assistant_linked_mint_denied").await
+        else {
+            return;
+        };
+        assert!(build_forward_authorization(&state, &auth, &service).await.is_err());
+
+        crate::services::consent_service::grant_consent_with_services(
+            &state.db,
+            &auth.user_id.to_string(),
+            &client_id,
+            "openid",
+            Some(Vec::new()),
+        )
+        .await
+        .unwrap();
+        let clients = state.db.collection::<crate::models::oauth_client::OauthClient>(
+            crate::models::oauth_client::COLLECTION_NAME,
+        );
+        for insufficient in ["proxy:*", "mcp:catalog:read"] {
+            clients
+                .update_one(
+                    mongodb::bson::doc! { "_id": &client_id },
+                    mongodb::bson::doc! { "$set": { "delegation_scopes": insufficient } },
+                )
+                .await
+                .unwrap();
+            assert!(build_forward_authorization(&state, &auth, &service).await.is_err());
+        }
+        clients
+            .update_one(
+                mongodb::bson::doc! { "_id": &client_id },
+                mongodb::bson::doc! {
+                    "$set": { "delegation_scopes": assistant_service::ASSISTANT_DELEGATED_SCOPE }
+                },
+            )
+            .await
+            .unwrap();
+        let mut stale_service = service.clone();
+        stale_service.id = uuid::Uuid::new_v4().to_string();
+        assert!(
+            build_forward_authorization(&state, &auth, &stale_service)
+                .await
+                .is_err()
+        );
+        clients
+            .update_one(
+                mongodb::bson::doc! { "_id": &client_id },
+                mongodb::bson::doc! { "$set": { "is_active": false } },
+            )
+            .await
+            .unwrap();
+        assert!(build_forward_authorization(&state, &auth, &service).await.is_err());
     }
 }
