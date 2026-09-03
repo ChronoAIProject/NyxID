@@ -288,6 +288,18 @@ prompt and response after `ORACLE_TASK_RETENTION_DAYS`. File bodies and file
 names are private task content: logs and audit events contain counts and sizes
 only.
 
+### Reasoning level (model label)
+
+A task's `model_label` (or the pool's `default_model_label`, e.g.
+`chatgpt-5.5-pro`) selects the ChatGPT reasoning level before the prompt is
+sent. The managed worker maps the label to the picker's levels: `-pro`,
+`extended`, or `扩展` -> **Pro**; `extra high`/`ultra` -> Extra High; `high` ->
+High; `medium`/`balanced` -> Medium; `instant`/`fast` -> Instant; anything else
+is matched literally. Selection uses real pointer clicks (the picker ignores
+synthetic clicks). The completed task's `model_label` reports the level that
+was actually selected; if it differs from what you requested, the picker did
+not expose that level and the worker answered on the current one.
+
 ### Worker endpoints (pool worker token)
 
 Under `/api/v1/oracle/worker`, each handler authenticates

@@ -178,6 +178,15 @@ node worker.mjs
 Use a different worker label, debug port, and Chrome profile for each concurrent
 worker.
 
+## Reasoning level
+
+The pool's `--model` (or a task's `model_label`) picks the ChatGPT reasoning
+level: `chatgpt-5.5-pro` selects **Pro**; `extra high`, `high`, `medium`, and
+`instant` select those levels. The worker opens the picker with real pointer
+clicks and reports the level it actually selected as the result's model, so a
+UI change that breaks selection is visible in `nyxid oracle result` instead of
+silently answering on Instant.
+
 ## Result artifacts
 
 For prompt tasks, the worker inspects only the last assistant turn. It captures
