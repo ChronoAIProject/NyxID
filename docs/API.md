@@ -34,6 +34,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [MCP Config](#mcp-config)
   - [Proxy](#proxy)
   - [Proxy Service Discovery](#proxy-service-discovery)
+  - [Assistant Action Effects](#assistant-action-effects)
   - [LLM Gateway](#llm-gateway)
   - [MFA](#mfa-multi-factor-authentication)
   - [OAuth / OpenID Connect](#oauth--openid-connect)
@@ -1146,6 +1147,7 @@ List all active downstream services. Supports optional filtering by service cate
       "auth_key_name": "Authorization",
       "is_active": true,
       "oauth_client_id": null,
+      "delegated_authority_client_id": null,
       "openapi_spec_url": null,
       "api_spec_url": null,
       "asyncapi_spec_url": null,
@@ -1202,6 +1204,7 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
 | `auth_key_name`    | string | HTTP only | Header or query param name. Defaults based on `auth_type`.                            |
 | `credential`       | string | HTTP only | API key, token, or `user:password` for basic. Not needed for OIDC services.           |
 | `service_category` | string | No       | `"connection"` or `"internal"` for SSH services; `"connection"` (default), `"internal"`, or `"provider"` for HTTP. |
+| `delegated_authority_client_id` | string | No | Consent-derived assistant authority client. Allowed only on the `aevatar` row; the active client must permit `proxy:* mcp:catalog:read`. |
 | `ssh_config`       | object | SSH only | SSH target configuration with `host`, `port`, `certificate_auth_enabled`, `certificate_ttl_minutes`, and `allowed_principals` |
 
 **Auth Type Mapping:**
@@ -1290,6 +1293,7 @@ When `auth_type` (or `auth_method`) is set to `"oidc"`, NyxID automatically prov
   "auth_key_name": "X-API-Key",
   "is_active": true,
   "oauth_client_id": null,
+  "delegated_authority_client_id": null,
   "openapi_spec_url": null,
   "api_spec_url": null,
   "asyncapi_spec_url": null,
@@ -1360,6 +1364,7 @@ Get a single downstream service by ID.
   "auth_key_name": "X-API-Key",
   "is_active": true,
   "oauth_client_id": null,
+  "delegated_authority_client_id": null,
   "openapi_spec_url": null,
   "api_spec_url": null,
   "asyncapi_spec_url": null,
@@ -1409,6 +1414,7 @@ Update a downstream service. Only the provided fields are updated (partial updat
 | `description`  | string  | No       | New description (max 500 chars)                                         |
 | `base_url`     | string  | No       | New base URL (max 2048 chars, SSRF-validated)                           |
 | `is_active`    | boolean | No       | Enable or disable the service                                           |
+| `delegated_authority_client_id` | string or null | No | Set, replace, or clear the consent-derived authority client. Valid only for the `aevatar` row and validated before persistence. |
 | `openapi_spec_url` | string  | No       | URL to an OpenAPI/Swagger spec for endpoint discovery (max 2048 chars). The legacy alias `api_spec_url` is also accepted. |
 | `asyncapi_spec_url` | string  | No       | URL to an AsyncAPI spec for WebSocket or SSE documentation (max 2048 chars) |
 | `ssh_config`   | object  | No       | Replacement SSH configuration for SSH services (`host`, `port`, `certificate_auth_enabled`, `certificate_ttl_minutes`, `allowed_principals`) |
@@ -1955,7 +1961,7 @@ Schema contract:
 
 Platform services are included only when the user has a valid connection with satisfied credentials. `provider` services are excluded because they are not proxyable. User-managed services additionally require an executable server credential or an in-scope dispatchable node route.
 
-**Auth:** Required
+**Auth:** Required. Session and ordinary access-token requests retain their existing catalog authority. An exact non-WebSocket delegated `GET` requires `mcp:catalog:read` and a matching live `CatalogDelegationGrant`; the catalog uses the authority in that verified grant. This rule applies to every provisioned OAuth client, not only the Aevatar client. API-key, service-account, and relay credentials remain rejected with `403 Forbidden` by the human-only middleware.
 
 **Response (200):**
 
@@ -3515,11 +3521,24 @@ Forward any HTTP request to a registered downstream service. NyxID resolves the 
 
 A browser session authenticates to NyxID with a cookie on the `/api/v1/assistant/*`
 pass-through. The session carries no Bearer for `forward_access_token` to
-forward. While the `aevatar` service row has `forward_access_token: true`, NyxID
-mints a delegated access token for the session user. The token has
-`delegated: true`, a REST-capable proxy scope, a 5-minute TTL, and
-`act.sub = "aevatar"`. NyxID sends the token as `Authorization: Bearer` with the
-standard identity assertion.
+forward. The active `aevatar` row supports two authority states.
+
+With no `delegated_authority_client_id`, NyxID retains the existing unrestricted
+session-derived mint path. Startup logs the compatibility state and continues.
+The path keeps the configured forward scope, session authority, token actor,
+five-minute TTL, and authorization header unchanged. Missing AC-3 configuration
+does not turn chat into a server error.
+
+With a link present, NyxID re-resolves the active Aevatar row and the linked
+OAuth client at startup and at each mint. The client must be active and its
+`delegation_scopes` must contain both `proxy:*` and `mcp:catalog:read`. A missing,
+inactive, mismatched, or under-scoped linked client fails closed. A restricted
+consent mints exactly its allowed service IDs. An unrestricted consent mints
+`allow_all_services: true`; the capability matches that consent exactly, and
+service access review is unreachable for that user by the user's choice. NyxID
+persists a matching live catalog grant before it releases the five-minute token.
+The linked token uses exact scope `proxy:* mcp:catalog:read`, with the linked
+client as both `act.sub` and `client_id`.
 
 At Aevatar, these credentials have different authorities.
 `X-NyxID-Identity-Token` selects a dedicated authentication scheme. Its signed
@@ -3535,12 +3554,26 @@ alone is not sufficient for typed streaming. These rules are pinned by
 `e5bba2e9719ad5132004b882744caa3875db1123`.
 
 Because the bridge token is delegated, `reject_delegated_tokens` keeps a leaked
-copy off account-management, admin, and key routes. Proxy and LLM routes accept
-the token. A mint failure fails the assistant request. Keep
-`forward_access_token: true` on the live `aevatar` row until a deployed probe
-proves that Aevatar receives both the identity assertion and a usable
-replacement capability. Source support for the delegation header alone is not
-a deployment receipt.
+copy off account-management, admin, and key routes. The exact non-WebSocket
+`GET /api/v1/mcp/config` exception requires the verified live grant and does not
+open another MCP, proxy, or management route. The legacy platform callback
+exception resolves the active `chrono-llm-public` row by server-owned identity.
+It accepts only the linked assistant authority whose subject is the caller and
+whose actor and receiving client both equal the current Aevatar link. The same
+live grant must remain valid. A user-owned service with the same slug retains
+`UserService` precedence and requires its own service ID in authority.
+
+Keep `forward_access_token: true` until a deployed probe proves that Aevatar
+receives both the identity assertion and the replacement capability. Source
+support for the delegation header alone is not a deployment receipt.
+
+Rollback follows the authority dependencies in this order:
+
+1. Disable the access-review action and effect.
+2. Stop restricted minting, revoke outstanding catalog grants, and restore the unrestricted session bridge.
+3. Verify typed chat plus identity and capability through Aevatar's default proxy-slug route, with the gateway as a control.
+4. Remove the `chrono-llm-public` exception, then remove the REST MCP exception.
+5. Clear the client link only after no live grant depends on it.
 
 **Response:** The downstream service's response status code, allowed headers, and body are returned directly. Only a safe allowlist of response headers is forwarded.
 
@@ -3707,6 +3740,76 @@ curl http://localhost:3001/api/v1/proxy/services \
 # With pagination
 curl "http://localhost:3001/api/v1/proxy/services?page=1&per_page=10" \
   -H "Authorization: Bearer <access_token>"
+```
+
+---
+
+### Assistant Action Effects
+
+#### POST /api/v1/assistant/actions/services/access-review
+
+Add one active user service to the current user's consent for the OAuth client
+linked to the active `aevatar` row. The handler accepts only HTTP and DTO data;
+the service layer resolves ownership, the active row, the linked client, and the
+canonical RFC 8707 resource URI before it reserves a receipt or changes consent.
+
+**Auth:** Required browser session. API-key, delegated, service-account, access-token,
+and relay credentials are rejected.
+
+**Request Body:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `actionRequestId` | string | Yes | Stable Aevatar action request identity |
+| `userServiceId` | string | Yes | Exact active `UserService` identity |
+| `serviceSlug` | string | Yes | Slug that must match the resolved service |
+| `resourceUri` | string | Yes | Exact HTTPS URI `{BASE_URL}/api/v1/proxy/s/{serviceSlug}` |
+
+```json
+{
+  "actionRequestId": "action-identity",
+  "userServiceId": "user-service-uuid",
+  "serviceSlug": "github",
+  "resourceUri": "https://auth.example.com/api/v1/proxy/s/github"
+}
+```
+
+The URI rejects userinfo, query, fragment, encoded-path confusion, an HTTP
+scheme, and any path that does not match the resolved slug. A foreign or
+inactive service also fails before receipt reservation or consent mutation.
+
+**Response (200):**
+
+```json
+{
+  "resource": {
+    "userServiceId": "user-service-uuid"
+  },
+  "replayed": false
+}
+```
+
+NyxID reserves a receipt keyed by the action, actor, owner, linked client,
+service, slug, and canonical URI before the atomic consent merge. An exact
+retry returns `replayed: true` and the same service identity. A changed request
+fingerprint conflicts. Recovery from a pending receipt may repeat only the
+idempotent set-union and then complete the receipt.
+
+After success, the browser reports the following allowlisted resource to the
+typed Aevatar actor. Aevatar projects completion only after its postcondition
+confirms that identity.
+
+```json
+{
+  "actionRequestId": "action-identity",
+  "originTurnId": "turn-identity",
+  "disposition": "completed",
+  "resource": {
+    "userService": {
+      "userServiceId": "user-service-uuid"
+    }
+  }
+}
 ```
 
 ---
@@ -4325,6 +4428,7 @@ Delegated tokens retain their native proxy, LLM, and refresh access according to
 | `/api/v1/proxy/{id}/{*path}`                        | Allowed by native proxy scopes                      |
 | `/api/v1/delegation/refresh`                        | Allowed for refreshable delegated scopes            |
 | `/api/v1/delegation/operation-catalog`              | Allowed only with `mcp:catalog:read`                |
+| `/api/v1/mcp/config`                                | Exact GET only with `mcp:catalog:read` and a matching live grant |
 | Eligible management `GET` endpoints                | Allowed only with exact `account:read`              |
 | Management writes, upgrades, and denied GET classes | Blocked                                             |
 
@@ -4885,7 +4989,11 @@ curl http://localhost:3001/api/v1/users/me/consents \
 
 #### DELETE /api/v1/users/me/consents/{client_id}
 
-Revoke an OAuth consent for a specific client. The user will be prompted to re-authorize on the next OAuth flow with this client.
+Revoke an OAuth consent for a specific client. NyxID first marks each unrevoked
+catalog grant revoked when the user matches and the client is either the actor
+or the receiver. It then revokes refresh-token chains and deletes the consent.
+The user is prompted to authorize again on the next OAuth flow with this client.
+Regranting within an old token's lifetime never reactivates the revoked grant.
 
 **Auth:** Required
 
@@ -5706,7 +5814,7 @@ Create a new OAuth client. Returns the client secret only at creation time -- it
 | `name`              | string   | Yes      | Client display name                                       |
 | `redirect_uris`     | string[] | Yes     | At least one redirect URI                                 |
 | `client_type`       | string   | No       | `"confidential"` (default) or `"public"`                  |
-| `delegation_scopes` | string   | No       | Space-separated scopes for token exchange (empty = disabled). Values: `llm:proxy`, `proxy:*`, `proxy:{service_id}`, `llm:status` |
+| `delegation_scopes` | string   | No       | Space-separated scopes for token exchange (empty = disabled). Values: `llm:proxy`, `proxy:*`, `proxy:{service_id}`, `llm:status`, `mcp:catalog:read` |
 
 ```json
 {
@@ -6024,6 +6132,7 @@ Update an OAuth client by `_id` as a platform admin, including ownerless Dynamic
 | `is_active`                 | boolean  | Activates or deactivates the client                          |
 | `redirect_uris`             | string[] | Replacement redirect URI list                                |
 | `allowed_scopes`            | string[] | Replacement allowed scope list                               |
+| `delegation_scopes`         | string   | Replacement token-exchange scopes, including `mcp:catalog:read` when required |
 | `client_name`               | string   | Replacement display name                                     |
 
 ```json

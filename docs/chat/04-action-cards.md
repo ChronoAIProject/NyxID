@@ -4,7 +4,7 @@ Last verified against `fcb79b18` (2026-08-01).
 
 Assistant action cards are a typed NyxIdChat protocol for asking the browser to perform a sensitive NyxID-owned journey and report only a safe outcome. The model does not receive credentials, raw connector responses, or browser form data.
 
-The current shipped action is `service.connect`. The card can open NyxID's catalog-service or custom-service connection journey, then report a disposition and a safe `UserService` identity to the typed actor.
+The service journeys include `service.connect` and `service.access_review`. The first creates or selects a connection. The second lets a user add one existing connection to the assistant client's consent. Both report only a disposition and a safe `UserService` identity to the typed actor.
 
 The rendering reference remains [assistant-action-cards-showcase.html](../assistant-action-cards-showcase.html). The executable contract is implemented by `frontend/src/schemas/assistant-actions.ts`, `frontend/src/lib/assistant/action-registry.ts:resolveAssistantAction`, `frontend/src/lib/assistant/chat-action-validation.ts:validateActionRequest`, `frontend/src/lib/assistant/chat-actor-state.ts:reduceActorFrame`, `frontend/src/components/assistant/blocks/action-card.tsx:ActionCard`, and `backend/src/services/assistant_service.rs`.
 
@@ -61,7 +61,7 @@ Fields have these meanings:
 | `taskId` | Optional bounded task correlation identity. |
 | `stepId` | Optional bounded step correlation identity. |
 | `actionRequestId` | Required idempotency and card identity. |
-| `action` | Requested verb. `service.connect` is the only executable verb. |
+| `action` | Requested verb. It must have an executable entry in the browser action registry. |
 | `params` | One strict resource variant. |
 
 `originTurnId` and `actionRequestId` are 1 through 256 characters and reject whitespace, control characters, `/`, `\`, `?`, and `#`. A nonempty `actorId` uses the same grammar. Optional correlation IDs are bounded to 256 characters. General wire strings are bounded to 4,096 characters.
@@ -119,6 +119,24 @@ The card shows a short, normalized service label rather than raw model prose. Kn
 
 The card does not accept a key value, token, password, Authorization header, or raw credential. Credential entry and storage occur inside the NyxID-owned connection UI.
 
+## `service.access_review` parameters
+
+The access-review action uses exactly one nested parameter object:
+
+```json
+{
+  "serviceAccessReview": {
+    "userServiceId": "service-identity",
+    "serviceSlug": "github",
+    "resourceUri": "https://nyxid.example/api/v1/proxy/s/github"
+  }
+}
+```
+
+All three fields are required and bounded. The slug must match `[A-Za-z0-9._-]{1,128}`. The resource URI must use HTTPS, contain no userinfo, query, or fragment, and have the exact path `/api/v1/proxy/s/{serviceSlug}`. Encoded-path variants do not normalize into an executable request. The card never renders the URI as instructions.
+
+The browser treats these fields as a request to review one connection, not as proof. On approval, the backend resolves the active `UserService` by ID and owner, compares its exact slug, and recomputes its RFC 8707 resource URI before any receipt or consent write. A foreign ID, wrong slug, non-HTTPS URI, userinfo, query, fragment, encoded path, or inactive service fails before mutation.
+
 ## Validation outcomes
 
 The browser uses two validation levels so a malformed request cannot execute but a user can still release a typed actor waiting on a recognizable request.
@@ -130,8 +148,8 @@ A request is executable only when:
 - the full strict envelope parses;
 - no secret-shaped key or value is present;
 - `schemaVersion` is 4;
-- `action` is `service.connect`; and
-- exactly one parameter variant normalizes to a supported connection journey.
+- `action` has a registered executable journey; and
+- its exact parameter variant normalizes successfully.
 
 It creates a card in `pending` state with the resolved catalog or custom journey.
 
@@ -153,7 +171,7 @@ These rules fail closed without trapping the user behind every syntactically rec
 
 | Status | Meaning | User action |
 | --- | --- | --- |
-| `pending` | valid request awaiting a decision | connect or decline |
+| `pending` | valid request awaiting a decision | open its journey or decline |
 | `in_progress` | NyxID connection journey is open or running | journey controls |
 | `blocked` | local journey/reporting could not continue safely | decline/fail, or wait for exact reissue |
 | `completed` | local action completed and completion is queued or delivered | none |
@@ -193,13 +211,39 @@ A changed blocked reissue conflicts; it does not re-arm. This preserves first-co
 Implementation: `frontend/src/lib/assistant/chat-actor-state.ts:decodeActorFrame`,
 `applyActionRequest`, and `actionIdentityMatches`.
 
-## Connection journey
+## Service journeys
 
 The action descriptor produces NyxID-authored title, body, and call-to-action copy. For `service.connect` the body states that NyxID brokers access and keeps the credential out of the model.
 
 The catalog journey selects an existing catalog service by normalized slug and may carry requested scopes, node preference, and target organization. The custom journey opens a controlled service-definition path with a validated HTTPS endpoint and auth method. The visible card does not submit its untrusted model payload directly to a generic API; the UI maps the resolved variant to explicit NyxID form inputs.
 
 On successful connection, the journey returns the created or selected `UserService` ID. That safe identity is the only completion resource reported for the shipped action. If the user cancels or declines, no resource is needed.
+
+`service.access_review` opens a local NyxID confirmation dialog and never starts an OAuth redirect. Approve sends the exact fields above with `actionRequestId` to `POST /api/v1/assistant/actions/services/access-review`. The response must name the same `userServiceId` before the browser can report completion. Cancel closes the dialog and restores the pending card without an effect or report. Decline reports directly without calling the effect. An error remains retryable; a retry after a lost response replays the completed receipt without widening consent again.
+
+After a successful effect, the user returns to chat and the browser sends `action.continue`. The report contains only `actionRequestId`, `originTurnId`, `disposition`, and optional `resource.userService.userServiceId`. Aevatar verifies the postcondition before its projected actor state settles the card.
+
+## Access-review authority
+
+Access review changes current OAuth consent for the client linked to the active `aevatar` service row. The effect set-unions one service ID and the required consent scope; it does not replace existing consent. A receipt reserved before the merge makes exact retries idempotent and rejects a changed request fingerprint. Consent revocation marks matching live catalog grants revoked before it removes refresh-token chains and consent, so regranting within an old token's five-minute lifetime cannot reactivate that token.
+
+The assistant capability uses exact scope `proxy:* mcp:catalog:read`. Its service authority comes from current consent, not the browser session's authority. Restricted consent mints exactly its allowed service IDs. Unrestricted consent mints `allow_all_services: true`, matching the user's consent exactly; access review is intentionally unreachable for that user by their own choice.
+
+Three boundaries enforce this model:
+
+1. Exact non-WebSocket `GET /api/v1/mcp/config` accepts `mcp:catalog:read` only after authentication validates a matching live `CatalogDelegationGrant`. This gate is generic and is not tied to Aevatar. No other MCP, proxy, or management route opens because of the catalog-read scope.
+2. The legacy platform callback exception applies only to the server-resolved active `chrono-llm-public` row. It requires delegated assistant authority whose subject is the caller and whose actor and receiving client both equal the current Aevatar link, backed by the same live grant. User-service resolution keeps precedence and still requires that user service's ID in authority.
+3. Creating or changing the Aevatar link validates the active OAuth client and its delegation policy. Minting re-resolves and validates both the row and client before issuing a capability.
+
+An active Aevatar row without `delegated_authority_client_id` remains a supported compatibility state. Startup logs and continues, and the existing unrestricted session-derived mint path remains unchanged. Missing AC-3 configuration does not turn chat into a 500. Once the link is present, startup and minting fail closed if the client is inactive, mismatched, or lacks either required scope. Before enabling the link, provision both `proxy:*` and `mcp:catalog:read` in that client's `delegation_scopes`; keep `forward_access_token=true` until a deployed probe proves identity and replacement capability delivery.
+
+Rollback follows the authority dependencies in reverse order:
+
+1. Disable the access-review action and effect.
+2. Stop restricted minting, revoke outstanding catalog grants, and restore the unrestricted session bridge.
+3. Verify typed chat plus identity and capability receipt through Aevatar's default proxy-slug route, with the gateway as a control.
+4. Remove the `chrono-llm-public` exception, then the REST MCP exception.
+5. Clear the client link only after no live grant depends on it.
 
 ## Report envelope
 
@@ -328,6 +372,7 @@ The complete action path maintains these invariants:
 - The first committed request wins for each `actionRequestId`.
 - Changed duplicates cannot mutate a pending or terminal card into a different action.
 - Completed `service.connect` reports contain only the safe `UserService` ID.
+- Completed `service.access_review` reports contain the same safe resource shape and no consent, URI, token, or credential data.
 - Report DTOs are rebuilt from allowlisted fields in both frontend and backend.
 - Reports return to the typed actor that issued the request, never to a workflow conversation guessed from UI context.
 - A blocked/conflicted completed side effect is surfaced for manual management but not falsely reported.
