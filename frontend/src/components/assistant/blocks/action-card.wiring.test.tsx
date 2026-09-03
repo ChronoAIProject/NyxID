@@ -84,6 +84,13 @@ vi.mock("@/components/assistant/assistant-service-update-dialog", () => ({
   AssistantServiceUpdateDialog: captureDialog("service_update"),
 }));
 
+vi.mock(
+  "@/components/assistant/assistant-service-access-review-dialog",
+  () => ({
+    AssistantServiceAccessReviewDialog: captureDialog("service_access_review"),
+  }),
+);
+
 vi.mock("@/components/assistant/assistant-service-delete-dialog", () => ({
   AssistantServiceDeleteDialog: captureDialog("service_delete"),
 }));
@@ -361,6 +368,85 @@ async function runJourney(options: JourneyOptions): Promise<void> {
 }
 
 describe("Wave-2 action card wiring", () => {
+  it("wires service.access_review through its typed dialog and exact report", async () => {
+    await runJourney({
+      action: "service.access_review",
+      rawParams: {
+        serviceAccessReview: {
+          userServiceId: "service-review-1",
+          serviceSlug: "github",
+          resourceUri: "https://nyxid.example/api/v1/proxy/s/github",
+        },
+      },
+      variant: "service_access_review",
+      normalizedParams: {
+        variant: "service_access_review",
+        user_service_id: "service-review-1",
+        service_slug: "github",
+        resource_uri: "https://nyxid.example/api/v1/proxy/s/github",
+      },
+      cta: "Review access",
+      dialogParams: {
+        userServiceId: "service-review-1",
+        serviceSlug: "github",
+        resourceUri: "https://nyxid.example/api/v1/proxy/s/github",
+      },
+      completion: "service-review-1",
+      resource: { userService: { userServiceId: "service-review-1" } },
+    });
+  });
+
+  it("declines service.access_review without opening the effect dialog", async () => {
+    const request = assistantActionRequestSchema.parse({
+      schemaVersion: ACTION_SCHEMA_VERSION,
+      actorId: "nyxid-chat-card-1",
+      originTurnId: "turn-review-1",
+      taskId: "task-review-1",
+      stepId: "step-review-1",
+      actionRequestId: "act-review-decline",
+      action: "service.access_review",
+      params: {
+        serviceAccessReview: {
+          userServiceId: "service-review-1",
+          serviceSlug: "github",
+          resourceUri: "https://nyxid.example/api/v1/proxy/s/github",
+        },
+      },
+    });
+    const resolved = resolveAssistantAction(request);
+    const onResolve = vi.fn();
+    render(
+      <ActionCard
+        block={{
+          type: "action_card",
+          block_id: "block-review-decline",
+          action: request.action,
+          action_request_id: request.actionRequestId,
+          origin_turn_id: request.originTurnId,
+          task_id: request.taskId,
+          step_id: request.stepId,
+          params: resolved.params,
+          status: "pending",
+          outcome_note: "",
+        }}
+        onProgress={vi.fn()}
+        onBlock={vi.fn()}
+        onResolve={onResolve}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Decline" }));
+
+    await waitFor(() =>
+      expect(onResolve).toHaveBeenCalledWith({
+        actionRequestId: "act-review-decline",
+        originTurnId: "turn-review-1",
+        disposition: "declined",
+      }),
+    );
+    expect(dialogCalls.has("service_access_review")).toBe(false);
+  });
+
   it("wires key.update through its typed dialog and key report", async () => {
     // Falsifiers exercised: deleting the registry row removes the dialog,
     // breaking toProps changes these props, and changing resource changes the report.

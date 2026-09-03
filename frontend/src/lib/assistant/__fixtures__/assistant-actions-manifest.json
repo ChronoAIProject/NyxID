@@ -1,6 +1,7 @@
 [
   "service.connect",
   "service.reauthorize",
+  "service.access_review",
   "key.create",
   "key.rotate",
   "key.update",

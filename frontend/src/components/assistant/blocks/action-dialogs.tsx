@@ -33,6 +33,7 @@ import { AssistantPendingCredentialPushDialog } from "@/components/assistant/ass
 import { AssistantProviderDisconnectDialog } from "@/components/assistant/assistant-provider-disconnect-dialog";
 import { AssistantProviderSetAppCredentialsDialog } from "@/components/assistant/assistant-provider-set-app-credentials-dialog";
 import { AssistantServiceAccountActionDialog } from "@/components/assistant/assistant-service-account-action-dialog";
+import { AssistantServiceAccessReviewDialog } from "@/components/assistant/assistant-service-access-review-dialog";
 import { AssistantServiceDeleteDialog } from "@/components/assistant/assistant-service-delete-dialog";
 import { AssistantServiceRotateCredentialDialog } from "@/components/assistant/assistant-service-rotate-credential-dialog";
 import { AssistantServiceRouteDialog } from "@/components/assistant/assistant-service-route-dialog";
@@ -125,6 +126,17 @@ export const ACTION_DIALOGS: {
         endpointUrl: params.endpoint_url,
         authMethod: params.auth_method,
         authKeyName: params.auth_key_name,
+      },
+    }),
+  },
+  service_access_review: {
+    Dialog:
+      AssistantServiceAccessReviewDialog as ComponentType<AssistantDialogProps>,
+    toProps: (params) => ({
+      params: {
+        userServiceId: params.user_service_id,
+        serviceSlug: params.service_slug,
+        resourceUri: params.resource_uri,
       },
     }),
   },

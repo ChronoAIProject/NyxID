@@ -41,6 +41,7 @@ import {
   serviceAccountCreateActionParamsSchema,
   serviceAccountIdentityActionParamsSchema,
   serviceAccountUpdateActionParamsSchema,
+  serviceAccessReviewActionParamsSchema,
   serviceDeleteActionParamsSchema,
   serviceReauthorizeActionParamsSchema,
   serviceRotateCredentialActionParamsSchema,
@@ -217,6 +218,18 @@ function normalizeServiceReauthorize(raw: unknown): ActionCardParams | null {
     variant: "service_reauthorize",
     user_service_id: parsed.data.userServiceId,
     requested_scopes: parsed.data.requestedScopes,
+  };
+}
+
+function normalizeServiceAccessReview(raw: unknown): ActionCardParams | null {
+  const parsed = serviceAccessReviewActionParamsSchema.safeParse(raw);
+  if (!parsed.success) return null;
+  const review = parsed.data.serviceAccessReview;
+  return {
+    variant: "service_access_review",
+    user_service_id: review.userServiceId,
+    service_slug: review.serviceSlug,
+    resource_uri: review.resourceUri,
   };
 }
 
@@ -883,6 +896,44 @@ const serviceReauthorizeDescriptor: ActionDescriptor = {
   wiring: "legacy_reauthorize",
   journey: (params) =>
     params.variant === "service_reauthorize" ? "service_reauthorize" : null,
+};
+
+const serviceAccessReviewDescriptor: ActionDescriptor = {
+  title: (params) =>
+    params.variant === "service_access_review"
+      ? `Allow ${humanizeServiceSlug(params.service_slug)}`
+      : "Review service access",
+  body: (params) =>
+    params.variant === "service_access_review"
+      ? `This assistant needs access to your ${humanizeServiceSlug(params.service_slug)} connection before it can continue.`
+      : "This assistant needs access to one connected service.",
+  cta: () => "Review access",
+  risk: "credential_access",
+  normalize: normalizeServiceAccessReview,
+  summary: (params) =>
+    params.variant === "service_access_review"
+      ? [
+          {
+            label: "Service",
+            value: humanizeServiceSlug(params.service_slug),
+          },
+          {
+            label: "Connection",
+            value: params.user_service_id,
+            mono: true,
+          },
+        ]
+      : [],
+  icon: "shield",
+  busyLabel: "Working",
+  assurance:
+    "NyxID grants access only to this connection. Your credential stays in NyxID.",
+  resource: (completion) => ({
+    userService: { userServiceId: completedId(completion) },
+  }),
+  wiring: "dialog",
+  journey: (params) =>
+    params.variant === "service_access_review" ? "service_access_review" : null,
 };
 
 const keyCreateDescriptor: ActionDescriptor = {
@@ -1906,6 +1957,7 @@ const unsupportedDescriptor: ActionDescriptor = {
 export const ACTION_REGISTRY: Readonly<Record<string, ActionDescriptor>> = {
   "service.connect": serviceConnectDescriptor,
   "service.reauthorize": serviceReauthorizeDescriptor,
+  "service.access_review": serviceAccessReviewDescriptor,
   "key.create": keyCreateDescriptor,
   "key.rotate": keyRotateDescriptor,
   "key.update": keyUpdateDescriptor,

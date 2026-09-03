@@ -12,8 +12,8 @@ describe("assistant action registry", () => {
   it("registry_covers_every_manifest_verb", () => {
     // Falsifier exercised: deleting the `openclaw.connect` registry row makes
     // this closure check fail instead of silently leaving the verb uncovered.
-    expect(manifestActions).toHaveLength(57);
-    expect(new Set(manifestActions).size).toBe(57);
+    expect(manifestActions).toHaveLength(58);
+    expect(new Set(manifestActions).size).toBe(58);
     expect(Object.keys(ACTION_REGISTRY).sort()).toEqual(
       [...manifestActions].sort(),
     );

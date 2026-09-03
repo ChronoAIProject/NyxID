@@ -127,6 +127,43 @@ export const serviceReauthorizeActionParamsSchema = z
   })
   .strict();
 
+const serviceAccessReviewResourceSchema = z
+  .object({
+    userServiceId: actionControlIdentitySchema,
+    serviceSlug: z.string().min(1).max(128).regex(ACTION_SERVICE_SLUG_PATTERN),
+    resourceUri: z.string().min(1).max(512),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    try {
+      const resource = new URL(value.resourceUri);
+      if (
+        resource.protocol !== "https:" ||
+        resource.username ||
+        resource.password ||
+        resource.search ||
+        resource.hash ||
+        resource.pathname !== `/api/v1/proxy/s/${value.serviceSlug}`
+      ) {
+        context.addIssue({
+          code: "custom",
+          path: ["resourceUri"],
+          message: "Invalid service resource URI",
+        });
+      }
+    } catch {
+      context.addIssue({
+        code: "custom",
+        path: ["resourceUri"],
+        message: "Invalid service resource URI",
+      });
+    }
+  });
+
+export const serviceAccessReviewActionParamsSchema = z
+  .object({ serviceAccessReview: serviceAccessReviewResourceSchema })
+  .strict();
+
 export const keyCreateActionParamsSchema = z
   .object({
     name: z
@@ -444,6 +481,7 @@ export const assistantActionParamsSchema = z
   .union([
     serviceConnectActionParamsSchema,
     serviceReauthorizeActionParamsSchema,
+    serviceAccessReviewActionParamsSchema,
     keyCreateActionParamsSchema,
     keyRotateActionParamsSchema,
     keyUpdateActionParamsSchema,
@@ -510,6 +548,16 @@ export const assistantActionRequestSchema = z
   })
   .strict()
   .superRefine((request, context) => {
+    if (
+      request.action === "service.access_review" &&
+      !serviceAccessReviewActionParamsSchema.safeParse(request.params).success
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["params"],
+        message: "Invalid service access review params",
+      });
+    }
     const secretPath = findSecretPath(request);
     if (!secretPath) return;
     context.addIssue({
@@ -587,6 +635,12 @@ export type ActionCardParams =
       readonly variant: "service_reauthorize";
       readonly user_service_id: string;
       readonly requested_scopes: readonly string[];
+    }
+  | {
+      readonly variant: "service_access_review";
+      readonly user_service_id: string;
+      readonly service_slug: string;
+      readonly resource_uri: string;
     }
   | {
       readonly variant: "key_create";

@@ -797,4 +797,96 @@ describe("chatActorState", () => {
       conflicted: true,
     });
   });
+
+  it("keeps service access review identity stable across duplicate and reload", () => {
+    const reviewRequest = {
+      ...actionRequest,
+      actorId: "nyxid-chat-review-actor",
+      actionRequestId: "action-review",
+      action: "service.access_review",
+      params: {
+        serviceAccessReview: {
+          userServiceId: "service-review",
+          serviceSlug: "github",
+          resourceUri: "https://nyxid.example/api/v1/proxy/s/github",
+        },
+      },
+    } as const;
+    const first = reduceActorFrame(
+      createChatActorProjection("nyxid-chat-review-actor"),
+      decodeActorFrame({
+        sequence: 1,
+        custom: { name: "nyxid.action.request", payload: reviewRequest },
+      }),
+    );
+    const duplicate = reduceActorFrame(
+      first,
+      decodeActorFrame({
+        sequence: 2,
+        custom: { name: "nyxid.action.request", payload: reviewRequest },
+      }),
+    );
+    expect(duplicate.actorId).toBe("nyxid-chat-review-actor");
+    expect(duplicate.actions.get("action-review")).toMatchObject({
+      action: "service.access_review",
+      supported: true,
+      recovered: false,
+    });
+    expect(duplicate.actions.get("action-review")?.conflicted).not.toBe(true);
+
+    const reloaded = applyCurrentStateResult(duplicate, {
+      status: "current",
+      stateVersion: 3,
+      snapshot: {
+        actorId: "nyxid-chat-review-actor",
+        scopeId: "scope-review",
+        stateVersion: 3,
+        progressSequence: 2,
+        activeTurn: null,
+        latestTurn: null,
+        recentTerminalTurns: [],
+        activeTask: null,
+        pendingInput: null,
+        pendingApproval: null,
+        pendingActions: [
+          {
+            schemaVersion: 4,
+            originTurnId: reviewRequest.originTurnId,
+            taskId: reviewRequest.taskId,
+            stepId: reviewRequest.stepId,
+            actionRequestId: reviewRequest.actionRequestId,
+            action: reviewRequest.action,
+            reports: [],
+            postconditionResult: null,
+            request: reviewRequest,
+          },
+        ],
+        recentActions: [],
+      },
+    }).projection;
+    expect(reloaded.actions.get("action-review")?.request).toEqual(
+      reviewRequest,
+    );
+
+    const conflicted = reduceActorFrame(
+      reloaded,
+      decodeActorFrame({
+        sequence: 3,
+        custom: {
+          name: "nyxid.action.request",
+          payload: {
+            ...reviewRequest,
+            params: {
+              serviceAccessReview: {
+                ...reviewRequest.params.serviceAccessReview,
+                serviceSlug: "gitlab",
+                resourceUri: "https://nyxid.example/api/v1/proxy/s/gitlab",
+              },
+            },
+          },
+        },
+      }),
+    );
+    expect(conflicted.actions.get("action-review")?.conflicted).toBe(true);
+  });
 });

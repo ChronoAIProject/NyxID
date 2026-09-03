@@ -338,6 +338,126 @@ describe("assistant action request schema", () => {
     });
   });
 
+  it("parses only the exact service.access_review v4 envelope", () => {
+    const request = assistantActionRequestSchema.parse({
+      ...BASE_REQUEST,
+      action: "service.access_review",
+      params: {
+        serviceAccessReview: {
+          userServiceId: "service-alpha",
+          serviceSlug: "github",
+          resourceUri: "https://nyxid.example/api/v1/proxy/s/github",
+        },
+      },
+    });
+
+    expect(resolveAssistantAction(request)).toMatchObject({
+      supported: true,
+      journey: "service_access_review",
+      params: {
+        variant: "service_access_review",
+        user_service_id: "service-alpha",
+        service_slug: "github",
+        resource_uri: "https://nyxid.example/api/v1/proxy/s/github",
+      },
+    });
+  });
+
+  it.each([
+    ["missing nested params", {}],
+    [
+      "extra outer member",
+      {
+        serviceAccessReview: {
+          userServiceId: "service-alpha",
+          serviceSlug: "github",
+          resourceUri: "https://nyxid.example/api/v1/proxy/s/github",
+        },
+        widened: true,
+      },
+    ],
+    [
+      "extra nested member",
+      {
+        serviceAccessReview: {
+          userServiceId: "service-alpha",
+          serviceSlug: "github",
+          resourceUri: "https://nyxid.example/api/v1/proxy/s/github",
+          approval: true,
+        },
+      },
+    ],
+    [
+      "HTTP resource",
+      {
+        serviceAccessReview: {
+          userServiceId: "service-alpha",
+          serviceSlug: "github",
+          resourceUri: "http://nyxid.example/api/v1/proxy/s/github",
+        },
+      },
+    ],
+    [
+      "userinfo resource",
+      {
+        serviceAccessReview: {
+          userServiceId: "service-alpha",
+          serviceSlug: "github",
+          resourceUri: "https://user@nyxid.example/api/v1/proxy/s/github",
+        },
+      },
+    ],
+    [
+      "query resource",
+      {
+        serviceAccessReview: {
+          userServiceId: "service-alpha",
+          serviceSlug: "github",
+          resourceUri: "https://nyxid.example/api/v1/proxy/s/github?next=1",
+        },
+      },
+    ],
+    [
+      "fragment resource",
+      {
+        serviceAccessReview: {
+          userServiceId: "service-alpha",
+          serviceSlug: "github",
+          resourceUri: "https://nyxid.example/api/v1/proxy/s/github#next",
+        },
+      },
+    ],
+    [
+      "encoded path resource",
+      {
+        serviceAccessReview: {
+          userServiceId: "service-alpha",
+          serviceSlug: "github",
+          resourceUri: "https://nyxid.example/api/v1/proxy/s/%67ithub",
+        },
+      },
+    ],
+    [
+      "secret-shaped resource",
+      {
+        serviceAccessReview: {
+          userServiceId: "service-alpha",
+          serviceSlug: "github",
+          resourceUri:
+            "https://nyxid.example/api/v1/proxy/s/github?token=nyxid_forbidden1234",
+        },
+      },
+    ],
+  ])("rejects service.access_review with %s", (_name, params) => {
+    expect(
+      assistantActionRequestSchema.safeParse({
+        ...BASE_REQUEST,
+        action: "service.access_review",
+        params,
+      }).success,
+    ).toBe(false);
+  });
+
   it("rejects empty, duplicate, unnormalized, packed, and widened reauthorization scopes", () => {
     const invalidParams = [
       { userServiceId: "service-alpha", requestedScopes: [] },
@@ -807,6 +927,32 @@ describe("assistant action request schema", () => {
 });
 
 describe("action continuation schema", () => {
+  it("serializes the exact service.access_review continuation report", () => {
+    const body = buildActionContinueBody(
+      "nyxid-chat-actor-1",
+      "request-1",
+      "turn-origin-1",
+      [
+        {
+          actionRequestId: "act-review",
+          originTurnId: "turn-origin-1",
+          disposition: "completed",
+          resource: { userService: { userServiceId: "service-alpha" } },
+        },
+      ],
+      new Map([["act-review", "service.access_review"]]),
+    );
+
+    expect(body.actions).toEqual([
+      {
+        actionRequestId: "act-review",
+        originTurnId: "turn-origin-1",
+        disposition: "completed",
+        resource: { userService: { userServiceId: "service-alpha" } },
+      },
+    ]);
+  });
+
   it("builds the exact strict completed body with a safe resource ref", () => {
     const body = buildActionContinueBody(
       "nyxid-chat-actor-1",
