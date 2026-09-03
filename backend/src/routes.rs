@@ -1676,7 +1676,6 @@ fn build_router_internal(
                 "/conversations/{conversation_id}/state",
                 get(handlers::assistant::get_state),
             )
-            .route("/completions", post(handlers::assistant::completions))
             .route("/chat", post(handlers::assistant::typed_chat))
     )
     .route_layer(axum::Extension(

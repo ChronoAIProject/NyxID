@@ -1118,25 +1118,6 @@ pub async fn get_state(
     .await)
 }
 
-/// `POST /api/v1/assistant/completions` -- OpenAI-compatible SSE stream.
-pub async fn completions(
-    State(state): State<AppState>,
-    auth_user: AuthUser,
-    request: Request<Body>,
-) -> AppResult<Response> {
-    let mut echoes = upstream_echo_collector(&state, &auth_user, request.headers()).await;
-    let response = forward(
-        &state,
-        &auth_user,
-        assistant_service::completions_path(),
-        request,
-        Vec::new(),
-        ForwardEcho::enabled(None, None, echoes.as_mut()),
-    )
-    .await?;
-    Ok(attach_wire_log(&state, &auth_user, None, response, echoes.as_deref()).await)
-}
-
 /// Bounds caller chat bodies: a 32k-char prompt is at most 128 KiB of UTF-8,
 /// with additional room for JSON escaping.
 const MAX_ASSISTANT_CHAT_REQUEST_BYTES: usize = 256 * 1024;

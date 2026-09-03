@@ -10073,31 +10073,31 @@ mod proxy_resolution_integration_tests {
 
         let mut debug_echoes = Vec::new();
         let calls_before_unknown_type = captured.lock().unwrap().len();
-        let unknown_type_error = crate::handlers::assistant::typed_chat(
-            axum::extract::State(state.clone()),
-            auth.clone(),
-            request(
-                Method::POST,
-                "/api/v1/assistant/chat",
-                Some(r#"{"type":"workflow.studio","prompt":"do not fall through"}"#),
-            ),
-        )
-        .await
-        .expect_err("an unknown typed command must fail locally");
-        assert_eq!(
-            unknown_type_error.into_response().status(),
-            StatusCode::BAD_REQUEST
-        );
+        for rejected_body in [
+            r#"{"type":"workflow.studio","prompt":"do not fall through"}"#,
+            r#"{"type":"plan.resolve","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","taskId":"task-1","planId":"plan-1","requestId":"plan-gate-1","clientRequestId":"00000000-0000-4000-8000-000000000011","planRevision":3,"confirmed":true,"expectedStateVersion":23}"#,
+        ] {
+            let rejected_error = crate::handlers::assistant::typed_chat(
+                axum::extract::State(state.clone()),
+                auth.clone(),
+                request(Method::POST, "/api/v1/assistant/chat", Some(rejected_body)),
+            )
+            .await
+            .expect_err("an unsupported typed command must fail locally");
+            assert_eq!(
+                rejected_error.into_response().status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
         assert_eq!(
             captured.lock().unwrap().len(),
             calls_before_unknown_type,
-            "an unknown typed command must not reach either upstream chat path"
+            "an unsupported typed command must not reach either upstream chat path"
         );
 
         for body in [
             r#"{"type":"text","prompt":"connect api-github","clientRequestId":"00000000-0000-4000-8000-000000000001"}"#,
             r#"{"type":"text","prompt":"continue","clientRequestId":"00000000-0000-4000-8000-000000000002","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae"}"#,
-            r#"{"type":"plan.resolve","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","taskId":"task-1","planId":"plan-1","requestId":"plan-gate-1","clientRequestId":"00000000-0000-4000-8000-000000000011","planRevision":3,"confirmed":true,"expectedStateVersion":23}"#,
             r#"{"type":"input.resolve","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000010","requestId":"input-1","answer":{"selectedOptionIds":["option-a","option-b"]},"expectedStateVersion":19}"#,
             r#"{"type":"action.continue","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000003","originTurnId":"turn-action-1","actions":[{"actionRequestId":"act-1","originTurnId":"turn-action-1","disposition":"completed","resource":{"userService":{"userServiceId":"00000000-0000-4000-8000-000000000123"}}}]}"#,
             r#"{"type":"action.continue","conversationId":"nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae","clientRequestId":"00000000-0000-4000-8000-000000000009","originTurnId":"turn-action-2","actions":[{"actionRequestId":"act-2","originTurnId":"turn-action-2","disposition":"failed"}]}"#,
@@ -10164,7 +10164,7 @@ mod proxy_resolution_integration_tests {
                 .count_documents(doc! { "user_id": &user_id })
                 .await
                 .expect("count stored assistant wire logs"),
-            11
+            10
         );
         assert_eq!(
             wire_logs
@@ -10184,7 +10184,7 @@ mod proxy_resolution_integration_tests {
                 })
                 .await
                 .expect("count conversation-scoped assistant wire logs"),
-            10
+            9
         );
 
         let malformed_typed_id = "nyxid-chat-not-a-guid";
@@ -10362,6 +10362,7 @@ mod proxy_resolution_integration_tests {
                 Method::GET,
                 "/api/v1/assistant/conversations/create-recovery/4380055d-e9c3-468e-bc93-64719a9f4658",
             ),
+            (Method::POST, "/api/v1/assistant/completions"),
         ] {
             let response = private
                 .clone()
@@ -10397,7 +10398,6 @@ mod proxy_resolution_integration_tests {
                 "/api/chat".to_string(),
                 "/api/chat".to_string(),
                 "/api/chat".to_string(),
-                "/api/chat".to_string(),
                 "/api/chat/conversations".to_string(),
                 format!("/api/scopes/{user_id}/chat-history"),
                 "/api/chat/conversations/nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae".to_string(),
@@ -10422,17 +10422,6 @@ mod proxy_resolution_integration_tests {
                 "prompt": "continue",
                 "clientRequestId": "00000000-0000-4000-8000-000000000002",
                 "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
-            }),
-            serde_json::json!({
-                "type": "plan.resolve",
-                "conversationId": "nyxid-chat-4a1e60ebd1fd44f192bf4bb90e1812ae",
-                "taskId": "task-1",
-                "planId": "plan-1",
-                "requestId": "plan-gate-1",
-                "clientRequestId": "00000000-0000-4000-8000-000000000011",
-                "planRevision": 3,
-                "confirmed": true,
-                "expectedStateVersion": 23,
             }),
             serde_json::json!({
                 "type": "input.resolve",
@@ -10524,7 +10513,6 @@ mod proxy_resolution_integration_tests {
             "text/event-stream",
             "text/event-stream",
             "application/json",
-            "application/json",
             "text/event-stream",
             "text/event-stream",
             "application/json",
@@ -10559,7 +10547,7 @@ mod proxy_resolution_integration_tests {
             );
         }
 
-        assert_eq!(debug_echoes.len(), 11);
+        assert_eq!(debug_echoes.len(), 10);
         for (call_index, envelope_array) in debug_echoes.iter().enumerate() {
             assert_eq!(envelope_array.len(), 1);
             let envelope = &envelope_array[0];
@@ -10617,7 +10605,7 @@ mod proxy_resolution_integration_tests {
         }
 
         for (_, _, _, headers) in [
-            &calls[0], &calls[10], &calls[11], &calls[12], &calls[13], &calls[14],
+            &calls[0], &calls[9], &calls[10], &calls[11], &calls[12], &calls[13],
         ] {
             assert!(headers.get(axum::http::header::AUTHORIZATION).is_none());
             assert!(headers.get("x-nyxid-identity-token").is_some());
