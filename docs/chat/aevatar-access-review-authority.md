@@ -62,8 +62,12 @@ rows were rerun through a real `cargo run` NyxID backend at the recorded SHA.
 The only stub was a loopback OpenAI-compatible downstream behind NyxID. It
 returned one fixed, successful chat-completion response so the gateway row
 could prove that NyxID forwarded the request; it did not replace NyxID or
-Aevatar. The gateway row is a control, not Aevatar's default route. Raw response
-logs are under `/tmp/ac2-evidence/runtime/`.
+Aevatar. The stub log contains four identical POST shapes from the repaired
+receipt run, the raw-response capture, the error-code-parser rerun, and the
+final rerun after correcting the local identity-token fixture to a 60-second
+lifetime. The final machine receipt comes from the fourth run; the raw gateway
+response comes from the second. The gateway row is a control, not Aevatar's
+default route. Raw response logs are under `/tmp/ac2-evidence/runtime/`.
 
 ## What the transport authenticates
 
@@ -209,6 +213,17 @@ IDs, so it cannot restore a platform row to a restricted catalog.
    (`src/Aevatar.Mainnet.Host.Api/appsettings.json:41-44`), but the current
    NyxID row has no field that resolves that identity.
 
+   The linked client's `delegation_scopes` must contain both `proxy:*` and
+   `mcp:catalog:read`. `validate_live_grant` checks every minted scope against
+   both the actor and receiving client, even when the link supplies both roles
+   (`backend/src/services/catalog_delegation_service.rs:120-132` and
+   `backend/src/services/token_exchange_service.rs:487-499`).
+   `OAUTH_CLIENT_DELEGATION_SCOPES` admits `proxy:*` and
+   `mcp:catalog:read`, but not bare `proxy`. This allowed list is why the mint
+   uses `proxy:* mcp:catalog:read`
+   (`backend/src/services/oauth_client_service.rs:41-49`). Validate the complete
+   scope at link time and again at mint time. A missing scope must fail closed.
+
 ## Decision predicate
 
 | Condition | Current system | Candidate design | Evidence and AC-3 proof |
@@ -241,6 +256,12 @@ capability from the linked client's current consent with scope
 no-grant denial and matching-live-grant success cases, and it remains subject to
 an independent security review before implementation begins.
 
+Before restricted minting is enabled, provision or verify both `proxy:*` and
+`mcp:catalog:read` in the linked Aevatar OAuth client's `delegation_scopes`.
+Verify the same complete scope for both actor and receiving client if AC-3 uses
+separate clients. Deployment must stop if either client is missing either
+scope.
+
 Until AC-3 lands and proves that Aevatar receives both caller identity and the
 restricted capability, keep `forward_access_token=true` and preserve the
 current unrestricted forwarding posture. Access review remains unreachable in
@@ -255,10 +276,11 @@ AC-3 remains subject to its own security review gate.
 | --- | --- |
 | Atomic consent merge | Add `consent_service::merge_consent_services_atomic` in `backend/src/services/consent_service.rs`. Use one atomic aggregation-pipeline `find_one_and_update` upsert keyed by `(user_id, client_id)`. Set-union the requested service ID and required scopes while preserving all existing scopes, IDs, `allow_all_services`, grant identity, and unrelated fields. On a concurrent first-approval E11000, retry as a non-upserting merge against the winning row. Never call `grant_consent_with_services`. `grant_consent_internal` replaces the full row at lines 71-100, and the OAuth consent page in `backend/src/handlers/oauth.rs:807-836` still calls that replacement path; treat it as a known concurrent-writer hazard. The unique `(user_id, client_id)` index is at `backend/src/db.rs:911-920`. |
 | HTTP effect | Add the confirmed `service.access_review` effect in `backend/src/handlers/assistant_action_effects_services.rs` and mount only its typed route in `backend/src/routes.rs`. Call `assistant_action_receipts::reserve_or_replay` before mutation. Resolve actor, client link, and user-owned service server-side; reject cross-user IDs before the merge. |
-| Authority mint | Replace the session projection in `backend/src/handlers/assistant.rs:build_forward_authorization`. Re-resolve the active `aevatar` row and `delegated_authority_client_id`, read current consent, derive `CatalogAuthority`, and call `generate_delegated_access_token_for_client` with exact scope `proxy:* mcp:catalog:read` so `client_id` is present. Use the linked client as both actor and receiver unless AC-3 introduces and validates a separate actor client. Persist the matching online grant with `catalog_delegation_service::persist_grant` before forwarding. Do not derive service restrictions from session `AuthUser`. |
+| Authority mint | Replace the session projection in `backend/src/handlers/assistant.rs:build_forward_authorization`. Re-resolve the active `aevatar` row and `delegated_authority_client_id`, read current consent, derive `CatalogAuthority`, and call `generate_delegated_access_token_for_client` with exact scope `proxy:* mcp:catalog:read` so `client_id` is present. Use the linked client as both actor and receiver unless AC-3 introduces and validates a separate actor client. Before minting, require every scope in that exact string to appear in both clients' `delegation_scopes`; fail closed on a missing scope. `OAUTH_CLIENT_DELEGATION_SCOPES` permits this pair and excludes bare `proxy` (`backend/src/services/oauth_client_service.rs:41-49`). Persist the matching online grant with `catalog_delegation_service::persist_grant` before forwarding. Do not derive service restrictions from session `AuthUser`. |
 | REST catalog guard | Change `mw/auth.rs:delegated_request_allowed`, `reject_delegated_tokens`, and their route tests; add verified live-grant enforcement before `handlers/mcp.rs:get_mcp_config` publishes `mcp_service::ServiceScope`. |
 | Platform callback | Narrow the legacy `DownstreamService` gate in `handlers/proxy.rs:execute_proxy_inner` for the exact active `chrono-llm-public` row. Require delegated assistant authority, actor and receiving client equal to the current Aevatar row link, and a valid live grant. Keep `handlers/llm_gateway.rs:gateway_request` as a control path; it is not Aevatar's default route. |
-| Client link | Extend `models/downstream_service.rs`, the admin service request and response DTOs in `handlers/services.rs`, and admin validation. At link create or change, require an active OAuth client and call `catalog_delegation_service::ensure_client_can_delegate_catalog`; append a metadata-only audit event. Re-resolve the link at mint time. No environment variable is added. |
+| Client link | Extend `models/downstream_service.rs`, the admin service request and response DTOs in `handlers/services.rs`, and admin validation. At link create or change, require an active OAuth client, call `catalog_delegation_service::ensure_client_can_delegate_catalog`, and validate complete delegation scope `proxy:* mcp:catalog:read`. Append a metadata-only audit event. Re-resolve the link and repeat both scope checks at mint time. No environment variable is added. |
+| OAuth client prerequisite | Before deployment, provision or verify `proxy:*` and `mcp:catalog:read` in the linked Aevatar client's `delegation_scopes`. Use `token_exchange_service::validate_delegation_scope` for the complete string and keep `catalog_delegation_service::validate_live_grant` authoritative at request time. Apply the same check to both actor and receiver if AC-3 uses separate clients. `OAUTH_CLIENT_DELEGATION_SCOPES` in `services/oauth_client_service.rs` permits this pair and excludes bare `proxy`. Fail closed if either scope is missing. |
 | Consent revocation | Extend `consent_service::revoke_consent` and `handlers/consent.rs::revoke_my_consent` to mark all outstanding catalog grants for the user and linked client revoked before consent deletion completes. Regranting consent within the old token's TTL must not reactivate that token. |
 | Audit | Append metadata-only events `assistant_delegated_authority_client_link_changed`, `assistant_service_access_review_requested`, `assistant_service_access_grant_merged`, `assistant_service_access_grant_replayed`, `assistant_service_access_grant_denied`, and `assistant_delegated_authority_minted`. Include actor ID, owner ID, service ID, client ID, action request ID, outcome, and online-grant ID where applicable; never include a token, credential, cookie, or authorization value. Preserve the existing `oauth_consent_revoked` event and make grant invalidation observable. |
 
@@ -270,7 +292,9 @@ denied, a missing/inactive/mismatched client link, exact-route denial without a
 grant, and audit metadata redaction. Catalog tests must prove that a restricted
 mint drops every platform row and that consent cannot restore one. Bootstrap
 tests must cover both the gateway control and the default proxy-slug callback,
-including denial for the wrong row, actor, receiver, or grant.
+including denial for the wrong row, actor, receiver, or grant. Client tests must
+remove `proxy:*` and `mcp:catalog:read` one at a time from both the actor and
+receiving client, and prove that link validation and minting fail closed.
 
 ## Negative cases
 
