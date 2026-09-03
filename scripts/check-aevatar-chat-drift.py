@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,8 @@ EXIT_CLEAN = 0
 EXIT_DRIFT = 1
 EXIT_TOOL = 2
 GIT_TIMEOUT_SECS = 180
+LOWER_HEX_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
+WATCHED_PATH_PATTERN = re.compile(r"[A-Za-z0-9._/-]+")
 
 
 class ToolError(Exception):
@@ -62,23 +65,23 @@ def load_pin(path: Path) -> ContractPin:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except OSError as error:
         raise ToolError(f"cannot read pin {path}: {error}") from error
-    except json.JSONDecodeError as error:
+    except UnicodeDecodeError as error:
+        raise ToolError(f"pin is not valid UTF-8: {error}") from error
+    except ValueError as error:
         raise ToolError(f"pin is not valid JSON: {error}") from error
     if not isinstance(raw, dict):
         raise ToolError("pin must be a JSON object")
 
     remote = _require_str(raw, "remote")
     branch = _require_str(raw, "branch")
-    remote_head = _require_str(raw, "remote_head")
-    effective_chat_sha = _require_str(raw, "effective_chat_sha")
+    remote_head = _require_sha(raw, "remote_head")
+    effective_chat_sha = _require_sha(raw, "effective_chat_sha")
     watched = raw.get("watched_paths")
     if not isinstance(watched, list) or not watched:
         raise ToolError("pin.watched_paths must be a nonempty array")
     paths: list[str] = []
-    for item in watched:
-        if not isinstance(item, str) or not item.strip():
-            raise ToolError("pin.watched_paths entries must be nonempty strings")
-        paths.append(item)
+    for index, item in enumerate(watched):
+        paths.append(_require_watched_path(item, index))
     return ContractPin(
         remote=remote,
         branch=branch,
@@ -92,6 +95,35 @@ def _require_str(raw: dict[str, object], key: str) -> str:
     value = raw.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ToolError(f"pin.{key} must be a nonempty string")
+    return value
+
+
+def _require_sha(raw: dict[str, object], key: str) -> str:
+    value = _require_str(raw, key)
+    if LOWER_HEX_SHA_PATTERN.fullmatch(value) is None:
+        raise ToolError(
+            f"pin.{key} must be exactly 40 lowercase hexadecimal characters"
+        )
+    return value
+
+
+def _require_watched_path(value: object, index: int) -> str:
+    field = f"pin.watched_paths[{index}]"
+    if not isinstance(value, str) or not value:
+        raise ToolError(f"{field} must be a nonempty string")
+    if value.startswith("/"):
+        raise ToolError(f"{field} must not start with '/'")
+    if value.startswith(":"):
+        raise ToolError(f"{field} must not start with ':'")
+    if WATCHED_PATH_PATTERN.fullmatch(value) is None:
+        raise ToolError(f"{field} contains unsupported characters")
+
+    path_without_directory_suffix = value[:-1] if value.endswith("/") else value
+    segments = path_without_directory_suffix.split("/")
+    if not path_without_directory_suffix or any(not segment for segment in segments):
+        raise ToolError(f"{field} must not contain empty segments")
+    if ".." in segments:
+        raise ToolError(f"{field} must not contain '..' segments")
     return value
 
 
@@ -115,6 +147,8 @@ def git(repo: str, *args: str) -> subprocess.CompletedProcess[str]:
         raise ToolError("git is not installed") from error
     except subprocess.TimeoutExpired as error:
         raise ToolError(f"git timed out: {' '.join(args)}") from error
+    except ValueError as error:
+        raise ToolError(f"invalid git argument: {error}") from error
 
 
 def git_ok(repo: str, *args: str) -> str:
@@ -135,8 +169,18 @@ def ensure_git_repo(path: str) -> None:
         raise ToolError(f"{path} is not a git repository")
 
 
+def validate_branch(branch: str) -> str:
+    try:
+        result = git(".", "check-ref-format", "--branch", branch)
+    except ToolError as error:
+        raise ToolError(f"branch is not a valid Git branch name: {error}") from error
+    if result.returncode != 0:
+        raise ToolError(f"branch is not a valid Git branch name: {branch!r}")
+    return branch
+
+
 def fetch_branch(repo: str, remote: str, branch: str, pin_sha: str) -> str:
-    fetched = git(repo, "fetch", "--", remote, f"refs/heads/{branch}")
+    fetched = git(repo, "fetch", "--", remote, f"+refs/heads/{branch}")
     if fetched.returncode != 0:
         detail = (fetched.stderr or fetched.stdout or "").strip()
         raise ToolError(detail or f"failed to fetch {remote} {branch}")
@@ -271,6 +315,7 @@ def main(argv: list[str] | None = None) -> int:
         branch = args.branch.strip() if args.branch else pin.branch
         if not remote or not branch:
             raise ToolError("remote and branch are required")
+        branch = validate_branch(branch)
         reuse = args.repo
         receipt = run_check(pin, remote, branch, reuse)
     except ToolError as error:
