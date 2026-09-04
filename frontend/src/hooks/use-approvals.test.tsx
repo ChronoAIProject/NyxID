@@ -161,12 +161,36 @@ describe("useApprovalGrants query string", () => {
   });
 
   it("appends org_id when listing an org's grants", async () => {
-    const { result } = renderHook(() => useApprovalGrants(1, 20, "org-1"), {
-      wrapper: wrapperFactory(),
-    });
+    const { result } = renderHook(
+      () => useApprovalGrants(1, 20, { orgId: "org-1" }),
+      {
+        wrapper: wrapperFactory(),
+      },
+    );
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(mockGet).toHaveBeenCalledWith(
       "/approvals/grants?page=1&per_page=20&org_id=org-1",
+    );
+  });
+
+  it("sends include_admin_orgs and keeps the option in the query key", async () => {
+    const { result, rerender } = renderHook(
+      ({ includeAdminOrgs }: { includeAdminOrgs: boolean }) =>
+        useApprovalGrants(1, 20, { includeAdminOrgs }),
+      {
+        initialProps: { includeAdminOrgs: false },
+        wrapper: wrapperFactory(),
+      },
+    );
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(mockGet).toHaveBeenCalledWith(
+      "/approvals/grants?page=1&per_page=20",
+    );
+
+    rerender({ includeAdminOrgs: true });
+    await waitFor(() => expect(mockGet).toHaveBeenCalledTimes(2));
+    expect(mockGet).toHaveBeenLastCalledWith(
+      "/approvals/grants?page=1&per_page=20&include_admin_orgs=true",
     );
   });
 });

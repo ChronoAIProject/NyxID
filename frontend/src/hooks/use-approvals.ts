@@ -167,24 +167,37 @@ export function useDecideApproval() {
 // --- Approval Grants ---
 
 /**
- * List active approval grants. When `orgId` is set, list grants owned by
- * the org instead of the caller's personal scope -- caller must be an
- * admin of that org. Org-policy approvals create grants under the org
- * user_id, so this is the only way for org admins to manage them.
+ * List active approval grants. `orgId` scopes the list to one org, while
+ * `includeAdminOrgs` unions the personal list with every org the caller
+ * currently administers.
  */
+export interface ApprovalGrantListOptions {
+  readonly orgId?: string;
+  readonly includeAdminOrgs?: boolean;
+}
+
 export function useApprovalGrants(
   page: number = 1,
   perPage: number = 20,
-  orgId?: string,
+  options: ApprovalGrantListOptions = {},
 ) {
+  const { orgId, includeAdminOrgs = false } = options;
   return useQuery({
-    queryKey: ["approvals", "grants", page, perPage, orgId ?? "personal"],
+    queryKey: [
+      "approvals",
+      "grants",
+      page,
+      perPage,
+      orgId ?? "personal",
+      includeAdminOrgs,
+    ],
     queryFn: async (): Promise<ApprovalGrantListResponse> => {
       const params = new URLSearchParams({
         page: String(page),
         per_page: String(perPage),
       });
       if (orgId) params.set("org_id", orgId);
+      if (includeAdminOrgs) params.set("include_admin_orgs", "true");
       return api.get<ApprovalGrantListResponse>(
         `/approvals/grants?${params.toString()}`,
       );
@@ -209,9 +222,8 @@ export function useRevokeGrant() {
       return api.delete<RevokeGrantResponse>(path);
     },
     onSuccess: () => {
-      // Broad invalidate -- the grants query key already varies by
-      // [page, perPage, orgId|"personal"], so this nukes both the org
-      // and personal lists rather than reasoning about the exact key.
+      // Broad invalidate so personal, combined-admin-org, and single-org
+      // grant lists all refresh after a revoke.
       void queryClient.invalidateQueries({
         queryKey: ["approvals", "grants"],
       });
