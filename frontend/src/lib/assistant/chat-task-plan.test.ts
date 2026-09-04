@@ -165,6 +165,58 @@ describe("decodeChatTaskPlan", () => {
     });
   });
 
+  it("decodes a historical confirm gate as a readable plan with no outbound command identity", () => {
+    const decoded = decodeChatTaskPlan({
+      schemaVersion: 4,
+      actorId: "conversation-alpha",
+      taskId: "task-alpha",
+      turnId: "turn-alpha",
+      planId: "plan-alpha",
+      planRevision: 3,
+      planRevisions: [],
+      title: "Inspect repository",
+      status: "active",
+      gate: {
+        mode: "confirm",
+        status: "pending",
+        requestId: "plan-gate-alpha",
+        taskId: "task-alpha",
+        planId: "plan-alpha",
+        planRevision: 3,
+        reason: "Confirm the planned write steps.",
+      },
+      steps: [
+        {
+          stepId: "step-alpha",
+          order: 1,
+          kind: "tool",
+          status: "waiting",
+          required: true,
+          description: "Inspect repository",
+          source: { tool: { toolName: "repository_read" } },
+          mayChangeExternalState: false,
+          externalEffect: "not_started",
+          availableActions: {},
+          dependsOn: [],
+          substeps: [],
+        },
+      ],
+    });
+
+    expect(decoded.title).toBe("Inspect repository");
+    expect(decoded.steps).toHaveLength(1);
+    expect(decoded.gate).toEqual({
+      mode: "confirm",
+      status: "pending",
+      reason: "Confirm the planned write steps.",
+    });
+    expect(decoded.gate).not.toHaveProperty("requestId");
+    expect(decoded.gate).not.toHaveProperty("taskId");
+    expect(decoded.gate).not.toHaveProperty("planId");
+    expect(decoded.gate).not.toHaveProperty("planRevision");
+    expect(JSON.stringify(decoded)).not.toContain("plan.resolve");
+  });
+
   it.each([
     ["thresholdOrigin", "override"],
     ["comparison", "gt"],

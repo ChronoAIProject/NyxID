@@ -30,17 +30,6 @@ export type ChatCommand =
       readonly prompt: string;
     }
   | {
-      readonly type: "plan.resolve";
-      readonly conversationId: string;
-      readonly taskId: string;
-      readonly planId: string;
-      readonly requestId: string;
-      readonly clientRequestId: string;
-      readonly planRevision: number;
-      readonly confirmed: boolean;
-      readonly expectedStateVersion: number;
-    }
-  | {
       readonly type: "input.resolve";
       readonly conversationId: string;
       readonly requestId: string;

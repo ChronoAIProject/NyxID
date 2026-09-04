@@ -33,7 +33,6 @@ const callbacks = {
   actionOverrides: new Map(),
   onResolveInput: vi.fn(),
   onResolveApproval: vi.fn(),
-  onResolvePlan: vi.fn(),
   onStop: vi.fn(),
   onControlStep: vi.fn(),
   onActionProgress: vi.fn(),

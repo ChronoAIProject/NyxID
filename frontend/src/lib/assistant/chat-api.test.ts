@@ -1,7 +1,54 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { sendChatCommand, ChatApiError } from "@/lib/assistant/chat-api";
+import {
+  sendChatCommand,
+  ChatApiError,
+  type ChatCommand,
+} from "@/lib/assistant/chat-api";
+
+const PIN = JSON.parse(
+  readFileSync(
+    path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      "../../../../tests/fixtures/assistant/aevatar-chat-contract-pin.json",
+    ),
+    "utf8",
+  ),
+) as { public_commands: string[] };
+
+type ChatCommandType = ChatCommand["type"];
+const PUBLIC_COMMAND_TYPES = [
+  "text",
+  "input.resolve",
+  "action.continue",
+  "approval.resolve",
+  "task.stop",
+  "task.steer",
+  "step.retry",
+  "step.skip",
+] as const satisfies readonly ChatCommandType[];
+
+const _exhaustiveCommandTypes: Record<ChatCommandType, true> = {
+  text: true,
+  "input.resolve": true,
+  "action.continue": true,
+  "approval.resolve": true,
+  "task.stop": true,
+  "task.steer": true,
+  "step.retry": true,
+  "step.skip": true,
+};
+void _exhaustiveCommandTypes;
 
 describe("chat API", () => {
+  it("exposes exactly the pin public_commands as the ChatCommand union", () => {
+    expect([...PUBLIC_COMMAND_TYPES].sort()).toEqual(
+      [...PIN.public_commands].sort(),
+    );
+  });
+
   beforeEach(() => {
     vi.unstubAllGlobals();
     globalThis.__nyxidAssistantHttpMock = undefined;

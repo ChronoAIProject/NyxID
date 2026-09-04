@@ -114,12 +114,13 @@ tools, action cards, approvals, task controls, or attachments.
 
 `POST /chat` accepts a discriminated command allowlist. NyxID parses each command with unknown-field denial, rejects secret-shaped keys and values, validates control identities, and rebuilds the exact upstream object. It never spreads an arbitrary caller object into the Aevatar body.
 
-Every typed command includes `clientRequestId`. NyxID copies that value into the outbound `Idempotency-Key` header. Text and action continuation request `Accept: text/event-stream`. Input, approval, and plan resolution plus stop, steer, retry, and skip request `Accept: application/json`.
+Every typed command includes `clientRequestId`. NyxID copies that value into the outbound `Idempotency-Key` header. Text and action continuation request `Accept: text/event-stream`. Input, approval, stop, steer, retry, and skip request `Accept: application/json`.
 
-The only accepted discriminators are `text`, `plan.resolve`, `input.resolve`,
+The only accepted discriminators are `text`, `input.resolve`,
 `action.continue`, `approval.resolve`, `task.stop`, `task.steer`, `step.retry`,
-and `step.skip`. An explicit unknown discriminator is a local `400`; it never
-falls back to a body without `type`.
+and `step.skip`. An explicit unknown discriminator, including the retired
+`plan.resolve` command, is a local `400`; it never falls back to a body without
+`type`.
 
 ### `text`
 
@@ -156,30 +157,6 @@ console-only `surface` and `attachment` fields and maps an attachment to
 `inputParts`; NyxID deliberately does not adopt that behaviour. Adding
 `inputParts` requires a separate feature with its own schema, secret review,
 and body-shape tests.
-
-### `plan.resolve`
-
-```json
-{
-  "type": "plan.resolve",
-  "conversationId": "nyxid-chat-f8369965a444433f92ec50e67ad8ee52",
-  "taskId": "task-identity",
-  "planId": "plan-identity",
-  "requestId": "plan-gate-identity",
-  "planRevision": 1,
-  "clientRequestId": "request-identity",
-  "expectedStateVersion": 22,
-  "confirmed": true
-}
-```
-
-The browser may send this only from the exact pending actor-owned gate. It
-copies every identity, revision, and fence from the current projection; the
-human supplies the `confirmed` decision. It does not derive actor facts from a
-transcript, URL, or previously rendered card. The
-deployment currently reports an automatic satisfied gate, so the normal path
-does not render a decision, but a conforming decoder and UI must retain the
-explicit-gate shape for deployments that return one.
 
 ### `input.resolve`
 
@@ -241,23 +218,9 @@ An empty `actions` array is a typed actor wake and may omit `originTurnId`.
 
 An empty reason is omitted. A nonempty reason is trimmed and limited to 2,048 characters. `expectedStateVersion` is required and must be positive. The browser reads it from the authoritative typed current-state envelope and verifies the exact pending approval identity. This command returns JSON transport acceptance; the matching `nyxid.approval.changed` or current-state `latestApprovalResolution` proves commit.
 
-### `plan.resolve`
-
-```json
-{
-  "type": "plan.resolve",
-  "conversationId": "nyxid-chat-f8369965a444433f92ec50e67ad8ee52",
-  "taskId": "task-identity",
-  "planId": "plan-identity",
-  "requestId": "plan-gate-identity",
-  "clientRequestId": "request-identity",
-  "planRevision": 3,
-  "confirmed": true,
-  "expectedStateVersion": 23
-}
-```
-
-All four plan and gate identities are required and `planRevision` plus `expectedStateVersion` must be positive. At click time the browser re-reads authoritative current state, requires an exact `confirm` + `pending` gate match, and submits the state version from that same read. A pending Stop fence is observed before this preflight. JSON 202 is dispatch acceptance only; the browser refreshes current state once and changes the card only when the actor-owned TaskPlan gate changes.
+Historical TaskPlan snapshots may still carry `gate.mode = "confirm"`. The
+decoder keeps that as display-only status. It does not preserve request
+identities and the browser has no Confirm or Reject plan control.
 
 ### `task.stop`
 

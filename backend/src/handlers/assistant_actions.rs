@@ -17,12 +17,11 @@ pub const ASSISTANT_ACTIONS_REVISION: &str = "nyxid-assistant-actions.v8";
 /// `ReadRequiredString(..., 128)` bound on the revision field.
 const MAX_REVISION_PARAM_CHARS: usize = 128;
 
-/// Mirrors Aevatar `PinnedActionsByRevision` on `origin/feature/integrate`
-/// (the superset of `origin/dev`'s `{v4…v7}`). Action-name order is Aevatar's
-/// listed order; it is not a prefix of the current default array (v7 skips
-/// `service.reauthorize` at index 1). `aevatar-nyxid-actions.v1` is Aevatar's
-/// own composition namespace and is not a NyxID-published revision.
-const PINNED_ACTIONS_BY_REVISION: &[(&str, &[&str])] = &[
+/// Legacy action subsets served when a caller requests a specific NyxID
+/// revision. The bare endpoint always serves the additive default manifest;
+/// current Aevatar uses `schema_version`, not this revision label, as its
+/// registry-wide compatibility gate.
+const PUBLISHED_ACTIONS_BY_REVISION: &[(&str, &[&str])] = &[
     ("nyxid-assistant-actions.v4", &["service.connect"]),
     (
         "nyxid-assistant-actions.v5",
@@ -100,13 +99,10 @@ const SERVICE_REAUTHORIZE_DESCRIPTION: &str = "Ask the user's browser to re-auth
 const KEY_CREATE_DESCRIPTION: &str = "Ask the user's browser to create a scoped NyxID API key for the named platform and allowed services. Use when the user wants a new agent identity bounded to specific user-service IDs. NyxID owns key creation and one-time key display, and reports only a safe key reference. Never request, expose, or repeat key material in chat.";
 const KEY_ROTATE_DESCRIPTION: &str = "Ask the user's browser to rotate one exact NyxID API key. Use when the user needs a replacement credential for the identified key. NyxID commits an authoritative predecessor-successor relation, displays replacement key material once in the browser, and reports only the replacement key reference. Never request, expose, or repeat key material in chat.";
 
-// Wave-2 descriptors below are published DORMANT: they are deliberately absent
-// from every Aevatar revision pin, so every current composition skips them at
-// registry load (upstream `Load_ShouldIgnoreUnknownActionWhenExecutableActionsArePresent`).
-// They become executable only when a future revision pins them; until that
-// revision bump they may still be amended. Do not edit the four shipped
-// descriptors above - their schemas are pinned byte-for-byte by
-// `JsonNode.DeepEquals` in deployed compositions.
+// Descriptors below are published additively. Aevatar skips unknown or
+// divergent descriptors per action. schema_version is the only registry-wide
+// gate. The four byte-compared descriptors above require a coordinated
+// consumer contract change.
 const KEY_UPDATE_DESCRIPTION: &str = "Ask the user's browser to update the display metadata of one exact NyxID API key - its name, platform, or description. Use when the user wants to relabel or reclassify an existing agent key without changing what it can reach. NyxID owns the journey and reports only the safe key reference. Never request, expose, or repeat key material in chat.";
 const KEY_DELETE_DESCRIPTION: &str = "Ask the user's browser to permanently delete one exact NyxID API key. Use when the user wants to retire an agent identity entirely. Deletion is destructive and confirmed in the browser every time; NyxID reports only the safe key reference. Never request, expose, or repeat key material in chat.";
 const KEY_EXTEND_SCOPE_DESCRIPTION: &str = "Ask the user's browser to widen one exact NyxID API key's allowed services by the listed user-service IDs. Use when a task needs the key to reach a service it cannot reach today. Widening is confirmed in the browser and never remembered; NyxID reports only the safe key reference. Never request, expose, or repeat key material in chat.";
@@ -295,7 +291,6 @@ static MANIFEST_BODY: LazyLock<String> = LazyLock::new(|| {
                 tier: "v1",
                 remember_eligible: false,
             },
-            // ---- Wave 2 (dormant until a future revision pins them) ----
             AssistantActionDescriptor {
                 action: "key.update",
                 description: KEY_UPDATE_DESCRIPTION,
@@ -1142,7 +1137,7 @@ static MANIFEST_BODY: LazyLock<String> = LazyLock::new(|| {
 /// (revision, action) and `JsonNode.DeepEquals`s it; current bytes only
 /// pass for revisions that pin the live descriptor.
 static PINNED_REVISION_BODIES: LazyLock<HashMap<&'static str, String>> = LazyLock::new(|| {
-    PINNED_ACTIONS_BY_REVISION
+    PUBLISHED_ACTIONS_BY_REVISION
         .iter()
         .map(|(revision, action_names)| {
             (*revision, compose_revision_manifest(revision, action_names))
@@ -1226,10 +1221,7 @@ pub async fn get_assistant_actions(Query(query): Query<AssistantActionsQuery>) -
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::{HashMap as StdHashMap, HashSet},
-        sync::Arc,
-    };
+    use std::{collections::HashSet, sync::Arc};
 
     use axum::{
         Extension,
@@ -1238,24 +1230,20 @@ mod tests {
         middleware,
         response::Response,
     };
-    use serde::Deserialize;
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
     use super::{
-        ASSISTANT_ACTIONS_REVISION, ASSISTANT_ACTIONS_SCHEMA_VERSION, PINNED_ACTIONS_BY_REVISION,
-        manifest_body, resolve_assistant_actions_body,
+        ASSISTANT_ACTIONS_REVISION, ASSISTANT_ACTIONS_SCHEMA_VERSION,
+        PUBLISHED_ACTIONS_BY_REVISION, manifest_body, resolve_assistant_actions_body,
     };
     use crate::config::TrustedProxyRange;
     use crate::mw::rate_limit::{GlobalRateLimiter, PerIpRateLimiter, rate_limit_middleware};
 
     const MAXIMUM_REGISTRY_BYTES: usize = 1_048_576;
-    /// Names the manifest may contain. The first 14 mirror the Aevatar
-    /// parser's `SupportedActions` contract; the Wave-2 block extends the
-    /// rail with dormant verbs the upstream loader provably skips until a
-    /// future revision pins them (it validates only that `action` is a
-    /// string of at most 128 chars before skipping). Names outside this
-    /// list still fail the conformance test below.
+    /// Names the NyxID manifest may contain. Fourteen are known to the pinned
+    /// Aevatar consumer; it ignores the remaining well-formed descriptors.
+    /// Names outside this list still fail the conformance test below.
     const SUPPORTED_ACTIONS: &[&str] = &[
         "service.connect",
         "service.reauthorize",
@@ -1300,7 +1288,7 @@ mod tests {
         "external_key.add_gcp_service_account",
         "openclaw.connect",
         "device.onboard",
-        "// Wave 2 (dormant; not pinned by any Aevatar revision yet)",
+        "// Additive descriptors",
         "key.update",
         "key.delete",
         "key.extend_scope",
@@ -1317,9 +1305,7 @@ mod tests {
         "provider.disconnect",
     ];
 
-    /// The composition the deployed v8 pin executes. Everything else in the
-    /// manifest is dormant and must stay non-remembered until pinned.
-    const V8_PINNED_ACTIONS: &[&str] = &[
+    const V8_PREFIX_ACTIONS: &[&str] = &[
         "service.connect",
         "service.reauthorize",
         "key.create",
@@ -2508,151 +2494,68 @@ mod tests {
         }
     }
 
-    /// Aevatar `KeyCreateParamsSchema` (the pre-least-scope constant).
-    /// Independent of NyxID's live descriptor so a serving regression that
-    /// copies current `key.create` bytes into v5 cannot hide behind a shared
-    /// helper.
-    fn aevatar_key_create_params_schema_pre_least_scope() -> Value {
-        json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["name", "platform", "allowedServiceIds"],
-            "properties": {
-                "name": { "type": "string" },
-                "platform": { "type": "string" },
-                "allowedServiceIds": {
-                    "type": "array",
-                    "items": { "type": "string" }
-                }
-            }
-        })
+    fn current_remember_eligible(action: &str) -> bool {
+        action == "service.connect"
     }
 
-    /// Mirrors `ValidatePinnedContract`'s per-revision schema selection on
-    /// both Aevatar lineages: v4/v5 → `KeyCreateParamsSchema`; v6/v7/v8 →
-    /// `LeastScopeKeyCreateParamsSchema`. Other pinned verbs have a single
-    /// compiled constant.
-    fn aevatar_pinned_params_schema(revision: &str, action: &str) -> Value {
-        match action {
-            "key.create" => match revision {
-                "nyxid-assistant-actions.v6"
-                | "nyxid-assistant-actions.v7"
-                | "nyxid-assistant-actions.v8" => key_create_params_schema(),
-                _ => aevatar_key_create_params_schema_pre_least_scope(),
-            },
-            other => current_params_schema(other),
-        }
-    }
-
-    fn aevatar_pinned_risk(action: &str) -> &'static str {
-        match action {
-            "service.connect" | "service.reauthorize" | "key.create" | "key.rotate" => "grant",
-            other => panic!("no Aevatar pinned risk for {other}"),
-        }
-    }
-
-    fn aevatar_pinned_remember_eligible(action: &str) -> bool {
-        match action {
-            "service.connect" => true,
-            "service.reauthorize" | "key.create" | "key.rotate" => false,
-            other => panic!("no Aevatar pinned remember_eligible for {other}"),
-        }
-    }
-
-    #[derive(Debug, Deserialize, PartialEq, Eq)]
-    struct AevatarRevisionMirror {
-        lineages: StdHashMap<String, AevatarLineageMirror>,
-    }
-
-    #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-    struct AevatarLineageMirror {
-        supported_revision: String,
-        revisions: StdHashMap<String, AevatarRevisionSets>,
-    }
-
-    #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-    struct AevatarRevisionSets {
-        pinned: Vec<String>,
-        executable: Vec<String>,
-    }
-
-    fn load_aevatar_revision_mirror() -> AevatarRevisionMirror {
+    fn consumer_contract_fixture() -> Value {
         serde_json::from_str(include_str!(
             "../../../tests/fixtures/assistant/aevatar-pinned-actions-by-revision.json"
         ))
-        .expect("manually synced Aevatar revision-set mirror must parse")
+        .expect("AC-1 consumer contract fixture must parse")
     }
 
-    fn integrate_lineage_sets(revision: &str) -> AevatarRevisionSets {
-        load_aevatar_revision_mirror()
-            .lineages
-            .get("origin/feature/integrate")
-            .expect("mirror must include origin/feature/integrate")
-            .revisions
-            .get(revision)
-            .cloned()
-            .unwrap_or_else(|| panic!("integrate lineage missing {revision}"))
+    fn chat_contract_pin() -> Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/assistant/aevatar-chat-contract-pin.json"
+        ))
+        .expect("AC-0 pin must parse")
     }
 
-    /// Reproduces Aevatar `Load` + `ValidatePinnedContract` for one served
-    /// composition: skip unknown/non-pinned names, DeepEquals the
-    /// revision-selected schema (via `serde_json::Value`, the Rust analogue
-    /// of `JsonNode.DeepEquals` on canonicalized JSON), check pinned
-    /// risk/remember, require every pinned name, and require every
-    /// executable name.
-    fn assert_matches_aevatar_pinned_contract(body: &str, revision: &str) {
-        let sets = integrate_lineage_sets(revision);
-        let manifest: Value = serde_json::from_str(body).expect("served body must be JSON");
-        let actions = manifest["actions"]
+    fn fixture_action_names<'a>(fixture: &'a Value, field: &str) -> Vec<&'a str> {
+        fixture[field]
             .as_array()
-            .expect("actions must be an array");
+            .unwrap_or_else(|| panic!("{field}"))
+            .iter()
+            .map(|value| value.as_str().expect("action name"))
+            .collect()
+    }
 
-        let pinned: HashSet<&str> = sets.pinned.iter().map(String::as_str).collect();
-        let mut seen = HashSet::new();
-        for entry in actions {
-            let action = entry["action"].as_str().expect("action must be a string");
-            if !pinned.contains(action) {
+    enum ConsumerLoad {
+        SchemaUnsupported,
+        Loaded {
+            accepted: Vec<String>,
+            skipped: Vec<String>,
+        },
+    }
+
+    fn consume_like_aevatar(manifest: &Value) -> ConsumerLoad {
+        let schema = manifest["schema_version"].as_u64();
+        if schema != Some(u64::from(ASSISTANT_ACTIONS_SCHEMA_VERSION)) {
+            return ConsumerLoad::SchemaUnsupported;
+        }
+        let fixture = consumer_contract_fixture();
+        let supported = fixture_action_names(&fixture, "consumer_supported_actions");
+        let pinned = fixture_action_names(&fixture, "pinned_descriptor_actions");
+        let mut accepted = Vec::new();
+        let mut skipped = Vec::new();
+        for entry in manifest["actions"].as_array().expect("actions") {
+            let action = entry["action"].as_str().expect("action");
+            if !supported.contains(&action) {
                 continue;
             }
-            assert!(
-                seen.insert(action),
-                "duplicate pinned action {action} at {revision}"
-            );
-            assert_eq!(
-                entry["params_schema"],
-                aevatar_pinned_params_schema(revision, action),
-                "Aevatar JsonNode.DeepEquals pin failed for {action} at {revision}"
-            );
-            assert_eq!(
-                entry["risk"].as_str(),
-                Some(aevatar_pinned_risk(action)),
-                "pinned risk mismatch for {action} at {revision}"
-            );
-            assert_eq!(
-                entry["remember_eligible"].as_bool(),
-                Some(aevatar_pinned_remember_eligible(action)),
-                "pinned remember_eligible mismatch for {action} at {revision}"
-            );
+            let matches_pinned_contract = !pinned.contains(&action)
+                || (entry["params_schema"] == current_params_schema(action)
+                    && entry["risk"].as_str() == Some("grant")
+                    && entry["remember_eligible"].as_bool()
+                        == Some(current_remember_eligible(action)));
+            if matches_pinned_contract {
+                accepted.push(action.to_string());
+            } else {
+                skipped.push(action.to_string());
+            }
         }
-
-        let seen_owned: HashSet<String> = seen.iter().map(|name| (*name).to_string()).collect();
-        let pinned_owned: HashSet<String> = sets.pinned.iter().cloned().collect();
-        assert_eq!(
-            seen_owned, pinned_owned,
-            "served {revision} is missing a pinned action"
-        );
-        for executable in &sets.executable {
-            assert!(
-                seen_owned.contains(executable),
-                "executable action {executable} missing from served {revision}"
-            );
-        }
-        if revision == "nyxid-assistant-actions.v4" {
-            assert!(
-                !seen.contains("key.create"),
-                "v4 pins only service.connect; key.create must not be served"
-            );
-        }
+        ConsumerLoad::Loaded { accepted, skipped }
     }
 
     fn action_names(manifest: &Value) -> Vec<&str> {
@@ -2729,19 +2632,13 @@ mod tests {
         assert_manifest_conforms(manifest_body());
     }
 
-    /// Guards the dormant-merge protocol: the revision stays v8, the four
-    /// pinned descriptors keep their positions (deployed compositions
-    /// deep-equal their schemas), and every Wave-2 descriptor is present,
-    /// never remember-eligible, and correctly marked destructive where the
-    /// wave says so. A revision bump or a shipped-schema edit fails here
-    /// before it can fail an Aevatar startup.
     #[test]
-    fn dormant_descriptors_are_appended_and_never_remembered() {
+    fn additive_descriptors_are_appended_and_never_remembered() {
         let manifest: Value = serde_json::from_str(manifest_body()).unwrap();
         assert_eq!(manifest["revision"], "nyxid-assistant-actions.v8");
 
         let actions = manifest["actions"].as_array().unwrap();
-        for (index, pinned) in V8_PINNED_ACTIONS.iter().enumerate() {
+        for (index, pinned) in V8_PREFIX_ACTIONS.iter().enumerate() {
             assert_eq!(
                 actions[index]["action"], *pinned,
                 "pinned descriptor moved: {pinned}"
@@ -2769,10 +2666,10 @@ mod tests {
             "service_account.revoke_tokens",
             "developer_app.delete",
         ];
-        let wave2: Vec<&str> = SUPPORTED_ACTIONS
+        let additive: Vec<&str> = SUPPORTED_ACTIONS
             .iter()
             .copied()
-            .filter(|name| !V8_PINNED_ACTIONS.contains(name))
+            .filter(|name| !V8_PREFIX_ACTIONS.contains(name))
             .filter(|name| {
                 actions
                     .iter()
@@ -2780,11 +2677,11 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            wave2.len(),
+            additive.len(),
             53,
             "expected 15 Wave-2 + 8 Wave-3 + 30 Wave-4 dormant descriptors"
         );
-        for name in wave2 {
+        for name in additive {
             let entry = actions
                 .iter()
                 .find(|entry| entry["action"].as_str() == Some(name))
@@ -2954,7 +2851,7 @@ mod tests {
         let (default_status, default_body) = response_bytes(default_response).await;
         assert_eq!(default_status, StatusCode::OK);
 
-        for (revision, expected_names) in PINNED_ACTIONS_BY_REVISION {
+        for (revision, expected_names) in PUBLISHED_ACTIONS_BY_REVISION {
             let response = request_assistant_actions(&format!(
                 "/api/v1/assistant/actions?revision={revision}"
             ))
@@ -2982,27 +2879,24 @@ mod tests {
 
     #[test]
     fn assistant_actions_every_published_revision_passes_parser_contract() {
-        for (revision, action_names) in PINNED_ACTIONS_BY_REVISION {
+        for (revision, action_names) in PUBLISHED_ACTIONS_BY_REVISION {
             let body = resolve_assistant_actions_body(Some(revision))
                 .unwrap_or_else(|error| panic!("missing composed body for {revision}: {error}"));
             assert_manifest_conforms_revision(body, revision, Some(action_names));
-            assert_matches_aevatar_pinned_contract(body, revision);
         }
         assert_manifest_conforms(manifest_body());
     }
 
     #[test]
     fn assistant_actions_revision_sets_are_monotone_append_only() {
-        // Going forward, each published set is a subset of the next. Aevatar's
-        // frozen pin map has one historical reduction: v5 (WaveOneDraft)
-        // listed reauthorize+rotate, then v6 (LeastScope) dropped them. That
-        // pair is the only permitted non-subset consecutive step.
-        let latest = PINNED_ACTIONS_BY_REVISION
+        // Each published set is a subset of the next except for the frozen
+        // v5-to-v6 reduction in NyxID's legacy revision responses.
+        let latest = PUBLISHED_ACTIONS_BY_REVISION
             .last()
             .expect("at least one published revision");
         let latest_set: HashSet<&str> = latest.1.iter().copied().collect();
 
-        for window in PINNED_ACTIONS_BY_REVISION.windows(2) {
+        for window in PUBLISHED_ACTIONS_BY_REVISION.windows(2) {
             let (left_revision, left_actions) = window[0];
             let (right_revision, right_actions) = window[1];
             let left: HashSet<&str> = left_actions.iter().copied().collect();
@@ -3022,90 +2916,14 @@ mod tests {
             );
         }
 
-        for (revision, actions) in PINNED_ACTIONS_BY_REVISION {
+        for (revision, actions) in PUBLISHED_ACTIONS_BY_REVISION {
             let set: HashSet<&str> = actions.iter().copied().collect();
             assert!(
                 set.is_subset(&latest_set),
-                "{revision} must be a subset of the latest pin {}",
+                "{revision} must be a subset of the latest published revision {}",
                 latest.0
             );
         }
-    }
-
-    #[test]
-    fn assistant_actions_revision_sets_match_manually_synced_aevatar_mirror() {
-        let mirror = load_aevatar_revision_mirror();
-        let dev = mirror
-            .lineages
-            .get("origin/dev")
-            .expect("mirror must include origin/dev");
-        let integrate = mirror
-            .lineages
-            .get("origin/feature/integrate")
-            .expect("mirror must include origin/feature/integrate");
-
-        assert_eq!(dev.supported_revision, "nyxid-assistant-actions.v7");
-        assert_eq!(integrate.supported_revision, "nyxid-assistant-actions.v8");
-        assert!(
-            !dev.revisions.contains_key("nyxid-assistant-actions.v8"),
-            "origin/dev does not publish v8"
-        );
-
-        assert_eq!(
-            integrate.revisions.len(),
-            PINNED_ACTIONS_BY_REVISION.len(),
-            "NyxID publishes the integrate superset of revisions"
-        );
-        for (revision, action_names) in PINNED_ACTIONS_BY_REVISION {
-            let sets = integrate
-                .revisions
-                .get(*revision)
-                .unwrap_or_else(|| panic!("integrate mirror missing {revision}"));
-            let expected: Vec<String> = action_names
-                .iter()
-                .map(|name| (*name).to_string())
-                .collect();
-            assert_eq!(
-                sets.pinned, expected,
-                "manually synced pinned set mismatch for {revision}"
-            );
-            for executable in &sets.executable {
-                assert!(
-                    sets.pinned.iter().any(|name| name == executable),
-                    "{executable} is executable on {revision} but not pinned"
-                );
-            }
-        }
-
-        for (revision, sets) in &dev.revisions {
-            assert_eq!(
-                integrate.revisions.get(revision),
-                Some(sets),
-                "{revision} pinned/executable sets must match across Aevatar lineages"
-            );
-        }
-
-        let v5 = integrate
-            .revisions
-            .get("nyxid-assistant-actions.v5")
-            .expect("v5");
-        assert_eq!(
-            v5.executable,
-            vec!["service.connect".to_string()],
-            "both lineages make only service.connect executable in v5"
-        );
-        let v8 = integrate
-            .revisions
-            .get("nyxid-assistant-actions.v8")
-            .expect("v8");
-        assert!(
-            v8.pinned.iter().any(|name| name == "service.reauthorize")
-                && !v8
-                    .executable
-                    .iter()
-                    .any(|name| name == "service.reauthorize"),
-            "v8 pins service.reauthorize dormant (not executable)"
-        );
     }
 
     #[tokio::test]
@@ -3177,32 +2995,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assistant_actions_dormant_descriptor_is_served_but_absent_from_all_pinned_sets() {
+    async fn assistant_actions_additive_descriptors_are_absent_from_legacy_revision_responses() {
         let default_manifest: Value = serde_json::from_str(manifest_body()).unwrap();
         let default_names = action_names(&default_manifest);
-        let latest_pin: HashSet<&str> = PINNED_ACTIONS_BY_REVISION
+        let latest_revision: HashSet<&str> = PUBLISHED_ACTIONS_BY_REVISION
             .last()
-            .expect("latest pin")
+            .expect("latest published revision")
             .1
             .iter()
             .copied()
             .collect();
-        let dormant: Vec<&str> = default_names
+        let additive: Vec<&str> = default_names
             .iter()
             .copied()
-            .filter(|name| !latest_pin.contains(name))
+            .filter(|name| !latest_revision.contains(name))
             .collect();
         assert_eq!(
-            dormant.len(),
+            additive.len(),
             53,
             "expected 15 Wave-2 + 8 Wave-3 + 30 Wave-4 dormant descriptors"
         );
 
-        for (revision, action_names) in PINNED_ACTIONS_BY_REVISION {
-            for name in &dormant {
+        for (revision, action_names) in PUBLISHED_ACTIONS_BY_REVISION {
+            for name in &additive {
                 assert!(
                     !action_names.contains(name),
-                    "{name} must stay absent from pinned set {revision}"
+                    "{name} must stay absent from legacy revision {revision}"
                 );
             }
         }
@@ -3211,10 +3029,153 @@ mod tests {
         let (status, body) = response_bytes(response).await;
         assert_eq!(status, StatusCode::OK);
         let served: Value = serde_json::from_slice(&body).unwrap();
-        for name in dormant {
+        for name in additive {
             assert!(
                 action_names(&served).contains(&name),
-                "default body must still serve dormant descriptor {name}"
+                "default body must still serve additive descriptor {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_manifest_action_names_match_consumer_fixture_golden() {
+        let fixture = consumer_contract_fixture();
+        let pin = chat_contract_pin();
+        let default_manifest: Value = serde_json::from_str(manifest_body()).unwrap();
+        let names = action_names(&default_manifest);
+        let golden: Vec<&str> = fixture["default_action_names"]
+            .as_array()
+            .expect("default_action_names")
+            .iter()
+            .map(|value| value.as_str().expect("action name"))
+            .collect();
+        assert_eq!(
+            default_manifest["schema_version"].as_u64(),
+            pin["action_registry"]["schema_version"].as_u64()
+        );
+        assert_eq!(names, golden);
+    }
+
+    #[test]
+    fn known_descriptors_are_accepted_by_the_per_action_consumer() {
+        let default_manifest: Value = serde_json::from_str(manifest_body()).unwrap();
+        match consume_like_aevatar(&default_manifest) {
+            ConsumerLoad::Loaded { accepted, skipped } => {
+                let fixture = consumer_contract_fixture();
+                assert_eq!(
+                    accepted,
+                    fixture_action_names(&fixture, "consumer_supported_actions")
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                );
+                assert!(skipped.is_empty());
+            }
+            ConsumerLoad::SchemaUnsupported => panic!("schema 4 must load"),
+        }
+    }
+
+    #[test]
+    fn unknown_descriptors_are_skipped_without_disabling_known_actions() {
+        let mut manifest: Value = serde_json::from_str(manifest_body()).unwrap();
+        let unknown = consumer_contract_fixture()["unknown_action"]
+            .as_str()
+            .expect("unknown_action")
+            .to_string();
+        manifest["actions"]
+            .as_array_mut()
+            .expect("actions")
+            .push(json!({
+                "action": unknown,
+                "description": "Unknown additive descriptor.",
+                "params_schema": { "type": "object", "additionalProperties": false },
+                "risk": "grant",
+                "tier": "v1",
+                "remember_eligible": false
+            }));
+        match consume_like_aevatar(&manifest) {
+            ConsumerLoad::Loaded { accepted, skipped } => {
+                assert!(!accepted.iter().any(|name| name == &unknown));
+                assert!(!skipped.iter().any(|name| name == &unknown));
+                assert_eq!(accepted.len(), 14);
+            }
+            ConsumerLoad::SchemaUnsupported => panic!("schema 4 must load"),
+        }
+    }
+
+    #[test]
+    fn divergent_descriptors_degrade_per_action() {
+        let mut manifest: Value = serde_json::from_str(manifest_body()).unwrap();
+        let actions = manifest["actions"].as_array_mut().expect("actions");
+        actions[0]["params_schema"] = json!({
+            "type": "object",
+            "additionalProperties": true
+        });
+        match consume_like_aevatar(&manifest) {
+            ConsumerLoad::Loaded { accepted, skipped } => {
+                assert_eq!(skipped, vec!["service.connect".to_string()]);
+                assert_eq!(accepted.len(), 13);
+                assert!(accepted.iter().any(|name| name == "key.create"));
+            }
+            ConsumerLoad::SchemaUnsupported => panic!("schema 4 must load"),
+        }
+    }
+
+    #[test]
+    fn schema_version_gates_the_registry() {
+        let mut manifest: Value = serde_json::from_str(manifest_body()).unwrap();
+        manifest["schema_version"] = json!(3);
+        assert!(matches!(
+            consume_like_aevatar(&manifest),
+            ConsumerLoad::SchemaUnsupported
+        ));
+        manifest["schema_version"] = json!(4);
+        manifest["revision"] = json!("nyxid-assistant-actions.future");
+        match consume_like_aevatar(&manifest) {
+            ConsumerLoad::Loaded { accepted, skipped } => {
+                assert_eq!(accepted.len(), 14);
+                assert!(skipped.is_empty());
+            }
+            ConsumerLoad::SchemaUnsupported => {
+                panic!("revision is an observability label, not a load gate")
+            }
+        }
+    }
+
+    #[test]
+    fn default_manifest_matches_aevatar_chat_contract_pin() {
+        let pin = chat_contract_pin();
+        let registry = pin
+            .get("action_registry")
+            .expect("pin must include action_registry");
+        assert_eq!(
+            registry.get("schema_version").and_then(Value::as_u64),
+            Some(u64::from(ASSISTANT_ACTIONS_SCHEMA_VERSION))
+        );
+        assert_eq!(
+            registry
+                .get("revision_is_observability_label")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            registry
+                .get("unknown_or_divergent_descriptors")
+                .and_then(Value::as_str),
+            Some("degrade_per_action")
+        );
+
+        let default_manifest: Value = serde_json::from_str(manifest_body()).unwrap();
+        let names = action_names(&default_manifest);
+        for action in [
+            "service.connect",
+            "service.reauthorize",
+            "key.create",
+            "key.rotate",
+        ] {
+            assert!(
+                names.contains(&action),
+                "{action} must remain in the additive default manifest"
             );
         }
     }

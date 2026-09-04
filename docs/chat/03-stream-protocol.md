@@ -1,6 +1,6 @@
 # Assistant Stream Protocol
 
-Last verified against Aevatar console and SDK commit `e7ba2e6eb` (2026-08-25).
+The Aevatar chat contract is pinned in `tests/fixtures/assistant/aevatar-chat-contract-pin.json`. See the pin section of [README.md](README.md).
 
 The Assistant consumes Aevatar AG-UI Server-Sent Events only from the typed
 `NyxIdChat` route. The stream is an ordered actor-observation protocol, not an

@@ -1,6 +1,6 @@
 # Assistant Chat Frontend Contract
 
-Last verified against Aevatar console commit `e7ba2e6eb` (2026-08-25).
+The Aevatar chat contract is pinned in `tests/fixtures/assistant/aevatar-chat-contract-pin.json`. See the pin section of [README.md](README.md).
 
 The assistant page presents one continuous transcript, an anchored composer, and a conversation sidebar. Network and stream states change the same surface in place; loading, thinking, streaming, terminal, and recovery states do not replace the application shell.
 
