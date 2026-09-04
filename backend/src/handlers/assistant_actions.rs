@@ -3218,4 +3218,45 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn default_manifest_matches_aevatar_chat_contract_pin() {
+        let pin: Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/assistant/aevatar-chat-contract-pin.json"
+        ))
+        .expect("AC-0 pin must parse");
+        let registry = pin
+            .get("action_registry")
+            .expect("pin must include action_registry");
+        assert_eq!(
+            registry.get("schema_version").and_then(Value::as_u64),
+            Some(u64::from(ASSISTANT_ACTIONS_SCHEMA_VERSION))
+        );
+        assert_eq!(
+            registry
+                .get("revision_is_observability_label")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            registry
+                .get("unknown_or_divergent_descriptors")
+                .and_then(Value::as_str),
+            Some("degrade_per_action")
+        );
+
+        let default_manifest: Value = serde_json::from_str(manifest_body()).unwrap();
+        let names = action_names(&default_manifest);
+        for action in [
+            "service.connect",
+            "service.reauthorize",
+            "key.create",
+            "key.rotate",
+        ] {
+            assert!(
+                names.contains(&action),
+                "{action} must remain in the additive default manifest"
+            );
+        }
+    }
 }

@@ -1,0 +1,76 @@
+{
+  "remote": "https://github.com/aevatarAI/aevatar.git",
+  "branch": "feature/integrate",
+  "remote_head": "e5bba2e9719ad5132004b882744caa3875db1123",
+  "effective_chat_sha": "706ea7cab9d1f882e0fb0f034bb338102b6d5d2b",
+  "watched_paths": [
+    "agents/Aevatar.GAgents.NyxidChat/",
+    "apps/aevatar-console-web/src/pages/chat/",
+    "apps/aevatar-console-web/src/shared/auth/client.ts",
+    "src/Aevatar.Mainnet.Host.Api/Chat/MainnetChatEndpoints.cs",
+    "src/Aevatar.Mainnet.Host.Api/Responses/NyxIdIdentityAssertionAuthentication.cs",
+    "src/Aevatar.AI.ToolProviders.NyxId/Tools/NyxIdRequireServiceTool.cs",
+    "src/Aevatar.AI.ToolProviders.NyxId/NyxIdActionEvidenceReadPort.cs",
+    "src/Aevatar.AI.ToolProviders.NyxId/NyxIdMcpOperationCatalogReader.cs",
+    "src/Aevatar.AI.ToolProviders.NyxId/NyxIdApiClient.cs",
+    "src/Aevatar.Studio.Hosting/Endpoints/ContentArtifactEndpoints.cs",
+    "src/Aevatar.Studio.Hosting/Endpoints/NyxIdLoginFinalizationEndpoints.cs"
+  ],
+  "public_commands": [
+    "text",
+    "input.resolve",
+    "action.continue",
+    "approval.resolve",
+    "task.stop",
+    "task.steer",
+    "step.retry",
+    "step.skip"
+  ],
+  "internal_actions": [
+    {
+      "action": "service.access_review",
+      "params": [
+        "userServiceId",
+        "serviceSlug",
+        "resourceUri"
+      ]
+    }
+  ],
+  "context_attachments": {
+    "max_unique_nonempty_artifact_id": 4,
+    "revision_modes": [
+      "follow_current",
+      "pinned_revision"
+    ],
+    "pinned_revision_requires": "pinnedRevisionId",
+    "kinds": [
+      "text",
+      "markdown",
+      "structured_document"
+    ],
+    "create_only": true,
+    "admission_code": "ATTACHMENT_ADMISSION_DENIED",
+    "admission_reasons": [
+      "not_found",
+      "access_denied",
+      "unsupported_kind",
+      "over_limit",
+      "pinned_revision_unavailable",
+      "invalid_request",
+      "inactive",
+      "read_model_unavailable"
+    ]
+  },
+  "delete": {
+    "accepted_status": 202,
+    "state": "accepted",
+    "state_url_field": "stateUrl",
+    "observe_until": "not_found"
+  },
+  "keepalive_seconds": 15,
+  "action_registry": {
+    "schema_version": 4,
+    "revision_is_observability_label": true,
+    "unknown_or_divergent_descriptors": "degrade_per_action"
+  }
+}
