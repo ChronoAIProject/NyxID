@@ -41,7 +41,7 @@ import {
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const BASE_URL = (process.env.NYXID_BASE_URL || "").replace(/\/$/, "");
@@ -807,16 +807,76 @@ export function shouldLeaveTabAlone({ url, loggedIn, pageOpen = true }) {
   return loggedIn === false && isChatGptUrl(url);
 }
 
+// Pick the one tab the worker drives. Prefers an existing ChatGPT tab, then a
+// login-flow tab (left alone), then a blank tab to navigate; duplicate ChatGPT
+// tabs (left behind by earlier recoveries) are reported so they can be closed.
+export function chooseChatPage(pages) {
+  const list = Array.isArray(pages) ? pages : [];
+  const url = (page) => (typeof page.url === "function" ? page.url() : page.url) || "";
+  const chat = list.filter((page) => isChatGptUrl(url(page)));
+  const auth = list.find((page) => isAuthFlowUrl(url(page)));
+  const blank = list.find((page) => /^(about:blank|chrome:\/\/newtab)/.test(url(page)));
+  if (chat.length) return { chosen: chat[0], duplicates: chat.slice(1), navigate: false };
+  if (auth) return { chosen: auth, duplicates: [], navigate: false };
+  if (blank) return { chosen: blank, duplicates: [], navigate: true };
+  return { chosen: null, duplicates: [], navigate: true };
+}
+
 async function getChatPage(context) {
-  let page =
-    context.pages().find((p) => isChatGptUrl(p.url())) ||
-    context.pages().find((p) => isAuthFlowUrl(p.url()));
-  if (!page) {
-    page = await context.newPage();
-    await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded" });
+  const { chosen, duplicates, navigate } = chooseChatPage(context.pages());
+  for (const extra of duplicates) {
+    await extra.close().catch(() => {});
   }
+  if (duplicates.length) log(`closed ${duplicates.length} duplicate ChatGPT tab(s)`);
+  let page = chosen;
+  if (!page) page = await context.newPage();
+  if (navigate) await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded" });
   if (isChatGptUrl(page.url())) await installDomCore(page);
   return page;
+}
+
+// Stop the Chrome instance bound to this worker's profile so a relaunch is a
+// real relaunch. Playwright's browser.close() on a CDP-attached browser only
+// disconnects; spawning again then hands the URL to the still-running
+// instance, which is how relaunch loops used to open a new tab every time.
+function terminateChrome() {
+  if (!CHROME_PROFILE_DIR) return 0;
+  const marker = `--user-data-dir=${CHROME_PROFILE_DIR}`;
+  let pids = [];
+  try {
+    pids = execFileSync("pgrep", ["-f", "--", marker], { encoding: "utf8" })
+      .split(/\s+/)
+      .map((value) => Number(value))
+      .filter((value) => Number.isInteger(value) && value > 0 && value !== process.pid);
+  } catch {
+    return 0;
+  }
+  for (const pid of pids) {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch {}
+  }
+  return pids.length;
+}
+
+async function waitForChromeExit(timeoutMs = 5000) {
+  const marker = `--user-data-dir=${CHROME_PROFILE_DIR}`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      execFileSync("pgrep", ["-f", "--", marker], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+    } catch {
+      return true; // pgrep exits non-zero when nothing matches
+    }
+    await sleep(250);
+  }
+  try {
+    for (const pid of execFileSync("pgrep", ["-f", "--", marker], { encoding: "utf8" }).split(/\s+/)) {
+      const value = Number(pid);
+      if (Number.isInteger(value) && value > 0) process.kill(value, "SIGKILL");
+    }
+  } catch {}
+  return false;
 }
 
 async function detectLoggedIn(page) {
@@ -857,7 +917,6 @@ function chromeArgs() {
     "--no-first-run",
     "--no-default-browser-check",
     ...extra,
-    "https://chatgpt.com/",
   ];
 }
 
@@ -928,6 +987,11 @@ async function recoverChrome(runtime, forceRelaunch = false) {
         runtime.browser = null;
         runtime.context = null;
         runtime.page = null;
+        const stopped = terminateChrome();
+        if (stopped) {
+          log(`stopping ${stopped} Chrome process(es) for a real relaunch`);
+          await waitForChromeExit();
+        }
         launchChrome();
         launched = true;
         await sleep(1500);
@@ -985,7 +1049,9 @@ async function ensureChatPage(runtime, targetUrl) {
       return recoverChrome(runtime, runtime.health.tab >= 5);
     }
     try {
+      const stale = runtime.page;
       runtime.page = await runtime.context.newPage();
+      if (stale && !stale.isClosed()) await stale.close().catch(() => {});
       await runtime.page.goto(targetUrl || "https://chatgpt.com/", {
         waitUntil: "domcontentloaded",
         timeout: 60000,
