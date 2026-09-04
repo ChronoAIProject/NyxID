@@ -267,6 +267,16 @@ node --check worker.mjs
 node --test worker.test.mjs
 ```
 
+## One tab per worker
+
+The worker drives exactly one ChatGPT tab in its dedicated Chrome. On every
+reconnect it reuses the existing ChatGPT tab and closes duplicate ChatGPT tabs
+that earlier recoveries left behind (a login-flow tab is left alone). A
+browser relaunch (`relaunch-browser`, or automatic after repeated CDP
+failures) first stops the Chrome process bound to this profile and then starts
+it again, so it never hands a URL to a still-running instance and adds a tab.
+Chrome is launched without a start URL; the worker opens ChatGPT itself.
+
 ## Identifying the dedicated Chrome
 
 Each install (and each `--profile`) drives its own Chrome user-data-dir under

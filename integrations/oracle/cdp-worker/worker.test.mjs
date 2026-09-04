@@ -5,6 +5,7 @@ import {
   artifactBudgetDecision,
   artifactFileId,
   backoffDelay,
+  chooseChatPage,
   choosePromptNavigation,
   classifyArtifactLink,
   decidePromptResume,
@@ -461,4 +462,16 @@ test("a cancelled pending command is dropped and draining is recomputed", () => 
   const untouched = { state: { pending_command: { id: "c3", command: "restart" }, draining: true } };
   assert.equal(dropCancelledCommand(untouched, ["other"]), false);
   assert.equal(untouched.state.pending_command.id, "c3");
+});
+
+test("one ChatGPT tab is driven and duplicates are reported for closing", () => {
+  const page = (url) => ({ url: () => url });
+  const a = page("https://chatgpt.com/c/one");
+  const b = page("https://chatgpt.com/");
+  const login = page("https://auth.openai.com/authorize");
+  const blank = page("about:blank");
+  assert.deepEqual(chooseChatPage([blank, a, b]), { chosen: a, duplicates: [b], navigate: false });
+  assert.deepEqual(chooseChatPage([login, blank]), { chosen: login, duplicates: [], navigate: false });
+  assert.deepEqual(chooseChatPage([blank]), { chosen: blank, duplicates: [], navigate: true });
+  assert.deepEqual(chooseChatPage([]), { chosen: null, duplicates: [], navigate: true });
 });
