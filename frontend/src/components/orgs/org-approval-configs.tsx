@@ -623,7 +623,9 @@ interface OrgApprovalGrantsProps {
  * user_id, so without this admin-only panel they would be unreachable.
  */
 function OrgApprovalGrants({ orgId }: OrgApprovalGrantsProps) {
-  const { data, isLoading, error, refetch } = useApprovalGrants(1, 50, orgId);
+  const { data, isLoading, error, refetch } = useApprovalGrants(1, 50, {
+    orgId,
+  });
   const revokeMutation = useRevokeGrant();
   const grants = data?.grants ?? [];
 

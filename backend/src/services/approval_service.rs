@@ -1450,6 +1450,13 @@ pub async fn get_request(db: &Database, request_id: &str) -> AppResult<ApprovalR
         .ok_or_else(|| AppError::NotFound("Approval request not found".to_string()))
 }
 
+fn service_config_supports_grants(config: &ServiceApprovalConfig) -> bool {
+    config.approval_mode == ApprovalMode::Grant
+        || config.rules.iter().any(|rule| {
+            rule.effect == ApprovalEffect::RequireApproval && rule.mode == ApprovalMode::Grant
+        })
+}
+
 /// Build the Mongo filter for listing approval grants. Empty
 /// `admin_branches` preserves the legacy per-user shape. When
 /// non-empty, branches are emitted as `$or` alternatives. Each
@@ -1459,9 +1466,10 @@ pub async fn get_request(db: &Database, request_id: &str) -> AppResult<ApprovalR
 /// also intersected with the mode set so a scoped admin never sees
 /// rows outside their `allowed_service_ids`.
 ///
-/// `grant_mode_by_owner` maps an owner `user_id` → its grant-mode
-/// service ids. An owner missing from the map has no services in
-/// grant mode and contributes no grants.
+/// `grant_mode_by_owner` maps an owner `user_id` → service ids with
+/// grant capability, whether from the top-level mode or a rule. An
+/// owner missing from the map has no grant-capable services and
+/// contributes no grants.
 fn build_grants_filter(
     user_id: &str,
     admin_branches: &[OrgFilterBranch],
@@ -1546,12 +1554,13 @@ fn build_grants_filter(
 
 /// List active approval grants for a user.
 ///
-/// Only returns grants for services currently in `Grant` mode.
-/// Grants for services in `PerRequest` mode (or with no config,
-/// which defaults to `PerRequest`) are excluded even if they
-/// haven't been revoked yet. This read-time filter acts as a
-/// safety net for any write-time race conditions or partial
-/// failures during mode switches (see #146).
+/// Only returns grants for services with current grant capability.
+/// Capability may come from top-level `Grant` mode (including legacy
+/// configs with a missing field) or a `require_approval` rule whose
+/// mode is `Grant`. Services with no config default to `PerRequest`
+/// and remain excluded. This read-time filter acts as a safety net
+/// for write-time races or partial failures during policy changes
+/// (see #146).
 ///
 /// `admin_branches` widens the listing to also include org-scoped
 /// grants owned by each supplied admin org, with per-branch scope
@@ -1581,18 +1590,18 @@ pub async fn list_grants(
     for id in &config_owner_ids {
         ids_bson.push(bson::Bson::String(id.clone()));
     }
+    // Load the owners' complete configs and resolve grant capability in Rust.
+    // Filtering on raw BSON `approval_mode` would miss both legacy documents
+    // where the field is absent and rule-level grant modes.
     let configs: Vec<ServiceApprovalConfig> = db
         .collection::<ServiceApprovalConfig>(SERVICE_APPROVAL_CONFIGS)
-        .find(doc! {
-            "user_id": { "$in": ids_bson },
-            "approval_mode": "grant",
-        })
+        .find(doc! { "user_id": { "$in": ids_bson } })
         .await?
         .try_collect()
         .await?;
     let mut grant_mode_by_owner: std::collections::HashMap<String, Vec<String>> =
         std::collections::HashMap::new();
-    for c in configs {
+    for c in configs.into_iter().filter(service_config_supports_grants) {
         grant_mode_by_owner
             .entry(c.user_id)
             .or_default()
@@ -1741,15 +1750,7 @@ pub async fn set_service_approval_config(
 
         match config {
             Ok(Some(cfg)) => {
-                // When the persisted mode is per_request, clean up stale state:
-                // 1. Revoke active grants so they no longer authorize proxy calls (#146)
-                // 2. Cancel pending grant-mode requests so they can't be approved (#153)
-                // Both operations are idempotent, so retries after partial failure
-                // still clean up.
-                if cfg.approval_mode == ApprovalMode::PerRequest {
-                    revoke_grants_for_service(db, user_id, service_id).await?;
-                    cancel_pending_grant_requests(db, user_id, service_id).await?;
-                }
+                reconcile_grant_state_for_config(db, user_id, service_id, &cfg).await?;
                 return Ok(cfg);
             }
             Ok(None) => {
@@ -1761,10 +1762,7 @@ pub async fn set_service_approval_config(
                 // Concurrent upserts can race on the unique (user_id, service_id) index.
                 // Read-after-write resolves to the winning document.
                 if let Some(existing) = collection.find_one(filter.clone()).await? {
-                    if existing.approval_mode == ApprovalMode::PerRequest {
-                        revoke_grants_for_service(db, user_id, service_id).await?;
-                        cancel_pending_grant_requests(db, user_id, service_id).await?;
-                    }
+                    reconcile_grant_state_for_config(db, user_id, service_id, &existing).await?;
                     return Ok(existing);
                 }
                 continue;
@@ -1797,8 +1795,8 @@ pub async fn delete_service_approval_config(
     // of deleted_count. If a previous attempt deleted the config but failed on
     // cleanup, this retry still cleans up. Both operations are no-ops when
     // nothing matches.
-    revoke_grants_for_service(db, user_id, service_id).await?;
-    cancel_pending_grant_requests(db, user_id, service_id).await?;
+    revoke_grants_for_service(db, user_id, service_id, false).await?;
+    cancel_pending_grant_requests(db, user_id, service_id, false).await?;
 
     if result.deleted_count == 0 {
         return Err(AppError::NotFound(
@@ -1907,9 +1905,37 @@ fn resolve_service_config_update(
     ))
 }
 
-/// Cancel all pending grant-mode approval requests for a (user, service) pair.
-/// Called when a service switches to `per_request` mode so stale grant requests
-/// are no longer actionable (see #153).
+/// Reconcile persisted grants and pending grant-mode requests after a policy
+/// update. Top-level grant mode retains service-wide and scoped state. With a
+/// rule-only grant capability, service-wide legacy state is invalid but scoped
+/// state remains eligible for the current evaluator to check operation by
+/// operation. `evaluate_and_check` consults a stored grant only after the live
+/// policy selects `Grant` for that operation, so a retained scope cannot bypass
+/// a newly selected `PerRequest` rule. The trade-off is stale scoped rows: when
+/// one grant rule remains, scopes created by removed or narrowed grant rules
+/// stay stored and visible until expiry or explicit revocation. Comparing two
+/// wildcard scope languages is not expressible through `grant_scope_covers`,
+/// which checks one concrete operation. When no grant capability remains, all
+/// grant state is invalid.
+async fn reconcile_grant_state_for_config(
+    db: &Database,
+    user_id: &str,
+    service_id: &str,
+    config: &ServiceApprovalConfig,
+) -> AppResult<()> {
+    if config.approval_mode == ApprovalMode::Grant {
+        return Ok(());
+    }
+
+    let unscoped_only = service_config_supports_grants(config);
+    revoke_grants_for_service(db, user_id, service_id, unscoped_only).await?;
+    cancel_pending_grant_requests(db, user_id, service_id, unscoped_only).await?;
+    Ok(())
+}
+
+/// Cancel pending grant-mode approval requests for a (user, service) pair.
+/// When `unscoped_only` is true, scoped requests remain eligible for live
+/// rule-level evaluation and only service-wide legacy requests are cancelled.
 ///
 /// Uses `$in: ["grant", null]` to also catch legacy requests that pre-date the
 /// `approval_mode` field -- those deserialize as `Grant` via
@@ -1918,39 +1944,48 @@ async fn cancel_pending_grant_requests(
     db: &Database,
     user_id: &str,
     service_id: &str,
+    unscoped_only: bool,
 ) -> AppResult<()> {
     let now = bson::DateTime::from_chrono(Utc::now());
+    let mut filter = doc! {
+        "user_id": user_id,
+        "service_id": service_id,
+        "status": "pending",
+        "approval_mode": { "$in": ["grant", null] },
+    };
+    if unscoped_only {
+        // `{ field: null }` matches both explicit null and a missing field,
+        // which covers every service-wide legacy request representation.
+        filter.insert("grant_scope", bson::Bson::Null);
+    }
     db.collection::<ApprovalRequest>(REQUESTS)
         .update_many(
-            doc! {
-                "user_id": user_id,
-                "service_id": service_id,
-                "status": "pending",
-                "approval_mode": { "$in": ["grant", null] },
-            },
+            filter,
             doc! { "$set": { "status": "expired", "decided_at": now } },
         )
         .await?;
     Ok(())
 }
 
-/// Revoke all active (non-revoked) grants for a (user, service) pair.
-/// Called after switching a service to `per_request` mode so stale grants
-/// no longer appear in the UI (see #146).
+/// Revoke active grants for a (user, service) pair. When `unscoped_only` is
+/// true, scoped grants remain eligible for live rule-level evaluation and only
+/// service-wide legacy grants are revoked.
 async fn revoke_grants_for_service(
     db: &Database,
     user_id: &str,
     service_id: &str,
+    unscoped_only: bool,
 ) -> AppResult<()> {
+    let mut filter = doc! {
+        "user_id": user_id,
+        "service_id": service_id,
+        "revoked": false,
+    };
+    if unscoped_only {
+        filter.insert("scope", bson::Bson::Null);
+    }
     db.collection::<ApprovalGrant>(GRANTS)
-        .update_many(
-            doc! {
-                "user_id": user_id,
-                "service_id": service_id,
-                "revoked": false,
-            },
-            doc! { "$set": { "revoked": true } },
-        )
+        .update_many(filter, doc! { "$set": { "revoked": true } })
         .await?;
     Ok(())
 }
@@ -2552,6 +2587,31 @@ mod tests {
         let id_clause = filter.get_document("_id").unwrap();
         let in_arr = id_clause.get_array("$in").unwrap();
         assert_eq!(in_arr.len(), 0);
+    }
+
+    #[test]
+    fn service_config_grant_capability_includes_rule_level_grant_mode() {
+        let mut config = ServiceApprovalConfig {
+            id: "cfg-1".to_string(),
+            user_id: "user-1".to_string(),
+            service_id: "svc-1".to_string(),
+            service_name: "Service".to_string(),
+            approval_required: true,
+            approval_mode: ApprovalMode::PerRequest,
+            rules: vec![],
+            default_effect: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        config.rules.push(ApprovalRule {
+            methods: vec!["POST".to_string()],
+            resource_pattern: "/v1/chat/**".to_string(),
+            verbs: vec![],
+            effect: ApprovalEffect::RequireApproval,
+            mode: ApprovalMode::Grant,
+        });
+
+        assert!(service_config_supports_grants(&config));
     }
 
     // ================================================================
@@ -3356,6 +3416,173 @@ mod tests {
         assert!(!still_valid);
     }
 
+    #[tokio::test]
+    async fn set_service_approval_config_reconciles_rule_scoped_and_service_wide_grants() {
+        let Some(db) = connect_test_database("appr_svc_set_cfg_rule_grants").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let scope = "v1:http:post:write:/v1/chat/**";
+
+        let mut rule_scoped = make_grant(
+            &user_id,
+            &service_id,
+            "api_key",
+            "rule-requester",
+            false,
+            30,
+        );
+        rule_scoped.scope = Some(scope.to_string());
+        let service_wide = make_grant(
+            &user_id,
+            &service_id,
+            "api_key",
+            "legacy-requester",
+            false,
+            30,
+        );
+        insert_grant(&db, &rule_scoped).await;
+        insert_grant(&db, &service_wide).await;
+
+        let grant_rule = ApprovalRule {
+            methods: vec!["POST".to_string()],
+            resource_pattern: "/v1/chat/**".to_string(),
+            verbs: vec![],
+            effect: ApprovalEffect::RequireApproval,
+            mode: ApprovalMode::Grant,
+        };
+        set_service_approval_config(
+            &db,
+            &user_id,
+            &service_id,
+            "Test Service",
+            Some(true),
+            Some(&ApprovalMode::PerRequest),
+            Some(std::slice::from_ref(&grant_rule)),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let grants = db.collection::<ApprovalGrant>(GRANTS);
+        let retained = grants
+            .find_one(doc! { "_id": &rule_scoped.id })
+            .await
+            .unwrap()
+            .unwrap();
+        let revoked_legacy = grants
+            .find_one(doc! { "_id": &service_wide.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!retained.revoked, "rule-scoped grant should remain active");
+        assert!(
+            revoked_legacy.revoked,
+            "service-wide grant requires top-level grant mode"
+        );
+
+        set_service_approval_config(
+            &db,
+            &user_id,
+            &service_id,
+            "Test Service",
+            Some(true),
+            Some(&ApprovalMode::PerRequest),
+            Some(&[]),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let revoked_rule = grants
+            .find_one(doc! { "_id": &rule_scoped.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            revoked_rule.revoked,
+            "scoped grant should be revoked after grant capability is removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_scoped_grant_cannot_bypass_current_per_request_rule() {
+        let Some(db) = connect_test_database("appr_svc_stale_scope_policy_gate").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let requester_id = "rule-requester";
+
+        let mut stale_grant = make_grant(&user_id, &service_id, "api_key", requester_id, false, 30);
+        stale_grant.scope = Some("v1:http:*:*:*".to_string());
+        insert_grant(&db, &stale_grant).await;
+
+        let rules = vec![
+            ApprovalRule {
+                methods: vec!["DELETE".to_string()],
+                resource_pattern: "/v1/admin/**".to_string(),
+                verbs: vec![],
+                effect: ApprovalEffect::RequireApproval,
+                mode: ApprovalMode::PerRequest,
+            },
+            ApprovalRule {
+                methods: vec!["POST".to_string()],
+                resource_pattern: "/v1/chat/**".to_string(),
+                verbs: vec![],
+                effect: ApprovalEffect::RequireApproval,
+                mode: ApprovalMode::Grant,
+            },
+        ];
+        set_service_approval_config(
+            &db,
+            &user_id,
+            &service_id,
+            "Test Service",
+            Some(true),
+            Some(&ApprovalMode::PerRequest),
+            Some(&rules),
+            None,
+        )
+        .await
+        .unwrap();
+
+        let retained = db
+            .collection::<ApprovalGrant>(GRANTS)
+            .find_one(doc! { "_id": &stale_grant.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!retained.revoked, "conservative cleanup retains the scope");
+
+        let operation = crate::services::operation_descriptor::build_http_descriptor(
+            "DELETE",
+            "/v1/admin/users/42",
+            None,
+        );
+        let outcome = evaluate_and_check(
+            &db,
+            &user_id,
+            &user_id,
+            &service_id,
+            &operation,
+            Some("api_key"),
+            requester_id,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+
+        let ApprovalOutcome::NeedsApproval(pending) = outcome else {
+            panic!("current per-request rule must not reuse the stale grant");
+        };
+        assert_eq!(pending.resolution.mode, ApprovalMode::PerRequest);
+    }
+
     // --- delete_service_approval_config ---
 
     #[tokio::test]
@@ -3689,6 +3916,59 @@ mod tests {
         let (grants, total) = list_grants(&db, &user_id, &[], 1, 10).await.unwrap();
         assert_eq!(total, 1);
         assert_eq!(grants.len(), 1);
+        assert_eq!(grants[0].id, grant.id);
+    }
+
+    #[tokio::test]
+    async fn list_grants_includes_legacy_config_without_stored_approval_mode() {
+        let Some(db) = connect_test_database("appr_svc_list_grants_legacy_mode").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let config = make_service_config(&user_id, &service_id, true, ApprovalMode::Grant);
+        insert_config(&db, &config).await;
+        db.collection::<bson::Document>(SERVICE_APPROVAL_CONFIGS)
+            .update_one(
+                doc! { "_id": &config.id },
+                doc! { "$unset": { "approval_mode": "" } },
+            )
+            .await
+            .unwrap();
+
+        let grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        insert_grant(&db, &grant).await;
+
+        let (grants, total) = list_grants(&db, &user_id, &[], 1, 10).await.unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(grants[0].id, grant.id);
+    }
+
+    #[tokio::test]
+    async fn list_grants_includes_rule_level_grant_mode_service() {
+        let Some(db) = connect_test_database("appr_svc_list_grants_rule_mode").await else {
+            eprintln!("skipping: no MongoDB");
+            return;
+        };
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let service_id = uuid::Uuid::new_v4().to_string();
+        let mut config = make_service_config(&user_id, &service_id, true, ApprovalMode::PerRequest);
+        config.rules.push(ApprovalRule {
+            methods: vec!["POST".to_string()],
+            resource_pattern: "/v1/chat/**".to_string(),
+            verbs: vec![],
+            effect: ApprovalEffect::RequireApproval,
+            mode: ApprovalMode::Grant,
+        });
+        insert_config(&db, &config).await;
+
+        let mut grant = make_grant(&user_id, &service_id, "sa", "req-1", false, 30);
+        grant.scope = Some("v1:http:post:write:/v1/chat/**".to_string());
+        insert_grant(&db, &grant).await;
+
+        let (grants, total) = list_grants(&db, &user_id, &[], 1, 10).await.unwrap();
+        assert_eq!(total, 1);
         assert_eq!(grants[0].id, grant.id);
     }
 
