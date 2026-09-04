@@ -666,13 +666,11 @@ fn synthetic_request(
     Ok(request)
 }
 
-/// Whether this call needs the TD-3 forward-token bridge: cookie sessions
-/// carry no bearer for `forward_access_token` to forward, so Aevatar —
-/// which today authenticates only `Authorization: Bearer <NyxID JWT>` —
-/// answers 401 for exactly the browser. Minting is gated on the row still
-/// being in Bearer-forwarding mode: when the TD-3 rollout flips
-/// `forward_access_token` off (Aevatar validates the identity token
-/// instead), the bridge retires itself with no code change.
+/// Whether this call needs the forward-token bridge. Cookie sessions carry no
+/// bearer for `forward_access_token` to forward. Aevatar validates the
+/// identity assertion separately, but typed execution still requires an
+/// Authorization Bearer or a delegation-header capability. The live row keeps
+/// this bridge enabled until deployment evidence proves the replacement path.
 fn needs_forward_token_bridge(auth_method: &AuthMethod, forward_access_token: bool) -> bool {
     *auth_method == AuthMethod::Session && forward_access_token
 }
@@ -811,18 +809,19 @@ async fn forward(
     };
 
     // TD-3 bridge: cookie sessions carry no bearer for `forward_access_token`
-    // to forward, and prod Aevatar authenticates only `Authorization: Bearer
-    // <NyxID JWT>`. Mint a DELEGATED access token and OVERWRITE Authorization
-    // — `AuthMethod::Session` means bearer auth did not happen, so any header
-    // present is not an authenticated credential. A delegated token is the
-    // platform standard for "downstream calls NyxID on the user's behalf":
-    // Aevatar reuses this same bearer to reach NyxID's LLM/proxy routes
-    // (`/proxy/s/chrono-llm-public`, `/llm/*`), which the delegated router
-    // accepts, while `reject_delegated_tokens` keeps a leaked copy off every
-    // account-management, admin, and key surface. The delegated capability
-    // comes from the row's `delegation_token_scope` (same source of truth as
-    // the standard `inject_delegation_token` path). Bearer callers (CLI login
-    // JWTs) never enter this branch and keep their token byte-for-byte.
+    // to forward. Aevatar authenticates caller identity from
+    // `X-NyxID-Identity-Token`, then selects an execution capability separately.
+    // Authorization Bearer takes precedence. `X-NyxID-Delegation-Token` is the
+    // Bearer-absent fallback. Mint a DELEGATED access token and overwrite
+    // Authorization. `AuthMethod::Session` means bearer auth did not happen, so
+    // any existing header is not an authenticated credential. Aevatar reuses
+    // this capability to reach NyxID's LLM/proxy routes, including
+    // `/proxy/s/chrono-llm-public` and `/llm/*`. `reject_delegated_tokens` keeps
+    // a leaked copy off every account-management, admin, and key route. The
+    // delegated capability comes from the row's `delegation_token_scope`. The
+    // standard `inject_delegation_token` path reads the same field. Bearer
+    // callers, including CLI login JWTs, never enter this branch and keep their
+    // token byte-for-byte.
     if bridge_minted {
         let value = build_forward_authorization(state, auth_user, &service)?;
         request.headers_mut().insert(header::AUTHORIZATION, value);
