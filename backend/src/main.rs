@@ -138,6 +138,11 @@ pub struct AppState {
     pub auth_device_approve_per_user_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
     /// Per-IP limiter for `POST /api/v1/auth/device/preview` (30/min).
     pub auth_device_preview_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    pub auth_agent_key_request_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    pub auth_agent_key_poll_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    pub auth_agent_key_approve_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    pub auth_agent_key_approve_per_user_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
+    pub auth_agent_key_preview_limiter: mw::rate_limit::SharedPerIpRateLimiter,
     /// Per-creator limiter for `POST /api/v1/connect-links` (10/min).
     pub connect_link_create_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
     /// Per-IP limiter for public connect-link previews (30/min).
@@ -838,6 +843,36 @@ async fn main() {
             30,
             60,
         ),
+        auth_agent_key_request_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_agent_key_request",
+            5,
+            60,
+        ),
+        auth_agent_key_poll_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_agent_key_poll",
+            60,
+            60,
+        ),
+        auth_agent_key_approve_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_agent_key_approve",
+            10,
+            60,
+        ),
+        auth_agent_key_approve_per_user_limiter: mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "auth_agent_key_approve_user",
+            10,
+            300,
+        ),
+        auth_agent_key_preview_limiter: mw::rate_limit::create_per_ip_rate_limiter(
+            db.clone(),
+            "auth_agent_key_preview",
+            30,
+            60,
+        ),
         connect_link_create_limiter: mw::rate_limit::create_per_key_rate_limiter(
             db.clone(),
             "connect_link_create",
@@ -917,6 +952,28 @@ async fn main() {
         config.rate_limit_burst, // per-IP max requests per window
         1,                       // 1-second window
     );
+
+    // Revoke abandoned Agent Key exchanges even when the CLI stops polling.
+    if config.agent_key_login_sweep_interval_secs > 0 {
+        let sweep_db = state.db.clone();
+        let sweep_interval = config.agent_key_login_sweep_interval_secs;
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(sweep_interval));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                if let Err(error) =
+                    services::auth_agent_key_login_service::sweep_expired(&sweep_db).await
+                {
+                    tracing::error!(
+                        error_code = error.error_code(),
+                        "Agent Key login expiry sweep failed"
+                    );
+                }
+            }
+        });
+    }
 
     // Expire abandoned app-bound connect links even when their creator has
     // stopped polling. Disabled when the interval is 0.

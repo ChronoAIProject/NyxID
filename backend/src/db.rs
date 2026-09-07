@@ -1325,6 +1325,56 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    // Agent Key login credentials and exchanges.
+    let credentials = db.collection::<crate::models::api_key_credential::ApiKeyCredential>(
+        crate::models::api_key_credential::COLLECTION_NAME,
+    );
+    credentials
+        .create_indexes([
+            IndexModel::builder()
+                .keys(doc! {"secret_hash": 1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"api_key_id": 1, "is_active": 1})
+                .build(),
+            IndexModel::builder().keys(doc! {"user_id": 1}).build(),
+        ])
+        .await?;
+    let agent_key_logins = db
+        .collection::<crate::models::agent_key_login_request::AgentKeyLoginRequest>(
+            crate::models::agent_key_login_request::COLLECTION_NAME,
+        );
+    agent_key_logins
+        .create_indexes([
+            IndexModel::builder()
+                .keys(doc! {"device_code_hmac": 1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"user_code_hmac": 1})
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+            IndexModel::builder()
+                .keys(doc! {"status": 1, "expires_at": 1})
+                .build(),
+            // Retain terminal outcomes for a day. An incomplete cleanup must never
+            // lose the durable IDs needed to revoke its credential.
+            IndexModel::builder()
+                .keys(doc! {"expires_at": 1})
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(86400))
+                        .partial_filter_expression(doc! {"$or": [
+                            {"status": {"$in": ["pending", "denied", "delivered"]}},
+                            {"status": "expired", "credential_id": bson::Bson::Null}
+                        ]})
+                        .build(),
+                )
+                .build(),
+        ])
+        .await?;
+
     // ── auth_device_codes ──
     let auth_device_codes = db.collection::<AuthDeviceCode>(AUTH_DEVICE_CODES);
     auth_device_codes

@@ -8775,6 +8775,7 @@ mod proxy_resolution_integration_tests {
             allowed_node_ids: vec![],
             api_key_id: None,
             api_key_name: None,
+            api_key_credential_id: None,
             api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -8800,6 +8801,7 @@ mod proxy_resolution_integration_tests {
             allowed_node_ids: vec![],
             api_key_id: None,
             api_key_name: None,
+            api_key_credential_id: None,
             api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -9548,7 +9550,7 @@ mod proxy_resolution_integration_tests {
         assert!(!created.allow_all_services);
         assert!(!created.allow_all_nodes);
 
-        let (validated_user_id, stored_key) =
+        let (validated_user_id, stored_key, _credential_id) =
             crate::services::key_service::validate_api_key(&db, &created.full_key)
                 .await
                 .expect("authenticate created key");

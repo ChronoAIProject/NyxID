@@ -506,6 +506,14 @@ fn build_router_internal(
         );
 
     let api_key_routes = Router::new()
+        .route(
+            "/{key_id}/credentials",
+            get(handlers::auth_agent_key::list_credentials),
+        )
+        .route(
+            "/{key_id}/credentials/{credential_id}",
+            delete(handlers::auth_agent_key::revoke_credential),
+        )
         .route("/", get(handlers::api_keys::list_keys))
         .route("/", post(handlers::api_keys::create_key))
         .route("/scope-plan", post(handlers::api_keys::plan_key_scope))
@@ -1523,6 +1531,15 @@ fn build_router_internal(
 
     let api_v1_public = Router::new()
         .route(
+            "/auth/agent-key/request",
+            post(handlers::auth_agent_key::request),
+        )
+        .route("/auth/agent-key/poll", post(handlers::auth_agent_key::poll))
+        .route(
+            "/auth/agent-key/preview",
+            post(handlers::auth_agent_key::preview),
+        )
+        .route(
             "/assistant/actions",
             get(handlers::assistant_actions::get_assistant_actions),
         )
@@ -1650,6 +1667,10 @@ fn build_router_internal(
 
     // Routes accessible by both users and service accounts (block delegated tokens)
     let api_v1_shared = Router::new()
+        .route(
+            "/auth/agent-key/self",
+            get(handlers::auth_agent_key::get_self).delete(handlers::auth_agent_key::delete_self),
+        )
         .nest("/connections", connection_routes)
         .nest("/providers", provider_routes)
         .nest("/nodes", node_registration_routes)
@@ -1738,6 +1759,15 @@ fn build_router_internal(
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .route(
+            "/auth/agent-key/options",
+            post(handlers::auth_agent_key::options),
+        )
+        .route(
+            "/auth/agent-key/approve",
+            post(handlers::auth_agent_key::approve),
+        )
+        .route("/auth/agent-key/deny", post(handlers::auth_agent_key::deny))
         .nest("/assistant", assistant_routes)
         .nest("/auth", auth_routes)
         .route(

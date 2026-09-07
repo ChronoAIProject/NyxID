@@ -1,6 +1,8 @@
+pub mod agent_key_login_request;
 pub mod agent_service_binding;
 pub mod anonymous_endpoint_usage;
 pub mod api_key;
+pub mod api_key_credential;
 pub mod approval_grant;
 pub mod approval_request;
 pub mod assistant_action_receipt;
@@ -41,6 +43,7 @@ pub mod feature_flag_metadata;
 pub mod feature_flag_override;
 pub mod group;
 pub mod invite_code;
+pub mod login_client_context;
 pub mod mcp_notification;
 pub mod mcp_session;
 pub mod mfa_factor;

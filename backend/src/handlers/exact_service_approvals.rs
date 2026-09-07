@@ -140,6 +140,7 @@ mod tests {
             allowed_node_ids: vec![],
             api_key_id: Some("key-alpha".to_string()),
             api_key_name: Some("Agent".to_string()),
+            api_key_credential_id: None,
             api_key_purpose: ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,

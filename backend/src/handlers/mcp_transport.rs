@@ -424,7 +424,7 @@ async fn authenticate_mcp(
             .map_err(|_| mcp_401(&state.config.base_url))?;
 
         match crate::services::key_service::validate_api_key(&state.db, raw_key).await {
-            Ok((user_id, api_key)) => {
+            Ok((user_id, api_key, _credential_id)) => {
                 if !auth::scope_allows_rest_proxy(&api_key.scopes) {
                     return Err(mcp_403_api_key_insufficient_scope());
                 }
@@ -3997,6 +3997,7 @@ mod tests {
             allowed_node_ids: vec![],
             api_key_id: Some(uuid::Uuid::new_v4().to_string()),
             api_key_name: Some("approval-parity-agent".to_string()),
+            api_key_credential_id: None,
             api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,

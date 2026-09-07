@@ -360,6 +360,27 @@ pub enum AppError {
     #[error("Auth device user code invalid")]
     AuthDeviceUserCodeInvalid,
 
+    #[error("Agent Key login request not found")]
+    AgentKeyLoginNotFound,
+    #[error("Agent Key login request expired")]
+    AgentKeyLoginExpired,
+    #[error("Agent Key authorization pending")]
+    AgentKeyLoginPending,
+    #[error("Slow down Agent Key login polling")]
+    AgentKeyLoginSlowDown,
+    #[error("Agent Key login denied")]
+    AgentKeyLoginDenied,
+    #[error("Agent Key credential already delivered")]
+    AgentKeyLoginAlreadyDelivered,
+    #[error("Too many Agent Key login attempts")]
+    AgentKeyLoginRateLimited,
+    #[error("Invalid Agent Key login user code")]
+    AgentKeyLoginUserCodeInvalid,
+    #[error("This key is not eligible for Agent Key login")]
+    AgentKeyLoginKeyIneligible,
+    #[error("Agent Key login credential not found")]
+    AgentKeyCredentialNotFound,
+
     #[error("Connect link not found")]
     ConnectLinkNotFound,
 
@@ -637,6 +658,16 @@ impl AppError {
             Self::AuthDeviceCodeAlreadyDelivered => StatusCode::GONE,
             Self::AuthDeviceCodeRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::AuthDeviceUserCodeInvalid => StatusCode::BAD_REQUEST,
+            Self::AgentKeyLoginNotFound => StatusCode::NOT_FOUND,
+            Self::AgentKeyLoginExpired => StatusCode::GONE,
+            Self::AgentKeyLoginPending => StatusCode::BAD_REQUEST,
+            Self::AgentKeyLoginSlowDown => StatusCode::TOO_MANY_REQUESTS,
+            Self::AgentKeyLoginDenied => StatusCode::FORBIDDEN,
+            Self::AgentKeyLoginAlreadyDelivered => StatusCode::GONE,
+            Self::AgentKeyLoginRateLimited => StatusCode::TOO_MANY_REQUESTS,
+            Self::AgentKeyLoginUserCodeInvalid => StatusCode::BAD_REQUEST,
+            Self::AgentKeyLoginKeyIneligible => StatusCode::BAD_REQUEST,
+            Self::AgentKeyCredentialNotFound => StatusCode::NOT_FOUND,
             Self::ConnectLinkNotFound => StatusCode::NOT_FOUND,
             Self::ConnectLinkExpired => StatusCode::GONE,
             Self::ConnectLinkAlreadyCompleted => StatusCode::CONFLICT,
@@ -802,6 +833,16 @@ impl AppError {
             Self::AuthDeviceCodeAlreadyDelivered => 11205,
             Self::AuthDeviceCodeRateLimited => 11206,
             Self::AuthDeviceUserCodeInvalid => 11207,
+            Self::AgentKeyLoginNotFound => 11900,
+            Self::AgentKeyLoginExpired => 11901,
+            Self::AgentKeyLoginPending => 11902,
+            Self::AgentKeyLoginSlowDown => 11903,
+            Self::AgentKeyLoginDenied => 11904,
+            Self::AgentKeyLoginAlreadyDelivered => 11905,
+            Self::AgentKeyLoginRateLimited => 11906,
+            Self::AgentKeyLoginUserCodeInvalid => 11907,
+            Self::AgentKeyLoginKeyIneligible => 11908,
+            Self::AgentKeyCredentialNotFound => 11909,
             Self::ConnectLinkNotFound => 11300,
             Self::ConnectLinkExpired => 11301,
             Self::ConnectLinkAlreadyCompleted => 11302,
@@ -1003,6 +1044,16 @@ impl AppError {
             Self::AuthDeviceCodeAlreadyDelivered => "auth_device_already_delivered",
             Self::AuthDeviceCodeRateLimited => "auth_device_rate_limited",
             Self::AuthDeviceUserCodeInvalid => "auth_device_user_code_invalid",
+            Self::AgentKeyLoginNotFound => "agent_key_login_not_found",
+            Self::AgentKeyLoginExpired => "agent_key_login_expired",
+            Self::AgentKeyLoginPending => "agent_key_login_pending",
+            Self::AgentKeyLoginSlowDown => "agent_key_login_slow_down",
+            Self::AgentKeyLoginDenied => "agent_key_login_denied",
+            Self::AgentKeyLoginAlreadyDelivered => "agent_key_login_already_delivered",
+            Self::AgentKeyLoginRateLimited => "agent_key_login_rate_limited",
+            Self::AgentKeyLoginUserCodeInvalid => "agent_key_login_user_code_invalid",
+            Self::AgentKeyLoginKeyIneligible => "agent_key_login_key_ineligible",
+            Self::AgentKeyCredentialNotFound => "agent_key_credential_not_found",
             Self::ConnectLinkNotFound => "connect_link_not_found",
             Self::ConnectLinkExpired => "connect_link_expired",
             Self::ConnectLinkAlreadyCompleted => "connect_link_already_completed",
