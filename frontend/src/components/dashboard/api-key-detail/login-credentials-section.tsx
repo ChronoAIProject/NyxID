@@ -20,7 +20,13 @@ import { ErrorBanner } from "@/components/shared/error-banner";
 const timestamp = (value: string | null) =>
   value ? new Date(value).toLocaleString() : "Never";
 
-export function LoginCredentialsSection({ keyId }: { keyId: string }) {
+export function LoginCredentialsSection({
+  keyId,
+  canWrite,
+}: {
+  keyId: string;
+  canWrite: boolean;
+}) {
   const credentials = useLoginCredentials(keyId);
   const revoke = useRevokeLoginCredential(keyId);
   const [selected, setSelected] = useState<LoginCredential | null>(null);
@@ -99,7 +105,7 @@ export function LoginCredentialsSection({ keyId }: { keyId: string }) {
                   )}
                 </dl>
               </div>
-              {credential.is_active && (
+              {canWrite && credential.is_active && (
                 <Button
                   variant="destructive"
                   onClick={() => {
@@ -116,7 +122,7 @@ export function LoginCredentialsSection({ keyId }: { keyId: string }) {
         })}
       </div>
       <Dialog
-        open={selected !== null}
+        open={canWrite && selected !== null}
         onOpenChange={(open) => {
           if (!open && !revoke.isPending) setSelected(null);
         }}
@@ -144,7 +150,7 @@ export function LoginCredentialsSection({ keyId }: { keyId: string }) {
               isLoading={revoke.isPending}
               disabled={revoke.isPending}
               onClick={() => {
-                if (selected)
+                if (canWrite && selected)
                   void revoke
                     .mutateAsync(selected.id)
                     .then(() => setSelected(null))

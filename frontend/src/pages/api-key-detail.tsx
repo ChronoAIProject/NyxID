@@ -27,6 +27,9 @@ export function ApiKeyDetailPage() {
   useBreadcrumbLabel(apiKey?.name);
   const [rotateOpen, setRotateOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const canWrite = apiKey != null &&
+    (apiKey.credential_source?.type !== "org" ||
+      apiKey.credential_source.role === "admin");
 
   if (isLoading) {
     return (
@@ -67,6 +70,7 @@ export function ApiKeyDetailPage() {
           apiKey.description ?? `API key ${maskApiKey(apiKey.key_prefix)}`
         }
         actions={
+          canWrite &&
           <div className="flex gap-2">
             <Button
               variant="outline"
@@ -127,16 +131,16 @@ export function ApiKeyDetailPage() {
         <UsageStatsCard keyId={apiKey.id} />
       </div>
 
-      <LoginCredentialsSection keyId={apiKey.id} />
+      <LoginCredentialsSection keyId={apiKey.id} canWrite={canWrite} />
 
       <RotateKeyDialog
-        open={rotateOpen}
+        open={canWrite && rotateOpen}
         onOpenChange={setRotateOpen}
         keyId={apiKey.id}
       />
 
       <DeleteKeyDialog
-        open={deleteOpen}
+        open={canWrite && deleteOpen}
         onOpenChange={setDeleteOpen}
         keyId={apiKey.id}
         keyName={apiKey.name}

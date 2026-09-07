@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LoginAgentKeyPage } from "./login-agent-key";
 import { LoginCredentialsSection } from "@/components/dashboard/api-key-detail/login-credentials-section";
 import { agentKeySummarySchema } from "@/schemas/agent-key-login";
+import * as agentKeySchemas from "@/schemas/agent-key-login";
 
 const mocks = vi.hoisted(() => ({
   post: vi.fn(),
@@ -90,7 +91,6 @@ const preview = {
   expires_at: "2026-01-01T00:10:00Z",
   seconds_remaining: 600,
   interval: 5,
-  api_key: null,
 };
 let client: QueryClient;
 
@@ -206,6 +206,33 @@ describe("Agent Key login page and hooks", () => {
     });
     expect(screen.getByText("Login rejected")).toBeInTheDocument();
   });
+  it("shows a new-key conversion issue without advancing or approving", async () => {
+    mount();
+    await review();
+    await click("Approve on this computer");
+    fireEvent.click(screen.getByRole("radio", { name: "Create a new key" }));
+    const invalid = agentKeySchemas.newKeySelection({
+      name: "CLI",
+      scopes: ["read"],
+      expires_at: "2000-01-01T00:00:00Z",
+    });
+    expect(invalid.success).toBe(false);
+    const conversion = vi
+      .spyOn(agentKeySchemas, "newKeySelection")
+      .mockReturnValueOnce(invalid);
+    await click("Review permissions");
+    expect(conversion).toHaveBeenCalledOnce();
+    expect(
+      screen.getByText(invalid.error!.issues[0]!.message),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Confirm effective permissions"),
+    ).not.toBeInTheDocument();
+    expect(
+      mocks.post.mock.calls.some(([path]) => path.endsWith("approve")),
+    ).toBe(false);
+    conversion.mockRestore();
+  });
   it.each(["approved", "delivered", "denied", "expired"])(
     "phone polling stops at %s and clears temporary state without storage writes",
     async (status) => {
@@ -279,7 +306,7 @@ describe("Agent Key login page and hooks", () => {
       ],
     });
     mocks.remove.mockResolvedValue({ ok: true });
-    mount(<LoginCredentialsSection keyId="key" />);
+    mount(<LoginCredentialsSection keyId="key" canWrite />);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1);
     });

@@ -285,8 +285,13 @@ export function LoginAgentKeyPage() {
   }
   function reviewNew(data: CreateApiKeyFormData) {
     if (!options.data || expired || throttled()) return;
-    const selected = newKeySelection(data);
-    if (selected.kind !== "new") return;
+    const result = newKeySelection(data);
+    if (!result.success) {
+      setError(result.error.issues[0]?.message ?? "Check the key details.");
+      return;
+    }
+    setError(null);
+    const selected = result.data;
     setNewKeyDraft(data);
     const org = options.data.orgs.find(
       (org) => org.id === selected.target_org_id,

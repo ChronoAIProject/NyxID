@@ -12,9 +12,10 @@ describe("Agent Key login schemas", () => {
       name: "CLI",
       scopes: ["read", "proxy"],
     });
+    expect(selection.success).toBe(true);
     const result = agentKeyApproveSchema.parse({
       user_code: "abcd-efgh",
-      selection,
+      selection: selection.data,
     });
     expect(result.user_code).toBe("ABCDEFGH");
     expect(result.selection).toMatchObject({
@@ -52,10 +53,11 @@ describe("Agent Key login schemas", () => {
       status: "pending",
       interval: 5,
       requested_profile: "demo",
-      api_key: null,
+      api_key: { name: "must-be-dropped" },
       credential: "must-be-dropped",
     });
     expect(result).not.toHaveProperty("credential");
+    expect(result).not.toHaveProperty("api_key");
     expect(result.client_ip_attribution).toBe("unavailable");
   });
   it("matches effective backend permissions without treating admin as proxy", () => {

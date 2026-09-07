@@ -69,7 +69,6 @@ async function fixture(page: Page, signedIn: boolean) {
         expires_at: new Date(Date.now() + 600000).toISOString(),
         seconds_remaining: 600,
         interval: 5,
-        api_key: null,
       };
     else if (path.endsWith("/agent-key/options"))
       body = {

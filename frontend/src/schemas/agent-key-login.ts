@@ -40,20 +40,6 @@ export const agentKeyOptionsSchema = z.object({
 export const agentKeyPreviewSchema = previewResponseSchema.extend({
   requested_profile: z.string().max(64).nullable(),
   interval: z.number().int().positive(),
-  api_key: agentKeySummarySchema
-    .pick({
-      name: true,
-      owner_type: true,
-      scopes: true,
-      allow_all_services: true,
-      allow_all_nodes: true,
-      expires_at: true,
-    })
-    .extend({
-      allowed_service_count: z.number().int().nonnegative(),
-      allowed_node_count: z.number().int().nonnegative(),
-    })
-    .nullable(),
 });
 const newKeySelectionSchema = createApiKeySchema
   .pick({
@@ -136,10 +122,8 @@ export type AgentKeyPreview = z.infer<typeof agentKeyPreviewSchema>;
 export type AgentKeyApprove = z.infer<typeof agentKeyApproveSchema>;
 export type LoginCredential = z.infer<typeof loginCredentialSchema>;
 
-export function newKeySelection(
-  form: CreateApiKeyFormData,
-): AgentKeyApprove["selection"] {
-  return newKeySelectionSchema.parse({
+export function newKeySelection(form: CreateApiKeyFormData) {
+  return newKeySelectionSchema.safeParse({
     kind: "new",
     name: form.name,
     scopes: form.scopes.join(" "),
