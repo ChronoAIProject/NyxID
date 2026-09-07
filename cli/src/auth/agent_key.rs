@@ -294,7 +294,7 @@ pub async fn show_identity(api: &mut ApiClient, output: crate::cli::OutputFormat
                 &serde_json::json!({"auth": {"kind": "agent_key", "api_key": identity.api_key, "credential_id": identity.credential_id, "credential_expires_at": identity.credential_expires_at, "label": identity.label}})
             )?
         ),
-        crate::cli::OutputFormat::Table => println!("{}", format_identity(&identity)),
+        crate::cli::OutputFormat::Table => eprintln!("{}", format_identity(&identity)),
     }
     Ok(())
 }

@@ -13,7 +13,7 @@ pub async fn run(api: &mut ApiClient, output: OutputFormat) -> Result<()> {
         None
     };
     if let (Some(identity), OutputFormat::Table) = (&identity, output) {
-        println!("{}\n", format_identity(identity));
+        eprintln!("{}\n", format_identity(identity));
     }
     let user = section(api, "/users/me").await?;
     let services_resp = section(api, "/keys").await?;
@@ -86,20 +86,20 @@ fn print_table_output(user: &Value, services: &Value, api_keys: &Value, nodes: &
     let role = user["role"].as_str().unwrap_or("-");
 
     if user.is_null() {
-        println!("Account: unavailable with this key's scope");
+        eprintln!("Account: unavailable with this key's scope");
     } else {
-        println!("Account: {email} ({role})");
+        eprintln!("Account: {email} ({role})");
     }
-    println!("Server:  {base}");
-    println!();
+    eprintln!("Server:  {base}");
+    eprintln!();
 
     // Services
     let svc_list = services.as_array();
     let svc_count = svc_list.map_or(0, |v| v.len());
-    println!("AI Services ({svc_count})");
+    eprintln!("AI Services ({svc_count})");
 
     if services.is_null() {
-        println!("  unavailable with this key's scope");
+        eprintln!("  unavailable with this key's scope");
     } else if svc_count > 0 {
         let mut table = Table::new();
         table.load_preset(UTF8_FULL_CONDENSED);
@@ -118,19 +118,19 @@ fn print_table_output(user: &Value, services: &Value, api_keys: &Value, nodes: &
             let status = crate::commands::service::display_status(svc);
             table.add_row([id, slug, endpoint, status]);
         }
-        println!("{table}");
+        eprintln!("{table}");
     } else {
-        println!("  (none)");
+        eprintln!("  (none)");
     }
-    println!();
+    eprintln!();
 
     // API Keys
     let key_list = api_keys.as_array();
     let key_count = key_list.map_or(0, |v| v.len());
-    println!("API Keys ({key_count})");
+    eprintln!("API Keys ({key_count})");
 
     if api_keys.is_null() {
-        println!("  unavailable with this key's scope");
+        eprintln!("  unavailable with this key's scope");
     } else if key_count > 0 {
         let mut table = Table::new();
         table.load_preset(UTF8_FULL_CONDENSED);
@@ -168,19 +168,19 @@ fn print_table_output(user: &Value, services: &Value, api_keys: &Value, nodes: &
             };
             table.add_row([id, name, scopes, &services, &nodes_scope]);
         }
-        println!("{table}");
+        eprintln!("{table}");
     } else {
-        println!("  (none)");
+        eprintln!("  (none)");
     }
-    println!();
+    eprintln!();
 
     // Nodes
     let node_list = nodes.as_array();
     let node_count = node_list.map_or(0, |v| v.len());
-    println!("Nodes ({node_count})");
+    eprintln!("Nodes ({node_count})");
 
     if nodes.is_null() {
-        println!("  unavailable with this key's scope");
+        eprintln!("  unavailable with this key's scope");
     } else if node_count > 0 {
         let mut table = Table::new();
         table.load_preset(UTF8_FULL_CONDENSED);
@@ -193,9 +193,9 @@ fn print_table_output(user: &Value, services: &Value, api_keys: &Value, nodes: &
             let last_seen = node["last_heartbeat_at"].as_str().unwrap_or("-");
             table.add_row([id, name, status, last_seen]);
         }
-        println!("{table}");
+        eprintln!("{table}");
     } else {
-        println!("  (none)");
+        eprintln!("  (none)");
     }
 }
 

@@ -279,15 +279,15 @@ async fn whoami_status_and_rejected_credentials_never_refresh_or_prompt() {
         )
         .await;
         assert!(output.status.success(), "{}", output_text(&output));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("Authentication: Agent Key"));
-        assert!(stdout.contains("workstation \u{00b7} home-agent"));
-        assert!(!String::from_utf8_lossy(&output.stderr).contains("Authentication: Agent Key"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("Authentication: Agent Key"));
+        assert!(stderr.contains("workstation \u{00b7} home-agent"));
+        assert!(output.stdout.is_empty());
         if command == "status" {
             for section in ["Account:", "AI Services (1)", "API Keys (1)", "Nodes (1)"] {
-                assert!(stdout.contains(section), "{stdout}");
+                assert!(stderr.contains(section), "{stderr}");
             }
-            assert!(stdout.find("Authentication:").unwrap() < stdout.find("Account:").unwrap());
+            assert!(stderr.find("Authentication:").unwrap() < stderr.find("Account:").unwrap());
         }
         assert!(!output_text(&output).contains(SECRET));
     }
@@ -304,6 +304,12 @@ async fn whoami_status_and_rejected_credentials_never_refresh_or_prompt() {
         ],
     )
     .await;
+    assert!(
+        json_output.status.success(),
+        "{}",
+        output_text(&json_output)
+    );
+    assert!(!String::from_utf8_lossy(&json_output.stderr).contains("Authentication:"));
     assert_eq!(
         serde_json::from_slice::<Value>(&json_output.stdout).unwrap()["auth"]["kind"],
         "agent_key"
@@ -410,27 +416,86 @@ async fn status_keeps_sections_or_scope_placeholders_in_table_and_json() {
             )
             .await;
             assert!(result.status.success(), "{}", output_text(&result));
-            let stdout = String::from_utf8_lossy(&result.stdout);
-            assert!(!String::from_utf8_lossy(&result.stderr).contains("Authentication:"));
+            let stderr = String::from_utf8_lossy(&result.stderr);
             if output == "json" {
+                assert!(!stderr.contains("Authentication:"));
+                assert!(!stderr.contains("Account:"));
                 let value: Value = serde_json::from_slice(&result.stdout).unwrap();
                 assert_eq!(value["auth"]["kind"], "agent_key");
                 for section in ["user", "services", "api_keys", "nodes"] {
                     assert_eq!(value[section].is_null(), status == 403, "{value}");
                 }
             } else {
-                assert!(stdout.starts_with("Authentication: Agent Key"), "{stdout}");
+                assert!(result.stdout.is_empty());
+                assert!(stderr.starts_with("Authentication: Agent Key"), "{stderr}");
                 assert_eq!(
-                    stdout.matches("unavailable with this key's scope").count(),
+                    stderr.matches("unavailable with this key's scope").count(),
                     if status == 403 { 4 } else { 0 }
                 );
                 for section in ["Account:", "AI Services", "API Keys", "Nodes"] {
-                    assert!(stdout.contains(section));
+                    assert!(stderr.contains(section));
                 }
+                assert!(stderr.find("Authentication:").unwrap() < stderr.find("Account:").unwrap());
             }
         }
         assert_eq!(server.received_requests().await.unwrap().len(), 10);
     }
+}
+
+#[tokio::test]
+async fn account_whoami_and_status_keep_table_on_stderr_and_json_on_stdout() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    mount_sections(&server, 200).await;
+    for command in ["whoami", "status"] {
+        for format in ["table", "json"] {
+            let result = run(
+                home.path(),
+                &[
+                    command,
+                    "--access-token",
+                    SECRET,
+                    "--base-url",
+                    &server.uri(),
+                    "--output",
+                    format,
+                ],
+            )
+            .await;
+            assert!(result.status.success(), "{}", output_text(&result));
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            assert!(!stderr.contains("Authentication: Agent Key"));
+            if format == "table" {
+                assert!(result.stdout.is_empty());
+                assert!(stderr.contains("human@example.com"));
+                let sections: &[&str] = if command == "whoami" {
+                    &["User ID:", "Email:", "Name:", "Role:", "MFA:", "Verified:"]
+                } else {
+                    &[
+                        "Account:",
+                        "Server:",
+                        "AI Services (1)",
+                        "API Keys (1)",
+                        "Nodes (1)",
+                    ]
+                };
+                for section in sections {
+                    assert!(stderr.contains(section), "{stderr}");
+                }
+            } else {
+                assert!(!stderr.contains("human@example.com"));
+                let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+                assert!(value.get("auth").is_none());
+                let user = if command == "whoami" {
+                    &value
+                } else {
+                    &value["user"]
+                };
+                assert_eq!(user["email"], "human@example.com");
+            }
+        }
+    }
+    assert_eq!(server.received_requests().await.unwrap().len(), 10);
 }
 
 #[tokio::test]
