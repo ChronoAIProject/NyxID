@@ -153,7 +153,7 @@ impl LarkFamilyAdapter {
         body: &[u8],
     ) -> AppResult<PreparedWebhook> {
         let raw_payload = parse_lark_payload(body, "invalid Lark/Feishu webhook JSON")?;
-        let configured_encrypt_key = secrets.and_then(|s| s.lark_encrypt_key.as_deref());
+        let configured_encrypt_key = secrets.and_then(|s| s.get("encrypt_key"));
 
         let (effective_body, effective_payload) = if let Some(encrypt_value) =
             extract_encrypt_value(&raw_payload)
@@ -246,7 +246,7 @@ fn verification_token_from_secrets<'a>(
     secrets: Option<&'a PlatformVerifySecrets>,
 ) -> AppResult<&'a str> {
     secrets
-        .and_then(|value| value.lark_verification_token.as_deref())
+        .and_then(|value| value.get("verification_token"))
         .ok_or_else(|| {
             AppError::ValidationError(format!(
                 "{} verification token not configured for bot {}; PATCH /api/v1/channel-bots/{} with verification_token",
@@ -668,10 +668,131 @@ fn parse_card_action_event(
 // PlatformAdapter implementation
 // ---------------------------------------------------------------------------
 
+pub(crate) fn lark_registration() -> super::super::channel_platform::RegistrationDescriptor {
+    use super::super::channel_registration::{
+        BOT_TOKEN_FIELD, RegistrationDescriptor, RegistrationField,
+    };
+    RegistrationDescriptor {
+        required_suffix: " for Lark/Feishu",
+        unsupported_patch_message: None,
+        token_fields: &["app_id", "app_secret"],
+        fields: &[
+            BOT_TOKEN_FIELD,
+            RegistrationField {
+                name: "verification_token",
+                label: "Verification Token",
+                storage: "lark_verification_token_encrypted",
+                secret: true,
+                required: true,
+                patchable: true,
+                clearable: false,
+                webhook_secret: true,
+            },
+            RegistrationField {
+                name: "app_id",
+                label: "App ID",
+                storage: "app_id",
+                secret: false,
+                required: true,
+                patchable: true,
+                clearable: false,
+                webhook_secret: false,
+            },
+            RegistrationField {
+                name: "app_secret",
+                label: "App Secret",
+                storage: "app_secret_encrypted",
+                secret: true,
+                required: true,
+                patchable: true,
+                clearable: false,
+                webhook_secret: false,
+            },
+            RegistrationField {
+                name: "encrypt_key",
+                label: "Encrypt Key",
+                storage: "lark_encrypt_key_encrypted",
+                secret: true,
+                required: false,
+                patchable: true,
+                clearable: true,
+                webhook_secret: true,
+            },
+        ],
+        ..RegistrationDescriptor::default()
+    }
+}
+
+pub(crate) fn parse_lark_bot_credentials(bot_token: &str) -> AppResult<(&str, &str)> {
+    bot_token
+        .split_once(':')
+        .ok_or_else(|| AppError::Internal("stored Lark/Feishu bot token is malformed".to_string()))
+}
+
+pub(crate) fn updated_lark_token(
+    current: &str,
+    fields: &super::super::channel_platform::RegistrationValues<'_>,
+) -> AppResult<Option<zeroize::Zeroizing<String>>> {
+    if fields.get("app_id").is_none() && fields.get("app_secret").is_none() {
+        return Ok(None);
+    }
+    let (app_id, app_secret) = parse_lark_bot_credentials(current)?;
+    Ok(Some(zeroize::Zeroizing::new(format!(
+        "{}:{}",
+        fields.get("app_id").unwrap_or(app_id),
+        fields.get("app_secret").unwrap_or(app_secret)
+    ))))
+}
+
 #[async_trait::async_trait]
 impl PlatformAdapter for LarkFamilyAdapter {
     fn platform_id(&self) -> &str {
         &self.platform
+    }
+
+    fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
+        lark_registration()
+    }
+
+    fn updated_token_error(&self, error: AppError) -> AppError {
+        AppError::ValidationError(format!(
+            "invalid {} app credentials: {error}",
+            self.platform_id()
+        ))
+    }
+
+    fn validate_stored_verification(&self, bot: &ChannelBot) -> AppResult<()> {
+        if bot.lark_verification_token_encrypted.is_none() {
+            return Err(AppError::ValidationError(format!(
+                "Lark/Feishu bot is missing Verification Token. PATCH /api/v1/channel-bots/{} with verification_token before verify.",
+                bot.id
+            )));
+        }
+        Ok(())
+    }
+
+    fn registration_token(
+        &self,
+        fields: &super::super::channel_platform::RegistrationValues<'_>,
+    ) -> AppResult<zeroize::Zeroizing<String>> {
+        Ok(zeroize::Zeroizing::new(
+            match (fields.get("app_id"), fields.get("app_secret")) {
+                (Some(id), Some(secret)) => format!("{id}:{secret}"),
+                _ => fields.get("bot_token").unwrap_or_default().to_string(),
+            },
+        ))
+    }
+
+    fn updated_token(
+        &self,
+        current: &str,
+        fields: &super::super::channel_platform::RegistrationValues<'_>,
+    ) -> AppResult<Option<zeroize::Zeroizing<String>>> {
+        updated_lark_token(current, fields)
+    }
+
+    fn supports_reply_metadata(&self, metadata: &serde_json::Value) -> bool {
+        metadata.get("card").is_some()
     }
 
     async fn prepare_webhook(
@@ -736,10 +857,11 @@ impl PlatformAdapter for LarkFamilyAdapter {
     async fn send_reply(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        let bot_token = credentials.token;
         // For Lark/Feishu, bot_token is stored as "app_id:app_secret".
         // We must exchange it for a tenant_access_token first.
         let (app_id, app_secret) = bot_token.split_once(':').ok_or_else(|| {
@@ -886,8 +1008,9 @@ impl PlatformAdapter for LarkFamilyAdapter {
     async fn verify_bot_token(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
+        let bot_token = credentials.token;
         // For Lark/Feishu, bot_token is "app_id:app_secret". Verify the
         // credentials by attempting to obtain a tenant_access_token.
         let (app_id, app_secret) = bot_token.split_once(':').ok_or_else(|| {
@@ -988,11 +1111,14 @@ mod tests {
         verification_token: Option<&str>,
         encrypt_key: Option<&str>,
     ) -> PlatformVerifySecrets {
-        PlatformVerifySecrets {
-            lark_verification_token: verification_token.map(str::to_string),
-            lark_encrypt_key: encrypt_key.map(str::to_string),
-            ..PlatformVerifySecrets::default()
+        let mut secrets = PlatformVerifySecrets::default();
+        if let Some(token) = verification_token {
+            secrets.insert("verification_token", token.to_string());
         }
+        if let Some(key) = encrypt_key {
+            secrets.insert("encrypt_key", key.to_string());
+        }
+        secrets
     }
 
     fn message_event_body(token: &str) -> Vec<u8> {

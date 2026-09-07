@@ -276,6 +276,33 @@ impl PlatformAdapter for TelegramAdapter {
         "telegram"
     }
 
+    fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
+        super::super::channel_platform::RegistrationDescriptor {
+            automatic_webhook: true,
+            empty_ack_is_text: false,
+            webhook_secret_label: None,
+            ..Default::default()
+        }
+    }
+
+    fn reply_context(
+        &self,
+        thread_id: Option<&str>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        metadata: &mut Option<serde_json::Value>,
+    ) {
+        if super::discord::apply_interaction_context(thread_id, created_at, metadata) {
+            return;
+        }
+        if let Some(thread_id) = thread_id {
+            super::super::channel_platform::insert_reply_context(
+                metadata,
+                "message_thread_id",
+                thread_id,
+            );
+        }
+    }
+
     async fn verify_webhook(
         &self,
         bot: &ChannelBot,
@@ -328,10 +355,11 @@ impl PlatformAdapter for TelegramAdapter {
     async fn send_reply(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        let bot_token = credentials.token;
         let text = reply.text.as_deref().unwrap_or("");
 
         let mut body = serde_json::json!({
@@ -444,8 +472,9 @@ impl PlatformAdapter for TelegramAdapter {
     async fn verify_bot_token(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
+        let bot_token = credentials.token;
         let url = format!("{TELEGRAM_API_BASE}{bot_token}/getMe");
         let resp: serde_json::Value = http
             .get(&url)

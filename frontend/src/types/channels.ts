@@ -3,7 +3,8 @@ export type ChannelPlatform =
   | "discord"
   | "lark"
   | "feishu"
-  | "slack";
+  | "slack"
+  | "whatsapp";
 
 /**
  * All platform values a conversation may report. `"device"` is for HTTP
@@ -58,6 +59,11 @@ export interface ChannelBotListResponse {
 }
 
 export interface ChannelBotDetail extends ChannelBotItem {
+  readonly phone_number_id?: string;
+  readonly waba_id?: string;
+  readonly webhook_url?: string;
+  readonly webhook_secret_label?: string | null;
+  readonly setup_instructions?: readonly string[];
   readonly conversations_count: number;
   readonly app_secret_configured: boolean;
   readonly lark_verification_token_configured: boolean;
@@ -77,7 +83,7 @@ export interface CreateChannelBotRequest {
   readonly label: string;
   /** Lark/Feishu only */
   readonly app_id?: string;
-  /** Lark/Feishu: app secret. Slack: app signing secret. */
+  /** Lark/Feishu: app secret. Slack: signing secret. WhatsApp: Meta App Secret. */
   readonly app_secret?: string;
   /** Lark/Feishu only */
   readonly verification_token?: string;
@@ -85,11 +91,14 @@ export interface CreateChannelBotRequest {
   readonly encrypt_key?: string;
   /** Discord only */
   readonly public_key?: string;
+  readonly phone_number_id?: string;
+  readonly waba_id?: string;
   /** Create this bot under the given org (caller must be admin). */
   readonly target_org_id?: string;
 }
 
 export interface UpdateChannelBotRequest {
+  readonly bot_token?: string;
   readonly label?: string;
   readonly verification_token?: string;
   readonly encrypt_key?: string;
@@ -98,6 +107,12 @@ export interface UpdateChannelBotRequest {
 }
 
 export interface CreateChannelBotResponse {
+  readonly phone_number_id?: string;
+  readonly waba_id?: string;
+  readonly webhook_url?: string;
+  readonly webhook_secret?: string | null;
+  readonly webhook_secret_label?: string | null;
+  readonly setup_instructions?: readonly string[];
   readonly id: string;
   readonly platform: ChannelPlatform;
   readonly platform_bot_username: string;

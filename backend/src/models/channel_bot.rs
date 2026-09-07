@@ -8,29 +8,29 @@ pub struct ChannelBot {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
-    /// Platform identifier: "telegram", "discord", "lark", "feishu", "slack"
+    /// Platform identifier: "telegram", "discord", "lark", "feishu", "slack", "whatsapp"
     pub platform: String,
     pub label: String,
     /// Encrypted bot token (AES-256 envelope encryption).
     /// For Slack this is the `xoxb-` bot user token.
     #[serde(with = "crate::models::bson_bytes::required")]
     pub bot_token_encrypted: Vec<u8>,
-    /// Platform-assigned bot identifier
+    /// Platform-assigned bot identifier; WhatsApp's Phone Number ID.
     pub platform_bot_id: String,
     /// Platform-assigned bot username or display handle
     pub platform_bot_username: String,
     /// Whether a webhook has been successfully registered with the platform
     pub webhook_registered: bool,
-    /// SHA-256 hash of the webhook verification secret (Telegram); unused for
-    /// platforms that derive the verifier from `app_secret_encrypted` instead
-    /// (Lark/Feishu/Slack).
+    /// SHA-256 hash of the generated webhook secret (Telegram secret header,
+    /// WhatsApp GET subscription Verify Token). Never contains a raw secret.
     pub webhook_secret_hash: String,
-    /// Lark/Feishu only: application ID
+    /// Platform account/application identifier: Lark/Feishu App ID or optional
+    /// WhatsApp Business Account ID (WABA). Not WhatsApp's Phone Number ID.
     #[serde(default)]
     pub app_id: Option<String>,
     /// Encrypted app/signing secret (AES-256 envelope encryption).
-    /// Lark/Feishu use it for HMAC + tenant-token exchange; Slack stores its
-    /// app signing secret here for Events API signature verification.
+    /// Lark/Feishu use it for tenant-token exchange; Slack and WhatsApp store
+    /// their app secrets here for inbound HMAC verification.
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub app_secret_encrypted: Option<Vec<u8>>,
     /// Lark/Feishu only: encrypted verification token from the Event
@@ -152,5 +152,24 @@ mod tests {
         assert_eq!(restored.lark_verification_token_encrypted, None);
         assert_eq!(restored.lark_encrypt_key_encrypted, None);
         assert_eq!(restored.public_key, None);
+    }
+
+    #[test]
+    fn whatsapp_storage_roundtrip_uses_existing_optional_columns() {
+        let mut bot = make_channel_bot();
+        bot.platform = "whatsapp".to_string();
+        bot.platform_bot_id = "123456".to_string();
+        bot.app_id = Some("654321".to_string());
+        bot.app_secret_encrypted = Some(vec![7, 8, 9]);
+        let document = bson::to_document(&bot).unwrap();
+        assert_eq!(document.get_str("platform_bot_id").unwrap(), "123456");
+        assert_eq!(document.get_str("app_id").unwrap(), "654321");
+        assert_eq!(
+            document.get_binary_generic("app_secret_encrypted").unwrap(),
+            &[7, 8, 9]
+        );
+        let restored: ChannelBot = bson::from_document(document).unwrap();
+        assert_eq!(restored.app_secret_encrypted, bot.app_secret_encrypted);
+        assert_eq!(restored.platform_bot_id, bot.platform_bot_id);
     }
 }

@@ -16,7 +16,7 @@ use axum::{
     http::HeaderMap,
 };
 use base64::Engine as _;
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use mongodb::bson::doc;
 use serde::{Deserialize, Serialize};
 
@@ -158,32 +158,27 @@ pub struct ResolveSenderResponse {
 /// (inline keyboards, embeds) but route through different metadata keys,
 /// so a `card` key sent to them would drop on the floor and the reply
 /// would go out as empty text.
-fn platform_supports_cards(platform: &str) -> bool {
-    matches!(platform, "lark" | "feishu")
-}
-
-/// Validate that a reply body carries something the target platform can send.
-///
-/// Rules:
-/// - Non-empty `text` is always accepted.
-/// - `metadata.card` is accepted only for platforms where
-///   [`platform_supports_cards`] returns true; per issue #306, agents may
-///   send card-only replies with `text: null` to Lark/Feishu.
-/// - Otherwise reject before hitting the platform API, so callers get a
-///   clear error instead of an empty message going out.
-fn validate_reply_for_platform(body: &AsyncReplyBody, platform: &str) -> AppResult<()> {
-    let has_text = body.text.as_deref().is_some_and(|s| !s.is_empty());
-    let has_card = body.metadata.as_ref().and_then(|m| m.get("card")).is_some();
-
-    if has_text {
+fn validate_reply_for_adapter(
+    body: &AsyncReplyBody,
+    adapter: &dyn crate::services::channel_platform::PlatformAdapter,
+) -> AppResult<()> {
+    if body.text.as_deref().is_some_and(|text| !text.is_empty())
+        || body
+            .metadata
+            .as_ref()
+            .is_some_and(|metadata| adapter.supports_reply_metadata(metadata))
+    {
         return Ok(());
     }
-    if has_card && platform_supports_cards(platform) {
-        return Ok(());
-    }
-    if has_card {
+    if body
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("card"))
+        .is_some()
+    {
         return Err(AppError::ValidationError(format!(
-            "metadata.card is only supported on Lark/Feishu (got platform={platform})"
+            "metadata.card is only supported on Lark/Feishu (got platform={})",
+            adapter.platform_id()
         )));
     }
     Err(AppError::ValidationError(
@@ -713,8 +708,8 @@ pub async fn async_reply(
     // Runs after bot lookup so we can reject card-only replies destined
     // for platforms (Telegram/Discord) that would otherwise emit an empty
     // message downstream.
-    validate_reply_for_platform(&body.reply, &bot.platform)?;
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    validate_reply_for_adapter(&body.reply, adapter.as_ref())?;
     let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
 
     // Use the actual platform conversation ID from the original inbound message
@@ -724,68 +719,12 @@ pub async fn async_reply(
         .as_deref()
         .unwrap_or(&conversation.platform_conversation_id);
 
-    // Translate the original inbound message's `thread_id` into the
-    // platform-specific metadata key that the outbound adapter
-    // understands. Two kinds of thread context need to flow forward:
-    //
-    // 1. **Discord deferred-interaction follow-up token**
-    //    (`thread_id = "interaction:{app}:{token}"`). Injected as
-    //    `interaction_thread_id` so `discord::send_reply()` posts to the
-    //    follow-up webhook endpoint instead of `/channels/{id}/messages`.
-    //
-    //    **TTL guard:** Discord interaction tokens are valid for ~15 min
-    //    with up to 5 follow-ups. `original.created_at` IS the real
-    //    interaction timestamp, so 14 minutes leaves a 1-minute safety
-    //    margin. (Device channels are guarded out above and never reach
-    //    this branch.)
-    //
-    // 2. **Telegram forum-topic id** (numeric `message_thread_id`).
-    //    Injected as `message_thread_id` so `telegram::send_reply()`
-    //    passes it to Telegram's `sendMessage` and the reply stays
-    //    scoped to the originating topic rather than the root chat.
-    //    Topic ids do not expire, so no TTL guard is applied.
-    //
-    // Other platforms currently have no thread-context routing, so we
-    // leave their metadata untouched.
     let mut metadata = body.reply.metadata;
-    if let Some(ref tid) = original.thread_id {
-        if tid.starts_with("interaction:") {
-            let interaction_window = Duration::minutes(14);
-            let age = Utc::now() - original.created_at;
-            if age < interaction_window {
-                let md = metadata.get_or_insert_with(|| serde_json::json!({}));
-                if let Some(obj) = md.as_object_mut() {
-                    obj.entry("interaction_thread_id")
-                        .or_insert_with(|| serde_json::json!(tid));
-                }
-            } else {
-                tracing::info!(
-                    message_id = %original.id,
-                    platform = %original.platform,
-                    age_secs = age.num_seconds(),
-                    "Skipping Discord interaction follow-up webhook: token past TTL, \
-                     falling through to regular channel message API"
-                );
-            }
-        } else if conversation.platform == "telegram" {
-            let md = metadata.get_or_insert_with(|| serde_json::json!({}));
-            if let Some(obj) = md.as_object_mut() {
-                obj.entry("message_thread_id")
-                    .or_insert_with(|| serde_json::json!(tid));
-            }
-        } else if conversation.platform == "slack" {
-            // Slack threading uses the ROOT message's `ts` as `thread_ts`.
-            // The inbound `thread_id` already holds the root (`thread_ts`
-            // from the original event), while `reply_to_platform_message_id`
-            // can be a child reply's `ts`. Surface the root explicitly so
-            // the adapter doesn't anchor replies on the wrong message.
-            let md = metadata.get_or_insert_with(|| serde_json::json!({}));
-            if let Some(obj) = md.as_object_mut() {
-                obj.entry("thread_ts")
-                    .or_insert_with(|| serde_json::json!(tid));
-            }
-        }
-    }
+    adapter.reply_context(
+        original.thread_id.as_deref(),
+        original.created_at,
+        &mut metadata,
+    );
 
     let outbound = OutboundReply {
         text: body.reply.text,
@@ -797,7 +736,10 @@ pub async fn async_reply(
     let platform_msg_id = adapter
         .send_reply(
             &state.http_client,
-            &bot_token,
+            &crate::services::channel_platform::BotCredentials {
+                token: &bot_token,
+                platform_bot_id: Some(&bot.platform_bot_id),
+            },
             platform_conversation_id,
             &outbound,
         )
@@ -888,9 +830,8 @@ pub async fn update_reply(
         return Err(AppError::DeviceChannelReplyNotAllowed);
     }
 
-    validate_reply_for_platform(&body.reply, &bot.platform)?;
-
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    validate_reply_for_adapter(&body.reply, adapter.as_ref())?;
     let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
     let edit = OutboundEdit {
         text: body.reply.text,
@@ -1404,6 +1345,21 @@ mod tests {
         assert!(!platform_supports_cards("discord"));
         assert!(!platform_supports_cards("openclaw"));
         assert!(!platform_supports_cards(""));
+    }
+
+    fn platform_supports_cards(platform: &str) -> bool {
+        let cache = std::sync::Arc::new(
+            crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
+        );
+        resolve_adapter(platform, &cache)
+            .is_ok_and(|adapter| adapter.supports_reply_metadata(&serde_json::json!({"card": {}})))
+    }
+
+    fn validate_reply_for_platform(body: &AsyncReplyBody, platform: &str) -> AppResult<()> {
+        let cache = std::sync::Arc::new(
+            crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
+        );
+        validate_reply_for_adapter(body, resolve_adapter(platform, &cache)?.as_ref())
     }
 
     #[test]

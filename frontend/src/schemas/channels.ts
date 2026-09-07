@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CHANNEL_PLATFORMS } from "@/lib/channel-platforms";
 
 const channelPlatformSchema = z.enum([
   "telegram",
@@ -6,6 +7,7 @@ const channelPlatformSchema = z.enum([
   "lark",
   "feishu",
   "slack",
+  "whatsapp",
 ]);
 
 /**
@@ -18,6 +20,7 @@ export const conversationPlatformSchema = z.enum([
   "discord",
   "lark",
   "feishu",
+  "whatsapp",
   "device",
 ]);
 
@@ -48,64 +51,27 @@ export const createChannelBotSchema = z
     verification_token: z.string().max(512).optional(),
     encrypt_key: z.string().max(512).optional(),
     public_key: z.string().max(256).optional(),
+    phone_number_id: z.string().max(32).optional(),
+    waba_id: z.string().max(32).optional(),
     /** When set, create this bot under the given org (caller must be admin). */
     target_org_id: z.string().optional(),
   })
   .superRefine((data, ctx) => {
-    const appId = data.app_id?.trim();
-    const appSecret = data.app_secret?.trim();
-    const verificationToken = data.verification_token?.trim();
-    const publicKey = data.public_key?.trim();
-
-    if (
-      (data.platform === "lark" || data.platform === "feishu") &&
-      !appId
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "App ID is required for Lark/Feishu",
-        path: ["app_id"],
-      });
-    }
-    if (
-      (data.platform === "lark" || data.platform === "feishu") &&
-      !appSecret
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "App Secret is required for Lark/Feishu",
-        path: ["app_secret"],
-      });
-    }
-    if (
-      (data.platform === "lark" || data.platform === "feishu") &&
-      !verificationToken
-    ) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Verification Token is required for Lark/Feishu",
-        path: ["verification_token"],
-      });
-    }
-    if (data.platform === "discord" && !publicKey) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Public Key is required for Discord",
-        path: ["public_key"],
-      });
-    }
-    if (data.platform === "slack" && !appSecret) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Signing Secret is required for Slack",
-        path: ["app_secret"],
-      });
+    for (const field of CHANNEL_PLATFORMS[data.platform].fields) {
+      const value = data[field.name]?.trim();
+      if (field.required && !value) {
+        ctx.addIssue({ code: "custom", message: `${field.label} is required for ${CHANNEL_PLATFORMS[data.platform].label}`, path: [field.name] });
+      }
+      if (field.numeric && value && !/^[0-9]+$/.test(value)) {
+        ctx.addIssue({ code: "custom", message: `${field.label} must be a numeric Meta identifier`, path: [field.name] });
+      }
     }
   });
 
 export type CreateChannelBotFormData = z.infer<typeof createChannelBotSchema>;
 
 export const updateChannelBotSchema = z.object({
+  bot_token: z.string().max(512).optional(),
   label: z
     .string()
     .min(1, "Label is required")

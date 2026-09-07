@@ -345,12 +345,20 @@ classDiagram
     class PlatformAdapter {
         <<trait>>
         +platform_id() str
+        +registration() RegistrationDescriptor
+        +registration_token(fields) Secret
+        +updated_token(current, fields) OptionalSecret
+        +build_verify_secrets(keys, bot) PlatformVerifySecrets
+        +webhook_policy(body) WebhookPolicy
+        +subscription_handshake(bot, query) String
         +prepare_webhook(bot, secrets, headers, body) PreparedWebhook
         +verify_webhook(bot, secrets, headers, body) Result
         +parse_inbound(body) Result~Vec~InboundMessage~~
-        +send_reply(http, bot, conversation_id, reply) Result~String~
+        +reply_context(thread_id, created_at, metadata)
+        +supports_reply_metadata(metadata) bool
+        +send_reply(http, credentials, conversation_id, reply) Result~String~
         +register_webhook(http, bot, url, secret) Result
-        +verify_bot_token(http, token) Result~BotIdentity~
+        +verify_bot_token(http, credentials) Result~BotIdentity~
     }
 
     class TelegramAdapter {
@@ -379,6 +387,17 @@ classDiagram
     PlatformAdapter <|.. TelegramAdapter
     PlatformAdapter <|.. DiscordAdapter
     PlatformAdapter <|.. LarkFamilyAdapter
+    PlatformAdapter <|.. SlackAdapter
+    PlatformAdapter <|.. WhatsAppAdapter
+
+    class WhatsAppAdapter {
+        +platform_id() "whatsapp"
+        -Meta App Secret HMAC-SHA256
+        -GET Verify Token handshake
+        -Phone Number ID event filter
+        -Immediate POST acknowledgment
+        -Cloud API text, template, interactive replies
+    }
 
     note for LarkFamilyAdapter "Single implementation,\nregistered twice:\nlark = larksuite.com\nfeishu = feishu.cn"
 ```
@@ -391,6 +410,8 @@ classDiagram
 | **Discord** | Bot token + Application ID | Ed25519 signature (`X-Signature-Ed25519` + `X-Signature-Timestamp`) | `PING` -> `PONG` interaction response | `POST /channels/{id}/messages` with `Authorization: Bot {token}` |
 | **Lark** | App ID + App Secret for tenant access token; Verification Token for inbound webhook auth; optional Encrypt Key for signed/encrypted delivery | Always verify Verification Token. If Encrypt Key is configured, also require `X-Lark-Signature` with `hex(SHA256(timestamp + nonce + encrypt_key + raw_body))`, then decrypt `{\"encrypt\":\"...\"}` using AES-256-CBC, PKCS7, IV = first 16 bytes, key = `SHA256(encrypt_key)` | `url_verification` -> verify token first, then echo `challenge` | `POST /im/v1/messages` with tenant access token |
 | **Feishu** | Same as Lark | Same as Lark | Same as Lark | Same as Lark, different base URL (`open.feishu.cn`) |
+| **Slack** | Bot user OAuth token (`xoxb-`) + Signing Secret | HMAC-SHA256 over `v0:timestamp:body`, five-minute replay window | `url_verification` | `POST /api/chat.postMessage` |
+| **WhatsApp** | Permanent System User access token + Phone Number ID + Meta App Secret; optional WABA ID | `X-Hub-Signature-256: sha256=<HMAC-SHA256(app_secret, raw_body)>` | GET subscription: constant-time SHA-256 Verify Token check, raw challenge as `text/plain` | `POST /{version}/{phone_number_id}/messages` with Bearer auth |
 
 For the Lark/Feishu platform family, `register_webhook()` remains a no-op. Configure the webhook URL and subscribe to both `im.message.receive_v1` and `card.action.trigger` only in the Lark/Feishu Developer Console. The console inputs map to NyxID fields as follows:
 
@@ -401,13 +422,48 @@ For the Lark/Feishu platform family, `register_webhook()` remains a no-op. Confi
 
 ### Adding New Platforms
 
-To add a new platform (e.g. WhatsApp, Slack, LINE), create a single adapter file implementing `PlatformAdapter`:
+Implement `PlatformAdapter` in `backend/src/services/channel_adapters/<platform>.rs`, then register its module and add it to `services/channel_adapters/mod.rs::resolve_adapter`, the single runtime registry. The handler module re-exports it for existing callers.
 
-1. `backend/src/services/channel_adapters/whatsapp.rs` (~300 lines)
-2. Register in `channel_adapters/mod.rs` and `resolve_adapter()`
-3. Add a webhook route in `routes.rs`
+- `registration()` declares field names, human labels, required/secret/patchable/clearable flags, storage columns, and which secrets verify webhooks. It also declares fields that rebuild outbound tokens, automatic versus dashboard webhook setup, the one-time secret label, and setup instructions. Handler and service validation, encrypted persistence, safe configuration responses, and secret decryption follow this descriptor.
+- `BotCredentials` carries the outbound token and platform bot identity separately. `registration_token` and `updated_token` own token construction; only the existing Lark/Feishu adapter retains its legacy composite format. Token rotation verifies the replacement before storing it. Label-only updates never decrypt credentials.
+- `PlatformVerifySecrets` is a generic map of zeroizing secret values, with redacted Debug output. Its default builder decrypts only fields marked as webhook secrets; an adapter may override `build_verify_secrets`.
+- `webhook_policy` selects inline processing, immediate acknowledgment with background processing, or the existing challenge-only response. Lark/Feishu challenges remain inside authenticated `prepare_webhook`. `subscription_handshake` defaults to denial and handles GET protocols when supported.
+- `prepare_webhook` verifies and preprocesses raw payloads before normalization. WhatsApp filters app-wide events by the bot's Phone Number ID here. `reply_context` translates stored thread context into outbound metadata; `supports_reply_metadata` admits platform-native content without text.
+- `dedup_inbound_by_platform_message_id` defaults to false. WhatsApp opts in to check existing inbound metadata by bot, platform, and platform message ID before routing/dispatch. Keep it off for platforms such as Telegram where edited messages legitimately reuse an ID.
+- The public `/api/v1/webhooks/channel/{platform}/{bot_id}` GET/POST handlers use these hooks. No new per-platform handler or generic pipeline branch is needed. Unknown platforms and OpenClaw return 404 on both methods; OpenClaw has its own integration path.
+- Mirror the registration fields in `frontend/src/lib/channel-platforms.ts`, extend the frontend platform type/schema and CLI options, and add normalization, verification, lifecycle, and reply tests. Callback payloads stay platform-independent.
 
-No model changes, no callback payload changes, no frontend changes needed. The agent receives the same normalized payload regardless of platform.
+### WhatsApp Cloud API Setup
+
+This integration supports **WhatsApp Business Platform through Meta's Cloud API**. The consumer **WhatsApp Business App has no API** and is not supported by this adapter. Twilio-hosted WhatsApp uses a different API and is out of scope.
+
+1. In Meta Business Settings, create a System User, assign the WhatsApp Business Account, and generate a permanent access token with `whatsapp_business_messaging` and `whatsapp_business_management` permissions. Obtain the **Phone Number ID** from WhatsApp > API Setup and the **Meta App Secret** from the app's Basic settings. The Phone Number ID is neither the display phone number nor the Meta App ID.
+2. Register the bot:
+
+   ```bash
+   nyxid channel-bot register --platform whatsapp --label "WhatsApp Support" \
+     --token-env WHATSAPP_ACCESS_TOKEN --phone-number-id 123456789 \
+     --app-secret-env META_APP_SECRET --waba-id 987654321
+   ```
+
+   `--waba-id` is optional. API fields are `bot_token`, `phone_number_id`, `app_secret`, and optional `waba_id`. The Phone Number ID is stored in `platform_bot_id`, the encrypted access token in `bot_token_encrypted`, the encrypted App Secret in `app_secret_encrypted`, and WABA ID in the optional generalized `app_id` column. No new model fields or collections are needed. API responses expose the identifier as `waba_id`, never as an App ID.
+3. Copy the returned **Callback URL** and **Verify Token** into Meta App Dashboard > WhatsApp > Configuration, then verify and save. The CLI prints both, and the web creation dialog shows them before navigation. The generated `webhook_secret` is shown once; only its SHA-256 hash is stored. Detail/list responses never return it. Keep it in a password manager; if lost, re-register the bot. The GET handshake returns the unquoted challenge with 200, or 403 for missing/invalid parameters or token.
+4. Subscribe to the **messages** webhook field. Separately subscribe the app to the WABA with `POST /{version}/{WABA_ID}/subscribed_apps` and Bearer authentication, following Meta's dashboard/subscription instructions. NyxID's `register_webhook` is a no-op; supplying `waba_id` records it for display but does not perform this API call.
+5. Add a conversation route to an agent key with a callback URL, then send the business phone a message. `conversation_id` is the sender's WhatsApp ID (`wa_id`/`from`, digits without `+`), and conversation type is always `private`. Use these digits when creating a route. Outbound recipients also accept one leading `+` and spaces/dashes, which the adapter removes before sending. The bot remains `pending_webhook` until a verified POST arrives.
+
+Meta subscriptions are app-wide: every bot URL filters out messages whose `metadata.phone_number_id` differs from its registered identity. A shared app callback does not relay the app's other numbers. Use separate apps or Meta's supported [webhook overrides](https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/override) to route each number to its matching NyxID bot URL.
+
+Rotate credentials with `nyxid channel-bot update <BOT_ID> --token-env WHATSAPP_ACCESS_TOKEN --app-secret-env META_APP_SECRET`, or PATCH `bot_token`/`app_secret`. Rotation preserves the Verify Token and phone identity. The Verify Bot action preserves WhatsApp's subscription secret; existing platforms retain their original verification lifecycle and response statuses.
+
+Inbound text, button replies, and interactive button/list selections normalize to text (title preferred, ID fallback). Image and sticker attachments use the `image` category; audio, video, and documents use `audio`, `video`, and `file`. Captions become text. Each attachment carries its media ID as `file_key` and a versioned Graph lookup URL. Fetch that URL with the bot's Bearer token to obtain the short-lived download `url`, then fetch the download URL with the same authentication. NyxID does not expose bot tokens to agents; agents needing media must have a separately authorized credential/proxy connection. Location and contact cards normalize to readable text; full details remain in the individual message's `raw_platform_data`. Orders use `unknown`; reaction, system, unsupported, unknown, and unrecognized types are skipped. Status-only and error-only deliveries are acknowledged without dispatch. Every message in a batch is processed independently.
+
+Replies support plain text, `metadata.template` objects, or `metadata.interactive` objects. Template and interactive content cannot be combined. Metadata cannot override the recipient, `recipient_type`, or `messaging_product`. `context.message_id` carries the original inbound message ID. Text splits into sequential messages of at most 4096 Unicode characters and returns the last `wamid`. A later chunk failure can leave earlier chunks delivered; there is no automatic outbound retry. Editing is unsupported. Outside the 24-hour customer service window, send an approved template; Graph code 131047 identifies that condition. Rate-limit and delivery errors use locally authored messages and numeric codes, never upstream text that could echo credentials.
+
+WhatsApp POST webhooks return 200 immediately and process in the background; verification/parse failures are suppressed while logging diagnostic errors with bot/platform identifiers, never bodies or tokens. This is best-effort delivery: an acknowledged event can be lost on process failure. Meta can retry for seven days. WhatsApp skips a delivery when an inbound `channel_messages` row already exists for the same bot, platform, and platform message ID (`wamid`), using the existing sparse platform-message index. Other platforms retain their existing behavior, including Telegram edits that reuse IDs. This lookup is not an atomic concurrent-delivery claim; simultaneous arrivals can still race. Suppression lasts while metadata is retained and also applies to rows whose callback failed. No new replay collection, index, or age cutoff is introduced.
+
+The adapter pins its Graph API version in the single `GRAPH_API_VERSION` constant. The `whatsapp-business` provider and `api-whatsapp-business` catalog counterpart inject a bearer token at the Graph root for separately authorized direct API calls; callers choose their versioned paths. There is no hosted WhatsApp OpenAPI overlay in the current registry.
+
+Meta references checked for this implementation: [webhook overview](https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/overview/), [endpoint verification](https://developers.facebook.com/documentation/business-messaging/whatsapp/webhooks/create-webhook-endpoint), [phone numbers](https://developers.facebook.com/documentation/business-messaging/whatsapp/business-phone-numbers/phone-numbers), [text messages](https://developers.facebook.com/documentation/business-messaging/whatsapp/messages/text-messages), [media](https://developers.facebook.com/documentation/business-messaging/whatsapp/business-phone-numbers/media), and [error codes](https://developers.facebook.com/documentation/business-messaging/whatsapp/support/error-codes).
 
 ### Why no generic/passthrough adapter
 
@@ -695,10 +751,14 @@ flowchart TD
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/api/v1/webhooks/channel/telegram` | Telegram bot webhook |
-| `POST` | `/api/v1/webhooks/channel/discord` | Discord interaction webhook |
-| `POST` | `/api/v1/webhooks/channel/lark` | Lark event webhook |
-| `POST` | `/api/v1/webhooks/channel/feishu` | Feishu event webhook |
+| `POST` | `/api/v1/webhooks/channel/telegram/{bot_id}` | Telegram bot webhook |
+| `POST` | `/api/v1/webhooks/channel/discord/{bot_id}` | Discord interaction webhook |
+| `POST` | `/api/v1/webhooks/channel/lark/{bot_id}` | Lark event webhook |
+| `POST` | `/api/v1/webhooks/channel/feishu/{bot_id}` | Feishu event webhook |
+| `POST` | `/api/v1/webhooks/channel/slack/{bot_id}` | Slack Events API webhook |
+| `GET`, `POST` | `/api/v1/webhooks/channel/whatsapp/{bot_id}` | Meta subscription verification and message webhook |
+
+These share the generic adapter-driven route outside JWT authentication, with the same global rate limiting and body-limit posture as the existing channel webhooks. `delegated_read_denied_path` already denies the entire `webhooks` route class; the public subscription handler never extracts `AuthUser` or relies on delegated authorization.
 
 ---
 
@@ -739,6 +799,7 @@ graph TD
 | **SSRF** | Callback URLs validated: HTTPS-only in production, block RFC 1918/loopback ranges, optional domain allowlist |
 | **Bot token storage** | AES-256 encrypted at rest (same pattern as `UserApiKey.credential_encrypted`). Never returned in API responses. Only `platform_bot_username` is exposed. |
 | **Webhook forgery** | Per-platform verification: Telegram secret header, Discord Ed25519, Lark / Feishu Verification Token checks plus optional Encrypt Key signature verification and AES decryption. All comparisons use constant-time equality where applicable. |
+| **WhatsApp verification** | POST HMAC verifies the exact raw body with the Meta App Secret before phone-number filtering. GET subscription checks SHA-256 of the one-time Verify Token in constant time. Bodies, secrets, and upstream free-form errors are never logged. |
 | **Replay attacks** | Callbacks include `X-NyxID-Timestamp`; agents should reject messages older than 5 minutes. Callback JWTs also expire after 5 minutes with 60s skew tolerance. |
 | **Callback authentication** | `X-NyxID-Callback-Token` is an RS256 JWT verifiable through `/.well-known/jwks.json`; its `body_sha256` claim binds the exact request bytes. `X-NyxID-Signature` HMAC is dual-emitted during transition and will be removed later. |
 | **Agent impersonation** | Async reply endpoint accepts two auth paths: (a) the agent API key, which must match the conversation's `agent_api_key_id`; or (b) a per-callback reply token bound to a specific `inbound_message_id`, `conversation_id`, `api_key_id`, and `platform`, single-use, 30-min TTL, and revalidated against live `api_key.is_active` on every call. See [Reply Token](#reply-token). |

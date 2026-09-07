@@ -23,6 +23,7 @@ import {
   type UpdateChannelBotFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
+import { CHANNEL_PLATFORMS, editableChannelFields } from "@/lib/channel-platforms";
 import { cn, formatDate, formatRelativeTime } from "@/lib/utils";
 import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import { PageHeader } from "@/components/shared/page-header";
@@ -661,172 +662,60 @@ function EditVerificationSection({
 }) {
   const botId = bot.id;
   const updateBot = useUpdateChannelBot();
-  const {
-    register,
-    handleSubmit,
-    reset,
-    formState: { errors, isDirty },
-  } = useAppForm<UpdateChannelBotFormData>({
+  const fields = editableChannelFields(bot.platform);
+  const { register, handleSubmit, reset, formState: { errors, isDirty } } = useAppForm<UpdateChannelBotFormData>({
     resolver: zodResolver(updateChannelBotSchema),
-    defaultValues: {
-      verification_token: "",
-      encrypt_key: "",
-      app_id: "",
-      app_secret: "",
-    },
+    defaultValues: { bot_token: "", verification_token: "", encrypt_key: "", app_id: "", app_secret: "" },
   });
 
   useEffect(() => {
-    reset({
-      verification_token: "",
-      encrypt_key: "",
-      app_id: "",
-      app_secret: "",
-    });
+    reset({ bot_token: "", verification_token: "", encrypt_key: "", app_id: "", app_secret: "" });
   }, [botId, reset]);
 
   function onSubmit(data: UpdateChannelBotFormData) {
-    const payload = {
-      verification_token: data.verification_token?.trim() || undefined,
-      encrypt_key: data.encrypt_key?.trim() || undefined,
-      app_id: data.app_id?.trim() || undefined,
-      app_secret: data.app_secret?.trim() || undefined,
-    };
-
-    if (
-      !payload.verification_token &&
-      !payload.encrypt_key &&
-      !payload.app_id &&
-      !payload.app_secret
-    ) {
+    const payload = Object.fromEntries(fields.flatMap(({ name }) => {
+      const value = data[name]?.trim();
+      return value ? [[name, value]] : [];
+    }));
+    if (Object.keys(payload).length === 0) {
       toast.error("Enter at least one value to update");
       return;
     }
-
-    updateBot.mutate(
-      { id: botId, data: payload },
-      {
-        onSuccess: () => {
-          toast.success("Verification settings updated");
-          reset({
-            verification_token: "",
-            encrypt_key: "",
-            app_id: "",
-            app_secret: "",
-          });
-        },
-        onError: (err) => {
-          toast.error(
-            err instanceof ApiError
-              ? err.message
-              : "Failed to update verification settings",
-          );
-        },
+    updateBot.mutate({ id: botId, data: payload }, {
+      onSuccess: () => {
+        toast.success("Credentials updated");
+        reset();
+        updateBot.reset();
       },
-    );
+      onError: (err) => toast.error(err instanceof ApiError ? err.message : "Failed to update credentials"),
+    });
   }
 
   return (
-    <DetailSection title="Edit Verification">
+    <DetailSection title="Edit Credentials">
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-4 p-5">
-        <div className="space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <Label htmlFor="verification_token">Verification Token</Label>
-            {bot.lark_verification_token_configured && (
-              <Badge variant="secondary" className="text-[10px] uppercase tracking-wide">
-                Configured
-              </Badge>
-            )}
+        {fields.map((field) => (
+          <div key={field.name} className="space-y-2">
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor={field.name}>{field.label}</Label>
+              {field.configuredKey && bot[field.configuredKey] && <Badge variant="secondary">Configured</Badge>}
+            </div>
+            <Input id={field.name} type={field.secret ? "password" : "text"} autoComplete={field.secret ? "new-password" : "off"}
+              placeholder="Leave blank to keep current value" {...register(field.name)} />
+            {field.hint && <p className="text-xs text-muted-foreground">{field.hint}</p>}
+            {errors[field.name] && <p className="text-xs text-destructive">{errors[field.name]?.message}</p>}
           </div>
-          <Input
-            id="verification_token"
-            type="password"
-            placeholder="Paste the Event Subscriptions Verification Token"
-            {...register("verification_token")}
-          />
+        ))}
+        {(bot.status === "pending" || bot.status === "pending_webhook") && (
           <p className="text-xs text-muted-foreground">
-            Required by Lark/Feishu webhook verification. Found in Event
-            Subscriptions → Security.
-          </p>
-          {errors.verification_token && (
-            <p className="text-xs text-destructive">
-              {errors.verification_token.message}
-            </p>
-          )}
-        </div>
-
-        <div className="space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <Label htmlFor="encrypt_key">Encrypt Key</Label>
-            {bot.lark_encrypt_key_configured && (
-              <Badge variant="secondary" className="text-[10px] uppercase tracking-wide">
-                Configured
-              </Badge>
-            )}
-          </div>
-          <Input
-            id="encrypt_key"
-            type="password"
-            placeholder="Optional Encrypt Key from Event Subscriptions"
-            {...register("encrypt_key")}
-          />
-          <p className="text-xs text-muted-foreground">
-            Optional. Leave blank to keep the current value. Use the API or CLI
-            with an empty `encrypt_key` to clear it explicitly.
-          </p>
-          {errors.encrypt_key && (
-            <p className="text-xs text-destructive">
-              {errors.encrypt_key.message}
-            </p>
-          )}
-        </div>
-
-        <div className="space-y-2">
-          <Label htmlFor="app_id">App ID</Label>
-          <Input
-            id="app_id"
-            placeholder="cli_xxxxxxxxxx"
-            {...register("app_id")}
-          />
-          {errors.app_id && (
-            <p className="text-xs text-destructive">{errors.app_id.message}</p>
-          )}
-        </div>
-
-        <div className="space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <Label htmlFor="app_secret">App Secret</Label>
-            {bot.app_secret_configured && (
-              <Badge variant="secondary" className="text-[10px] uppercase tracking-wide">
-                Configured
-              </Badge>
-            )}
-          </div>
-          <Input
-            id="app_secret"
-            type="password"
-            placeholder="Paste a new App Secret if needed"
-            {...register("app_secret")}
-          />
-          {errors.app_secret && (
-            <p className="text-xs text-destructive">
-              {errors.app_secret.message}
-            </p>
-          )}
-        </div>
-
-        {bot.status === "pending" && (
-          <p className="text-xs text-muted-foreground">
-            Saving stores these credentials immediately (watch the
-            &ldquo;Configured&rdquo; badges above) — the bot stays{" "}
-            <span className="text-warning">Pending</span> until the platform
-            delivers its first verified webhook, which auto-promotes it to
-            Active.
+            Saving stores these credentials immediately (watch the Configured badges above).
+            The bot stays pending until the platform delivers its first verified webhook,
+            which changes its status to Active.
           </p>
         )}
         <div className="flex justify-end">
-          <Button variant="primary" type="submit" disabled={updateBot.isPending || !isDirty}>
-            {updateBot.isPending ? "Saving..." : "Save Verification Settings"}
+          <Button variant="primary" type="submit" disabled={updateBot.isPending || !isDirty} isLoading={updateBot.isPending}>
+            Save Credentials
           </Button>
         </div>
       </form>
@@ -840,17 +729,7 @@ function EditVerificationSection({
  * "Learn more →" affordance.
  */
 function platformWebhookDocsHref(platform: ChannelPlatform): string | undefined {
-  switch (platform) {
-    case "telegram":
-      return "https://core.telegram.org/bots/api#setwebhook";
-    case "discord":
-      return "https://discord.com/developers/docs/topics/gateway";
-    case "lark":
-    case "feishu":
-      return "https://open.feishu.cn/document/server-docs/event-subscription-guide/configure-callback-request-address-in-the-event-subscription-config";
-    default:
-      return undefined;
-  }
+  return CHANNEL_PLATFORMS[platform]?.webhookDocs;
 }
 
 type ChecklistStatus = "done" | "todo" | "waiting" | "optional";
@@ -915,7 +794,7 @@ function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
   // which is also the right default for single-origin local dev where
   // BACKEND_URL is unset.
   const apiBase = runtimeConfig?.api_base_url ?? window.location.origin;
-  const webhookUrl = `${apiBase}/api/v1/webhooks/channel/${bot.platform}/${bot.id}`;
+  const webhookUrl = bot.webhook_url ?? `${apiBase}/api/v1/webhooks/channel/${bot.platform}/${bot.id}`;
   const isLark = bot.platform === "lark" || bot.platform === "feishu";
 
   const rows: ChecklistRow[] = [];
@@ -953,7 +832,9 @@ function WebhookSetupChecklist({ bot }: { readonly bot: ChannelBotDetail }) {
     rows.push({
       status: "done",
       label: "Verification",
-      hint: `Handled automatically by the ${platformLabel(bot.platform)} webhook secret.`,
+      hint: bot.setup_instructions?.length
+        ? `Use the ${bot.webhook_secret_label ?? "verification secret"} shown once at creation in the platform dashboard.`
+        : `Handled automatically by the ${platformLabel(bot.platform)} webhook secret.`,
     });
   }
 
@@ -1116,7 +997,8 @@ export function ChannelBotDetailPage() {
           badgeVariant="secondary"
         />
         <DetailRow label="Bot Username" value={bot.platform_bot_username || "-"} />
-        <DetailRow label="Platform Bot ID" value={bot.platform_bot_id || "-"} copyable />
+        <DetailRow label={bot.phone_number_id ? "Phone Number ID" : "Platform Bot ID"} value={bot.platform_bot_id || "-"} copyable />
+        {bot.waba_id && <DetailRow label="WhatsApp Business Account ID" value={bot.waba_id} copyable />}
         <DetailRow label="Status" value={statusLabel(bot.status)} badge badgeVariant={statusBadgeVariant(bot.status)} />
         <DetailRow label="Webhook" value={bot.webhook_registered ? "Registered" : "Not registered"} />
         <DetailRow label="Owner" value={ownerLabel} />
@@ -1128,12 +1010,18 @@ export function ChannelBotDetailPage() {
         />
       </DetailSection>
 
-      {(bot.platform === "lark" || bot.platform === "feishu") && (
-        <>
-          <LarkPermissionSetupSection bot={bot} />
-          <EditVerificationSection bot={bot} />
-        </>
+      {Boolean(bot.setup_instructions?.length) && (
+        <DetailSection title={`${platformLabel(bot.platform)} Setup`}>
+          <div className="space-y-4 p-5">
+            <CopyableUrlCallout label="Callback URL" url={bot.webhook_url ?? ""} docsHref={platformWebhookDocsHref(bot.platform)} />
+            <ol className="list-decimal space-y-2 pl-4 text-xs text-muted-foreground">
+              {bot.setup_instructions?.map((instruction) => <li key={instruction}>{instruction}</li>)}
+            </ol>
+          </div>
+        </DetailSection>
       )}
+      {bot.permission_setup_url && <LarkPermissionSetupSection bot={bot} />}
+      {editableChannelFields(bot.platform).length > 0 && <EditVerificationSection bot={bot} />}
 
       {/* Conversation Routes */}
       <ConversationsSection

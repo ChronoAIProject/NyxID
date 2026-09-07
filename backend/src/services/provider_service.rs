@@ -1753,6 +1753,52 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // WhatsApp Business Platform (direct Meta Cloud API).
+    if !slug_exists!("whatsapp-business") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "whatsapp-business".to_string(),
+            name: "WhatsApp Business Platform".to_string(),
+            description: Some("WhatsApp Business Platform credentials for the direct Meta Cloud API. NyxID injects the System User token as Authorization: Bearer. The WhatsApp Business App and Twilio API are not supported.".to_string()),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some("In Meta Business Settings, create a System User token with whatsapp_business_messaging and whatsapp_business_management permissions and assign your WhatsApp Business Account. Use the Phone Number ID in Cloud API paths.".to_string()),
+            api_key_url: Some("https://developers.facebook.com/apps".to_string()),
+            icon_url: None,
+            documentation_url: Some(
+                "https://developers.facebook.com/documentation/business-messaging/whatsapp/overview".to_string(),
+            ),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        collection.insert_one(&provider).await?;
+        tracing::info!(
+            slug = "whatsapp-business",
+            "Seeded default provider: WhatsApp Business Platform"
+        );
+        seeded_count += 1;
+    }
+
     // 23. OpenClaw (API Key + self-hosted gateway URL)
     if !slug_exists!("openclaw") {
         let provider = ProviderConfig {
@@ -2986,6 +3032,29 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
+    },
+    DefaultServiceSeed {
+        provider_slug: "whatsapp-business",
+        service_slug: "api-whatsapp-business",
+        service_name: "WhatsApp Business Platform (Meta Cloud API)",
+        base_url: "https://graph.facebook.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Direct Meta Cloud API with a System User bearer token. Use a versioned Graph path and the Phone Number ID for messaging; the channel-bot adapter pins its own Graph version.",
+        ),
+        default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        homepage_url: Some("https://business.whatsapp.com/products/business-platform"),
+        auth_notes: Some(
+            "System User token with whatsapp_business_messaging and whatsapp_business_management, assigned to the WhatsApp Business Account.",
+        ),
+        known_limitations: Some(
+            "WhatsApp Business App has no API. Twilio-hosted WhatsApp is a separate API. Free-form replies require an open 24-hour customer service window; otherwise use approved templates.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "openclaw",

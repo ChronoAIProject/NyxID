@@ -13,7 +13,9 @@ use crate::crypto::aes::EncryptionKeys;
 use crate::errors::{AppError, AppResult};
 use crate::models::channel_bot::{COLLECTION_NAME, ChannelBot};
 use crate::models::channel_conversation::COLLECTION_NAME as CONVERSATIONS;
-use crate::services::channel_platform::{BotIdentity, PlatformAdapter};
+use crate::services::channel_platform::{
+    BotCredentials, BotIdentity, PlatformAdapter, RegistrationDescriptor, RegistrationValues,
+};
 
 /// Result of creating a bot: the persisted record plus the raw webhook secret
 /// (shown once, never stored in cleartext).
@@ -30,6 +32,7 @@ pub enum SecretPatch<'a> {
 }
 
 pub struct UpdateBotParams<'a> {
+    pub bot_token: Option<&'a str>,
     pub label: Option<&'a str>,
     pub verification_token: Option<&'a str>,
     pub encrypt_key: SecretPatch<'a>,
@@ -37,39 +40,92 @@ pub struct UpdateBotParams<'a> {
     pub app_secret: Option<&'a str>,
 }
 
-fn parse_lark_bot_credentials(bot_token: &str) -> AppResult<(&str, &str)> {
-    bot_token
-        .split_once(':')
-        .ok_or_else(|| AppError::Internal("stored Lark/Feishu bot token is malformed".to_string()))
+impl<'a> UpdateBotParams<'a> {
+    pub fn fields(&self) -> RegistrationValues<'a> {
+        RegistrationValues(
+            [
+                ("bot_token", self.bot_token),
+                ("app_id", self.app_id),
+                ("app_secret", self.app_secret),
+                ("verification_token", self.verification_token),
+                (
+                    "encrypt_key",
+                    match self.encrypt_key {
+                        SecretPatch::Unchanged => None,
+                        SecretPatch::Clear => Some(""),
+                        SecretPatch::Set(value) => Some(value),
+                    },
+                ),
+            ]
+            .into_iter()
+            .filter_map(|(key, value)| value.map(|value| (key, value)))
+            .collect(),
+        )
+    }
 }
 
-async fn maybe_rebuild_lark_bot_token(
+async fn maybe_rebuild_bot_token(
     encryption_keys: &EncryptionKeys,
     http_client: &reqwest::Client,
     adapter: &dyn PlatformAdapter,
     bot: &ChannelBot,
     params: &UpdateBotParams<'_>,
 ) -> AppResult<Option<Vec<u8>>> {
-    if !matches!(bot.platform.as_str(), "lark" | "feishu")
-        || (params.app_id.is_none() && params.app_secret.is_none())
+    let fields = params.fields();
+    if !adapter
+        .registration()
+        .token_fields
+        .iter()
+        .any(|field| fields.get(field).is_some())
     {
         return Ok(None);
     }
-
-    let current_bot_token = decrypt_bot_token(encryption_keys, bot).await?;
-    let (current_app_id, current_app_secret) = parse_lark_bot_credentials(&current_bot_token)?;
-    let effective_app_id = params.app_id.unwrap_or(current_app_id);
-    let effective_app_secret = params.app_secret.unwrap_or(current_app_secret);
-    let composite = format!("{effective_app_id}:{effective_app_secret}");
-
+    let current = zeroize::Zeroizing::new(decrypt_bot_token(encryption_keys, bot).await?);
+    let Some(token) = adapter.updated_token(&current, &fields)? else {
+        return Ok(None);
+    };
     adapter
-        .verify_bot_token(http_client, &composite)
+        .verify_bot_token(
+            http_client,
+            &BotCredentials {
+                token: &token,
+                platform_bot_id: Some(&bot.platform_bot_id),
+            },
+        )
         .await
-        .map_err(|e| {
-            AppError::ValidationError(format!("invalid {} app credentials: {e}", bot.platform))
-        })?;
+        .map_err(|error| adapter.updated_token_error(error))?;
+    Ok(Some(encryption_keys.encrypt(token.as_bytes()).await?))
+}
 
-    Ok(Some(encryption_keys.encrypt(composite.as_bytes()).await?))
+async fn write_registration_fields(
+    keys: &EncryptionKeys,
+    descriptor: &RegistrationDescriptor,
+    fields: &RegistrationValues<'_>,
+    set: &mut bson::Document,
+    unset: &mut bson::Document,
+) -> AppResult<()> {
+    for field in descriptor.all_fields() {
+        // Token construction and verification are handled by the adapter.
+        if field.name == "bot_token" {
+            continue;
+        }
+        if let Some(value) = fields.get(field.name) {
+            if value.is_empty() && field.clearable {
+                unset.insert(field.storage, "");
+            } else if field.secret {
+                set.insert(
+                    field.storage,
+                    bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: keys.encrypt(value.as_bytes()).await?,
+                    },
+                );
+            } else {
+                set.insert(field.storage, value);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Register a new channel bot for the given user.
@@ -85,14 +141,11 @@ pub async fn create_bot(
     http_client: &reqwest::Client,
     adapter: &dyn PlatformAdapter,
     user_id: &str,
-    bot_token: &str,
     label: &str,
-    app_id: Option<&str>,
-    app_secret: Option<&str>,
-    public_key: Option<&str>,
-    verification_token: Option<&str>,
-    encrypt_key: Option<&str>,
+    fields: &RegistrationValues<'_>,
 ) -> AppResult<CreateBotResult> {
+    let descriptor = adapter.registration();
+    descriptor.validate(fields, false)?;
     // Validate label
     if label.is_empty() || label.len() > 200 {
         return Err(AppError::ValidationError(
@@ -113,45 +166,19 @@ pub async fn create_bot(
         )));
     }
 
-    // Slack requires the app's signing secret to verify webhook signatures.
-    // Without it the bot can never receive any inbound message, so fail fast
-    // at registration time. Mirrors the Lark/Feishu requirement of
-    // `app_id`+`app_secret` enforced at the handler layer. Treat blank /
-    // whitespace-only secrets as missing so non-frontend clients (CLI with
-    // an empty env var, API callers passing `""`) can't register an unusable
-    // bot.
-    if adapter.platform_id() == "slack" && app_secret.map(|s| s.trim().is_empty()).unwrap_or(true) {
-        return Err(AppError::ValidationError(
-            "Slack signing secret is required (pass via app_secret)".to_string(),
-        ));
-    }
-
-    if matches!(adapter.platform_id(), "lark" | "feishu")
-        && verification_token
-            .map(|value| value.trim().is_empty())
-            .unwrap_or(true)
-    {
-        return Err(AppError::ValidationError(
-            "Lark/Feishu Verification Token is required".to_string(),
-        ));
-    }
-
-    // For Lark/Feishu, verify_bot_token expects "app_id:app_secret" format.
-    // Build the effective token for verification matching what we'll store.
-    let verify_token = if matches!(adapter.platform_id(), "lark" | "feishu") {
-        match (app_id, app_secret) {
-            (Some(id), Some(secret)) => format!("{id}:{secret}"),
-            _ => bot_token.to_string(),
-        }
-    } else {
-        bot_token.to_string()
-    };
-
-    // Verify the token with the platform to obtain bot identity
+    let effective_token = adapter.registration_token(fields)?;
     let BotIdentity {
         platform_bot_id,
         platform_bot_username,
-    } = adapter.verify_bot_token(http_client, &verify_token).await?;
+    } = adapter
+        .verify_bot_token(
+            http_client,
+            &BotCredentials {
+                token: &effective_token,
+                platform_bot_id: descriptor.identity(fields),
+            },
+        )
+        .await?;
 
     // Check for duplicate platform bot
     let existing = db
@@ -175,33 +202,7 @@ pub async fn create_bot(
     let raw_secret = hex::encode(rand::random::<[u8; 32]>());
     let secret_hash = hex::encode(Sha256::digest(raw_secret.as_bytes()));
 
-    // For Lark/Feishu, store "app_id:app_secret" as the bot token so that
-    // send_reply can exchange it for a tenant_access_token at send time.
-    let effective_token = if matches!(adapter.platform_id(), "lark" | "feishu") {
-        match (app_id, app_secret) {
-            (Some(id), Some(secret)) => format!("{id}:{secret}"),
-            _ => bot_token.to_string(),
-        }
-    } else {
-        bot_token.to_string()
-    };
-
-    // Encrypt the bot token
     let bot_token_encrypted = encryption_keys.encrypt(effective_token.as_bytes()).await?;
-
-    // Encrypt app secret if provided (Lark/Feishu)
-    let app_secret_encrypted = match app_secret {
-        Some(secret) => Some(encryption_keys.encrypt(secret.as_bytes()).await?),
-        None => None,
-    };
-    let lark_verification_token_encrypted = match verification_token {
-        Some(token) => Some(encryption_keys.encrypt(token.as_bytes()).await?),
-        None => None,
-    };
-    let lark_encrypt_key_encrypted = match encrypt_key {
-        Some(key) => Some(encryption_keys.encrypt(key.as_bytes()).await?),
-        None => None,
-    };
 
     let now = Utc::now();
     let bot = ChannelBot {
@@ -214,17 +215,29 @@ pub async fn create_bot(
         platform_bot_username,
         webhook_registered: false,
         webhook_secret_hash: secret_hash,
-        app_id: app_id.map(String::from),
-        app_secret_encrypted,
-        lark_verification_token_encrypted,
-        lark_encrypt_key_encrypted,
-        public_key: public_key.map(String::from),
+        app_id: None,
+        app_secret_encrypted: None,
+        lark_verification_token_encrypted: None,
+        lark_encrypt_key_encrypted: None,
+        public_key: None,
         status: "pending".to_string(),
         is_active: true,
         created_at: now,
         updated_at: now,
     };
 
+    let mut document = bson::to_document(&bot)
+        .map_err(|_| AppError::Internal("Unable to serialize channel bot".to_string()))?;
+    write_registration_fields(
+        encryption_keys,
+        &descriptor,
+        fields,
+        &mut document,
+        &mut doc! {},
+    )
+    .await?;
+    let bot: ChannelBot = bson::from_document(document)
+        .map_err(|_| AppError::Internal("Invalid channel bot storage fields".to_string()))?;
     db.collection::<ChannelBot>(COLLECTION_NAME)
         .insert_one(&bot)
         .await?;
@@ -259,53 +272,20 @@ pub async fn update_bot(
         set_doc.insert("label", label);
     }
 
-    if let Some(verification_token) = params.verification_token {
-        let encrypted = encryption_keys
-            .encrypt(verification_token.as_bytes())
-            .await?;
-        set_doc.insert(
-            "lark_verification_token_encrypted",
-            bson::Binary {
-                subtype: bson::spec::BinarySubtype::Generic,
-                bytes: encrypted,
-            },
-        );
-    }
-
-    match params.encrypt_key {
-        SecretPatch::Unchanged => {}
-        SecretPatch::Clear => {
-            unset_doc.insert("lark_encrypt_key_encrypted", "");
-        }
-        SecretPatch::Set(value) => {
-            let encrypted = encryption_keys.encrypt(value.as_bytes()).await?;
-            set_doc.insert(
-                "lark_encrypt_key_encrypted",
-                bson::Binary {
-                    subtype: bson::spec::BinarySubtype::Generic,
-                    bytes: encrypted,
-                },
-            );
-        }
-    }
-
-    if let Some(app_id) = params.app_id {
-        set_doc.insert("app_id", app_id);
-    }
-
-    if let Some(app_secret) = params.app_secret {
-        let encrypted = encryption_keys.encrypt(app_secret.as_bytes()).await?;
-        set_doc.insert(
-            "app_secret_encrypted",
-            bson::Binary {
-                subtype: bson::spec::BinarySubtype::Generic,
-                bytes: encrypted,
-            },
-        );
-    }
+    let descriptor = adapter.registration();
+    let fields = params.fields();
+    descriptor.validate(&fields, true)?;
+    write_registration_fields(
+        encryption_keys,
+        &descriptor,
+        &fields,
+        &mut set_doc,
+        &mut unset_doc,
+    )
+    .await?;
 
     if let Some(bot_token_encrypted) =
-        maybe_rebuild_lark_bot_token(encryption_keys, http_client, adapter, &bot, &params).await?
+        maybe_rebuild_bot_token(encryption_keys, http_client, adapter, &bot, &params).await?
     {
         set_doc.insert(
             "bot_token_encrypted",
@@ -347,7 +327,7 @@ pub async fn register_webhook(
     // Platforms with manual webhook setup (Discord, Lark, Feishu) return Ok
     // from register_webhook but the user must configure the URL themselves.
     // Only mark as fully registered for platforms where we actually set the URL.
-    let auto_registered = matches!(adapter.platform_id(), "telegram");
+    let auto_registered = adapter.registration().automatic_webhook;
 
     let (status, registered) = if auto_registered {
         ("active", true)
@@ -504,12 +484,24 @@ mod tests {
         assert_ne!(hash_a, hash_b);
     }
 
+    use crate::services::channel_adapters::lark::parse_lark_bot_credentials;
+
     struct RecordingAdapter {
         seen_tokens: Arc<Mutex<Vec<String>>>,
     }
 
     #[async_trait::async_trait]
     impl PlatformAdapter for RecordingAdapter {
+        fn registration(&self) -> RegistrationDescriptor {
+            crate::services::channel_adapters::lark::lark_registration()
+        }
+        fn updated_token(
+            &self,
+            current: &str,
+            fields: &RegistrationValues<'_>,
+        ) -> AppResult<Option<zeroize::Zeroizing<String>>> {
+            crate::services::channel_adapters::lark::updated_lark_token(current, fields)
+        }
         fn platform_id(&self) -> &str {
             "lark"
         }
@@ -531,10 +523,11 @@ mod tests {
         async fn send_reply(
             &self,
             _http: &reqwest::Client,
-            _bot_token: &str,
+            credentials: &crate::services::channel_platform::BotCredentials<'_>,
             _conversation_id: &str,
             _reply: &OutboundReply,
         ) -> AppResult<Option<String>> {
+            let _bot_token = credentials.token;
             unimplemented!("send_reply is not used in these tests")
         }
 
@@ -551,8 +544,9 @@ mod tests {
         async fn verify_bot_token(
             &self,
             _http: &reqwest::Client,
-            bot_token: &str,
+            credentials: &crate::services::channel_platform::BotCredentials<'_>,
         ) -> AppResult<BotIdentity> {
+            let bot_token = credentials.token;
             self.seen_tokens.lock().unwrap().push(bot_token.to_string());
             Ok(BotIdentity {
                 platform_bot_id: "cli_test".to_string(),
@@ -598,6 +592,7 @@ mod tests {
         };
         let bot = make_lark_bot(&encryption_keys, "old_app:old_secret").await;
         let params = UpdateBotParams {
+            bot_token: None,
             label: None,
             verification_token: None,
             encrypt_key: SecretPatch::Unchanged,
@@ -606,7 +601,7 @@ mod tests {
         };
 
         let rebuilt =
-            maybe_rebuild_lark_bot_token(&encryption_keys, &http_client, &adapter, &bot, &params)
+            maybe_rebuild_bot_token(&encryption_keys, &http_client, &adapter, &bot, &params)
                 .await
                 .unwrap()
                 .unwrap();
@@ -629,6 +624,7 @@ mod tests {
         };
         let bot = make_lark_bot(&encryption_keys, "old_app:old_secret").await;
         let params = UpdateBotParams {
+            bot_token: None,
             label: None,
             verification_token: None,
             encrypt_key: SecretPatch::Unchanged,
@@ -637,7 +633,7 @@ mod tests {
         };
 
         let rebuilt =
-            maybe_rebuild_lark_bot_token(&encryption_keys, &http_client, &adapter, &bot, &params)
+            maybe_rebuild_bot_token(&encryption_keys, &http_client, &adapter, &bot, &params)
                 .await
                 .unwrap()
                 .unwrap();
@@ -660,6 +656,7 @@ mod tests {
         };
         let bot = make_lark_bot(&encryption_keys, "old_app:old_secret").await;
         let params = UpdateBotParams {
+            bot_token: None,
             label: None,
             verification_token: None,
             encrypt_key: SecretPatch::Unchanged,
@@ -668,7 +665,7 @@ mod tests {
         };
 
         let rebuilt =
-            maybe_rebuild_lark_bot_token(&encryption_keys, &http_client, &adapter, &bot, &params)
+            maybe_rebuild_bot_token(&encryption_keys, &http_client, &adapter, &bot, &params)
                 .await
                 .unwrap()
                 .unwrap();
@@ -691,6 +688,7 @@ mod tests {
         };
         let bot = make_lark_bot(&encryption_keys, "old_app:old_secret").await;
         let params = UpdateBotParams {
+            bot_token: None,
             label: Some("New Label"),
             verification_token: None,
             encrypt_key: SecretPatch::Unchanged,
@@ -699,7 +697,7 @@ mod tests {
         };
 
         let rebuilt =
-            maybe_rebuild_lark_bot_token(&encryption_keys, &http_client, &adapter, &bot, &params)
+            maybe_rebuild_bot_token(&encryption_keys, &http_client, &adapter, &bot, &params)
                 .await
                 .unwrap();
 
@@ -770,7 +768,7 @@ mod tests {
         assert!(matches!(set, SecretPatch::Set("value")));
     }
 
-    // ---- maybe_rebuild_lark_bot_token (non-lark platform) ----
+    // ---- maybe_rebuild_bot_token (non-lark platform) ----
 
     #[tokio::test]
     async fn maybe_rebuild_returns_none_for_non_lark_platform() {
@@ -803,10 +801,11 @@ mod tests {
             async fn send_reply(
                 &self,
                 _http: &reqwest::Client,
-                _bot_token: &str,
+                credentials: &crate::services::channel_platform::BotCredentials<'_>,
                 _conversation_id: &str,
                 _reply: &OutboundReply,
             ) -> AppResult<Option<String>> {
+                let _bot_token = credentials.token;
                 unimplemented!()
             }
 
@@ -823,8 +822,9 @@ mod tests {
             async fn verify_bot_token(
                 &self,
                 _http: &reqwest::Client,
-                _bot_token: &str,
+                credentials: &crate::services::channel_platform::BotCredentials<'_>,
             ) -> AppResult<BotIdentity> {
+                let _bot_token = credentials.token;
                 unimplemented!()
             }
         }
@@ -834,6 +834,7 @@ mod tests {
         bot.platform = "telegram".to_string();
 
         let params = UpdateBotParams {
+            bot_token: None,
             label: None,
             verification_token: None,
             encrypt_key: SecretPatch::Unchanged,
@@ -842,7 +843,7 @@ mod tests {
         };
 
         let result =
-            maybe_rebuild_lark_bot_token(&encryption_keys, &http_client, &adapter, &bot, &params)
+            maybe_rebuild_bot_token(&encryption_keys, &http_client, &adapter, &bot, &params)
                 .await
                 .unwrap();
 

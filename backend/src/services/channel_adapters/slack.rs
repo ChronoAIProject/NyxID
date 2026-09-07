@@ -263,6 +263,54 @@ impl PlatformAdapter for SlackAdapter {
         "slack"
     }
 
+    fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
+        use super::super::channel_registration::{
+            BOT_TOKEN_FIELD, RegistrationDescriptor, RegistrationField,
+        };
+        RegistrationDescriptor {
+            required_suffix: " for Slack",
+            unsupported_patch_message: Some(
+                "verification_token, encrypt_key, and app_id are only supported for Lark/Feishu bots",
+            ),
+            fields: &[
+                BOT_TOKEN_FIELD,
+                RegistrationField {
+                    name: "app_secret",
+                    label: "Signing Secret",
+                    storage: "app_secret_encrypted",
+                    secret: true,
+                    required: true,
+                    patchable: true,
+                    clearable: false,
+                    webhook_secret: true,
+                },
+            ],
+            ..RegistrationDescriptor::default()
+        }
+    }
+
+    fn webhook_policy(&self, body: &[u8]) -> super::super::channel_platform::WebhookPolicy {
+        use super::super::channel_platform::WebhookPolicy;
+        match self.handle_challenge(body) {
+            Some(challenge) => WebhookPolicy::Challenge(challenge),
+            None => WebhookPolicy::Immediate(None),
+        }
+    }
+
+    fn reply_context(
+        &self,
+        thread_id: Option<&str>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        metadata: &mut Option<serde_json::Value>,
+    ) {
+        if super::discord::apply_interaction_context(thread_id, created_at, metadata) {
+            return;
+        }
+        if let Some(thread_id) = thread_id {
+            super::super::channel_platform::insert_reply_context(metadata, "thread_ts", thread_id);
+        }
+    }
+
     async fn verify_webhook(
         &self,
         _bot: &ChannelBot,
@@ -303,7 +351,7 @@ impl PlatformAdapter for SlackAdapter {
         }
 
         let signing_secret = secrets
-            .and_then(|s| s.slack_signing_secret.as_deref())
+            .and_then(|s| s.get("app_secret"))
             .unwrap_or_default();
         if signing_secret.is_empty() {
             return Err(AppError::ChannelWebhookVerificationFailed(
@@ -362,10 +410,11 @@ impl PlatformAdapter for SlackAdapter {
     async fn send_reply(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        let bot_token = credentials.token;
         let text = reply.text.as_deref().unwrap_or("");
 
         let mut body = serde_json::json!({
@@ -464,8 +513,9 @@ impl PlatformAdapter for SlackAdapter {
     async fn verify_bot_token(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
+        let bot_token = credentials.token;
         let url = format!("{SLACK_API_BASE}/auth.test");
         let resp: serde_json::Value = http
             .post(&url)
@@ -614,10 +664,7 @@ mod tests {
         let body = br#"{"type":"event_callback"}"#;
         let ts = chrono::Utc::now().timestamp();
         let bot = make_test_bot(secret);
-        let secrets = PlatformVerifySecrets {
-            slack_signing_secret: Some(secret.to_string()),
-            ..PlatformVerifySecrets::default()
-        };
+        let secrets = PlatformVerifySecrets::from([("app_secret", secret)]);
 
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(SIGNATURE_HEADER, sign(secret, ts, body).parse().unwrap());
@@ -635,10 +682,7 @@ mod tests {
         let body = br#"{"type":"event_callback"}"#;
         let ts = chrono::Utc::now().timestamp();
         let bot = make_test_bot("real_secret");
-        let secrets = PlatformVerifySecrets {
-            slack_signing_secret: Some("real_secret".to_string()),
-            ..PlatformVerifySecrets::default()
-        };
+        let secrets = PlatformVerifySecrets::from([("app_secret", "real_secret")]);
 
         let mut headers = axum::http::HeaderMap::new();
         // Sign with a different secret -> mismatch.
@@ -664,10 +708,7 @@ mod tests {
         let err = adapter
             .verify_webhook(
                 &bot,
-                Some(&PlatformVerifySecrets {
-                    slack_signing_secret: Some("secret".to_string()),
-                    ..PlatformVerifySecrets::default()
-                }),
+                Some(&PlatformVerifySecrets::from([("app_secret", "secret")])),
                 &headers,
                 b"{}",
             )
@@ -685,10 +726,7 @@ mod tests {
         let err = adapter
             .verify_webhook(
                 &bot,
-                Some(&PlatformVerifySecrets {
-                    slack_signing_secret: Some("secret".to_string()),
-                    ..PlatformVerifySecrets::default()
-                }),
+                Some(&PlatformVerifySecrets::from([("app_secret", "secret")])),
                 &headers,
                 b"{}",
             )
@@ -705,10 +743,7 @@ mod tests {
         // 10 minutes in the past, beyond the 5-minute replay window.
         let ts = chrono::Utc::now().timestamp() - 600;
         let bot = make_test_bot(secret);
-        let secrets = PlatformVerifySecrets {
-            slack_signing_secret: Some(secret.to_string()),
-            ..PlatformVerifySecrets::default()
-        };
+        let secrets = PlatformVerifySecrets::from([("app_secret", secret)]);
 
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(SIGNATURE_HEADER, sign(secret, ts, body).parse().unwrap());

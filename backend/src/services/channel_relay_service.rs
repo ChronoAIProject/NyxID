@@ -105,6 +105,27 @@ pub struct CallbackAttachment {
 // Message storage
 // ---------------------------------------------------------------------------
 
+/// Check existing metadata before dispatching retries for adapters that opt in.
+/// This lookup is best-effort; it does not claim concurrent deliveries atomically.
+pub async fn inbound_platform_message_exists(
+    db: &mongodb::Database,
+    channel_bot_id: &str,
+    platform: &str,
+    platform_message_id: &str,
+) -> AppResult<bool> {
+    Ok(db
+        .collection::<mongodb::bson::Document>(COLLECTION_NAME)
+        .find_one(doc! {
+            "channel_bot_id": channel_bot_id,
+            "platform": platform,
+            "platform_message_id": platform_message_id,
+            "direction": "inbound",
+        })
+        .projection(doc! { "_id": 1 })
+        .await?
+        .is_some())
+}
+
 /// Persist inbound-message metadata (platform -> agent direction).
 ///
 /// Per ADR-013, this record stores routing metadata only — not the message
@@ -635,6 +656,50 @@ pub fn build_callback_payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn inbound_retry_lookup_is_scoped_to_bot_platform_and_direction() {
+        let db = crate::test_utils::connect_transaction_test_database("channel_retry_scope").await;
+        db.collection::<mongodb::bson::Document>(COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": uuid::Uuid::new_v4().to_string(), "channel_bot_id": "bot-a",
+                "platform": "whatsapp", "platform_message_id": "wamid.same", "direction": "inbound",
+            })
+            .await
+            .unwrap();
+        assert!(
+            inbound_platform_message_exists(&db, "bot-a", "whatsapp", "wamid.same")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !inbound_platform_message_exists(&db, "bot-b", "whatsapp", "wamid.same")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !inbound_platform_message_exists(&db, "bot-a", "telegram", "wamid.same")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !inbound_platform_message_exists(&db, "bot-a", "whatsapp", "wamid.new")
+                .await
+                .unwrap()
+        );
+        db.collection::<mongodb::bson::Document>(COLLECTION_NAME)
+            .update_one(
+                doc! { "channel_bot_id": "bot-a" },
+                doc! { "$set": { "direction": "outbound" } },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !inbound_platform_message_exists(&db, "bot-a", "whatsapp", "wamid.same")
+                .await
+                .unwrap()
+        );
+    }
 
     #[test]
     fn hmac_signature_is_deterministic() {
