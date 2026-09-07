@@ -1,3 +1,4 @@
+import { z } from "zod";
 import type {
   AgentKeyOptions,
   AgentKeySummary,
@@ -117,4 +118,3 @@ export function agentKeyLoginError(error: unknown): string {
       : "Could not reach NyxID. Try again.")
   );
 }
-import { z } from "zod";
