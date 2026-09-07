@@ -265,7 +265,7 @@ fn handle_poll_error(code: i64, interval: u64) -> Result<u64> {
 pub fn format_identity(identity: &Identity) -> String {
     let key = &identity.api_key;
     format!(
-        "Authentication: Agent Key\nKey: {} ({})\nOwner: {} ({})\nScopes: {}\nServices: {} (allow all: {})\nNodes: {} (allow all: {})\nKey expiry: {}\nCredential expiry: {}\nRate limit: {} requests/s; burst: {}",
+        "Authentication: Agent Key\nKey: {} ({})\nOwner: {} ({})\nScopes: {}\nServices: {} (allow all: {})\nNodes: {} (allow all: {})\nKey expiry: {}\nCredential expiry: {}\nCredential label: {}\nRate limit: {} requests/s; burst: {}",
         key.name,
         key.key_prefix,
         key.owner_name,
@@ -277,6 +277,7 @@ pub fn format_identity(identity: &Identity) -> String {
         key.allow_all_nodes,
         key.expires_at.as_deref().unwrap_or("None"),
         identity.credential_expires_at.as_deref().unwrap_or("None"),
+        identity.label,
         key.rate_limit_per_second
             .map_or_else(|| "Default".into(), |v| v.to_string()),
         key.rate_limit_burst
@@ -293,7 +294,7 @@ pub async fn show_identity(api: &mut ApiClient, output: crate::cli::OutputFormat
                 &serde_json::json!({"auth": {"kind": "agent_key", "api_key": identity.api_key, "credential_id": identity.credential_id, "credential_expires_at": identity.credential_expires_at, "label": identity.label}})
             )?
         ),
-        crate::cli::OutputFormat::Table => eprintln!("{}", format_identity(&identity)),
+        crate::cli::OutputFormat::Table => println!("{}", format_identity(&identity)),
     }
     Ok(())
 }

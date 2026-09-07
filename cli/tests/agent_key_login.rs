@@ -9,7 +9,7 @@ use wiremock::{
 const SECRET: &str = "nyxid_ag_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn identity() -> Value {
-    json!({"api_key": {"id": "key-id", "name": "Home Agent", "key_prefix": "nyxid_ag_01234567", "owner_type": "personal", "owner_id": "owner-id", "owner_name": "Human", "scopes": "read proxy", "allow_all_services": false, "allow_all_nodes": false, "allowed_service_ids": ["service-id"], "allowed_node_ids": [], "expires_at": null, "rate_limit_per_second": 10, "rate_limit_burst": 20, "platform": "generic", "created_now": false}, "credential_id": "credential-id", "credential_expires_at": null, "label": "workstation"})
+    json!({"api_key": {"id": "key-id", "name": "Home Agent", "key_prefix": "nyxid_ag_01234567", "owner_type": "personal", "owner_id": "owner-id", "owner_name": "Human", "scopes": "read proxy", "allow_all_services": false, "allow_all_nodes": false, "allowed_service_ids": ["service-id"], "allowed_node_ids": [], "expires_at": null, "rate_limit_per_second": 10, "rate_limit_burst": 20, "platform": "generic", "created_now": false}, "credential_id": "credential-id", "credential_expires_at": null, "label": "workstation \u{00b7} home-agent"})
 }
 
 fn command(home: &Path) -> Command {
@@ -258,6 +258,7 @@ async fn whoami_status_and_rejected_credentials_never_refresh_or_prompt() {
     let server = MockServer::start().await;
     let home = tempfile::tempdir().unwrap();
     seed_profile(home.path(), &server);
+    mount_sections(&server, 200).await;
     Mock::given(method("GET"))
         .and(path("/api/v1/auth/agent-key/self"))
         .and(header("Authorization", format!("Bearer {SECRET}")))
@@ -278,7 +279,16 @@ async fn whoami_status_and_rejected_credentials_never_refresh_or_prompt() {
         )
         .await;
         assert!(output.status.success(), "{}", output_text(&output));
-        assert!(output_text(&output).contains("Authentication: Agent Key"));
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Authentication: Agent Key"));
+        assert!(stdout.contains("workstation \u{00b7} home-agent"));
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("Authentication: Agent Key"));
+        if command == "status" {
+            for section in ["Account:", "AI Services (1)", "API Keys (1)", "Nodes (1)"] {
+                assert!(stdout.contains(section), "{stdout}");
+            }
+            assert!(stdout.find("Authentication:").unwrap() < stdout.find("Account:").unwrap());
+        }
         assert!(!output_text(&output).contains(SECRET));
     }
     let json_output = run(
@@ -342,6 +352,112 @@ async fn whoami_status_and_rejected_credentials_never_refresh_or_prompt() {
     assert_eq!(refresh.status.code(), Some(3));
     assert!(output_text(&refresh).contains("Agent Key sessions do not refresh"));
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+async fn mount_sections(server: &MockServer, status: u16) {
+    for (endpoint, body) in [
+        (
+            "/users/me",
+            json!({"id": "owner-id", "email": "human@example.com", "role": "user"}),
+        ),
+        (
+            "/keys",
+            json!({"keys": [{"id": "service-id", "slug": "allowed", "is_active": true}]}),
+        ),
+        (
+            "/api-keys",
+            json!({"keys": [{"id": "key-id", "name": "Home Agent", "scopes": "read proxy"}]}),
+        ),
+        (
+            "/nodes",
+            json!({"nodes": [{"id": "node-id", "name": "Workstation", "status": "online"}]}),
+        ),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1{endpoint}")))
+            .and(header("Authorization", format!("Bearer {SECRET}")))
+            .respond_with(
+                ResponseTemplate::new(status).set_body_json(if status == 200 {
+                    body
+                } else {
+                    json!({"error_code": 2001, "error": "forbidden", "message": "Scope denied"})
+                }),
+            )
+            .mount(server)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn status_keeps_sections_or_scope_placeholders_in_table_and_json() {
+    for status in [200, 403] {
+        let server = MockServer::start().await;
+        let home = tempfile::tempdir().unwrap();
+        seed_profile(home.path(), &server);
+        let mut auth = identity();
+        auth["api_key"]["scopes"] = json!(if status == 200 { "read" } else { "proxy" });
+        Mock::given(method("GET"))
+            .and(path("/api/v1/auth/agent-key/self"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(auth))
+            .expect(2)
+            .mount(&server)
+            .await;
+        mount_sections(&server, status).await;
+        for output in ["table", "json"] {
+            let result = run(
+                home.path(),
+                &["status", "--profile", "home-agent", "--output", output],
+            )
+            .await;
+            assert!(result.status.success(), "{}", output_text(&result));
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            assert!(!String::from_utf8_lossy(&result.stderr).contains("Authentication:"));
+            if output == "json" {
+                let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+                assert_eq!(value["auth"]["kind"], "agent_key");
+                for section in ["user", "services", "api_keys", "nodes"] {
+                    assert_eq!(value[section].is_null(), status == 403, "{value}");
+                }
+            } else {
+                assert!(stdout.starts_with("Authentication: Agent Key"), "{stdout}");
+                assert_eq!(
+                    stdout.matches("unavailable with this key's scope").count(),
+                    if status == 403 { 4 } else { 0 }
+                );
+                for section in ["Account:", "AI Services", "API Keys", "Nodes"] {
+                    assert!(stdout.contains(section));
+                }
+            }
+        }
+        assert_eq!(server.received_requests().await.unwrap().len(), 10);
+    }
+}
+
+#[tokio::test]
+async fn status_section_401_surfaces_rejection_without_refresh() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    seed_profile(home.path(), &server);
+    Mock::given(method("GET"))
+        .and(path("/api/v1/auth/agent-key/self"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(identity()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/users/me"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(
+            json!({"error_code": 1001, "error": "unauthorized", "message": "revoked"}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let result = run(home.path(), &["status", "--profile", "home-agent"]).await;
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("Your Agent Key credential was rejected")
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
 #[tokio::test]

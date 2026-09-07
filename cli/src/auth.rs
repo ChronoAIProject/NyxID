@@ -367,7 +367,11 @@ pub(crate) fn resolve_access_token_with_source(auth: &AuthArgs) -> Result<Resolv
     }
 
     if agent_key::is_agent_key_profile(auth.profile.as_deref()) {
-        bail!("{}", agent_key::REJECTED_MESSAGE);
+        let login = match auth.profile.as_deref() {
+            Some(name) => format!("nyxid login --agent-key --profile {name}"),
+            None => "nyxid login --agent-key".to_string(),
+        };
+        bail!("This profile's Agent Key credential is missing. Run `{login}` to authorize again.");
     }
     if auth.access_token_env == DEFAULT_ACCESS_TOKEN_ENV {
         bail!(
@@ -2068,6 +2072,28 @@ mod tests {
         super::ensure_session(&auth)
             .await
             .expect("explicit token is honored");
+    }
+
+    #[test]
+    fn missing_agent_credential_identifies_profile_and_reauthorization_command() {
+        let _home = PreflightHome::set();
+        let mut auth = preflight_auth_args();
+        for profile in [Some("ensure-session-test"), None] {
+            auth.profile = profile.map(str::to_owned);
+            let dir = token_dir_for_profile(profile).unwrap();
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("auth_kind"), "agent_key").unwrap();
+            let error = super::resolve_access_token_with_source(&auth)
+                .err()
+                .expect("missing credential must fail")
+                .to_string();
+            let expected = if profile.is_some() {
+                "This profile's Agent Key credential is missing. Run `nyxid login --agent-key --profile ensure-session-test` to authorize again."
+            } else {
+                "This profile's Agent Key credential is missing. Run `nyxid login --agent-key` to authorize again."
+            };
+            assert_eq!(error, expected);
+        }
     }
 
     #[tokio::test]

@@ -39,12 +39,12 @@ pub async fn run(api: &mut ApiClient, output: OutputFormat) -> Result<()> {
                 "no"
             };
 
-            eprintln!("User ID:  {id}");
-            eprintln!("Email:    {email}");
-            eprintln!("Name:     {name}");
-            eprintln!("Role:     {role}");
-            eprintln!("MFA:      {mfa}");
-            eprintln!("Verified: {verified}");
+            println!("User ID:  {id}");
+            println!("Email:    {email}");
+            println!("Name:     {name}");
+            println!("Role:     {role}");
+            println!("MFA:      {mfa}");
+            println!("Verified: {verified}");
         }
     }
 
