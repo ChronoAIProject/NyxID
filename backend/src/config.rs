@@ -372,6 +372,11 @@ pub struct AppConfig {
     /// (default: 60). Set to 0 to disable the sweep.
     pub connect_link_expiry_sweep_interval_secs: u64,
 
+    /// Interval in seconds between expired Agent Key login cleanup sweeps,
+    /// revoking undelivered credentials (default: 60). Set to 0 to disable
+    /// the background sweep; poll and preview still clean up expired exchanges.
+    pub agent_key_login_sweep_interval_secs: u64,
+
     /// Interval in seconds between proactive OAuth token-refresh sweeps
     /// (default: 600 = 10 min). Set to 0 to disable the sweep entirely
     /// (lazy proxy-time refresh still applies). The sweep refreshes
@@ -1190,6 +1195,9 @@ impl AppConfig {
             .and_then(|v| v.parse().ok())
             .unwrap_or(60),
 
+            agent_key_login_sweep_interval_secs: env::var("AGENT_KEY_LOGIN_SWEEP_INTERVAL_SECS")
+                .ok().and_then(|v| v.parse().ok()).unwrap_or(60),
+
             oauth_refresh_sweep_interval_secs: env::var("OAUTH_REFRESH_SWEEP_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1905,6 +1913,7 @@ mod tests {
             telegram_bot_username: None,
             approval_expiry_interval_secs: 5,
             connect_link_expiry_sweep_interval_secs: 60,
+            agent_key_login_sweep_interval_secs: 60,
             oauth_refresh_sweep_interval_secs: 600,
             oauth_refresh_sweep_window_secs: 900,
             connection_expiry_notifications: true,

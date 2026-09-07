@@ -368,6 +368,12 @@ fn authentication_section() -> DoctorSection {
     }
 
     match auth::read_saved_token_for(None) {
+        Some(_) if auth::agent_key::is_agent_key_profile(None) => {
+            let detail = auth::agent_key::read_metadata(None)
+                .map(|identity| auth::agent_key::format_identity(&identity))
+                .unwrap_or_else(|| "Authentication: Agent Key".into());
+            rows.push(row("Login state", detail, DoctorStatus::Pass));
+        }
         Some(token) => {
             let login = auth::jwt_claim_string_from_token(&token, "email")
                 .or_else(|| auth::jwt_claim_string_from_token(&token, "preferred_username"))

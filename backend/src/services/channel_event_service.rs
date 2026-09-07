@@ -485,6 +485,7 @@ pub async fn forward_trigger_event(
         allowed_node_ids: Vec::new(),
         api_key_id: Some(conversation.agent_api_key_id),
         api_key_name: None,
+        api_key_credential_id: None,
         api_key_purpose: crate::models::api_key::ApiKeyPurpose::General,
         rate_limit_per_second: None,
         rate_limit_burst: None,

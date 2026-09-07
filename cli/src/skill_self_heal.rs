@@ -272,6 +272,7 @@ mod tests {
                 base_url: String::new(),
                 password: false,
                 device: false,
+                agent_key: false,
                 email: None,
                 profile: None
             }
@@ -284,6 +285,7 @@ mod tests {
             base_url: String::new(),
             password: false,
             device: false,
+            agent_key: false,
             email: None,
             profile: None
         })));

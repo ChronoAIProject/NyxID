@@ -295,7 +295,7 @@ export function LoginDevicePage() {
   );
 }
 
-function LoginDeviceShell({
+export function LoginDeviceShell({
   children,
 }: {
   readonly children: React.ReactNode;
@@ -307,7 +307,7 @@ function LoginDeviceShell({
   );
 }
 
-function ApprovalCaution() {
+export function ApprovalCaution() {
   return (
     <div className="flex items-start gap-2 px-1 text-[12px] leading-relaxed text-muted-foreground">
       <Info className="mt-0.5 size-4 shrink-0" />
@@ -321,7 +321,7 @@ function ApprovalCaution() {
   );
 }
 
-function PreviewPanel({
+export function PreviewPanel({
   preview,
   remainingSeconds,
 }: {

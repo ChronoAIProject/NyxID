@@ -21,6 +21,7 @@ export class ApiError extends Error {
 }
 
 interface RequestOptions {
+  readonly credentials?: RequestCredentials;
   readonly method?: string;
   readonly body?: unknown;
   readonly headers?: Record<string, string>;
@@ -71,7 +72,7 @@ function buildFetchConfig(options: RequestOptions): RequestInit {
       ...telemetryHeaders,
       ...headers,
     },
-    credentials: "include",
+    credentials: options.credentials ?? "include",
     signal,
   };
 

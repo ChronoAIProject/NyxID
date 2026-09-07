@@ -13,7 +13,11 @@ use crate::models::agent_service_binding::{
     AgentServiceBinding, COLLECTION_NAME as AGENT_BINDINGS,
 };
 use crate::models::api_key::{ApiKey, ApiKeyPurpose, COLLECTION_NAME as API_KEYS};
+use crate::models::api_key_credential::{
+    ApiKeyCredential, COLLECTION_NAME as API_KEY_CREDENTIALS, CredentialRevokedReason,
+};
 use crate::redaction::RedactedLen;
+use crate::services::api_key_credential_service;
 use crate::services::{
     api_key_mutation_service as key_mutations,
     api_key_scope_service::{self, ScopeAuthorization},
@@ -85,7 +89,7 @@ struct RotationMaterial {
 }
 
 enum RotationTransactionOutcome {
-    Created(ApiKey),
+    Created(ApiKey, Vec<ApiKeyCredential>),
     AlreadyCommitted(ApiKey),
 }
 
@@ -189,8 +193,10 @@ fn generate_scoped_api_key() -> (String, String, String) {
     rand::thread_rng().fill_bytes(&mut bytes);
 
     let hex_encoded = hex::encode(bytes);
-    let full_key = format!("nyxid_ag_{hex_encoded}");
-    let prefix = format!("nyxid_ag_{}", &hex_encoded[..8]);
+    let full_key = format!("{}{hex_encoded}", crate::crypto::token::AGENT_KEY_PREFIX);
+    let prefix = crate::crypto::token::agent_key_display_prefix(&full_key)
+        .expect("generated Agent Key has a valid display prefix")
+        .to_string();
     let mut hasher = Sha256::new();
     hasher.update(full_key.as_bytes());
     let hash = hex::encode(hasher.finalize());
@@ -279,6 +285,7 @@ pub async fn create_api_key_with_scope_authorization(
         scope_plan_digest,
         ApiKeyPurpose::General,
         false,
+        None,
     )
     .await
 }
@@ -327,6 +334,7 @@ pub async fn create_api_key_with_scope_authorization_and_id(
         scope_plan_digest,
         ApiKeyPurpose::General,
         false,
+        None,
     )
     .await
 }
@@ -372,6 +380,43 @@ pub async fn create_api_key_with_security_class(
         scope_plan_digest,
         purpose,
         scheduled_write_enabled,
+        None,
+    )
+    .await
+}
+
+/// The Agent Key exchange uses the same creation validation inside its atomic
+/// approval transaction; no key or primary secret is committed independently.
+pub async fn create_login_api_key(
+    db: &mongodb::Database,
+    owner: &str,
+    actor: &str,
+    id: &str,
+    input: &super::auth_agent_key_login_service::NewKeyInput,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<CreatedApiKey> {
+    create_api_key_with_security_class_and_id(
+        db,
+        owner,
+        Some(actor),
+        Some(id),
+        &input.name,
+        &input.scopes,
+        expires_at,
+        None,
+        Some(&input.allowed_service_ids),
+        Some(&input.allowed_node_ids),
+        Some(input.allow_all_services),
+        Some(input.allow_all_nodes),
+        input.rate_limit_per_second,
+        input.rate_limit_burst,
+        input.platform.as_deref(),
+        None,
+        input.scope_plan_digest.as_deref(),
+        ApiKeyPurpose::General,
+        false,
+        Some(session),
     )
     .await
 }
@@ -397,6 +442,7 @@ async fn create_api_key_with_security_class_and_id(
     scope_plan_digest: Option<&str>,
     purpose: ApiKeyPurpose,
     scheduled_write_enabled: bool,
+    session: Option<&mut mongodb::ClientSession>,
 ) -> AppResult<CreatedApiKey> {
     if name.is_empty() || name.len() > 200 {
         return Err(AppError::ValidationError(
@@ -510,7 +556,7 @@ async fn create_api_key_with_security_class_and_id(
         scheduled_write_enabled,
     };
 
-    key_mutations::insert_one(db, &new_key, None).await?;
+    key_mutations::insert_one(db, &new_key, session).await?;
 
     Ok(CreatedApiKey {
         id,
@@ -591,6 +637,19 @@ pub async fn delete_api_key_with_expected_state_version(
     if result.matched_count != 1 {
         return Err(unmatched_api_key_write(db, user_id, key_id, expected_state_version).await?);
     }
+
+    let children = api_key_credential_service::revoke_children(
+        db,
+        key_id,
+        CredentialRevokedReason::ParentRevoked,
+        None,
+    )
+    .await?;
+    api_key_credential_service::audit_revocations(
+        db,
+        &children,
+        CredentialRevokedReason::ParentRevoked,
+    );
 
     tracing::info!(key_id = %key_id, user_id = %user_id, "API key deactivated");
 
@@ -717,6 +776,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
         ));
     }
 
+    let audit_db = db.clone();
     let db = db.clone();
     let user_id = user_id.to_string();
     let predecessor_id = predecessor_id.to_string();
@@ -910,6 +970,13 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                     ));
                 }
                 key_mutations::insert_one(&db, &successor, Some(&mut *session)).await?;
+                let children = api_key_credential_service::revoke_children(
+                    &db,
+                    &old_key.id,
+                    CredentialRevokedReason::ParentRotated,
+                    Some(&mut *session),
+                )
+                .await?;
 
                 if !old_bindings.is_empty() {
                     let now = rotation_material.created_at;
@@ -931,7 +998,7 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
                         .await?;
                 }
 
-                Ok(RotationTransactionOutcome::Created(successor))
+                Ok(RotationTransactionOutcome::Created(successor, children))
             }
             .await;
             key_mutations::transaction_result(operation)
@@ -943,7 +1010,12 @@ async fn rotate_api_key_with_scope_authorization_and_id_inner(
         RotationTransactionOutcome::AlreadyCommitted(key) => {
             Ok(ApiKeyRotationOutcome::AlreadyCommitted(key))
         }
-        RotationTransactionOutcome::Created(key) => {
+        RotationTransactionOutcome::Created(key, children) => {
+            api_key_credential_service::audit_revocations(
+                &audit_db,
+                &children,
+                CredentialRevokedReason::ParentRotated,
+            );
             let full_key = material
                 .lock()
                 .map_err(|_| AppError::Internal("rotation material lock poisoned".to_string()))?
@@ -1203,14 +1275,33 @@ pub async fn update_api_key_scope_with_expected_state_version(
 pub async fn validate_api_key(
     db: &mongodb::Database,
     raw_key: &str,
-) -> AppResult<(String, ApiKey)> {
+) -> AppResult<(String, ApiKey, Option<String>)> {
     let key_hash = hash_token(raw_key);
 
-    let key = db
+    let primary = db
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! { "key_hash": &key_hash, "is_active": true })
-        .await?
-        .ok_or_else(|| AppError::Unauthorized("Invalid API key".to_string()))?;
+        .await?;
+    let (key, credential_id) = if let Some(key) = primary {
+        (key, None)
+    } else {
+        let child = db
+            .collection::<ApiKeyCredential>(API_KEY_CREDENTIALS)
+            .find_one(doc! {"secret_hash": &key_hash, "is_active": true})
+            .await?
+            .ok_or_else(|| AppError::Unauthorized("Invalid API key".into()))?;
+        if child.expires_at.is_some_and(|expiry| expiry <= Utc::now()) {
+            return Err(AppError::Unauthorized(
+                "API key credential has expired".into(),
+            ));
+        }
+        let parent = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! {"_id": &child.api_key_id, "user_id": &child.user_id, "is_active": true})
+            .await?
+            .ok_or_else(|| AppError::Unauthorized("Invalid API key".into()))?;
+        (parent, Some(child.id))
+    };
 
     // Check expiration
     if let Some(expires_at) = key.expires_at
@@ -1230,7 +1321,15 @@ pub async fn validate_api_key(
     )
     .await?;
 
-    Ok((user_id, key))
+    if let Some(id) = credential_id.as_deref() {
+        db.collection::<ApiKeyCredential>(API_KEY_CREDENTIALS)
+            .update_one(
+                doc! {"_id": id},
+                doc! {"$set": {"last_used_at": bson::DateTime::from_chrono(now)}},
+            )
+            .await?;
+    }
+    Ok((user_id, key, credential_id))
 }
 
 #[cfg(test)]
@@ -2239,10 +2338,11 @@ mod tests {
         )
         .await
         .expect("create key");
-        let (returned_uid, key) = validate_api_key(&db, &created.full_key)
+        let (returned_uid, key, credential_id) = validate_api_key(&db, &created.full_key)
             .await
             .expect("should validate");
         assert_eq!(returned_uid, user_id);
+        assert!(credential_id.is_none());
         assert_eq!(key.name, "validate-me");
         let touched = get_api_key(&db, &user_id, &created.id)
             .await

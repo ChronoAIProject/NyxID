@@ -5,6 +5,9 @@ use crate::api::ApiClient;
 use crate::cli::OutputFormat;
 
 pub async fn run(api: &mut ApiClient, output: OutputFormat) -> Result<()> {
+    if api.is_agent_key_auth() {
+        return crate::auth::agent_key::show_identity(api, output).await;
+    }
     let user: Value = api.get("/users/me").await?;
 
     match output {

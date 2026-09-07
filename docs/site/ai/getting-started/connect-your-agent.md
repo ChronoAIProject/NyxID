@@ -16,7 +16,7 @@ There are two NyxID identities involved here, and only the human can move betwee
 - **You** — the human running these steps. You authenticate **once** via `nyxid login` (browser or device-code). Your session is what authorizes everything else; the CLI saves it to `~/.nyxid/`.
 - **The agent** — a separate, scoped identity (`nyxid_ag_…` API key) that **you mint for the agent** with `nyxid api-key create`. The agent reads it from `NYXID_API_KEY` in its environment and uses it for proxy requests.
 
-**Agents must never run `nyxid login`.** Device-code login requires a human to approve a code in a signed-in browser — there is nothing for an autonomous agent to "approve" on its own end. If your agent tries `nyxid login`, it will block on the approval step (interactive TTYs) or short-circuit with an api-key hint (CI / GITHUB_ACTIONS / BUILDKITE / etc.). Either way the correct action for the agent is to read its pre-issued API key from `NYXID_API_KEY` — which you set for it below.
+**Agents must never obtain a human account session through ordinary `nyxid login`.** Use a pre-issued API key in `NYXID_API_KEY`, or have a human operator enroll a restricted profile with `nyxid login --agent-key` as described below. Both Agent Key enrollment and device-code login require a human to review and approve the request; an autonomous agent cannot approve its own request.
 :::
 
 ## Install the CLI
@@ -66,6 +66,12 @@ Confirm the session is working:
 ```bash
 nyxid status
 ```
+
+### Authorize an agent profile without transferring a secret
+
+As a human operator, you can run `nyxid login --agent-key --profile my-agent --base-url <BASE_URL>` on the agent machine. Enter the terminal's code in the web UI, then choose an existing eligible key or create a limited key and confirm its permissions. **Approve from your phone** displays a QR code for the NyxID mobile app; approval stays on your phone and leaves no account login in that computer's browser.
+
+The profile stores a new restricted login credential bound to the key, not an account session. Selecting a shared key leaves its existing secret unchanged. `nyxid whoami --profile my-agent` reports Agent Key authentication; `nyxid logout --profile my-agent` revokes that credential. The key detail page can revoke one login credential or the whole key. Scopes, bindings, restrictions, rate limits, and expiry apply live, and rejected credentials never fall back to a human session. An autonomous agent cannot approve its own request; a human must review and confirm it. See [Agent Key login](/docs/cli/getting-started/authenticate#agent-key-login).
 
 ## Create an Agent Key (for the agent to use)
 

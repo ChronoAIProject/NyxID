@@ -1,3 +1,4 @@
+use super::login_client_context::*;
 use std::net::{IpAddr, SocketAddr};
 
 use axum::{
@@ -13,11 +14,9 @@ use utoipa::ToSchema;
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::apply_browser_session_cookies;
-use crate::models::auth_device_code::AuthDeviceClientIpAttribution;
 use crate::mw::auth::AuthUser;
-use crate::mw::rate_limit::{ClientIpAttribution, ResolvedClientIp};
 use crate::services::auth_device_service::{
-    self, ApproveInput, DenyInput, InitiateInput, PollClaim, PreviewOutput,
+    self, ApproveInput, DenyInput, PollClaim, PreviewOutput,
 };
 use crate::services::{audit_service, token_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
@@ -162,39 +161,10 @@ pub async fn request_auth_device(
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
 
-    let location = trusted_client_location(&headers, addr, &state.config.trusted_proxy_ips);
-    let origin = auth_device_service::classify_initiating_origin(
-        header_text(&headers, header::ORIGIN.as_str()).as_deref(),
-        &state.config.frontend_url,
-    );
-
     let initiated = auth_device_service::initiate(
         &state.db,
         state.auth_device_hmac_key.as_slice(),
-        InitiateInput {
-            client_label: body.client_label,
-            client_user_agent: body.client_user_agent,
-            client_ip: Some(client_ip.to_string()),
-            client_ip_attribution: auth_device_attribution(resolved_client.attribution),
-            client_country: location.country,
-            client_city: location.city,
-            client_region: location.region,
-            client_continent: location.continent,
-            client_ip_timezone: location.timezone,
-            initiating_origin: origin.origin,
-            initiating_origin_status: origin.status,
-            client_app: body.client_app,
-            client_platform: body.client_platform,
-            client_model: body.client_model,
-            client_form_factor: body.client_form_factor,
-            client_timezone: body.client_timezone,
-            client_locale: body.client_locale,
-            client_screen_width: body.client_screen_width,
-            client_screen_height: body.client_screen_height,
-            client_device_pixel_ratio: body.client_device_pixel_ratio,
-            client_hardware_concurrency: body.client_hardware_concurrency,
-            client_device_memory: body.client_device_memory,
-        },
+        capture_client_context(&headers, addr, &state, body)?,
     )
     .await?;
 
@@ -645,64 +615,6 @@ pub async fn preview_auth_device(
     Ok(Json(preview_response(preview)))
 }
 
-fn resolve_client_ip(headers: &HeaderMap, addr: SocketAddr, state: &AppState) -> AppResult<IpAddr> {
-    resolve_client_context(headers, addr, state).map(|resolved| resolved.ip)
-}
-
-fn resolve_client_context(
-    headers: &HeaderMap,
-    addr: SocketAddr,
-    state: &AppState,
-) -> AppResult<ResolvedClientIp> {
-    crate::mw::rate_limit::resolve_client_ip(headers, Some(addr), &state.config.trusted_proxy_ips)
-        .ok_or_else(|| AppError::Internal("unable to resolve client IP".to_string()))
-}
-
-fn auth_device_attribution(value: ClientIpAttribution) -> AuthDeviceClientIpAttribution {
-    match value {
-        ClientIpAttribution::Verified => AuthDeviceClientIpAttribution::Verified,
-        ClientIpAttribution::Unverified => AuthDeviceClientIpAttribution::Unverified,
-        ClientIpAttribution::Unavailable => AuthDeviceClientIpAttribution::Unavailable,
-    }
-}
-
-fn trusted_client_location(
-    headers: &HeaderMap,
-    peer: SocketAddr,
-    trusted_proxies: &[crate::config::TrustedProxyRange],
-) -> auth_device_service::TrustedClientLocation {
-    if !crate::mw::rate_limit::is_trusted_proxy(peer.ip(), trusted_proxies) {
-        return Default::default();
-    }
-
-    // Cloudflare also offers coordinates, postal codes, and metro codes. Those
-    // are intentionally not collected: city-level recognition is sufficient
-    // for this approval check and avoids retaining unnecessary precise location.
-    auth_device_service::TrustedClientLocation {
-        country: auth_device_service::normalize_client_country(header_text(
-            headers,
-            "cf-ipcountry",
-        )),
-        city: auth_device_service::normalize_geo_label(header_text(headers, "cf-ipcity")),
-        region: auth_device_service::normalize_geo_label(header_text(headers, "cf-region")),
-        continent: auth_device_service::normalize_client_continent(header_text(
-            headers,
-            "cf-ipcontinent",
-        )),
-        timezone: auth_device_service::normalize_client_timezone(header_text(
-            headers,
-            "cf-timezone",
-        )),
-    }
-}
-
-fn header_text(headers: &HeaderMap, name: &str) -> Option<String> {
-    headers
-        .get(name)
-        .and_then(|header| header.to_str().ok())
-        .map(String::from)
-}
-
 fn client_ip_hash(state: &AppState, ip: IpAddr) -> String {
     hmac_hex(
         state.auth_device_hmac_key.as_slice(),
@@ -742,7 +654,7 @@ fn user_agent(headers: &HeaderMap) -> Option<String> {
         .map(String::from)
 }
 
-fn preview_response(preview: PreviewOutput) -> AuthDevicePreviewResponse {
+pub(super) fn preview_response(preview: PreviewOutput) -> AuthDevicePreviewResponse {
     AuthDevicePreviewResponse {
         client_label: preview.client_label,
         client_user_agent: preview.client_user_agent,
@@ -795,6 +707,7 @@ fn trace_poll_error(client_ip_hash: &str, outcome: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::auth_device_code::AuthDeviceClientIpAttribution;
     use axum::http::{StatusCode, header};
     use mongodb::bson::doc;
     use reqwest::Client;

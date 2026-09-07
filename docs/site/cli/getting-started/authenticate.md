@@ -32,6 +32,28 @@ Authenticated commands resolve credentials in this order: `--access-token`, the 
 
 Caller-selected credentials are fail-closed: if the server rejects one, the CLI exits nonzero and does not refresh or retry with the stored session identity.
 
+## Agent Key login
+
+Authorize a CLI profile with a restricted Agent Key instead of an account session:
+
+```bash
+nyxid login --agent-key --profile home-agent --base-url <BASE_URL>
+```
+
+The CLI prints a one-time code and the bare `/login/agent-key` verification URL. Enter the code and choose **Approve on this computer** to sign in and review the request, or **Approve from your phone** to display a QR code. Scan it with the NyxID mobile app, explicitly preview the request, and approve on your phone. The phone path creates no account login in the requesting computer's browser. A web browser ignores codes in the URL; enter the terminal's code explicitly.
+
+Review the requesting device, profile, IP attribution, location, and time. Choose an existing eligible personal key or a key owned by an organization you administer, or create a new key. New keys default to `read proxy`, no allowed services or nodes, and a 90-day expiry; select the resources and expiry you intend to grant. The final confirmation shows effective permissions, resource names, allow-all warnings, expiry, and rate limits. You can reject instead of approving.
+
+Approval issues a new login credential bound to the selected key. Selecting an existing key does not change its secret, scopes, or other consumers. The CLI receives the credential once, directly from NyxID. It stores it in the profile's `token` file with mode `0600`, plus an `auth_kind` marker, safe identity metadata in `agent_key.json`, and the backend URL. Stale account access tokens, refresh tokens, and user IDs are removed. No account session is stored, and unsupported backends fail without falling back to account login.
+
+`nyxid whoami` and `nyxid status` identify **Authentication: Agent Key**. The key's live scopes, service and node restrictions, bindings, rate limits, and expiry remain authoritative. Credentials cannot outlive a key's expiry. Rejected credentials fail without refreshing or switching identities; `nyxid session refresh` exits with code 3 because Agent Key sessions do not refresh.
+
+Identity output includes the credential's hostname/profile label. `status` then lists the account, AI services, API keys, and nodes; sections denied by the key's scope display "unavailable with this key's scope". JSON output includes an `auth` object and uses `null` for unavailable sections. A missing local credential prompts reauthorization for that profile; a server rejection still fails the command.
+
+`nyxid logout --profile home-agent` attempts to revoke this login credential and always clears the local credential, reporting whether server revocation succeeded. In the web console, open the key's **Login credentials** section to revoke a specific CLI login. Revoking or rotating the key invalidates every credential issued under it. Revocation and expiry take effect on subsequent authenticated requests. Abandoned approvals expire after a 60-second delivery window and their credentials are revoked automatically.
+
+`--agent-key` cannot be combined with `--device` or `--password`. It supports headless polling, including a human authorizing a waiting CI job; unattended jobs should normally use a pre-issued credential through the existing environment-variable options.
+
 ## Check your session
 
 ```bash

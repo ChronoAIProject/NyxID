@@ -4,7 +4,6 @@ import { zodResolver } from "@hookform/resolvers/zod";
 import {
   createApiKeySchema,
   type CreateApiKeyFormData,
-  API_KEY_SCOPES,
 } from "@/schemas/api-keys";
 import { PLATFORM_OPTIONS } from "@/schemas/agent-bindings";
 import { useCreateApiKey } from "@/hooks/use-api-keys";
@@ -12,7 +11,6 @@ import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { useOrgs } from "@/hooks/use-orgs";
 import { OrgScopeSelect } from "@/components/shared/org-scope-select";
-import { ServiceIcon } from "@/components/service-icon";
 import { copyToClipboard } from "@/lib/utils";
 import { ApiError } from "@/lib/api-client";
 import {
@@ -37,24 +35,18 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { Badge } from "@/components/ui/badge";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
-import { Copy, Check, Shield, Server } from "lucide-react";
+import { Copy, Check } from "lucide-react";
 import { PlatformIcon } from "@/components/platform-icon";
-import { DatePicker } from "@/components/ui/date-picker";
+import {
+  ApiKeyNameField,
+  ApiKeyScopesField,
+  ApiKeyExpiryField,
+  ApiKeyResourceFields,
+} from "./api-key-form-fields";
 import { toast } from "sonner";
 import type { CredentialSource } from "@/schemas/orgs";
 import type { KeyInfo } from "@/types/keys";
 import type { NodeInfo } from "@/types/nodes";
-
-function toggleInArray(
-  items: readonly string[],
-  item: string,
-): readonly string[] {
-  return items.includes(item)
-    ? items.filter((i) => i !== item)
-    : [...items, item];
-}
 
 function sourceMatchesSelectedOwner(
   source: CredentialSource | undefined,
@@ -135,7 +127,6 @@ export function ApiKeyCreateDialog({
   });
 
   const watchAllServices = form.watch("allow_all_services") ?? true;
-  const watchAllNodes = form.watch("allow_all_nodes") ?? true;
   const watchAllowedServices = form.watch("allowed_service_ids") ?? [];
   const watchTargetOrg = form.watch("target_org_id");
   const setupRequiresServiceSelection =
@@ -259,7 +250,9 @@ export function ApiKeyCreateDialog({
                   </Link>
                 </Button>
               )}
-              <Button variant="primary" onClick={handleClose}>Done</Button>
+              <Button variant="primary" onClick={handleClose}>
+                Done
+              </Button>
             </DialogFooter>
           </>
         ) : (
@@ -286,19 +279,7 @@ export function ApiKeyCreateDialog({
                   </div>
                 )}
 
-                <FormField
-                  control={form.control}
-                  name="name"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Name</FormLabel>
-                      <FormControl>
-                        <Input placeholder="My API Key" {...field} />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+                <ApiKeyNameField form={form} />
 
                 {setupMode && (
                   <FormField
@@ -311,7 +292,11 @@ export function ApiKeyCreateDialog({
                           {PLATFORM_OPTIONS.map((platform) => (
                             <Badge
                               key={platform}
-                              variant={field.value === platform ? "default" : "secondary"}
+                              variant={
+                                field.value === platform
+                                  ? "default"
+                                  : "secondary"
+                              }
                               className="cursor-pointer gap-1"
                               onClick={() => field.onChange(platform)}
                             >
@@ -364,64 +349,9 @@ export function ApiKeyCreateDialog({
                   />
                 )}
 
-                <FormField
-                  control={form.control}
-                  name="scopes"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>Scopes</FormLabel>
-                      <div className="flex flex-wrap gap-2">
-                        {API_KEY_SCOPES.map((scope) => {
-                          const isSelected = (
-                            field.value as readonly string[]
-                          ).includes(scope);
-                          return (
-                            <Badge
-                              key={scope}
-                              variant={isSelected ? "default" : "secondary"}
-                              className="cursor-pointer"
-                              onClick={() =>
-                                field.onChange(
-                                  toggleInArray(
-                                    field.value as readonly string[],
-                                    scope,
-                                  ),
-                                )
-                              }
-                            >
-                              {scope}
-                            </Badge>
-                          );
-                        })}
-                      </div>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+                <ApiKeyScopesField form={form} />
 
-                <FormField
-                  control={form.control}
-                  name="expires_at"
-                  render={({ field }) => (
-                    <FormItem>
-                      <FormLabel>
-                        Expiry Date{" "}
-                        <span className="text-muted-foreground">
-                          (optional)
-                        </span>
-                      </FormLabel>
-                      <FormControl>
-                        <DatePicker
-                          value={field.value ?? null}
-                          onChange={(v) => field.onChange(v)}
-                          minDate={new Date().toISOString().slice(0, 10)}
-                          placeholder="No expiry"
-                        />
-                      </FormControl>
-                      <FormMessage />
-                    </FormItem>
-                  )}
-                />
+                <ApiKeyExpiryField form={form} />
 
                 <FormField
                   control={form.control}
@@ -446,220 +376,30 @@ export function ApiKeyCreateDialog({
                         />
                       </FormControl>
                       <p className="text-xs text-muted-foreground">
-                        Where NyxID sends channel relay messages. Required for Channel Bot routing.
+                        Where NyxID sends channel relay messages. Required for
+                        Channel Bot routing.
                       </p>
                       <FormMessage />
                     </FormItem>
                   )}
                 />
 
-                {/* Access scope section */}
-                <div className="space-y-3 rounded-lg border border-border p-4">
-                  <p className="text-[12px] font-medium">Access Scope</p>
-                  <p className="text-xs text-muted-foreground">
-                    Restrict which services and nodes this key can access via proxy.
-                    {setupMode
-                      ? " Keep service access narrow, then verify the allowed service succeeds and an unselected service is denied before giving the key to an agent."
-                      : ""}
-                  </p>
-
-                  {/* Service scope */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
-                        <Shield className="h-3.5 w-3.5" />
-                        Services
-                      </div>
-                      <FormField
-                        control={form.control}
-                        name="allow_all_services"
-                        render={({ field }) => (
-                          <FormItem>
-                            <div className="flex items-center gap-2">
-                              <Checkbox
-                                id="allow-all-services"
-                                checked={field.value}
-                                onCheckedChange={(checked) =>
-                                  field.onChange(checked === true)
-                                }
-                              />
-                              <Label
-                                htmlFor="allow-all-services"
-                                className="text-[12px]"
-                              >
-                                Allow all
-                              </Label>
-                            </div>
-                          </FormItem>
-                        )}
-                      />
-                    </div>
-
-                    {!watchAllServices && (
-                      <FormField
-                        control={form.control}
-                        name="allowed_service_ids"
-                        render={({ field }) => {
-                          const visibleServices = (services ?? []).filter(
-                            (s) => serviceCanBeScopedToKey(s, watchTargetOrg),
-                          );
-                          return (
-                            <FormItem>
-                              <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
-                                <p className="text-xs text-muted-foreground">
-                                  Select allowed services:
-                                </p>
-                                {visibleServices.length > 0 ? (
-                                  visibleServices.map((s) => (
-                                    <div
-                                      key={s.id}
-                                      className="flex items-center gap-2"
-                                    >
-                                      <Checkbox
-                                        id={`create-svc-${s.id}`}
-                                        checked={(
-                                          field.value as readonly string[]
-                                        ).includes(s.id)}
-                                        onCheckedChange={() =>
-                                          field.onChange(
-                                            toggleInArray(
-                                              field.value as readonly string[],
-                                              s.id,
-                                            ),
-                                          )
-                                        }
-                                      />
-                                      <ServiceIcon
-                                        slug={s.catalog_service_slug}
-                                        size="2xs"
-                                      />
-                                      <Label
-                                        htmlFor={`create-svc-${s.id}`}
-                                        className="text-xs"
-                                      >
-                                        {s.label}
-                                        <span className="ml-1 text-muted-foreground">
-                                          ({s.slug})
-                                        </span>
-                                      </Label>
-                                    </div>
-                                  ))
-                                ) : (
-                                  <p className="text-xs text-muted-foreground">
-                                    {watchTargetOrg
-                                      ? "This org has no services yet."
-                                      : "No services available for this personal key."}
-                                  </p>
-                                )}
-                              </div>
-                              <FormMessage />
-                            </FormItem>
-                          );
-                        }}
-                      />
-                    )}
-                  </div>
-
-                  {/* Node scope */}
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-1.5 text-[12px] font-medium text-muted-foreground">
-                        <Server className="h-3.5 w-3.5" />
-                        Nodes
-                      </div>
-                      <FormField
-                        control={form.control}
-                        name="allow_all_nodes"
-                        render={({ field }) => (
-                          <FormItem>
-                            <div className="flex items-center gap-2">
-                              <Checkbox
-                                id="allow-all-nodes"
-                                checked={field.value}
-                                onCheckedChange={(checked) =>
-                                  field.onChange(checked === true)
-                                }
-                              />
-                              <Label
-                                htmlFor="allow-all-nodes"
-                                className="text-[12px]"
-                              >
-                                Allow all
-                              </Label>
-                            </div>
-                          </FormItem>
-                        )}
-                      />
-                    </div>
-
-                    {!watchAllNodes && (
-                      <FormField
-                        control={form.control}
-                        name="allowed_node_ids"
-                        render={({ field }) => {
-                          const visibleNodes = (nodes ?? []).filter((node) =>
-                            nodeCanBeScopedToKey(node, watchTargetOrg),
-                          );
-                          return (
-                            <FormItem>
-                              <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
-                                <p className="text-xs text-muted-foreground">
-                                  Select allowed nodes:
-                                </p>
-                                {visibleNodes.length > 0 ? (
-                                  visibleNodes.map((n) => (
-                                    <div
-                                      key={n.id}
-                                      className="flex items-center gap-2"
-                                    >
-                                      <Checkbox
-                                        id={`create-node-${n.id}`}
-                                        checked={(
-                                          field.value as readonly string[]
-                                        ).includes(n.id)}
-                                        onCheckedChange={() =>
-                                          field.onChange(
-                                            toggleInArray(
-                                              field.value as readonly string[],
-                                              n.id,
-                                            ),
-                                          )
-                                        }
-                                      />
-                                      <Label
-                                        htmlFor={`create-node-${n.id}`}
-                                        className="text-xs"
-                                      >
-                                        {n.name}
-                                        <Badge
-                                          variant={
-                                            n.status === "Online"
-                                              ? "default"
-                                              : "secondary"
-                                          }
-                                          className="ml-1 text-[10px]"
-                                        >
-                                          {n.status}
-                                        </Badge>
-                                      </Label>
-                                    </div>
-                                  ))
-                                ) : (
-                                  <p className="text-xs text-muted-foreground">
-                                    {watchTargetOrg
-                                      ? "This org has no nodes yet."
-                                      : "No nodes available for this personal key."}
-                                  </p>
-                                )}
-                              </div>
-                              <FormMessage />
-                            </FormItem>
-                          );
-                        }}
-                      />
-                    )}
-                  </div>
-                </div>
+                <ApiKeyResourceFields
+                  form={form}
+                  services={(services ?? [])
+                    .filter((service) =>
+                      serviceCanBeScopedToKey(service, watchTargetOrg),
+                    )
+                    .map((service) => ({
+                      id: service.id,
+                      name: service.label || service.slug,
+                    }))}
+                  nodes={(nodes ?? [])
+                    .filter((node) =>
+                      nodeCanBeScopedToKey(node, watchTargetOrg),
+                    )
+                    .map((node) => ({ id: node.id, name: node.name }))}
+                />
 
                 <DialogFooter>
                   <Button type="button" variant="outline" onClick={handleClose}>
@@ -669,7 +409,10 @@ export function ApiKeyCreateDialog({
                     variant="primary"
                     type="submit"
                     isLoading={createMutation.isPending}
-                    disabled={!form.watch("name").trim() || setupRequiresServiceSelection}
+                    disabled={
+                      !form.watch("name").trim() ||
+                      setupRequiresServiceSelection
+                    }
                   >
                     {setupMode ? "Create Agent Key" : "Create Key"}
                   </Button>

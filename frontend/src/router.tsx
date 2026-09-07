@@ -74,6 +74,7 @@ import {
   CliAuthPage,
   CliPairPage,
   LoginDevicePage,
+  LoginAgentKeyPage,
   ConnectLinkPage,
   ConnectLinkReturnPage,
   OAuthLaunchingPage,
@@ -253,6 +254,13 @@ const cliPairRoute = createRoute({
   path: "/cli/pair",
   getParentRoute: () => rootRoute,
   component: CliPairPage,
+});
+
+export const loginAgentKeyRoute = createRoute({
+  path: "/login/agent-key",
+  getParentRoute: () => rootRoute,
+  validateSearch: (): Record<string, never> => ({}),
+  component: LoginAgentKeyPage,
 });
 
 const loginDeviceRoute = createRoute({
@@ -900,6 +908,7 @@ const routeTree = rootRoute.addChildren([
   cliAuthRoute,
   cliPairRoute,
   loginDeviceRoute,
+  loginAgentKeyRoute,
   connectLinkRoute,
   connectLinkReturnRoute,
   sshTerminalRoute,

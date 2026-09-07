@@ -489,6 +489,9 @@ pub struct LoginArgs {
     /// Use RFC 8628 device-code login instead of opening the browser
     #[arg(long, conflicts_with = "password")]
     pub device: bool,
+    /// Authorize this CLI with an Agent Key chosen or created in the web UI (no account session is stored)
+    #[arg(long, conflicts_with_all = ["password", "device"])]
+    pub agent_key: bool,
     /// Email address (only used with --password)
     #[arg(long)]
     pub email: Option<String>,

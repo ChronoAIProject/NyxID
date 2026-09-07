@@ -76,6 +76,8 @@ pub struct AuthUser {
     pub api_key_id: Option<String>,
     /// Human-readable API key name (for audit logs)
     pub api_key_name: Option<String>,
+    /// Child login credential used for this request, retaining parent authority.
+    pub api_key_credential_id: Option<String>,
     /// Immutable security class copied from the verified API key. Non-API-key
     /// authentication contexts use `general`.
     pub api_key_purpose: ApiKeyPurpose,
@@ -308,6 +310,11 @@ fn ensure_api_key_purpose_route(api_key: &ApiKey, path: &str) -> Result<(), AppE
 }
 
 fn api_key_management_write_requires_scope(method: &Method, path: &str) -> bool {
+    // A restricted login credential can always revoke itself. The handler
+    // requires the calling child identity and cannot revoke another credential.
+    if *method == Method::DELETE && path == "/api/v1/auth/agent-key/self" {
+        return false;
+    }
     if !matches!(
         *method,
         Method::POST | Method::PUT | Method::PATCH | Method::DELETE
@@ -591,7 +598,7 @@ impl FromRequestParts<AppState> for AuthUser {
                             match crate::services::key_service::validate_api_key(&state.db, token)
                                 .await
                             {
-                                Ok((api_user_id_str, api_key)) => {
+                                Ok((api_user_id_str, api_key, credential_id)) => {
                                     ensure_api_key_purpose_route(&api_key, parts.uri.path())?;
                                     let user_id =
                                         Uuid::parse_str(&api_user_id_str).map_err(|_| {
@@ -634,6 +641,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                         allowed_node_ids: api_key.allowed_node_ids.clone(),
                                         api_key_id: Some(api_key.id.clone()),
                                         api_key_name: Some(api_key.name.clone()),
+                                        api_key_credential_id: credential_id,
                                         api_key_purpose: api_key.purpose,
                                         rate_limit_per_second: api_key.rate_limit_per_second,
                                         rate_limit_burst: api_key.rate_limit_burst,
@@ -726,6 +734,7 @@ impl FromRequestParts<AppState> for AuthUser {
                             allowed_node_ids: vec![],
                             api_key_id: None,
                             api_key_name: None,
+                            api_key_credential_id: None,
                             api_key_purpose: ApiKeyPurpose::General,
                             rate_limit_per_second: None,
                             rate_limit_burst: None,
@@ -862,6 +871,7 @@ impl FromRequestParts<AppState> for AuthUser {
                         allowed_node_ids,
                         api_key_id,
                         api_key_name,
+                        api_key_credential_id: None,
                         api_key_purpose: ApiKeyPurpose::General,
                         rate_limit_per_second: None,
                         rate_limit_burst: None,
@@ -933,6 +943,7 @@ impl FromRequestParts<AppState> for AuthUser {
                                     allowed_node_ids: vec![],
                                     api_key_id: None,
                                     api_key_name: None,
+                                    api_key_credential_id: None,
                                     api_key_purpose: ApiKeyPurpose::General,
                                     rate_limit_per_second: None,
                                     rate_limit_burst: None,
@@ -972,7 +983,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     .to_str()
                     .map_err(|_| AppError::Unauthorized("Invalid API key header".to_string()))?;
 
-                let (user_id_str, key) =
+                let (user_id_str, key, credential_id) =
                     crate::services::key_service::validate_api_key(&state.db, api_key).await?;
                 ensure_api_key_purpose_route(&key, parts.uri.path())?;
 
@@ -1012,6 +1023,7 @@ impl FromRequestParts<AppState> for AuthUser {
                     allowed_node_ids: key.allowed_node_ids.clone(),
                     api_key_id: Some(key.id.clone()),
                     api_key_name: Some(key.name.clone()),
+                    api_key_credential_id: credential_id,
                     api_key_purpose: key.purpose,
                     rate_limit_per_second: key.rate_limit_per_second,
                     rate_limit_burst: key.rate_limit_burst,
@@ -1420,6 +1432,7 @@ mod tests {
             allowed_node_ids: vec![],
             api_key_id: None,
             api_key_name: None,
+            api_key_credential_id: None,
             api_key_purpose: ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,
@@ -2785,6 +2798,7 @@ mod tests {
             allowed_node_ids: vec![],
             api_key_id: Some("key-uuid-123".to_string()),
             api_key_name: Some("coding-agent".to_string()),
+            api_key_credential_id: None,
             api_key_purpose: ApiKeyPurpose::General,
             rate_limit_per_second: None,
             rate_limit_burst: None,
