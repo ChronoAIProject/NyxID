@@ -1902,24 +1902,9 @@ fn build_router_internal(
         .nest("/api/v1/webhooks/triggers", trigger_webhook_routes)
         // Channel bot webhook routes -- unauthenticated (per-bot signature verified)
         .route(
-            "/api/v1/webhooks/channel/telegram/{bot_id}",
-            post(handlers::channel_webhooks::telegram_webhook),
-        )
-        .route(
-            "/api/v1/webhooks/channel/discord/{bot_id}",
-            post(handlers::channel_webhooks::discord_webhook),
-        )
-        .route(
-            "/api/v1/webhooks/channel/lark/{bot_id}",
-            post(handlers::channel_webhooks::lark_webhook),
-        )
-        .route(
-            "/api/v1/webhooks/channel/feishu/{bot_id}",
-            post(handlers::channel_webhooks::feishu_webhook),
-        )
-        .route(
-            "/api/v1/webhooks/channel/slack/{bot_id}",
-            post(handlers::channel_webhooks::slack_webhook),
+            "/api/v1/webhooks/channel/{platform}/{bot_id}",
+            get(handlers::channel_webhooks::channel_subscription)
+                .post(handlers::channel_webhooks::channel_webhook),
         )
         .nest("/api/v1/integrations", integration_routes)
         .nest("/api/v1/node-agent", node_agent_routes)

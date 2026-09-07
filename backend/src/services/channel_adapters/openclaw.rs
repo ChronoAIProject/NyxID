@@ -35,6 +35,13 @@ impl PlatformAdapter for OpenClawAdapter {
         "openclaw"
     }
 
+    fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
+        super::super::channel_platform::RegistrationDescriptor {
+            enabled: false,
+            ..Default::default()
+        }
+    }
+
     /// Webhook verification is handled by the legacy OpenClaw handler which
     /// performs per-mapping HMAC-SHA256 verification via
     /// `openclaw_channel_service::verify_webhook_for_mapping`. This is a no-op
@@ -97,10 +104,11 @@ impl PlatformAdapter for OpenClawAdapter {
     async fn send_reply(
         &self,
         _http: &reqwest::Client,
-        _bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
         _conversation_id: &str,
         _reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        let _bot_token = credentials.token;
         Ok(None)
     }
 
@@ -121,8 +129,9 @@ impl PlatformAdapter for OpenClawAdapter {
     async fn verify_bot_token(
         &self,
         _http: &reqwest::Client,
-        _bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
+        let _bot_token = credentials.token;
         Ok(BotIdentity {
             platform_bot_id: "openclaw".to_string(),
             platform_bot_username: "openclaw".to_string(),
@@ -249,7 +258,9 @@ mod tests {
             reply_to_platform_message_id: None,
             metadata: None,
         };
-        let result = adapter.send_reply(&http, "", "conv_id", &reply).await;
+        let result = adapter
+            .send_reply(&http, &"".into(), "conv_id", &reply)
+            .await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
     }
@@ -268,7 +279,10 @@ mod tests {
     async fn verify_bot_token_returns_placeholder() {
         let adapter = OpenClawAdapter;
         let http = reqwest::Client::new();
-        let identity = adapter.verify_bot_token(&http, "any_token").await.unwrap();
+        let identity = adapter
+            .verify_bot_token(&http, &"any_token".into())
+            .await
+            .unwrap();
         assert_eq!(identity.platform_bot_id, "openclaw");
         assert_eq!(identity.platform_bot_username, "openclaw");
     }

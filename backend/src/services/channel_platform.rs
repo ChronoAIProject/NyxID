@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+pub use super::channel_registration::{BotCredentials, RegistrationDescriptor, RegistrationValues};
 use crate::errors::AppResult;
 
 /// Verified bot identity returned by the platform after token validation.
@@ -75,26 +76,40 @@ pub struct OutboundEdit {
 /// handler. Secrets never live on persisted model structs.
 #[derive(Clone, Default)]
 pub struct PlatformVerifySecrets {
-    pub slack_signing_secret: Option<String>,
-    pub lark_verification_token: Option<String>,
-    pub lark_encrypt_key: Option<String>,
+    values: std::collections::BTreeMap<String, zeroize::Zeroizing<String>>,
+}
+
+impl PlatformVerifySecrets {
+    pub fn insert(&mut self, name: &str, value: String) {
+        self.values
+            .insert(name.to_string(), zeroize::Zeroizing::new(value));
+    }
+
+    pub fn get(&self, name: &str) -> Option<&str> {
+        self.values.get(name).map(|value| value.as_str())
+    }
+}
+
+impl<const N: usize> From<[(&str, &str); N]> for PlatformVerifySecrets {
+    fn from(values: [(&str, &str); N]) -> Self {
+        let mut secrets = Self::default();
+        for (name, value) in values {
+            secrets.insert(name, value.to_string());
+        }
+        secrets
+    }
 }
 
 impl std::fmt::Debug for PlatformVerifySecrets {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PlatformVerifySecrets")
-            .field(
-                "slack_signing_secret",
-                &self.slack_signing_secret.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "lark_verification_token",
-                &self.lark_verification_token.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "lark_encrypt_key",
-                &self.lark_encrypt_key.as_ref().map(|_| "[REDACTED]"),
-            )
+        if self.values.is_empty() {
+            return f
+                .debug_struct("PlatformVerifySecrets")
+                .field("values", &Option::<()>::None)
+                .finish();
+        }
+        f.debug_map()
+            .entries(self.values.keys().map(|key| (key, "[REDACTED]")))
             .finish()
     }
 }
@@ -106,12 +121,102 @@ pub struct PreparedWebhook {
     pub challenge_response: Option<serde_json::Value>,
 }
 
+/// Challenge-only responses perform no relay work. Immediate acknowledgments
+/// dispatch processing in the background; inline adapters can verify challenges.
+pub enum WebhookPolicy {
+    Inline,
+    Immediate(Option<serde_json::Value>),
+    Challenge(serde_json::Value),
+}
+
+pub fn insert_reply_context(metadata: &mut Option<serde_json::Value>, key: &str, value: &str) {
+    if let Some(object) = metadata
+        .get_or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+    {
+        object
+            .entry(key)
+            .or_insert_with(|| serde_json::json!(value));
+    }
+}
+
 /// Trait that each chat platform (Telegram, Discord, Lark, Feishu) implements
 /// to normalize webhook verification, message parsing, and reply sending.
 #[async_trait::async_trait]
 pub trait PlatformAdapter: Send + Sync {
     /// Platform identifier (e.g. "telegram", "discord", "lark", "feishu").
     fn platform_id(&self) -> &str;
+
+    fn registration(&self) -> RegistrationDescriptor {
+        RegistrationDescriptor::default()
+    }
+
+    fn registration_token(
+        &self,
+        fields: &RegistrationValues<'_>,
+    ) -> AppResult<zeroize::Zeroizing<String>> {
+        Ok(zeroize::Zeroizing::new(
+            fields.get("bot_token").unwrap_or_default().to_string(),
+        ))
+    }
+
+    fn updated_token(
+        &self,
+        _current: &str,
+        fields: &RegistrationValues<'_>,
+    ) -> AppResult<Option<zeroize::Zeroizing<String>>> {
+        Ok(fields
+            .get("bot_token")
+            .map(|token| zeroize::Zeroizing::new(token.to_string())))
+    }
+
+    fn updated_token_error(&self, error: crate::errors::AppError) -> crate::errors::AppError {
+        error
+    }
+
+    fn validate_stored_verification(
+        &self,
+        _bot: &crate::models::channel_bot::ChannelBot,
+    ) -> AppResult<()> {
+        Ok(())
+    }
+
+    async fn build_verify_secrets(
+        &self,
+        keys: &crate::crypto::aes::EncryptionKeys,
+        bot: &crate::models::channel_bot::ChannelBot,
+    ) -> AppResult<PlatformVerifySecrets> {
+        self.registration().verification_secrets(keys, bot).await
+    }
+
+    fn webhook_policy(&self, _body: &[u8]) -> WebhookPolicy {
+        WebhookPolicy::Inline
+    }
+
+    fn subscription_handshake(
+        &self,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _query: &std::collections::HashMap<String, String>,
+    ) -> AppResult<String> {
+        Err(crate::errors::AppError::Forbidden(
+            "Subscription handshake is not supported".to_string(),
+        ))
+    }
+
+    fn reply_context(
+        &self,
+        thread_id: Option<&str>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        metadata: &mut Option<serde_json::Value>,
+    ) {
+        super::channel_adapters::discord::apply_interaction_context(
+            thread_id, created_at, metadata,
+        );
+    }
+
+    fn supports_reply_metadata(&self, _metadata: &serde_json::Value) -> bool {
+        false
+    }
 
     /// Verify and preprocess the webhook payload before parsing. Adapters may
     /// return a platform challenge response or a transformed body (for example,
@@ -147,7 +252,7 @@ pub trait PlatformAdapter: Send + Sync {
     async fn send_reply(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &BotCredentials<'_>,
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>>;
@@ -176,7 +281,7 @@ pub trait PlatformAdapter: Send + Sync {
     async fn verify_bot_token(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &BotCredentials<'_>,
     ) -> AppResult<BotIdentity>;
 
     /// Handle a platform-specific verification challenge (e.g. Discord PING,
@@ -195,18 +300,14 @@ mod tests {
     #[test]
     fn platform_verify_secrets_default_all_none() {
         let secrets = PlatformVerifySecrets::default();
-        assert!(secrets.slack_signing_secret.is_none());
-        assert!(secrets.lark_verification_token.is_none());
-        assert!(secrets.lark_encrypt_key.is_none());
+        assert!(secrets.get("app_secret").is_none());
+        assert!(secrets.get("verification_token").is_none());
+        assert!(secrets.get("encrypt_key").is_none());
     }
 
     #[test]
     fn platform_verify_secrets_debug_redacts_slack_signing_secret() {
-        let secrets = PlatformVerifySecrets {
-            slack_signing_secret: Some("super-secret-slack-value".to_string()),
-            lark_verification_token: None,
-            lark_encrypt_key: None,
-        };
+        let secrets = PlatformVerifySecrets::from([("app_secret", "super-secret-slack-value")]);
         let debug_output = format!("{:?}", secrets);
         assert!(
             !debug_output.contains("super-secret-slack-value"),
@@ -220,11 +321,7 @@ mod tests {
 
     #[test]
     fn platform_verify_secrets_debug_redacts_lark_verification_token() {
-        let secrets = PlatformVerifySecrets {
-            slack_signing_secret: None,
-            lark_verification_token: Some("lark-token-value".to_string()),
-            lark_encrypt_key: None,
-        };
+        let secrets = PlatformVerifySecrets::from([("verification_token", "lark-token-value")]);
         let debug_output = format!("{:?}", secrets);
         assert!(!debug_output.contains("lark-token-value"));
         assert!(debug_output.contains("[REDACTED]"));
@@ -232,11 +329,7 @@ mod tests {
 
     #[test]
     fn platform_verify_secrets_debug_redacts_lark_encrypt_key() {
-        let secrets = PlatformVerifySecrets {
-            slack_signing_secret: None,
-            lark_verification_token: None,
-            lark_encrypt_key: Some("encrypt-key-raw".to_string()),
-        };
+        let secrets = PlatformVerifySecrets::from([("encrypt_key", "encrypt-key-raw")]);
         let debug_output = format!("{:?}", secrets);
         assert!(!debug_output.contains("encrypt-key-raw"));
         assert!(debug_output.contains("[REDACTED]"));
@@ -244,11 +337,11 @@ mod tests {
 
     #[test]
     fn platform_verify_secrets_debug_redacts_all_fields() {
-        let secrets = PlatformVerifySecrets {
-            slack_signing_secret: Some("s1".to_string()),
-            lark_verification_token: Some("s2".to_string()),
-            lark_encrypt_key: Some("s3".to_string()),
-        };
+        let secrets = PlatformVerifySecrets::from([
+            ("app_secret", "s1"),
+            ("verification_token", "s2"),
+            ("encrypt_key", "s3"),
+        ]);
         let debug_output = format!("{:?}", secrets);
         assert!(!debug_output.contains("s1"));
         assert!(!debug_output.contains("s2"));

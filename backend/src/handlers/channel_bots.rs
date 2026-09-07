@@ -14,7 +14,7 @@ use crate::services::channel_adapters::lark::LarkFamilyAdapter;
 use crate::services::channel_adapters::openclaw::OpenClawAdapter;
 use crate::services::channel_adapters::slack::SlackAdapter;
 use crate::services::channel_adapters::telegram::TelegramAdapter;
-use crate::services::channel_platform::PlatformAdapter;
+use crate::services::channel_platform::{BotCredentials, PlatformAdapter, RegistrationValues};
 use crate::services::{audit_service, channel_bot_service, lark_permission, org_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
@@ -37,6 +37,10 @@ pub struct CreateChannelBotRequest {
     pub encrypt_key: Option<String>,
     #[serde(default)]
     pub public_key: Option<String>,
+    #[serde(default)]
+    pub phone_number_id: Option<String>,
+    #[serde(default)]
+    pub waba_id: Option<String>,
     /// When set, create this channel bot under the given org. The
     /// resulting `ChannelBot.user_id` is the org's user id, making
     /// it visible to every org admin and to the org-delete blocker.
@@ -47,6 +51,8 @@ pub struct CreateChannelBotRequest {
 
 #[derive(Deserialize)]
 pub struct UpdateChannelBotRequest {
+    #[serde(default)]
+    pub bot_token: Option<String>,
     #[serde(default)]
     pub label: Option<String>,
     #[serde(default)]
@@ -88,6 +94,8 @@ impl std::fmt::Debug for CreateChannelBotRequest {
                 &self.encrypt_key.as_ref().map(|_| "[REDACTED]"),
             )
             .field("public_key", &self.public_key)
+            .field("phone_number_id", &self.phone_number_id)
+            .field("waba_id", &self.waba_id)
             .field("target_org_id", &self.target_org_id)
             .finish()
     }
@@ -102,6 +110,7 @@ impl std::fmt::Display for CreateChannelBotRequest {
 impl std::fmt::Debug for UpdateChannelBotRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("UpdateChannelBotRequest")
+            .field("bot_token", &self.bot_token.as_ref().map(|_| "[REDACTED]"))
             .field("label", &self.label)
             .field(
                 "verification_token",
@@ -142,19 +151,11 @@ pub(crate) fn hash_conversation_id(id: &str) -> String {
     hex::encode(&digest[..8])
 }
 
-fn ensure_lark_verify_material_present(
+fn ensure_verify_material_present(
     bot: &crate::models::channel_bot::ChannelBot,
+    adapter: &dyn PlatformAdapter,
 ) -> AppResult<()> {
-    if matches!(bot.platform.as_str(), "lark" | "feishu")
-        && bot.lark_verification_token_encrypted.is_none()
-    {
-        return Err(AppError::ValidationError(format!(
-            "Lark/Feishu bot is missing Verification Token. PATCH /api/v1/channel-bots/{} with verification_token before verify.",
-            bot.id
-        )));
-    }
-
-    Ok(())
+    adapter.validate_stored_verification(bot)
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +187,11 @@ pub struct ChannelBotListResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelBotDetailResponse {
+    #[serde(flatten)]
+    pub platform_config: std::collections::BTreeMap<String, String>,
+    pub webhook_url: String,
+    pub webhook_secret_label: Option<&'static str>,
+    pub setup_instructions: &'static [&'static str],
     pub id: String,
     pub platform: String,
     pub label: String,
@@ -213,8 +219,14 @@ pub struct ChannelBotDetailResponse {
     pub permission_setup_scopes: Option<Vec<String>>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct CreateChannelBotResponse {
+    #[serde(flatten)]
+    pub platform_config: std::collections::BTreeMap<String, String>,
+    pub webhook_url: String,
+    pub webhook_secret: Option<String>,
+    pub webhook_secret_label: Option<&'static str>,
+    pub setup_instructions: &'static [&'static str],
     pub id: String,
     pub platform: String,
     pub platform_bot_username: String,
@@ -233,6 +245,16 @@ pub struct VerifyBotResponse {
     pub id: String,
     pub status: String,
     pub webhook_registered: bool,
+}
+
+impl std::fmt::Debug for CreateChannelBotResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateChannelBotResponse")
+            .field("id", &self.id)
+            .field("platform", &self.platform)
+            .field("webhook_secret", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -343,9 +365,12 @@ pub fn resolve_adapter(
             token_exchange_cache.clone(),
         ))),
         "slack" => Ok(Box::new(SlackAdapter)),
+        "whatsapp" => Ok(Box::new(
+            crate::services::channel_adapters::whatsapp::WhatsAppAdapter,
+        )),
         "openclaw" => Ok(Box::new(OpenClawAdapter)),
         other => Err(AppError::ValidationError(format!(
-            "unsupported platform: {other}. Supported: telegram, discord, lark, feishu, slack, openclaw"
+            "unsupported platform: {other}. Supported: telegram, discord, lark, feishu, slack, whatsapp, openclaw"
         ))),
     }
 }
@@ -400,65 +425,30 @@ pub async fn create_bot(
 ) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
     let actor = auth_user.user_id.to_string();
 
-    // Only platforms with working webhook routes can be registered as bots.
-    // OpenClaw uses a separate integration path (openclaw_channel handler).
-    if !matches!(
-        body.platform.as_str(),
-        "telegram" | "discord" | "lark" | "feishu" | "slack"
-    ) {
-        return Err(AppError::ValidationError(format!(
-            "unsupported bot platform: {}. Supported: telegram, discord, lark, feishu, slack",
-            body.platform
-        )));
-    }
-
     let adapter = resolve_adapter(&body.platform, &state.token_exchange_cache)?;
-
+    let descriptor = adapter.registration();
     let label = body.label.trim();
-    let bot_token = body.bot_token.trim();
-    let app_id = normalize_optional_field(body.app_id.as_deref());
-    let app_secret = normalize_optional_field(body.app_secret.as_deref());
-    let verification_token = normalize_optional_field(body.verification_token.as_deref());
-    let encrypt_key = normalize_optional_field(body.encrypt_key.as_deref());
-    let public_key = normalize_optional_field(body.public_key.as_deref());
-
-    // Validate label length (service also validates, but fail fast here)
     if label.is_empty() || label.len() > 128 {
         return Err(AppError::ValidationError(
             "Label must be between 1 and 128 characters".to_string(),
         ));
     }
-    if bot_token.is_empty() {
-        return Err(AppError::ValidationError(
-            "Bot token is required".to_string(),
-        ));
-    }
-
-    if matches!(body.platform.as_str(), "lark" | "feishu") && verification_token.is_none() {
-        return Err(AppError::ValidationError(
-            "Verification Token is required for Lark/Feishu".to_string(),
-        ));
-    }
-    if matches!(body.platform.as_str(), "lark" | "feishu") && app_id.is_none() {
-        return Err(AppError::ValidationError(
-            "App ID is required for Lark/Feishu".to_string(),
-        ));
-    }
-    if matches!(body.platform.as_str(), "lark" | "feishu") && app_secret.is_none() {
-        return Err(AppError::ValidationError(
-            "App Secret is required for Lark/Feishu".to_string(),
-        ));
-    }
-    if body.platform == "discord" && public_key.is_none() {
-        return Err(AppError::ValidationError(
-            "Public Key is required for Discord".to_string(),
-        ));
-    }
-    if body.platform == "slack" && app_secret.is_none() {
-        return Err(AppError::ValidationError(
-            "Signing Secret is required for Slack".to_string(),
-        ));
-    }
+    let fields = RegistrationValues(
+        [
+            ("bot_token", Some(body.bot_token.as_str())),
+            ("app_id", body.app_id.as_deref()),
+            ("app_secret", body.app_secret.as_deref()),
+            ("verification_token", body.verification_token.as_deref()),
+            ("encrypt_key", body.encrypt_key.as_deref()),
+            ("public_key", body.public_key.as_deref()),
+            ("phone_number_id", body.phone_number_id.as_deref()),
+            ("waba_id", body.waba_id.as_deref()),
+        ]
+        .into_iter()
+        .filter_map(|(key, value)| normalize_optional_field(value).map(|value| (key, value)))
+        .collect(),
+    );
+    descriptor.validate(&fields, false)?;
 
     // Resolve the effective owner. When `target_org_id` is set the bot
     // is written under the org's user_id so every admin can manage it
@@ -473,13 +463,8 @@ pub async fn create_bot(
         &state.http_client,
         adapter.as_ref(),
         &owner_id,
-        bot_token,
         label,
-        app_id,
-        app_secret,
-        public_key,
-        verification_token,
-        encrypt_key,
+        &fields,
     )
     .await?;
 
@@ -541,10 +526,15 @@ pub async fn create_bot(
     Ok((
         StatusCode::CREATED,
         Json(CreateChannelBotResponse {
+            platform_config: descriptor.configuration(&create_result.bot)?,
+            webhook_url,
+            webhook_secret: descriptor.webhook_secret_label.map(|_| webhook_secret),
+            webhook_secret_label: descriptor.webhook_secret_label,
+            setup_instructions: descriptor.setup_instructions,
             id: bot_id,
             platform: create_result.bot.platform,
             platform_bot_username: create_result.bot.platform_bot_username,
-            status: "active".to_string(),
+            status: descriptor.create_response_status.to_string(),
             permission_setup_url,
             permission_setup_scopes,
         }),
@@ -618,37 +608,6 @@ pub async fn update_bot(
         None => None,
     };
 
-    match bot.platform.as_str() {
-        "lark" | "feishu" => {}
-        "slack" => {
-            if verification_token.is_some()
-                || !matches!(
-                    encrypt_key,
-                    crate::services::channel_bot_service::SecretPatch::Unchanged
-                )
-                || app_id.is_some()
-            {
-                return Err(AppError::ValidationError(
-                    "verification_token, encrypt_key, and app_id are only supported for Lark/Feishu bots".to_string(),
-                ));
-            }
-        }
-        _ => {
-            if verification_token.is_some()
-                || !matches!(
-                    encrypt_key,
-                    crate::services::channel_bot_service::SecretPatch::Unchanged
-                )
-                || app_id.is_some()
-                || app_secret.is_some()
-            {
-                return Err(AppError::ValidationError(
-                    "Only label updates are supported for this bot platform".to_string(),
-                ));
-            }
-        }
-    }
-
     let updated = channel_bot_service::update_bot(
         &state.db,
         &state.encryption_keys,
@@ -657,6 +616,7 @@ pub async fn update_bot(
         &bot_id,
         &owner_id,
         crate::services::channel_bot_service::UpdateBotParams {
+            bot_token: body.bot_token.as_deref().map(str::trim),
             label,
             verification_token,
             encrypt_key,
@@ -689,6 +649,13 @@ pub async fn update_bot(
     let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&updated);
 
     Ok(Json(ChannelBotDetailResponse {
+        platform_config: adapter.registration().configuration(&updated)?,
+        webhook_url: format!(
+            "{}/api/v1/webhooks/channel/{}/{}",
+            state.config.base_url, updated.platform, updated.id
+        ),
+        webhook_secret_label: adapter.registration().webhook_secret_label,
+        setup_instructions: adapter.registration().setup_instructions,
         id: updated.id,
         platform: updated.platform,
         label: updated.label,
@@ -731,6 +698,7 @@ pub async fn get_bot(
 ) -> AppResult<Json<ChannelBotDetailResponse>> {
     let actor = auth_user.user_id.to_string();
     let (_owner_id, bot) = resolve_bot_owner_for_read(&state, &actor, &bot_id).await?;
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
 
     // Count active conversations for this bot
     let conversations_count = state
@@ -745,6 +713,13 @@ pub async fn get_bot(
     let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&bot);
 
     Ok(Json(ChannelBotDetailResponse {
+        platform_config: adapter.registration().configuration(&bot)?,
+        webhook_url: format!(
+            "{}/api/v1/webhooks/channel/{}/{}",
+            state.config.base_url, bot.platform, bot.id
+        ),
+        webhook_secret_label: adapter.registration().webhook_secret_label,
+        setup_instructions: adapter.registration().setup_instructions,
         id: bot.id,
         platform: bot.platform,
         label: bot.label,
@@ -826,10 +801,25 @@ pub async fn verify_bot(
     let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
 
     adapter
-        .verify_bot_token(&state.http_client, &bot_token)
+        .verify_bot_token(
+            &state.http_client,
+            &BotCredentials {
+                token: &bot_token,
+                platform_bot_id: Some(&bot.platform_bot_id),
+            },
+        )
         .await?;
 
-    ensure_lark_verify_material_present(&bot)?;
+    ensure_verify_material_present(&bot, adapter.as_ref())?;
+
+    // Some subscription protocols bind the dashboard to the original secret.
+    if adapter.registration().preserve_subscription_on_verify {
+        return Ok(Json(VerifyBotResponse {
+            id: bot.id,
+            status: bot.status,
+            webhook_registered: bot.webhook_registered,
+        }));
+    }
 
     // Re-register webhook with a fresh secret. The original raw secret is not
     // stored (only its SHA-256 hash), so we generate a new one and update the
@@ -923,7 +913,18 @@ mod tests {
     #[test]
     fn verify_requires_lark_verification_token_to_be_configured() {
         let bot = make_lark_bot(false);
-        let err = ensure_lark_verify_material_present(&bot).unwrap_err();
+        let err = ensure_verify_material_present(
+            &bot,
+            resolve_adapter(
+                &bot.platform,
+                &std::sync::Arc::new(
+                    crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
+                ),
+            )
+            .unwrap()
+            .as_ref(),
+        )
+        .unwrap_err();
 
         assert!(matches!(err, AppError::ValidationError(_)));
         assert!(err.to_string().contains("missing Verification Token"));
@@ -933,8 +934,18 @@ mod tests {
     #[test]
     fn verify_allows_lark_bot_when_verification_token_is_present() {
         let bot = make_lark_bot(true);
-        ensure_lark_verify_material_present(&bot)
-            .expect("verification token should satisfy verify precondition");
+        ensure_verify_material_present(
+            &bot,
+            resolve_adapter(
+                &bot.platform,
+                &std::sync::Arc::new(
+                    crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
+                ),
+            )
+            .unwrap()
+            .as_ref(),
+        )
+        .expect("verification token should satisfy verify precondition");
     }
 
     fn make_telegram_bot() -> crate::models::channel_bot::ChannelBot {
@@ -1038,6 +1049,8 @@ mod tests {
         let req = CreateChannelBotRequest {
             platform: "telegram".to_string(),
             bot_token: "secret123".to_string(),
+            phone_number_id: None,
+            waba_id: None,
             label: "Test".to_string(),
             app_id: None,
             app_secret: Some("app_secret_val".to_string()),

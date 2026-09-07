@@ -217,10 +217,78 @@ fn parse_gateway_message(payload: &serde_json::Value) -> Option<InboundMessage> 
 // PlatformAdapter implementation
 // ---------------------------------------------------------------------------
 
+/// Legacy relay rows can carry an interaction marker independently of the
+/// conversation platform. Preserve that routing before platform thread keys.
+pub(crate) fn apply_interaction_context(
+    thread_id: Option<&str>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    metadata: &mut Option<serde_json::Value>,
+) -> bool {
+    let Some(thread_id) = thread_id.filter(|id| id.starts_with("interaction:")) else {
+        return false;
+    };
+    if chrono::Utc::now() - created_at < chrono::Duration::minutes(14) {
+        super::super::channel_platform::insert_reply_context(
+            metadata,
+            "interaction_thread_id",
+            thread_id,
+        );
+    }
+    true
+}
+
 #[async_trait::async_trait]
 impl PlatformAdapter for DiscordAdapter {
     fn platform_id(&self) -> &str {
         "discord"
+    }
+
+    fn registration(&self) -> super::super::channel_platform::RegistrationDescriptor {
+        use super::super::channel_registration::{
+            BOT_TOKEN_FIELD, RegistrationDescriptor, RegistrationField,
+        };
+        RegistrationDescriptor {
+            required_suffix: " for Discord",
+            fields: &[
+                BOT_TOKEN_FIELD,
+                RegistrationField {
+                    name: "public_key",
+                    label: "Public Key",
+                    storage: "public_key",
+                    secret: false,
+                    required: true,
+                    patchable: false,
+                    clearable: false,
+                    webhook_secret: false,
+                },
+            ],
+            ..RegistrationDescriptor::default()
+        }
+    }
+
+    fn webhook_policy(&self, body: &[u8]) -> super::super::channel_platform::WebhookPolicy {
+        use super::super::channel_platform::WebhookPolicy;
+        if let Some(challenge) = self.handle_challenge(body) {
+            return WebhookPolicy::Challenge(challenge);
+        }
+        let is_interaction = serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|value| value.get("type")?.as_u64())
+            .is_some_and(|kind| kind == 2 || kind == 4);
+        if is_interaction {
+            WebhookPolicy::Immediate(Some(serde_json::json!({"type": 5})))
+        } else {
+            WebhookPolicy::Inline
+        }
+    }
+
+    fn reply_context(
+        &self,
+        thread_id: Option<&str>,
+        created_at: chrono::DateTime<chrono::Utc>,
+        metadata: &mut Option<serde_json::Value>,
+    ) {
+        apply_interaction_context(thread_id, created_at, metadata);
     }
 
     async fn verify_webhook(
@@ -326,10 +394,11 @@ impl PlatformAdapter for DiscordAdapter {
     async fn send_reply(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
+        let bot_token = credentials.token;
         let text = reply.text.as_deref().unwrap_or("");
 
         let body = serde_json::json!({ "content": text });
@@ -406,8 +475,9 @@ impl PlatformAdapter for DiscordAdapter {
     async fn verify_bot_token(
         &self,
         http: &reqwest::Client,
-        bot_token: &str,
+        credentials: &crate::services::channel_platform::BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
+        let bot_token = credentials.token;
         let url = format!("{DISCORD_API_BASE}/users/@me");
         let resp: serde_json::Value = http
             .get(&url)

@@ -20,7 +20,6 @@ use mongodb::bson::doc;
 use crate::AppState;
 use crate::handlers::channel_bots::{hash_conversation_id, resolve_adapter};
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
-use crate::services::channel_platform::PlatformVerifySecrets;
 use crate::services::{channel_bot_service, channel_relay_service, channel_routing_service};
 use crate::telemetry::{
     TelemetryClient, TelemetryContext, TelemetryEvent, emit_event, should_sample_event,
@@ -52,188 +51,91 @@ impl<'a> From<&'a AppState> for WebhookHandlerDeps<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// Platform-specific webhook handlers
+// Adapter-driven webhook handlers
 // ---------------------------------------------------------------------------
 
-/// POST /api/v1/webhooks/channel/telegram/{bot_id}
-///
-/// Receives webhook updates from Telegram for a specific channel bot.
-/// Always returns 200 OK to prevent Telegram from retrying failed deliveries.
-/// Errors are logged internally but never surfaced to the platform.
-pub async fn telegram_webhook(
+pub async fn channel_webhook(
     State(state): State<AppState>,
-    Path(bot_id): Path<String>,
+    Path((platform, bot_id)): Path<(String, String)>,
     headers: HeaderMap,
     body: Bytes,
-) -> StatusCode {
-    if let Err(e) = handle_webhook_inner(&state, &bot_id, "telegram", &headers, &body).await {
-        tracing::warn!(
-            bot_id = %bot_id,
-            platform = "telegram",
-            error = %e,
-            "channel webhook processing error (suppressed)"
-        );
-    }
-    StatusCode::OK
-}
-
-/// POST /api/v1/webhooks/channel/discord/{bot_id}
-///
-/// Receives interaction events from Discord for a specific channel bot.
-/// Discord requires immediate JSON responses for certain interactions (PING),
-/// so this handler returns the appropriate response body when needed.
-pub async fn discord_webhook(
-    State(state): State<AppState>,
-    Path(bot_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    // Discord PING challenge must be answered before any bot lookup / verification.
-    // The adapter can parse the body without needing bot state.
-    let adapter = match resolve_adapter("discord", &state.token_exchange_cache) {
-        Ok(a) => a,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".to_string()).into_response(),
+) -> axum::response::Response {
+    use crate::services::channel_platform::WebhookPolicy;
+    let Ok(adapter) = resolve_adapter(&platform, &state.token_exchange_cache) else {
+        return StatusCode::OK.into_response();
     };
-
-    if let Some(challenge_response) = adapter.handle_challenge(&body) {
-        return (StatusCode::OK, Json(challenge_response)).into_response();
+    if !adapter.registration().enabled {
+        return StatusCode::OK.into_response();
     }
-
-    // Discord interactions (APPLICATION_COMMAND=2, MESSAGE_COMPONENT=4) require
-    // an immediate interaction response. Return a deferred reply (type 5) and
-    // process in a background task -- the relay will send the actual response
-    // as a follow-up message via the REST API.
-    let is_interaction = serde_json::from_slice::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v.get("type")?.as_u64())
-        .is_some_and(|t| t == 2 || t == 4);
-
-    if is_interaction {
-        let state_bg = state.clone();
-        let bot_id_bg = bot_id.clone();
-        let headers_bg = headers.clone();
-        let body_bg = body.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                handle_webhook_inner(&state_bg, &bot_id_bg, "discord", &headers_bg, &body_bg).await
-            {
-                tracing::warn!(
-                    bot_id = %bot_id_bg,
-                    platform = "discord",
-                    error = %e,
-                    "discord interaction relay error (background)"
-                );
+    let empty_ack_is_text = adapter.registration().empty_ack_is_text;
+    match adapter.webhook_policy(&body) {
+        WebhookPolicy::Challenge(response) => Json(response).into_response(),
+        WebhookPolicy::Immediate(response) => {
+            tokio::spawn(async move {
+                // Suppress payload-derived errors; identifiers alone are safe to log.
+                if handle_webhook_inner(&state, &bot_id, &platform, &headers, &body)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(bot_id = %bot_id, platform = %platform, "channel webhook processing failed (suppressed)");
+                }
+            });
+            webhook_response(response, empty_ack_is_text)
+        }
+        WebhookPolicy::Inline => {
+            match handle_webhook_inner(&state, &bot_id, &platform, &headers, &body).await {
+                Ok(response) => webhook_response(response, empty_ack_is_text),
+                Err(_) => {
+                    tracing::warn!(bot_id = %bot_id, platform = %platform, "channel webhook processing failed (suppressed)");
+                    webhook_response(None, empty_ack_is_text)
+                }
             }
-        });
-        // DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE (type 5)
-        return (StatusCode::OK, Json(serde_json::json!({ "type": 5 }))).into_response();
-    }
-
-    // Non-interaction messages (gateway-style) -- process inline
-    if let Err(e) = handle_webhook_inner(&state, &bot_id, "discord", &headers, &body).await {
-        tracing::warn!(
-            bot_id = %bot_id,
-            platform = "discord",
-            error = %e,
-            "channel webhook processing error (suppressed)"
-        );
-    }
-    (StatusCode::OK, "".to_string()).into_response()
-}
-
-/// POST /api/v1/webhooks/channel/lark/{bot_id}
-///
-/// Receives event callbacks from Lark (international) for a specific channel bot.
-/// Lark url_verification challenges are answered only after bot lookup and
-/// Verification Token validation, and may require decrypting the body first.
-pub async fn lark_webhook(
-    State(state): State<AppState>,
-    Path(bot_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    match handle_webhook_inner(&state, &bot_id, "lark", &headers, &body).await {
-        Ok(Some(challenge_response)) => (StatusCode::OK, Json(challenge_response)).into_response(),
-        Ok(None) => (StatusCode::OK, "".to_string()).into_response(),
-        Err(e) => {
-            tracing::warn!(
-                bot_id = %bot_id,
-                platform = "lark",
-                error = %e,
-                "channel webhook processing error (suppressed)"
-            );
-            (StatusCode::OK, "".to_string()).into_response()
         }
     }
 }
 
-/// POST /api/v1/webhooks/channel/feishu/{bot_id}
-///
-/// Receives event callbacks from Feishu (China mainland) for a specific channel bot.
-/// Feishu url_verification challenges are answered only after bot lookup and
-/// Verification Token validation, and may require decrypting the body first.
-pub async fn feishu_webhook(
-    State(state): State<AppState>,
-    Path(bot_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    match handle_webhook_inner(&state, &bot_id, "feishu", &headers, &body).await {
-        Ok(Some(challenge_response)) => (StatusCode::OK, Json(challenge_response)).into_response(),
-        Ok(None) => (StatusCode::OK, "".to_string()).into_response(),
-        Err(e) => {
-            tracing::warn!(
-                bot_id = %bot_id,
-                platform = "feishu",
-                error = %e,
-                "channel webhook processing error (suppressed)"
-            );
-            (StatusCode::OK, "".to_string()).into_response()
-        }
+fn webhook_response(
+    response: Option<serde_json::Value>,
+    empty_ack_is_text: bool,
+) -> axum::response::Response {
+    match response {
+        Some(response) => Json(response).into_response(),
+        None if empty_ack_is_text => (StatusCode::OK, String::new()).into_response(),
+        None => StatusCode::OK.into_response(),
     }
 }
 
-/// POST /api/v1/webhooks/channel/slack/{bot_id}
-///
-/// Receives Events API callbacks from Slack for a specific channel bot.
-/// Slack requires a 2xx response within 3 seconds, so heavy processing
-/// (signature verification, agent dispatch) runs in a background task and
-/// the handler returns 200 OK immediately. The one-time `url_verification`
-/// challenge is answered synchronously without bot lookup.
-pub async fn slack_webhook(
+pub async fn channel_subscription(
     State(state): State<AppState>,
-    Path(bot_id): Path<String>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
-    let adapter = match resolve_adapter("slack", &state.token_exchange_cache) {
-        Ok(a) => a,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "".to_string()).into_response(),
-    };
-
-    if let Some(challenge_response) = adapter.handle_challenge(&body) {
-        return (StatusCode::OK, Json(challenge_response)).into_response();
-    }
-
-    // Honor Slack's 3-second ACK rule: ACK immediately, process asynchronously.
-    let state_bg = state.clone();
-    let bot_id_bg = bot_id.clone();
-    let headers_bg = headers.clone();
-    let body_bg = body.clone();
-    tokio::spawn(async move {
-        if let Err(e) =
-            handle_webhook_inner(&state_bg, &bot_id_bg, "slack", &headers_bg, &body_bg).await
+    Path((platform, bot_id)): Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let result = async {
+        let bot = channel_bot_service::get_bot(&state.db, &bot_id).await?;
+        if bot.platform != platform
+            || !bot.is_active
+            || !matches!(bot.status.as_str(), "active" | "pending_webhook")
         {
-            tracing::warn!(
-                bot_id = %bot_id_bg,
-                platform = "slack",
-                error = %e,
-                "slack webhook processing error (background, suppressed)"
-            );
+            return Err(crate::errors::AppError::Forbidden(
+                "Invalid subscription".to_string(),
+            ));
         }
-    });
-
-    (StatusCode::OK, "".to_string()).into_response()
+        resolve_adapter(&platform, &state.token_exchange_cache)?
+            .subscription_handshake(&bot, &query)
+    }
+    .await;
+    match result {
+        Ok(challenge) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            challenge,
+        )
+            .into_response(),
+        Err(_) => StatusCode::FORBIDDEN.into_response(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -312,11 +214,12 @@ async fn handle_webhook_inner_with_deps(
         },
     )?;
 
-    let verify_secrets = build_verify_secrets(&state, &bot).await.map_err(
-        |e| -> Box<dyn std::error::Error + Send + Sync> {
+    let verify_secrets = adapter
+        .build_verify_secrets(state.encryption_keys, &bot)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
             format!("failed to prepare webhook secrets: {e}").into()
-        },
-    )?;
+        })?;
 
     let prepared = adapter
         .prepare_webhook(&bot, Some(&verify_secrets), headers, body)
@@ -574,67 +477,6 @@ async fn handle_webhook_inner_with_deps(
     Ok(None)
 }
 
-async fn decrypt_secret_field(
-    state: &WebhookHandlerDeps<'_>,
-    field_name: &str,
-    value: Option<&Vec<u8>>,
-) -> crate::errors::AppResult<Option<String>> {
-    let Some(encrypted) = value else {
-        return Ok(None);
-    };
-
-    let decrypted = state
-        .encryption_keys
-        .decrypt(encrypted)
-        .await
-        .map_err(|e| {
-            crate::errors::AppError::Internal(format!("failed to decrypt {field_name}: {e}"))
-        })?;
-
-    let text = String::from_utf8(decrypted).map_err(|e| {
-        crate::errors::AppError::Internal(format!(
-            "{field_name} decryption produced invalid UTF-8: {e}"
-        ))
-    })?;
-
-    Ok(Some(text))
-}
-
-async fn build_verify_secrets(
-    state: &WebhookHandlerDeps<'_>,
-    bot: &crate::models::channel_bot::ChannelBot,
-) -> crate::errors::AppResult<PlatformVerifySecrets> {
-    let mut secrets = PlatformVerifySecrets::default();
-
-    match bot.platform.as_str() {
-        "slack" => {
-            secrets.slack_signing_secret = decrypt_secret_field(
-                state,
-                "Slack signing secret",
-                bot.app_secret_encrypted.as_ref(),
-            )
-            .await?;
-        }
-        "lark" | "feishu" => {
-            secrets.lark_verification_token = decrypt_secret_field(
-                state,
-                "Lark verification token",
-                bot.lark_verification_token_encrypted.as_ref(),
-            )
-            .await?;
-            secrets.lark_encrypt_key = decrypt_secret_field(
-                state,
-                "Lark encrypt key",
-                bot.lark_encrypt_key_encrypted.as_ref(),
-            )
-            .await?;
-        }
-        _ => {}
-    }
-
-    Ok(secrets)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -645,6 +487,119 @@ mod tests {
     use mongodb::bson::doc;
     use tokio::sync::{Mutex, oneshot};
     use tokio::time::{Duration, timeout};
+
+    #[tokio::test]
+    async fn whatsapp_subscription_http_verifies_token_and_returns_raw_challenge() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::Request;
+        use sha2::{Digest, Sha256};
+        use tower::ServiceExt;
+
+        let db = crate::test_utils::connect_transaction_test_database("whatsapp_handshake").await;
+        let bot_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &bot_id, "user_id": "owner", "platform": "whatsapp", "label": "Support",
+                "platform_bot_id": "123456", "platform_bot_username": "+123456",
+                "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
+                "webhook_secret_hash": hex::encode(Sha256::digest(b"verify-token")),
+                "webhook_registered": false, "status": "pending_webhook", "is_active": true,
+                "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+            })
+            .await.unwrap();
+        let router = Router::new()
+            .route(
+                "/webhooks/channel/{platform}/{bot_id}",
+                post(channel_webhook).get(channel_subscription),
+            )
+            .with_state(crate::test_utils::test_app_state(db));
+        for (query, status, expected) in [
+            (
+                "hub.mode=subscribe&hub.verify_token=verify-token&hub.challenge=000123",
+                StatusCode::OK,
+                "000123",
+            ),
+            (
+                "hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=000123",
+                StatusCode::FORBIDDEN,
+                "",
+            ),
+            (
+                "hub.mode=subscribe&hub.verify_token=verify-token",
+                StatusCode::FORBIDDEN,
+                "",
+            ),
+            ("", StatusCode::FORBIDDEN, ""),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/webhooks/channel/whatsapp/{bot_id}?{query}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), status);
+            if status == StatusCode::OK {
+                assert_eq!(
+                    response.headers()["content-type"],
+                    "text/plain; charset=utf-8"
+                );
+            }
+            assert_eq!(
+                to_bytes(response.into_body(), 1024).await.unwrap(),
+                expected
+            );
+        }
+        // Invalid signatures and malformed JSON are still immediately acknowledged.
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/webhooks/channel/whatsapp/{bot_id}"))
+                    .body(Body::from("not-json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn channel_empty_ack_preserves_legacy_headers_and_bytes() {
+        let cache =
+            Arc::new(crate::services::provider_token_exchange_service::TokenExchangeCache::new());
+        for platform in ["telegram", "discord", "lark", "feishu", "slack"] {
+            let adapter = resolve_adapter(platform, &cache).unwrap();
+            let response = webhook_response(None, adapter.registration().empty_ack_is_text);
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get("content-type")
+                    .map(|value| value.to_str().unwrap()),
+                if platform == "telegram" {
+                    None
+                } else {
+                    Some("text/plain; charset=utf-8")
+                }
+            );
+            assert!(
+                axum::body::to_bytes(response.into_body(), 1024)
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
 
     fn test_config(
         database_url: String,
@@ -1096,9 +1051,9 @@ mod tests {
     #[test]
     fn platform_verify_secrets_default_is_all_none() {
         let secrets = crate::services::channel_platform::PlatformVerifySecrets::default();
-        assert!(secrets.slack_signing_secret.is_none());
-        assert!(secrets.lark_verification_token.is_none());
-        assert!(secrets.lark_encrypt_key.is_none());
+        assert!(secrets.get("app_secret").is_none());
+        assert!(secrets.get("verification_token").is_none());
+        assert!(secrets.get("encrypt_key").is_none());
     }
 
     // ── WebhookHandlerDeps lifetime wiring ──────────────────────────────

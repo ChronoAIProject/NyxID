@@ -33,6 +33,7 @@ pub mod channel_adapters;
 pub mod channel_bot_service;
 pub mod channel_event_service;
 pub mod channel_platform;
+pub mod channel_registration;
 pub mod channel_relay_service;
 pub mod channel_routing_service;
 pub mod chatgpt_translator;
