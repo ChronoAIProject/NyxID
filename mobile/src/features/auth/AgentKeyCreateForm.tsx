@@ -249,15 +249,7 @@ export function AgentKeyCreateForm({
         label="Review permissions"
         disabled={disabled}
         onPress={() => {
-          const data = {
-            ...draft,
-            expires_at:
-              expiry === "custom" &&
-              /^\d{4}-\d{2}-\d{2}$/.test(draft.expires_at ?? "")
-                ? `${draft.expires_at}T23:59:59Z`
-                : draft.expires_at,
-          };
-          const parsed = newAgentKeySchema.safeParse(data);
+          const parsed = newAgentKeySchema.safeParse(draft);
           if (expiry === "custom" && !draft.expires_at) {
             setError("Choose a custom expiry date.");
             return;

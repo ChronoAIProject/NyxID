@@ -94,6 +94,9 @@ export function issuanceNotice(existing: boolean): string {
 }
 
 export function agentKeyLoginError(error: unknown): string {
+  if (error instanceof z.ZodError) {
+    return error.issues[0]?.message ?? "Check the login details.";
+  }
   const code = (error as { errorCode?: number } | null)?.errorCode;
   const messages: Record<number, string> = {
     11900: "This request is no longer available.",
@@ -114,3 +117,4 @@ export function agentKeyLoginError(error: unknown): string {
       : "Could not reach NyxID. Try again.")
   );
 }
+import { z } from "zod";

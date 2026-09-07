@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { authDevicePreviewSchema } from "./authDeviceSchema";
 import { normalizeAuthDeviceUserCode } from "../../features/auth/deviceUserCode";
+import { normalizeAgentKeyExpiry } from "../../features/auth/agentKeyExpiry";
 
 export const agentKeyScopes = [
   "read",
@@ -52,6 +53,15 @@ export const futureExpirySchema = z
   .string()
   .nullable()
   .optional()
+  .transform((value, ctx) => {
+    if (value == null) return value;
+    try {
+      return normalizeAgentKeyExpiry(value);
+    } catch (error) {
+      ctx.addIssue({ code: "custom", message: (error as Error).message });
+      return z.NEVER;
+    }
+  })
   .refine(
     (value) =>
       !value ||
