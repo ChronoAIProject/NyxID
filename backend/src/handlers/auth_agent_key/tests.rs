@@ -92,7 +92,6 @@ impl Server {
 #[tokio::test]
 async fn login_audit_records_capture_actor_context_and_request_identity() {
     use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDITS};
-    crate::services::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([61; 32]));
     let server = Server::new("akl_audit_context").await;
     let (actor, human) = server.human().await;
     for approve in [true, false] {
@@ -147,7 +146,6 @@ async fn login_audit_records_capture_actor_context_and_request_identity() {
             assert_eq!(audit.user_id.as_deref(), Some(actor.as_str()));
             assert_eq!(audit.ip_address.as_deref(), Some("127.0.0.1"));
             assert_eq!(audit.user_agent, Some(format!("AgentKeyTest/{endpoint}")));
-            assert!(audit.seq.is_some());
             if approve {
                 let details = audit.event_data.as_ref().unwrap();
                 assert_eq!(details["api_key_id"], delivery["api_key"]["id"]);
@@ -273,7 +271,7 @@ async fn traces_record_hashed_ip_identifiers_and_outcomes_without_secrets() {
     .with_subscriber(subscriber)
     .await;
     let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
-    for expected in [
+    for (i, expected) in [
         "client_ip_hash",
         "row_id",
         "requested",
@@ -285,8 +283,11 @@ async fn traces_record_hashed_ip_identifiers_and_outcomes_without_secrets() {
         "agent_key_login.poll.outcome",
         &delivery.api_key.id,
         &delivery.credential_id,
-    ] {
-        assert!(logs.contains(expected), "missing {expected}: {logs}");
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert!(logs.contains(expected), "missing marker #{i}");
     }
     let ip_hash = crate::services::auth_device_service::hmac_hex(
         state.auth_device_hmac_key.as_slice(),

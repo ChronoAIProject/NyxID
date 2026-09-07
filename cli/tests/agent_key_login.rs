@@ -118,8 +118,8 @@ async fn full_login_stores_only_restricted_credential_and_safe_metadata() {
     let metadata = std::fs::read_to_string(dir.join("agent_key.json")).unwrap();
     assert!(!metadata.contains(SECRET));
     assert_eq!(
-        serde_json::from_str::<Value>(&metadata).unwrap()["api_key"]["id"],
-        "key-id"
+        serde_json::from_str::<Value>(&metadata).unwrap(),
+        identity()
     );
     for file in ["access_token", "refresh_token", "user_id"] {
         assert!(!dir.join(file).exists());
@@ -310,9 +310,11 @@ async fn whoami_status_and_rejected_credentials_never_refresh_or_prompt() {
         output_text(&json_output)
     );
     assert!(!String::from_utf8_lossy(&json_output.stderr).contains("Authentication:"));
+    let mut expected_auth = identity();
+    expected_auth["kind"] = json!("agent_key");
     assert_eq!(
-        serde_json::from_slice::<Value>(&json_output.stdout).unwrap()["auth"]["kind"],
-        "agent_key"
+        serde_json::from_slice::<Value>(&json_output.stdout).unwrap()["auth"],
+        expected_auth
     );
     server.verify().await;
     server.reset().await;
@@ -404,11 +406,12 @@ async fn status_keeps_sections_or_scope_placeholders_in_table_and_json() {
         auth["api_key"]["scopes"] = json!(if status == 200 { "read" } else { "proxy" });
         Mock::given(method("GET"))
             .and(path("/api/v1/auth/agent-key/self"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(auth))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&auth))
             .expect(2)
             .mount(&server)
             .await;
         mount_sections(&server, status).await;
+        auth["kind"] = json!("agent_key");
         for output in ["table", "json"] {
             let result = run(
                 home.path(),
@@ -421,7 +424,7 @@ async fn status_keeps_sections_or_scope_placeholders_in_table_and_json() {
                 assert!(!stderr.contains("Authentication:"));
                 assert!(!stderr.contains("Account:"));
                 let value: Value = serde_json::from_slice(&result.stdout).unwrap();
-                assert_eq!(value["auth"]["kind"], "agent_key");
+                assert_eq!(value["auth"], auth);
                 for section in ["user", "services", "api_keys", "nodes"] {
                     assert_eq!(value[section].is_null(), status == 403, "{value}");
                 }
