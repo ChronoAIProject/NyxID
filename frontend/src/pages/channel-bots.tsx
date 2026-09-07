@@ -310,6 +310,7 @@ function CreateBotDialog({
   }, [open, defaultOrgId, reset]);
 
   const platform = useWatch({ control, name: "platform" });
+  const setupNote = CHANNEL_PLATFORMS[platform].setupNote;
   const targetOrgId = useWatch({ control, name: "target_org_id" }) ?? null;
 
   function onSubmit(data: CreateChannelBotFormData) {
@@ -430,6 +431,12 @@ function CreateBotDialog({
             )}
           </div>
 
+          {setupNote && (
+            <div className="space-y-1 rounded-lg border border-border/70 bg-muted/30 p-4">
+              <p className="text-[12px] font-medium">{setupNote.title}</p>
+              <p className="text-xs text-muted-foreground">{setupNote.text}</p>
+            </div>
+          )}
           {CHANNEL_PLATFORMS[platform].fields.map((field) => (
             <div key={field.name} className="space-y-2">
               <Label htmlFor={field.name}>{field.label}{field.required ? "" : " (optional)"}</Label>

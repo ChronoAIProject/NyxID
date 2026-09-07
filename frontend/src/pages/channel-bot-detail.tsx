@@ -706,6 +706,13 @@ function EditVerificationSection({
             {errors[field.name] && <p className="text-xs text-destructive">{errors[field.name]?.message}</p>}
           </div>
         ))}
+        {(bot.status === "pending" || bot.status === "pending_webhook") && (
+          <p className="text-xs text-muted-foreground">
+            Saving stores these credentials immediately (watch the Configured badges above).
+            The bot stays pending until the platform delivers its first verified webhook,
+            which changes its status to Active.
+          </p>
+        )}
         <div className="flex justify-end">
           <Button variant="primary" type="submit" disabled={updateBot.isPending || !isDirty} isLoading={updateBot.isPending}>
             Save Credentials

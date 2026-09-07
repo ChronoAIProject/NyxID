@@ -40,8 +40,15 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     await page.goto("/channel-bots");
     await page.getByRole("button", { name: "Add Bot", exact: true }).first().click();
     const dialog = page.getByRole("dialog");
+    for (const platform of ["Lark", "Feishu"]) {
+      await dialog.getByRole("combobox").last().click();
+      await page.getByRole("option", { name: platform, exact: true }).click();
+      await expect(dialog.getByText("Lark webhook verification", { exact: true })).toBeVisible();
+      await expect(dialog.getByText("In Lark/Feishu Event Subscriptions, copy the Verification Token from Security settings. Encrypt Key is optional and should match the Encrypt Key field from the same panel if you enabled encrypted callbacks.", { exact: true })).toBeVisible();
+    }
     await dialog.getByRole("combobox").last().click();
     await page.getByRole("option", { name: "WhatsApp", exact: true }).click();
+    await expect(dialog.getByText("Meta Cloud API credentials", { exact: true })).toBeVisible();
     await dialog.getByLabel("Label", { exact: true }).fill(bot.label);
     await dialog.getByLabel("Access Token", { exact: true }).fill("e2e-access-token");
     await dialog.getByLabel("Phone Number ID", { exact: true }).fill(bot.phone_number_id);
@@ -59,6 +66,7 @@ for (const viewport of [{ width: 1440, height: 1000 }, { width: 390, height: 844
     await expect(page).toHaveURL(/channel-bots\/whatsapp-e2e$/);
     await expect(page.getByText(secret, { exact: true })).toHaveCount(0);
     await expect(page.getByText("Phone Number ID", { exact: true })).toBeVisible();
+    await expect(page.getByText("Saving stores these credentials immediately", { exact: false })).toBeVisible();
     await page.getByLabel("Access Token", { exact: true }).fill("replacement-access-token");
     await page.getByLabel("Meta App Secret", { exact: true }).fill("replacement-app-secret");
     await page.getByRole("button", { name: "Save Credentials", exact: true }).click();
