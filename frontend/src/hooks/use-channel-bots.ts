@@ -69,6 +69,7 @@ export function useCreateChannelBot() {
   const queryClient = useQueryClient();
 
   return useMutation({
+    gcTime: 0,
     mutationFn: async (
       data: CreateChannelBotRequest,
     ): Promise<CreateChannelBotResponse> => {
@@ -99,6 +100,7 @@ export function useUpdateChannelBot() {
   const queryClient = useQueryClient();
 
   return useMutation({
+    gcTime: 0,
     mutationFn: async ({
       id,
       data,

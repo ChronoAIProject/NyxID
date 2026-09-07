@@ -109,11 +109,40 @@ describe("createChannelBotSchema platform-specific superRefine", () => {
 });
 
 describe("updateChannelBotSchema", () => {
+  it("accepts WhatsApp token and app secret rotation", () => {
+    expect(updateChannelBotSchema.safeParse({ bot_token: "replacement", app_secret: "new-app-secret" }).success).toBe(true);
+  });
   it("accepts an empty partial patch and rejects an over-long label", () => {
     expect(updateChannelBotSchema.safeParse({}).success).toBe(true);
     expect(
       updateChannelBotSchema.safeParse({ label: "a".repeat(129) }).success,
     ).toBe(false);
+  });
+});
+
+describe("WhatsApp channel registration", () => {
+  const valid = { platform: "whatsapp", bot_token: "system-user-token", label: "Support", phone_number_id: "123456", app_secret: "meta-secret", waba_id: "654321" };
+
+  it("accepts the Cloud API fields and an optional WABA ID", () => {
+    expect(createChannelBotSchema.safeParse(valid).success).toBe(true);
+    expect(createChannelBotSchema.safeParse({ ...valid, waba_id: undefined }).success).toBe(true);
+    expect(conversationPlatformSchema.safeParse("whatsapp").success).toBe(true);
+  });
+
+  it("requires a Phone Number ID and Meta App Secret independently of App ID", () => {
+    for (const name of ["phone_number_id", "app_secret"] as const) {
+      const result = createChannelBotSchema.safeParse({ ...valid, [name]: " ", app_id: "123456" });
+      expect(result.success).toBe(false);
+      if (!result.success) expect(result.error.issues.some((issue) => issue.path[0] === name)).toBe(true);
+    }
+  });
+
+  it("rejects display phone numbers and invalid Meta IDs", () => {
+    for (const name of ["phone_number_id", "waba_id"] as const) {
+      for (const value of ["+1 555 1234", "../1234", "a", "1".repeat(33)]) {
+        expect(createChannelBotSchema.safeParse({ ...valid, [name]: value }).success).toBe(false);
+      }
+    }
   });
 });
 

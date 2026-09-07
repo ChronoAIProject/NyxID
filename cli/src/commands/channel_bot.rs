@@ -22,15 +22,30 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             verification_token,
             encrypt_key,
             public_key,
+            phone_number_id,
+            waba_id,
             org,
             auth,
         } => {
             let token = resolve_secret(bot_token.as_deref(), token_env.as_deref(), "bot token")?;
             let resolved_app_secret =
                 resolve_optional_secret(app_secret.as_deref(), app_secret_env.as_deref())?;
-            let resolved_verification_token =
-                verification_token.or_else(|| env_secret("NYXID_LARK_VERIFICATION_TOKEN"));
-            let resolved_encrypt_key = encrypt_key.or_else(|| env_secret("NYXID_LARK_ENCRYPT_KEY"));
+            validate_platform_fields(
+                &platform,
+                phone_number_id.as_deref(),
+                waba_id.as_deref(),
+                resolved_app_secret.as_deref(),
+            )?;
+            let resolved_verification_token = verification_token.or_else(|| {
+                (platform != "whatsapp")
+                    .then(|| env_secret("NYXID_LARK_VERIFICATION_TOKEN"))
+                    .flatten()
+            });
+            let resolved_encrypt_key = encrypt_key.or_else(|| {
+                (platform != "whatsapp")
+                    .then(|| env_secret("NYXID_LARK_ENCRYPT_KEY"))
+                    .flatten()
+            });
 
             if matches!(platform.as_str(), "lark" | "feishu")
                 && resolved_verification_token
@@ -79,6 +94,12 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             if let Some(key) = public_key {
                 body["public_key"] = Value::String(key);
             }
+            if let Some(id) = phone_number_id {
+                body["phone_number_id"] = Value::String(id);
+            }
+            if let Some(id) = waba_id {
+                body["waba_id"] = Value::String(id);
+            }
             if let Some(ref org_id) = org {
                 body["target_org_id"] = Value::String(org_id.clone());
             }
@@ -100,6 +121,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     eprintln!("Platform: {platform}");
                     eprintln!("Username: {username}");
                     eprintln!("Status:   {status}");
+                    print_webhook_setup(&result);
                     print_permission_block(&result);
                 }
             }
@@ -107,6 +129,9 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
         }
 
         ChannelBotCommands::Update {
+            bot_token,
+            token_env,
+            app_secret_env,
             id,
             label,
             verification_token,
@@ -115,6 +140,11 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             app_secret,
             auth,
         } => {
+            let app_secret =
+                resolve_optional_secret(app_secret.as_deref(), app_secret_env.as_deref())?;
+            let bot_token = resolve_optional_secret(bot_token.as_deref(), token_env.as_deref())?;
+            let explicit_verification_token = verification_token.is_some();
+            let explicit_encrypt_key = encrypt_key.is_some();
             let resolved_verification_token =
                 verification_token.or_else(|| env_secret("NYXID_LARK_VERIFICATION_TOKEN"));
             let resolved_encrypt_key = match encrypt_key {
@@ -131,6 +161,13 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
 
             let mut body = serde_json::json!({});
             let mut changed = false;
+            if let Some(value) = bot_token {
+                if value.trim().is_empty() {
+                    bail!("Bot access token cannot be blank");
+                }
+                body["bot_token"] = Value::String(value.trim().to_string());
+                changed = true;
+            }
 
             if let Some(value) = label
                 .as_deref()
@@ -178,6 +215,23 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             }
 
             let mut api = ApiClient::from_auth_checked(&auth).await?;
+            if (!explicit_verification_token && body.get("verification_token").is_some())
+                || (!explicit_encrypt_key && body.get("encrypt_key").is_some())
+            {
+                let bot: Value = api.get(&format!("/channel-bots/{id}")).await?;
+                if bot["platform"] == "whatsapp" {
+                    let fields = body.as_object_mut().expect("update body is an object");
+                    if !explicit_verification_token {
+                        fields.remove("verification_token");
+                    }
+                    if !explicit_encrypt_key {
+                        fields.remove("encrypt_key");
+                    }
+                    if fields.is_empty() {
+                        bail!("No update fields provided");
+                    }
+                }
+            }
             let result: Value = api.patch(&format!("/channel-bots/{id}"), &body).await?;
 
             match auth.output {
@@ -567,6 +621,118 @@ async fn run_route(command: ChannelRouteCommands) -> Result<()> {
     }
 }
 
+fn validate_platform_fields(
+    platform: &str,
+    phone_number_id: Option<&str>,
+    waba_id: Option<&str>,
+    app_secret: Option<&str>,
+) -> Result<()> {
+    if platform == "whatsapp" {
+        let phone_number_id = phone_number_id.ok_or_else(|| {
+            anyhow::anyhow!("--phone-number-id is required for WhatsApp Cloud API")
+        })?;
+        for (label, value) in [
+            ("--phone-number-id", Some(phone_number_id)),
+            ("--waba-id", waba_id),
+        ] {
+            if let Some(value) = value
+                && (value.is_empty()
+                    || value.len() > 32
+                    || !value.bytes().all(|byte| byte.is_ascii_digit()))
+            {
+                bail!("{label} must be a numeric Meta identifier");
+            }
+        }
+        if app_secret.is_none_or(|secret| secret.trim().is_empty()) {
+            bail!("--app-secret-env is required for WhatsApp (Meta App Secret)");
+        }
+    } else if phone_number_id.is_some() || waba_id.is_some() {
+        bail!("--phone-number-id and --waba-id are only supported for WhatsApp");
+    }
+    Ok(())
+}
+
+fn print_webhook_setup(result: &Value) {
+    if let Some(url) = result["webhook_url"].as_str() {
+        eprintln!("Callback URL: {url}");
+    }
+    if let Some(secret) = result["webhook_secret"].as_str() {
+        let label = result["webhook_secret_label"]
+            .as_str()
+            .unwrap_or("Webhook secret");
+        eprintln!("{label} (shown once): {secret}");
+    }
+    for instruction in result["setup_instructions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+    {
+        eprintln!("  {instruction}");
+    }
+}
+
+#[cfg(test)]
+mod whatsapp_tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn channel_whatsapp_registration_requires_phone_and_secret() {
+        assert!(
+            validate_platform_fields("whatsapp", Some("123456"), Some("654321"), Some("secret"))
+                .is_ok()
+        );
+        assert!(validate_platform_fields("whatsapp", None, None, Some("secret")).is_err());
+        assert!(validate_platform_fields("whatsapp", Some("123456"), None, Some(" ")).is_err());
+        assert!(
+            validate_platform_fields("whatsapp", Some("+1 555"), None, Some("secret")).is_err()
+        );
+        assert!(
+            validate_platform_fields("whatsapp", Some("123456"), Some("../bad"), Some("secret"))
+                .is_err()
+        );
+        assert!(validate_platform_fields("telegram", Some("123456"), None, None).is_err());
+    }
+
+    #[test]
+    fn channel_whatsapp_cli_accepts_registration_and_rotation_flags() {
+        assert!(
+            crate::cli::Cli::try_parse_from([
+                "nyxid",
+                "channel-bot",
+                "register",
+                "--platform",
+                "whatsapp",
+                "--label",
+                "Support",
+                "--token-env",
+                "WHATSAPP_ACCESS_TOKEN",
+                "--phone-number-id",
+                "123456",
+                "--app-secret-env",
+                "META_APP_SECRET",
+                "--waba-id",
+                "654321",
+            ])
+            .is_ok()
+        );
+        assert!(
+            crate::cli::Cli::try_parse_from([
+                "nyxid",
+                "channel-bot",
+                "update",
+                "bot-id",
+                "--token-env",
+                "WHATSAPP_ACCESS_TOKEN",
+                "--app-secret-env",
+                "META_APP_SECRET",
+            ])
+            .is_ok()
+        );
+    }
+}
+
 /// Resolve a required secret from an inline value, an environment variable, or
 /// an interactive prompt.
 fn resolve_secret(inline: Option<&str>, env_var: Option<&str>, label: &str) -> Result<String> {
@@ -624,6 +790,8 @@ mod tests {
         verification_token: Option<&str>,
     ) -> ChannelBotCommands {
         ChannelBotCommands::Register {
+            phone_number_id: None,
+            waba_id: None,
             platform: platform.to_string(),
             bot_token: bot_token.map(str::to_string),
             token_env: None,
@@ -657,6 +825,63 @@ mod tests {
         run(register(server.uri(), "telegram", Some("tok-123"), None))
             .await
             .expect("telegram register should succeed");
+    }
+
+    #[tokio::test]
+    async fn channel_whatsapp_registration_and_rotation_use_separate_credentials() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/channel-bots"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "platform": "whatsapp", "bot_token": "meta-token", "label": "support",
+                "phone_number_id": "123456", "waba_id": "654321", "app_secret": "meta-secret"
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": "bot-1", "status": "pending_webhook", "webhook_secret": "verify-token",
+                "webhook_secret_label": "Verify Token"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut command = register(server.uri(), "whatsapp", Some("meta-token"), None);
+        if let ChannelBotCommands::Register {
+            phone_number_id,
+            waba_id,
+            app_secret,
+            ..
+        } = &mut command
+        {
+            *phone_number_id = Some("123456".to_string());
+            *waba_id = Some("654321".to_string());
+            *app_secret = Some("meta-secret".to_string());
+        }
+        run(command).await.unwrap();
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/channel-bots/bot-1"))
+            .and(wiremock::matchers::body_json(
+                serde_json::json!({"bot_token": "new-token", "app_secret": "new-secret"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"id": "bot-1", "platform": "whatsapp"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        run(ChannelBotCommands::Update {
+            bot_token: Some("new-token".to_string()),
+            token_env: None,
+            app_secret_env: None,
+            id: "bot-1".to_string(),
+            label: None,
+            verification_token: None,
+            encrypt_key: None,
+            app_id: None,
+            app_secret: Some("new-secret".to_string()),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -709,6 +934,9 @@ mod tests {
             .await;
 
         run(ChannelBotCommands::Update {
+            bot_token: None,
+            token_env: None,
+            app_secret_env: None,
             id: "bot-1".to_string(),
             label: Some("renamed".to_string()),
             verification_token: None,
@@ -732,6 +960,9 @@ mod tests {
             std::env::remove_var("NYXID_LARK_ENCRYPT_KEY");
         }
         let result = run(ChannelBotCommands::Update {
+            bot_token: None,
+            token_env: None,
+            app_secret_env: None,
             id: "bot-1".to_string(),
             label: None,
             verification_token: None,
@@ -927,6 +1158,8 @@ mod tests {
             .await;
 
         run(ChannelBotCommands::Register {
+            phone_number_id: None,
+            waba_id: None,
             platform: "lark".to_string(),
             bot_token: Some("tok".to_string()),
             token_env: None,
@@ -961,6 +1194,8 @@ mod tests {
             .await;
 
         run(ChannelBotCommands::Register {
+            phone_number_id: None,
+            waba_id: None,
             platform: "telegram".to_string(),
             bot_token: Some("tok".to_string()),
             token_env: None,
@@ -999,6 +1234,9 @@ mod tests {
             .await;
 
         run(ChannelBotCommands::Update {
+            bot_token: None,
+            token_env: None,
+            app_secret_env: None,
             id: "bot-1".to_string(),
             label: None,
             verification_token: Some("vtok2".to_string()),
@@ -1021,6 +1259,9 @@ mod tests {
             std::env::remove_var("NYXID_LARK_VERIFICATION_TOKEN");
         }
         let result = run(ChannelBotCommands::Update {
+            bot_token: None,
+            token_env: None,
+            app_secret_env: None,
             id: "bot-1".to_string(),
             label: None,
             verification_token: Some("   ".to_string()),

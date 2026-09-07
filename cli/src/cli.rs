@@ -172,7 +172,7 @@ pub enum Commands {
     },
     /// Update the CLI and installed skills
     Update(UpdateArgs),
-    /// Manage channel bot relay (Telegram/Discord/Lark/Feishu bridge to agents)
+    /// Manage channel bot relay (Telegram/Discord/Lark/Feishu/Slack/WhatsApp)
     ChannelBot {
         #[command(subcommand)]
         command: ChannelBotCommands,
@@ -4417,7 +4417,7 @@ pub enum AiSetupCommands {
 pub enum ChannelBotCommands {
     /// Register a new messaging platform bot
     Register {
-        /// Platform: telegram, discord, lark, feishu, slack
+        /// Platform: telegram, discord, lark, feishu, slack, whatsapp (Meta Cloud API)
         #[arg(long)]
         platform: String,
         /// Bot token (hidden from help -- use --token-env instead).
@@ -4434,7 +4434,7 @@ pub enum ChannelBotCommands {
         #[arg(long)]
         app_id: Option<String>,
         /// App secret (hidden from help -- use --app-secret-env instead).
-        /// Lark/Feishu: app secret. Slack: app signing secret.
+        /// Lark/Feishu: app secret. Slack: signing secret. WhatsApp: Meta App Secret.
         #[arg(long, hide = true)]
         app_secret: Option<String>,
         /// Read app secret from this environment variable
@@ -4451,6 +4451,12 @@ pub enum ChannelBotCommands {
         /// Platform public key (required for Discord)
         #[arg(long)]
         public_key: Option<String>,
+        /// WhatsApp Cloud API Phone Number ID (not the phone number or Meta App ID)
+        #[arg(long)]
+        phone_number_id: Option<String>,
+        /// Optional WhatsApp Business Account ID
+        #[arg(long)]
+        waba_id: Option<String>,
         /// Create this bot under the given org (you must be an admin of
         /// that org). Omit for a personal bot.
         #[arg(
@@ -4480,9 +4486,18 @@ pub enum ChannelBotCommands {
         /// Lark/Feishu App ID
         #[arg(long)]
         app_id: Option<String>,
-        /// Lark/Feishu App Secret or Slack signing secret
+        /// Lark/Feishu App Secret, Slack signing secret, or Meta App Secret
         #[arg(long, hide = true)]
         app_secret: Option<String>,
+        /// Read replacement app secret from this environment variable
+        #[arg(long)]
+        app_secret_env: Option<String>,
+        /// Replacement bot access token (WhatsApp); prefer --token-env
+        #[arg(long, hide = true)]
+        bot_token: Option<String>,
+        /// Read replacement bot access token from this environment variable (WhatsApp)
+        #[arg(long)]
+        token_env: Option<String>,
         #[command(flatten)]
         auth: AuthArgs,
     },

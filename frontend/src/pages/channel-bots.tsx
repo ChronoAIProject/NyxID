@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import { useWatch } from "react-hook-form";
 import { useAppForm } from "@/components/ui/form";
@@ -17,6 +17,8 @@ import {
   type CreateDeviceConversationFormData,
 } from "@/schemas/channels";
 import { ApiError } from "@/lib/api-client";
+import { CHANNEL_PLATFORMS, channelBotRegistrationPayload } from "@/lib/channel-platforms";
+import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { formatDate } from "@/lib/utils";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
@@ -59,6 +61,7 @@ import type {
   ChannelBotStatus,
   ChannelConversationItem,
   ChannelPlatform,
+  CreateChannelBotResponse,
 } from "@/types/channels";
 
 function statusBadgeVariant(
@@ -80,20 +83,7 @@ function statusBadgeVariant(
 }
 
 function platformLabel(platform: ChannelPlatform): string {
-  switch (platform) {
-    case "telegram":
-      return "Telegram";
-    case "discord":
-      return "Discord";
-    case "lark":
-      return "Lark";
-    case "feishu":
-      return "Feishu";
-    case "slack":
-      return "Slack";
-    default:
-      return platform;
-  }
+  return CHANNEL_PLATFORMS[platform]?.label ?? platform;
 }
 
 function BotRow({
@@ -276,14 +266,20 @@ function CreateBotDialog({
 }) {
   const navigate = useNavigate();
   const createBot = useCreateChannelBot();
+  const [createdBot, setCreatedBot] = useState<CreateChannelBotResponse | null>(null);
+  const dialogContentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (createdBot && dialogContentRef.current) dialogContentRef.current.scrollTop = 0;
+  }, [createdBot]);
   const {
     register,
     handleSubmit,
     setValue,
     control,
     reset,
-    formState: { errors },
+    formState: { errors, isDirty, isValid },
   } = useAppForm<CreateChannelBotFormData>({
+    mode: "onChange",
     resolver: zodResolver(createChannelBotSchema),
     defaultValues: {
       platform: "telegram",
@@ -317,16 +313,15 @@ function CreateBotDialog({
   const targetOrgId = useWatch({ control, name: "target_org_id" }) ?? null;
 
   function onSubmit(data: CreateChannelBotFormData) {
-    // Empty strings from the form should not be sent as target_org_id.
-    const payload = {
-      ...data,
-      target_org_id:
-        data.target_org_id && data.target_org_id.length > 0
-          ? data.target_org_id
-          : undefined,
-    };
+    const payload = channelBotRegistrationPayload(data);
     createBot.mutate(payload, {
       onSuccess: (result) => {
+        if (result.webhook_secret) {
+          setCreatedBot(result);
+          reset();
+          createBot.reset();
+          return;
+        }
         toast.success(
           `Bot "${result.platform_bot_username}" created successfully`,
         );
@@ -351,16 +346,39 @@ function CreateBotDialog({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="md:max-w-md">
+    <Dialog open={open} onOpenChange={(next) => {
+      onOpenChange(next);
+      if (!next) {
+        const id = createdBot?.id;
+        setCreatedBot(null);
+        createBot.reset();
+        reset();
+        if (id) void navigate({ to: "/channel-bots/$botId", params: { botId: id } });
+      }
+    }}>
+      <DialogContent ref={dialogContentRef} className="max-h-[90dvh] overflow-y-auto md:max-w-md">
         <DialogHeader>
-          <DialogTitle>Add Channel Bot</DialogTitle>
+          <DialogTitle>{createdBot ? `${platformLabel(createdBot.platform)} Bot Created` : "Add Channel Bot"}</DialogTitle>
           <DialogDescription>
-            Connect a messaging platform bot to relay messages to your AI agents.
+            {createdBot ? "Store this verification secret now. It will not be shown again." : "Connect a messaging platform bot to your AI agents."}
           </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+        {createdBot ? (
+          <div className="space-y-4">
+            <CopyableUrlCallout label="Callback URL" url={createdBot.webhook_url ?? ""} />
+            <CopyableUrlCallout label={createdBot.webhook_secret_label ?? "Webhook Secret"} url={createdBot.webhook_secret ?? ""} />
+            <ol className="list-decimal space-y-2 pl-4 text-xs text-muted-foreground">
+              {createdBot.setup_instructions?.map((instruction) => <li key={instruction}>{instruction}</li>)}
+            </ol>
+            <DialogFooter><Button variant="primary" onClick={() => {
+              const id = createdBot.id;
+              setCreatedBot(null);
+              onOpenChange(false);
+              void navigate({ to: "/channel-bots/$botId", params: { botId: id } });
+            }}>Done</Button></DialogFooter>
+          </div>
+        ) : <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
           <div className="space-y-2">
             <Label htmlFor="scope">Scope</Label>
             <OrgScopeSelect
@@ -388,11 +406,7 @@ function CreateBotDialog({
                 <SelectValue placeholder="Select platform" />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="telegram">Telegram</SelectItem>
-                <SelectItem value="discord">Discord</SelectItem>
-                <SelectItem value="lark">Lark</SelectItem>
-                <SelectItem value="feishu">Feishu</SelectItem>
-                <SelectItem value="slack">Slack</SelectItem>
+                {Object.entries(CHANNEL_PLATFORMS).map(([id, descriptor]) => <SelectItem key={id} value={id}>{descriptor.label}</SelectItem>)}
               </SelectContent>
             </Select>
             {errors.platform && (
@@ -406,7 +420,7 @@ function CreateBotDialog({
             <Label htmlFor="label">Label</Label>
             <Input
               id="label"
-              placeholder="My Telegram Bot"
+              placeholder={`My ${platformLabel(platform)} Bot`}
               {...register("label")}
             />
             {errors.label && (
@@ -416,139 +430,15 @@ function CreateBotDialog({
             )}
           </div>
 
-          <div className="space-y-2">
-            <Label htmlFor="bot_token">Bot Token</Label>
-            <Input
-              id="bot_token"
-              type="password"
-              placeholder="Enter your bot token"
-              {...register("bot_token")}
-            />
-            {errors.bot_token && (
-              <p className="text-xs text-destructive">
-                {errors.bot_token.message}
-              </p>
-            )}
-          </div>
-
-          {(platform === "lark" || platform === "feishu") && (
-            <>
-              <div className="space-y-2">
-                <Label htmlFor="app_id">App ID</Label>
-                <Input
-                  id="app_id"
-                  placeholder="cli_xxxxxxxxxx"
-                  {...register("app_id")}
-                />
-                {errors.app_id && (
-                  <p className="text-xs text-destructive">
-                    {errors.app_id.message}
-                  </p>
-                )}
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="app_secret">App Secret</Label>
-                <Input
-                  id="app_secret"
-                  type="password"
-                  placeholder="Enter app secret"
-                  {...register("app_secret")}
-                />
-                {errors.app_secret && (
-                  <p className="text-xs text-destructive">
-                    {errors.app_secret.message}
-                  </p>
-                )}
-              </div>
-              <div className="rounded-lg border border-border/70 bg-muted/30 p-4">
-                <div className="space-y-1">
-                  <p className="text-[12px] font-medium">Lark webhook verification</p>
-                  <p className="text-xs text-muted-foreground">
-                    In Lark/Feishu Event Subscriptions, copy the
-                    Verification Token from Security settings. Encrypt Key is
-                    optional and should match the Encrypt Key field from the
-                    same panel if you enabled encrypted callbacks.
-                  </p>
-                </div>
-
-                <div className="mt-4 space-y-2">
-                  <Label htmlFor="verification_token">Verification Token</Label>
-                  <Input
-                    id="verification_token"
-                    type="password"
-                    placeholder="Event Subscriptions Verification Token"
-                    {...register("verification_token")}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Required. Lark sends this back on every webhook as
-                    `header.token` or `token`.
-                  </p>
-                  {errors.verification_token && (
-                    <p className="text-xs text-destructive">
-                      {errors.verification_token.message}
-                    </p>
-                  )}
-                </div>
-
-                <div className="mt-4 space-y-2">
-                  <Label htmlFor="encrypt_key">Encrypt Key</Label>
-                  <Input
-                    id="encrypt_key"
-                    type="password"
-                    placeholder="Optional Event Subscriptions Encrypt Key"
-                    {...register("encrypt_key")}
-                  />
-                  <p className="text-xs text-muted-foreground">
-                    Optional. Only enter this if encrypted webhook payloads
-                    are enabled in the Lark/Feishu Event Subscriptions console.
-                  </p>
-                  {errors.encrypt_key && (
-                    <p className="text-xs text-destructive">
-                      {errors.encrypt_key.message}
-                    </p>
-                  )}
-                </div>
-              </div>
-            </>
-          )}
-
-          {platform === "discord" && (
-            <div className="space-y-2">
-              <Label htmlFor="public_key">Public Key</Label>
-              <Input
-                id="public_key"
-                placeholder="Discord application public key"
-                {...register("public_key")}
-              />
-              {errors.public_key && (
-                <p className="text-xs text-destructive">
-                  {errors.public_key.message}
-                </p>
-              )}
+          {CHANNEL_PLATFORMS[platform].fields.map((field) => (
+            <div key={field.name} className="space-y-2">
+              <Label htmlFor={field.name}>{field.label}{field.required ? "" : " (optional)"}</Label>
+              <Input id={field.name} type={field.secret ? "password" : "text"} inputMode={field.numeric ? "numeric" : undefined}
+                autoComplete={field.secret ? "new-password" : "off"} {...register(field.name)} />
+              {field.hint && <p className="text-xs text-muted-foreground">{field.hint}</p>}
+              {errors[field.name] && <p className="text-xs text-destructive">{errors[field.name]?.message}</p>}
             </div>
-          )}
-
-          {platform === "slack" && (
-            <div className="space-y-2">
-              <Label htmlFor="app_secret">Signing Secret</Label>
-              <Input
-                id="app_secret"
-                type="password"
-                placeholder="Slack app signing secret"
-                {...register("app_secret")}
-              />
-              <p className="text-xs text-muted-foreground">
-                Found under Basic Information → App Credentials in your
-                Slack app settings. Used to verify Events API request
-                signatures.
-              </p>
-              {errors.app_secret && (
-                <p className="text-xs text-destructive">
-                  {errors.app_secret.message}
-                </p>
-              )}
-            </div>
-          )}
+          ))}
 
           <DialogFooter>
             <Button
@@ -558,11 +448,11 @@ function CreateBotDialog({
             >
               Cancel
             </Button>
-            <Button variant="primary" type="submit" disabled={createBot.isPending}>
+            <Button variant="primary" type="submit" disabled={createBot.isPending || !isDirty || !isValid}>
               {createBot.isPending ? "Creating..." : "Add Bot"}
             </Button>
           </DialogFooter>
-        </form>
+        </form>}
       </DialogContent>
     </Dialog>
   );
