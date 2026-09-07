@@ -265,10 +265,115 @@ impl<'a> From<&'a str> for BotCredentials<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handlers::channel_bots::resolve_adapter;
+    use crate::services::channel_adapters::resolve_adapter;
     use crate::services::channel_platform::WebhookPolicy;
     use crate::services::provider_token_exchange_service::TokenExchangeCache;
     use std::sync::Arc;
+
+    #[test]
+    fn channel_retry_dedup_is_opt_in_for_whatsapp_only() {
+        let cache = Arc::new(TokenExchangeCache::new());
+        for platform in [
+            "telegram", "discord", "lark", "feishu", "slack", "openclaw", "whatsapp",
+        ] {
+            assert_eq!(
+                resolve_adapter(platform, &cache)
+                    .unwrap()
+                    .dedup_inbound_by_platform_message_id(),
+                platform == "whatsapp"
+            );
+        }
+    }
+
+    #[test]
+    fn channel_registration_preserves_exact_legacy_validation_messages() {
+        let cache = Arc::new(TokenExchangeCache::new());
+        for (platform, field, expected) in [
+            (
+                "lark",
+                "verification_token",
+                "Verification Token is required for Lark/Feishu",
+            ),
+            ("lark", "app_id", "App ID is required for Lark/Feishu"),
+            (
+                "lark",
+                "app_secret",
+                "App Secret is required for Lark/Feishu",
+            ),
+            (
+                "feishu",
+                "verification_token",
+                "Verification Token is required for Lark/Feishu",
+            ),
+            ("feishu", "app_id", "App ID is required for Lark/Feishu"),
+            (
+                "feishu",
+                "app_secret",
+                "App Secret is required for Lark/Feishu",
+            ),
+            (
+                "discord",
+                "public_key",
+                "Public Key is required for Discord",
+            ),
+            (
+                "slack",
+                "app_secret",
+                "Signing Secret is required for Slack",
+            ),
+            ("telegram", "bot_token", "Bot token is required"),
+        ] {
+            let descriptor = resolve_adapter(platform, &cache).unwrap().registration();
+            let mut fields = RegistrationValues(
+                [
+                    ("bot_token", "token"),
+                    ("app_id", "id"),
+                    ("app_secret", "secret"),
+                    ("verification_token", "verification"),
+                    ("public_key", "public"),
+                ]
+                .into(),
+            );
+            fields.0.remove(field);
+            let AppError::ValidationError(message) =
+                descriptor.validate(&fields, false).unwrap_err()
+            else {
+                panic!("expected validation error")
+            };
+            assert_eq!(message, expected);
+        }
+        for (platform, field, expected) in [
+            (
+                "telegram",
+                "app_secret",
+                "Only label updates are supported for this bot platform",
+            ),
+            (
+                "slack",
+                "verification_token",
+                "verification_token, encrypt_key, and app_id are only supported for Lark/Feishu bots",
+            ),
+            (
+                "slack",
+                "encrypt_key",
+                "verification_token, encrypt_key, and app_id are only supported for Lark/Feishu bots",
+            ),
+            (
+                "slack",
+                "app_id",
+                "verification_token, encrypt_key, and app_id are only supported for Lark/Feishu bots",
+            ),
+        ] {
+            let descriptor = resolve_adapter(platform, &cache).unwrap().registration();
+            let AppError::ValidationError(message) = descriptor
+                .validate(&RegistrationValues([(field, "value")].into()), true)
+                .unwrap_err()
+            else {
+                panic!("expected validation error")
+            };
+            assert_eq!(message, expected);
+        }
+    }
 
     #[test]
     fn channel_registration_requirements_and_patch_policies_are_adapter_owned() {

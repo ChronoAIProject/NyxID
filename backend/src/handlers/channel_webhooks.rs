@@ -62,22 +62,20 @@ pub async fn channel_webhook(
 ) -> axum::response::Response {
     use crate::services::channel_platform::WebhookPolicy;
     let Ok(adapter) = resolve_adapter(&platform, &state.token_exchange_cache) else {
-        return StatusCode::OK.into_response();
+        return StatusCode::NOT_FOUND.into_response();
     };
     if !adapter.registration().enabled {
-        return StatusCode::OK.into_response();
+        return StatusCode::NOT_FOUND.into_response();
     }
     let empty_ack_is_text = adapter.registration().empty_ack_is_text;
     match adapter.webhook_policy(&body) {
         WebhookPolicy::Challenge(response) => Json(response).into_response(),
         WebhookPolicy::Immediate(response) => {
             tokio::spawn(async move {
-                // Suppress payload-derived errors; identifiers alone are safe to log.
-                if handle_webhook_inner(&state, &bot_id, &platform, &headers, &body)
-                    .await
-                    .is_err()
+                if let Err(e) =
+                    handle_webhook_inner(&state, &bot_id, &platform, &headers, &body).await
                 {
-                    tracing::warn!(bot_id = %bot_id, platform = %platform, "channel webhook processing failed (suppressed)");
+                    tracing::warn!(bot_id = %bot_id, platform = %platform, error = %e, "channel webhook processing failed (suppressed)");
                 }
             });
             webhook_response(response, empty_ack_is_text)
@@ -85,8 +83,8 @@ pub async fn channel_webhook(
         WebhookPolicy::Inline => {
             match handle_webhook_inner(&state, &bot_id, &platform, &headers, &body).await {
                 Ok(response) => webhook_response(response, empty_ack_is_text),
-                Err(_) => {
-                    tracing::warn!(bot_id = %bot_id, platform = %platform, "channel webhook processing failed (suppressed)");
+                Err(e) => {
+                    tracing::warn!(bot_id = %bot_id, platform = %platform, error = %e, "channel webhook processing failed (suppressed)");
                     webhook_response(None, empty_ack_is_text)
                 }
             }
@@ -110,6 +108,12 @@ pub async fn channel_subscription(
     Path((platform, bot_id)): Path<(String, String)>,
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> axum::response::Response {
+    let Ok(adapter) = resolve_adapter(&platform, &state.token_exchange_cache) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !adapter.registration().enabled {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let result = async {
         let bot = channel_bot_service::get_bot(&state.db, &bot_id).await?;
         if bot.platform != platform
@@ -120,8 +124,7 @@ pub async fn channel_subscription(
                 "Invalid subscription".to_string(),
             ));
         }
-        resolve_adapter(&platform, &state.token_exchange_cache)?
-            .subscription_handshake(&bot, &query)
+        adapter.subscription_handshake(&bot, &query)
     }
     .await;
     match result {
@@ -272,6 +275,22 @@ async fn handle_webhook_inner_with_deps(
     )?;
 
     for inbound in &messages {
+        if adapter.dedup_inbound_by_platform_message_id()
+            && channel_relay_service::inbound_platform_message_exists(
+                state.db,
+                &bot.id,
+                &bot.platform,
+                &inbound.platform_message_id,
+            )
+            .await?
+        {
+            tracing::debug!(
+                bot_id = %bot.id, platform = %bot.platform,
+                platform_message_id = %inbound.platform_message_id,
+                "skipping duplicate inbound platform message"
+            );
+            continue;
+        }
         // Resolve which agent should handle this message
         let route = match channel_routing_service::resolve_agent(
             state.db,
@@ -487,6 +506,136 @@ mod tests {
     use mongodb::bson::doc;
     use tokio::sync::{Mutex, oneshot};
     use tokio::time::{Duration, timeout};
+
+    async fn assert_duplicate_delivery_counts(platform: &str, expected_count: u64) {
+        use hmac::{Hmac, Mac};
+        use sha2::{Digest, Sha256};
+
+        let db = crate::test_utils::connect_transaction_test_database("channel_retry_dedup").await;
+        let state = crate::test_utils::test_app_state(db.clone());
+        let bot_id = uuid::Uuid::new_v4().to_string();
+        let owner_id = uuid::Uuid::new_v4().to_string();
+        let api_key_id = uuid::Uuid::new_v4().to_string();
+        let (callback_url, received, shutdown_tx) = spawn_mock_callback_server().await;
+        let encrypted_secret = state.encryption_keys.encrypt(b"app-secret").await.unwrap();
+        db.collection::<bson::Document>(crate::models::channel_bot::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": &bot_id, "user_id": &owner_id, "platform": platform, "label": "Retry test",
+                "platform_bot_id": "123456", "platform_bot_username": "support",
+                "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
+                "app_secret_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted_secret },
+                "webhook_secret_hash": hex::encode(Sha256::digest(b"verify-token")),
+                "webhook_registered": true, "status": "active", "is_active": true,
+                "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+            }).await.unwrap();
+        db.collection::<bson::Document>(API_KEYS)
+            .insert_one(doc! {
+                "_id": &api_key_id, "user_id": &owner_id, "name": "agent", "key_prefix": "nyxid_ag",
+                "key_hash": "deadbeef".repeat(8), "scopes": "read write", "is_active": true,
+                "callback_url": callback_url, "created_at": bson::DateTime::now(),
+            })
+            .await
+            .unwrap();
+        db.collection::<bson::Document>(crate::models::channel_conversation::COLLECTION_NAME)
+            .insert_one(doc! {
+                "_id": uuid::Uuid::new_v4().to_string(), "user_id": &owner_id, "channel_bot_id": &bot_id,
+                "platform": platform, "platform_conversation_id": "15551234567",
+                "platform_conversation_type": "private", "agent_api_key_id": &api_key_id,
+                "default_agent": false, "is_active": true,
+                "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+            }).await.unwrap();
+        let payload = if platform == "whatsapp" {
+            serde_json::json!({"object": "whatsapp_business_account", "entry": [{"changes": [{
+                "field": "messages", "value": {"messaging_product": "whatsapp", "metadata": {"phone_number_id": "123456"},
+                "messages": [{"from": "15551234567", "id": "wamid.retry", "type": "text", "text": {"body": "Hello"}}]}
+            }]}]})
+        } else {
+            serde_json::json!({"update_id": 1, "message": {"message_id": 42,
+                "chat": {"id": 15551234567_i64, "type": "private"}, "from": {"id": 15551234567_i64}, "text": "Hello"}})
+        };
+        let body = serde_json::to_vec(&payload).unwrap();
+        let mut headers = HeaderMap::new();
+        if platform == "whatsapp" {
+            let mut mac = Hmac::<Sha256>::new_from_slice(b"app-secret").unwrap();
+            mac.update(&body);
+            headers.insert(
+                "x-hub-signature-256",
+                format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
+                    .parse()
+                    .unwrap(),
+            );
+        } else {
+            headers.insert(
+                "x-telegram-bot-api-secret-token",
+                "verify-token".parse().unwrap(),
+            );
+        }
+        for _ in 0..2 {
+            handle_webhook_inner_with_deps(
+                WebhookHandlerDeps::from(&state),
+                &bot_id,
+                platform,
+                &headers,
+                &body,
+            )
+            .await
+            .unwrap();
+        }
+        let stored_count = db
+            .collection::<bson::Document>(crate::models::channel_message::COLLECTION_NAME)
+            .count_documents(
+                doc! { "channel_bot_id": &bot_id, "platform": platform, "direction": "inbound" },
+            )
+            .await
+            .unwrap();
+        assert_eq!(stored_count, expected_count);
+        assert_eq!(received.lock().await.len() as u64, expected_count);
+        let _ = shutdown_tx.send(());
+    }
+
+    #[tokio::test]
+    async fn duplicate_whatsapp_delivery_stores_and_dispatches_once() {
+        assert_duplicate_delivery_counts("whatsapp", 1).await;
+    }
+
+    #[tokio::test]
+    async fn duplicate_telegram_delivery_still_stores_and_dispatches_twice() {
+        assert_duplicate_delivery_counts("telegram", 2).await;
+    }
+
+    #[tokio::test]
+    async fn unknown_and_nonregistrable_webhook_platforms_return_not_found_for_get_and_post() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let router = Router::new()
+            .route(
+                "/webhooks/channel/{platform}/{bot_id}",
+                post(channel_webhook).get(channel_subscription),
+            )
+            .with_state(crate::test_utils::test_app_state_no_db().await);
+        for platform in ["unknown", "openclaw"] {
+            for method in ["GET", "POST"] {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(format!("/webhooks/channel/{platform}/bot"))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::NOT_FOUND,
+                    "{method} {platform}"
+                );
+            }
+        }
+    }
 
     #[tokio::test]
     async fn whatsapp_subscription_http_verifies_token_and_returns_raw_challenge() {

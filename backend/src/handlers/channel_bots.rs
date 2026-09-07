@@ -9,11 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::mw::auth::AuthUser;
-use crate::services::channel_adapters::discord::DiscordAdapter;
-use crate::services::channel_adapters::lark::LarkFamilyAdapter;
-use crate::services::channel_adapters::openclaw::OpenClawAdapter;
-use crate::services::channel_adapters::slack::SlackAdapter;
-use crate::services::channel_adapters::telegram::TelegramAdapter;
+pub use crate::services::channel_adapters::resolve_adapter;
 use crate::services::channel_platform::{BotCredentials, PlatformAdapter, RegistrationValues};
 use crate::services::{audit_service, channel_bot_service, lark_permission, org_service};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
@@ -224,6 +220,7 @@ pub struct CreateChannelBotResponse {
     #[serde(flatten)]
     pub platform_config: std::collections::BTreeMap<String, String>,
     pub webhook_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub webhook_secret: Option<String>,
     pub webhook_secret_label: Option<&'static str>,
     pub setup_instructions: &'static [&'static str],
@@ -254,6 +251,30 @@ impl std::fmt::Debug for CreateChannelBotResponse {
             .field("platform", &self.platform)
             .field("webhook_secret", &"[REDACTED]")
             .finish_non_exhaustive()
+    }
+}
+
+impl CreateChannelBotResponse {
+    fn from_bot(
+        bot: crate::models::channel_bot::ChannelBot,
+        descriptor: crate::services::channel_platform::RegistrationDescriptor,
+        webhook_url: String,
+        webhook_secret: String,
+    ) -> AppResult<Self> {
+        let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&bot);
+        Ok(Self {
+            platform_config: descriptor.configuration(&bot)?,
+            webhook_url,
+            webhook_secret: descriptor.webhook_secret_label.map(|_| webhook_secret),
+            webhook_secret_label: descriptor.webhook_secret_label,
+            setup_instructions: descriptor.setup_instructions,
+            id: bot.id,
+            platform: bot.platform,
+            platform_bot_username: bot.platform_bot_username,
+            status: descriptor.create_response_status.to_string(),
+            permission_setup_url,
+            permission_setup_scopes,
+        })
     }
 }
 
@@ -338,40 +359,6 @@ async fn resolve_list_owner(
         Ok(org_id.to_string())
     } else {
         Ok(actor.to_string())
-    }
-}
-
-/// Resolve the platform adapter for the given platform identifier.
-///
-/// Supported platforms: telegram, discord, lark, feishu, slack, openclaw.
-///
-/// The Lark and Feishu adapters share a process-wide
-/// [`TokenExchangeCache`] that is also used by the proxy's
-/// `token_exchange` auth method. Callers pass the cache from `AppState`
-/// so both code paths deduplicate token exchanges for the same Lark app.
-pub fn resolve_adapter(
-    platform: &str,
-    token_exchange_cache: &std::sync::Arc<
-        crate::services::provider_token_exchange_service::TokenExchangeCache,
-    >,
-) -> AppResult<Box<dyn PlatformAdapter>> {
-    match platform {
-        "telegram" => Ok(Box::new(TelegramAdapter)),
-        "discord" => Ok(Box::new(DiscordAdapter)),
-        "lark" => Ok(Box::new(LarkFamilyAdapter::lark(
-            token_exchange_cache.clone(),
-        ))),
-        "feishu" => Ok(Box::new(LarkFamilyAdapter::feishu(
-            token_exchange_cache.clone(),
-        ))),
-        "slack" => Ok(Box::new(SlackAdapter)),
-        "whatsapp" => Ok(Box::new(
-            crate::services::channel_adapters::whatsapp::WhatsAppAdapter,
-        )),
-        "openclaw" => Ok(Box::new(OpenClawAdapter)),
-        other => Err(AppError::ValidationError(format!(
-            "unsupported platform: {other}. Supported: telegram, discord, lark, feishu, slack, whatsapp, openclaw"
-        ))),
     }
 }
 
@@ -520,24 +507,14 @@ pub async fn create_bot(
         })),
     );
 
-    let (permission_setup_url, permission_setup_scopes) =
-        lark_permission_payload(&create_result.bot);
-
     Ok((
         StatusCode::CREATED,
-        Json(CreateChannelBotResponse {
-            platform_config: descriptor.configuration(&create_result.bot)?,
+        Json(CreateChannelBotResponse::from_bot(
+            create_result.bot,
+            descriptor,
             webhook_url,
-            webhook_secret: descriptor.webhook_secret_label.map(|_| webhook_secret),
-            webhook_secret_label: descriptor.webhook_secret_label,
-            setup_instructions: descriptor.setup_instructions,
-            id: bot_id,
-            platform: create_result.bot.platform,
-            platform_bot_username: create_result.bot.platform_bot_username,
-            status: descriptor.create_response_status.to_string(),
-            permission_setup_url,
-            permission_setup_scopes,
-        }),
+            webhook_secret,
+        )?),
     ))
 }
 
@@ -885,6 +862,33 @@ pub async fn verify_bot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_response_only_exposes_dashboard_verification_secrets() {
+        let cache = std::sync::Arc::new(
+            crate::services::provider_token_exchange_service::TokenExchangeCache::new(),
+        );
+        for platform in ["telegram", "whatsapp"] {
+            let mut bot = make_telegram_bot();
+            bot.platform = platform.to_string();
+            let descriptor = resolve_adapter(platform, &cache).unwrap().registration();
+            let response = CreateChannelBotResponse::from_bot(
+                bot,
+                descriptor,
+                "https://nyxid.example/webhook".to_string(),
+                "generated-secret".to_string(),
+            )
+            .unwrap();
+            let json = serde_json::to_value(response).unwrap();
+            if platform == "telegram" {
+                assert!(json.get("webhook_secret").is_none());
+                assert!(json["webhook_secret_label"].is_null());
+            } else {
+                assert_eq!(json["webhook_secret"], "generated-secret");
+                assert_eq!(json["webhook_secret_label"], "Verify Token");
+            }
+        }
+    }
     use chrono::Utc;
 
     fn make_lark_bot(has_verification_token: bool) -> crate::models::channel_bot::ChannelBot {

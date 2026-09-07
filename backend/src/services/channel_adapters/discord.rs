@@ -227,11 +227,17 @@ pub(crate) fn apply_interaction_context(
     let Some(thread_id) = thread_id.filter(|id| id.starts_with("interaction:")) else {
         return false;
     };
-    if chrono::Utc::now() - created_at < chrono::Duration::minutes(14) {
+    let age = chrono::Utc::now() - created_at;
+    if age < chrono::Duration::minutes(14) {
         super::super::channel_platform::insert_reply_context(
             metadata,
             "interaction_thread_id",
             thread_id,
+        );
+    } else {
+        tracing::info!(
+            age_secs = age.num_seconds(),
+            "Skipping Discord interaction follow-up webhook: token past TTL, falling through to regular channel message API"
         );
     }
     true

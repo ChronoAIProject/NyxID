@@ -280,7 +280,7 @@ impl PlatformAdapter for TelegramAdapter {
         super::super::channel_platform::RegistrationDescriptor {
             automatic_webhook: true,
             empty_ack_is_text: false,
-            webhook_secret_label: Some("Webhook secret"),
+            webhook_secret_label: None,
             ..Default::default()
         }
     }

@@ -193,6 +193,11 @@ pub trait PlatformAdapter: Send + Sync {
         WebhookPolicy::Inline
     }
 
+    /// Opt in only when repeated message IDs identify retries, not edits.
+    fn dedup_inbound_by_platform_message_id(&self) -> bool {
+        false
+    }
+
     fn subscription_handshake(
         &self,
         _bot: &crate::models::channel_bot::ChannelBot,

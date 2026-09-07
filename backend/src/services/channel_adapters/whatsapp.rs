@@ -159,6 +159,11 @@ fn parse_message(message: &Value, contacts: &Value) -> Option<InboundMessage> {
 
 /// The actual request builder, shared by production sends and unit tests.
 fn reply_bodies(recipient: &str, reply: &OutboundReply) -> AppResult<Vec<Value>> {
+    let recipient: String = recipient
+        .chars()
+        .filter(|character| *character != ' ' && *character != '-')
+        .collect();
+    let recipient = recipient.strip_prefix('+').unwrap_or(&recipient);
     validate_id(recipient, "Recipient")?;
     let metadata = reply.metadata.as_ref();
     let template = metadata
@@ -336,6 +341,10 @@ impl PlatformAdapter for WhatsAppAdapter {
 
     fn webhook_policy(&self, _body: &[u8]) -> WebhookPolicy {
         WebhookPolicy::Immediate(None)
+    }
+
+    fn dedup_inbound_by_platform_message_id(&self) -> bool {
+        true
     }
 
     fn validate_stored_verification(&self, bot: &ChannelBot) -> AppResult<()> {
@@ -900,6 +909,39 @@ mod tests {
             text: text.map(String::from),
             reply_to_platform_message_id: Some("wamid.parent".to_string()),
             metadata,
+        }
+    }
+
+    #[test]
+    fn reply_recipient_normalizes_phone_formatting_but_rejects_invalid_ids() {
+        for recipient in [
+            "15551234567",
+            "+15551234567",
+            "+1 555-123-4567",
+            "1 555 123 4567",
+        ] {
+            for content in [
+                reply(Some("Hello"), None),
+                reply(None, Some(json!({"template": {"name": "greeting"}}))),
+            ] {
+                assert_eq!(
+                    reply_bodies(recipient, &content).unwrap()[0]["to"],
+                    "15551234567"
+                );
+            }
+        }
+        for recipient in [
+            "++15551234567",
+            "1555+1234567",
+            "abc",
+            "+ - ",
+            "1555/1234567",
+            "(1555)1234567",
+        ] {
+            assert!(
+                reply_bodies(recipient, &reply(Some("Hello"), None)).is_err(),
+                "{recipient}"
+            );
         }
     }
 
