@@ -16,6 +16,8 @@ use crate::api::{
 };
 use crate::cli::{AuthArgs, LoginArgs};
 
+pub mod agent_key;
+
 /// Default NyxID base URL used when prompting for re-login on a session that
 /// was never associated with a saved base URL. Mirrors the `LoginArgs::base_url`
 /// clap default in `cli.rs`; kept in sync so the prompt path and the explicit
@@ -124,7 +126,13 @@ fn user_id_file_path_for(profile: Option<&str>) -> Result<PathBuf> {
 }
 
 pub fn read_saved_token_for(profile: Option<&str>) -> Option<String> {
-    let path = token_file_path_for(profile).ok()?;
+    let path = if agent_key::is_agent_key_profile(profile) {
+        token_dir_for_profile(profile)
+            .ok()?
+            .join(agent_key::TOKEN_FILE)
+    } else {
+        token_file_path_for(profile).ok()?
+    };
     std::fs::read_to_string(path)
         .ok()
         .map(|t| t.trim().to_string())
@@ -136,6 +144,9 @@ pub fn read_saved_token() -> Option<String> {
 }
 
 pub fn read_saved_refresh_token_for(profile: Option<&str>) -> Option<String> {
+    if agent_key::is_agent_key_profile(profile) {
+        return None;
+    }
     let path = refresh_token_file_path_for(profile).ok()?;
     std::fs::read_to_string(path)
         .ok()
@@ -163,6 +174,9 @@ pub fn read_saved_base_url_for(profile: Option<&str>) -> Option<String> {
 /// it when deriving from the current token fails.
 #[allow(dead_code)]
 pub fn read_saved_user_id_for(profile: Option<&str>) -> Option<String> {
+    if agent_key::is_agent_key_profile(profile) {
+        return None;
+    }
     if let Some(access_token) = read_saved_token_for(profile)
         && let Some(user_id) = jwt_sub_from_token(&access_token)
     {
@@ -199,8 +213,18 @@ fn write_token_file(path: &std::path::Path, token: &str) -> Result<()> {
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "token".to_string());
-    let temp = path.with_file_name(format!(".{file_name}.tmp-{}", std::process::id()));
-    std::fs::write(&temp, token)
+    let temp = path.with_file_name(format!(".{file_name}.tmp-{}", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temp)
+        .with_context(|| format!("Failed to create {}", temp.display()))?;
+    file.write_all(token.as_bytes())
         .with_context(|| format!("Failed to write token to {}", temp.display()))?;
     #[cfg(unix)]
     {
@@ -238,6 +262,7 @@ pub fn save_tokens_for(
             }
         }
     }
+    agent_key::clear_agent_files(profile)?;
     Ok(())
 }
 
@@ -248,6 +273,7 @@ pub fn save_tokens(access_token: &str, refresh_token: Option<&str>) -> Result<()
 }
 
 fn clear_token_for(profile: Option<&str>) -> Result<()> {
+    agent_key::clear_agent_files(profile)?;
     let path = token_file_path_for(profile)?;
     if path.exists() {
         std::fs::remove_file(&path)
@@ -276,6 +302,7 @@ pub(crate) enum AccessTokenSource {
     Explicit,
     Environment,
     SavedSession,
+    SavedAgentKey,
 }
 
 impl AccessTokenSource {
@@ -331,10 +358,17 @@ pub(crate) fn resolve_access_token_with_source(auth: &AuthArgs) -> Result<Resolv
     if let Some(token) = read_saved_token_for(auth.profile.as_deref()) {
         return Ok(ResolvedAccessToken {
             token,
-            source: AccessTokenSource::SavedSession,
+            source: if agent_key::is_agent_key_profile(auth.profile.as_deref()) {
+                AccessTokenSource::SavedAgentKey
+            } else {
+                AccessTokenSource::SavedSession
+            },
         });
     }
 
+    if agent_key::is_agent_key_profile(auth.profile.as_deref()) {
+        bail!("{}", agent_key::REJECTED_MESSAGE);
+    }
     if auth.access_token_env == DEFAULT_ACCESS_TOKEN_ENV {
         bail!(
             "No access token found. Run `nyxid login --base-url <URL>`, \
@@ -415,6 +449,10 @@ pub async fn ensure_session(auth: &AuthArgs) -> Result<()> {
     }
 
     let profile = auth.profile.as_deref();
+
+    if agent_key::is_agent_key_profile(profile) {
+        return Ok(());
+    }
 
     let Some(access_token) = read_saved_token_for(profile) else {
         return handle_dead_session(auth, DeadSessionReason::NoToken).await;
@@ -701,6 +739,12 @@ async fn refresh_saved_session(auth: &AuthArgs) -> SessionRefresh {
 pub async fn force_refresh_session(auth: &AuthArgs) -> Result<RefreshReport> {
     let profile = auth.profile.as_deref();
     let _lock = acquire_refresh_lock(profile).ok();
+    if agent_key::is_agent_key_profile(profile) {
+        return Err(anyhow::Error::new(ReauthRequired {
+            code: "agent_key_does_not_refresh",
+            message: "Agent Key sessions do not refresh. Run `nyxid login --agent-key` to authorize again.".into(),
+        }));
+    }
     let Some(refresh_token) = read_saved_refresh_token_for(profile) else {
         return Err(anyhow::Error::new(ReauthRequired {
             code: "refresh_token_not_found",
@@ -820,6 +864,7 @@ async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Resu
         base_url,
         password: false,
         device: false,
+        agent_key: false,
         email: None,
         profile: auth.profile.clone(),
     })
@@ -836,6 +881,9 @@ async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Resu
 // ---- Login ----
 
 pub async fn run_login(args: LoginArgs) -> Result<()> {
+    if args.agent_key {
+        return agent_key::run_login(&args.base_url, args.profile.as_deref()).await;
+    }
     let strategies = RealLoginStrategies;
     run_login_with_strategies(args, &strategies).await
 }
@@ -936,6 +984,9 @@ async fn run_login_with_strategies(
 // ---- Logout ----
 
 pub async fn run_logout(base_url: &str, profile: Option<&str>) -> Result<()> {
+    if agent_key::is_agent_key_profile(profile) {
+        return agent_key::run_logout(base_url, profile).await;
+    }
     let base_url = base_url.trim_end_matches('/');
 
     // Best-effort server-side logout
@@ -2434,6 +2485,7 @@ mod tests {
             base_url: "https://nyx-api.example".to_string(),
             password: false,
             device: false,
+            agent_key: false,
             email: None,
             profile: None,
         }

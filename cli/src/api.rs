@@ -267,6 +267,7 @@ pub struct ApiClient {
     /// a specific API key and must not silently fall back to the user's
     /// saved session access token on the `profile`.
     refresh_disabled: bool,
+    agent_key_auth: bool,
 }
 
 impl ApiClient {
@@ -280,13 +281,17 @@ impl ApiClient {
         profile: Option<String>,
     ) -> Result<Self> {
         let client = build_cli_http_client(profile.as_deref())?;
+        let agent_key_auth = crate::auth::agent_key::is_agent_key_profile(profile.as_deref())
+            && crate::auth::read_saved_token_for(profile.as_deref()).as_deref()
+                == Some(access_token.as_str());
 
         Ok(Self {
             client,
             base_url: format!("{}/api/v1", base_url.trim_end_matches('/')),
             access_token,
             profile,
-            refresh_disabled: false,
+            refresh_disabled: agent_key_auth,
+            agent_key_auth,
         })
     }
 
@@ -296,6 +301,7 @@ impl ApiClient {
         let allow_refresh = resolved.source.allows_session_refresh();
         let mut client = Self::new_with_profile(&base_url, resolved.token, auth.profile.clone())?;
         client.refresh_disabled = !allow_refresh;
+        client.agent_key_auth = resolved.source == crate::auth::AccessTokenSource::SavedAgentKey;
         Ok(client)
     }
 
@@ -333,6 +339,17 @@ impl ApiClient {
             .unwrap_or(&self.base_url)
     }
 
+    pub fn is_agent_key_auth(&self) -> bool {
+        self.agent_key_auth
+    }
+
+    fn reject_agent_key_unauthorized(&self, response: &reqwest::Response) -> Result<()> {
+        if self.agent_key_auth && response.status() == reqwest::StatusCode::UNAUTHORIZED {
+            bail!("{}", crate::auth::agent_key::REJECTED_MESSAGE);
+        }
+        Ok(())
+    }
+
     /// Attempt to refresh the access token using the saved refresh token.
     /// Returns `true` if the token was refreshed successfully. Delegates the
     /// wire protocol to [`crate::auth::exchange_refresh_token`] (the single
@@ -346,6 +363,9 @@ impl ApiClient {
         // Same cross-process discipline as the preflight: lock, then prefer a
         // token another process already rotated over presenting a stale one.
         let _lock = crate::auth::acquire_refresh_lock(profile).ok();
+        if crate::auth::agent_key::is_agent_key_profile(profile) {
+            return false;
+        }
         if let Some(access_token) = crate::auth::fresh_access_token_on_disk(profile)
             && access_token != self.access_token
         {
@@ -391,6 +411,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("GET {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
@@ -420,6 +441,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("GET {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             resp = self
                 .client
@@ -451,6 +473,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("POST {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
@@ -481,6 +504,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("PUT {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
@@ -512,6 +536,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("PATCH {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
@@ -537,6 +562,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("DELETE {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
@@ -572,6 +598,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("DELETE {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
@@ -598,6 +625,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("POST {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await {
             let resp = self
                 .client
@@ -687,6 +715,7 @@ impl ApiClient {
             .await
             .with_context(|| format!("Proxy request to {path} failed"))?;
 
+        self.reject_agent_key_unauthorized(&resp)?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED && !self.refresh_disabled {
             // Drain the auth error body before refreshing so reqwest can reuse
             // the connection for the refresh + retry sequence.
