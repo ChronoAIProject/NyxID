@@ -48,6 +48,8 @@ Approval issues a new login credential bound to the selected key. Selecting an e
 
 `nyxid whoami` and `nyxid status` identify **Authentication: Agent Key**. The key's live scopes, service and node restrictions, bindings, rate limits, and expiry remain authoritative. Credentials cannot outlive a key's expiry. Rejected credentials fail without refreshing or switching identities; `nyxid session refresh` exits with code 3 because Agent Key sessions do not refresh.
 
+Identity output includes the credential's hostname/profile label. `status` then lists the account, AI services, API keys, and nodes; sections denied by the key's scope display "unavailable with this key's scope". JSON output includes an `auth` object and uses `null` for unavailable sections. A missing local credential prompts reauthorization for that profile; a server rejection still fails the command.
+
 `nyxid logout --profile home-agent` attempts to revoke this login credential and always clears the local credential, reporting whether server revocation succeeded. In the web console, open the key's **Login credentials** section to revoke a specific CLI login. Revoking or rotating the key invalidates every credential issued under it. Revocation and expiry take effect on subsequent authenticated requests. Abandoned approvals expire after a 60-second delivery window and their credentials are revoked automatically.
 
 `--agent-key` cannot be combined with `--device` or `--password`. It supports headless polling, including a human authorizing a waiting CI job; unattended jobs should normally use a pre-issued credential through the existing environment-variable options.
