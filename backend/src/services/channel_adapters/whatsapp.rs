@@ -484,9 +484,9 @@ impl PlatformAdapter for WhatsAppAdapter {
         conversation_id: &str,
         reply: &OutboundReply,
     ) -> AppResult<Option<String>> {
-        let phone_number_id = credentials.platform_bot_id.unwrap_or_default();
-        validate_id(phone_number_id, "Phone Number ID")?;
-        let url = format!("{}/messages", graph_url(phone_number_id));
+        let business_object_id = credentials.platform_bot_id.unwrap_or_default();
+        validate_id(business_object_id, "Phone Number ID")?;
+        let url = format!("{}/messages", graph_url(business_object_id));
         let mut last_id = None;
         for body in reply_bodies(conversation_id, reply)? {
             let response = http
@@ -530,10 +530,10 @@ impl PlatformAdapter for WhatsAppAdapter {
         http: &reqwest::Client,
         credentials: &BotCredentials<'_>,
     ) -> AppResult<BotIdentity> {
-        let phone_number_id = credentials.platform_bot_id.unwrap_or_default();
-        validate_id(phone_number_id, "Phone Number ID")?;
+        let business_object_id = credentials.platform_bot_id.unwrap_or_default();
+        validate_id(business_object_id, "Phone Number ID")?;
         let response = http
-            .get(graph_url(phone_number_id))
+            .get(graph_url(business_object_id))
             .query(&[("fields", "id,display_phone_number,verified_name")])
             .bearer_auth(credentials.token)
             .send()
@@ -542,7 +542,7 @@ impl PlatformAdapter for WhatsAppAdapter {
                 AppError::ChannelPlatformError("WhatsApp identity verification failed".to_string())
             })?;
         let response = graph_response(response).await?;
-        if response["id"].as_str() != Some(phone_number_id) {
+        if response["id"].as_str() != Some(business_object_id) {
             return Err(AppError::ChannelPlatformError(
                 "WhatsApp phone number identity mismatch".to_string(),
             ));
@@ -551,9 +551,9 @@ impl PlatformAdapter for WhatsAppAdapter {
             .as_str()
             .filter(|name| !name.is_empty())
             .or_else(|| response["verified_name"].as_str())
-            .unwrap_or(phone_number_id);
+            .unwrap_or(business_object_id);
         Ok(BotIdentity {
-            platform_bot_id: phone_number_id.to_string(),
+            platform_bot_id: business_object_id.to_string(),
             platform_bot_username: username.to_string(),
         })
     }

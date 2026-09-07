@@ -656,11 +656,13 @@ fn print_webhook_setup(result: &Value) {
     if let Some(url) = result["webhook_url"].as_str() {
         eprintln!("Callback URL: {url}");
     }
-    if let Some(secret) = result["webhook_secret"].as_str() {
+    // The one-time dashboard verification value is intentionally shown to the
+    // operator once (same posture as API-key and client-secret creation output).
+    if let Some(dashboard_value) = result["webhook_secret"].as_str() {
         let label = result["webhook_secret_label"]
             .as_str()
             .unwrap_or("Webhook secret");
-        eprintln!("{label} (shown once): {secret}");
+        eprintln!("{label} (shown once): {dashboard_value}");
     }
     for instruction in result["setup_instructions"]
         .as_array()
