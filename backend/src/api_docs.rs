@@ -38,6 +38,17 @@
         crate::handlers::connect_links::preview_connect_link,
         crate::handlers::connect_links::cancel_hosted_connect_link,
         crate::handlers::connect_links::complete_connect_link,
+        // Agent Key Login
+        crate::handlers::auth_agent_key::request,
+        crate::handlers::auth_agent_key::poll,
+        crate::handlers::auth_agent_key::preview,
+        crate::handlers::auth_agent_key::options,
+        crate::handlers::auth_agent_key::approve,
+        crate::handlers::auth_agent_key::deny,
+        crate::handlers::auth_agent_key::get_self,
+        crate::handlers::auth_agent_key::delete_self,
+        crate::handlers::auth_agent_key::list_credentials,
+        crate::handlers::auth_agent_key::revoke_credential,
         // Auth Device Login
         crate::handlers::auth_device::request_auth_device,
         crate::handlers::auth_device::poll_auth_device,
@@ -100,6 +111,24 @@
     components(
         schemas(
             crate::errors::ErrorResponse,
+            crate::handlers::auth_agent_key::RequestBody,
+            crate::handlers::auth_agent_key::RequestResponse,
+            crate::handlers::auth_agent_key::CodeBody,
+            crate::handlers::auth_agent_key::PollBody,
+            crate::handlers::auth_agent_key::ApproveBody,
+            crate::handlers::auth_agent_key::DeliveryResponse,
+            crate::handlers::auth_agent_key::PreviewResponse,
+            crate::handlers::auth_agent_key::DecisionResponse,
+            crate::handlers::auth_agent_key::CredentialResponse,
+            crate::handlers::auth_agent_key::CredentialsResponse,
+            crate::handlers::auth_agent_key::SelfResponse,
+            crate::services::auth_agent_key_login_service::RequestOutput,
+            crate::services::auth_agent_key_login_service::NewKeyInput,
+            crate::services::auth_agent_key_login_service::Selection,
+            crate::services::auth_agent_key_login_service::KeySummary,
+            crate::services::auth_agent_key_login_service::ResourceSummary,
+            crate::services::auth_agent_key_login_service::LoginOptions,
+            crate::models::api_key_credential::CredentialRevokedReason,
             crate::handlers::services::CreateServiceRequest,
             crate::handlers::services::SshServiceConfigRequest,
             crate::handlers::services::SshServiceConfigResponse,
@@ -243,6 +272,7 @@
         )
     ),
     tags(
+        (name = "Agent Key Login", description = "Human-approved CLI enrollment and child credential management"),
         (name = "Docs", description = "NyxID API documentation endpoints"),
         (name = "Proxy Docs", description = "Downstream OpenAPI and AsyncAPI catalog endpoints"),
         (name = "Services", description = "Downstream service management (admin)"),
@@ -276,5 +306,73 @@ impl utoipa::Modify for SecurityAddon {
                 "bearer_auth",
                 SecurityScheme::Http(Http::new(HttpAuthScheme::Bearer)),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use utoipa::OpenApi;
+
+    #[test]
+    fn agent_key_login_operations_and_schema_references_are_registered() {
+        let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let paths = &document["paths"];
+        for (path, method, authenticated, body) in [
+            ("/api/v1/auth/agent-key/request", "post", false, true),
+            ("/api/v1/auth/agent-key/poll", "post", false, true),
+            ("/api/v1/auth/agent-key/preview", "post", false, true),
+            ("/api/v1/auth/agent-key/options", "post", true, true),
+            ("/api/v1/auth/agent-key/approve", "post", true, true),
+            ("/api/v1/auth/agent-key/deny", "post", true, true),
+            ("/api/v1/auth/agent-key/self", "get", true, false),
+            ("/api/v1/auth/agent-key/self", "delete", true, false),
+            ("/api/v1/api-keys/{key_id}/credentials", "get", true, false),
+            (
+                "/api/v1/api-keys/{key_id}/credentials/{credential_id}",
+                "delete",
+                true,
+                false,
+            ),
+        ] {
+            let operation = &paths[path][method];
+            assert_eq!(operation["tags"][0], "Agent Key Login", "{method} {path}");
+            assert_eq!(operation.get("requestBody").is_some(), body);
+            assert_eq!(operation.get("security").is_some(), authenticated);
+            for status in ["200", "400", "403", "404", "429", "500"] {
+                assert!(
+                    operation["responses"].get(status).is_some(),
+                    "{method} {path}: {status}"
+                );
+            }
+        }
+        fn verify_refs(value: &serde_json::Value, document: &serde_json::Value) {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    if let Some(reference) = fields
+                        .get("$ref")
+                        .and_then(|v| v.as_str())
+                        .and_then(|v| v.strip_prefix('#'))
+                    {
+                        assert!(
+                            document.pointer(reference).is_some(),
+                            "unresolved {reference}"
+                        );
+                    }
+                    for value in fields.values() {
+                        verify_refs(value, document);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        verify_refs(value, document);
+                    }
+                }
+                _ => {}
+            }
+        }
+        verify_refs(&document, &document);
+        let preview = &document["components"]["schemas"]["AgentKeyLoginPreviewResponse"];
+        assert!(!preview.to_string().contains("api_key"));
     }
 }

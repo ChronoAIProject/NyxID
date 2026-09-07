@@ -7,7 +7,7 @@ use mongodb::{
 use rand::{RngCore, rngs::OsRng};
 use zeroize::Zeroizing;
 
-use crate::crypto::token::hash_token;
+use crate::crypto::token::{AGENT_KEY_PREFIX, agent_key_display_prefix, hash_token};
 use crate::errors::{AppError, AppResult};
 use crate::models::api_key::{ApiKey, COLLECTION_NAME as API_KEYS};
 use crate::models::api_key_credential::{
@@ -38,7 +38,10 @@ pub fn credential_expiry(
 pub fn generate_secret() -> Zeroizing<String> {
     let mut random = Zeroizing::new([0u8; 32]);
     OsRng.fill_bytes(random.as_mut());
-    Zeroizing::new(format!("nyxid_ag_{}", hex::encode(random.as_slice())))
+    Zeroizing::new(format!(
+        "{AGENT_KEY_PREFIX}{}",
+        hex::encode(random.as_slice())
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -52,13 +55,15 @@ pub async fn issue(
     secret: &str,
     session: &mut ClientSession,
 ) -> AppResult<()> {
+    let secret_prefix = agent_key_display_prefix(secret)
+        .ok_or_else(|| AppError::ValidationError("Invalid Agent Key credential prefix".into()))?;
     let expires_at = credential_expiry(parent.expires_at, expires_at)?;
     let row = ApiKeyCredential {
         id: id.into(),
         api_key_id: parent.id.clone(),
         user_id: parent.user_id.clone(),
         secret_hash: hash_token(secret),
-        secret_prefix: secret[..17].into(),
+        secret_prefix: secret_prefix.into(),
         kind: ApiKeyCredentialKind::AgentKeyLogin,
         label: label.into(),
         login_request_id: login_request_id.into(),

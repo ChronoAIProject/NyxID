@@ -77,6 +77,7 @@ impl Server {
         let mut request = self
             .http
             .post(format!("{}/api/v1/auth/agent-key/{endpoint}", self.url))
+            .header(header::USER_AGENT, format!("AgentKeyTest/{endpoint}"))
             .json(&body);
         if let Some(token) = token {
             request = request.bearer_auth(token);
@@ -85,6 +86,222 @@ impl Server {
         let status = response.status();
         let json = response.json().await.unwrap();
         (status, json)
+    }
+}
+
+#[tokio::test]
+async fn login_audit_records_capture_actor_context_and_request_identity() {
+    use crate::models::audit_log::{AuditLog, COLLECTION_NAME as AUDITS};
+    crate::services::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new([61; 32]));
+    let server = Server::new("akl_audit_context").await;
+    let (actor, human) = server.human().await;
+    for approve in [true, false] {
+        let (_, request) = server.post("request", None, json!({})).await;
+        let row = server
+            .state
+            .db
+            .collection::<crate::models::agent_key_login_request::AgentKeyLoginRequest>(
+                crate::models::agent_key_login_request::COLLECTION_NAME,
+            )
+            .find_one(doc! {"status": "pending"})
+            .await
+            .unwrap()
+            .unwrap();
+        let endpoint = if approve { "approve" } else { "deny" };
+        let (status, body) = server.post(endpoint, Some(&human), json!({"user_code": request["user_code"], "selection": {"kind": "new", "name": "Audited", "scopes": "read proxy"}})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let mut delivery = Value::Null;
+        if approve {
+            let (status, value) = server
+                .post("poll", None, json!({"device_code": request["device_code"]}))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{value}");
+            delivery = value;
+        }
+        let events: &[(&str, &str)] = if approve {
+            &[
+                ("agent_key_login_approved", "approve"),
+                ("agent_key_login_delivered", "poll"),
+            ]
+        } else {
+            &[("agent_key_login_denied", "deny")]
+        };
+        for (event, endpoint) in events {
+            let audit = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Some(audit) = server
+                        .state
+                        .db
+                        .collection::<AuditLog>(AUDITS)
+                        .find_one(doc! {"event_type": event, "event_data.request_id": &row.id})
+                        .await
+                        .unwrap()
+                    {
+                        break audit;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("audit append");
+            assert_eq!(audit.user_id.as_deref(), Some(actor.as_str()));
+            assert_eq!(audit.ip_address.as_deref(), Some("127.0.0.1"));
+            assert_eq!(audit.user_agent, Some(format!("AgentKeyTest/{endpoint}")));
+            assert!(audit.seq.is_some());
+            if approve {
+                let details = audit.event_data.as_ref().unwrap();
+                assert_eq!(details["api_key_id"], delivery["api_key"]["id"]);
+                assert_eq!(details["credential_id"], delivery["credential_id"]);
+                assert!(
+                    !serde_json::to_string(&audit)
+                        .unwrap()
+                        .contains(delivery["credential"].as_str().unwrap())
+                );
+            }
+            let json = serde_json::to_string(&audit).unwrap();
+            assert!(!json.contains(request["user_code"].as_str().unwrap()));
+            assert!(!json.contains(request["device_code"].as_str().unwrap()));
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TraceCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for TraceCapture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn traces_record_hashed_ip_identifiers_and_outcomes_without_secrets() {
+    use tracing::instrument::WithSubscriber;
+    let server = Server::new("akl_observability").await;
+    let (actor, _) = server.human().await;
+    let state = server.state.clone();
+    let capture = TraceCapture(Default::default());
+    let writer = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let (user_code, device_code, delivery) = async {
+        let addr = "203.0.113.9:1234".parse().unwrap();
+        let (_, Json(created)) = request(
+            State(state.clone()),
+            ConnectInfo(addr),
+            HeaderMap::new(),
+            Json(serde_json::from_value(json!({"client_label": "private-client-label"})).unwrap()),
+        )
+        .await
+        .unwrap();
+        for (code, expected) in [
+            ("private-invalid-device-code", 11900),
+            (created.request.device_code.as_str(), 11902),
+            (created.request.device_code.as_str(), 11903),
+        ] {
+            let error = poll(
+                State(state.clone()),
+                ConnectInfo(addr),
+                HeaderMap::new(),
+                TelemetryContext::default(),
+                Json(PollBody {
+                    device_code: code.into(),
+                }),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.error_code(), expected);
+        }
+        service::approve(
+            &state.db,
+            &state.encryption_keys,
+            state.auth_device_hmac_key.as_slice(),
+            &actor,
+            &created.request.user_code,
+            serde_json::from_value(
+                json!({"kind": "new", "name": "Trace key", "scopes": "read proxy"}),
+            )
+            .unwrap(),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let (_, Json(delivery)) = poll(
+            State(state.clone()),
+            ConnectInfo(addr),
+            HeaderMap::new(),
+            TelemetryContext::default(),
+            Json(PollBody {
+                device_code: created.request.device_code.clone(),
+            }),
+        )
+        .await
+        .unwrap();
+        for _ in 0..4 {
+            let _ = request(
+                State(state.clone()),
+                ConnectInfo(addr),
+                HeaderMap::new(),
+                Json(serde_json::from_value(json!({})).unwrap()),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(matches!(
+            request(
+                State(state.clone()),
+                ConnectInfo(addr),
+                HeaderMap::new(),
+                Json(serde_json::from_value(json!({})).unwrap())
+            )
+            .await,
+            Err(AppError::AgentKeyLoginRateLimited)
+        ));
+        (
+            created.request.user_code,
+            created.request.device_code,
+            delivery,
+        )
+    }
+    .with_subscriber(subscriber)
+    .await;
+    let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    for expected in [
+        "client_ip_hash",
+        "row_id",
+        "requested",
+        "pending",
+        "slow_down",
+        "not_found",
+        "delivered",
+        "rate_limit_hit",
+        "agent_key_login.poll.outcome",
+        &delivery.api_key.id,
+        &delivery.credential_id,
+    ] {
+        assert!(logs.contains(expected), "missing {expected}: {logs}");
+    }
+    let ip_hash = crate::services::auth_device_service::hmac_hex(
+        state.auth_device_hmac_key.as_slice(),
+        b"203.0.113.9",
+    );
+    assert!(logs.contains(&ip_hash));
+    for secret in [
+        &user_code,
+        &device_code,
+        &delivery.credential,
+        "203.0.113.9",
+        "private-client-label",
+        "private-invalid-device-code",
+    ] {
+        assert!(!logs.contains(secret), "unexpected secret in tracing");
     }
 }
 
@@ -318,7 +535,7 @@ async fn public_request_preview_and_poll_need_no_account_and_never_return_browse
     assert_eq!(status, StatusCode::OK);
     assert_eq!(preview["requested_profile"], "home-agent");
     assert_eq!(preview["status"], "pending");
-    assert!(preview["api_key"].is_null());
+    assert!(preview.get("api_key").is_none());
     assert!(preview.get("credential").is_none());
     assert!(preview.get("device_code").is_none());
     let (_, pending) = server
@@ -414,12 +631,18 @@ async fn web_and_phone_choices_deliver_child_auth_and_support_scoped_logout_and_
             .post("preview", None, json!({"user_code": code}))
             .await;
         assert_eq!(preview["status"], "approved");
-        assert_eq!(preview["api_key"]["name"], "CLI key");
+        assert!(preview.get("api_key").is_none());
         assert!(preview.get("credential").is_none());
         let (status, delivery) = server
             .post("poll", None, json!({"device_code": request["device_code"]}))
             .await;
         assert_eq!(status, StatusCode::OK, "{delivery}");
+        assert_eq!(delivery["label"], "workstation \u{00b7} home-agent");
+        let (_, preview) = server
+            .post("preview", None, json!({"user_code": code}))
+            .await;
+        assert_eq!(preview["status"], "delivered");
+        assert!(preview.get("api_key").is_none());
         let secret = delivery["credential"].as_str().unwrap();
         key_id = delivery["api_key"]["id"].as_str().unwrap().to_string();
         assert_eq!(delivery["api_key"]["owner_id"], actor);
@@ -447,6 +670,7 @@ async fn web_and_phone_choices_deliver_child_auth_and_support_scoped_logout_and_
             assert!(response.headers().get("set-cookie").is_none());
             let body: Value = response.json().await.unwrap();
             assert_eq!(body["credential_id"], delivery["credential_id"]);
+            assert_eq!(body["label"], delivery["label"]);
             assert!(!body.to_string().contains(secret));
         }
         let list_url = format!("{}/api/v1/api-keys/{key_id}/credentials", server.url);

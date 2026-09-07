@@ -14,7 +14,7 @@ pub enum ApiKeyCredentialKind {
     AgentKeyLogin,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CredentialRevokedReason {
     Logout,

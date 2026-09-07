@@ -371,6 +371,10 @@ pub struct AppConfig {
     /// Interval in seconds between abandoned app connect-link expiry sweeps
     /// (default: 60). Set to 0 to disable the sweep.
     pub connect_link_expiry_sweep_interval_secs: u64,
+
+    /// Interval in seconds between expired Agent Key login cleanup sweeps,
+    /// revoking undelivered credentials (default: 60). Set to 0 to disable
+    /// the background sweep; poll and preview still clean up expired exchanges.
     pub agent_key_login_sweep_interval_secs: u64,
 
     /// Interval in seconds between proactive OAuth token-refresh sweeps

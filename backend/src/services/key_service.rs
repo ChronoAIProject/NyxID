@@ -193,8 +193,10 @@ fn generate_scoped_api_key() -> (String, String, String) {
     rand::thread_rng().fill_bytes(&mut bytes);
 
     let hex_encoded = hex::encode(bytes);
-    let full_key = format!("nyxid_ag_{hex_encoded}");
-    let prefix = format!("nyxid_ag_{}", &hex_encoded[..8]);
+    let full_key = format!("{}{hex_encoded}", crate::crypto::token::AGENT_KEY_PREFIX);
+    let prefix = crate::crypto::token::agent_key_display_prefix(&full_key)
+        .expect("generated Agent Key has a valid display prefix")
+        .to_string();
     let mut hasher = Sha256::new();
     hasher.update(full_key.as_bytes());
     let hash = hex::encode(hasher.finalize());

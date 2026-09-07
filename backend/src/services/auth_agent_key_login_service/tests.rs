@@ -8,6 +8,157 @@ use crate::test_utils::{
 
 const HMAC_KEY: &[u8] = b"agent-key-login-test-domain-key";
 
+#[test]
+fn credential_labels_distinguish_profiles_and_are_sanitized_and_bounded() {
+    for (client, profile, expected) in [
+        (Some("host\n"), Some("profile\r"), "host \u{00b7} profile"),
+        (Some("host"), None, "host"),
+        (None, Some("profile"), "profile"),
+        (Some("\n"), Some("\r"), "NyxID CLI"),
+        (None, None, "NyxID CLI"),
+    ] {
+        let context = LoginClientContext {
+            client_label: client.map(str::to_owned),
+            ..Default::default()
+        };
+        assert_eq!(credential_label(&context, profile), expected);
+    }
+    let context = LoginClientContext {
+        client_label: Some("h".repeat(64)),
+        ..Default::default()
+    };
+    let label = credential_label(&context, Some(&"p".repeat(64)));
+    assert_eq!(label.chars().count(), 96);
+}
+
+#[tokio::test]
+async fn sweep_isolates_a_failed_revoke_and_retries_its_durable_marker() {
+    let (db, actor, key, _) = fixture("akl_sweep_partial_failure").await;
+    let failing = start(&db).await;
+    accept(&db, &actor, &key, &failing).await;
+    let failing = expire_request(&db, &failing.user_code).await;
+    let healthy = start(&db).await;
+    accept(&db, &actor, &key, &healthy).await;
+    let healthy = expire_request(&db, &healthy.user_code).await;
+    let bad_id = failing.credential_id.as_deref().unwrap();
+    let good_id = healthy.credential_id.as_deref().unwrap();
+    db.run_command(doc! {"collMod": CREDENTIALS, "validator": {"$or": [{"_id": {"$ne": bad_id}}, {"is_active": true}]}, "validationLevel": "strict", "validationAction": "error"}).await.unwrap();
+    assert_eq!(
+        sweep_expired(&db).await.unwrap(),
+        SweepResult {
+            succeeded: 1,
+            failed: 1
+        }
+    );
+    let children = db.collection::<ApiKeyCredential>(CREDENTIALS);
+    assert!(
+        children
+            .find_one(doc! {"_id": bad_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active
+    );
+    let revoked = children
+        .find_one(doc! {"_id": good_id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!revoked.is_active);
+    assert_eq!(
+        revoked.revoked_reason,
+        Some(CredentialRevokedReason::UndeliveredExpired)
+    );
+    let pending_cleanup = db
+        .collection::<AgentKeyLoginRequest>(COLLECTION_NAME)
+        .find_one(doc! {"_id": &failing.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(pending_cleanup.status, Status::Expired);
+    assert_eq!(pending_cleanup.credential_id.as_deref(), Some(bad_id));
+    assert!(pending_cleanup.delivery_credential_encrypted.is_none());
+    let cleaned = db
+        .collection::<AgentKeyLoginRequest>(COLLECTION_NAME)
+        .find_one(doc! {"_id": &healthy.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(cleaned.status, Status::Expired);
+    assert!(cleaned.credential_id.is_none());
+    db.run_command(doc! {"collMod": CREDENTIALS, "validator": {}})
+        .await
+        .unwrap();
+    assert_eq!(sweep_expired(&db).await.unwrap().failed, 0);
+    assert!(
+        !children
+            .find_one(doc! {"_id": bad_id})
+            .await
+            .unwrap()
+            .unwrap()
+            .is_active
+    );
+}
+
+#[tokio::test]
+async fn issuance_rejects_short_secret_without_inserting_a_child() {
+    let (db, _, key, _) = fixture("akl_short_secret").await;
+    let mut session = db.client().start_session().await.unwrap();
+    for secret in ["", "nyxid_ag_1234567", "nyxid_ag_1234567\u{00e9}"] {
+        assert!(matches!(
+            credentials::issue(
+                &db,
+                &key,
+                &Uuid::new_v4().to_string(),
+                &Uuid::new_v4().to_string(),
+                "CLI",
+                None,
+                secret,
+                &mut session
+            )
+            .await,
+            Err(AppError::ValidationError(_))
+        ));
+    }
+    assert_eq!(
+        db.collection::<ApiKeyCredential>(CREDENTIALS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn approve(
+    db: &Database,
+    encryption: &EncryptionKeys,
+    hmac_key: &[u8],
+    actor: &str,
+    user_code: &str,
+    selection: Selection,
+    expires_at: Option<DateTime<Utc>>,
+    ip: Option<&str>,
+) -> AppResult<()> {
+    super::approve(
+        db, encryption, hmac_key, actor, user_code, selection, expires_at, ip, None,
+    )
+    .await
+}
+
+async fn poll(
+    db: &Database,
+    encryption: &EncryptionKeys,
+    hmac_key: &[u8],
+    device_code: &str,
+) -> AppResult<Delivery> {
+    super::poll(db, encryption, hmac_key, device_code, None, None).await
+}
+
+async fn deny(db: &Database, hmac_key: &[u8], actor: &str, user_code: &str) -> AppResult<()> {
+    super::deny(db, hmac_key, actor, user_code, None, None).await
+}
+
 async fn fixture(name: &str) -> (Database, String, ApiKey, String) {
     let db = connect_transaction_test_database(name).await;
     crate::db::ensure_indexes(&db).await.expect("indexes");
@@ -432,7 +583,7 @@ async fn poll_preview_and_sweep_expiry_revoke_undelivered_credentials() {
                 Status::Expired
             ),
             _ => {
-                assert!(sweep_expired(&db).await.unwrap() > 0);
+                assert!(sweep_expired(&db).await.unwrap().succeeded > 0);
             }
         }
         assert!(key_service::validate_api_key(&db, secret).await.is_err());

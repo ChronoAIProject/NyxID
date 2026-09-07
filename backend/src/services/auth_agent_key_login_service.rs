@@ -7,6 +7,7 @@ use mongodb::{
 };
 use rand::{RngCore, rngs::OsRng};
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -36,7 +37,32 @@ use crate::models::{
 pub const REQUEST_TTL_SECS: i64 = 600;
 pub const POLL_INTERVAL_SECS: u32 = 5;
 
-#[derive(Serialize)]
+pub fn error_outcome(error: &AppError) -> &'static str {
+    match error {
+        AppError::AgentKeyLoginPending => "pending",
+        AppError::AgentKeyLoginSlowDown => "slow_down",
+        AppError::AgentKeyLoginDenied => "denied",
+        AppError::AgentKeyLoginExpired => "expired",
+        AppError::AgentKeyLoginAlreadyDelivered => "already_delivered",
+        AppError::AgentKeyLoginNotFound | AppError::AgentKeyLoginUserCodeInvalid => "not_found",
+        AppError::AgentKeyLoginRateLimited => "rate_limit_hit",
+        _ => "error",
+    }
+}
+
+fn credential_label(context: &LoginClientContext, profile: Option<&str>) -> String {
+    let client = sanitize_optional(context.client_label.clone(), 64);
+    let profile = sanitize_optional(profile.map(str::to_owned), 64);
+    let label = match (client, profile) {
+        (Some(client), Some(profile)) => format!("{client} \u{00b7} {profile}"),
+        (Some(value), None) | (None, Some(value)) => value,
+        (None, None) => "NyxID CLI".into(),
+    };
+    sanitize_optional(Some(label), 96).expect("login label is nonempty")
+}
+
+#[derive(Serialize, ToSchema)]
+#[schema(as = AgentKeyLoginRequestOutput)]
 pub struct RequestOutput {
     pub device_code: String,
     pub user_code: String,
@@ -51,7 +77,8 @@ impl std::fmt::Debug for RequestOutput {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[schema(as = AgentKeyLoginNewKeyInput)]
 #[serde(deny_unknown_fields)]
 pub struct NewKeyInput {
     pub name: String,
@@ -72,21 +99,24 @@ pub struct NewKeyInput {
     pub scope_plan_digest: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, ToSchema)]
+#[schema(as = AgentKeyLoginSelection)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Selection {
     Existing { api_key_id: String },
     New(NewKeyInput),
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[schema(as = AgentKeyLoginResourceSummary)]
 pub struct ResourceSummary {
     pub id: String,
     pub name: String,
     pub owner_id: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, ToSchema)]
+#[schema(as = AgentKeyLoginKeySummary)]
 pub struct KeySummary {
     pub id: String,
     pub name: String,
@@ -108,7 +138,8 @@ pub struct KeySummary {
     pub created_now: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
+#[schema(as = AgentKeyLoginLoginOptions)]
 pub struct LoginOptions {
     pub keys: Vec<KeySummary>,
     pub services: Vec<ResourceSummary>,
@@ -120,7 +151,6 @@ pub struct LoginPreview {
     pub context: PreviewOutput,
     pub requested_profile: Option<String>,
     pub interval: u32,
-    pub api_key: Option<KeySummary>,
 }
 
 pub struct Delivery {
@@ -193,6 +223,7 @@ pub async fn request(
             .await
         {
             Ok(_) => {
+                tracing::Span::current().record("row_id", row.id.as_str());
                 return Ok(RequestOutput {
                     device_code,
                     user_code: auth_device_service::format_user_code(&user_code),
@@ -223,6 +254,18 @@ async fn find_by_user_code(
         .find_one(doc! {"user_code_hmac": code_hash(hmac_key, &normalized_code(raw)?)})
         .await?
         .ok_or(AppError::AgentKeyLoginUserCodeInvalid)
+        .inspect(record_request_identity)
+}
+
+fn record_request_identity(row: &AgentKeyLoginRequest) {
+    let span = tracing::Span::current();
+    span.record("row_id", row.id.as_str());
+    if let Some(id) = row.api_key_id.as_deref() {
+        span.record("api_key_id", id);
+    }
+    if let Some(id) = row.credential_id.as_deref() {
+        span.record("credential_id", id);
+    }
 }
 
 fn decision_error(row: &AgentKeyLoginRequest) -> AppError {
@@ -421,22 +464,6 @@ pub async fn preview(
         row.status = Status::Expired;
     }
     let ready = row.delivery_credential_encrypted.is_some() || row.status == Status::Delivered;
-    let api_key = if matches!(row.status, Status::Approved | Status::Delivered) && ready {
-        if let Some(id) = row.api_key_id.as_deref() {
-            let key = db
-                .collection::<ApiKey>(API_KEYS)
-                .find_one(doc! {"_id": id})
-                .await?;
-            match key {
-                Some(key) => Some(key_summary(db, &key, row.key_was_created).await?),
-                None => None,
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
     let status = if row.status == Status::Approved && !ready {
         Status::Pending
     } else {
@@ -453,7 +480,6 @@ pub async fn preview(
         ),
         requested_profile: row.requested_profile,
         interval: row.poll_interval_secs,
-        api_key,
     })
 }
 
@@ -467,6 +493,7 @@ pub async fn approve(
     selection: Selection,
     credential_expires_at: Option<DateTime<Utc>>,
     approver_ip: Option<&str>,
+    approver_user_agent: Option<&str>,
 ) -> AppResult<()> {
     let row = find_by_user_code(db, hmac_key, user_code).await?;
     if row.status != Status::Pending || row.expires_at <= Utc::now() {
@@ -484,6 +511,10 @@ pub async fn approve(
     let mut session = db.client().start_session().await?;
     // Claim, key insertion, child issuance, and encrypted delivery are committed
     // together. A cancelled future or process crash cannot leave a partial grant.
+    let request_id = row.id.clone();
+    tracing::Span::current().record("row_id", request_id.as_str());
+    tracing::Span::current().record("api_key_id", key_id.as_str());
+    tracing::Span::current().record("credential_id", credential_id.as_str());
     let owner_type = {
         let db = db.clone();
         let actor = actor.to_string();
@@ -517,7 +548,7 @@ pub async fn approve(
             if !access.can_write() { return Err(AppError::AgentKeyLoginKeyIneligible); }
             let owner_type = key_summary(&db, &parent, created_now).await?.owner_type;
             credentials::issue(&db, &parent, &credential_id, &row.id,
-                row.context.client_label.as_deref().unwrap_or("NyxID CLI"), credential_expires_at, &secret, &mut *session).await?;
+                &credential_label(&row.context, row.requested_profile.as_deref()), credential_expires_at, &secret, &mut *session).await?;
             let now = Utc::now();
             if row.expires_at <= now { return Err(AppError::AgentKeyLoginExpired); }
             db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME).update_one(
@@ -542,17 +573,24 @@ pub async fn approve(
         Some(actor.into()),
         "agent_key_login_approved".into(),
         Some(
-            serde_json::json!({"api_key_id": key_id, "credential_id": credential_id, "key_was_created": created_now, "owner_type": owner_type}),
+            serde_json::json!({"request_id": request_id, "api_key_id": key_id, "credential_id": credential_id, "key_was_created": created_now, "owner_type": owner_type}),
         ),
-        None,
-        None,
+        approver_ip.map(str::to_owned),
+        approver_user_agent.map(str::to_owned),
         None,
         None,
     );
     Ok(())
 }
 
-pub async fn deny(db: &Database, hmac_key: &[u8], actor: &str, user_code: &str) -> AppResult<()> {
+pub async fn deny(
+    db: &Database,
+    hmac_key: &[u8],
+    actor: &str,
+    user_code: &str,
+    approver_ip: Option<&str>,
+    approver_user_agent: Option<&str>,
+) -> AppResult<()> {
     let row = find_by_user_code(db, hmac_key, user_code).await?;
     let now = Utc::now();
     if row.status != Status::Pending || row.expires_at <= now {
@@ -570,25 +608,34 @@ pub async fn deny(db: &Database, hmac_key: &[u8], actor: &str, user_code: &str) 
         Some(actor.into()),
         "agent_key_login_denied".into(),
         Some(serde_json::json!({"request_id": row.id})),
-        None,
-        None,
+        approver_ip.map(str::to_owned),
+        approver_user_agent.map(str::to_owned),
         None,
         None,
     );
     Ok(())
 }
 
+#[tracing::instrument(
+    name = "agent_key_login.poll",
+    skip_all,
+    fields(row_id, api_key_id, credential_id, outcome)
+)]
 pub async fn poll(
     db: &Database,
     encryption: &EncryptionKeys,
     hmac_key: &[u8],
     device_code: &str,
+    poller_ip: Option<&str>,
+    poller_user_agent: Option<&str>,
 ) -> AppResult<Delivery> {
+    let result: AppResult<Delivery> = async {
     let collection = db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME);
     let row = collection
         .find_one(doc! {"device_code_hmac": code_hash(hmac_key, device_code)})
         .await?
         .ok_or(AppError::AgentKeyLoginNotFound)?;
+    record_request_identity(&row);
     let now = Utc::now();
     if row.status == Status::Delivered {
         return Err(AppError::AgentKeyLoginAlreadyDelivered);
@@ -635,14 +682,25 @@ pub async fn poll(
         delivered.approved_user_id,
         "agent_key_login_delivered".into(),
         Some(
-            serde_json::json!({"api_key_id": delivery.api_key.id, "credential_id": delivery.credential_id}),
+            serde_json::json!({"request_id": delivered.id, "api_key_id": delivery.api_key.id, "credential_id": delivery.credential_id}),
         ),
-        None,
-        None,
+        poller_ip.map(str::to_owned),
+        poller_user_agent.map(str::to_owned),
         None,
         None,
     );
     Ok(delivery)
+    }.await;
+    let outcome = result
+        .as_ref()
+        .map_or_else(|error| error_outcome(error), |_| "delivered");
+    tracing::Span::current().record("outcome", outcome);
+    tracing::info!(
+        outcome,
+        error_code = result.as_ref().err().map(AppError::error_code),
+        "agent_key_login.poll.outcome"
+    );
+    result
 }
 
 async fn prepare_delivery(
@@ -727,15 +785,31 @@ async fn expire(db: &Database, row: &AgentKeyLoginRequest) -> AppResult<()> {
     Ok(())
 }
 
-pub async fn sweep_expired(db: &Database) -> AppResult<u64> {
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct SweepResult {
+    pub succeeded: u64,
+    pub failed: u64,
+}
+
+pub async fn sweep_expired(db: &Database) -> AppResult<SweepResult> {
     let mut cursor = db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME)
         .find(doc! {"status": {"$in": ["pending", "approved", "expired"]}, "expires_at": {"$lte": bson::DateTime::from_chrono(Utc::now())}}).await?;
-    let mut count = 0;
+    let mut result = SweepResult::default();
     while let Some(row) = cursor.try_next().await? {
-        expire(db, &row).await?;
-        count += 1;
+        match expire(db, &row).await {
+            Ok(()) => result.succeeded += 1,
+            Err(error) => {
+                result.failed += 1;
+                tracing::error!(row_id = %row.id, error_code = error.error_code(), outcome = "cleanup_failed", "agent_key_login.sweep.row");
+            }
+        }
     }
-    Ok(count)
+    tracing::info!(
+        succeeded = result.succeeded,
+        failed = result.failed,
+        "agent_key_login.sweep"
+    );
+    Ok(result)
 }
 
 pub async fn self_metadata(
