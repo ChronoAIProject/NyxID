@@ -45,6 +45,7 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 11500 `GrantCascadeConfirmationRequired` (HTTP 409)
 - 11600-11606 triggers: 11600 `TriggerNotFound`, 11601 `TriggerSecretInvalid`, 11602 `TriggerRateLimited`, 11603 `TriggerPayloadTooLarge`, 11604 `TriggerDeliveryUnsupported`, 11605 `TriggerDeliveryFailed`, 11606 `TriggerDeliveryRecordNotFound`
 - 11700 `RequestBodyTooLarge` (HTTP 413): a bounded proxy or forwarding ingress exceeded its configured byte limit
+- 11900-11909 Agent Key login: 11900 `AgentKeyLoginNotFound`, 11901 `AgentKeyLoginExpired`, 11902 `AgentKeyLoginPending`, 11903 `AgentKeyLoginSlowDown`, 11904 `AgentKeyLoginDenied`, 11905 `AgentKeyLoginAlreadyDelivered`, 11906 `AgentKeyLoginRateLimited`, 11907 `AgentKeyLoginUserCodeInvalid`, 11908 `AgentKeyLoginKeyIneligible`, 11909 `AgentKeyCredentialNotFound`
 
 ### 4. Frontend Patterns
 
@@ -196,6 +197,17 @@ Single-use hosted credential setup for agents and CLI callers. An authenticated 
 - Trigger inbound secrets use the `nyx_trg_` prefix and are SHA-256 hashed. HMAC verification additionally retains an encrypted copy because verification requires the raw key. Trigger and delivery types are serde-tagged enums; all secret-bearing structs use redacted `Debug` implementations.
 - Trigger ingress is public; unknown and disabled triggers are not-found-shaped, then per-trigger rate limiting runs before body reads, HMAC decryption, or verification. Webhook-target envelopes are persisted only in `trigger_deliveries`, encrypted with `EncryptionKeys`, and TTL-expired for durable dedup and authenticated replay; `TRIGGER_DELIVERY_RETENTION_HOURS=0` stores metadata only. Agent and notification payloads are never persisted; their event IDs use fenced, TTL-expiring dedup claims in MongoDB. Agent targets enter through the trusted channel-event service path without broadening the public channel-event auth contract.
 
+### 15. Agent Key Login
+
+`nyxid login --agent-key` authorizes a CLI profile with a child login credential bound to an existing or newly created Agent Key. It never creates an account session or falls back to account login. Follow Rule 12's client-context sanitization, request attribution, explicit review, and throttling posture.
+
+- **Routes**: `POST /auth/agent-key/{request,poll,preview}` are public with shared per-IP limits. `POST /auth/agent-key/{options,approve,deny}` live in `api_v1_human_only`; session/access JWTs for people are required, and API-key, service-account, delegated, and relay tokens are rejected. Approver actions have per-IP and per-user limits. `GET/DELETE /auth/agent-key/self` live outside the human-only group and require the calling child credential; DELETE can revoke itself even without a write scope. `GET /api-keys/{id}/credentials` and `DELETE /api-keys/{id}/credentials/{credential_id}` inherit key-management auth and personal/org ACLs; API-key callers are rejected by that router, and mutation requires write authority.
+- **Credential model**: `api_key_credentials` stores only a SHA-256 hash of each `nyxid_ag_` secret, its parent ID, copied owner, sanitized label, request ID, lifecycle metadata, and bounded expiry. `validate_api_key` returns the live parent plus `api_key_credential_id`; scopes, restrictions, bindings, rate limits, and audit attribution stay on the parent. Existing-key selection never edits or rotates that key. New-key creation uses the existing scope-authorized validation path, defaults both allow-all flags to false, and discards the primary secret; delivery always uses a child.
+- **Exchange**: `agent_key_login_requests` stores domain-separated HMACs of the opaque `nyx_akl_` device code and user code. Approval atomically commits the pending claim, optional key insertion, child issuance, and encrypted delivery in a MongoDB transaction. Pending requests last 10 minutes; approval opens a 60-second delivery window. Poll atomically claims approved -> delivered once and unsets ciphertext. Deny races only on pending. Failed approval transactions commit no orphaned key or credential. Poll/preview expiry and the `AGENT_KEY_LOGIN_SWEEP_INTERVAL_SECS` sweep (default 60; 0 disables) revoke undelivered credentials and remove newly created abandoned keys; terminal TTL never removes an unfinished cleanup marker.
+- **Revocation**: logout revokes only the calling child (`logout`); the key detail page revokes a child (`web_revoke`). Parent revoke/rotation deactivates children (`parent_revoked`/`parent_rotated`), and parent/child expiry is checked live. Metadata-only approval, denial, delivery, and revocation audits never contain codes or secrets.
+- **Anti-phishing and privacy**: the CLI prints the bare verification URL. The public `/login/agent-key` web page strips and ignores `?user_code=` and previews only on explicit Continue. Phone QR contains a user code, never a credential; scanning/deep linking only prefills the mobile Agent Key page. Approval always requires review, key selection, permission confirmation, and an explicit decision with >=750 ms throttling. The computer's QR path uses anonymous preview polling at >=5 seconds, component state only, and clears temporary state at terminal/unmount without storing account credentials or cookies.
+- **CLI profiles**: atomic mode-0600 `token`, `auth_kind=agent_key`, safe `agent_key.json`, and existing `base_url` handling. Stale account access/refresh/user files are removed. Saved Agent Key credentials never refresh, parse JWT expiry, or prompt for account login. `whoami`/`status` use live self metadata; explicit/env credential precedence stays unchanged. `session refresh` exits 3, and logout always clears local credentials after best-effort server revocation.
+
 ## File Structure
 
 ```
@@ -244,6 +256,7 @@ sdk/                     # OAuth SDK monorepo (@nyxids/* npm namespace): oauth-c
 All API routes under `/api/v1`:
 - `/auth` -- register, login, logout, refresh, verify-email, forgot/reset-password
 - `/auth/device/{request,poll,poll-web,preview,approve,deny}` -- auth device-code login (see Critical Rule 12 for auth posture per route)
+- `/auth/agent-key/{request,poll,preview,options,approve,deny,self}` -- Agent Key login and calling-credential identity/revocation (Critical Rule 15)
 - `/connect-links` -- create, poll, creator cancel, public preview, human decline, and human-only completion for hosted service connections (see Critical Rule 13)
 - `/developer/oauth-clients/{client_id}/connection-webhook` -- human-only developer-app lifecycle webhook configure/disable; `/connection-webhook/rotate-secret` returns a new signing secret and key ID once
 - `/triggers` -- trigger CRUD; `/{id}/rotate-secret`, `/{id}/rotate-delivery-secret`, `/{id}/deliveries`, and `/{id}/deliveries/{event_id}/redeliver` cover inbound/outbound secret rotation, delivery history, and retained-envelope replay (JWT or agent API key; delegated, relay, and service-account tokens rejected)
@@ -252,6 +265,7 @@ All API routes under `/api/v1`:
 - `/users` -- get/update current user
 - `/api-keys` -- CRUD + rotate; `ApiKey` scope + agent isolation fields per Critical Rules 8-9
 - `/api-keys/{id}/bindings` -- agent credential binding CRUD (`AgentServiceBinding`)
+- `/api-keys/{id}/credentials` and `/{credential_id}` -- list and revoke login credentials bound to a key
 - `/services` -- CRUD + OIDC credentials + endpoints + requirements
 - `/sessions` -- list sessions
 - `/connections` -- connect/disconnect services
@@ -377,6 +391,7 @@ TELEGRAM_WEBHOOK_URL=               # e.g. https://auth.nyxid.dev/api/v1/webhook
 TELEGRAM_BOT_USERNAME=              # Without @
 APPROVAL_EXPIRY_INTERVAL_SECS=5     # Interval between expiry sweeps
 CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS=60  # App connect-link expiry webhooks; 0 disables
+AGENT_KEY_LOGIN_SWEEP_INTERVAL_SECS=60    # Revoke expired undelivered Agent Key credentials; 0 disables
 
 # OAuth token refresh (optional)
 OAUTH_REFRESH_SWEEP_INTERVAL_SECS=600  # Proactive refresh sweep for expiring multi-connection OAuth
@@ -433,6 +448,7 @@ cargo build -p nyxid-cli                # Build CLI binary (includes node subcom
 cargo test -p nyxid-cli                 # CLI tests (includes node agent tests)
 cargo install --path cli                # Install as `nyxid`
 nyxid session refresh                   # Renew the saved session now (rotates the refresh token); exit 3 = must `nyxid login`, 4 = retry later
+nyxid login --agent-key --profile agent  # Web key selection/creation or phone QR approval; stores no account session
 nyxid login --device                    # Headless browser-assisted login;
                                         # NYXID_LOGIN_NO_DEVICE_FALLBACK=1 disables auto-fallback from plain `nyxid login`
 

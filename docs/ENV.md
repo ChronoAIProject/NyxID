@@ -346,6 +346,12 @@ The approval system works without Telegram -- users can always approve/reject vi
 |----------|---------|-------------|
 | `CONNECT_LINK_EXPIRY_SWEEP_INTERVAL_SECS` | `60` | Interval between sweeps that claim overdue app-bound connect links and dispatch `connect_link.expired`. Effective deadlines include the pinned OAuth/device finalization grace. `0` disables the sweep; query-time expiry remains active. |
 
+## Agent Key Login
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AGENT_KEY_LOGIN_SWEEP_INTERVAL_SECS` | `60` | Sweep expired Agent Key login exchanges and revoke undelivered child credentials. Freshly created keys in abandoned exchanges are removed. `0` disables the sweep; poll/preview expiry cleanup remains active. Requests last 10 minutes and approval opens a 60-second delivery window. Requires transaction-capable MongoDB. |
+
 ## OAuth Token Refresh (Optional)
 
 | Variable | Default | Description |
