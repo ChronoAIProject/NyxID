@@ -3,6 +3,7 @@ import { StyleSheet, View } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { AuthHomeScreen } from "../features/auth/AuthHomeScreen";
 import { DeviceLoginScreen } from "../features/auth/DeviceLoginScreen";
+import { AgentKeyLoginScreen } from "../features/auth/AgentKeyLoginScreen";
 import { useAuthSession } from "../features/auth/AuthSessionContext";
 import { AccountSettingsScreen } from "../features/account/AccountSettingsScreen";
 import { ActivityScreen } from "../features/activity/ActivityScreen";
@@ -23,6 +24,7 @@ export type RootStackParamList = {
   TermsOfService: undefined;
   PrivacyPolicy: undefined;
   DeviceLogin: { user_code?: string; start_scanner?: boolean } | undefined;
+  AgentKeyLogin: { user_code?: string } | undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -49,7 +51,7 @@ export function AppNavigator({ currentRouteName, onMainTabPress, onNyxPress }: A
   const activeMainTab = resolveActiveMainTab(currentRouteName);
   const isLegalRoute = currentRouteName === "TermsOfService" || currentRouteName === "PrivacyPolicy";
   const isDetailRoute = currentRouteName === "ActivityDetail";
-  const isDeviceLoginRoute = currentRouteName === "DeviceLogin";
+  const isDeviceLoginRoute = currentRouteName === "DeviceLogin" || currentRouteName === "AgentKeyLogin";
   const showGlobalBottomNav =
     isAuthenticated &&
     Boolean(onMainTabPress) &&
@@ -111,6 +113,7 @@ export function AppNavigator({ currentRouteName, onMainTabPress, onNyxPress }: A
             component={DeviceLoginScreen}
             options={{ title: "Approve Device Login", animation: "slide_from_right" }}
           />
+          <Stack.Screen name="AgentKeyLogin" component={AgentKeyLoginScreen} options={{ title: "Agent Key Login", animation: "slide_from_right" }} />
         </Stack.Navigator>
       </View>
       {showGlobalBottomNav ? (

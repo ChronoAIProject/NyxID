@@ -69,7 +69,7 @@ function formatRemaining(seconds: number): string {
   return `${minutes}:${String(remainder).padStart(2, "0")}`;
 }
 
-function DetailRow({
+export function DetailRow({
   label,
   value,
   mono = false,
@@ -104,7 +104,7 @@ function DetailRow({
   );
 }
 
-function formatLocation(preview: AuthDevicePreview): string {
+export function formatLocation(preview: AuthDevicePreview): string {
   if (preview.client_ip_attribution !== "verified") return "Not available";
   const locality = [preview.client_city, preview.client_region]
     .filter((value): value is string => Boolean(value))
@@ -122,7 +122,7 @@ function formatLocation(preview: AuthDevicePreview): string {
     : "Not available";
 }
 
-function formatNetwork(preview: AuthDevicePreview): string {
+export function formatNetwork(preview: AuthDevicePreview): string {
   if (preview.client_ip_attribution !== "verified") return "Not available";
   const relation =
     preview.network_relation ??
@@ -152,7 +152,7 @@ function formatScreen(preview: AuthDevicePreview): string {
   return `${preview.client_screen_width} x ${preview.client_screen_height} CSS px${ratio}`;
 }
 
-function formatDevice(preview: AuthDevicePreview): string {
+export function formatDevice(preview: AuthDevicePreview): string {
   if (preview.client_label && preview.client_model) {
     return `${preview.client_label} · ${preview.client_model}`;
   }
@@ -181,7 +181,7 @@ function timezoneRow(
   };
 }
 
-function requesterValue(preview: AuthDevicePreview): string {
+export function requesterValue(preview: AuthDevicePreview): string {
   if (preview.client_ip_attribution === "verified" && preview.client_ip) {
     return preview.client_ip;
   }
@@ -432,7 +432,12 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
     [claimAction],
   );
 
-  const handleScannedCode = (normalized: string) => {
+  const handleScannedCode = (normalized: string, kind: "device" | "agent-key") => {
+    if (kind === "agent-key") {
+      setIsScanning(false);
+      navigation.navigate("AgentKeyLogin", { user_code: normalized });
+      return;
+    }
     const formatted = formatAuthDeviceUserCode(normalized);
     setUserCode(formatted);
     setManualEntryVisible(false);
@@ -600,6 +605,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
             <Text style={styles.title}>Approve device login</Text>
           </View>
           <Text style={styles.subtitle}>Review the request details.</Text>
+          {!preview && <PrimaryButton label="Agent Key login" kind="ghost" onPress={() => navigation.navigate("AgentKeyLogin")} />}
 
           {!preview ? (
             <View style={styles.inputSection}>

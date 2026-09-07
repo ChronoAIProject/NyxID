@@ -293,6 +293,10 @@ export const appLinking: LinkingOptions<RootStackParamList> = {
         path: "login/device",
         parse: { user_code: String },
       },
+      AgentKeyLogin: {
+        path: "login/agent-key",
+        parse: { user_code: String },
+      },
       TermsOfService: "terms",
       PrivacyPolicy: "privacy",
     },
