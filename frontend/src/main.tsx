@@ -59,6 +59,16 @@ if (import.meta.env.DEV) {
 
 function Root() {
   const [ready, setReady] = useState(false);
+  const [agentKeyLogin, setAgentKeyLogin] = useState(
+    () => window.location.pathname === "/login/agent-key",
+  );
+  useEffect(
+    () =>
+      router.subscribe("onResolved", () => {
+        setAgentKeyLogin(window.location.pathname === "/login/agent-key");
+      }),
+    [],
+  );
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const consentAsked = useConsentStore((s) => s.asked);
   const consentEnabled = useConsentStore((s) => s.enabled);
@@ -77,13 +87,13 @@ function Root() {
   // MCP tabs) still fetch it via their own hook invocations.
   const telemetryMightInit = !consentAsked || consentEnabled;
   const { data: publicConfig } = usePublicConfig({
-    enabled: telemetryMightInit,
+    enabled: telemetryMightInit && !agentKeyLogin,
   });
 
   useEffect(() => {
     useAuthStore
       .getState()
-      .checkAuth()
+      .checkAuth({ ephemeral: window.location.pathname === "/login/agent-key" })
       .finally(() => {
         setReady(true);
       });
@@ -97,7 +107,7 @@ function Root() {
   // stays undefined forever and we simply never initialize — which is
   // the correct outcome.
   useEffect(() => {
-    if (!ready || !publicConfig) return;
+    if (!ready || !publicConfig || agentKeyLogin) return;
     initTelemetry({
       dsn: publicConfig.telemetry_dsn,
       host: publicConfig.telemetry_host,
@@ -110,7 +120,7 @@ function Root() {
     if (isAuthenticated && user?.id) {
       telemetryIdentify(user.id);
     }
-  }, [ready, publicConfig, consentEnabled, isAuthenticated]);
+  }, [ready, publicConfig, consentEnabled, isAuthenticated, agentKeyLogin]);
 
   // When auth resolves, redirect as needed:
   // - Authenticated user on landing → dashboard
@@ -147,7 +157,7 @@ function Root() {
   return (
     <>
       <RouterProvider router={router} />
-      <ConsentBanner />
+      {!agentKeyLogin && <ConsentBanner />}
     </>
   );
 }

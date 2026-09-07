@@ -56,6 +56,8 @@ export const createApiKeySchema = z.object({
     .nullable()
     .optional(),
   platform: z.string().nullable().optional(),
+  rate_limit_per_second: z.number().int().positive().max(4294967295).optional(),
+  rate_limit_burst: z.number().int().positive().max(4294967295).optional(),
   /**
    * When set, the key is created under the given org and managed by every
    * admin of that org. Omit for a personal key. The backend enforces that

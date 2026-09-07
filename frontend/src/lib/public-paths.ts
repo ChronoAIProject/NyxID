@@ -25,6 +25,7 @@ export function isPublicPath(path: string): boolean {
     path === "/oauth-launching" ||
     path === "/cli-auth" ||
     path === "/cli/pair" ||
-    path === "/login/device"
+    path === "/login/device" ||
+    path === "/login/agent-key"
   );
 }

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { User, LoginResponse } from "@/types/api";
-import { api, ApiError } from "@/lib/api-client";
+import { api, apiClient, ApiError } from "@/lib/api-client";
 import {
   identify as telemetryIdentify,
   reset as telemetryReset,
@@ -43,7 +43,7 @@ interface AuthState {
 interface AuthActions {
   readonly login: (email: string, password: string) => Promise<LoginResult>;
   readonly logout: () => Promise<void>;
-  readonly checkAuth: () => Promise<void>;
+  readonly checkAuth: (options?: { ephemeral?: boolean }) => Promise<void>;
   readonly setUser: (user: User | null) => void;
   readonly setMfaRequired: (required: boolean, token: string | null) => void;
   readonly clearMfaState: () => void;
@@ -109,24 +109,28 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     }
   },
 
-  checkAuth: async (): Promise<void> => {
+  checkAuth: async ({ ephemeral = false } = {}): Promise<void> => {
     set({ isLoading: true });
     try {
-      const user = await api.get<User>("/users/me");
+      const user = ephemeral
+        ? await apiClient<User>("/users/me", { preserveSessionOn401: true })
+        : await api.get<User>("/users/me");
       applyIdentityTransition(get().user, user);
       set({ user, isAuthenticated: true, isLoading: false });
       // Associate the restored session with its user_id so pageviews
       // captured after boot attribute correctly. Safe no-op when
       // telemetry is off.
-      telemetryIdentify(user.id);
+      if (!ephemeral) telemetryIdentify(user.id);
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         // Session expired / server rejected — this is a sign-out path
         // and must reset the telemetry identity before we wipe state
         // so subsequent pageviews attribute to a fresh anon, not the
         // ex-user. Parity with the explicit `logout()` branch above.
-        telemetryReset();
-        clearAssistantLocalState();
+        if (!ephemeral) {
+          telemetryReset();
+          clearAssistantLocalState();
+        }
         transitionAssistantIdentity(null);
         set({ user: null, isAuthenticated: false, isLoading: false });
       } else {

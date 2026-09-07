@@ -19,6 +19,7 @@ import { BindingsCard } from "@/components/dashboard/api-key-detail/bindings-car
 import { UsageStatsCard } from "@/components/dashboard/api-key-detail/usage-stats-card";
 import { VerifyKeyCard } from "@/components/dashboard/api-key-detail/verify-key-card";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
+import { LoginCredentialsSection } from "@/components/dashboard/api-key-detail/login-credentials-section";
 
 export function ApiKeyDetailPage() {
   const { keyId } = useParams({ strict: false }) as { keyId: string };
@@ -125,6 +126,8 @@ export function ApiKeyDetailPage() {
         <VerifyKeyCard apiKey={apiKey} />
         <UsageStatsCard keyId={apiKey.id} />
       </div>
+
+      <LoginCredentialsSection keyId={apiKey.id} />
 
       <RotateKeyDialog
         open={rotateOpen}
