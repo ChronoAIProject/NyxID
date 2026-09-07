@@ -152,7 +152,7 @@ steps apply to `api-feishu-bot`.
 
 ## Channel Bot Relay
 
-NyxID can bridge messaging platforms (Telegram, Discord, Lark, Feishu, Slack) to AI agent callback URLs. Users register their own bots, configure conversation-to-agent routing, and NyxID handles webhook reception, message normalization, and delivery to the agent.
+NyxID can bridge messaging platforms (Telegram, Discord, Lark, Feishu, Slack, WhatsApp) to AI agent callback URLs. Users register their own bots, configure conversation-to-agent routing, and NyxID handles webhook reception, message normalization, and delivery to the agent.
 
 NyxID is a **pure passthrough gateway** (ADR-013): it never stores message bodies or attachments. Only routing metadata lives in NyxID; the full conversation history belongs to the downstream agent.
 
@@ -173,7 +173,14 @@ nyxid channel-bot register --platform feishu --label "My Feishu Bot" --token-env
 
 # Slack (pass the xoxb- bot user token and the app's signing secret)
 nyxid channel-bot register --platform slack --label "My Slack Bot" --token-env SLACK_BOT_TOKEN --app-secret-env SLACK_SIGNING_SECRET
+
+# WhatsApp Business Platform (direct Meta Cloud API; WABA ID is optional)
+nyxid channel-bot register --platform whatsapp --label "WhatsApp Support" --token-env WHATSAPP_ACCESS_TOKEN --phone-number-id 123456789 --app-secret-env META_APP_SECRET --waba-id 987654321
 ```
+
+For WhatsApp, copy the returned Callback URL and one-time **Verify Token** into Meta App Dashboard > WhatsApp > Configuration, verify and save, then subscribe to `messages`. Manually subscribe the app to the WABA with `POST /{version}/{WABA_ID}/subscribed_apps`. The token must be a System User access token authorized for that account. `phone_number_id` is the Meta phone identifier, not its display number or App ID. NyxID filters other phone numbers' app-wide events. The WhatsApp Business App has no API; Twilio-hosted WhatsApp is a separate, unsupported API.
+
+Rotate WhatsApp credentials with `nyxid channel-bot update <BOT_ID> --token-env WHATSAPP_ACCESS_TOKEN --app-secret-env META_APP_SECRET`. The Verify Token is preserved. Sender WhatsApp IDs identify private conversations. Replies use text (split at 4096 characters), `metadata.template`, or `metadata.interactive`; outside the 24-hour service window only approved templates are allowed. Inbound media references require a two-step authenticated Graph download through a separately authorized connection. Inbound retries are not deduplicated by the existing relay. Full setup: `docs/CHANNEL_BOT_RELAY.md`.
 
 For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu/Slack, configure the webhook URL in the platform's developer console: `https://<your-nyxid>/api/v1/webhooks/channel/<platform>/<bot-id>`. Telegram/Discord/Slack bots auto-activate on first successful webhook delivery. Lark/Feishu bots promote from `pending_webhook` to `active` only after inbound webhook verification passes, which requires the bot's Verification Token to be set correctly. Encrypt Key is optional, but if it is enabled in the Lark/Feishu console it must also be set on the bot. The CLI falls back to `NYXID_LARK_VERIFICATION_TOKEN` and `NYXID_LARK_ENCRYPT_KEY` when `--verification-token` or `--encrypt-key` are omitted. For Slack, paste the URL into the app's **Event Subscriptions** page — Slack's `url_verification` handshake is answered automatically.
 
