@@ -53,6 +53,26 @@ The owner confirmed on 8 September 2026 that the Nyxbot session, chat-pairing an
 - A temporary **Review spending cap** action opens the designed cap choices without implying Meta authorization. **Set cap & connect** remains disabled and nothing is saved. Replace this blocked-state action with the designed Meta-to-cap sequence when the contracts above exist.
 - No remote OAuth consent, real Telegram registration, or paid Meta activation was performed during development. Automated tests use isolated API responses; they do not prove a deployed service integration.
 
+## Local Preview Against Hosted NyxID
+
+The owner selected `https://nyx.chrono-ai.fun` for integration. Its API is `https://nyx-api.chrono-ai.fun`; the public configuration enables Google, GitHub and Apple, requires invite codes for registration, and disables email authentication. Run the existing frontend against that environment from `frontend/`:
+
+```sh
+BACKEND_URL=https://nyx-api.chrono-ai.fun \
+FRONTEND_URL=https://nyx.chrono-ai.fun \
+npm run dev -- --host 127.0.0.1 --port 3000 --strictPort
+```
+
+`FRONTEND_URL` sets the existing Vite proxy's upstream Origin/Referer. The proxy also uses the repository's existing local cookie rewriting. Neither setting changes the hosted backend's configuration or OAuth return URL policy. This preview uses the selected live environment and its real account data.
+
+On the current development machine, native Node HTTPS connections need the already-running local network proxy. With Node 25, also set `NODE_USE_ENV_PROXY=1`, `HTTPS_PROXY=http://127.0.0.1:7897`, `HTTP_PROXY=http://127.0.0.1:7897` and `NO_PROXY=127.0.0.1,localhost` when starting Vite. Without these, the proxy can fail with `ECONNRESET` before TLS negotiation. TLS certificate verification remains enabled. These machine-specific settings belong in the local launch environment.
+
+For a local browser session, use the existing **Continue with the NyxID app** flow. Read its displayed code, open the displayed `https://nyx.chrono-ai.fun/login/device` address in a browser already signed in to the same NyxID environment, enter the code, and review and approve that login. The local page polls `/api/v1/auth/device/poll-web`, receives a real browser session cookie through the proxy and returns to `/onboarding`. No account cookie, access token or OAuth secret needs to be copied between browsers or applications.
+
+Verified on 8 September 2026: proxied public configuration returned HTTP 200 with the three social providers, and this device login flow established the local browser session and reached the data-source step. That step still reported Google Workspace authorization unavailable; account sign-in does not establish Drive/Calendar grants. The Google platform-readiness item above remains open.
+
+Direct social login is a separate local-preview limitation: the hosted backend ignores a localhost `return_to`, and its provider callback remains on the hosted API domain. Initiating through a localhost proxy also puts the OAuth state cookie on localhost rather than the hosted callback domain. Changing `BACKEND_URL` alone therefore does not make Google/GitHub/Apple return to localhost. Verify those complete flows with the frontend deployed under the backend's configured frontend origin, or with a dedicated environment whose OAuth callbacks and frontend origin are configured together. Aevatar's `NYXID_CLIENT_ID` belongs to its separate OAuth client flow and is not a substitute for this first-party browser session.
+
 ## Assets
 
 - Google glyph: reused from the existing NyxID authentication provider button paths.
