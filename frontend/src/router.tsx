@@ -19,9 +19,11 @@ import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
 
 import {
   LandingPage,
+  NyxbotOnboardingPage,
   AiSetupPage,
   LoginPage,
   RegisterPage,
@@ -148,6 +150,14 @@ const loginRoute = createRoute({
       : {}),
   }),
   component: LoginPage,
+});
+
+const nyxbotOnboardingRoute = createRoute({
+  path: "/onboarding",
+  getParentRoute: () => rootRoute,
+  validateSearch: (search: Record<string, unknown>) =>
+    nyxbotSearchSchema.parse(search),
+  component: NyxbotOnboardingPage,
 });
 
 const registerRoute = createRoute({
@@ -907,6 +917,7 @@ const adminFeatureFlagsRoute = createRoute({
 
 const routeTree = rootRoute.addChildren([
   landingRoute,
+  nyxbotOnboardingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,
   oauthLaunchingRoute,

@@ -12,6 +12,7 @@ export function isPublicPath(path: string): boolean {
     path === "/" ||
     path === "/login" ||
     path === "/register" ||
+    path === "/onboarding" ||
     path === "/privacy" ||
     path === "/terms" ||
     path === "/blog" ||

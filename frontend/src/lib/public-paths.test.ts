@@ -2,6 +2,10 @@ import { describe, expect, it } from "vitest";
 import { isPublicPath } from "./public-paths";
 
 describe("public route policy", () => {
+  it("allows the exact onboarding entry before auth without broadening the route prefix", () => {
+    expect(isPublicPath("/onboarding")).toBe(true);
+    expect(isPublicPath("/onboarding/admin")).toBe(false);
+  });
   it("renders both OAuth popup routes before auth resolution", () => {
     expect(isPublicPath("/oauth-complete")).toBe(true);
     expect(isPublicPath("/oauth-launching")).toBe(true);

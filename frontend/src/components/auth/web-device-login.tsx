@@ -24,6 +24,7 @@ interface WebDeviceLoginProps {
   readonly returnTo?: string;
   readonly isOpen?: boolean;
   readonly onOpenChange?: (open: boolean) => void;
+  readonly triggerLabel?: string;
 }
 
 export const LOGIN_PROVIDER_ROW_CLASS =
@@ -33,6 +34,7 @@ export function WebDeviceLogin({
   returnTo,
   isOpen: controlledOpen,
   onOpenChange,
+  triggerLabel = "Continue with the NyxID app",
 }: WebDeviceLoginProps) {
   const navigate = useNavigate();
   const [internalOpen, setInternalOpen] = useState(false);
@@ -123,12 +125,12 @@ export function WebDeviceLogin({
         type="button"
         onClick={openPanel}
         className={LOGIN_PROVIDER_ROW_CLASS}
-        aria-label="Continue with the NyxID app"
+        aria-label={triggerLabel}
       >
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-overlay-strong">
           <NyxidIcon alt="" className="h-4 w-4 object-contain" />
         </span>
-        Continue with the NyxID app
+        {triggerLabel}
         <ChevronRight className="ml-auto size-4 text-muted-foreground" />
       </button>
     );
