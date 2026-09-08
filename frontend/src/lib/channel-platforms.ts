@@ -31,13 +31,17 @@ const larkSetupNote = {
 
 // Mirrors each backend adapter's registration descriptor. Rendering, validation,
 // and payload selection use the same fields so hidden credentials never cross platforms.
-export const CHANNEL_PLATFORMS: Record<ChannelPlatform, { readonly label: string; readonly fields: readonly ChannelFieldDescriptor[]; readonly webhookDocs: string; readonly managedFlow?: "meta_embedded_signup"; readonly advancedLabel?: string; readonly setupNote?: { readonly title: string; readonly text: string } }> = {
+export type ManagedFlow = "meta_embedded_signup" | "oauth_connection";
+export const CHANNEL_PLATFORMS: Record<ChannelPlatform, { readonly label: string; readonly fields: readonly ChannelFieldDescriptor[]; readonly webhookDocs: string; readonly identityLabel?: string; readonly detailFields?: readonly { readonly name: keyof ChannelBotDetail; readonly label: string }[]; readonly managedFlow?: ManagedFlow; readonly managedOnly?: boolean; readonly webhookIngestion?: boolean; readonly connectLabel?: string; readonly connectedLabel?: string; readonly deletionNote?: string; readonly advancedLabel?: string; readonly setupNote?: { readonly title: string; readonly text: string } }> = {
   telegram: { label: "Telegram", fields: [tokenField], webhookDocs: "https://core.telegram.org/bots/api#setwebhook" },
   discord: { label: "Discord", fields: [tokenField, { name: "public_key", label: "Public Key", required: true }], webhookDocs: "https://discord.com/developers/docs/interactions/receiving-and-responding" },
   lark: { label: "Lark", fields: larkFields, setupNote: larkSetupNote, webhookDocs: "https://open.larksuite.com/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case" },
   feishu: { label: "Feishu", fields: larkFields, setupNote: larkSetupNote, webhookDocs: "https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case" },
   slack: { label: "Slack", fields: [tokenField, { name: "app_secret", label: "Signing Secret", secret: true, required: true, patchable: true, configuredKey: "app_secret_configured", hint: "Basic Information > App Credentials in Slack app settings." }], webhookDocs: "https://api.slack.com/apis/events-api" },
   whatsapp: {
+    identityLabel: "Phone Number ID",
+    detailFields: [{ name: "waba_id", label: "WhatsApp Business Account ID" }],
+    deletionNote: "The number stays subscribed to the app in Meta.",
     managedFlow: "meta_embedded_signup",
     advancedLabel: "Advanced: use your own Meta app",
     label: "WhatsApp",
@@ -50,7 +54,19 @@ export const CHANNEL_PLATFORMS: Record<ChannelPlatform, { readonly label: string
       { name: "waba_id", label: "WhatsApp Business Account ID", numeric: true, hint: "Optional WABA ID." },
     ],
   },
+  x: {
+    label: "X (Twitter)", fields: [], managedFlow: "oauth_connection", managedOnly: true,
+    webhookIngestion: false, webhookDocs: "https://docs.x.com/x-api/direct-messages/lookup/introduction",
+    connectLabel: "Connect X account", connectedLabel: "Connected X account",
+    deletionNote: "The OAuth connection stays connected. Manage it separately in your account's connections.",
+  },
 };
+
+export function managedConnectPlatform(value: unknown): ChannelPlatform | undefined {
+  if (typeof value !== "string" || !Object.hasOwn(CHANNEL_PLATFORMS, value)) return undefined;
+  const platform = value as ChannelPlatform;
+  return CHANNEL_PLATFORMS[platform].managedFlow ? platform : undefined;
+}
 
 export function channelBotRegistrationPayload(data: CreateChannelBotRequest): CreateChannelBotRequest {
   const fields = Object.fromEntries(CHANNEL_PLATFORMS[data.platform].fields.flatMap(({ name }) => {

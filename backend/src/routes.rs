@@ -1778,8 +1778,16 @@ fn build_router_internal(
             post(handlers::channel_managed::complete),
         )
         .route(
+            "/channel-bots/managed-onboarding/{platform}/start",
+            post(handlers::channel_managed::start),
+        )
+        .route(
             "/channel-bots/{id}/reregister",
             post(handlers::channel_managed::reregister),
+        )
+        .route(
+            "/channel-bots/{id}/reconnect",
+            post(handlers::channel_managed::reconnect),
         )
         .route(
             "/channel-bots/{id}/managed-setup/repair",

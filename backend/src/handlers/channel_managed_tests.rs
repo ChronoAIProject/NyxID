@@ -196,7 +196,7 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
     for adapter in crate::services::channel_adapters::registered_adapters(&cache) {
         assert_eq!(
             adapter.managed_onboarding().is_some(),
-            adapter.platform_id() == "whatsapp"
+            matches!(adapter.platform_id(), "whatsapp" | "x")
         );
         assert_eq!(
             adapter.platform_webhook(),
@@ -204,8 +204,9 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
         );
     }
     let all = credentials::descriptors(&cache);
-    assert_eq!(all.len(), 1);
+    assert_eq!(all.len(), 2);
     assert_eq!(all[0].1.provider, "meta");
+    assert_eq!(all[1].1.provider, "x");
 }
 
 #[tokio::test]
@@ -482,7 +483,13 @@ async fn platform_credentials_mask_rotate_clear_and_fallback_on_demand() {
     assert!(!serialized.to_string().contains("secret-for-test"));
     assert!(!format!("{list:?}").contains(list[0].webhook_verify_token.as_ref().unwrap()));
     assert!(!serialized.to_string().contains("test_graph_base"));
-    let original = credentials::load(&state.db, "meta").await.unwrap().unwrap();
+    let credential_descriptor = credentials::descriptor(&state.token_exchange_cache, "meta")
+        .unwrap()
+        .1;
+    let original = credentials::load(&state.db, &credential_descriptor)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         uuid::Uuid::parse_str(&original.id)
             .unwrap()
@@ -552,7 +559,7 @@ async fn platform_credentials_mask_rotate_clear_and_fallback_on_demand() {
         .await
         .unwrap();
     assert!(
-        credentials::load(&state.db, "meta")
+        credentials::load(&state.db, &credential_descriptor)
             .await
             .unwrap()
             .is_none()
@@ -609,6 +616,10 @@ async fn admin_endpoints_reject_non_admin_and_onboarding_rejects_non_humans() {
             ("POST", "/connect-links/complete"),
             ("GET", "/channel-bots/managed-onboarding/whatsapp"),
             ("POST", "/channel-bots/managed-onboarding/whatsapp/complete"),
+            ("GET", "/channel-bots/managed-onboarding/x"),
+            ("POST", "/channel-bots/managed-onboarding/x/start"),
+            ("POST", "/channel-bots/managed-onboarding/x/complete"),
+            ("POST", "/channel-bots/bot/reconnect"),
             ("POST", "/channel-bots/bot/reregister"),
             ("POST", "/channel-bots/bot/managed-setup/repair"),
         ] {
@@ -1030,9 +1041,13 @@ async fn platform_dispatcher_handshake_signature_and_multinumber_targets() {
     let (state, auth, server) = fixture().await;
     let (_, Json(rows)) = admin::list(State(state.clone()), auth).await.unwrap();
     let adapter = resolve_adapter("whatsapp", &state.token_exchange_cache).unwrap();
-    let secrets = credentials::load_decrypted(&state.db, &state.encryption_keys, "meta")
-        .await
-        .unwrap();
+    let secrets = credentials::load_decrypted(
+        &state.db,
+        &state.encryption_keys,
+        &adapter.platform_credentials().unwrap(),
+    )
+    .await
+    .unwrap();
     let mut query = [
         ("hub.mode".to_string(), "subscribe".to_string()),
         (

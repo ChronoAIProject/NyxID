@@ -4,11 +4,53 @@
 
 ## Overview
 
-NyxID Channel Bot Relay turns NyxID into a **multi-platform messaging gateway**. Users register their own bots (Telegram, Discord, Lark, Feishu), NyxID receives messages via platform webhooks, normalizes them into a common format, routes each message to the correct AI agent's callback URL, and relays the agent's response back to the chat.
+NyxID Channel Bot Relay turns NyxID into a **multi-platform messaging gateway**. Users register bots or connect accounts (Telegram, Discord, Lark, Feishu, Slack, WhatsApp, X). Adapter-owned webhooks or polling normalize inbound messages into a common format, route each message to the correct AI agent's callback URL, and relay the agent's asynchronous response back to the chat.
 
 Combined with [Agent Isolation](./AGENT_ISOLATION.md), the same NyxID user can wire different messaging platforms (or even different conversations on the same platform) to different AI agents -- each with independent credentials, rate limits, and audit trails.
 
 ---
+
+## X DM Accounts
+
+X is managed-only: users connect their own X account with OAuth and provide no developer credentials. NyxID uses the account's user-context token to poll incoming one-to-one and group DMs and deliver the routed agent's asynchronous reply. App-only bearer tokens cannot access private DMs. Although X also supports legacy OAuth 1.0a user-context credentials, a BYO path would require users to supply and maintain developer credentials, so this channel deliberately does not expose one.
+
+### Platform setup and pricing
+
+Admin > Platform Credentials lists every registered adapter's provider descriptor. Meta uses encrypted `platform_credentials`; X's `ProviderOAuth { provider_slug: "twitter" }` backing reads and writes the **same encrypted Client ID and Client Secret** used by the existing `twitter` OAuth provider. There is no second copy of X's app credentials. Clearing either X credential clears a shared provider field, retaining the provider record, and stops all of the `twitter` provider's OAuth connections and logins until restored. Both provider-wide and per-field clear buttons require this impact confirmation; CLI clears require `--confirm-shared-provider`. Update and delete audits record `shared_provider_slug`. Rotating credentials affects all connections using the shared app. Secret values never appear in admin responses. The descriptor supplies fields, setup checklist, backing information and callback URL for the generic API, page and CLI.
+
+Configure a confidential Web App with OAuth 2.0 user authentication and PKCE in the X Developer Console. Set the callback to `{BASE_URL}/api/v1/providers/callback`, exactly as displayed in Platform Credentials. Enable `tweet.read users.read dm.read dm.write offline.access`. Seed migration additively includes these scopes in `twitter.default_scopes`; it does not grant new permissions to old connections. Completion rejects connections without every required scope and requires fresh consent.
+
+**Pricing checked 2026-09-08:** [X's current pricing documentation](https://docs.x.com/x-api/getting-started/pricing) specifies pay-per-usage credits with no subscriptions, replacing the older Basic/Pro tier assumption. Published DM Event reads cost $0.010 per resource and DM Interaction creates cost $0.015 per request. Fund and monitor **NyxID's shared app** in the [Developer Console/pricing page](https://developer.x.com/#pricing): all customers' DM traffic consumes that app's credits and caps. Prices and access entitlements can change; the console is authoritative. Repeated polling can retrieve already-seen resources, so budget from provider usage reports rather than treating every lookup as free.
+
+[Current rate limits](https://docs.x.com/x-api/fundamentals/rate-limits): `/2/dm_events` permits 15 reads per 15 minutes per user. Existing-conversation message creation permits 15 per 15 minutes and 1,440 per day per user, plus 1,440 per day per app. X therefore declares a 60-second minimum poll interval. The generic sweep defaults to 30 seconds (`CHANNEL_POLL_INTERVAL_SECS`; `0` disables). A quiet, healthy account normally receives new DMs within roughly 60-90 seconds, plus callback processing; pagination, provider backoff and sweep load can increase latency.
+
+### Connect, route and recover
+
+Use Add Channel Bot > X (Twitter), or `nyxid channel-bot register --platform x --managed`. The CLI checks the server's managed bootstrap and prints `/channel-bots?connect=x`; optional label and org scope are preserved. An unconfigured app shows an explicit unavailable state.
+
+`GET /api/v1/channel-bots/managed-onboarding/x` returns `available`, `flow: "oauth_connection"`, `provider_slug`, `required_scopes` and `authorize_start_url`. `POST` to its `/start` endpoint accepts `{label, target_org_id?}` and creates an owner-bound OAuth connection through existing OAuth/PKCE machinery. Channel-started connection rows are tagged `source: "channel_onboarding"` with a unique `source_id`. The existing OAuth refresh sweep deletes pending rows older than one hour, retaining completed connections. Cleanup is disabled when `OAUTH_REFRESH_SWEEP_INTERVAL_SECS=0`. The existing popup completion protocol carries only a nonce and completion status. `POST` to `/complete` accepts `{connection_id, label, target_org_id?}`; this ID is the `user_api_keys` row UUID, not the OAuth protocol's internal connection UUID. Completion validates ownership, platform credential provenance and scopes, verifies `/2/users/me`, initializes the cursor and applies the ordinary duplicate-account and bot-limit checks.
+
+All managed bootstrap/start/complete and reconnect routes require an authenticated human. API keys, delegated tokens, service accounts and relay tokens are rejected by the existing human-only middleware. Writes share the existing per-user managed-onboarding rate limit. Org creation and reconnect require the same owning-org admin access as other channel bots; an actor's personal connection cannot back an org bot.
+
+The bot starts `active` with `credential_source: "connection"` and `webhook_registered: false`. A polling descriptor suppresses webhook setup UI; no callback or webhook verification secret is needed. Configure conversation/default-agent routing exactly as for other channels. Detail and `channel-bot show` include the connected handle, connection UUID, cursor, last/next poll, error count and locally authored failure cause.
+
+Polling, Verify Bot and async replies resolve the live owner-bound connection and reuse `refresh_user_api_key_in_place`. A deleted/revoked connection, insufficient scopes or permanent refresh failure marks the bot `failed` with a metadata-only audit event; there is no stale-token fallback. Transient polling errors back off exponentially, and five consecutive failures stop polling with an audit. Rate limits defer polling without counting as an error. Reconnect runs OAuth again and posts `{connection_id}` to `POST /api/v1/channel-bots/{id}/reconnect`; it requires the same X account, swaps the connection and preserves the committed cursor. The next sweep processes DMs received during the failure through the normal bounded page walk and deduplication. Only a missing cursor is initialized to the newest event. Delete removes the bot and routes but **retains the OAuth connection**; revoke that connection separately when appropriate.
+
+### Polling and message semantics
+
+The adapter's `Ingestion::Poll` and `CredentialResolution::OAuthConnection` hooks drive generic sweeps. Up to eight due bots per adapter are processed concurrently, and a per-bot failure does not stop the other bots in that tick. Each due bot is atomically claimed by `find_one_and_update`, with a 90-second lease renewed every 20 seconds and a 15-minute work deadline. Claims, renewals and cursor commits are fenced; reconnect invalidates the previous claim. All outcomes attempt to release the lease. An abrupt process exit recovers at lease expiry. Backoff, cursors, timestamps and error counts are persisted with BSON datetime compatibility for legacy rows.
+
+[The DM events endpoint](https://docs.x.com/x-api/direct-messages/get-dm-events) does **not** support `since_id`. The adapter requests 100 `MessageCreate` events per page, follows `pagination_token` newest-first until the saved event ID (or an older ID) is reached, and emits the batch chronologically. Own-account messages are skipped. At onboarding it saves the newest existing ID without emitting history; empty accounts use an explicit empty baseline. At most ten pages (about 1,000 events) are walked. When that limit is reached before the cursor, the fetched batch is emitted chronologically and the cursor advances to its newest event after processing. Older DMs are skipped, with a persistent, locally authored `last_poll_notice` on the detail page and CLI; this does not count as an error or fail the bot. A processing error or a 429 before the bounded window completes retains the old cursor. X exposes only the last 30 days of events.
+
+The shared pipeline retains the existing webhook behavior, metadata-only message storage, routing, callback telemetry and touch semantics. X opts into the existing bot/platform/message-ID dedup hook. Overlapping completed batches are suppressed. Callback delivery retains the existing relay semantics: a stored message is not automatically redelivered after callback failure. This is not an exactly-once end-to-end delivery guarantee, and an interrupted provider reply may already have sent an earlier chunk.
+
+One-to-one IDs have `{smaller_user_id}-{larger_user_id}` form; group DMs have their own conversation ID. Sender display names and media are normalized from expansions; raw event data is forwarded to the agent and never logged or persisted as a message body. Media URLs are private and may need the connected user's bearer token; the callback never exposes that token. `referenced_tweets` contains shared posts, **not DM reply targets**. Current docs expose no DM reply-reference field; optional `referenced_events` reply references are preserved when supplied, without inventing references from shared posts.
+
+Replies call only `POST /2/dm_conversations/{dm_conversation_id}/messages`, supporting existing private/group conversations. Text is split into chunks of at most 10,000 Unicode characters. `metadata.attachments` accepts one `{media_id}` uploaded by that user; it is attached to the first chunk only. Editing is unsupported. 401, 403 and 429 errors use local messages and rate-limit retry delay, never upstream error prose. The current v2 schema does not publish a text maximum; the established 10,000-character DM limit could not be independently reconfirmed from the Help Center during implementation (HTTP 403).
+
+### Automation policy and verified limits
+
+Automated replies to inbound DMs are allowed under [X's automation rules](https://help.x.com/en/rules-and-policies/x-automation) subject to user intent, consent and opt-out requirements. Unsolicited automated outbound DMs are not permitted. NyxID's channel reply authorization binds an existing inbound message/conversation; this adapter never initiates a conversation. Operators remain responsible for consent, opt-out handling and compliant agent responses. The policy page returned HTTP 403 during this implementation, so its current exact wording could not be rechecked. The current pricing page lists DM webhook charges; Enterprise-only webhook entitlement was not independently confirmed. This implementation deliberately uses the requested polling model and needs no webhook subscription.
 
 ## Problem Statement
 
@@ -1183,6 +1225,7 @@ graph LR
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots a user can register |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |
+| `CHANNEL_POLL_INTERVAL_SECS` | `30` | Generic polling sweep interval; `0` disables. Each adapter's minimum interval, backoff and lease also apply. |
 
 ---
 

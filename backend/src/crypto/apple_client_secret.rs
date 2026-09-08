@@ -234,6 +234,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             public_mcp_rate_limit_per_minute:
                 crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
             channel_relay_callback_timeout_secs: 30,
+            channel_poll_interval_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
             channel_relay_edit_rate_limit_per_second: 10,

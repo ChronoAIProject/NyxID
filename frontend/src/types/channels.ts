@@ -4,6 +4,7 @@ export type ChannelPlatform =
   | "lark"
   | "feishu"
   | "slack"
+  | "x"
   | "whatsapp";
 
 /**
@@ -37,7 +38,7 @@ export type ContentType =
   | "unknown";
 
 export interface ChannelBotItem {
-  readonly credential_source?: "user" | "platform";
+  readonly credential_source?: "user" | "platform" | "connection";
   readonly managed_setup?: ManagedBotSetup | null;
   readonly id: string;
   readonly platform: ChannelPlatform;
@@ -61,6 +62,15 @@ export interface ChannelBotListResponse {
 }
 
 export interface ChannelBotDetail extends ChannelBotItem {
+  readonly webhook_ingestion?: boolean;
+  readonly connection_id?: string | null;
+  readonly poll_cursor?: string | null;
+  readonly last_polled_at?: string | null;
+  readonly next_poll_at?: string | null;
+  readonly poll_backoff_until?: string | null;
+  readonly poll_error_count?: number;
+  readonly last_poll_notice?: string | null;
+  readonly error?: string | null;
   readonly phone_number_id?: string;
   readonly waba_id?: string;
   readonly webhook_url?: string;
@@ -109,7 +119,9 @@ export interface UpdateChannelBotRequest {
 }
 
 export interface CreateChannelBotResponse {
-  readonly credential_source?: "user" | "platform";
+  readonly credential_source?: "user" | "platform" | "connection";
+  readonly webhook_ingestion?: boolean;
+  readonly connection_id?: string | null;
   readonly managed_setup?: ManagedBotSetup | null;
   readonly phone_number_id?: string;
   readonly waba_id?: string;

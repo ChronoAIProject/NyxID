@@ -501,6 +501,7 @@ pub struct AppConfig {
     /// Timeout in seconds for delivering inbound messages to agent callback URLs (default: 30)
     pub channel_relay_callback_timeout_secs: u32,
     /// Maximum number of channel bots a single user can register (default: 5)
+    pub channel_poll_interval_secs: u64,
     pub channel_relay_max_bots_per_user: u32,
     /// TTL in days for channel messages before automatic expiry (default: 30)
     pub channel_relay_message_ttl_days: u32,
@@ -1379,6 +1380,7 @@ impl AppConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(30),
+            channel_poll_interval_secs: env::var("CHANNEL_POLL_INTERVAL_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(30),
             channel_relay_max_bots_per_user: env::var("CHANNEL_RELAY_MAX_BOTS_PER_USER")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1967,6 +1969,7 @@ mod tests {
             public_mcp_rate_limit_per_minute:
                 crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
             channel_relay_callback_timeout_secs: 30,
+            channel_poll_interval_secs: 30,
             channel_relay_max_bots_per_user: 5,
             channel_relay_message_ttl_days: 30,
             channel_relay_edit_rate_limit_per_second: 10,

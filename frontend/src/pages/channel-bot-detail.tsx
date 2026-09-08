@@ -26,7 +26,7 @@ import { ApiError } from "@/lib/api-client";
 import { CHANNEL_PLATFORMS, editableChannelFields } from "@/lib/channel-platforms";
 import { cn, formatDate, formatRelativeTime } from "@/lib/utils";
 import { useRuntimeConfig } from "@/hooks/use-runtime-config";
-import { useReregisterChannelBot, useRepairChannelBot } from "@/hooks/use-channel-managed";
+import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
 import { PageHeader } from "@/components/shared/page-header";
 import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
@@ -562,13 +562,13 @@ function DeleteBotDialog({
   onOpenChange,
   onConfirm,
   isPending,
-  managed,
+  deletionNote,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly onConfirm: () => void;
   readonly isPending: boolean;
-  readonly managed: boolean;
+  readonly deletionNote?: string;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -578,7 +578,7 @@ function DeleteBotDialog({
           <DialogDescription>
             This will permanently delete this bot and all its conversation
             routes. This action cannot be undone.
-            {managed && " The number stays subscribed to the app in Meta."}
+            {deletionNote && ` ${deletionNote}`}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -659,20 +659,6 @@ function LarkPermissionSetupSection({
   );
 }
 
-function ManagedSetupSection({ bot }: { readonly bot: ChannelBotDetail }) {
-  const reregister = useReregisterChannelBot();
-  const repair = useRepairChannelBot();
-  return <DetailSection title="Managed setup">
-    <DetailRow label="Subscription" value={bot.managed_setup?.subscription ?? "pending"} />
-    <DetailRow label="Webhook override" value={bot.managed_setup?.webhook_override ?? "pending"} />
-    <DetailRow label="Number registration" value={bot.managed_setup?.registration ?? "pending"} />
-    {Object.entries(bot.managed_setup?.coexistence_sync ?? {}).map(([name, status]) => <DetailRow key={name} label={name === "history" ? "History sync" : "Contact sync"} value={status} />)}
-    <div className="flex flex-wrap gap-2 p-4">
-      <Button variant="outline" disabled={repair.isPending} isLoading={reregister.isPending} onClick={() => reregister.mutate(bot.id, { onSuccess: () => toast.success("Number registration checked"), onError: (error) => toast.error(error instanceof ApiError ? error.message : "Unable to re-register number") })}><ShieldCheck className="size-3" />Re-register number</Button>
-      <Button variant="outline" disabled={reregister.isPending} isLoading={repair.isPending} onClick={() => repair.mutate(bot.id, { onSuccess: () => toast.success("Setup checked"), onError: (error) => toast.error(error instanceof ApiError ? error.message : "Unable to repair setup") })}><ShieldCheck className="size-3" />Repair setup</Button>
-    </div>
-  </DetailSection>;
-}
 
 function EditVerificationSection({
   bot,
@@ -1009,7 +995,7 @@ export function ChannelBotDetailPage() {
 
       {/* Bot Information */}
       <DetailSection title="Bot Information">
-        <DetailRow label="Credential source" value={bot.credential_source === "platform" ? "Platform-managed" : "Your own app"} />
+        <DetailRow label="Credential source" value={bot.credential_source === "connection" ? CHANNEL_PLATFORMS[bot.platform].connectedLabel ?? "Connected account" : bot.credential_source === "platform" ? "Platform-managed" : "Your own app"} />
         <DetailRow
           label="Platform"
           value={platformLabel(bot.platform)}
@@ -1017,10 +1003,10 @@ export function ChannelBotDetailPage() {
           badgeVariant="secondary"
         />
         <DetailRow label="Bot Username" value={bot.platform_bot_username || "-"} />
-        <DetailRow label={bot.phone_number_id ? "Phone Number ID" : "Platform Bot ID"} value={bot.platform_bot_id || "-"} copyable />
-        {bot.waba_id && <DetailRow label="WhatsApp Business Account ID" value={bot.waba_id} copyable />}
+        <DetailRow label={CHANNEL_PLATFORMS[bot.platform].identityLabel ?? "Platform Bot ID"} value={bot.platform_bot_id || "-"} copyable />
+        {CHANNEL_PLATFORMS[bot.platform].detailFields?.map(({ name, label }) => typeof bot[name] === "string" && bot[name] ? <DetailRow key={name} label={label} value={String(bot[name])} copyable /> : null)}
         <DetailRow label="Status" value={statusLabel(bot.status)} badge badgeVariant={statusBadgeVariant(bot.status)} />
-        <DetailRow label="Webhook" value={bot.webhook_registered ? "Registered" : "Not registered"} />
+        {bot.webhook_ingestion === false ? <DetailRow label="Ingestion" value="Polling" /> : <DetailRow label="Webhook" value={bot.webhook_registered ? "Registered" : "Not registered"} />}
         <DetailRow label="Owner" value={ownerLabel} />
         <DetailRow label="Created" value={formatDate(bot.created_at)} />
         <DetailRow label="Updated" value={formatRelativeTime(bot.updated_at)} />
@@ -1041,7 +1027,11 @@ export function ChannelBotDetailPage() {
         </DetailSection>
       )}
       {bot.permission_setup_url && <LarkPermissionSetupSection bot={bot} />}
-      {bot.credential_source === "platform" ? <ManagedSetupSection bot={bot} /> : editableChannelFields(bot.platform).length > 0 && <EditVerificationSection bot={bot} />}
+      {(() => {
+        const flow = CHANNEL_PLATFORMS[bot.platform].managedFlow;
+        const ManagedDetail = flow ? MANAGED_FLOW_COMPONENTS[flow].Detail : undefined;
+        return bot.credential_source !== "user" && bot.credential_source && ManagedDetail ? <ManagedDetail bot={bot} orgId={ownerOrgId} /> : editableChannelFields(bot.platform).length > 0 && <EditVerificationSection bot={bot} />;
+      })()}
 
       {/* Conversation Routes */}
       <ConversationsSection
@@ -1052,7 +1042,7 @@ export function ChannelBotDetailPage() {
 
       {/* Delete Confirmation */}
       <DeleteBotDialog
-        managed={bot.credential_source === "platform"}
+        deletionNote={bot.credential_source !== "user" ? CHANNEL_PLATFORMS[bot.platform].deletionNote : undefined}
         open={showDeleteDialog}
         onOpenChange={setShowDeleteDialog}
         onConfirm={() => void handleDelete()}
