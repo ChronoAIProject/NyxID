@@ -90,6 +90,7 @@ async fn maybe_rebuild_bot_token(
             &BotCredentials {
                 token: &token,
                 platform_bot_id: Some(&bot.platform_bot_id),
+                platform_secrets: None,
             },
         )
         .await
@@ -167,18 +168,48 @@ pub async fn create_bot(
     }
 
     let effective_token = adapter.registration_token(fields)?;
-    let BotIdentity {
-        platform_bot_id,
-        platform_bot_username,
-    } = adapter
+    let identity = adapter
         .verify_bot_token(
             http_client,
             &BotCredentials {
                 token: &effective_token,
                 platform_bot_id: descriptor.identity(fields),
+                platform_secrets: None,
             },
         )
         .await?;
+
+    persist_verified_bot(
+        db,
+        encryption_keys,
+        adapter,
+        user_id,
+        label,
+        fields,
+        &effective_token,
+        identity,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn persist_verified_bot(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    adapter: &dyn PlatformAdapter,
+    user_id: &str,
+    label: &str,
+    fields: &RegistrationValues<'_>,
+    effective_token: &str,
+    identity: BotIdentity,
+    managed: Option<(&str, &crate::models::channel_bot::ManagedBotSetup)>,
+) -> AppResult<CreateBotResult> {
+    let descriptor = adapter.registration();
+    let BotIdentity {
+        platform_bot_id,
+        platform_bot_username,
+    } = identity;
 
     // Check for duplicate platform bot
     let existing = db
@@ -210,6 +241,17 @@ pub async fn create_bot(
         user_id: user_id.to_string(),
         platform: adapter.platform_id().to_string(),
         label: label.to_string(),
+        credential_source: if managed.is_some() {
+            "platform"
+        } else {
+            "user"
+        }
+        .to_string(),
+        registration_pin_encrypted: match managed {
+            Some((pin, _)) => Some(encryption_keys.encrypt(pin.as_bytes()).await?),
+            None => None,
+        },
+        managed_setup: managed.map(|(_, setup)| setup.clone()),
         bot_token_encrypted,
         platform_bot_id,
         platform_bot_username,
@@ -220,7 +262,12 @@ pub async fn create_bot(
         lark_verification_token_encrypted: None,
         lark_encrypt_key_encrypted: None,
         public_key: None,
-        status: "pending".to_string(),
+        status: if managed.is_some() {
+            "pending_webhook"
+        } else {
+            "pending"
+        }
+        .to_string(),
         is_active: true,
         created_at: now,
         updated_at: now,
@@ -248,6 +295,158 @@ pub async fn create_bot(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub async fn create_managed_bot(
+    db: &mongodb::Database,
+    config: &AppConfig,
+    keys: &EncryptionKeys,
+    http: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    owner: &str,
+    label: &str,
+    input: &super::channel_managed::ManagedOnboardingInput,
+    progress: &super::channel_managed::ManagedProgress,
+) -> AppResult<CreateBotResult> {
+    let descriptor = adapter
+        .managed_onboarding()
+        .ok_or_else(super::channel_managed::unavailable)?;
+    let credential_descriptor = adapter
+        .platform_credentials()
+        .ok_or_else(super::channel_managed::unavailable)?;
+    let row = super::platform_credential_service::load(db, descriptor.provider).await?;
+    if !super::platform_credential_service::configured(row.as_ref(), &credential_descriptor) {
+        return Err(super::channel_managed::unavailable());
+    }
+    if label.trim().is_empty() || label.len() > 128 {
+        return Err(AppError::ValidationError(
+            "Label must be between 1 and 128 characters".to_string(),
+        ));
+    }
+    let active_count = db
+        .collection::<ChannelBot>(COLLECTION_NAME)
+        .count_documents(doc! { "user_id": owner, "is_active": true })
+        .await?;
+    if active_count >= u64::from(config.channel_relay_max_bots_per_user) {
+        return Err(AppError::ChannelBotLimitReached(
+            "Channel bot limit reached".to_string(),
+        ));
+    }
+    let platform =
+        super::platform_credential_service::load_decrypted(db, keys, descriptor.provider).await?;
+    progress.stage("exchanging");
+    let result = adapter
+        .complete_managed_onboarding(http, &platform, input)
+        .await?;
+    let fields = RegistrationValues(
+        result
+            .fields
+            .iter()
+            .map(|(key, value)| (*key, value.as_str()))
+            .collect(),
+    );
+    let created = persist_verified_bot(
+        db,
+        keys,
+        adapter,
+        owner,
+        label,
+        &fields,
+        &result.token,
+        result.identity,
+        Some((&result.registration_pin, &result.setup)),
+    )
+    .await?;
+    let webhook_url = format!(
+        "{}/api/v1/webhooks/channel/{}/{}",
+        config.base_url,
+        adapter.platform_id(),
+        created.bot.id
+    );
+    let credentials = BotCredentials {
+        token: &result.token,
+        platform_bot_id: Some(&created.bot.platform_bot_id),
+        platform_secrets: Some(&platform),
+    };
+    let setup = adapter
+        .setup_managed_bot(
+            http,
+            &credentials,
+            &created.bot,
+            &webhook_url,
+            &created.webhook_secret,
+            &result.registration_pin,
+            progress,
+        )
+        .await?;
+    store_managed_setup(db, &created.bot.id, &setup).await?;
+    Ok(CreateBotResult {
+        bot: get_bot(db, &created.bot.id).await?,
+        webhook_secret: created.webhook_secret,
+    })
+}
+
+pub async fn store_managed_setup(
+    db: &mongodb::Database,
+    bot_id: &str,
+    setup: &crate::models::channel_bot::ManagedBotSetup,
+) -> AppResult<()> {
+    let setup = bson::to_bson(setup)
+        .map_err(|_| AppError::Internal("Unable to serialize managed setup".to_string()))?;
+    db.collection::<ChannelBot>(COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": bot_id },
+            doc! { "$set": { "managed_setup": setup, "updated_at": bson::DateTime::now() } },
+        )
+        .await?;
+    Ok(())
+}
+
+pub async fn reregister_managed_bot(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    http: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+) -> AppResult<()> {
+    if bot.credential_source != "platform" || !bot.is_active {
+        return Err(super::channel_managed::unavailable());
+    }
+    let provider = adapter
+        .platform_credentials()
+        .ok_or_else(super::channel_managed::unavailable)?
+        .provider;
+    let platform = super::platform_credential_service::load_decrypted(db, keys, provider).await?;
+    let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, bot).await?);
+    let pin_bytes = zeroize::Zeroizing::new(
+        keys.decrypt(
+            bot.registration_pin_encrypted
+                .as_deref()
+                .ok_or_else(super::channel_managed::unavailable)?,
+        )
+        .await?,
+    );
+    let pin = std::str::from_utf8(&pin_bytes)
+        .map_err(|_| AppError::Internal("Invalid registration PIN encoding".to_string()))?;
+    let credentials = BotCredentials {
+        token: &token,
+        platform_bot_id: Some(&bot.platform_bot_id),
+        platform_secrets: Some(&platform),
+    };
+    let mut setup = bot
+        .managed_setup
+        .clone()
+        .ok_or_else(super::channel_managed::unavailable)?;
+    let result = adapter
+        .reregister_managed_bot(http, &credentials, pin)
+        .await;
+    setup.registration = result
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|_| "failed".to_string());
+    store_managed_setup(db, &bot.id, &setup).await?;
+    result.map(|_| ())
+}
+
 pub async fn update_bot(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -258,6 +457,12 @@ pub async fn update_bot(
     params: UpdateBotParams<'_>,
 ) -> AppResult<ChannelBot> {
     let bot = get_bot_for_user(db, bot_id, user_id).await?;
+    if bot.credential_source == "platform" && !params.fields().0.is_empty() {
+        return Err(AppError::ValidationError(
+            "Platform-managed credentials cannot be edited. Reconnect through managed onboarding."
+                .to_string(),
+        ));
+    }
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
@@ -565,6 +770,9 @@ mod tests {
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "lark".to_string(),
             label: "Test Bot".to_string(),
+            credential_source: "user".to_string(),
+            registration_pin_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted: encryption_keys.encrypt(bot_token.as_bytes()).await.unwrap(),
             platform_bot_id: "cli_test".to_string(),
             platform_bot_username: "testbot".to_string(),

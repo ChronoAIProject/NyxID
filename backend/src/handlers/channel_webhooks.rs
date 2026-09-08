@@ -72,6 +72,23 @@ pub async fn channel_webhook(
         WebhookPolicy::Challenge(response) => Json(response).into_response(),
         WebhookPolicy::Immediate(response) => {
             tokio::spawn(async move {
+                // A WABA override covers all of its numbers. Managed callbacks
+                // fan out through the same verified dispatcher as the app route.
+                if adapter.platform_webhook()
+                    && channel_bot_service::get_bot(&state.db, &bot_id)
+                        .await
+                        .is_ok_and(|bot| {
+                            bot.platform == platform && bot.credential_source == "platform"
+                        })
+                {
+                    if dispatch_platform_webhook(&state, &platform, &headers, &body)
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(bot_id = %bot_id, platform = %platform, "managed channel webhook processing failed");
+                    }
+                    return;
+                }
                 if let Err(e) =
                     handle_webhook_inner(&state, &bot_id, &platform, &headers, &body).await
                 {
@@ -90,6 +107,104 @@ pub async fn channel_webhook(
             }
         }
     }
+}
+
+pub async fn platform_subscription(
+    State(state): State<AppState>,
+    Path(platform): Path<String>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> axum::response::Response {
+    let Ok(adapter) = resolve_adapter(&platform, &state.token_exchange_cache) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let Some(descriptor) = adapter
+        .platform_credentials()
+        .filter(|_| adapter.platform_webhook())
+    else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let result = async {
+        let credentials = crate::services::platform_credential_service::load_decrypted(
+            &state.db,
+            &state.encryption_keys,
+            descriptor.provider,
+        )
+        .await?;
+        adapter.platform_subscription_handshake(&credentials, &query)
+    }
+    .await;
+    match result {
+        Ok(challenge) => (
+            StatusCode::OK,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            challenge,
+        )
+            .into_response(),
+        Err(_) => StatusCode::FORBIDDEN.into_response(),
+    }
+}
+
+pub async fn platform_webhook(
+    State(state): State<AppState>,
+    Path(platform): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> axum::response::Response {
+    if !resolve_adapter(&platform, &state.token_exchange_cache)
+        .is_ok_and(|adapter| adapter.platform_webhook())
+    {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    tokio::spawn(async move {
+        if dispatch_platform_webhook(&state, &platform, &headers, &body)
+            .await
+            .is_err()
+        {
+            tracing::warn!(platform = %platform, "platform channel webhook processing failed");
+        }
+    });
+    StatusCode::OK.into_response()
+}
+
+pub(super) async fn dispatch_platform_webhook(
+    state: &AppState,
+    platform: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> crate::errors::AppResult<()> {
+    let adapter = resolve_adapter(platform, &state.token_exchange_cache)?;
+    let descriptor = adapter
+        .platform_credentials()
+        .ok_or_else(crate::services::channel_managed::unavailable)?;
+    let credentials = crate::services::platform_credential_service::load_decrypted(
+        &state.db,
+        &state.encryption_keys,
+        descriptor.provider,
+    )
+    .await?;
+    let targets = adapter
+        .platform_webhook_targets(&credentials, headers, body)
+        .await?;
+    for target in targets {
+        let bot = state.db.collection::<crate::models::channel_bot::ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
+            .find_one(doc! { "platform": platform, "platform_bot_id": &target, "is_active": true, "status": { "$in": ["active", "pending_webhook"] } }).await?;
+        let Some(bot) = bot else {
+            tracing::debug!(platform, platform_bot_id = %target, "platform webhook for unknown number");
+            continue;
+        };
+        // Reuse per-bot verification and phone filtering; BYO bots still require
+        // their own app secret even on this shared ingress.
+        if handle_webhook_inner(state, &bot.id, platform, headers, body)
+            .await
+            .is_err()
+        {
+            tracing::warn!(platform, bot_id = %bot.id, "platform webhook bot processing failed");
+        }
+    }
+    Ok(())
 }
 
 fn webhook_response(
@@ -217,12 +332,16 @@ async fn handle_webhook_inner_with_deps(
         },
     )?;
 
-    let verify_secrets = adapter
-        .build_verify_secrets(state.encryption_keys, &bot)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-            format!("failed to prepare webhook secrets: {e}").into()
-        })?;
+    let verify_secrets = crate::services::channel_managed::build_verify_secrets(
+        state.db,
+        state.encryption_keys,
+        adapter.as_ref(),
+        &bot,
+    )
+    .await
+    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+        format!("failed to prepare webhook secrets: {e}").into()
+    })?;
 
     let prepared = adapter
         .prepare_webhook(&bot, Some(&verify_secrets), headers, body)
@@ -997,6 +1116,9 @@ mod tests {
             user_id: user_id.clone(),
             platform: "lark".to_string(),
             label: "Lark Bot".to_string(),
+            credential_source: "user".to_string(),
+            registration_pin_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted: vec![0; 16],
             platform_bot_id: "cli_test".to_string(),
             platform_bot_username: "lark_bot".to_string(),

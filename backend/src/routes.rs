@@ -961,6 +961,16 @@ fn build_router_internal(
                 .patch(handlers::admin::update_broker_settings),
         )
         .route(
+            "/platform-credentials",
+            get(handlers::admin_platform_credentials::list),
+        )
+        .route(
+            "/platform-credentials/{provider}",
+            axum::routing::put(handlers::admin_platform_credentials::update)
+                .patch(handlers::admin_platform_credentials::update)
+                .delete(handlers::admin_platform_credentials::delete),
+        )
+        .route(
             "/oauth-clients",
             get(handlers::admin::list_oauth_clients).post(handlers::admin::create_oauth_client),
         )
@@ -1426,7 +1436,19 @@ fn build_router_internal(
                 .patch(handlers::channel_bots::update_bot)
                 .delete(handlers::channel_bots::delete_bot),
         )
-        .route("/{id}/verify", post(handlers::channel_bots::verify_bot));
+        .route("/{id}/verify", post(handlers::channel_bots::verify_bot))
+        .route(
+            "/managed-onboarding/{platform}",
+            get(handlers::channel_managed::bootstrap),
+        )
+        .route(
+            "/managed-onboarding/{platform}/complete",
+            post(handlers::channel_managed::complete),
+        )
+        .route(
+            "/{id}/reregister",
+            post(handlers::channel_managed::reregister),
+        );
 
     let channel_conversation_routes = Router::new()
         .route(
@@ -1905,6 +1927,11 @@ fn build_router_internal(
             "/api/v1/webhooks/channel/{platform}/{bot_id}",
             get(handlers::channel_webhooks::channel_subscription)
                 .post(handlers::channel_webhooks::channel_webhook),
+        )
+        .route(
+            "/webhooks/channel/{platform}/platform",
+            get(handlers::channel_webhooks::platform_subscription)
+                .post(handlers::channel_webhooks::platform_webhook),
         )
         .nest("/api/v1/integrations", integration_routes)
         .nest("/api/v1/node-agent", node_agent_routes)

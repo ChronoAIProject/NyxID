@@ -160,6 +160,7 @@ fn ensure_verify_material_present(
 
 #[derive(Debug, Serialize)]
 pub struct ChannelBotItem {
+    pub credential_source: String,
     pub id: String,
     pub platform: String,
     pub label: String,
@@ -183,6 +184,8 @@ pub struct ChannelBotListResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelBotDetailResponse {
+    pub credential_source: String,
+    pub managed_setup: Option<ManagedSetupResponse>,
     #[serde(flatten)]
     pub platform_config: std::collections::BTreeMap<String, String>,
     pub webhook_url: String,
@@ -217,6 +220,8 @@ pub struct ChannelBotDetailResponse {
 
 #[derive(Serialize)]
 pub struct CreateChannelBotResponse {
+    pub credential_source: String,
+    pub managed_setup: Option<ManagedSetupResponse>,
     #[serde(flatten)]
     pub platform_config: std::collections::BTreeMap<String, String>,
     pub webhook_url: String,
@@ -244,6 +249,29 @@ pub struct VerifyBotResponse {
     pub webhook_registered: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ManagedSetupResponse {
+    pub subscription: String,
+    pub webhook_override: String,
+    pub registration: String,
+    pub business_id: Option<String>,
+    pub coexistence: bool,
+    pub coexistence_sync: std::collections::BTreeMap<String, String>,
+}
+
+impl From<&crate::models::channel_bot::ManagedBotSetup> for ManagedSetupResponse {
+    fn from(value: &crate::models::channel_bot::ManagedBotSetup) -> Self {
+        Self {
+            subscription: value.subscription.clone(),
+            webhook_override: value.webhook_override.clone(),
+            registration: value.registration.clone(),
+            business_id: value.business_id.clone(),
+            coexistence: value.coexistence,
+            coexistence_sync: value.coexistence_sync.clone(),
+        }
+    }
+}
+
 impl std::fmt::Debug for CreateChannelBotResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CreateChannelBotResponse")
@@ -255,7 +283,7 @@ impl std::fmt::Debug for CreateChannelBotResponse {
 }
 
 impl CreateChannelBotResponse {
-    fn from_bot(
+    pub(crate) fn from_bot(
         bot: crate::models::channel_bot::ChannelBot,
         descriptor: crate::services::channel_platform::RegistrationDescriptor,
         webhook_url: String,
@@ -263,11 +291,20 @@ impl CreateChannelBotResponse {
     ) -> AppResult<Self> {
         let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&bot);
         Ok(Self {
+            credential_source: bot.credential_source.clone(),
+            managed_setup: bot.managed_setup.as_ref().map(Into::into),
             platform_config: descriptor.configuration(&bot)?,
             webhook_url,
-            webhook_secret: descriptor.webhook_secret_label.map(|_| webhook_secret),
+            webhook_secret: descriptor
+                .webhook_secret_label
+                .filter(|_| bot.credential_source != "platform")
+                .map(|_| webhook_secret),
             webhook_secret_label: descriptor.webhook_secret_label,
-            setup_instructions: descriptor.setup_instructions,
+            setup_instructions: if bot.credential_source == "platform" {
+                &[]
+            } else {
+                descriptor.setup_instructions
+            },
             id: bot.id,
             platform: bot.platform,
             platform_bot_username: bot.platform_bot_username,
@@ -287,7 +324,7 @@ impl CreateChannelBotResponse {
 /// org-owned bots, resolves the caller's access to the org and requires
 /// `can_write()` (admin). Returns the bot's `user_id` on success so the
 /// caller can pass it to the org-agnostic service layer.
-async fn resolve_bot_owner_for_write(
+pub(crate) async fn resolve_bot_owner_for_write(
     state: &AppState,
     actor: &str,
     bot_id: &str,
@@ -323,7 +360,7 @@ async fn resolve_bot_owner_for_read(
 /// Resolve the owner id for creation. If `target_org_id` is set, the
 /// caller must be an admin of that org; otherwise the owner is the
 /// caller's own id.
-async fn resolve_create_owner(
+pub(crate) async fn resolve_create_owner(
     state: &AppState,
     actor: &str,
     target_org_id: Option<&str>,
@@ -386,6 +423,7 @@ fn lark_permission_payload(
 
 fn bot_to_item(bot: &crate::models::channel_bot::ChannelBot) -> ChannelBotItem {
     ChannelBotItem {
+        credential_source: bot.credential_source.clone(),
         id: bot.id.clone(),
         platform: bot.platform.clone(),
         label: bot.label.clone(),
@@ -626,13 +664,19 @@ pub async fn update_bot(
     let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&updated);
 
     Ok(Json(ChannelBotDetailResponse {
+        credential_source: updated.credential_source.clone(),
+        managed_setup: updated.managed_setup.as_ref().map(Into::into),
         platform_config: adapter.registration().configuration(&updated)?,
         webhook_url: format!(
             "{}/api/v1/webhooks/channel/{}/{}",
             state.config.base_url, updated.platform, updated.id
         ),
         webhook_secret_label: adapter.registration().webhook_secret_label,
-        setup_instructions: adapter.registration().setup_instructions,
+        setup_instructions: if updated.credential_source == "platform" {
+            &[]
+        } else {
+            adapter.registration().setup_instructions
+        },
         id: updated.id,
         platform: updated.platform,
         label: updated.label,
@@ -690,13 +734,19 @@ pub async fn get_bot(
     let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&bot);
 
     Ok(Json(ChannelBotDetailResponse {
+        credential_source: bot.credential_source.clone(),
+        managed_setup: bot.managed_setup.as_ref().map(Into::into),
         platform_config: adapter.registration().configuration(&bot)?,
         webhook_url: format!(
             "{}/api/v1/webhooks/channel/{}/{}",
             state.config.base_url, bot.platform, bot.id
         ),
         webhook_secret_label: adapter.registration().webhook_secret_label,
-        setup_instructions: adapter.registration().setup_instructions,
+        setup_instructions: if bot.credential_source == "platform" {
+            &[]
+        } else {
+            adapter.registration().setup_instructions
+        },
         id: bot.id,
         platform: bot.platform,
         label: bot.label,
@@ -776,6 +826,19 @@ pub async fn verify_bot(
 
     // Decrypt the token and verify it is still valid with the platform
     let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
+    let platform_secrets = if bot.credential_source == "platform" {
+        Some(
+            crate::services::channel_managed::build_verify_secrets(
+                &state.db,
+                &state.encryption_keys,
+                adapter.as_ref(),
+                &bot,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
 
     adapter
         .verify_bot_token(
@@ -783,6 +846,7 @@ pub async fn verify_bot(
             &BotCredentials {
                 token: &bot_token,
                 platform_bot_id: Some(&bot.platform_bot_id),
+                platform_secrets: platform_secrets.as_ref(),
             },
         )
         .await?;
@@ -897,6 +961,9 @@ mod tests {
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "lark".to_string(),
             label: "Test Lark Bot".to_string(),
+            credential_source: "user".to_string(),
+            registration_pin_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted: vec![0; 16],
             platform_bot_id: "cli_test".to_string(),
             platform_bot_username: "testbot".to_string(),
@@ -958,6 +1025,9 @@ mod tests {
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "telegram".to_string(),
             label: "TG Bot".to_string(),
+            credential_source: "user".to_string(),
+            registration_pin_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted: vec![0; 8],
             platform_bot_id: "123".to_string(),
             platform_bot_username: "tgbot".to_string(),

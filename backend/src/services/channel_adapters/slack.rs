@@ -283,6 +283,7 @@ impl PlatformAdapter for SlackAdapter {
                     patchable: true,
                     clearable: false,
                     webhook_secret: true,
+                    platform_fallback: None,
                 },
             ],
             ..RegistrationDescriptor::default()
@@ -590,6 +591,9 @@ mod tests {
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "slack".to_string(),
             label: "Test Slack Bot".to_string(),
+            credential_source: "user".to_string(),
+            registration_pin_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted: vec![0; 16],
             platform_bot_id: "B12345".to_string(),
             platform_bot_username: "testbot".to_string(),

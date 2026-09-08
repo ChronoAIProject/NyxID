@@ -18,6 +18,7 @@ pub struct RegistrationField {
     pub patchable: bool,
     pub clearable: bool,
     pub webhook_secret: bool,
+    pub platform_fallback: Option<&'static str>,
 }
 
 pub const BOT_TOKEN_FIELD: RegistrationField = RegistrationField {
@@ -29,6 +30,7 @@ pub const BOT_TOKEN_FIELD: RegistrationField = RegistrationField {
     patchable: false,
     clearable: false,
     webhook_secret: false,
+    platform_fallback: None,
 };
 
 // These fields were accepted and stored by every pre-existing platform's
@@ -43,6 +45,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        platform_fallback: None,
     },
     RegistrationField {
         name: "app_secret",
@@ -53,6 +56,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        platform_fallback: None,
     },
     RegistrationField {
         name: "public_key",
@@ -63,6 +67,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        platform_fallback: None,
     },
     RegistrationField {
         name: "verification_token",
@@ -73,6 +78,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: false,
         webhook_secret: false,
+        platform_fallback: None,
     },
     RegistrationField {
         name: "encrypt_key",
@@ -83,6 +89,7 @@ const LEGACY_OPTIONAL_FIELDS: &[RegistrationField] = &[
         patchable: false,
         clearable: true,
         webhook_secret: false,
+        platform_fallback: None,
     },
 ];
 
@@ -242,6 +249,7 @@ impl RegistrationDescriptor {
 pub struct BotCredentials<'a> {
     pub token: &'a str,
     pub platform_bot_id: Option<&'a str>,
+    pub platform_secrets: Option<&'a super::channel_platform::PlatformVerifySecrets>,
 }
 
 impl std::fmt::Debug for BotCredentials<'_> {
@@ -258,6 +266,7 @@ impl<'a> From<&'a str> for BotCredentials<'a> {
         Self {
             token,
             platform_bot_id: None,
+            platform_secrets: None,
         }
     }
 }

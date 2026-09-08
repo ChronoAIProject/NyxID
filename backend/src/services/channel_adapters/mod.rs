@@ -4,6 +4,7 @@ pub mod openclaw;
 pub mod slack;
 pub mod telegram;
 pub mod whatsapp;
+mod whatsapp_managed;
 
 use std::sync::Arc;
 
@@ -18,22 +19,23 @@ pub fn resolve_adapter(
     platform: &str,
     token_exchange_cache: &Arc<TokenExchangeCache>,
 ) -> AppResult<Box<dyn PlatformAdapter>> {
-    match platform {
-        "telegram" => Ok(Box::new(telegram::TelegramAdapter)),
-        "discord" => Ok(Box::new(discord::DiscordAdapter)),
-        "lark" => Ok(Box::new(lark::LarkFamilyAdapter::lark(
-            token_exchange_cache.clone(),
-        ))),
-        "feishu" => Ok(Box::new(lark::LarkFamilyAdapter::feishu(
-            token_exchange_cache.clone(),
-        ))),
-        "slack" => Ok(Box::new(slack::SlackAdapter)),
-        "whatsapp" => Ok(Box::new(whatsapp::WhatsAppAdapter)),
-        "openclaw" => Ok(Box::new(openclaw::OpenClawAdapter)),
-        other => Err(AppError::ValidationError(format!(
-            "unsupported platform: {other}. Supported: telegram, discord, lark, feishu, slack, whatsapp"
-        ))),
-    }
+    registered_adapters(token_exchange_cache).into_iter()
+        .find(|adapter| adapter.platform_id() == platform)
+        .ok_or_else(|| AppError::ValidationError(format!(
+            "unsupported platform: {platform}. Supported: telegram, discord, lark, feishu, slack, whatsapp"
+        )))
+}
+
+pub fn registered_adapters(cache: &Arc<TokenExchangeCache>) -> Vec<Box<dyn PlatformAdapter>> {
+    vec![
+        Box::new(telegram::TelegramAdapter),
+        Box::new(discord::DiscordAdapter),
+        Box::new(lark::LarkFamilyAdapter::lark(cache.clone())),
+        Box::new(lark::LarkFamilyAdapter::feishu(cache.clone())),
+        Box::new(slack::SlackAdapter),
+        Box::new(whatsapp::WhatsAppAdapter),
+        Box::new(openclaw::OpenClawAdapter),
+    ]
 }
 
 #[cfg(test)]

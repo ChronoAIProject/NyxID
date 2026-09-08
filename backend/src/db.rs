@@ -1934,6 +1934,15 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(IndexModel::builder().keys(doc! { "user_id": 1 }).build())
         .await?;
 
+    db.collection::<mongodb::bson::Document>(crate::models::platform_credential::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "provider": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+
     // ── channel_bots ──
     let channel_bots = db.collection::<mongodb::bson::Document>("channel_bots");
     channel_bots
