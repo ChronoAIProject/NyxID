@@ -603,24 +603,52 @@ async fn store_telegram_identity(
     Ok(token)
 }
 
-/// Initiate an OAuth2 connection flow. Returns the authorization URL.
-///
-/// When `on_behalf_of` is `Some(sa_id)`, the flow stores tokens under the SA's
-/// ID instead of the initiating user. `redirect_path` overrides the default
-/// frontend callback path for the post-OAuth redirect.
-///
-/// `additional_scopes` are merged (deduped, order-preserving) on top of the
-/// provider's `default_scopes`. Pass an empty slice to preserve the original
-/// default-scopes-only behavior.
+/// Resolve product defaults from the owned connection, never a caller-supplied slug.
+async fn google_product_for_connection(
+    db: &mongodb::Database,
+    owner_id: &str,
+    provider: &ProviderConfig,
+    connection_id: Option<&str>,
+) -> AppResult<Option<super::google_workspace::GoogleProduct>> {
+    use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+
+    if provider.slug != "google" {
+        return Ok(None);
+    }
+    let Some(connection_id) = connection_id else {
+        return Ok(None);
+    };
+    let key = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find_one(doc! {
+            "connection_id": connection_id,
+            "user_id": owner_id,
+            "provider_config_id": &provider.id,
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Google connection not found".into()))?;
+    let service = db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc! { "api_key_id": &key.id, "user_id": owner_id })
+        .await?;
+    let Some(catalog_id) = service.and_then(|s| s.catalog_service_id) else {
+        return Ok(None);
+    };
+    let catalog = db
+        .collection::<DownstreamService>(SERVICES)
+        .find_one(doc! { "_id": catalog_id, "provider_config_id": &provider.id })
+        .await?;
+    Ok(catalog.and_then(|s| super::google_workspace::GoogleProduct::from_slug(&s.slug)))
+}
+
+/// Initiate an OAuth2 authorization-code flow. Additional scopes extend the
+/// product's defaults (or provider defaults for other services); an override
+/// replaces them. A connection ID pins the callback to its UserApiKey. Legacy
+/// flows without one write to UserProviderToken.
+/// `on_behalf_of` selects the token owner; `redirect_path` selects the frontend
+/// destination after the OAuth callback.
 #[allow(clippy::too_many_arguments)]
-/// Initiate an OAuth2 authorization-code flow.
-///
-/// `connection_id` (multi-connection rollout): when `Some`, the flow is
-/// part of a fresh multi-connection add — the callback will write the
-/// resulting token directly to the `UserApiKey` row carrying this
-/// `connection_id` (bypassing `user_provider_tokens`). When `None`, the
-/// callback takes the legacy single-tenant path (writing to
-/// `user_provider_tokens` keyed by `(user_id, provider_config_id)`).
 pub async fn initiate_oauth_connect(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -703,6 +731,22 @@ pub async fn initiate_oauth_connect(
             .await?
     };
 
+    let google_product = google_product_for_connection(
+        db,
+        on_behalf_of.unwrap_or(user_id),
+        &provider,
+        connection_id,
+    )
+    .await?;
+    let default_scopes = google_product
+        .map(|product| product.default_scopes())
+        .or_else(|| provider.default_scopes.clone());
+    let scope_param =
+        resolve_scope_param(default_scopes.as_ref(), additional_scopes, scope_override);
+    if let Some(product) = google_product {
+        product.validate_scopes(scope_param.as_deref())?;
+    }
+
     // Platform-client scope allowlist (spec D5/B4): a request riding NyxID's
     // shared platform OAuth app may only ask for vetted scopes. BYO flows
     // stay free-form — connection-level Custom Apps set `used_connection_byo`,
@@ -713,11 +757,7 @@ pub async fn initiate_oauth_connect(
     if is_platform_flow
         && let Some(allowlist) =
             crate::services::scope_catalog::platform_scope_allowlist(&provider.slug)
-        && let Some(scope_str) = resolve_scope_param(
-            provider.default_scopes.as_ref(),
-            additional_scopes,
-            scope_override,
-        )
+        && let Some(scope_str) = scope_param.as_deref()
     {
         let disallowed: Vec<&str> = scope_str
             .split_whitespace()
@@ -851,12 +891,8 @@ pub async fn initiate_oauth_connect(
     // omit `scope` entirely; a `Some("")` is only produced for an admin-seeded
     // `default_scopes: Some(vec![])`, preserving the byte-identical
     // pre-feature URL.
-    if let Some(scope_str) = resolve_scope_param(
-        provider.default_scopes.as_ref(),
-        additional_scopes,
-        scope_override,
-    ) {
-        auth_url.push_str(&format!("&scope={}", urlencoding::encode(&scope_str)));
+    if let Some(scope_str) = scope_param.as_deref() {
+        auth_url.push_str(&format!("&scope={}", urlencoding::encode(scope_str)));
     }
 
     if let Some(ref verifier) = code_verifier {
@@ -4420,6 +4456,132 @@ mod tests {
             !auth_url.authorization_url.contains("platform-client-id"),
             "BYO reconnect must NOT flip to the platform client"
         );
+    }
+
+    #[tokio::test]
+    async fn google_product_oauth_resolves_connection_scopes_and_owner() {
+        use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+        use crate::services::google_workspace::{CALENDAR, DRIVE, GoogleProduct};
+
+        let db = connect_test_database("google_product_oauth")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        let mut provider = make_test_provider(
+            &Uuid::new_v4().to_string(),
+            "https://oauth2.googleapis.com/token",
+            Some(enc.encrypt(b"shared-client").await.unwrap()),
+            Some(enc.encrypt(b"shared-secret").await.unwrap()),
+        );
+        provider.slug = "google".into();
+        provider.default_scopes = Some(vec!["openid".into(), "email".into(), "profile".into()]);
+        provider.extra_auth_params = Some(HashMap::from([
+            ("access_type".into(), "offline".into()),
+            ("prompt".into(), "consent".into()),
+        ]));
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        for slug in [
+            "api-google-workspace",
+            "api-google-calendar",
+            "api-google-drive",
+        ] {
+            let product = GoogleProduct::from_slug(slug).unwrap();
+            let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+            let conn = key.connection_id.as_deref();
+            let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+            catalog.id = Uuid::new_v4().to_string();
+            catalog.slug = slug.into();
+            catalog.provider_config_id = Some(provider.id.clone());
+            db.collection::<DownstreamService>(SERVICES)
+                .insert_one(&catalog)
+                .await
+                .unwrap();
+            // The user may rename their service; resolve the product from its catalog link.
+            let mut service = crate::test_utils::test_user_service(
+                &Uuid::new_v4().to_string(),
+                &key.user_id,
+                "renamed-google",
+                "endpoint",
+                Some(&catalog.id),
+                None,
+            );
+            service.api_key_id = Some(key.id.clone());
+            db.collection::<UserService>(USER_SERVICES)
+                .insert_one(&service)
+                .await
+                .unwrap();
+            for org_flow in [false, true] {
+                let (actor, owner) = if org_flow {
+                    ("org-admin", Some(key.user_id.as_str()))
+                } else {
+                    (key.user_id.as_str(), None)
+                };
+                let result = super::initiate_oauth_connect(
+                    &db,
+                    &enc,
+                    "http://localhost:3001",
+                    actor,
+                    &provider.id,
+                    owner,
+                    None,
+                    &[],
+                    None,
+                    conn,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+                let url = url::Url::parse(&result.authorization_url).unwrap();
+                let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                assert_eq!(query["scope"], product.default_scopes().join(" "));
+                assert_eq!(query["client_id"], "shared-client");
+                assert_eq!(
+                    query["redirect_uri"],
+                    "http://localhost:3001/api/v1/providers/callback"
+                );
+                assert_eq!(query["access_type"], "offline");
+                assert_eq!(query["code_challenge_method"], "S256");
+            }
+            let forbidden = match product {
+                GoogleProduct::Calendar => DRIVE,
+                GoogleProduct::Drive => CALENDAR,
+                GoogleProduct::Workspace => "https://www.googleapis.com/auth/gmail.modify",
+            };
+            for use_override in [false, true] {
+                let scopes = vec![forbidden.to_string()];
+                let (additional, scope_override) = if use_override {
+                    (&[][..], Some(scopes.as_slice()))
+                } else {
+                    (scopes.as_slice(), None)
+                };
+                let err = super::initiate_oauth_connect(
+                    &db,
+                    &enc,
+                    "http://localhost:3001",
+                    &key.user_id,
+                    &provider.id,
+                    None,
+                    None,
+                    additional,
+                    scope_override,
+                    conn,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap_err();
+                assert!(matches!(err, AppError::ValidationError(_)));
+            }
+            let err = super::google_product_for_connection(&db, "different-owner", &provider, conn)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, AppError::NotFound(_)));
+        }
     }
 
     #[tokio::test]

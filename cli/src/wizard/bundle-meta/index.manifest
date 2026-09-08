@@ -28,7 +28,10 @@ frontend/src/components/service-icons/api-feishu.tsx
 frontend/src/components/service-icons/api-firecrawl.tsx
 frontend/src/components/service-icons/api-github-pat.tsx
 frontend/src/components/service-icons/api-github.tsx
+frontend/src/components/service-icons/api-google-calendar.tsx
 frontend/src/components/service-icons/api-google-cloud.tsx
+frontend/src/components/service-icons/api-google-drive.tsx
+frontend/src/components/service-icons/api-google-workspace.tsx
 frontend/src/components/service-icons/api-google.tsx
 frontend/src/components/service-icons/api-lark-bot.tsx
 frontend/src/components/service-icons/api-lark.tsx
