@@ -29,9 +29,23 @@ impl Drop for Server {
 }
 impl Server {
     async fn new(name: &str) -> Self {
+        Self::new_configured(name, |_| {}).await
+    }
+    async fn with_request_budget(name: &str) -> Self {
+        Self::new_configured(name, |state| {
+            // These handler assertions count admissions, not UTC window resets.
+            // Use the existing local limiter without rollover during the test;
+            // leave room for its cleanup path's window_secs * 2 calculation.
+            state.auth_agent_key_request_limiter =
+                crate::mw::rate_limit::PerIpRateLimiter::new(5, u64::MAX / 2).into();
+        })
+        .await
+    }
+    async fn new_configured(name: &str, configure: impl FnOnce(&mut AppState)) -> Self {
         let db = connect_transaction_test_database(name).await;
         crate::db::ensure_indexes(&db).await.unwrap();
-        let state = test_app_state(db);
+        let mut state = test_app_state(db);
+        configure(&mut state);
         let (_, private) = crate::routes::build_router();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
@@ -250,7 +264,7 @@ async fn traces_record_hashed_ip_identifiers_and_outcomes_without_secrets() {
     {
         return;
     }
-    let server = Server::new("akl_observability").await;
+    let server = Server::with_request_budget("akl_observability").await;
     let (actor, _) = server.human().await;
     let state = server.state.clone();
     let capture = TraceCapture(Default::default());
@@ -586,7 +600,7 @@ async fn enrolled_credential_executes_only_allowed_proxy_with_live_parent_bindin
 
 #[tokio::test]
 async fn public_request_preview_and_poll_need_no_account_and_never_return_browser_secrets() {
-    let server = Server::new("akl_public_http").await;
+    let server = Server::with_request_budget("akl_public_http").await;
     let (status, request) = server
         .post(
             "request",
@@ -620,7 +634,8 @@ async fn public_request_preview_and_poll_need_no_account_and_never_return_browse
         .await;
     assert_eq!(slow["error_code"], 11903);
     for _ in 0..4 {
-        server.post("request", None, json!({})).await;
+        let (status, _) = server.post("request", None, json!({})).await;
+        assert_eq!(status, StatusCode::OK);
     }
     let (status, limited) = server.post("request", None, json!({})).await;
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
