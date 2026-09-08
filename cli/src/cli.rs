@@ -289,7 +289,7 @@ pub enum AdminCommands {
 
 #[derive(Subcommand)]
 pub enum AdminPlatformCredentialsCommands {
-    /// Show field configuration and platform webhook setup
+    /// Show provider field configuration and callback setup
     Show {
         provider: String,
         #[command(flatten)]
@@ -308,7 +308,7 @@ pub enum AdminPlatformCredentialsCommands {
         app_id: Option<String>,
         #[arg(long)]
         embedded_signup_config_id: Option<String>,
-        /// Read the Meta app secret from this environment variable
+        /// Compatibility alias for --field-env app_secret=ENV_VAR
         #[arg(long)]
         app_secret_env: Option<String>,
         #[arg(long)]

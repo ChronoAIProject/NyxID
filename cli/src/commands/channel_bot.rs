@@ -29,9 +29,6 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             auth,
         } => {
             if managed {
-                if platform != "whatsapp" {
-                    bail!("Managed onboarding is not supported for this platform");
-                }
                 if [
                     bot_token.as_ref(),
                     token_env.as_ref(),
@@ -48,6 +45,18 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                 .any(|value| value.is_some())
                 {
                     bail!("--managed cannot be combined with credential flags");
+                }
+                let mut api = ApiClient::from_auth_checked(&auth).await?;
+                let bootstrap: Value = api
+                    .get(&format!(
+                        "/channel-bots/managed-onboarding/{}",
+                        urlencoding::encode(&platform)
+                    ))
+                    .await?;
+                if bootstrap["available"] != true {
+                    bail!(
+                        "Managed onboarding is not supported or not configured for this platform"
+                    );
                 }
                 let frontend = crate::auth::fetch_frontend_url(
                     &auth.resolved_base_url()?,
@@ -72,7 +81,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     OutputFormat::Table => {
                         println!("{url}");
                         eprintln!(
-                            "Open this URL, sign in to NyxID, and complete Connect with Meta in your browser. Meta will ask you to choose a business and phone number."
+                            "Open this URL, sign in to NyxID, and complete the account connection in your browser."
                         );
                     }
                 }
@@ -399,7 +408,27 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                     eprintln!("Bot ID:         {bot_user_id}");
                     eprintln!("Username:       {username}");
                     eprintln!("Status:         {status}");
-                    eprintln!("Webhook:        {webhook}");
+                    if bot["webhook_ingestion"] == false {
+                        eprintln!("Ingestion:      polling");
+                        for (field, label) in [
+                            ("connection_id", "Connection"),
+                            ("last_polled_at", "Last polled"),
+                            ("next_poll_at", "Next poll"),
+                            ("poll_cursor", "Cursor"),
+                            ("poll_backoff_until", "Backoff until"),
+                        ] {
+                            eprintln!("{label}: {}", bot[field].as_str().unwrap_or("-"));
+                        }
+                        eprintln!(
+                            "Poll errors: {}",
+                            bot["poll_error_count"].as_u64().unwrap_or(0)
+                        );
+                    } else {
+                        eprintln!("Webhook:        {webhook}");
+                    }
+                    if let Some(error) = bot["error"].as_str() {
+                        eprintln!("Error: {error}");
+                    }
                     eprintln!("Active:         {active}");
                     eprintln!("Conversations:  {conversations}");
                     eprintln!("Created:        {created}");
@@ -861,8 +890,74 @@ mod tests {
     const ORG_UUID: &str = "00000000-0000-0000-0000-0000000000bb";
 
     #[tokio::test]
+    async fn x_managed_arguments_bootstrap_and_show_are_generic() {
+        use clap::Parser;
+        crate::cli::Cli::try_parse_from([
+            "nyxid",
+            "channel-bot",
+            "register",
+            "--platform",
+            "x",
+            "--managed",
+        ])
+        .unwrap();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-bots/managed-onboarding/x"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({"available": true, "flow": "oauth_connection"}),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/public/config"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"frontend_url": "https://nyxid.example"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/api/v1/channel-bots/x-bot"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": "x-bot", "platform": "x", "webhook_ingestion": false,
+                "credential_source": "connection", "connection_id": "connection", "poll_cursor": "100", "poll_error_count": 5,
+                "last_polled_at": "2026-09-08T00:00:00Z", "next_poll_at": null, "status": "failed", "error": "Reconnect the channel account."})))
+            .expect(1).mount(&server).await;
+        let mut command = register(server.uri(), "x", None, None);
+        if let ChannelBotCommands::Register { managed, .. } = &mut command {
+            *managed = true;
+        }
+        run(command).await.unwrap();
+        run(ChannelBotCommands::Show {
+            id: "x-bot".into(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn managed_signup_discovers_browser_url_without_posting_credentials() {
         let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-bots/managed-onboarding/whatsapp"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "available": true })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/channel-bots/managed-onboarding/telegram"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "available": false })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
         Mock::given(method("GET"))
             .and(path("/api/v1/public/config"))
             .respond_with(
@@ -878,7 +973,7 @@ mod tests {
             *label = None;
         }
         run(command).await.unwrap();
-        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
         let mut command = register(server.uri(), "telegram", None, None);
         if let ChannelBotCommands::Register { managed, .. } = &mut command {
             *managed = true;

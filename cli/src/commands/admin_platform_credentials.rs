@@ -35,6 +35,9 @@ fn print(row: &Value, output: OutputFormat) -> Result<()> {
         return Ok(());
     }
     eprintln!("Provider: {}", row["provider"].as_str().unwrap_or("-"));
+    if let Some(provider) = row["backing"]["provider_slug"].as_str() {
+        eprintln!("Shared with the {provider} provider.");
+    }
     for field in row["fields"].as_array().into_iter().flatten() {
         eprintln!(
             "{}: {}",
@@ -86,7 +89,7 @@ pub async fn run(command: AdminPlatformCredentialsCommands) -> Result<()> {
             for item in fields {
                 let (name, value) = pair(&item)?;
                 if field(&descriptor, name)?["secret"] == true {
-                    bail!("Secret fields require --field-env or --app-secret-env");
+                    bail!("Secret fields require --field-env NAME=ENV_VAR");
                 }
                 if values.insert(name.to_string(), json!(value)).is_some() {
                     bail!("A field was provided more than once");
@@ -235,5 +238,55 @@ mod tests {
                 .to_string()
                 .contains("Secret fields require")
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn x_show_and_set_use_the_same_multi_provider_commands() {
+        let _guard = env_lock().lock().unwrap();
+        let server = MockServer::start().await;
+        let descriptor = json!({"provider": "x", "backing": {"kind": "provider_oauth", "provider_slug": "twitter"},
+            "fields": [{"name": "client_id", "secret": true}, {"name": "client_secret", "secret": true}]});
+        Mock::given(method("GET"))
+            .and(path("/api/v1/admin/platform-credentials"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!([{"provider": "meta", "fields": []}, descriptor])),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH")).and(path("/api/v1/admin/platform-credentials/x"))
+            .and(body_json(json!({"fields": {"client_id": "x-client", "client_secret": "x-secret"}, "regenerate_verify_token": false})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"provider": "x"}))).expect(1).mount(&server).await;
+        run(AdminPlatformCredentialsCommands::Show {
+            provider: "x".into(),
+            auth: mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
+        unsafe {
+            std::env::set_var("NYXID_TEST_X_CLIENT", "x-client");
+            std::env::set_var("NYXID_TEST_X_SECRET", "x-secret");
+        }
+        let result = run(AdminPlatformCredentialsCommands::Set {
+            provider: "x".into(),
+            fields: vec![],
+            field_envs: vec![
+                "client_id=NYXID_TEST_X_CLIENT".into(),
+                "client_secret=NYXID_TEST_X_SECRET".into(),
+            ],
+            app_id: None,
+            embedded_signup_config_id: None,
+            app_secret_env: None,
+            regenerate_verify_token: false,
+            auth: mock_auth(server.uri()),
+        })
+        .await;
+        unsafe {
+            std::env::remove_var("NYXID_TEST_X_CLIENT");
+            std::env::remove_var("NYXID_TEST_X_SECRET");
+        }
+        result.unwrap();
     }
 }
