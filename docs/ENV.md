@@ -466,6 +466,7 @@ All manual forwarding limits return the structured `request_body_too_large` erro
 | `CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS` | `30` | HTTP timeout for agent callback requests |
 | `CHANNEL_RELAY_MAX_BOTS_PER_USER` | `5` | Maximum bots per user across all platforms |
 | `CHANNEL_RELAY_MESSAGE_TTL_DAYS` | `30` | TTL for `channel_messages` auto-cleanup |
+| `CHANNEL_POLL_INTERVAL_SECS` | `30` | Interval for the generic channel poll sweep; `0` disables it. Only polling adapters participate. X has a 60-second minimum per bot; provider backoff and MongoDB leases can defer the next poll. Webhook channels are unaffected. |
 
 ## Oracle Relay
 
