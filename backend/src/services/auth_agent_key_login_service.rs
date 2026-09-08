@@ -6,7 +6,7 @@ use mongodb::{
     options::ReturnDocument,
 };
 use rand::{RngCore, rngs::OsRng};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -77,35 +77,7 @@ impl std::fmt::Debug for RequestOutput {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, ToSchema)]
-#[schema(as = AgentKeyLoginNewKeyInput)]
-#[serde(deny_unknown_fields)]
-pub struct NewKeyInput {
-    pub name: String,
-    pub scopes: String,
-    #[serde(default)]
-    pub allowed_service_ids: Vec<String>,
-    #[serde(default)]
-    pub allowed_node_ids: Vec<String>,
-    #[serde(default)]
-    pub allow_all_services: bool,
-    #[serde(default)]
-    pub allow_all_nodes: bool,
-    pub expires_at: Option<String>,
-    pub rate_limit_per_second: Option<u32>,
-    pub rate_limit_burst: Option<u32>,
-    pub platform: Option<String>,
-    pub target_org_id: Option<String>,
-    pub scope_plan_digest: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, ToSchema)]
-#[schema(as = AgentKeyLoginSelection)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Selection {
-    Existing { api_key_id: String },
-    New(NewKeyInput),
-}
+pub use crate::models::login_grant::{NewKeyInput, Selection};
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[schema(as = AgentKeyLoginResourceSummary)]
@@ -149,7 +121,6 @@ pub struct LoginOptions {
 
 pub struct LoginPreview {
     pub context: PreviewOutput,
-    pub requested_profile: Option<String>,
     pub interval: u32,
 }
 
@@ -182,8 +153,9 @@ pub async fn request(
     context: LoginClientContext,
     requested_profile: Option<String>,
 ) -> AppResult<RequestOutput> {
-    let context = sanitize_context(context);
-    let requested_profile = sanitize_optional(requested_profile, 64);
+    let mut context = sanitize_context(context);
+    context.requested_profile =
+        sanitize_optional(requested_profile.or(context.requested_profile), 64);
     for attempt in 0..5 {
         let mut random = Zeroizing::new([0u8; 32]);
         OsRng.fill_bytes(random.as_mut());
@@ -203,12 +175,12 @@ pub async fn request(
                 .as_deref()
                 .map(|ip| code_hash(hmac_key, ip)),
             context: context.clone(),
-            requested_profile: requested_profile.clone(),
             approved_user_id: None,
             approver_ip_hmac: None,
             api_key_id: None,
             credential_id: None,
             key_was_created: false,
+            key_created_by_approval: false,
             delivery_credential_encrypted: None,
             approved_at: None,
             delivered_at: None,
@@ -290,6 +262,25 @@ async fn current_decision_error(db: &Database, id: &str) -> AppResult<AppError> 
 }
 
 pub async fn eligible_key(db: &Database, actor: &str, id: &str) -> AppResult<ApiKey> {
+    if legacy_parent_reserved(db, id).await? {
+        return Err(AppError::AgentKeyLoginKeyIneligible);
+    }
+    eligible_delivery_key(db, actor, id).await
+}
+
+async fn legacy_parent_reserved(db: &Database, id: &str) -> AppResult<bool> {
+    // Old sweepers can delete these parents without a reuse fence. Do not admit
+    // a new consumer until the old exchange has completed its delivery.
+    Ok(db
+        .collection::<AgentKeyLoginRequest>(COLLECTION_NAME)
+        .find_one(doc! {
+            "api_key_id": id, "key_was_created": true, "status": {"$ne": "delivered"},
+        })
+        .await?
+        .is_some())
+}
+
+async fn eligible_delivery_key(db: &Database, actor: &str, id: &str) -> AppResult<ApiKey> {
     let key = db
         .collection::<ApiKey>(API_KEYS)
         .find_one(doc! {"_id": id})
@@ -388,6 +379,10 @@ pub async fn options(
     if row.expires_at <= Utc::now() || row.status != Status::Pending {
         return Err(decision_error(&row));
     }
+    options_for_actor(db, actor).await
+}
+
+pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOptions> {
     let mut owners = vec![actor.to_string()];
     let mut orgs = Vec::new();
     for membership in org_service::list_memberships_for_member(db, actor, false).await? {
@@ -413,7 +408,7 @@ pub async fn options(
     let mut keys = Vec::new();
     for owner in owners {
         for key in key_service::list_api_keys(db, &owner).await? {
-            if key_is_eligible(&key) {
+            if key_is_eligible(&key) && !legacy_parent_reserved(db, &key.id).await? {
                 keys.push(key_summary(db, &key, false).await?);
             }
         }
@@ -448,6 +443,97 @@ pub async fn options(
     })
 }
 
+/// Issue a selected key and its child inside the caller's authorization transaction.
+#[allow(clippy::too_many_arguments)]
+pub async fn issue_selected(
+    db: &Database,
+    actor: &str,
+    request_id: &str,
+    context: &LoginClientContext,
+    profile: Option<&str>,
+    selection: &Selection,
+    credential_expires_at: Option<DateTime<Utc>>,
+    key_id: &str,
+    credential_id: &str,
+    secret: &str,
+    session: &mut mongodb::ClientSession,
+) -> AppResult<ApiKey> {
+    if matches!(selection, Selection::Existing { .. }) && legacy_parent_reserved(db, key_id).await?
+    {
+        return Err(AppError::AgentKeyLoginKeyIneligible);
+    }
+    if let Selection::New(input) = selection {
+        let owner = api_key_scope_service::resolve_scope_owner_id(
+            db,
+            actor,
+            input.target_org_id.as_deref(),
+        )
+        .await?;
+        let expires_at = input
+            .expires_at
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(api_key_validation::parse_expires_at)
+            .transpose()?;
+        credentials::credential_expiry(expires_at, credential_expires_at)?;
+        api_key_validation::resolve_create_allow_all(
+            &input.allowed_service_ids,
+            Some(input.allow_all_services),
+            "allow_all_services",
+            "allowed_service_ids",
+        )?;
+        api_key_validation::resolve_create_allow_all(
+            &input.allowed_node_ids,
+            Some(input.allow_all_nodes),
+            "allow_all_nodes",
+            "allowed_node_ids",
+        )?;
+        let created = key_service::create_login_api_key(
+            db,
+            &owner,
+            actor,
+            key_id,
+            input,
+            expires_at,
+            &mut *session,
+        )
+        .await?;
+        drop(Zeroizing::new(created.full_key));
+    }
+    let parent = db
+        .collection::<ApiKey>(API_KEYS)
+        .find_one(doc! {"_id": key_id, "is_active": true})
+        .session(&mut *session)
+        .await?
+        .ok_or(AppError::AgentKeyLoginKeyIneligible)?;
+    if !key_is_eligible(&parent)
+        || !org_service::resolve_owner_access(db, actor, &parent.user_id)
+            .await?
+            .can_write()
+    {
+        return Err(AppError::AgentKeyLoginKeyIneligible);
+    }
+    credentials::issue(
+        db,
+        &parent,
+        credential_id,
+        request_id,
+        &credential_label(context, profile),
+        credential_expires_at,
+        secret,
+        &mut *session,
+    )
+    .await?;
+    db.collection::<ApiKeyCredential>(CREDENTIALS)
+        .update_one(
+            doc! {"_id": credential_id},
+            doc! {"$set": {"is_active": true}},
+        )
+        .session(&mut *session)
+        .await?;
+    Ok(parent)
+}
+
 pub async fn preview(
     db: &Database,
     hmac_key: &[u8],
@@ -478,7 +564,6 @@ pub async fn preview(
             viewer_ip,
             attribution,
         ),
-        requested_profile: row.requested_profile,
         interval: row.poll_interval_secs,
     })
 }
@@ -530,38 +615,21 @@ pub async fn approve(
             if claimed.is_none() {
                 return Err(current_decision_error(&db, &row.id).await?);
             }
-            if let Selection::New(input) = &selection {
-                let owner = api_key_scope_service::resolve_scope_owner_id(&db, &actor, input.target_org_id.as_deref()).await?;
-                let expires_at = input.expires_at.as_deref().filter(|s| !s.is_empty())
-                    .map(api_key_validation::parse_expires_at).transpose()?;
-                credentials::credential_expiry(expires_at, credential_expires_at)?;
-                api_key_validation::resolve_create_allow_all(&input.allowed_service_ids, Some(input.allow_all_services), "allow_all_services", "allowed_service_ids")?;
-                api_key_validation::resolve_create_allow_all(&input.allowed_node_ids, Some(input.allow_all_nodes), "allow_all_nodes", "allowed_node_ids")?;
-                let created = key_service::create_login_api_key(&db, &owner, &actor, &key_id, input, expires_at, &mut *session).await?;
-                drop(Zeroizing::new(created.full_key));
-            }
-            let parent = db.collection::<ApiKey>(API_KEYS)
-                .find_one(doc! {"_id": &key_id, "is_active": true}).session(&mut *session).await?
-                .ok_or(AppError::AgentKeyLoginKeyIneligible)?;
-            if !key_is_eligible(&parent) { return Err(AppError::AgentKeyLoginKeyIneligible); }
-            let access = org_service::resolve_owner_access(&db, &actor, &parent.user_id).await?;
-            if !access.can_write() { return Err(AppError::AgentKeyLoginKeyIneligible); }
+            let parent = issue_selected(&db, &actor, &row.id, &row.context,
+                row.context.requested_profile.as_deref(), &selection, credential_expires_at,
+                &key_id, &credential_id, &secret, &mut *session).await?;
             let owner_type = key_summary(&db, &parent, created_now).await?.owner_type;
-            credentials::issue(&db, &parent, &credential_id, &row.id,
-                &credential_label(&row.context, row.requested_profile.as_deref()), credential_expires_at, &secret, &mut *session).await?;
             let now = Utc::now();
             if row.expires_at <= now { return Err(AppError::AgentKeyLoginExpired); }
             db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME).update_one(
                 doc! {"_id": &row.id, "status": "approved"},
                 doc! {"$set": {"approved_user_id": &actor, "api_key_id": &key_id,
-                    "credential_id": &credential_id, "key_was_created": created_now,
+                    "credential_id": &credential_id, "key_was_created": false,
+                    "key_created_by_approval": created_now,
                     "approver_ip_hmac": &approver_ip_hmac,
                     "approved_at": bson::DateTime::from_chrono(now),
                     "expires_at": bson::DateTime::from_chrono(now + Duration::seconds(60)),
                     "delivery_credential_encrypted": bson::Binary {subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted.clone()}}},
-            ).session(&mut *session).await?;
-            db.collection::<ApiKeyCredential>(CREDENTIALS).update_one(
-                doc! {"_id": &credential_id}, doc! {"$set": {"is_active": true}},
             ).session(&mut *session).await?;
             Ok(owner_type)
         }.await;
@@ -708,38 +776,48 @@ async fn prepare_delivery(
     encryption: &EncryptionKeys,
     row: &AgentKeyLoginRequest,
 ) -> AppResult<Delivery> {
-    let id = row
-        .credential_id
-        .as_deref()
-        .ok_or(AppError::AgentKeyCredentialNotFound)?;
+    prepare_credential_delivery(
+        db,
+        encryption,
+        row.credential_id.as_deref(),
+        row.approved_user_id.as_deref(),
+        row.delivery_credential_encrypted.as_deref(),
+        row.key_was_created || row.key_created_by_approval,
+    )
+    .await
+}
+
+pub async fn prepare_credential_delivery(
+    db: &Database,
+    encryption: &EncryptionKeys,
+    credential_id: Option<&str>,
+    approved_user_id: Option<&str>,
+    encrypted: Option<&[u8]>,
+    key_was_created: bool,
+) -> AppResult<Delivery> {
+    let id = credential_id.ok_or(AppError::AgentKeyCredentialNotFound)?;
     let child = db
         .collection::<ApiKeyCredential>(CREDENTIALS)
         .find_one(doc! {"_id": id, "is_active": true})
         .await?
         .ok_or(AppError::AgentKeyCredentialNotFound)?;
-    let parent = eligible_key(
+    let parent = eligible_delivery_key(
         db,
-        row.approved_user_id
-            .as_deref()
-            .ok_or(AppError::AgentKeyLoginKeyIneligible)?,
+        approved_user_id.ok_or(AppError::AgentKeyLoginKeyIneligible)?,
         &child.api_key_id,
     )
     .await?;
     credentials::credential_expiry(parent.expires_at, child.expires_at)?;
     let plaintext = Zeroizing::new(
         encryption
-            .decrypt(
-                row.delivery_credential_encrypted
-                    .as_deref()
-                    .ok_or(AppError::AgentKeyCredentialNotFound)?,
-            )
+            .decrypt(encrypted.ok_or(AppError::AgentKeyCredentialNotFound)?)
             .await?,
     );
     let credential = Zeroizing::new(
         String::from_utf8(plaintext.to_vec())
             .map_err(|_| AppError::Internal("Invalid Agent Key delivery encoding".into()))?,
     );
-    let api_key = key_summary(db, &parent, row.key_was_created).await?;
+    let api_key = key_summary(db, &parent, key_was_created).await?;
     Ok(Delivery {
         credential,
         credential_id: child.id,
@@ -753,15 +831,9 @@ async fn cleanup(db: &Database, row: &AgentKeyLoginRequest) -> AppResult<()> {
     if let Some(id) = row.credential_id.as_deref() {
         credentials::revoke(db, id, CredentialRevokedReason::UndeliveredExpired).await?;
     }
-    if row.key_was_created
-        && let Some(id) = row.api_key_id.as_deref()
-    {
-        // The primary secret was never disclosed. Remove only this exchange's
-        // reserved newly-created key; existing selected keys are untouched.
-        db.collection::<ApiKey>(API_KEYS)
-            .delete_one(doc! {"_id": id})
-            .await?;
-    }
+    // Parent configuration belongs to the approver and may already be reused.
+    // Its primary secret was discarded at creation; only this child can leak
+    // usable authority from an abandoned exchange, so revoke that child alone.
     Ok(())
 }
 

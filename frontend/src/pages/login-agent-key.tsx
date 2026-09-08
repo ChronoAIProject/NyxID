@@ -28,7 +28,9 @@ import {
   useApproveAgentKeyLogin,
   useDenyAgentKeyLogin,
   previewAgentKey,
+  type LoginFlow,
 } from "@/hooks/use-agent-key-login";
+import { useApproveAuthDevice } from "@/hooks/use-auth-device";
 import {
   agentKeyErrorMessage,
   newKeySelection,
@@ -37,6 +39,9 @@ import {
   type AgentKeySummary,
 } from "@/schemas/agent-key-login";
 import type { CreateApiKeyFormData } from "@/schemas/api-keys";
+import { useMintLoginCode } from "@/hooks/use-login-code";
+import { LoginCodeStatus } from "@/components/auth/login-code-status";
+import type { LoginCode } from "@/schemas/login-code";
 import {
   formatAuthDeviceUserCodeInput,
   userCodeSchema,
@@ -50,7 +55,7 @@ import {
   ApprovalCaution,
   LoginDeviceShell,
   PreviewPanel,
-} from "./login-device";
+} from "@/components/auth/login-request-preview";
 
 type Step =
   | "enter-code"
@@ -58,6 +63,7 @@ type Step =
   | "phone"
   | "options"
   | "confirm"
+  | "account"
   | "terminal";
 type Terminal = "approved" | "denied" | "expired";
 
@@ -73,17 +79,19 @@ function PhoneApproval({
   interval,
   deadline,
   onTerminal,
+  flow,
 }: {
   code: string;
   interval: number;
   deadline: number;
   onTerminal: (state: Terminal) => void;
+  flow: LoginFlow;
 }) {
   const [qr, setQr] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
-    const url = new URL("/login/agent-key", window.location.origin);
+    const url = new URL(`/login/${flow}`, window.location.origin);
     url.searchParams.set("user_code", code);
     void QRCode.toDataURL(url.toString(), {
       errorCorrectionLevel: "M",
@@ -101,7 +109,7 @@ function PhoneApproval({
     return () => {
       cancelled = true;
     };
-  }, [code]);
+  }, [code, flow]);
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -113,7 +121,7 @@ function PhoneApproval({
         return;
       }
       try {
-        const response = await previewAgentKey(code);
+        const response = await previewAgentKey(code, flow);
         if (cancelled) return;
         if (response.status === "approved" || response.status === "delivered") {
           onTerminal("approved");
@@ -146,7 +154,7 @@ function PhoneApproval({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [code, deadline, interval, onTerminal]);
+  }, [code, deadline, interval, onTerminal, flow]);
   return (
     <section className="flex flex-col items-center gap-3 border-t border-border/50 pt-4">
       <h2 className="text-[15px] font-semibold">Approve from your phone</h2>
@@ -171,9 +179,12 @@ function PhoneApproval({
   );
 }
 
-export function LoginAgentKeyPage() {
+export function LoginAgentKeyPage({ flow = "agent-key", mint = false }: { flow?: LoginFlow; mint?: boolean } = {}) {
   const { user, isAuthenticated, logout } = useAuthStore();
-  const [step, setStep] = useState<Step>("enter-code");
+  const [step, setStep] = useState<Step>(mint ? "review" : "enter-code");
+  const [issued, setIssued] = useState<LoginCode | null>(null);
+  const mintCode = useMintLoginCode();
+  const clearIssuedCode = useCallback(() => setIssued((value) => value?.code ? { ...value, code: "" } : value), []);
   const [code, setCode] = useState("");
   const [context, setContext] = useState<AgentKeyPreview | null>(null);
   const [deadline, setDeadline] = useState<number | null>(null);
@@ -189,16 +200,18 @@ export function LoginAgentKeyPage() {
   const [newKeyDraft, setNewKeyDraft] = useState<CreateApiKeyFormData>();
   const [signingOut, setSigningOut] = useState(false);
   const lastAction = useRef(0);
-  const preview = usePreviewAgentKeyLogin();
-  const options = useAgentKeyLoginOptions();
-  const approve = useApproveAgentKeyLogin();
-  const deny = useDenyAgentKeyLogin();
+  const preview = usePreviewAgentKeyLogin(flow);
+  const options = useAgentKeyLoginOptions(flow, mint);
+  const approve = useApproveAgentKeyLogin(flow);
+  const deny = useDenyAgentKeyLogin(flow);
+  const accountApprove = useApproveAuthDevice();
   const pending =
     preview.isPending ||
     options.isPending ||
     approve.isPending ||
-    deny.isPending;
+    deny.isPending || accountApprove.isPending || mintCode.isPending;
   const normalized = userCodeSchema.safeParse(code);
+  const supportsRestricted = mint || flow === "agent-key" || (normalized.success && normalized.data.length === 9);
   const remaining =
     deadline === null ? null : secondsUntilAuthDeviceDeadline(deadline, now);
   const expired = remaining === 0;
@@ -266,10 +279,10 @@ export function LoginAgentKeyPage() {
     }
   }
   async function loadOptions() {
-    if (!normalized.success || expired || throttled()) return;
+    if ((!mint && !normalized.success) || expired || throttled()) return;
     setError(null);
     try {
-      await options.mutateAsync(normalized.data);
+      await options.mutateAsync(normalized.success ? normalized.data : "");
       setStep("options");
     } catch (failure) {
       setError(agentKeyErrorMessage(failure));
@@ -325,7 +338,7 @@ export function LoginAgentKeyPage() {
   }
   async function decide(accepted: boolean) {
     if (
-      !normalized.success ||
+      (!mint && !normalized.success) ||
       expired ||
       throttled() ||
       (accepted && !selection)
@@ -333,6 +346,17 @@ export function LoginAgentKeyPage() {
       return;
     setError(null);
     try {
+      if (mint) {
+        if (!accepted) { setStep("review"); return; }
+        if (!selection) return;
+        const result = await mintCode.mutateAsync({ auth_kind: "agent_key", selection,
+          ...(credentialExpiry ? { credential_expires_at: new Date(credentialExpiry).toISOString() } : {}),
+        });
+        setIssued(result);
+        mintCode.reset();
+        return;
+      }
+      if (!normalized.success) return;
       if (accepted && selection)
         await approve.mutateAsync({
           user_code: normalized.data,
@@ -354,10 +378,12 @@ export function LoginAgentKeyPage() {
       <header className="space-y-3 text-center">
         <NyxidIcon className="mx-auto size-10" />
         <h1 className="text-[22px] font-bold sm:text-[28px]">
-          Agent Key login
+          {mint ? "One-time login code" : flow === "device" ? "Device login" : "Agent Key login"}
         </h1>
       </header>
-      {step === "terminal" ? (
+      {issued ? <LoginCodeStatus issued={issued} onClearCode={clearIssuedCode} onNew={() => {
+        setIssued(null); setStep("review"); setSelection(null); setSummary(null); setCredentialExpiry(""); setChoice("");
+      }} /> : step === "terminal" ? (
         <section className="space-y-4 py-4 text-center" aria-live="polite">
           {terminal === "approved" ? (
             <CheckCircle2 className="mx-auto size-8 text-success" />
@@ -366,7 +392,7 @@ export function LoginAgentKeyPage() {
           )}
           <h2 className="text-[15px] font-semibold">
             {terminal === "approved"
-              ? "Approved - return to your terminal"
+              ? "Approved - return to the requesting device"
               : terminal === "denied"
                 ? "Login rejected"
                 : "Login request expired"}
@@ -408,9 +434,10 @@ export function LoginAgentKeyPage() {
               </label>
               <Input
                 id="agent-key-code"
+                data-sensitive
                 autoComplete="off"
                 value={code}
-                maxLength={9}
+                maxLength={11}
                 placeholder="ABCD-EFGH"
                 disabled={pending}
                 className="h-12 text-center font-mono text-[22px]"
@@ -448,25 +475,33 @@ export function LoginAgentKeyPage() {
           )}
           {error && <ErrorBanner message={error} />}
           {step === "review" && (
-            <div className="flex flex-col gap-2 sm:flex-row">
-              {isAuthenticated ? (
+            <div className="flex flex-col gap-2">
+              {mint && <p className="text-[12px] text-muted-foreground">Anyone with this code can redeem the selected access once, within five minutes. Restricted Agent Key access is recommended.</p>}
+              {isAuthenticated && supportsRestricted ? (
                 <Button
                   disabled={pending || expired}
                   isLoading={options.isPending}
                   onClick={() => void loadOptions()}
                 >
                   <Monitor className="size-3" />
-                  Approve on this computer
+                  {flow === "device" || mint ? "Restricted Agent Key" : "Approve on this computer"}
                 </Button>
-              ) : (
+              ) : !isAuthenticated ? (
                 <Button asChild>
-                  <Link to="/login" search={{ return_to: "/login/agent-key" }}>
+                  <Link to="/login" search={{ return_to: mint ? "/login/code" : `/login/${flow}` }}>
                     <Monitor className="size-3" />
                     Approve on this computer
                   </Link>
                 </Button>
+              ) : null}
+              {(flow === "device" || mint) && isAuthenticated && (
+                <Button disabled={pending || expired} onClick={() => {
+                  if (!throttled()) setStep("account");
+                }}>
+                  <ShieldCheck className="size-3" /> Full account session
+                </Button>
               )}
-              <Button
+              {!mint && <Button
                 disabled={pending || expired}
                 onClick={() => {
                   if (!throttled()) setStep("phone");
@@ -474,8 +509,8 @@ export function LoginAgentKeyPage() {
               >
                 <Smartphone className="size-3" />
                 Approve from your phone
-              </Button>
-              {isAuthenticated && (
+              </Button>}
+              {!mint && isAuthenticated && (
                 <Button
                   variant="destructive"
                   disabled={pending || expired}
@@ -496,6 +531,7 @@ export function LoginAgentKeyPage() {
                 interval={context.interval}
                 deadline={deadline}
                 onTerminal={finish}
+                flow={flow}
               />
             )}
           {step === "phone" && (
@@ -503,6 +539,34 @@ export function LoginAgentKeyPage() {
               <ArrowLeft className="size-3" />
               Back
             </Button>
+          )}
+          {step === "account" && (
+            <section className="space-y-4 border-t border-border/50 pt-4">
+              <h2 className="text-[15px] font-semibold">Confirm full account access</h2>
+              <p className="text-[12px] text-muted-foreground">
+                This machine receives an account session with access to your account,
+                services, credentials, and organization permissions. The session can refresh
+                until it expires or you revoke it in Settings.
+              </p>
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button disabled={pending} onClick={() => setStep("review")}><ArrowLeft className="size-3" /> Back</Button>
+                <Button variant="destructive" disabled={pending || expired} onClick={() => void decide(false)}><ShieldX className="size-3" /> Reject</Button>
+                <Button disabled={pending || expired} isLoading={accountApprove.isPending}
+                  className="border-success/30 bg-success/10 text-success hover:bg-success/20"
+                  onClick={() => {
+                    if (mint) {
+                      if (throttled()) return;
+                      void mintCode.mutateAsync({ auth_kind: "account_session" }).then((result) => {
+                        setIssued(result); mintCode.reset();
+                      }).catch((failure: unknown) => setError(agentKeyErrorMessage(failure)));
+                      return;
+                    }
+                    if (!normalized.success || throttled()) return;
+                    void accountApprove.mutateAsync(normalized.data).then(() => finish("approved"))
+                      .catch((failure: unknown) => setError(agentKeyErrorMessage(failure)));
+                  }}><ShieldCheck className="size-3" /> {mint ? "Generate account login code" : "Approve full account session"}</Button>
+              </div>
+            </section>
           )}
           {step === "options" && options.data && (
             <section className="space-y-4">
@@ -597,7 +661,7 @@ export function LoginAgentKeyPage() {
                   onClick={() => void decide(false)}
                 >
                   <ShieldX className="size-3" />
-                  Reject
+                  {mint ? "Cancel" : "Reject"}
                 </Button>
                 <Button
                   className="border-success/30 bg-success/10 text-success hover:bg-success/20"
@@ -606,7 +670,7 @@ export function LoginAgentKeyPage() {
                   onClick={() => void decide(true)}
                 >
                   <ShieldCheck className="size-3" />
-                  Approve
+                  {mint ? "Generate restricted login code" : "Approve"}
                 </Button>
               </div>
             </section>

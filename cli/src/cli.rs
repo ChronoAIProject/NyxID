@@ -227,6 +227,8 @@ pub struct ConnectArgs {
 
 #[derive(Subcommand)]
 pub enum ProviderCommands {
+    /// Optionally import a local Codex API key after confirming the account and instance
+    ConnectCodex(CodexConnectArgs),
     /// Disconnect a personal or org-owned provider token
     Disconnect {
         /// Provider ID
@@ -247,6 +249,36 @@ pub enum ProviderCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+}
+
+#[derive(Args)]
+pub struct CodexConnectArgs {
+    /// Finish without reading Codex configuration or credentials
+    #[arg(long, conflicts_with_all = ["status", "verify", "approve_instance", "approve_account", "replace_connection"])]
+    pub skip: bool,
+    /// Inspect the saved NyxID connection without reading local Codex credentials
+    #[arg(long, conflicts_with_all = ["verify", "approve_instance", "approve_account", "replace_connection"])]
+    pub status: bool,
+    /// Verify the already saved connection with a small OpenAI Responses request
+    #[arg(long, conflicts_with_all = ["approve_instance", "approve_account", "replace_connection"])]
+    pub verify: bool,
+    /// Explicit credential-transfer consent for this exact NyxID instance
+    #[arg(long, requires = "approve_account")]
+    pub approve_instance: Option<String>,
+    /// Explicit credential-transfer consent for this live NyxID account UUID
+    #[arg(long, requires = "approve_instance")]
+    pub approve_account: Option<String>,
+    /// Explicitly approve replacing this existing connection UUID
+    #[arg(long, requires_all = ["approve_account", "replace_version"])]
+    pub replace_connection: Option<String>,
+    /// Reviewed version of the connection being replaced
+    #[arg(long, requires = "replace_connection", conflicts_with_all = ["skip", "status", "verify"])]
+    pub replace_version: Option<i64>,
+    /// Model for the small verification request; billed by OpenAI at API rates
+    #[arg(long, default_value = "gpt-4.1-mini")]
+    pub verification_model: String,
+    #[command(flatten)]
+    pub auth: AuthArgs,
 }
 
 #[derive(Subcommand)]
@@ -462,6 +494,8 @@ pub struct DoctorArgs {
 
 #[derive(Args, Clone)]
 pub struct UpdateArgs {
+    #[command(subcommand)]
+    pub command: Option<UpdateCommands>,
     /// Only update installed skills, skip CLI binary update
     #[arg(long)]
     pub skills_only: bool,
@@ -488,8 +522,40 @@ pub struct UpdateArgs {
     pub base_url: Option<String>,
 }
 
-#[derive(Clone, Copy, clap::ValueEnum)]
+#[derive(Subcommand, Clone)]
+pub enum UpdateCommands {
+    /// Configure opt-in verified prebuilt upgrades (macOS/Linux user scheduler)
+    Auto {
+        #[command(subcommand)]
+        command: AutoUpdateCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AutoUpdateCommands {
+    /// Install a user scheduler; running nodes adopt updates on manual restart
+    Enable {
+        #[arg(long, default_value_t = 24, value_parser = clap::value_parser!(u32).range(1..=720))]
+        interval_hours: u32,
+    },
+    /// Prevent automatic installation and remove the user scheduler
+    Disable,
+    /// Show policy, scheduler availability, recent result, and next check window
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pause automatic installation at the currently active version
+    Hold,
+    /// Clear a hold, including a hold created by deliberate rollback
+    Resume,
+    /// Run one due check; normally invoked by the user scheduler
+    Run,
+}
+
+#[derive(Clone, Copy, Default, clap::ValueEnum)]
 pub enum OutputFormat {
+    #[default]
     Table,
     Json,
 }
@@ -521,15 +587,11 @@ pub enum PublicCommands {
 
 // ---- Login ----
 
-#[derive(Args)]
+#[derive(Args, Default)]
 pub struct LoginArgs {
     /// NyxID base URL, e.g. https://auth.nyxid.dev
-    #[arg(
-        long,
-        env = "NYXID_URL",
-        default_value = "https://nyx-api.chrono-ai.fun"
-    )]
-    pub base_url: String,
+    #[arg(long, env = "NYXID_URL", global = true)]
+    pub base_url: Option<String>,
     /// Use email/password login instead of opening the browser
     #[arg(long)]
     pub password: bool,
@@ -543,8 +605,30 @@ pub struct LoginArgs {
     #[arg(long)]
     pub email: Option<String>,
     /// Agent profile name (isolates tokens)
-    #[arg(long, env = "NYXID_PROFILE")]
+    #[arg(long, env = "NYXID_PROFILE", global = true)]
     pub profile: Option<String>,
+    /// Print the authorization challenge and exit without polling or opening a browser
+    #[arg(long, conflicts_with_all = ["password", "code"])]
+    pub no_wait: bool,
+    /// Structured login events on stdout; credentials are never printed
+    #[arg(long, value_enum, default_value = "table", global = true)]
+    pub output: OutputFormat,
+    /// Redeem a one-time code created in the web console or mobile app; omit its value for a hidden prompt
+    #[arg(long, num_args = 0..=1, default_missing_value = "", conflicts_with_all = ["password", "device", "agent_key"])]
+    pub code: Option<String>,
+    #[command(subcommand)]
+    pub command: Option<LoginCommands>,
+}
+
+#[derive(Subcommand)]
+pub enum LoginCommands {
+    /// Complete an existing locally saved login request
+    Resume {
+        request_id: String,
+        /// Check once; a pending request exits with login_pending instead of waiting
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 // ---- Register (C1) ----

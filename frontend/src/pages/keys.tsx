@@ -3,6 +3,7 @@ import { Link, useSearch, useNavigate } from "@tanstack/react-router";
 import { useKeys } from "@/hooks/use-keys";
 import { useUserServices } from "@/hooks/use-user-services";
 import { PageHeader } from "@/components/shared/page-header";
+import { CodexConnectionSection } from "@/components/providers/codex-connection";
 import { AddCtaButton } from "@/components/shared/add-cta-button";
 import { TeachingEmptyState } from "@/components/shared/teaching-empty-state";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -969,6 +970,7 @@ export function KeysPage() {
         </div>
 
         <TabsContent value="services" className="mt-6">
+          <CodexConnectionSection />
           <ExternalServicesTab
             onAdd={() => setAddServiceOpen(true)}
             onReconnect={(keyInfo) => {

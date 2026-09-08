@@ -1,3 +1,13 @@
+## Optional Codex credential connection
+
+After verifying a successful Codex installation, offer Connect or Skip for saving
+existing Codex credentials in the user's chosen NyxID account. Installation alone
+does not permit credential access. Check `nyxid provider connect-codex --help`
+before offering the local helper; older releases use separate provider
+authorization in AI Services. Follow Step 3 of `skills/INSTALL.md` for consent.
+Never inspect credential files or print their contents. Skipping, cancellation,
+or unsupported storage leaves installation successful.
+
 ## Recommended: Set up approval notifications
 
 Before using NyxID with AI agents, set up a notification channel so you can approve

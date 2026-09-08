@@ -14,6 +14,8 @@ use tokio::io::AsyncWriteExt;
 use crate::cli::UpdateArgs;
 use crate::commands::repo::REPO_URL;
 
+pub(crate) mod auto;
+
 pub(crate) const GITHUB_API_URL: &str = "https://api.github.com";
 pub(crate) const GITHUB_OWNER: &str = "ChronoAIProject";
 pub(crate) const GITHUB_REPO: &str = "NyxID";
@@ -22,13 +24,34 @@ const DIST_PACKAGE_NAME: &str = "nyxid-cli";
 const INSTALL_ROOT_ENV: &str = "NYXID_INSTALL_ROOT";
 const ACTIVE_SYMLINK_ENV: &str = "NYXID_ACTIVE_SYMLINK";
 const RETAINED_VERSION_COUNT: usize = 3;
+const MAX_ARCHIVE_BYTES: u64 = 512 * 1024 * 1024;
 
 pub async fn run(args: UpdateArgs) -> Result<()> {
+    if let Some(command) = args.command.clone() {
+        anyhow::ensure!(
+            !args.skills_only
+                && !args.check
+                && !args.rollback
+                && !args.list_versions
+                && !args.from_source
+                && !args.insecure_skip_verify
+                && args.version.is_none(),
+            "Automatic update policy cannot be combined with manual update flags"
+        );
+        let crate::cli::UpdateCommands::Auto { command } = command;
+        return auto::run(command).await;
+    }
     if args.list_versions {
         return list_versions();
     }
 
+    if args.check {
+        return check_cli_update(&args).await;
+    }
+    let _lock = auto::lock_update()?;
     if args.rollback {
+        // Persist the hold before activation, so even a crash cannot undo a
+        // deliberate rollback on the next scheduled run.
         let target = rollback_cli()?;
         eprintln!("Rolled back nyxid to {}.", target.display());
         return Ok(());
@@ -38,10 +61,6 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
         return update_skills(&args.base_url).await;
     }
 
-    if args.check {
-        return check_cli_update(&args).await;
-    }
-
     let replaced_binary = update_cli(&args).await?;
 
     // Hand off the skills phase to the freshly-installed binary so it always
@@ -49,7 +68,41 @@ pub async fn run(args: UpdateArgs) -> Result<()> {
     // process was launched from an older binary that predates new skill paths.
     if let Some(new_bin) = find_new_binary(replaced_binary.as_deref()) {
         eprintln!("Handing off to {} for skill update...", new_bin.display());
-        return exec_skills_update(&new_bin, &args.base_url);
+        #[cfg(unix)]
+        let retention = if replaced_binary.is_some() {
+            cleanup_old_versions(
+                &install_versions_root()?,
+                Some(&new_bin),
+                RETAINED_VERSION_COUNT,
+            )
+        } else {
+            Ok(())
+        };
+        #[cfg(not(unix))]
+        let retention: Result<()> = Ok(());
+        let skills = exec_skills_update(&new_bin, &args.base_url).await;
+        let mut failures = Vec::new();
+        if replaced_binary.is_some()
+            && !args.insecure_skip_verify
+            && let Err(error) = auto::install_controller(&install_versions_root()?, &new_bin)
+        {
+            failures.push(format!(
+                "updater controller refresh: {error}; retry a verified nyxid update"
+            ));
+        }
+        if let Err(error) = retention {
+            failures.push(format!("retention cleanup: {error}"));
+        }
+        if let Err(error) = skills {
+            failures.push(format!("skills refresh: {error}"));
+        }
+        anyhow::ensure!(
+            failures.is_empty(),
+            "CLI activation at {} succeeded, but {}. Run `nyxid update --skills-only` to retry skills; inspect node daemon definitions before retrying retention with `nyxid update`.",
+            new_bin.display(),
+            failures.join("; ")
+        );
+        return Ok(());
     }
 
     eprintln!(
@@ -380,6 +433,8 @@ pub(crate) fn github_client() -> Result<reqwest::Client> {
 
     reqwest::Client::builder()
         .default_headers(headers)
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(300))
         .build()
         .context("Failed to build GitHub HTTP client")
 }
@@ -404,6 +459,7 @@ pub(crate) async fn resolve_release(
 
     let response = client
         .get(&url)
+        .timeout(Duration::from_secs(30))
         .send()
         .await
         .with_context(|| format!("Failed to query GitHub release API: {url}"))?;
@@ -447,11 +503,17 @@ async fn download_asset(
         .await
         .with_context(|| format!("Failed to create {}", destination.display()))?;
 
+    let mut bytes = 0_u64;
     while let Some(chunk) = response
         .chunk()
         .await
         .with_context(|| format!("Failed while reading {}", asset.name))?
     {
+        bytes = bytes.saturating_add(chunk.len() as u64);
+        anyhow::ensure!(
+            bytes <= MAX_ARCHIVE_BYTES,
+            "Release archive exceeds the supported size limit"
+        );
         file.write_all(&chunk)
             .await
             .with_context(|| format!("Failed while writing {}", destination.display()))?;
@@ -498,28 +560,38 @@ fn install_release_binary(archive_path: &Path, tag: &str) -> Result<PathBuf> {
         let active_path = active_binary_path()?;
         retarget_active_symlink(&active_path, &versioned_bin)?;
         retarget_secondary_symlinks(&versioned_bin, &active_path);
-        cleanup_old_versions(
-            &install_versions_root()?,
-            Some(&versioned_bin),
-            RETAINED_VERSION_COUNT,
-        )?;
         Ok(versioned_bin)
     }
 }
 
 #[cfg(unix)]
 fn extract_binary_to_version_dir(archive_path: &Path, tag: &str) -> Result<PathBuf> {
+    extract_binary_to_version_root(archive_path, tag, &install_versions_root()?)
+}
+
+#[cfg(unix)]
+fn extract_binary_to_version_root(archive_path: &Path, tag: &str, root: &Path) -> Result<PathBuf> {
     let tag = normalize_release_tag(tag)?;
-    let version_dir = install_versions_root()?.join(&tag);
+    fs::create_dir_all(root)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".staging-")
+        .tempdir_in(root)?;
+    let extracted = extract_binary(archive_path, staging.path())?;
+    anyhow::ensure!(
+        fs::symlink_metadata(&extracted)?.file_type().is_file(),
+        "Release binary must be a regular file"
+    );
+    let file = fs::File::open(&extracted)?;
+    anyhow::ensure!(file.metadata()?.len() > 0, "Release binary is empty");
+    file.sync_all()?;
+    let version_dir = root.join(&tag);
     fs::create_dir_all(&version_dir)
         .with_context(|| format!("Failed to create {}", version_dir.display()))?;
     let destination = version_dir.join(archive_binary_name());
-    if destination.exists() {
-        fs::remove_file(&destination)
-            .with_context(|| format!("Failed to replace {}", destination.display()))?;
-    }
-
-    extract_binary(archive_path, &version_dir)
+    // Rename replaces the directory entry, never truncates the running inode.
+    fs::rename(extracted, &destination).context("Failed to publish staged release binary")?;
+    fs::File::open(&version_dir)?.sync_all()?;
+    Ok(destination)
 }
 
 fn extract_binary(archive_path: &Path, extract_dir: &Path) -> Result<PathBuf> {
@@ -530,6 +602,7 @@ fn extract_binary(archive_path: &Path, extract_dir: &Path) -> Result<PathBuf> {
     // exactly, so we have to ask for the nested path.
     let archive_dir = archive_root_dir(current_target());
     let in_archive_path = format!("{archive_dir}/{bin_name}");
+    #[cfg(windows)]
     self_update::Extract::from_source(archive_path)
         .extract_file(extract_dir, &in_archive_path)
         .with_context(|| {
@@ -538,6 +611,50 @@ fn extract_binary(archive_path: &Path, extract_dir: &Path) -> Result<PathBuf> {
                 archive_path.display()
             )
         })?;
+
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let decoder =
+            flate2::read::GzDecoder::new(fs::File::open(archive_path)?).take(MAX_ARCHIVE_BYTES);
+        let mut archive = tar::Archive::new(decoder);
+        let mut found = false;
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            if entry.path()?.as_ref() != Path::new(&in_archive_path) {
+                continue;
+            }
+            anyhow::ensure!(
+                !found && entry.header().entry_type().is_file(),
+                "Expected one regular release binary"
+            );
+            let expected_size = entry.header().size()?;
+            anyhow::ensure!(
+                expected_size > 0 && expected_size <= MAX_ARCHIVE_BYTES,
+                "Unsupported release binary size"
+            );
+            found = true;
+            let destination = extract_dir.join(&in_archive_path);
+            fs::create_dir_all(
+                destination
+                    .parent()
+                    .context("Invalid release binary path")?,
+            )?;
+            let mut output = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination)?;
+            anyhow::ensure!(
+                std::io::copy(&mut entry, &mut output)? == expected_size,
+                "Truncated release binary"
+            );
+            output.sync_all()?;
+        }
+        anyhow::ensure!(
+            found,
+            "Release archive does not contain the expected binary"
+        );
+    }
 
     let new_bin = extract_dir.join(&archive_dir).join(bin_name);
     if !new_bin.exists() {
@@ -570,10 +687,18 @@ fn replace_current_binary(new_bin: &Path) -> Result<PathBuf> {
 }
 
 pub(crate) fn install_versions_root() -> Result<PathBuf> {
+    if let Ok(executable) = std::env::current_exe()
+        && executable
+            .file_name()
+            .is_some_and(|name| name == ".update-controller")
+        && let Some(root) = executable.parent()
+    {
+        return Ok(root.to_path_buf());
+    }
     if let Ok(root) = std::env::var(INSTALL_ROOT_ENV)
         && !root.trim().is_empty()
     {
-        return Ok(PathBuf::from(root));
+        return Ok(std::path::absolute(root)?);
     }
 
     #[cfg(windows)]
@@ -589,7 +714,9 @@ pub(crate) fn install_versions_root() -> Result<PathBuf> {
         if let Ok(data_home) = std::env::var("XDG_DATA_HOME")
             && !data_home.trim().is_empty()
         {
-            return Ok(PathBuf::from(data_home).join("nyxid").join("versions"));
+            return Ok(std::path::absolute(
+                PathBuf::from(data_home).join("nyxid").join("versions"),
+            )?);
         }
 
         let home = dirs::home_dir().context("Could not determine home directory")?;
@@ -609,7 +736,14 @@ fn active_binary_path_with_current(current_exe: Option<&Path>) -> Result<PathBuf
     if let Ok(path) = std::env::var(ACTIVE_SYMLINK_ENV)
         && !path.trim().is_empty()
     {
-        return Ok(PathBuf::from(path));
+        return Ok(std::path::absolute(path)?);
+    }
+    if current_exe.is_some_and(|path| {
+        path.file_name()
+            .is_some_and(|name| name == ".update-controller")
+    }) && let Some(binary) = auto::local_policy()?.active_binary
+    {
+        return Ok(binary);
     }
 
     if let Some(current_exe) = current_exe
@@ -680,6 +814,15 @@ fn paths_equivalent(left: &Path, right: &Path) -> bool {
 /// PATH dir should never abort the update.
 #[cfg(unix)]
 fn retarget_secondary_symlinks(versioned_bin: &Path, primary: &Path) {
+    retarget_secondary_symlinks_with_policy(versioned_bin, primary, false);
+}
+
+#[cfg(unix)]
+fn retarget_secondary_symlinks_with_policy(
+    versioned_bin: &Path,
+    primary: &Path,
+    allow_downgrade: bool,
+) {
     let Ok(versions_root) = install_versions_root() else {
         return;
     };
@@ -728,7 +871,8 @@ fn retarget_secondary_symlinks(versioned_bin: &Path, primary: &Path) {
             .as_deref()
             .and_then(|v| tag_for_path_in_versions(v, &canonical_versions))
             .or_else(|| tag_for_path_in_versions(versioned_bin, &canonical_versions));
-        if let (Some(existing), Some(new_tag)) = (target_tag.as_deref(), new_tag.as_deref())
+        if !allow_downgrade
+            && let (Some(existing), Some(new_tag)) = (target_tag.as_deref(), new_tag.as_deref())
             && matches!(
                 compare_release_tags(existing, new_tag),
                 Ok(Ordering::Greater)
@@ -862,7 +1006,19 @@ fn installed_versions_with_active_target(
             continue;
         }
 
-        let binary = path.join(archive_binary_name());
+        let flat = path.join(archive_binary_name());
+        let legacy = path
+            .join(archive_root_dir(current_target()))
+            .join(archive_binary_name());
+        let binary = if legacy.is_file()
+            && active_target.is_some_and(|target| paths_equivalent(target, &legacy))
+        {
+            legacy
+        } else if flat.is_file() {
+            flat
+        } else {
+            legacy
+        };
         if !binary.is_file() {
             continue;
         }
@@ -923,6 +1079,21 @@ fn cleanup_old_versions(
     active_binary: Option<&Path>,
     keep_total: usize,
 ) -> Result<()> {
+    cleanup_old_versions_with_pins(
+        root,
+        active_binary,
+        keep_total,
+        &crate::node::daemon::pinned_binary_paths()?,
+    )
+}
+
+#[cfg(unix)]
+fn cleanup_old_versions_with_pins(
+    root: &Path,
+    active_binary: Option<&Path>,
+    keep_total: usize,
+    pins: &[PathBuf],
+) -> Result<()> {
     let versions = installed_versions_with_active_target(root, active_binary)?;
     if versions.len() <= keep_total {
         return Ok(());
@@ -943,6 +1114,21 @@ fn cleanup_old_versions(
             break;
         }
         keep.insert(version.dir.clone());
+    }
+
+    // Running nodes retain additional versions without consuming the normal
+    // rollback budget.
+    for version in &versions {
+        let canonical_dir = version.dir.canonicalize()?;
+        if pins.iter().any(|pin| {
+            pin.starts_with(&version.dir)
+                || pin
+                    .canonicalize()
+                    .ok()
+                    .is_some_and(|pin| pin.starts_with(&canonical_dir))
+        }) {
+            keep.insert(version.dir.clone());
+        }
     }
 
     for version in versions {
@@ -977,7 +1163,9 @@ fn rollback_cli() -> Result<PathBuf> {
         let Some(target) = versions.get(active_index + 1) else {
             anyhow::bail!("No previous nyxid version is available to roll back to");
         };
+        auto::hold_for_rollback(&target.tag)?;
         retarget_active_symlink(&active_path, &target.binary)?;
+        retarget_secondary_symlinks_with_policy(&target.binary, &active_path, true);
         Ok(target.binary.clone())
     }
 }
@@ -1216,39 +1404,164 @@ fn find_new_binary(preferred: Option<&Path>) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-/// Replace the current process with `<new_bin> update --skills-only [--base-url X]`.
-/// On Unix this `exec`s in place; on Windows we spawn + wait + propagate the
-/// exit code since `exec` semantics aren't available.
-fn exec_skills_update(new_bin: &PathBuf, base_url: &Option<String>) -> Result<()> {
-    let mut cmd = std::process::Command::new(new_bin);
-    cmd.arg("update").arg("--skills-only");
+/// Keep the parent update lock while the new binary refreshes installed skills.
+async fn exec_skills_update(new_bin: &Path, base_url: &Option<String>) -> Result<()> {
+    let mut cmd = tokio::process::Command::new(new_bin);
+    cmd.arg("ai-setup")
+        .arg("update")
+        .kill_on_drop(true)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .env("NYXID_NO_UPDATE_CHECK", "1")
+        .env("NYXID_TELEMETRY", "0");
     if let Some(url) = base_url {
         cmd.arg("--base-url").arg(url);
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // On success, exec replaces the process and never returns.
-        let err = cmd.exec();
-        Err(anyhow::anyhow!(
-            "Failed to exec {}: {err}",
-            new_bin.display()
-        ))
-    }
-    #[cfg(not(unix))]
-    {
-        let status = cmd
-            .status()
-            .with_context(|| format!("Failed to spawn {}", new_bin.display()))?;
-        std::process::exit(status.code().unwrap_or(1));
-    }
+    let mut child = cmd
+        .spawn()
+        .context("Failed to start installed-skills refresh")?;
+    let status = tokio::time::timeout(Duration::from_secs(300), child.wait())
+        .await
+        .context("Installed-skills refresh timed out; retry nyxid update --skills-only")??;
+    anyhow::ensure!(
+        status.success(),
+        "Installed-skills refresh failed; retry nyxid update --skills-only"
+    );
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn explicit_active_path_recovers_controller_with_corrupt_policy() {
+        let _lock = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let _root = EnvGuard::set(INSTALL_ROOT_ENV, tmp.path().as_os_str());
+        let active = tmp.path().join("bin/nyxid");
+        let _active = EnvGuard::set(ACTIVE_SYMLINK_ENV, active.as_os_str());
+        fs::write(tmp.path().join(".auto-update.json"), b"invalid").unwrap();
+        assert_eq!(
+            active_binary_path_with_current(Some(&tmp.path().join(".update-controller"))).unwrap(),
+            active
+        );
+    }
+
+    #[cfg(unix)]
+    pub(super) fn release_tarball(path: &Path, payload: &[u8]) {
+        let encoder = flate2::write::GzEncoder::new(
+            fs::File::create(path).unwrap(),
+            flate2::Compression::default(),
+        );
+        let mut archive = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        archive
+            .append_data(
+                &mut header,
+                format!("{}/nyxid", archive_root_dir(current_target())),
+                payload,
+            )
+            .unwrap();
+        archive.into_inner().unwrap().finish().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staged_real_archive_is_listed_and_rollback_preserves_previous_executable() {
+        let _lock = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("versions");
+        let active = tmp.path().join("bin/nyxid");
+        let _install = EnvGuard::set(INSTALL_ROOT_ENV, root.as_os_str());
+        let _active = EnvGuard::set(ACTIVE_SYMLINK_ENV, active.as_os_str());
+        let archive = tmp.path().join("fixture.tar.gz");
+        release_tarball(&archive, b"#!/bin/sh\nprintf previous\n");
+        let first = extract_binary_to_version_root(&archive, "v0.4.0", &root).unwrap();
+        retarget_active_symlink(&active, &first).unwrap();
+        assert!(rollback_cli().is_err());
+        assert!(auto::local_policy().unwrap().held_version.is_none());
+        release_tarball(&archive, b"#!/bin/sh\nprintf current\n");
+        let second = extract_binary_to_version_root(&archive, "v0.5.0", &root).unwrap();
+        retarget_active_symlink(&active, &second).unwrap();
+        assert_eq!(
+            installed_versions_in(&root, Some(&active)).unwrap().len(),
+            2
+        );
+        rollback_cli().unwrap();
+        assert!(auto::local_policy().unwrap().held_version.is_some());
+        assert_eq!(
+            std::process::Command::new(&active).output().unwrap().stdout,
+            b"previous"
+        );
+        fs::write(&archive, b"interrupted archive").unwrap();
+        assert!(extract_binary_to_version_root(&archive, "v0.4.0", &root).is_err());
+        assert_eq!(
+            std::process::Command::new(&active).output().unwrap().stdout,
+            b"previous"
+        );
+        assert_eq!(fs::read_link(active).unwrap(), first);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn retention_recognizes_legacy_nested_layout_and_keeps_node_pins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let legacy = root
+            .join("v0.1.0")
+            .join(archive_root_dir(current_target()))
+            .join("nyxid");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        fs::write(&legacy, b"legacy running node").unwrap();
+        for version in ["v0.2.0", "v0.3.0", "v0.4.0", "v0.5.0"] {
+            write_version_binary(root, version);
+        }
+        let current = root.join("v0.5.0/nyxid");
+        assert_eq!(
+            installed_versions_with_active_target(root, Some(&legacy))
+                .unwrap()
+                .iter()
+                .filter(|v| v.active)
+                .count(),
+            1
+        );
+        cleanup_old_versions_with_pins(root, Some(&current), 3, std::slice::from_ref(&legacy))
+            .unwrap();
+        assert!(legacy.is_file() && current.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_pins_do_not_consume_the_recent_rollback_budget() {
+        let tmp = tempfile::tempdir().unwrap();
+        for version in ["v0.1.0", "v0.2.0", "v0.3.0", "v0.4.0", "v0.5.0", "v0.6.0"] {
+            write_version_binary(tmp.path(), version);
+        }
+        let active = tmp.path().join("v0.6.0/nyxid");
+        let pins = [
+            tmp.path().join("v0.1.0/nyxid"),
+            tmp.path().join("v0.2.0/nyxid"),
+        ];
+        cleanup_old_versions_with_pins(tmp.path(), Some(&active), 3, &pins).unwrap();
+        for version in ["v0.1.0", "v0.2.0", "v0.4.0", "v0.5.0", "v0.6.0"] {
+            assert!(
+                tmp.path().join(version).join("nyxid").is_file(),
+                "lost retained {version}"
+            );
+        }
+        assert!(!tmp.path().join("v0.3.0").exists());
+    }
 
     #[test]
     fn extracts_nested_binary_from_dist_tarball() {
@@ -1556,10 +1869,14 @@ mod tests {
         std::thread::sleep(Duration::from_millis(15));
         let second = write_version_binary(&root, "v0.5.0");
         retarget_active_symlink(&active, &second).unwrap();
+        let alias = tmp.path().join("legacy/nyxid");
+        retarget_active_symlink(&alias, &second).unwrap();
+        let _path = EnvGuard::set("PATH", alias.parent().unwrap().as_os_str());
 
         let rolled_back = rollback_cli().unwrap();
         assert!(paths_equivalent(&rolled_back, &first));
         assert!(paths_equivalent(&fs::read_link(&active).unwrap(), &first));
+        assert!(paths_equivalent(&fs::read_link(&alias).unwrap(), &first));
     }
 
     #[cfg(unix)]

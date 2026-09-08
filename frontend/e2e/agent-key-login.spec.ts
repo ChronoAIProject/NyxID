@@ -128,7 +128,7 @@ test("phone QR is public, ignores URL codes and leaves no browser storage or acc
   ).toBe(true);
   state.status = "approved";
   await expect(
-    page.getByText("Approved - return to your terminal"),
+    page.getByText("Approved - return to the requesting device"),
   ).toBeVisible({ timeout: 10000 });
   await expect(page.getByAltText("Agent Key login QR code")).toHaveCount(0);
   const count = requests.length;
@@ -189,7 +189,7 @@ for (const selection of ["existing", "new"] as const)
     await page.waitForTimeout(800);
     await page.getByRole("button", { name: "Approve", exact: true }).click();
     await expect(
-      page.getByText("Approved - return to your terminal"),
+      page.getByText("Approved - return to the requesting device"),
     ).toBeVisible();
     const approvals = requests.filter((request) =>
       request.path.endsWith("/approve"),

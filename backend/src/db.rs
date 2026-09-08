@@ -1376,40 +1376,115 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     // ── auth_device_codes ──
-    let auth_device_codes = db.collection::<AuthDeviceCode>(AUTH_DEVICE_CODES);
-    auth_device_codes
+    let login_codes = db.collection::<crate::models::login_code::LoginCode>(
+        crate::models::login_code::COLLECTION_NAME,
+    );
+    login_codes
         .create_index(
             IndexModel::builder()
-                .keys(doc! { "device_code_hmac": 1 })
+                .keys(doc! {"code_hmac": 1})
                 .options(IndexOptions::builder().unique(true).build())
                 .build(),
         )
         .await?;
-    auth_device_codes
+    login_codes
         .create_index(
             IndexModel::builder()
-                .keys(doc! { "user_code_hmac": 1 })
+                .keys(doc! {"user_id": 1, "created_at": -1})
+                .build(),
+        )
+        .await?;
+    login_codes
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! {"purge_at": 1})
                 .options(
                     IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! { "status": "pending" })
+                        .expire_after(std::time::Duration::ZERO)
                         .build(),
                 )
                 .build(),
         )
         .await?;
-    auth_device_codes
-        .create_index(
-            IndexModel::builder()
-                .keys(doc! { "expires_at": 1 })
-                .options(
-                    IndexOptions::builder()
-                        .expire_after(Duration::from_secs(0))
-                        .build(),
-                )
-                .build(),
-        )
-        .await?;
+    for collection_name in [
+        AUTH_DEVICE_CODES,
+        crate::models::auth_device_code::V2_COLLECTION_NAME,
+    ] {
+        let auth_device_codes = db.collection::<AuthDeviceCode>(collection_name);
+        auth_device_codes
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"user_code_reservation_hmac": 1})
+                    .options(
+                        IndexOptions::builder()
+                            .unique(true)
+                            .partial_filter_expression(
+                                doc! {"user_code_reservation_hmac": {"$type": "string"}},
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+        auth_device_codes
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "device_code_hmac": 1 })
+                    .options(IndexOptions::builder().unique(true).build())
+                    .build(),
+            )
+            .await?;
+        auth_device_codes
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "user_code_hmac": 1 })
+                    .options(
+                        IndexOptions::builder()
+                            .unique(true)
+                            .partial_filter_expression(doc! { "status": "pending" })
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+        // Cleanup must revoke undelivered grants before TTL can remove the row.
+        // Drop only the obsolete unconditional TTL index during rolling upgrades.
+        let mut indexes = auth_device_codes.list_indexes().await?;
+        while let Some(index) = indexes.try_next().await? {
+            if index.keys == doc! {"expires_at": 1}
+                && index
+                    .options
+                    .as_ref()
+                    .is_some_and(|options| options.expire_after.is_some())
+                && let Some(name) = index.options.and_then(|options| options.name)
+                && let Err(error) = auth_device_codes.drop_index(name).await
+                && !matches!(error.kind.as_ref(), mongodb::error::ErrorKind::Command(command) if matches!(command.code, 26 | 27))
+            {
+                return Err(error);
+            }
+        }
+        auth_device_codes
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "purge_at": 1 })
+                    .options(
+                        IndexOptions::builder()
+                            .expire_after(Duration::from_secs(0))
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await?;
+        auth_device_codes
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! {"status": 1, "expires_at": 1})
+                    .build(),
+            )
+            .await?;
+        auth_device_codes.update_many(doc! {"status": {"$in": ["denied", "delivered"]}, "purge_at": bson::Bson::Null},
+        doc! {"$set": {"purge_at": bson::DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::days(1))}}).await?;
+    }
 
     // ── connect_links ──
     let connect_links = db.collection::<ConnectLink>(CONNECT_LINKS);

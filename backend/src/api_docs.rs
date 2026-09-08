@@ -51,10 +51,24 @@
         crate::handlers::auth_agent_key::revoke_credential,
         // Auth Device Login
         crate::handlers::auth_device::request_auth_device,
+        crate::handlers::auth_device::request_auth_device_v2,
+        crate::handlers::auth_device::poll_auth_device_v2,
+        crate::handlers::auth_device::poll_auth_device_web_v2,
+        crate::handlers::auth_device::auth_device_options,
+        crate::handlers::login_code::options,
+        crate::handlers::login_code::mint,
+        crate::handlers::login_code::redeem,
+        crate::handlers::login_code::status,
+        crate::handlers::login_code::cancel,
+        crate::handlers::login_code::revoke,
+        crate::handlers::codex_connection::status,
+        crate::handlers::codex_connection::import,
+        crate::handlers::codex_connection::verify,
         crate::handlers::auth_device::poll_auth_device,
         crate::handlers::auth_device::poll_auth_device_web,
         crate::handlers::auth_device::preview_auth_device,
         crate::handlers::auth_device::approve_auth_device,
+        crate::handlers::auth_device::approve_auth_device_agent_key,
         crate::handlers::auth_device::deny_auth_device,
         // Catalog
         crate::handlers::catalog::list_catalog,
@@ -313,6 +327,39 @@ impl utoipa::Modify for SecurityAddon {
 mod tests {
     use super::*;
     use utoipa::OpenApi;
+
+    #[test]
+    fn selectable_login_and_codex_contracts_are_discoverable() {
+        let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        for (path, method, authenticated) in [
+            ("/api/v1/auth/device/v2/request", "post", false),
+            ("/api/v1/auth/device/v2/poll", "post", false),
+            ("/api/v1/auth/device/v2/poll-web", "post", false),
+            ("/api/v1/auth/device/options", "post", true),
+            ("/api/v1/auth/device/approve-agent-key", "post", true),
+            ("/api/v1/auth/login-code", "post", true),
+            ("/api/v1/auth/login-code/options", "post", true),
+            ("/api/v1/auth/login-code/redeem", "post", false),
+            ("/api/v1/auth/login-code/{id}", "get", true),
+            ("/api/v1/auth/login-code/{id}", "delete", true),
+            ("/api/v1/auth/login-code/{id}/revoke", "post", true),
+            ("/api/v1/providers/codex-connection", "get", true),
+            ("/api/v1/providers/codex-connection", "post", true),
+            ("/api/v1/providers/codex-connection/verify", "post", true),
+        ] {
+            let operation = &document["paths"][path][method];
+            assert!(operation.is_object(), "missing {method} {path}");
+            assert_eq!(
+                operation.get("security").is_some(),
+                authenticated,
+                "{method} {path}"
+            );
+            assert!(
+                operation["responses"].get("200").is_some(),
+                "{method} {path}"
+            );
+        }
+    }
 
     #[test]
     fn agent_key_login_operations_and_schema_references_are_registered() {
