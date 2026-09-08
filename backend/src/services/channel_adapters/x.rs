@@ -38,13 +38,8 @@ fn base<'a>(adapter: &'a XAdapter, credentials: &'a BotCredentials<'_>) -> &'a s
     if let Some(base) = &adapter.api_base {
         return base;
     }
-    #[cfg(test)]
-    if let Some(base) = credentials
-        .platform_secrets
-        .and_then(|s| s.get("test_x_base"))
-    {
-        return base;
-    }
+    // Only the adapter's own test override may change the host; credential
+    // material never influences request URLs.
     let _ = (adapter, credentials);
     "https://api.x.com"
 }
