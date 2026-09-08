@@ -1090,6 +1090,25 @@ async fn main() {
         });
     }
 
+    if config.channel_poll_interval_secs > 0 {
+        let poll_state = state.clone();
+        let poll_interval = config.channel_poll_interval_secs;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(poll_interval));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if services::channel_poll_service::sweep(&poll_state)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Channel poll sweep failed; retrying on the next tick");
+                }
+            }
+        });
+    }
+
     // Telegram integration: webhook mode (production) or polling mode (development)
     if let (Some(bot_token), Some(webhook_url), Some(webhook_secret)) = (
         &config.telegram_bot_token,

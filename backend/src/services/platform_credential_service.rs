@@ -4,7 +4,7 @@ use std::sync::Arc;
 use bson::doc;
 use zeroize::Zeroizing;
 
-use super::channel_managed::PlatformCredentialDescriptor;
+use super::channel_managed::{PlatformCredentialBacking, PlatformCredentialDescriptor};
 use super::channel_platform::PlatformVerifySecrets;
 use super::provider_token_exchange_service::TokenExchangeCache;
 use crate::crypto::aes::EncryptionKeys;
@@ -36,6 +36,39 @@ pub fn descriptor(
 }
 
 pub async fn load(db: &mongodb::Database, provider: &str) -> AppResult<Option<PlatformCredential>> {
+    let (_, descriptor) = descriptor(&Arc::new(TokenExchangeCache::new()), provider)?;
+    if let PlatformCredentialBacking::ProviderOAuth { provider_slug } = descriptor.backing {
+        let row = db
+            .collection::<crate::models::provider_config::ProviderConfig>(
+                crate::models::provider_config::COLLECTION_NAME,
+            )
+            .find_one(doc! { "slug": provider_slug })
+            .await?;
+        return Ok(row.map(|row| PlatformCredential {
+            id: row.id,
+            provider: provider.to_string(),
+            fields: BTreeMap::new(),
+            secrets: [
+                ("client_id", row.client_id_encrypted),
+                ("client_secret", row.client_secret_encrypted),
+            ]
+            .into_iter()
+            .filter_map(|(name, bytes)| {
+                bytes.map(|bytes| {
+                    (
+                        name.to_string(),
+                        bson::Binary {
+                            subtype: bson::spec::BinarySubtype::Generic,
+                            bytes,
+                        },
+                    )
+                })
+            })
+            .collect(),
+            updated_by: row.created_by,
+            updated_at: row.updated_at,
+        }));
+    }
     Ok(db
         .collection::<PlatformCredential>(COLLECTION_NAME)
         .find_one(doc! { "provider": provider })
@@ -90,6 +123,17 @@ pub async fn update(
     fields: &BTreeMap<String, Option<Zeroizing<String>>>,
     regenerate_verify_token: bool,
 ) -> AppResult<()> {
+    if let PlatformCredentialBacking::ProviderOAuth { provider_slug } = descriptor.backing {
+        return update_provider_oauth(
+            db,
+            keys,
+            descriptor,
+            provider_slug,
+            fields,
+            regenerate_verify_token,
+        )
+        .await;
+    }
     let mut set = doc! { "updated_by": actor, "updated_at": bson::DateTime::now() };
     let mut unset = doc! {};
     for (name, value) in fields {
@@ -183,8 +227,83 @@ pub async fn update(
 }
 
 pub async fn delete(db: &mongodb::Database, provider: &str) -> AppResult<()> {
+    let (_, descriptor) = descriptor(&Arc::new(TokenExchangeCache::new()), provider)?;
+    if let PlatformCredentialBacking::ProviderOAuth { provider_slug } = descriptor.backing {
+        db.collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
+            .update_one(
+                doc! { "slug": provider_slug },
+                doc! {
+                    "$unset": { "client_id_encrypted": "", "client_secret_encrypted": "" },
+                    "$set": { "updated_at": bson::DateTime::now() },
+                },
+            )
+            .await?;
+        return Ok(());
+    }
     db.collection::<PlatformCredential>(COLLECTION_NAME)
         .delete_one(doc! { "provider": provider })
         .await?;
+    Ok(())
+}
+
+async fn update_provider_oauth(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    descriptor: &PlatformCredentialDescriptor,
+    provider_slug: &str,
+    fields: &BTreeMap<String, Option<Zeroizing<String>>>,
+    regenerate_verify_token: bool,
+) -> AppResult<()> {
+    if regenerate_verify_token {
+        return Err(AppError::ValidationError(
+            "Platform webhooks are not supported".to_string(),
+        ));
+    }
+    let mut set = doc! { "updated_at": bson::DateTime::now() };
+    let mut unset = doc! {};
+    for (name, value) in fields {
+        if !matches!(name.as_str(), "client_id" | "client_secret")
+            || !descriptor.fields.iter().any(|field| field.name == name)
+        {
+            return Err(AppError::ValidationError(
+                "Unknown platform credential field".to_string(),
+            ));
+        }
+        let path = format!("{name}_encrypted");
+        match value {
+            Some(value) => {
+                let value = value.trim();
+                if value.is_empty() || value.len() > 4096 {
+                    return Err(AppError::ValidationError(format!("Invalid {name}")));
+                }
+                set.insert(
+                    path,
+                    bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: keys.encrypt(value.as_bytes()).await?,
+                    },
+                );
+            }
+            None => {
+                unset.insert(path, "");
+            }
+        }
+    }
+    let mut update = doc! { "$set": set };
+    if !unset.is_empty() {
+        update.insert("$unset", unset);
+    }
+    let result = db
+        .collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
+        .update_one(
+            doc! { "slug": provider_slug, "provider_type": "oauth2" },
+            update,
+        )
+        .await?;
+    if result.matched_count == 0 {
+        return Err(AppError::NotFound(
+            "OAuth provider is not configured".to_string(),
+        ));
+    }
     Ok(())
 }

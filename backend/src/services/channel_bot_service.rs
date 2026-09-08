@@ -146,6 +146,9 @@ pub async fn create_bot(
     fields: &RegistrationValues<'_>,
 ) -> AppResult<CreateBotResult> {
     let descriptor = adapter.registration();
+    if descriptor.managed_only {
+        return Err(super::channel_managed::unavailable());
+    }
     descriptor.validate(fields, false)?;
     // Validate label
     if label.is_empty() || label.len() > 200 {
@@ -189,6 +192,7 @@ pub async fn create_bot(
         &effective_token,
         identity,
         None,
+        None,
     )
     .await
 }
@@ -204,6 +208,7 @@ async fn persist_verified_bot(
     effective_token: &str,
     identity: BotIdentity,
     managed: Option<(&str, &crate::models::channel_bot::ManagedBotSetup)>,
+    connection: Option<(&str, &super::channel_platform::PollOutcome)>,
 ) -> AppResult<CreateBotResult> {
     let descriptor = adapter.registration();
     let BotIdentity {
@@ -230,10 +235,22 @@ async fn persist_verified_bot(
     }
 
     // Generate webhook secret: raw (hex-encoded random bytes) + SHA-256 hash
-    let raw_secret = hex::encode(rand::random::<[u8; 32]>());
-    let secret_hash = hex::encode(Sha256::digest(raw_secret.as_bytes()));
+    let raw_secret = if descriptor.webhook_ingestion {
+        hex::encode(rand::random::<[u8; 32]>())
+    } else {
+        String::new()
+    };
+    let secret_hash = if descriptor.webhook_ingestion {
+        hex::encode(Sha256::digest(raw_secret.as_bytes()))
+    } else {
+        String::new()
+    };
 
-    let bot_token_encrypted = encryption_keys.encrypt(effective_token.as_bytes()).await?;
+    let bot_token_encrypted = if connection.is_some() {
+        Vec::new()
+    } else {
+        encryption_keys.encrypt(effective_token.as_bytes()).await?
+    };
 
     let now = Utc::now();
     let bot = ChannelBot {
@@ -241,12 +258,23 @@ async fn persist_verified_bot(
         user_id: user_id.to_string(),
         platform: adapter.platform_id().to_string(),
         label: label.to_string(),
-        credential_source: if managed.is_some() {
+        credential_source: if connection.is_some() {
+            "connection"
+        } else if managed.is_some() {
             "platform"
         } else {
             "user"
         }
         .to_string(),
+        connection_id: connection.map(|(id, _)| id.to_string()),
+        poll_cursor: connection.and_then(|(_, outcome)| outcome.cursor.clone()),
+        poll_lease_until: None,
+        last_polled_at: connection.map(|_| now),
+        poll_backoff_until: connection
+            .and_then(|(_, outcome)| outcome.backoff)
+            .map(|d| now + chrono::Duration::seconds(d.as_secs().min(86400) as i64)),
+        poll_error_count: 0,
+        error: None,
         registration_pin_encrypted: match managed {
             Some((pin, _)) => Some(encryption_keys.encrypt(pin.as_bytes()).await?),
             None => None,
@@ -267,7 +295,9 @@ async fn persist_verified_bot(
         lark_verification_token_encrypted: None,
         lark_encrypt_key_encrypted: None,
         public_key: None,
-        status: if managed.is_some() {
+        status: if !descriptor.webhook_ingestion {
+            "active"
+        } else if managed.is_some() {
             "pending_webhook"
         } else {
             "pending"
@@ -337,6 +367,56 @@ pub async fn create_managed_bot(
             config.channel_relay_max_bots_per_user
         )));
     }
+    if let super::channel_platform::CredentialResolution::OAuthConnection {
+        provider_slug,
+        required_scopes,
+    } = adapter.credential_resolution()
+    {
+        let connection_id = input.get("connection_id")?;
+        let token = super::channel_credentials::connection_token(
+            db,
+            keys,
+            owner,
+            connection_id,
+            provider_slug,
+            required_scopes,
+        )
+        .await?;
+        progress.stage("verifying");
+        let identity = adapter
+            .verify_bot_token(http, &BotCredentials::from(token.as_str()))
+            .await?;
+        let outcome = adapter
+            .poll_inbound(
+                http,
+                &BotCredentials {
+                    token: &token,
+                    platform_bot_id: Some(&identity.platform_bot_id),
+                    platform_secrets: None,
+                },
+                None,
+            )
+            .await?;
+        if outcome.cursor.is_none() {
+            return Err(AppError::ChannelPlatformError(
+                "Initial channel poll was rate limited; retry after the provider's reset"
+                    .to_string(),
+            ));
+        }
+        return persist_verified_bot(
+            db,
+            keys,
+            adapter,
+            owner,
+            label,
+            &RegistrationValues::default(),
+            "",
+            identity,
+            None,
+            Some((connection_id, &outcome)),
+        )
+        .await;
+    }
     let platform =
         super::platform_credential_service::load_decrypted(db, keys, descriptor.provider).await?;
     progress.stage("exchanging");
@@ -360,6 +440,7 @@ pub async fn create_managed_bot(
         &result.token,
         result.identity,
         Some((&result.registration_pin, &result.setup)),
+        None,
     )
     .await?;
     let webhook_url = format!(
@@ -404,6 +485,74 @@ pub async fn store_managed_setup(
             doc! { "$set": { "managed_setup": setup, "updated_at": bson::DateTime::now() } },
         )
         .await?;
+    Ok(())
+}
+
+pub async fn reconnect_bot(
+    db: &mongodb::Database,
+    keys: &EncryptionKeys,
+    http: &reqwest::Client,
+    adapter: &dyn PlatformAdapter,
+    bot: &ChannelBot,
+    connection_id: &str,
+) -> AppResult<()> {
+    let super::channel_platform::CredentialResolution::OAuthConnection {
+        provider_slug,
+        required_scopes,
+    } = adapter.credential_resolution()
+    else {
+        return Err(super::channel_managed::unavailable());
+    };
+    if !bot.is_active || bot.credential_source != "connection" {
+        return Err(super::channel_managed::unavailable());
+    }
+    let token = super::channel_credentials::connection_token(
+        db,
+        keys,
+        &bot.user_id,
+        connection_id,
+        provider_slug,
+        required_scopes,
+    )
+    .await?;
+    let identity = adapter
+        .verify_bot_token(http, &BotCredentials::from(token.as_str()))
+        .await?;
+    if identity.platform_bot_id != bot.platform_bot_id {
+        return Err(AppError::ValidationError(
+            "Reconnect the same platform account to preserve its conversation routes".to_string(),
+        ));
+    }
+    let outcome = adapter
+        .poll_inbound(
+            http,
+            &BotCredentials {
+                token: &token,
+                platform_bot_id: Some(&identity.platform_bot_id),
+                platform_secrets: None,
+            },
+            None,
+        )
+        .await?;
+    let cursor = outcome.cursor.ok_or_else(|| {
+        AppError::ChannelPlatformError(
+            "Initial channel poll was rate limited; retry later".to_string(),
+        )
+    })?;
+    let result = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
+        doc! { "_id": &bot.id, "user_id": &bot.user_id, "is_active": true, "connection_id": &bot.connection_id, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
+        doc! { "$set": {
+            "connection_id": connection_id, "platform_bot_username": identity.platform_bot_username,
+            "poll_cursor": cursor, "poll_lease_until": null, "poll_error_count": 0,
+            "poll_backoff_until": outcome.backoff.map(|d| bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(d.as_secs().min(86400) as i64))),
+            "last_polled_at": bson::DateTime::now(), "status": "active", "error": null, "updated_at": bson::DateTime::now(),
+        } },
+    ).await?;
+    if result.matched_count == 0 {
+        return Err(AppError::Conflict(
+            "Channel bot changed during reconnect; retry".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -545,7 +694,9 @@ pub async fn update_bot(
     params: UpdateBotParams<'_>,
 ) -> AppResult<ChannelBot> {
     let bot = get_bot_for_user(db, bot_id, user_id).await?;
-    if bot.credential_source == "platform" && !params.fields().0.is_empty() {
+    if matches!(bot.credential_source.as_str(), "platform" | "connection")
+        && !params.fields().0.is_empty()
+    {
         return Err(AppError::ValidationError(
             "Platform-managed credentials cannot be edited. Reconnect through managed onboarding."
                 .to_string(),
@@ -905,6 +1056,13 @@ mod tests {
             platform: "lark".to_string(),
             label: "Test Bot".to_string(),
             credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

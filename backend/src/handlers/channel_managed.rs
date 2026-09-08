@@ -23,6 +23,10 @@ use crate::{
 #[derive(Debug, Serialize)]
 pub struct BootstrapResponse {
     pub available: bool,
+    pub flow: Option<&'static str>,
+    pub provider_slug: Option<&'static str>,
+    pub required_scopes: &'static [&'static str],
+    pub authorize_start_url: Option<String>,
     #[serde(flatten)]
     pub fields: BTreeMap<String, String>,
     pub graph_version: Option<&'static str>,
@@ -66,6 +70,10 @@ pub async fn bootstrap(
     let adapter = resolve_adapter(&platform, &state.token_exchange_cache)?;
     let mut response = BootstrapResponse {
         available: false,
+        flow: None,
+        provider_slug: None,
+        required_scopes: &[],
+        authorize_start_url: None,
         fields: BTreeMap::new(),
         graph_version: None,
         signup_version: None,
@@ -75,8 +83,27 @@ pub async fn bootstrap(
     if let (Some(managed), Some(credentials)) =
         (adapter.managed_onboarding(), adapter.platform_credentials())
     {
+        response.flow = Some(managed.flow);
         let row = platform_credential_service::load(&state.db, managed.provider).await?;
         response.available = platform_credential_service::configured(row.as_ref(), &credentials);
+        if let crate::services::channel_platform::CredentialResolution::OAuthConnection {
+            provider_slug,
+            required_scopes,
+        } = adapter.credential_resolution()
+        {
+            response.provider_slug = Some(provider_slug);
+            response.required_scopes = required_scopes;
+            let provider = state
+                .db
+                .collection::<crate::models::provider_config::ProviderConfig>(
+                    crate::models::provider_config::COLLECTION_NAME,
+                )
+                .find_one(bson::doc! { "slug": provider_slug, "is_active": true })
+                .await?;
+            response.available &= provider.is_some();
+            response.authorize_start_url =
+                provider.map(|_| format!("/channel-bots/managed-onboarding/{platform}/start"));
+        }
         if response.available {
             for field in managed.bootstrap_fields {
                 if credentials
@@ -159,6 +186,67 @@ pub async fn complete(
     .into_response())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartRequest {
+    pub label: String,
+    pub target_org_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct StartResponse {
+    pub connection_id: String,
+    pub authorization_url: String,
+    pub attempt_nonce: Option<String>,
+}
+
+impl std::fmt::Debug for StartResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StartResponse([REDACTED])")
+    }
+}
+
+pub async fn start(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(platform): Path<String>,
+    Json(body): Json<StartRequest>,
+) -> AppResult<(HeaderMap, Json<StartResponse>)> {
+    limit(&state, &auth).await?;
+    let actor = auth.user_id.to_string();
+    let owner = resolve_create_owner(&state, &actor, body.target_org_id.as_deref()).await?;
+    let adapter = resolve_adapter(&platform, &state.token_exchange_cache)?;
+    let started = crate::services::channel_credentials::start_connection(
+        &state.db,
+        &state.encryption_keys,
+        &state.config.base_url,
+        adapter.as_ref(),
+        &actor,
+        &owner,
+        body.label.trim(),
+    )
+    .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth,
+        "channel_bot_oauth_started",
+        Some(
+            serde_json::json!({ "platform": platform, "owner_user_id": owner, "connection_id": started.connection_id }),
+        ),
+    );
+    Ok((
+        HeaderMap::from_iter([(
+            header::CACHE_CONTROL,
+            "no-store".parse().expect("static header"),
+        )]),
+        Json(StartResponse {
+            connection_id: started.connection_id,
+            authorization_url: started.authorization_url,
+            attempt_nonce: started.attempt_nonce,
+        }),
+    ))
+}
+
 pub(crate) async fn complete_inner(
     state: &AppState,
     auth: &AuthUser,
@@ -206,7 +294,7 @@ pub(crate) async fn complete_inner(
         auth,
         "channel_bot_created",
         Some(
-            serde_json::json!({ "bot_id": created.bot.id, "platform": platform, "credential_source": "platform", "owner_user_id": owner }),
+            serde_json::json!({ "bot_id": created.bot.id, "platform": platform, "credential_source": created.bot.credential_source, "owner_user_id": owner }),
         ),
     );
     Ok((
@@ -241,6 +329,39 @@ pub async fn reregister(
         &auth,
         "channel_bot_number_reregistered",
         Some(serde_json::json!({ "bot_id": id, "platform": bot.platform })),
+    );
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReconnectRequest {
+    pub connection_id: String,
+}
+
+pub async fn reconnect(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<ReconnectRequest>,
+) -> AppResult<StatusCode> {
+    limit(&state, &auth).await?;
+    let (_, bot) = resolve_bot_owner_for_write(&state, &auth.user_id.to_string(), &id).await?;
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    channel_bot_service::reconnect_bot(
+        &state.db,
+        &state.encryption_keys,
+        &state.http_client,
+        adapter.as_ref(),
+        &bot,
+        &body.connection_id,
+    )
+    .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth,
+        "channel_bot_reconnected",
+        Some(serde_json::json!({ "bot_id": id, "connection_id": body.connection_id })),
     );
     Ok(StatusCode::NO_CONTENT)
 }

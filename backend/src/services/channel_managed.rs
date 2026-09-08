@@ -19,9 +19,20 @@ pub struct PlatformCredentialField {
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PlatformCredentialBacking {
+    Stored,
+    #[serde(rename = "provider_oauth")]
+    ProviderOAuth {
+        provider_slug: &'static str,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct PlatformCredentialDescriptor {
     pub provider: &'static str,
     pub label: &'static str,
+    pub backing: PlatformCredentialBacking,
     pub fields: &'static [PlatformCredentialField],
     pub setup_checklist: &'static [&'static str],
     /// Saving this field creates the platform handshake token if absent.
@@ -31,6 +42,7 @@ pub struct PlatformCredentialDescriptor {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ManagedOnboardingDescriptor {
+    pub flow: &'static str,
     pub provider: &'static str,
     pub bootstrap_fields: &'static [&'static str],
     pub completion_fields: &'static [&'static str],

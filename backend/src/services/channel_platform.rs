@@ -3,6 +3,37 @@ use serde::{Deserialize, Serialize};
 pub use super::channel_registration::{BotCredentials, RegistrationDescriptor, RegistrationValues};
 use crate::errors::AppResult;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum Ingestion {
+    Webhook,
+    Poll { min_interval_secs: u64 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CredentialResolution {
+    StoredToken,
+    OAuthConnection {
+        provider_slug: &'static str,
+        required_scopes: &'static [&'static str],
+    },
+}
+
+pub struct PollOutcome {
+    pub messages: Vec<InboundMessage>,
+    pub cursor: Option<String>,
+    pub backoff: Option<std::time::Duration>,
+}
+
+impl std::fmt::Debug for PollOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PollOutcome")
+            .field("message_count", &self.messages.len())
+            .field("backoff", &self.backoff)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Verified bot identity returned by the platform after token validation.
 #[derive(Debug, Clone)]
 pub struct BotIdentity {
@@ -146,6 +177,23 @@ pub fn insert_reply_context(metadata: &mut Option<serde_json::Value>, key: &str,
 pub trait PlatformAdapter: Send + Sync {
     /// Platform identifier (e.g. "telegram", "discord", "lark", "feishu").
     fn platform_id(&self) -> &str;
+
+    fn ingestion(&self) -> Ingestion {
+        Ingestion::Webhook
+    }
+
+    fn credential_resolution(&self) -> CredentialResolution {
+        CredentialResolution::StoredToken
+    }
+
+    async fn poll_inbound(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _cursor: Option<&str>,
+    ) -> AppResult<PollOutcome> {
+        Err(super::channel_managed::unavailable())
+    }
 
     fn platform_credentials(&self) -> Option<super::channel_managed::PlatformCredentialDescriptor> {
         None

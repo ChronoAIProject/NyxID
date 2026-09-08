@@ -1960,6 +1960,14 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    channel_bots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "platform": 1, "is_active": 1, "status": 1, "last_polled_at": 1 })
+                .build(),
+        )
+        .await?;
+
     // ── channel_conversations ──
     //
     // Two partial unique indexes cover the two conversation regimes, since

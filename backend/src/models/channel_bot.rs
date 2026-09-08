@@ -13,6 +13,22 @@ pub struct ChannelBot {
     pub label: String,
     #[serde(default = "default_credential_source")]
     pub credential_source: String,
+    /// The owner's UserApiKey UUID, resolved live for connection-backed bots.
+    #[serde(default)]
+    pub connection_id: Option<String>,
+    #[serde(default)]
+    pub poll_cursor: Option<String>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub poll_lease_until: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub last_polled_at: Option<DateTime<Utc>>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub poll_backoff_until: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub poll_error_count: u32,
+    /// Locally authored operational cause, never upstream error prose.
+    #[serde(default)]
+    pub error: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub registration_pin_encrypted: Option<Vec<u8>>,
     /// Managed-only copy of the generated verify token for repeatable setup.
@@ -98,6 +114,45 @@ mod tests {
         assert_eq!(COLLECTION_NAME, "channel_bots");
     }
 
+    #[test]
+    fn polling_fields_are_bson_datetimes_and_legacy_rows_keep_defaults() {
+        let mut bot = make_channel_bot();
+        let now = bson::DateTime::now().to_chrono();
+        bot.connection_id = Some(uuid::Uuid::new_v4().to_string());
+        bot.poll_cursor = Some("123".into());
+        bot.poll_lease_until = Some(now);
+        bot.last_polled_at = Some(now);
+        bot.poll_backoff_until = Some(now);
+        bot.poll_error_count = 2;
+        let mut document = bson::to_document(&bot).unwrap();
+        for field in ["poll_lease_until", "last_polled_at", "poll_backoff_until"] {
+            assert_eq!(document.get_datetime(field).unwrap().to_chrono(), now);
+        }
+        let restored: ChannelBot = bson::from_document(document.clone()).unwrap();
+        assert_eq!(restored.connection_id, bot.connection_id);
+        assert_eq!(restored.poll_cursor, bot.poll_cursor);
+        assert_eq!(restored.poll_error_count, 2);
+        for field in [
+            "connection_id",
+            "poll_cursor",
+            "poll_lease_until",
+            "last_polled_at",
+            "poll_backoff_until",
+            "poll_error_count",
+            "error",
+        ] {
+            document.remove(field);
+        }
+        let legacy: ChannelBot = bson::from_document(document).unwrap();
+        assert!(legacy.connection_id.is_none());
+        assert!(legacy.poll_cursor.is_none());
+        assert!(legacy.poll_lease_until.is_none());
+        assert!(legacy.last_polled_at.is_none());
+        assert!(legacy.poll_backoff_until.is_none());
+        assert!(legacy.error.is_none());
+        assert_eq!(legacy.poll_error_count, 0);
+    }
+
     fn make_channel_bot() -> ChannelBot {
         ChannelBot {
             id: uuid::Uuid::new_v4().to_string(),
@@ -105,6 +160,13 @@ mod tests {
             platform: "telegram".to_string(),
             label: "My Bot".to_string(),
             credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

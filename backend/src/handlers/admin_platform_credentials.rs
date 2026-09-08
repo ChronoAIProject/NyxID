@@ -39,6 +39,7 @@ pub struct CredentialFieldResponse {
 
 #[derive(Serialize)]
 pub struct PlatformCredentialsResponse {
+    pub backing: crate::services::channel_managed::PlatformCredentialBacking,
     pub provider: &'static str,
     pub label: &'static str,
     pub platform: String,
@@ -90,15 +91,26 @@ async fn response(
     let credentials =
         service::load_decrypted(&state.db, &state.encryption_keys, descriptor.provider).await?;
     Ok(PlatformCredentialsResponse {
+        backing: descriptor.backing,
         provider: descriptor.provider,
         label: descriptor.label,
         available: service::configured(row.as_ref(), &descriptor),
-        callback_url: descriptor.webhook_secret_field.map(|_| {
-            format!(
-                "{}/api/v1/webhooks/channel/{platform}/platform",
+        callback_url: if matches!(
+            descriptor.backing,
+            crate::services::channel_managed::PlatformCredentialBacking::ProviderOAuth { .. }
+        ) {
+            Some(format!(
+                "{}/api/v1/providers/callback",
                 state.config.base_url
-            )
-        }),
+            ))
+        } else {
+            descriptor.webhook_secret_field.map(|_| {
+                format!(
+                    "{}/api/v1/webhooks/channel/{platform}/platform",
+                    state.config.base_url
+                )
+            })
+        },
         webhook_verify_token: credentials
             .get(service::VERIFY_TOKEN_FIELD)
             .map(String::from),

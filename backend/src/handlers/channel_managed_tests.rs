@@ -196,7 +196,7 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
     for adapter in crate::services::channel_adapters::registered_adapters(&cache) {
         assert_eq!(
             adapter.managed_onboarding().is_some(),
-            adapter.platform_id() == "whatsapp"
+            matches!(adapter.platform_id(), "whatsapp" | "x")
         );
         assert_eq!(
             adapter.platform_webhook(),
@@ -204,8 +204,9 @@ fn managed_registry_and_admin_descriptors_are_adapter_owned() {
         );
     }
     let all = credentials::descriptors(&cache);
-    assert_eq!(all.len(), 1);
+    assert_eq!(all.len(), 2);
     assert_eq!(all[0].1.provider, "meta");
+    assert_eq!(all[1].1.provider, "x");
 }
 
 #[tokio::test]
@@ -609,6 +610,10 @@ async fn admin_endpoints_reject_non_admin_and_onboarding_rejects_non_humans() {
             ("POST", "/connect-links/complete"),
             ("GET", "/channel-bots/managed-onboarding/whatsapp"),
             ("POST", "/channel-bots/managed-onboarding/whatsapp/complete"),
+            ("GET", "/channel-bots/managed-onboarding/x"),
+            ("POST", "/channel-bots/managed-onboarding/x/start"),
+            ("POST", "/channel-bots/managed-onboarding/x/complete"),
+            ("POST", "/channel-bots/bot/reconnect"),
             ("POST", "/channel-bots/bot/reregister"),
             ("POST", "/channel-bots/bot/managed-setup/repair"),
         ] {

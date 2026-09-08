@@ -135,17 +135,7 @@ fn normalize_optional_field(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
 }
 
-/// Truncated SHA-256 of a platform conversation ID, for use in telemetry
-/// properties where raw conversation IDs must not be emitted. Returns the
-/// first 16 hex chars (8 bytes) of the digest — enough entropy for
-/// per-conversation cardinality analysis, short enough to stay ergonomic.
-pub(crate) fn hash_conversation_id(id: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(id.as_bytes());
-    let digest = hasher.finalize();
-    hex::encode(&digest[..8])
-}
+pub(crate) use crate::services::channel_inbound_service::hash_conversation_id;
 
 fn ensure_verify_material_present(
     bot: &crate::models::channel_bot::ChannelBot,
@@ -184,6 +174,8 @@ pub struct ChannelBotListResponse {
 
 #[derive(Debug, Serialize)]
 pub struct ChannelBotDetailResponse {
+    #[serde(flatten)]
+    pub connection: ChannelConnectionState,
     pub credential_source: String,
     pub managed_setup: Option<ManagedSetupResponse>,
     #[serde(flatten)]
@@ -220,6 +212,8 @@ pub struct ChannelBotDetailResponse {
 
 #[derive(Serialize)]
 pub struct CreateChannelBotResponse {
+    pub webhook_ingestion: bool,
+    pub connection_id: Option<String>,
     pub credential_source: String,
     pub managed_setup: Option<ManagedSetupResponse>,
     #[serde(flatten)]
@@ -291,10 +285,16 @@ impl CreateChannelBotResponse {
     ) -> AppResult<Self> {
         let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&bot);
         Ok(Self {
+            webhook_ingestion: descriptor.webhook_ingestion,
+            connection_id: bot.connection_id.clone(),
             credential_source: bot.credential_source.clone(),
             managed_setup: bot.managed_setup.as_ref().map(Into::into),
             platform_config: descriptor.configuration(&bot)?,
-            webhook_url,
+            webhook_url: if descriptor.webhook_ingestion {
+                webhook_url
+            } else {
+                String::new()
+            },
             webhook_secret: descriptor
                 .webhook_secret_label
                 .filter(|_| bot.credential_source != "platform")
@@ -312,6 +312,58 @@ impl CreateChannelBotResponse {
             permission_setup_url,
             permission_setup_scopes,
         })
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChannelConnectionState {
+    pub webhook_ingestion: bool,
+    pub connection_id: Option<String>,
+    pub poll_cursor: Option<String>,
+    pub last_polled_at: Option<String>,
+    pub next_poll_at: Option<String>,
+    pub poll_backoff_until: Option<String>,
+    pub poll_error_count: u32,
+    pub error: Option<String>,
+}
+
+impl ChannelConnectionState {
+    fn new(
+        bot: &crate::models::channel_bot::ChannelBot,
+        adapter: &dyn PlatformAdapter,
+        config: &crate::config::AppConfig,
+    ) -> Self {
+        let next = match adapter.ingestion() {
+            crate::services::channel_platform::Ingestion::Poll { min_interval_secs }
+                if config.channel_poll_interval_secs > 0
+                    && bot.is_active
+                    && bot.status == "active" =>
+            {
+                let interval = min_interval_secs
+                    .max(config.channel_poll_interval_secs)
+                    .min(i64::MAX as u64) as i64;
+                let next = bot.last_polled_at.unwrap_or_else(chrono::Utc::now)
+                    + chrono::Duration::seconds(interval);
+                Some(
+                    bot.poll_backoff_until
+                        .unwrap_or(next)
+                        .max(bot.poll_lease_until.unwrap_or(next))
+                        .max(next)
+                        .to_rfc3339(),
+                )
+            }
+            _ => None,
+        };
+        Self {
+            webhook_ingestion: adapter.registration().webhook_ingestion,
+            connection_id: bot.connection_id.clone(),
+            poll_cursor: bot.poll_cursor.clone(),
+            last_polled_at: bot.last_polled_at.map(|d| d.to_rfc3339()),
+            next_poll_at: next,
+            poll_backoff_until: bot.poll_backoff_until.map(|d| d.to_rfc3339()),
+            poll_error_count: bot.poll_error_count,
+            error: bot.error.clone(),
+        }
     }
 }
 
@@ -664,6 +716,7 @@ pub async fn update_bot(
     let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&updated);
 
     Ok(Json(ChannelBotDetailResponse {
+        connection: ChannelConnectionState::new(&updated, adapter.as_ref(), &state.config),
         credential_source: updated.credential_source.clone(),
         managed_setup: updated.managed_setup.as_ref().map(Into::into),
         platform_config: adapter.registration().configuration(&updated)?,
@@ -734,6 +787,7 @@ pub async fn get_bot(
     let (permission_setup_url, permission_setup_scopes) = lark_permission_payload(&bot);
 
     Ok(Json(ChannelBotDetailResponse {
+        connection: ChannelConnectionState::new(&bot, adapter.as_ref(), &state.config),
         credential_source: bot.credential_source.clone(),
         managed_setup: bot.managed_setup.as_ref().map(Into::into),
         platform_config: adapter.registration().configuration(&bot)?,
@@ -826,7 +880,13 @@ pub async fn verify_bot(
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
 
     // Decrypt the token and verify it is still valid with the platform
-    let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
+    let bot_token = crate::services::channel_credentials::resolve_bot_token(
+        &state.db,
+        &state.encryption_keys,
+        adapter.as_ref(),
+        &bot,
+    )
+    .await?;
     let platform_secrets = if bot.credential_source == "platform" {
         Some(
             crate::services::channel_managed::build_verify_secrets(
@@ -963,6 +1023,13 @@ mod tests {
             platform: "lark".to_string(),
             label: "Test Lark Bot".to_string(),
             credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
@@ -1028,6 +1095,13 @@ mod tests {
             platform: "telegram".to_string(),
             label: "TG Bot".to_string(),
             credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
