@@ -459,3 +459,8 @@ export interface UpdateInviteCodeRequest {
 export interface DeactivateInviteCodeResponse {
   readonly message: string;
 }
+export type PlatformCredentials = import("zod").infer<typeof import("@/schemas/admin-platform-credentials").platformCredentialsSchema>;
+export interface PlatformCredentialsUpdate {
+  readonly fields?: Record<string, string | null>;
+  readonly regenerate_verify_token?: boolean;
+}

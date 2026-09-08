@@ -1,7 +1,7 @@
 import { Suspense, useState, useEffect, useCallback, useMemo, createContext, useContext } from "react";
 import { Outlet, Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { Sidebar, AssistantNavEntry, APPROVALS_NAV, DEVELOPER_NAV, ADMIN_NAV, getVisibleMainNav, isNavActive } from "@/components/dashboard/sidebar";
-import { hasAdminRead } from "@/types/api";
+import { canAdminWrite, hasAdminRead } from "@/types/api";
 import {
   CommandPalette,
   ALL_ITEMS as SEARCH_ITEMS,
@@ -199,6 +199,7 @@ const SIDEBAR_ITEMS: Record<string, string> = {
   "/admin/groups": "Groups",
   "/admin/invite-codes": "Invite Codes",
   "/admin/feature-flags": "Feature Flags",
+  "/admin/platform-credentials": "Platform Credentials",
   "/admin/nodes": "Nodes",
   "/admin/services": "Services",
   "/admin/providers": "Providers",
@@ -658,7 +659,7 @@ function MobileNav({
                   </span>
                 </div>
                 <div className="flex flex-col gap-0.5">
-                  {ADMIN_NAV.map((item) => (
+                  {ADMIN_NAV.filter((item) => item.to !== "/admin/platform-credentials" || canAdminWrite(user)).map((item) => (
                     <MobileNavItem
                       key={item.to}
                       item={item}

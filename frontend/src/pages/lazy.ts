@@ -224,6 +224,8 @@ export const AdminInviteCodesPage = lazy(() =>
     default: m.AdminInviteCodesPage,
   })),
 );
+export const AdminPlatformCredentialsPage = lazy(() => import("./admin-platform-credentials").then((m) => ({ default: m.AdminPlatformCredentialsPage })));
+
 export const AdminFeatureFlagsPage = lazy(() =>
   import("@/pages/admin-feature-flags").then((m) => ({
     default: m.AdminFeatureFlagsPage,

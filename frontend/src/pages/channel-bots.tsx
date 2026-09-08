@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useSearch } from "@tanstack/react-router";
+import { useManagedOnboarding } from "@/hooks/use-channel-managed";
+import { ManagedWhatsApp } from "@/components/channels/managed-whatsapp";
 import { useWatch } from "react-hook-form";
 import { useAppForm } from "@/components/ui/form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -257,12 +259,16 @@ function CreateBotDialog({
   open,
   onOpenChange,
   defaultOrgId,
+  defaultPlatform = "telegram",
+  defaultLabel = "",
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   /** Pre-select this org in the scope picker when the page already has one
    *  active. `null` defaults to personal. */
   readonly defaultOrgId: string | null;
+  readonly defaultPlatform?: ChannelPlatform;
+  readonly defaultLabel?: string;
 }) {
   const navigate = useNavigate();
   const createBot = useCreateChannelBot();
@@ -282,9 +288,9 @@ function CreateBotDialog({
     mode: "onChange",
     resolver: zodResolver(createChannelBotSchema),
     defaultValues: {
-      platform: "telegram",
+      platform: defaultPlatform,
       bot_token: "",
-      label: "",
+      label: defaultLabel,
       verification_token: "",
       encrypt_key: "",
       target_org_id: defaultOrgId ?? undefined,
@@ -300,18 +306,22 @@ function CreateBotDialog({
   useEffect(() => {
     if (!open) return;
     reset({
-      platform: "telegram",
+      platform: defaultPlatform,
       bot_token: "",
-      label: "",
+      label: defaultLabel,
       verification_token: "",
       encrypt_key: "",
       target_org_id: defaultOrgId ?? undefined,
     });
-  }, [open, defaultOrgId, reset]);
+  }, [open, defaultOrgId, defaultPlatform, defaultLabel, reset]);
 
   const platform = useWatch({ control, name: "platform" });
   const setupNote = CHANNEL_PLATFORMS[platform].setupNote;
   const targetOrgId = useWatch({ control, name: "target_org_id" }) ?? null;
+  const label = useWatch({ control, name: "label" });
+  const managed = useManagedOnboarding(platform, open && Boolean(CHANNEL_PLATFORMS[platform].managedFlow));
+  const [advanced, setAdvanced] = useState(false);
+  const managedAvailable = Boolean(CHANNEL_PLATFORMS[platform].managedFlow && managed.data?.available);
 
   function onSubmit(data: CreateChannelBotFormData) {
     const payload = channelBotRegistrationPayload(data);
@@ -431,6 +441,14 @@ function CreateBotDialog({
             )}
           </div>
 
+          {managedAvailable && managed.data && <>
+            <ManagedWhatsApp key={platform} bootstrap={managed.data} label={label} orgId={targetOrgId} onConnected={(bot) => {
+              onOpenChange(false);
+              void navigate({ to: "/channel-bots/$botId", params: { botId: bot.id } });
+            }} />
+            <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)} className="border-t border-border pt-4"><summary className="cursor-pointer text-xs text-muted-foreground">{CHANNEL_PLATFORMS[platform].advancedLabel}</summary></details>
+          </>}
+          {(!managedAvailable || advanced) && <>
           {setupNote && (
             <div className="space-y-1 rounded-lg border border-border/70 bg-muted/30 p-4">
               <p className="text-[12px] font-medium">{setupNote.title}</p>
@@ -459,6 +477,7 @@ function CreateBotDialog({
               {createBot.isPending ? "Creating..." : "Add Bot"}
             </Button>
           </DialogFooter>
+          </>}
         </form>}
       </DialogContent>
     </Dialog>
@@ -972,9 +991,10 @@ function DeviceChannelsSection({
 }
 
 export function ChannelBotsPage() {
-  const [scopeOrgId, setScopeOrgId] = useState<string | null>(null);
+  const search = useSearch({ strict: false }) as { connect?: ChannelPlatform; label?: string; target_org_id?: string };
+  const [scopeOrgId, setScopeOrgId] = useState<string | null>(search.target_org_id ?? null);
   const { data: bots, isLoading, error, refetch } = useChannelBots({ orgId: scopeOrgId });
-  const [createOpen, setCreateOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(Boolean(search.connect));
   const [createDeviceOpen, setCreateDeviceOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
   const [viewMode, setViewMode] = useViewMode("channel-bots");
@@ -1016,6 +1036,8 @@ export function ChannelBotsPage() {
         open={createOpen}
         onOpenChange={setCreateOpen}
         defaultOrgId={scopeOrgId}
+        defaultPlatform={search.connect}
+        defaultLabel={search.label}
       />
       <CreateDeviceChannelDialog
         open={createDeviceOpen}

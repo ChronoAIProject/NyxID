@@ -26,6 +26,7 @@ import { ApiError } from "@/lib/api-client";
 import { CHANNEL_PLATFORMS, editableChannelFields } from "@/lib/channel-platforms";
 import { cn, formatDate, formatRelativeTime } from "@/lib/utils";
 import { useRuntimeConfig } from "@/hooks/use-runtime-config";
+import { useReregisterChannelBot } from "@/hooks/use-channel-managed";
 import { PageHeader } from "@/components/shared/page-header";
 import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
@@ -655,6 +656,17 @@ function LarkPermissionSetupSection({
   );
 }
 
+function ManagedSetupSection({ bot }: { readonly bot: ChannelBotDetail }) {
+  const reregister = useReregisterChannelBot();
+  return <DetailSection title="Managed setup">
+    <DetailRow label="Subscription" value={bot.managed_setup?.subscription ?? "pending"} />
+    <DetailRow label="Webhook override" value={bot.managed_setup?.webhook_override ?? "pending"} />
+    <DetailRow label="Number registration" value={bot.managed_setup?.registration ?? "pending"} />
+    {Object.entries(bot.managed_setup?.coexistence_sync ?? {}).map(([name, status]) => <DetailRow key={name} label={name === "history" ? "History sync" : "Contact sync"} value={status} />)}
+    <div className="p-4"><Button variant="outline" isLoading={reregister.isPending} onClick={() => reregister.mutate(bot.id, { onSuccess: () => toast.success("Number registration checked"), onError: (error) => toast.error(error instanceof ApiError ? error.message : "Unable to re-register number") })}><ShieldCheck className="size-3" />Re-register number</Button></div>
+  </DetailSection>;
+}
+
 function EditVerificationSection({
   bot,
 }: {
@@ -986,10 +998,11 @@ export function ChannelBotDetailPage() {
         }
       />
 
-      {bot.status === "pending_webhook" && <WebhookSetupChecklist bot={bot} />}
+      {bot.status === "pending_webhook" && (bot.credential_source === "platform" ? <p role="status" className="text-xs text-muted-foreground">{bot.managed_setup?.subscription === "failed" || bot.managed_setup?.registration === "failed" ? "Managed setup needs attention. Review the setup status below." : "Waiting for the first verified inbound message."}</p> : <WebhookSetupChecklist bot={bot} />)}
 
       {/* Bot Information */}
       <DetailSection title="Bot Information">
+        <DetailRow label="Credential source" value={bot.credential_source === "platform" ? "Platform-managed" : "Your own app"} />
         <DetailRow
           label="Platform"
           value={platformLabel(bot.platform)}
@@ -1021,7 +1034,7 @@ export function ChannelBotDetailPage() {
         </DetailSection>
       )}
       {bot.permission_setup_url && <LarkPermissionSetupSection bot={bot} />}
-      {editableChannelFields(bot.platform).length > 0 && <EditVerificationSection bot={bot} />}
+      {bot.credential_source === "platform" ? <ManagedSetupSection bot={bot} /> : editableChannelFields(bot.platform).length > 0 && <EditVerificationSection bot={bot} />}
 
       {/* Conversation Routes */}
       <ConversationsSection

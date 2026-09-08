@@ -37,6 +37,8 @@ export type ContentType =
   | "unknown";
 
 export interface ChannelBotItem {
+  readonly credential_source?: "user" | "platform";
+  readonly managed_setup?: ManagedBotSetup | null;
   readonly id: string;
   readonly platform: ChannelPlatform;
   readonly label: string;
@@ -107,6 +109,8 @@ export interface UpdateChannelBotRequest {
 }
 
 export interface CreateChannelBotResponse {
+  readonly credential_source?: "user" | "platform";
+  readonly managed_setup?: ManagedBotSetup | null;
   readonly phone_number_id?: string;
   readonly waba_id?: string;
   readonly webhook_url?: string;
@@ -119,6 +123,15 @@ export interface CreateChannelBotResponse {
   readonly status: ChannelBotStatus;
   readonly permission_setup_url?: string | null;
   readonly permission_setup_scopes?: readonly string[] | null;
+}
+
+export interface ManagedBotSetup {
+  readonly subscription: string;
+  readonly webhook_override: string;
+  readonly registration: string;
+  readonly business_id?: string | null;
+  readonly coexistence: boolean;
+  readonly coexistence_sync?: Record<string, string>;
 }
 
 export interface ChannelConversationItem {
