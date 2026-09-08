@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { KeyRound, RotateCw, Save, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
@@ -45,7 +45,11 @@ function CredentialForm({
     mode: "onChange",
   });
   const { reset } = form;
+  const lastRevision = useRef<string | null>(null);
   useEffect(() => {
+    const revision = JSON.stringify([provider.provider, provider.updated_at, provider.fields]);
+    if (lastRevision.current === revision) return;
+    lastRevision.current = revision;
     reset({
       fields: Object.fromEntries(
         provider.fields.map((field) => [
@@ -101,6 +105,9 @@ function CredentialForm({
           {provider.available ? "Configured" : "Not configured"}
         </Badge>
       </div>
+      {provider.backing?.type === "provider_oauth" && (
+        <p className="text-xs text-muted-foreground">Shared with the {provider.backing.provider_slug} provider.</p>
+      )}
       <form onSubmit={form.handleSubmit(save)} className="max-w-2xl space-y-4">
         {form.formState.errors.root && (
           <ErrorBanner
