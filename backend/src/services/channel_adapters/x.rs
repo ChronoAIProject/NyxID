@@ -463,7 +463,8 @@ impl PlatformAdapter for XAdapter {
                 .ok_or_else(protocol_error)?;
             pagination = Some(next.to_string());
         }
-        unreachable!("the final page always returns a bounded batch")
+        // The final page always returns above; keep a non-panicking guard for a server path.
+        Err(protocol_error())
     }
 
     fn supports_reply_metadata(&self, metadata: &Value) -> bool {
