@@ -2,7 +2,7 @@
 
 NyxID exposes three catalog services backed by the existing `google` OAuth
 provider. Configure one Google web client on that provider; users choose a
-product in **AI Services > Add Service**, select **NyxID managed**, and approve
+product in **AI Services > Connect Service**, select **NyxID managed**, and approve
 Google's consent screen. Each connection has its own encrypted tokens and
 refresh lifecycle. Adding Workspace does not automatically create Calendar
 and Drive connections.
@@ -82,16 +82,19 @@ provider; creating a sign-in client alone does not provision managed services.
    Startup replaces the unique service-provider index with a nonunique lookup
    index. Rolling back to an older backend requires removing the new product
    rows first, because the older version recreates the one-service constraint.
-2. As a NyxID administrator, open **Providers**, edit the existing **Google**
-   provider (slug `google`), and save the Google **Client ID** and **Client
-   Secret**. Use credential mode `both` for managed and custom-app options,
-   or `admin` for managed credentials only. The provider must be active.
+2. As a NyxID administrator, open **Providers > Manage Providers**, edit the
+   existing **Google** provider (slug `google`), and enter the Google
+   **Client ID** and **Client Secret**. Set **Credential Mode** to
+   **Admin or User** (`both`) for managed and custom-app options, or
+   **Admin Only** (`admin`) for managed credentials only. Keep **Active**
+   enabled and click **Save Changes**. All three catalog entries use these
+   credentials; users supply only their consent through Google.
 3. Retain the seeded OAuth configuration: Google's v2 authorization endpoint,
    `https://oauth2.googleapis.com/token`, PKCE enabled, and extra authorization
    parameters `access_type=offline` and `prompt=consent`. Product scopes are
    resolved per connection; the generic Google provider can keep its identity
    defaults. Do not create three copies of the OAuth client or provider.
-4. Open **AI Services > Add Service** and connect each desired product with
+4. Open **AI Services > Connect Service** and connect each desired product with
    a Google test account. The managed option appears only when the provider
    has usable client credentials. Custom apps continue to use their own
    connection-pinned credentials.
