@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ExternalLink } from "lucide-react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { ErrorBanner } from "@/components/shared/error-banner";
 import { DetailSection } from "@/components/shared/detail-section";
@@ -202,6 +203,9 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
         value={String(bot.poll_error_count ?? 0)}
       />
       <div className="space-y-3 py-3">
+        {bot.last_poll_notice && (
+          <p role="status" className="text-xs text-warning">{bot.last_poll_notice}</p>
+        )}
         {bot.error && <ErrorBanner message={bot.error} />}
         {bootstrap.isError && (
           <ErrorBanner
@@ -216,7 +220,7 @@ export function ManagedOAuthDetail({ bot, orgId }: ManagedDetailProps) {
             label={bot.label}
             orgId={orgId}
             botId={bot.id}
-            onConnected={() => undefined}
+            onConnected={() => toast.success("Account reconnected")}
           />
         )}
         {bootstrap.data && !bootstrap.data.available && (

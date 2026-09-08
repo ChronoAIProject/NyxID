@@ -38,7 +38,10 @@ function CredentialForm({
 }) {
   const update = useUpdatePlatformCredentials(provider.provider);
   const clear = useClearPlatformCredentials(provider.provider);
-  const [confirm, setConfirm] = useState<"clear" | "regenerate" | null>(null);
+  const [confirm, setConfirm] = useState<"clear" | "regenerate" | { field: string } | null>(null);
+  const sharedProvider = provider.backing?.type === "provider_oauth"
+    ? provider.backing.provider_slug
+    : null;
   const form = useAppForm<PlatformCredentialForm>({
     resolver: zodResolver(platformCredentialFormSchema),
     defaultValues: { fields: {} },
@@ -83,7 +86,9 @@ function CredentialForm({
 
   async function confirmAction() {
     try {
-      if (confirm === "clear") await clear.mutateAsync();
+      if (confirm && typeof confirm === "object") {
+        await update.mutateAsync({ fields: { [confirm.field]: null } });
+      } else if (confirm === "clear") await clear.mutateAsync();
       else await update.mutateAsync({ regenerate_verify_token: true });
       update.reset();
       setConfirm(null);
@@ -143,7 +148,9 @@ function CredentialForm({
                 title={`Clear ${field.label}`}
                 aria-label={`Clear ${field.label}`}
                 disabled={pending || !field.configured}
-                onClick={() => form.setValue(`fields.${field.name}`, null)}
+                onClick={() => sharedProvider
+                  ? setConfirm({ field: field.name })
+                  : form.setValue(`fields.${field.name}`, null)}
               >
                 <X className="size-3" />
               </Button>
@@ -213,13 +220,15 @@ function CredentialForm({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {confirm === "clear"
+              {confirm !== "regenerate"
                 ? "Clear platform credentials"
                 : "Regenerate verify token"}
             </DialogTitle>
             <DialogDescription>
-              {confirm === "clear"
-                ? "Managed onboarding and managed bot authentication will be unavailable until credentials are restored."
+              {confirm !== "regenerate"
+                ? sharedProvider
+                  ? `These credentials are shared with the ${sharedProvider} provider. Clearing them stops all of its OAuth connections and logins until credentials are restored.`
+                  : "Managed onboarding and managed bot authentication will be unavailable until credentials are restored."
                 : `Update ${provider.label}'s webhook verification settings with the replacement token.`}
             </DialogDescription>
           </DialogHeader>

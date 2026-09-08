@@ -53,12 +53,13 @@ for (const viewport of [
     await page.setViewportSize(viewport);
     await mockDashboard(page);
     const errors: string[] = [];
+    let currentBot = { ...bot, error: null as string | null };
     page.on("pageerror", (error) => errors.push(error.message));
     await page.route("**/channel-bots/managed-onboarding/x", (route) =>
       route.fulfill({ json: bootstrap }),
     );
-    await page.route("**/channel-bots/connected-x", (route) =>
-      route.fulfill({ json: bot }),
+    await page.route("**/api/v1/channel-bots/connected-x", (route) =>
+      route.fulfill({ json: currentBot }),
     );
     const starts: unknown[] = [];
     const completes: unknown[] = [];
@@ -85,6 +86,8 @@ for (const viewport of [
     );
     await page.route("**/channel-bots/connected-x/reconnect", async (route) => {
       reconnects.push(route.request().postDataJSON());
+      currentBot = { ...currentBot, status: "active", poll_error_count: 0, error: null,
+        next_poll_at: "2026-09-08T00:10:00Z" };
       await route.fulfill({ json: { ok: true } });
     });
     await context.route("https://x.com/i/oauth2/authorize?**", (route) =>
@@ -127,9 +130,18 @@ for (const viewport of [
     await expect(
       page.getByText("Finish webhook setup", { exact: true }),
     ).toHaveCount(0);
+    currentBot = { ...currentBot, status: "failed", poll_error_count: 5, error: "Reconnect the account to resume polling" };
+    await page.reload();
+    await expect(page.getByText(currentBot.error, { exact: true })).toBeVisible();
+    await expect(page.getByText("Consecutive errors", { exact: true }).locator("..")).toContainText("5");
     await page.getByRole("button", { name: "Reconnect", exact: true }).click();
     await expect.poll(() => reconnects.length).toBe(1);
     expect(reconnects[0]).toEqual({ connection_id: connection });
+    await expect(page.getByText("Account reconnected", { exact: true })).toBeVisible();
+    await expect(page.getByText("Reconnect the account to resume polling", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Consecutive errors", { exact: true }).locator("..")).toContainText("0");
+    await expect(page.getByText("Next poll", { exact: true }).locator("..")).toContainText("2026-09-08T00:10:00Z");
+    await expect(page.getByText("Cursor", { exact: true }).locator("..")).toContainText("100");
     await page.getByRole("button", { name: "Delete", exact: true }).click();
     await expect(
       page.getByRole("dialog").getByText(/OAuth connection stays connected/),

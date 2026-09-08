@@ -69,6 +69,7 @@ export interface ChannelBotDetail extends ChannelBotItem {
   readonly next_poll_at?: string | null;
   readonly poll_backoff_until?: string | null;
   readonly poll_error_count?: number;
+  readonly last_poll_notice?: string | null;
   readonly error?: string | null;
   readonly phone_number_id?: string;
   readonly waba_id?: string;

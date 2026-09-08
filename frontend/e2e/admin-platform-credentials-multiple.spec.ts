@@ -5,6 +5,46 @@ for (const viewport of [
   { width: 1440, height: 1000 },
   { width: 390, height: 844 },
 ]) {
+  test(`shared provider and field clears require impact confirmation at ${String(viewport.width)}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await mockDashboard(page);
+    const provider = {
+      provider: "x", label: "X (Twitter)", platform: "x", available: true,
+      backing: { type: "provider_oauth", provider_slug: "twitter" },
+      updated_at: "2026-09-08T00:00:00Z", setup_checklist: [],
+      webhook_verify_token: null, callback_url: null,
+      fields: ["client_id", "client_secret"].map((name) => ({ name,
+        label: name === "client_id" ? "Client ID" : "Client Secret",
+        secret: true, required: true, numeric: false, configured: true, help: "" })),
+    };
+    await page.route("**/api/v1/admin/platform-credentials", (route) => route.fulfill({ json: [provider] }));
+    const writes: { method: string; body: unknown }[] = [];
+    await page.route("**/api/v1/admin/platform-credentials/x", async (route) => {
+      const method = route.request().method();
+      writes.push({ method, body: method === "PATCH" ? route.request().postDataJSON() : null });
+      await route.fulfill(method === "DELETE" ? { status: 204 } : { json: provider });
+    });
+    await page.goto("/admin/platform-credentials");
+    const warning = "These credentials are shared with the twitter provider. Clearing them stops all of its OAuth connections and logins until credentials are restored.";
+    for (const name of ["Clear Client ID", "Clear Client Secret", "Clear provider"]) {
+      await page.getByRole("button", { name, exact: true }).click();
+      await expect(page.getByRole("dialog").getByText(warning, { exact: true })).toBeVisible();
+      await page.getByRole("dialog").getByRole("button", { name: "Cancel", exact: true }).click();
+      expect(writes).toEqual([]);
+      await expect(page.getByRole("button", { name: "Save credentials" })).toBeDisabled();
+    }
+    await page.getByRole("button", { name: "Clear Client Secret", exact: true }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
+    await expect.poll(() => writes.length).toBe(1);
+    expect(writes[0]).toEqual({ method: "PATCH", body: { fields: { client_secret: null } } });
+    await page.getByRole("button", { name: "Clear provider", exact: true }).click();
+    await expect(page.getByRole("dialog").getByText(warning, { exact: true })).toBeVisible();
+    await page.getByRole("dialog").getByRole("button", { name: "Confirm", exact: true }).click();
+    await expect.poll(() => writes.length).toBe(2);
+    expect(writes[1]).toEqual({ method: "DELETE", body: null });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  });
+
   test(`platform credentials isolate two provider forms at ${String(viewport.width)}px`, async ({
     page,
   }) => {
