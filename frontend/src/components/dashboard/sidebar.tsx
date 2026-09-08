@@ -76,6 +76,7 @@ export const ADMIN_NAV = [
   { to: "/admin/users", icon: Users, label: "Users" },
   { to: "/admin/invite-codes", icon: Ticket, label: "Invite Codes" },
   { to: "/admin/feature-flags", icon: Flag, label: "Feature Flags" },
+  { to: "/admin/platform-credentials", icon: KeyRound, label: "Platform Credentials" },
   { to: "/admin/audit-log", icon: ClipboardList, label: "Audit Log" },
   { to: "/admin/integrity", icon: ShieldCheck, label: "Integrity" },
   {
@@ -112,7 +113,7 @@ function getVisibleAdminNav(
 ): readonly NavItemDef[] {
   return ADMIN_NAV.filter(
     (item) =>
-      item.to !== "/admin/platform-ops" || canAdminWrite(user),
+      !["/admin/platform-ops", "/admin/platform-credentials"].includes(item.to) || canAdminWrite(user),
   );
 }
 

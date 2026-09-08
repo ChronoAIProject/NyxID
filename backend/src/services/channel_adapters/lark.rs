@@ -687,6 +687,7 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
                 patchable: true,
                 clearable: false,
                 webhook_secret: true,
+                platform_fallback: None,
             },
             RegistrationField {
                 name: "app_id",
@@ -697,6 +698,7 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
                 patchable: true,
                 clearable: false,
                 webhook_secret: false,
+                platform_fallback: None,
             },
             RegistrationField {
                 name: "app_secret",
@@ -707,6 +709,7 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
                 patchable: true,
                 clearable: false,
                 webhook_secret: false,
+                platform_fallback: None,
             },
             RegistrationField {
                 name: "encrypt_key",
@@ -717,6 +720,7 @@ pub(crate) fn lark_registration() -> super::super::channel_platform::Registratio
                 patchable: true,
                 clearable: true,
                 webhook_secret: true,
+                platform_fallback: None,
             },
         ],
         ..RegistrationDescriptor::default()
@@ -1090,6 +1094,10 @@ mod tests {
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: platform.to_string(),
             label: "Test Lark Bot".to_string(),
+            credential_source: "user".to_string(),
+            registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted: vec![0; 16],
             platform_bot_id: "cli_test".to_string(),
             platform_bot_username: "testbot".to_string(),

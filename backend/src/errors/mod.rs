@@ -1119,18 +1119,9 @@ impl AppError {
     }
 }
 
-impl IntoResponse for AppError {
-    fn into_response(self) -> Response {
-        let status = self.status_code();
-
-        // Log server errors at error level; client errors at warn level
-        match &self {
-            AppError::Internal(msg) => tracing::error!(error = %msg, "Internal server error"),
-            AppError::DatabaseError(err) => tracing::error!(error = %err, "Database error"),
-            _ => tracing::warn!(error = %self, "Client error"),
-        }
-
-        // Extract MFA session token before consuming self in the message match
+impl AppError {
+    /// The same client-safe payload for JSON responses and streaming errors.
+    pub fn response_body(&self) -> ErrorResponse {
         let mfa_session_token = match &self {
             AppError::MfaRequired { session_token } => Some(session_token.clone()),
             _ => None,
@@ -1156,7 +1147,7 @@ impl IntoResponse for AppError {
             _ => None,
         };
 
-        let body = ErrorResponse {
+        ErrorResponse {
             error: self.error_key().to_string(),
             error_code: self.error_code(),
             message: match &self {
@@ -1186,9 +1177,19 @@ impl IntoResponse for AppError {
             request_id: approval_request_id,
             approve_url,
             details,
-        };
+        }
+    }
+}
 
-        (status, axum::Json(body)).into_response()
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        // Log server errors at error level; client errors at warn level.
+        match &self {
+            AppError::Internal(msg) => tracing::error!(error = %msg, "Internal server error"),
+            AppError::DatabaseError(err) => tracing::error!(error = %err, "Database error"),
+            _ => tracing::warn!(error = %self, "Client error"),
+        }
+        (self.status_code(), axum::Json(self.response_body())).into_response()
     }
 }
 

@@ -733,12 +733,26 @@ pub async fn async_reply(
     };
 
     // Send reply to platform
+    let platform_secrets = if bot.credential_source == "platform" {
+        Some(
+            crate::services::channel_managed::build_verify_secrets(
+                &state.db,
+                &state.encryption_keys,
+                adapter.as_ref(),
+                &bot,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     let platform_msg_id = adapter
         .send_reply(
             &state.http_client,
             &crate::services::channel_platform::BotCredentials {
                 token: &bot_token,
                 platform_bot_id: Some(&bot.platform_bot_id),
+                platform_secrets: platform_secrets.as_ref(),
             },
             platform_conversation_id,
             &outbound,
@@ -1201,6 +1215,10 @@ mod tests {
             user_id: user_id.clone(),
             platform: "telegram".to_string(),
             label: "Test Bot".to_string(),
+            credential_source: "user".to_string(),
+            registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted,
             platform_bot_id: "bot_123".to_string(),
             platform_bot_username: "test_bot".to_string(),
@@ -1660,6 +1678,10 @@ mod tests {
             user_id: fixture.bot.user_id.clone(),
             platform: "lark".to_string(),
             label: "Aevatar2".to_string(),
+            credential_source: "user".to_string(),
+            registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted: fixture.bot.bot_token_encrypted.clone(),
             platform_bot_id: "cli_aab1d48eadb8ded3".to_string(),
             platform_bot_username: "lark_bot".to_string(),

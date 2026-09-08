@@ -1,5 +1,4 @@
-import { ApiError } from "@/lib/api-client";
-import { isTelemetryActive } from "@/lib/telemetry";
+import { ApiError, apiUrl, buildFetchConfig } from "@/lib/api-client";
 import { WireBodyCapture } from "@/lib/assistant/wire-body-capture";
 import type { ApiErrorResponse } from "@/types/api";
 import {
@@ -9,7 +8,6 @@ import {
 } from "@/stores/assistant-wire-log-store";
 import { useAuthStore } from "@/stores/auth-store";
 
-const API_PREFIX = "/api/v1";
 const DEBUG_REQUEST_HEADER = "X-NyxID-Debug-Upstream";
 const DEBUG_ID_HEADER = "X-NyxID-Debug-Upstream-Id";
 const DEBUG_LOG_HEADER = "X-NyxID-Debug-Upstream-Log";
@@ -20,6 +18,7 @@ const responseWireLogExchangeIds = new WeakMap<Response, string>();
 type AssistantMethod = "GET" | "POST" | "DELETE";
 
 export interface AssistantHttpRequest {
+  readonly apiBaseUrl?: string;
   readonly body?: unknown;
   readonly headers?: Readonly<Record<string, string>>;
   readonly method?: AssistantMethod;
@@ -92,7 +91,10 @@ async function captureResponse(
   const wireLogId = response.headers.get(DEBUG_ID_HEADER);
   const exchangeId = wireLogId
     ? captureAssistantWireLogId(wireLogId, meta)
-    : captureAssistantWireLogHeader(response.headers.get(DEBUG_LOG_HEADER), meta);
+    : captureAssistantWireLogHeader(
+        response.headers.get(DEBUG_LOG_HEADER),
+        meta,
+      );
   if (!exchangeId) return;
   responseWireLogExchangeIds.set(response, exchangeId);
 
@@ -157,8 +159,7 @@ async function parseError(response: Response): Promise<ApiErrorResponse> {
     const value = (await response.json()) as Record<string, unknown>;
     return {
       error: typeof value.error === "string" ? value.error : "unknown_error",
-      error_code:
-        typeof value.error_code === "number" ? value.error_code : -1,
+      error_code: typeof value.error_code === "number" ? value.error_code : -1,
       message:
         typeof value.message === "string" && value.message
           ? value.message
@@ -197,32 +198,23 @@ export async function assistantHttp(
   options: AssistantHttpRequest = {},
 ): Promise<Response> {
   const method = options.method ?? "GET";
-  const init: RequestInit = {
+  const init = buildFetchConfig({
+    ...options,
     method,
-    credentials: "include",
     headers: {
-      "Content-Type": "application/json",
-      ...(isTelemetryActive() ? { "X-NyxID-Client": "ui" } : {}),
       ...wireHeaders(endpoint),
       ...options.headers,
     },
-    signal: options.signal,
-    ...(options.body === undefined
-      ? {}
-      : { body: JSON.stringify(options.body) }),
-  };
+  });
   const response =
     (await mockResponse(endpoint, init)) ??
-    (await fetch(`${API_PREFIX}${endpoint}`, init));
+    (await fetch(apiUrl(endpoint, options.apiBaseUrl), init));
 
   void captureResponse(endpoint, method, response).catch(() => undefined);
   if (response.ok) return response;
 
   const errorBody = await parseError(response);
-  if (
-    response.status === 401 &&
-    DEAD_SESSION_CODES.has(errorBody.error_code)
-  ) {
+  if (response.status === 401 && DEAD_SESSION_CODES.has(errorBody.error_code)) {
     useAuthStore.getState().setUser(null);
   }
   redirectToConsent(errorBody);

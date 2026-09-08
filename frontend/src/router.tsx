@@ -67,6 +67,7 @@ import {
   AdminNodesPage,
   AdminAuditLogPage,
   AdminFeatureFlagsPage,
+  AdminPlatformCredentialsPage,
   AdminIntegrityPage,
   AdminPlatformOpsPage,
   AdminCreditsPage,
@@ -717,6 +718,7 @@ const apiKeyDetailRoute = createRoute({
 
 const channelBotsRoute = createRoute({
   path: "/channel-bots",
+  validateSearch: (search: Record<string, unknown>): { connect?: "whatsapp"; label?: string; target_org_id?: string } => ({ connect: search.connect === "whatsapp" ? "whatsapp" : undefined, label: typeof search.label === "string" ? search.label.slice(0, 128) : undefined, target_org_id: typeof search.target_org_id === "string" ? search.target_org_id : undefined }),
   getParentRoute: () => dashboardLayout,
   component: ChannelBotsPage,
 });
@@ -885,6 +887,18 @@ const adminInviteCodesRoute = createRoute({
   component: AdminInviteCodesPage,
 });
 
+const adminPlatformCredentialsRoute = createRoute({
+  path: "platform-credentials",
+  getParentRoute: () => adminLayout,
+  beforeLoad: () => {
+    const { user, isLoading } = useAuthStore.getState();
+    if (!isLoading && !canAdminWrite(user)) {
+      throw redirect({ to: "/dashboard" });
+    }
+  },
+  component: AdminPlatformCredentialsPage,
+});
+
 const adminFeatureFlagsRoute = createRoute({
   path: "feature-flags",
   getParentRoute: () => adminLayout,
@@ -978,6 +992,7 @@ const routeTree = rootRoute.addChildren([
       adminCreditsRoute,
       adminInviteCodesRoute,
       adminFeatureFlagsRoute,
+      adminPlatformCredentialsRoute,
     ]),
   ]),
 ]);

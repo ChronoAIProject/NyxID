@@ -961,6 +961,16 @@ fn build_router_internal(
                 .patch(handlers::admin::update_broker_settings),
         )
         .route(
+            "/platform-credentials",
+            get(handlers::admin_platform_credentials::list),
+        )
+        .route(
+            "/platform-credentials/{provider}",
+            axum::routing::put(handlers::admin_platform_credentials::update)
+                .patch(handlers::admin_platform_credentials::update)
+                .delete(handlers::admin_platform_credentials::delete),
+        )
+        .route(
             "/oauth-clients",
             get(handlers::admin::list_oauth_clients).post(handlers::admin::create_oauth_client),
         )
@@ -1760,6 +1770,22 @@ fn build_router_internal(
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
         .route(
+            "/channel-bots/managed-onboarding/{platform}",
+            get(handlers::channel_managed::bootstrap),
+        )
+        .route(
+            "/channel-bots/managed-onboarding/{platform}/complete",
+            post(handlers::channel_managed::complete),
+        )
+        .route(
+            "/channel-bots/{id}/reregister",
+            post(handlers::channel_managed::reregister),
+        )
+        .route(
+            "/channel-bots/{id}/managed-setup/repair",
+            post(handlers::channel_managed::repair),
+        )
+        .route(
             "/auth/agent-key/options",
             post(handlers::auth_agent_key::options),
         )
@@ -1905,6 +1931,11 @@ fn build_router_internal(
             "/api/v1/webhooks/channel/{platform}/{bot_id}",
             get(handlers::channel_webhooks::channel_subscription)
                 .post(handlers::channel_webhooks::channel_webhook),
+        )
+        .route(
+            "/webhooks/channel/{platform}/platform",
+            get(handlers::channel_webhooks::platform_subscription)
+                .post(handlers::channel_webhooks::platform_webhook),
         )
         .nest("/api/v1/integrations", integration_routes)
         .nest("/api/v1/node-agent", node_agent_routes)

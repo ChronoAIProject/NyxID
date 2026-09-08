@@ -1,6 +1,6 @@
 [package]
 name = "nyxid"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 rust-version.workspace = true
 license.workspace = true
@@ -60,7 +60,7 @@ rpassword = "7.5.1"
 subtle = "2"
 url = "2.5"
 urlencoding = "2.1"
-zeroize = "1"
+zeroize = { version = "1", features = ["serde"] }
 async-trait = "0.1"
 regex = "1.12.3"
 globset = "0.4.18"
@@ -94,6 +94,7 @@ tempfile = "3.27.0"
 axum-extra = { version = "0.12.6", features = ["form", "query"] }
 
 [dev-dependencies]
+wiremock = "0.6"
 # Used only by `test_utils` (compiled under `#[cfg(test)]`) to register an
 # `atexit` hook that drops the per-test databases at process exit. Already in
 # the dependency tree transitively, so this adds no new compilation.

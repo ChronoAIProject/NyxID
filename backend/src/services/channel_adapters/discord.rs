@@ -266,6 +266,7 @@ impl PlatformAdapter for DiscordAdapter {
                     patchable: false,
                     clearable: false,
                     webhook_secret: false,
+                    platform_fallback: None,
                 },
             ],
             ..RegistrationDescriptor::default()
@@ -779,6 +780,10 @@ mod tests {
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "discord".to_string(),
             label: "Test Discord Bot".to_string(),
+            credential_source: "user".to_string(),
+            registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted: vec![0; 16],
             platform_bot_id: "bot_123".to_string(),
             platform_bot_username: "testbot".to_string(),

@@ -37,6 +37,21 @@ To restrict an app's service access, have the user re-consent with `prompt=conse
 
 ## Admin Operations
 
+### Platform credentials
+
+Platform admins configure NyxID-owned integration apps at `/admin/platform-credentials`. This secret-delivering GET is **admin-only**, including for reads; operators cannot read it. The inventory and fields come from registered channel adapters (currently Meta). No configuration is required for existing platform behavior.
+
+```bash
+nyxid admin platform-credentials show meta
+nyxid admin platform-credentials set meta --app-id 123456 --embedded-signup-config-id 789012 --app-secret-env META_APP_SECRET
+nyxid admin platform-credentials set meta --field app_id=123456 --field-env app_secret=META_APP_SECRET
+nyxid admin platform-credentials set meta --regenerate-verify-token
+nyxid admin platform-credentials clear meta --field app_secret
+nyxid admin platform-credentials clear meta
+```
+
+Set secrets through environment-variable flags, never literal command arguments. Show returns configured badges and public values, plus the admin-readable generated platform Verify Token and callback URL; it never returns the app secret. Clear with `--field` removes selected fields; without it, removes the whole provider. The API is `GET /api/v1/admin/platform-credentials`, `PUT/PATCH/DELETE /api/v1/admin/platform-credentials/{provider}`; null clears a field. App-secret rotation preserves the Verify Token unless regeneration is explicitly requested. Regeneration requires updating Meta's dashboard. Clearing/deleting required credentials disables managed signup and disrupts managed webhook verification/replies until restored. Follow the descriptor's Meta checklist and `docs/CHANNEL_BOT_RELAY.md`.
+
 ### Platform roles
 
 NyxID has three platform-level roles, ordered low-to-high:

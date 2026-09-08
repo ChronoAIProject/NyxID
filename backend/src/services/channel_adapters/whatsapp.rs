@@ -27,7 +27,7 @@ fn graph_url(id: &str) -> String {
     format!("https://graph.facebook.com/{GRAPH_API_VERSION}/{id}")
 }
 
-fn validate_id(id: &str, label: &str) -> AppResult<()> {
+pub(super) fn validate_id(id: &str, label: &str) -> AppResult<()> {
     if id.is_empty() || id.len() > 32 || !id.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(AppError::ValidationError(format!(
             "{label} must be a numeric Meta identifier"
@@ -36,7 +36,7 @@ fn validate_id(id: &str, label: &str) -> AppResult<()> {
     Ok(())
 }
 
-fn verification_failed() -> AppError {
+pub(super) fn verification_failed() -> AppError {
     AppError::ChannelWebhookVerificationFailed("Invalid WhatsApp webhook signature".to_string())
 }
 
@@ -239,7 +239,7 @@ fn graph_error(status: StatusCode, body: &Value, retry_after: Option<&str>) -> A
     ))
 }
 
-async fn graph_response(response: reqwest::Response) -> AppResult<Value> {
+pub(super) async fn graph_response(response: reqwest::Response) -> AppResult<Value> {
     let status = response.status();
     let retry_after = response
         .headers()
@@ -269,6 +269,89 @@ impl PlatformAdapter for WhatsAppAdapter {
         "whatsapp"
     }
 
+    fn platform_credentials(
+        &self,
+    ) -> Option<crate::services::channel_managed::PlatformCredentialDescriptor> {
+        Some(super::whatsapp_managed::CREDENTIALS)
+    }
+    fn managed_onboarding(
+        &self,
+    ) -> Option<crate::services::channel_managed::ManagedOnboardingDescriptor> {
+        Some(super::whatsapp_managed::ONBOARDING)
+    }
+    fn validate_platform_subscription(
+        &self,
+        query: &std::collections::HashMap<String, String>,
+    ) -> AppResult<()> {
+        super::whatsapp_managed::validate_handshake(query)
+    }
+    fn managed_webhook_scope(&self, bot: &ChannelBot) -> Option<(&'static str, String)> {
+        bot.app_id.clone().map(|waba| ("app_id", waba))
+    }
+    async fn remove_managed_webhook_override(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        bot: &ChannelBot,
+    ) -> AppResult<()> {
+        super::whatsapp_managed::remove_override(http, credentials, bot).await
+    }
+    fn platform_webhook(&self) -> bool {
+        true
+    }
+    fn platform_subscription_handshake(
+        &self,
+        credentials: &PlatformVerifySecrets,
+        query: &std::collections::HashMap<String, String>,
+    ) -> AppResult<String> {
+        super::whatsapp_managed::handshake(credentials, query)
+    }
+    async fn platform_webhook_targets(
+        &self,
+        credentials: &PlatformVerifySecrets,
+        headers: &HeaderMap,
+        body: &[u8],
+    ) -> AppResult<Vec<String>> {
+        super::whatsapp_managed::targets(credentials, headers, body)
+    }
+    async fn complete_managed_onboarding(
+        &self,
+        http: &reqwest::Client,
+        credentials: &PlatformVerifySecrets,
+        input: &crate::services::channel_managed::ManagedOnboardingInput,
+    ) -> AppResult<crate::services::channel_managed::ManagedOnboardingResult> {
+        super::whatsapp_managed::complete(http, credentials, input).await
+    }
+    async fn setup_managed_bot(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        bot: &ChannelBot,
+        webhook_url: &str,
+        verify_token: &str,
+        pin: &str,
+        progress: &crate::services::channel_managed::ManagedProgress,
+    ) -> AppResult<crate::models::channel_bot::ManagedBotSetup> {
+        super::whatsapp_managed::setup(
+            http,
+            credentials,
+            bot,
+            webhook_url,
+            verify_token,
+            pin,
+            progress,
+        )
+        .await
+    }
+    async fn reregister_managed_bot(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        pin: &str,
+    ) -> AppResult<String> {
+        super::whatsapp_managed::register(http, credentials, pin).await
+    }
+
     fn registration(&self) -> RegistrationDescriptor {
         RegistrationDescriptor {
             extra_fields: &[],
@@ -290,6 +373,7 @@ impl PlatformAdapter for WhatsAppAdapter {
                     patchable: false,
                     clearable: false,
                     webhook_secret: false,
+                    platform_fallback: None,
                 },
                 RegistrationField {
                     name: "app_secret",
@@ -300,6 +384,7 @@ impl PlatformAdapter for WhatsAppAdapter {
                     patchable: true,
                     clearable: false,
                     webhook_secret: true,
+                    platform_fallback: Some("app_secret"),
                 },
                 RegistrationField {
                     name: "waba_id",
@@ -310,6 +395,7 @@ impl PlatformAdapter for WhatsAppAdapter {
                     patchable: false,
                     clearable: false,
                     webhook_secret: false,
+                    platform_fallback: None,
                 },
             ],
             webhook_secret_label: Some("Verify Token"),
@@ -348,7 +434,7 @@ impl PlatformAdapter for WhatsAppAdapter {
     }
 
     fn validate_stored_verification(&self, bot: &ChannelBot) -> AppResult<()> {
-        if bot.app_secret_encrypted.is_none() {
+        if bot.app_secret_encrypted.is_none() && bot.credential_source != "platform" {
             return Err(AppError::ValidationError(
                 "Meta App Secret is not configured".to_string(),
             ));
@@ -489,15 +575,13 @@ impl PlatformAdapter for WhatsAppAdapter {
         let url = format!("{}/messages", graph_url(business_object_id));
         let mut last_id = None;
         for body in reply_bodies(conversation_id, reply)? {
-            let response = http
-                .post(&url)
-                .bearer_auth(credentials.token)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|_| {
-                    AppError::ChannelPlatformError("WhatsApp send request failed".to_string())
-                })?;
+            let response =
+                super::whatsapp_managed::authenticate(http.post(&url).json(&body), credentials)?
+                    .send()
+                    .await
+                    .map_err(|_| {
+                        AppError::ChannelPlatformError("WhatsApp send request failed".to_string())
+                    })?;
             let response = graph_response(response).await?;
             last_id = Some(
                 response["messages"][0]["id"]
@@ -532,15 +616,16 @@ impl PlatformAdapter for WhatsAppAdapter {
     ) -> AppResult<BotIdentity> {
         let business_object_id = credentials.platform_bot_id.unwrap_or_default();
         validate_id(business_object_id, "Phone Number ID")?;
-        let response = http
-            .get(graph_url(business_object_id))
-            .query(&[("fields", "id,display_phone_number,verified_name")])
-            .bearer_auth(credentials.token)
-            .send()
-            .await
-            .map_err(|_| {
-                AppError::ChannelPlatformError("WhatsApp identity verification failed".to_string())
-            })?;
+        let response = super::whatsapp_managed::authenticate(
+            http.get(graph_url(business_object_id))
+                .query(&[("fields", "id,display_phone_number,verified_name")]),
+            credentials,
+        )?
+        .send()
+        .await
+        .map_err(|_| {
+            AppError::ChannelPlatformError("WhatsApp identity verification failed".to_string())
+        })?;
         let response = graph_response(response).await?;
         if response["id"].as_str() != Some(business_object_id) {
             return Err(AppError::ChannelPlatformError(

@@ -147,6 +147,92 @@ pub trait PlatformAdapter: Send + Sync {
     /// Platform identifier (e.g. "telegram", "discord", "lark", "feishu").
     fn platform_id(&self) -> &str;
 
+    fn platform_credentials(&self) -> Option<super::channel_managed::PlatformCredentialDescriptor> {
+        None
+    }
+
+    fn managed_onboarding(&self) -> Option<super::channel_managed::ManagedOnboardingDescriptor> {
+        None
+    }
+
+    fn platform_webhook(&self) -> bool {
+        false
+    }
+
+    fn platform_subscription_handshake(
+        &self,
+        _credentials: &PlatformVerifySecrets,
+        _query: &std::collections::HashMap<String, String>,
+    ) -> AppResult<String> {
+        Err(super::channel_managed::unavailable())
+    }
+
+    /// Reject malformed public handshakes before storage or decryption.
+    fn validate_platform_subscription(
+        &self,
+        _query: &std::collections::HashMap<String, String>,
+    ) -> AppResult<()> {
+        Err(super::channel_managed::unavailable())
+    }
+
+    /// Storage field and value identifying bots that share a managed callback.
+    fn managed_webhook_scope(
+        &self,
+        _bot: &crate::models::channel_bot::ChannelBot,
+    ) -> Option<(&'static str, String)> {
+        None
+    }
+
+    async fn remove_managed_webhook_override(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _bot: &crate::models::channel_bot::ChannelBot,
+    ) -> AppResult<()> {
+        Err(super::channel_managed::unavailable())
+    }
+
+    async fn platform_webhook_targets(
+        &self,
+        _credentials: &PlatformVerifySecrets,
+        _headers: &axum::http::HeaderMap,
+        _body: &[u8],
+    ) -> AppResult<Vec<String>> {
+        Err(super::channel_managed::unavailable())
+    }
+
+    async fn complete_managed_onboarding(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &PlatformVerifySecrets,
+        _input: &super::channel_managed::ManagedOnboardingInput,
+    ) -> AppResult<super::channel_managed::ManagedOnboardingResult> {
+        Err(super::channel_managed::unavailable())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn setup_managed_bot(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _bot: &crate::models::channel_bot::ChannelBot,
+        _webhook_url: &str,
+        _verify_token: &str,
+        _pin: &str,
+        _progress: &super::channel_managed::ManagedProgress,
+    ) -> AppResult<crate::models::channel_bot::ManagedBotSetup> {
+        Err(super::channel_managed::unavailable())
+    }
+
+    async fn reregister_managed_bot(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _pin: &str,
+    ) -> AppResult<String> {
+        Err(super::channel_managed::unavailable())
+    }
+
     fn registration(&self) -> RegistrationDescriptor {
         RegistrationDescriptor::default()
     }

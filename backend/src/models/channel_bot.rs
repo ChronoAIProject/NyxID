@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 pub const COLLECTION_NAME: &str = "channel_bots";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ChannelBot {
     #[serde(rename = "_id")]
     pub id: String,
@@ -11,6 +11,15 @@ pub struct ChannelBot {
     /// Platform identifier: "telegram", "discord", "lark", "feishu", "slack", "whatsapp"
     pub platform: String,
     pub label: String,
+    #[serde(default = "default_credential_source")]
+    pub credential_source: String,
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    pub registration_pin_encrypted: Option<Vec<u8>>,
+    /// Managed-only copy of the generated verify token for repeatable setup.
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    pub webhook_secret_encrypted: Option<Vec<u8>>,
+    #[serde(default)]
+    pub managed_setup: Option<ManagedBotSetup>,
     /// Encrypted bot token (AES-256 envelope encryption).
     /// For Slack this is the `xoxb-` bot user token.
     #[serde(with = "crate::models::bson_bytes::required")]
@@ -53,6 +62,33 @@ pub struct ChannelBot {
     pub updated_at: DateTime<Utc>,
 }
 
+fn default_credential_source() -> String {
+    "user".to_string()
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ManagedBotSetup {
+    pub subscription: String,
+    pub webhook_override: String,
+    pub registration: String,
+    #[serde(default)]
+    pub business_id: Option<String>,
+    #[serde(default)]
+    pub coexistence: bool,
+    #[serde(default)]
+    pub coexistence_sync: std::collections::BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for ChannelBot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChannelBot")
+            .field("id", &self.id)
+            .field("platform", &self.platform)
+            .field("credentials", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -68,6 +104,10 @@ mod tests {
             user_id: uuid::Uuid::new_v4().to_string(),
             platform: "telegram".to_string(),
             label: "My Bot".to_string(),
+            credential_source: "user".to_string(),
+            registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
+            managed_setup: None,
             bot_token_encrypted: vec![1, 2, 3, 4],
             platform_bot_id: "123456789".to_string(),
             platform_bot_username: "mybot".to_string(),
@@ -171,5 +211,42 @@ mod tests {
         let restored: ChannelBot = bson::from_document(document).unwrap();
         assert_eq!(restored.app_secret_encrypted, bot.app_secret_encrypted);
         assert_eq!(restored.platform_bot_id, bot.platform_bot_id);
+    }
+
+    #[test]
+    fn managed_fields_are_optional_and_pin_is_bson_binary() {
+        let mut bot = make_channel_bot();
+        let mut old = bson::to_document(&bot).unwrap();
+        for field in [
+            "credential_source",
+            "registration_pin_encrypted",
+            "webhook_secret_encrypted",
+            "managed_setup",
+        ] {
+            old.remove(field);
+        }
+        let legacy: ChannelBot = bson::from_document(old).unwrap();
+        assert_eq!(legacy.credential_source, "user");
+        assert!(legacy.registration_pin_encrypted.is_none());
+        assert!(legacy.webhook_secret_encrypted.is_none());
+        assert!(legacy.managed_setup.is_none());
+        bot.credential_source = "platform".to_string();
+        bot.registration_pin_encrypted = Some(vec![9, 8, 7]);
+        bot.webhook_secret_encrypted = Some(vec![6, 5, 4]);
+        bot.managed_setup = Some(ManagedBotSetup {
+            registration: "registered".to_string(),
+            ..Default::default()
+        });
+        let stored = bson::to_document(&bot).unwrap();
+        assert_eq!(
+            stored
+                .get_binary_generic("registration_pin_encrypted")
+                .unwrap(),
+            &[9, 8, 7]
+        );
+        let restored: ChannelBot = bson::from_document(stored).unwrap();
+        assert_eq!(restored.webhook_secret_encrypted, Some(vec![6, 5, 4]));
+        assert_eq!(restored.managed_setup.unwrap().registration, "registered");
+        assert!(!format!("{bot:?}").contains("9, 8, 7"));
     }
 }
