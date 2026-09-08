@@ -1894,6 +1894,91 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // 25. Notion (OAuth2)
+    //
+    // Notion public integrations use a plain authorization-code flow with
+    // no `scope` parameter -- capabilities are chosen in the Notion
+    // integration settings and the pages/databases a token can reach are
+    // chosen by the user in Notion's own consent picker. Consequences:
+    //   * `default_scopes: None` -- `resolve_scope_param` then omits the
+    //     parameter entirely, which is what Notion expects.
+    //   * No `platform_scope_allowlist` entry (see `scope_catalog.rs`).
+    //     The spec D5 allowlist exists to stop a shared platform app from
+    //     requesting un-vetted scopes; with no scope parameter there is
+    //     nothing to gate, and `None` correctly skips the check.
+    //   * `owner=user` is REQUIRED on the authorize URL; Notion rejects
+    //     the request without it.
+    //   * Token exchange is HTTP Basic (`client_secret_basic`).
+    //   * PKCE is not supported by Notion's OAuth implementation.
+    // Access tokens are long-lived and the token response carries no
+    // `refresh_token` / `expires_in`; both are already `Option` on the
+    // callback path, so the token simply persists without an expiry.
+    if !slug_exists!("notion") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "notion".to_string(),
+            name: "Notion".to_string(),
+            description: Some(
+                "Notion workspace access via OAuth 2.0. The pages and databases \
+                 an integration can reach are selected by the user during \
+                 authorization."
+                    .to_string(),
+            ),
+            provider_type: "oauth2".to_string(),
+            authorization_url: Some("https://api.notion.com/v1/oauth/authorize".to_string()),
+            token_url: Some("https://api.notion.com/v1/oauth/token".to_string()),
+            revocation_url: Some("https://api.notion.com/v1/oauth/revoke".to_string()),
+            revocation: Some(RevocationConfig {
+                style: "rfc7009".to_string(),
+                url: "https://api.notion.com/v1/oauth/revoke".to_string(),
+                // "inherit" resolves to HTTP Basic here because
+                // `token_endpoint_auth_method` is `client_secret_basic`,
+                // which is what Notion's revoke endpoint expects.
+                auth: "inherit".to_string(),
+                // Revoking one Notion token does not touch other bot
+                // installations of the same integration, so no cascade
+                // confirmation is warranted.
+                revokes_grant: false,
+            }),
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: None,
+            api_key_url: None,
+            icon_url: None,
+            documentation_url: Some(
+                "https://developers.notion.com/docs/authorization".to_string(),
+            ),
+            is_active: true,
+            // "both": BYO wins when present, otherwise the ops-provisioned
+            // platform OAuth app (one-click connect). Deliberately NOT added
+            // to SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS, so an ops
+            // update to this row survives restarts.
+            credential_mode: "both".to_string(),
+            token_endpoint_auth_method: "client_secret_basic".to_string(),
+            extra_auth_params: Some(HashMap::from([(
+                "owner".to_string(),
+                "user".to_string(),
+            )])),
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 1,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_revocation(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "notion", "Seeded default provider: Notion");
+        seeded_count += 1;
+    }
+
     // Cloud billing providers (NyxID#716, #778). AWS uses direct sigv4
     // injection (non-delegated). Google Cloud uses the standard OAuth2
     // delegated flow via the new `google-cloud` provider + `api-google-cloud`
@@ -2469,6 +2554,22 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
             },
             false,
         )),
+        // Notion is request/response JSON only: no WebSocket surface, no
+        // streaming responses, and file content is uploaded to a signed S3
+        // URL returned by Notion rather than through the proxy, so binary
+        // upload is not a capability of this service.
+        "api-notion" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: false,
+                supports_direct_downstream_auth: true,
+                supports_authoring_via_nyx: true,
+                supports_websocket: false,
+                supports_streaming: false,
+            },
+            false,
+        )),
         _ => None,
     }
 }
@@ -2480,6 +2581,26 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
 /// `anthropic-version` (every official SDK) and clients that already set
 /// `content-type` continue to win -- the defaults only kick in when the
 /// caller omits them.
+/// Required Notion API headers. `Notion-Version` is mandatory on every
+/// request (Notion returns 400 without it), and `content-type` covers the
+/// JSON-bodied endpoints. Both are `overridable: true` so a caller pinning
+/// a different API version -- or an SDK that already sets these -- wins;
+/// the defaults only apply when the caller omits them.
+const NOTION_DEFAULT_HEADERS: &[SeededHeader] = &[
+    SeededHeader {
+        name: "Notion-Version",
+        value: "2022-06-28",
+        overridable: true,
+        sensitive: false,
+    },
+    SeededHeader {
+        name: "content-type",
+        value: "application/json",
+        overridable: true,
+        sensitive: false,
+    },
+];
+
 const ANTHROPIC_DEFAULT_HEADERS: &[SeededHeader] = &[
     SeededHeader {
         name: "anthropic-version",
@@ -2827,6 +2948,38 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
+    },
+    DefaultServiceSeed {
+        provider_slug: "notion",
+        service_slug: "api-notion",
+        service_name: "Notion",
+        base_url: "https://api.notion.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Notion pages, databases, blocks, comments, and users. Search, read, \
+             create, and update workspace content the connected user shared with \
+             the integration.",
+        ),
+        default_request_headers: Some(NOTION_DEFAULT_HEADERS),
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://www.notion.so"),
+        auth_notes: Some(
+            "Connect a Notion workspace using the NyxID managed app or your own \
+             public integration. Notion has no OAuth scopes: the integration's \
+             capabilities are fixed in Notion's developer settings, and the user \
+             picks which pages and databases to share during authorization.",
+        ),
+        known_limitations: Some(
+            "Only content the user explicitly shared with the integration is \
+             reachable; newly created pages must be shared separately. Notion \
+             enforces roughly three requests per second per integration. File \
+             uploads go to a signed URL returned by Notion, not through the \
+             proxy. Access tokens do not expire and are not refreshed.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "github-pat",
@@ -5271,7 +5424,8 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
 #[cfg(test)]
 mod tests {
     use super::{
-        ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, OPENROUTER_DEFAULT_HEADERS, SeededHeader,
+        ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, NOTION_DEFAULT_HEADERS,
+        OPENROUTER_DEFAULT_HEADERS, SeededHeader,
         normalize_telegram_bot_token, normalize_telegram_bot_username, reconcile_seeded_headers,
         seed_capability_override,
     };
@@ -5470,6 +5624,114 @@ mod tests {
         assert!(
             version.overridable,
             "anthropic-version must be overridable so SDK-supplied versions win"
+        );
+    }
+
+    #[test]
+    fn notion_seed_carries_required_version_header() {
+        let seed = DEFAULT_SERVICE_SEEDS
+            .iter()
+            .find(|s| s.service_slug == "api-notion")
+            .expect("api-notion seed should exist");
+
+        assert_eq!(seed.provider_slug, "notion");
+        assert_eq!(seed.base_url, "https://api.notion.com");
+        assert_eq!(seed.injection_method, "bearer");
+        assert_eq!(seed.injection_key, "Authorization");
+        // Delegated provider-managed auth: the ServiceProviderRequirement
+        // drives injection, so the service itself must not carry a static
+        // auth method.
+        assert!(seed.service_auth_method.is_none());
+        assert!(seed.requires_user_credential);
+        assert_eq!(seed.service_category, "connection");
+
+        let headers = seed
+            .default_request_headers
+            .expect("api-notion must carry seeded default headers");
+        let names: Vec<&str> = headers.iter().map(|h| h.name).collect();
+        assert!(
+            names.contains(&"Notion-Version"),
+            "Notion-Version must be seeded (Notion rejects requests without it); got {names:?}"
+        );
+
+        let version = headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("notion-version"))
+            .expect("Notion-Version present");
+        assert!(
+            version.overridable,
+            "Notion-Version must be overridable so a caller pinning another API version wins"
+        );
+        assert!(!version.sensitive, "an API version header is not a secret");
+        assert_eq!(NOTION_DEFAULT_HEADERS.len(), 2);
+    }
+
+    #[test]
+    fn seed_capability_override_notion_has_correct_flags() {
+        let (caps, streaming) =
+            super::seed_capability_override("api-notion").expect("api-notion has an override");
+        assert!(caps.supports_proxy_read);
+        assert!(caps.supports_proxy_write);
+        assert!(
+            !caps.supports_websocket,
+            "Notion exposes no WebSocket surface"
+        );
+        assert!(
+            !caps.supports_streaming,
+            "Notion responses are not streamed"
+        );
+        assert!(
+            !caps.supports_proxy_binary_upload,
+            "Notion file uploads go to a signed URL, not through the proxy"
+        );
+        assert!(!streaming);
+    }
+
+    #[tokio::test]
+    async fn seed_default_providers_seeds_notion_for_managed_oauth() {
+        let Some(db) = seed_default_catalog("prov_seed_notion").await else {
+            return;
+        };
+        let provider = db
+            .collection::<ProviderConfig>(COLLECTION_NAME)
+            .find_one(doc! { "slug": "notion" })
+            .await
+            .expect("query notion provider")
+            .expect("notion provider seeded");
+
+        assert_eq!(provider.provider_type, "oauth2");
+        assert!(provider.is_active);
+        // Managed one-click by default once ops provisions a client; BYO
+        // still wins when a user supplies their own integration.
+        assert_eq!(provider.credential_mode, "both");
+        // Notion authenticates the token endpoint with HTTP Basic.
+        assert_eq!(provider.token_endpoint_auth_method, "client_secret_basic");
+        // Notion's OAuth implementation has no PKCE support.
+        assert!(!provider.supports_pkce);
+        // Notion has no scope parameter at all -- capabilities are fixed on
+        // the integration and page access is chosen in Notion's own picker.
+        assert!(
+            provider.default_scopes.is_none(),
+            "Notion takes no scope parameter; sending one is a protocol error"
+        );
+        // `owner=user` is mandatory on the authorize request.
+        assert_eq!(
+            provider
+                .extra_auth_params
+                .as_ref()
+                .and_then(|params| params.get("owner"))
+                .map(String::as_str),
+            Some("user")
+        );
+        // Fresh installs must not be reverted to BYO-only on restart.
+        assert!(
+            !super::SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS.contains(&"notion"),
+            "notion must stay out of the user-mode reversion migration so ops updates stick"
+        );
+        // No platform scope allowlist is required precisely because there is
+        // no scope parameter to gate (spec D5).
+        assert!(
+            crate::services::scope_catalog::platform_scope_allowlist("notion").is_none()
         );
     }
 
