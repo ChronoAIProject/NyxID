@@ -16,11 +16,7 @@ export interface FacebookSdk {
       config_id: string;
       response_type: "code";
       override_default_response_type: true;
-      extras: {
-        setup: Record<string, never>;
-        featureType: string;
-        sessionInfoVersion: "3";
-      };
+      extras: Record<string, unknown>;
     },
   ): void;
 }

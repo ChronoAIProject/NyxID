@@ -9,6 +9,7 @@ import {
   type FacebookSdk,
 } from "@/lib/meta-embedded-signup";
 import { completeManagedOnboarding } from "@/hooks/use-channel-managed";
+import { useRuntimeConfig } from "@/hooks/use-runtime-config";
 import type { ManagedBootstrap } from "@/schemas/channel-managed";
 import type { CreateChannelBotResponse } from "@/types/channels";
 
@@ -38,6 +39,7 @@ export function ManagedWhatsApp({
   const cleanupRef = useRef<(() => void) | null>(null);
   const busyRef = useRef(false);
   const client = useQueryClient();
+  const { data: runtimeConfig, error: runtimeError } = useRuntimeConfig();
 
   useEffect(() => {
     let active = true;
@@ -67,7 +69,18 @@ export function ManagedWhatsApp({
   }, [bootstrap.app_id, bootstrap.graph_version, sdkAttempt]);
 
   function connect() {
-    if (!sdk || !bootstrap.embedded_signup_config_id || busyRef.current) return;
+    if (
+      !sdk ||
+      !bootstrap.embedded_signup_config_id ||
+      !runtimeConfig ||
+      busyRef.current
+    )
+      return;
+    const extras = bootstrap.signup_extras[feature];
+    if (!bootstrap.signup_version || !extras) {
+      setError("Meta signup configuration is unavailable. Refresh and retry.");
+      return;
+    }
     busyRef.current = true;
     setError(null);
     setStage("popup");
@@ -118,6 +131,7 @@ export function ManagedWhatsApp({
         },
         setStage,
         controller.signal,
+        runtimeConfig.api_base_url,
       )
         .then(async (result) => {
           if (!active) return;
@@ -139,6 +153,16 @@ export function ManagedWhatsApp({
       if (!active || completing) return;
       const message = parseEmbeddedSignupEvent(event);
       if (!message) return;
+      if (
+        message.event === "ERROR" ||
+        message.data.error_code ||
+        message.data.error_message
+      ) {
+        fail(
+          "Meta could not complete signup. Retry or check your business account in Meta.",
+        );
+        return;
+      }
       if (message.event === "CANCEL") {
         fail(
           message.data.current_step
@@ -147,17 +171,31 @@ export function ManagedWhatsApp({
         );
         return;
       }
-      if (message.event === "ERROR") {
+      if (
+        message.event === "FINISH_OBO_MIGRATION" ||
+        message.event === "FINISH_GRANT_ONLY_API_ACCESS"
+      ) {
         fail(
-          "Meta could not complete signup. Retry or check your business account in Meta.",
+          "Select the Cloud API or WhatsApp Business app onboarding flow in Meta.",
         );
         return;
       }
-      if (!message.data.waba_id) {
+      if ((message.data.waba_ids?.length ?? 0) > 1) {
+        fail(
+          "Select one WhatsApp Business Account for this bot and retry signup.",
+        );
+        return;
+      }
+      const waba = message.data.waba_id ?? message.data.waba_ids?.[0];
+      if (!waba) {
         fail("Meta did not return a WhatsApp Business Account. Retry signup.");
         return;
       }
-      assets = message.data;
+      assets = {
+        phone_number_id: message.data.phone_number_id,
+        waba_id: waba,
+        business_id: message.data.business_id,
+      };
       finish();
     };
     window.addEventListener("message", listener);
@@ -179,7 +217,7 @@ export function ManagedWhatsApp({
           config_id: bootstrap.embedded_signup_config_id,
           response_type: "code",
           override_default_response_type: true,
-          extras: { setup: {}, featureType: feature, sessionInfoVersion: "3" },
+          extras,
         },
       );
     } catch {
@@ -190,6 +228,9 @@ export function ManagedWhatsApp({
   return (
     <div className="space-y-4">
       {error && <ErrorBanner message={error} />}
+      {runtimeError && (
+        <ErrorBanner message="Unable to load API configuration. Refresh and retry." />
+      )}
       {error && !sdk && (
         <Button
           type="button"
@@ -249,7 +290,11 @@ export function ManagedWhatsApp({
         type="button"
         variant="primary"
         disabled={
-          !sdk || !label.trim() || label.trim().length > 128 || stage !== null
+          !sdk ||
+          !runtimeConfig ||
+          !label.trim() ||
+          label.trim().length > 128 ||
+          stage !== null
         }
         onClick={connect}
       >

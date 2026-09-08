@@ -2,9 +2,9 @@ import type { ApiErrorResponse } from "@/types/api";
 import { useAuthStore } from "@/stores/auth-store";
 import { isTelemetryActive } from "@/lib/telemetry";
 
-const API_ORIGIN = "";
-
-const BASE_URL = `${API_ORIGIN}/api/v1`;
+export function apiUrl(endpoint: string, apiBaseUrl = ""): string {
+  return `${apiBaseUrl.replace(/\/+$/, "")}/api/v1${endpoint}`;
+}
 
 export class ApiError extends Error {
   readonly status: number;
@@ -21,6 +21,7 @@ export class ApiError extends Error {
 }
 
 interface RequestOptions {
+  readonly apiBaseUrl?: string;
   readonly credentials?: RequestCredentials;
   readonly method?: string;
   readonly body?: unknown;
@@ -50,7 +51,7 @@ const NO_AUTH_STATE_CLEAR_ENDPOINTS = new Set([
   "/auth/setup",
 ]);
 
-function buildFetchConfig(options: RequestOptions): RequestInit {
+export function buildFetchConfig(options: RequestOptions): RequestInit {
   const { method = "GET", body, headers = {}, signal } = options;
 
   // Surface identification for server-side telemetry. Only attached
@@ -124,10 +125,20 @@ export async function apiClient<T>(
     }
   }
 
-  const config = buildFetchConfig(options);
-  const url = `${BASE_URL}${endpoint}`;
+  const response = await apiFetch(endpoint, options);
+  if (response.status === 204) return undefined as T;
+  return response.json() as Promise<T>;
+}
 
-  const response = await fetch(url, config);
+/** Authenticated transport shared by JSON and streaming API requests. */
+export async function apiFetch(
+  endpoint: string,
+  options: RequestOptions = {},
+): Promise<Response> {
+  const response = await fetch(
+    apiUrl(endpoint, options.apiBaseUrl),
+    buildFetchConfig(options),
+  );
   try {
     options.onResponse?.(response);
   } catch {
@@ -148,11 +159,7 @@ export async function apiClient<T>(
     throw new ApiError(response.status, errorBody);
   }
 
-  if (response.status === 204) {
-    return undefined as T;
-  }
-
-  return response.json() as Promise<T>;
+  return response;
 }
 
 export const api = {

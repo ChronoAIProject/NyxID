@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
-import { api } from "@/lib/api-client";
+import { api, apiFetch, ApiError } from "@/lib/api-client";
 import { SsePayloadDecoder } from "@/lib/assistant/sse-frame-normalizer";
 import {
   managedBootstrapSchema,
@@ -27,6 +27,8 @@ export function useManagedOnboarding(platform: string, enabled = true) {
 const progressSchema = z.object({
   stage: z.enum(["exchanging", "subscribing", "registering"]).optional(),
   error: z.string().optional(),
+  message: z.string().optional(),
+  error_code: z.number().optional(),
   result: z
     .object({ id: z.string(), platform: z.string() })
     .passthrough()
@@ -37,26 +39,21 @@ export async function completeManagedOnboarding(
   input: ManagedCompleteInput,
   onStage: (stage: string) => void,
   signal: AbortSignal,
+  apiBaseUrl: string,
 ): Promise<CreateChannelBotResponse> {
-  const response = await fetch(
-    `/api/v1/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/complete`,
+  const response = await apiFetch(
+    `/channel-bots/managed-onboarding/${encodeURIComponent(platform)}/complete`,
     {
       method: "POST",
-      credentials: "include",
+      apiBaseUrl,
       headers: {
         "Content-Type": "application/json",
         Accept: "text/event-stream",
       },
-      body: JSON.stringify(managedCompleteSchema.parse(input)),
+      body: managedCompleteSchema.parse(input),
       signal,
     },
   );
-  if (!response.ok)
-    throw new Error(
-      response.status === 429
-        ? "Too many attempts. Wait a minute before trying again."
-        : "Unable to connect WhatsApp. Check your session and retry.",
-    );
   if (!response.headers.get("content-type")?.includes("text/event-stream"))
     return (await response.json()) as CreateChannelBotResponse;
   if (!response.body)
@@ -70,7 +67,12 @@ export async function completeManagedOnboarding(
       const { done, value } = await reader.read();
       for (const payload of done ? decoder.finish() : decoder.push(value)) {
         const event = progressSchema.parse(JSON.parse(payload));
-        if (event.error) throw new Error(event.error);
+        if (event.error)
+          throw new ApiError(response.status, {
+            error: event.error,
+            message: event.message ?? event.error,
+            error_code: event.error_code ?? -1,
+          });
         if (event.stage) onStage(event.stage);
         if (event.result)
           return event.result as unknown as CreateChannelBotResponse;
@@ -90,6 +92,15 @@ export function useReregisterChannelBot() {
   return useMutation({
     mutationFn: (id: string) =>
       api.post(`/channel-bots/${encodeURIComponent(id)}/reregister`),
+    onSettled: () => client.invalidateQueries({ queryKey: ["channel-bots"] }),
+  });
+}
+
+export function useRepairChannelBot() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      api.post(`/channel-bots/${encodeURIComponent(id)}/managed-setup/repair`),
     onSettled: () => client.invalidateQueries({ queryKey: ["channel-bots"] }),
   });
 }

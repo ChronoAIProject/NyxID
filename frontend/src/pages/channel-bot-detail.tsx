@@ -26,7 +26,7 @@ import { ApiError } from "@/lib/api-client";
 import { CHANNEL_PLATFORMS, editableChannelFields } from "@/lib/channel-platforms";
 import { cn, formatDate, formatRelativeTime } from "@/lib/utils";
 import { useRuntimeConfig } from "@/hooks/use-runtime-config";
-import { useReregisterChannelBot } from "@/hooks/use-channel-managed";
+import { useReregisterChannelBot, useRepairChannelBot } from "@/hooks/use-channel-managed";
 import { PageHeader } from "@/components/shared/page-header";
 import { CopyableUrlCallout } from "@/components/shared/copyable-url-callout";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
@@ -562,11 +562,13 @@ function DeleteBotDialog({
   onOpenChange,
   onConfirm,
   isPending,
+  managed,
 }: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
   readonly onConfirm: () => void;
   readonly isPending: boolean;
+  readonly managed: boolean;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -576,6 +578,7 @@ function DeleteBotDialog({
           <DialogDescription>
             This will permanently delete this bot and all its conversation
             routes. This action cannot be undone.
+            {managed && " The number stays subscribed to the app in Meta."}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -658,12 +661,16 @@ function LarkPermissionSetupSection({
 
 function ManagedSetupSection({ bot }: { readonly bot: ChannelBotDetail }) {
   const reregister = useReregisterChannelBot();
+  const repair = useRepairChannelBot();
   return <DetailSection title="Managed setup">
     <DetailRow label="Subscription" value={bot.managed_setup?.subscription ?? "pending"} />
     <DetailRow label="Webhook override" value={bot.managed_setup?.webhook_override ?? "pending"} />
     <DetailRow label="Number registration" value={bot.managed_setup?.registration ?? "pending"} />
     {Object.entries(bot.managed_setup?.coexistence_sync ?? {}).map(([name, status]) => <DetailRow key={name} label={name === "history" ? "History sync" : "Contact sync"} value={status} />)}
-    <div className="p-4"><Button variant="outline" isLoading={reregister.isPending} onClick={() => reregister.mutate(bot.id, { onSuccess: () => toast.success("Number registration checked"), onError: (error) => toast.error(error instanceof ApiError ? error.message : "Unable to re-register number") })}><ShieldCheck className="size-3" />Re-register number</Button></div>
+    <div className="flex flex-wrap gap-2 p-4">
+      <Button variant="outline" disabled={repair.isPending} isLoading={reregister.isPending} onClick={() => reregister.mutate(bot.id, { onSuccess: () => toast.success("Number registration checked"), onError: (error) => toast.error(error instanceof ApiError ? error.message : "Unable to re-register number") })}><ShieldCheck className="size-3" />Re-register number</Button>
+      <Button variant="outline" disabled={reregister.isPending} isLoading={repair.isPending} onClick={() => repair.mutate(bot.id, { onSuccess: () => toast.success("Setup checked"), onError: (error) => toast.error(error instanceof ApiError ? error.message : "Unable to repair setup") })}><ShieldCheck className="size-3" />Repair setup</Button>
+    </div>
   </DetailSection>;
 }
 
@@ -1045,6 +1052,7 @@ export function ChannelBotDetailPage() {
 
       {/* Delete Confirmation */}
       <DeleteBotDialog
+        managed={bot.credential_source === "platform"}
         open={showDeleteDialog}
         onOpenChange={setShowDeleteDialog}
         onConfirm={() => void handleDelete()}

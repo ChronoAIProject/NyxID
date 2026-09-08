@@ -10,6 +10,44 @@ import {
 import { parseEmbeddedSignupEvent } from "@/lib/meta-embedded-signup";
 
 describe("managed onboarding boundaries", () => {
+  it("accepts v4 assets and reported errors without legacy session options", () => {
+    for (const data of [
+      {
+        event: "FINISH",
+        data: { waba_ids: ["123"], phone_number_id: "456", page_ids: ["789"] },
+      },
+      { event: "FINISH_ONLY_WABA", data: { waba_id: "123" } },
+      {
+        event: "FINISH_WHATSAPP_BUSINESS_APP_ONBOARDING",
+        data: { waba_id: "123" },
+        version: 3,
+      },
+      {
+        event: "CANCEL",
+        data: {
+          error_message: "Meta text",
+          error_code: "524126",
+          session_id: "session",
+          timestamp: "1746041036",
+        },
+      },
+    ])
+      expect(
+        parseEmbeddedSignupEvent(
+          new MessageEvent("message", {
+            origin: "https://www.facebook.com",
+            data: { type: "WA_EMBEDDED_SIGNUP", ...data },
+          }),
+        )?.event,
+      ).toBe(data.event);
+    const bootstrap = managedBootstrapSchema.parse({
+      available: true,
+      signup_version: "v4",
+      signup_extras: { "": {} },
+    });
+    expect(bootstrap.signup_version).toBe("v4");
+    expect(bootstrap.signup_extras[""]).toEqual({});
+  });
   it("accepts unavailable bootstrap and WABA-only completion", () => {
     expect(managedBootstrapSchema.parse({ available: false }).available).toBe(
       false,
