@@ -356,7 +356,7 @@ The approval system works without Telegram -- users can always approve/reject vi
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OAUTH_REFRESH_SWEEP_INTERVAL_SECS` | `600` (10 min) | Interval between proactive OAuth refresh sweeps. `0` disables the sweep (lazy proxy-time refresh still applies). |
+| `OAUTH_REFRESH_SWEEP_INTERVAL_SECS` | `600` (10 min) | Interval between proactive OAuth refresh sweeps. Also deletes channel-started `pending_auth` connections older than one hour. `0` disables both tasks (lazy proxy-time refresh still applies). |
 | `CONNECTION_EXPIRY_NOTIFICATIONS` | `true` | Sends a one-time notification when an OAuth connection changes from healthy to unusable. Audit events are always recorded. |
 | `OAUTH_REFRESH_SWEEP_WINDOW_SECS` | `900` (15 min) | How far ahead the sweep looks for expiring access tokens. Keep larger than the proxy-time 5-minute refresh buffer so the sweep wins for idle services. |
 
