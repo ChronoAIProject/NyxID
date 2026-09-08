@@ -52,7 +52,7 @@ pub const CREDENTIALS: PlatformCredentialDescriptor = PlatformCredentialDescript
     setup_checklist: &[
         "Create or choose a Meta Business app. NyxID's existing facebook provider app can be reused by adding the WhatsApp product.",
         "Add the WhatsApp product and enroll as a Tech Provider.",
-        "Create a Facebook Login for Business Embedded Signup configuration; enter its ID here. Allow the NyxID frontend domain and enable JavaScript SDK login.",
+        "Create a new Facebook Login for Business Embedded Signup configuration and select the Cloud API product to enable v4; enter its ID here. Allow the NyxID frontend domain and enable JavaScript SDK login.",
         "Complete Business Verification and App Review. Request advanced access for whatsapp_business_management and whatsapp_business_messaging.",
         "Configure the app-level Webhooks callback URL and Verify Token below and subscribe to messages.",
         "For Business App coexistence, enable Meta's Business App onboarding flow and subscribe to smb_app_state_sync, smb_message_echoes, and history. Historical chat import is not provided by NyxID.",
@@ -65,6 +65,14 @@ pub const ONBOARDING: ManagedOnboardingDescriptor = ManagedOnboardingDescriptor 
     bootstrap_fields: &["app_id", "embedded_signup_config_id"],
     completion_fields: &["code", "phone_number_id", "waba_id", "business_id"],
     graph_version: GRAPH_API_VERSION,
+    signup_version: "v4",
+    signup_extras: |feature| {
+        if feature.is_empty() {
+            json!({})
+        } else {
+            json!({ "featureType": feature })
+        }
+    },
     feature_types: &["", "whatsapp_business_app_onboarding"],
 };
 
@@ -376,6 +384,7 @@ pub async fn setup(
     let endpoint = url(base(platform), &format!("{waba}/subscribed_apps"));
     let mut state = bot.managed_setup.clone().ok_or_else(protocol_error)?;
     progress.stage("subscribing");
+    state.webhook_override = "pending".to_string();
     let subscription = send(authenticate(http.post(&endpoint), credentials)?).await;
     state.subscription = if subscription.is_ok_and(|v| v["success"] == true) {
         "subscribed"
@@ -404,6 +413,13 @@ pub async fn setup(
         .unwrap_or_else(|_| "failed".to_string());
     if state.coexistence && state.subscription == "subscribed" {
         for sync_type in ["smb_app_state_sync", "history"] {
+            if state
+                .coexistence_sync
+                .get(sync_type)
+                .is_some_and(|status| status == "requested")
+            {
+                continue;
+            }
             let result = send(authenticate(
                 http.post(url(
                     base(platform),
@@ -423,6 +439,7 @@ pub fn handshake(
     credentials: &PlatformVerifySecrets,
     query: &HashMap<String, String>,
 ) -> AppResult<String> {
+    validate_handshake(query)?;
     let denied = || AppError::Forbidden("Invalid platform subscription verification".to_string());
     let token = credentials
         .get(crate::services::platform_credential_service::VERIFY_TOKEN_FIELD)
@@ -438,6 +455,39 @@ pub fn handshake(
         .filter(|v| !v.is_empty())
         .cloned()
         .ok_or_else(denied)
+}
+
+pub fn validate_handshake(query: &HashMap<String, String>) -> AppResult<()> {
+    if query.get("hub.mode").map(String::as_str) != Some("subscribe")
+        || query
+            .get("hub.verify_token")
+            .is_none_or(|token| token.is_empty())
+    {
+        return Err(AppError::Forbidden(
+            "Invalid platform subscription verification".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn remove_override(
+    http: &reqwest::Client,
+    credentials: &BotCredentials<'_>,
+    bot: &ChannelBot,
+) -> AppResult<()> {
+    let platform = credentials.platform_secrets.ok_or_else(protocol_error)?;
+    let waba = bot.app_id.as_deref().ok_or_else(protocol_error)?;
+    validate_id(waba, "WABA ID")?;
+    // Meta removes the WABA override when subscribing without any body parameters.
+    let response = send(authenticate(
+        http.post(url(base(platform), &format!("{waba}/subscribed_apps"))),
+        credentials,
+    )?)
+    .await?;
+    if response["success"] != true {
+        return Err(protocol_error());
+    }
+    Ok(())
 }
 
 pub fn verify_signature(

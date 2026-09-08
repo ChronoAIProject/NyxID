@@ -561,7 +561,9 @@ async fn platform_credentials_mask_rotate_clear_and_fallback_on_demand() {
 
 #[tokio::test]
 async fn admin_endpoints_reject_non_admin_and_onboarding_rejects_non_humans() {
-    let (state, auth, _) = fixture().await;
+    use base64::Engine;
+    use tower::ServiceExt;
+    let (state, _, _) = fixture().await;
     let id = uuid::Uuid::new_v4().to_string();
     state
         .db
@@ -591,22 +593,47 @@ async fn admin_endpoints_reject_non_admin_and_onboarding_rejects_non_humans() {
             .status(),
         StatusCode::FORBIDDEN
     );
-    for method in [
-        crate::mw::auth::AuthMethod::ApiKey,
-        crate::mw::auth::AuthMethod::ServiceAccount,
-        crate::mw::auth::AuthMethod::Delegated,
-        crate::mw::auth::AuthMethod::Relay,
-    ] {
-        let mut denied = auth.clone();
-        denied.auth_method = method;
-        assert_eq!(
-            managed::bootstrap(State(state.clone()), denied, Path("whatsapp".into()))
+    let (_, router) = crate::routes::build_router_with_state(state.clone());
+    let router = router.with_state(state);
+    let mut tokens = vec!["nyxid_ag_test".to_string()];
+    for claim in ["sa", "delegated", "relay"] {
+        let payload = json!({ claim: true, "scope": "account:read" });
+        tokens.push(format!(
+            "header.{}.signature",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+        ));
+    }
+    for token in tokens {
+        let mut expected = None;
+        for (method, path) in [
+            ("POST", "/connect-links/complete"),
+            ("GET", "/channel-bots/managed-onboarding/whatsapp"),
+            ("POST", "/channel-bots/managed-onboarding/whatsapp/complete"),
+            ("POST", "/channel-bots/bot/reregister"),
+            ("POST", "/channel-bots/bot/managed-setup/repair"),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method(method)
+                        .uri(format!("/api/v1{path}"))
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(axum::body::Body::empty())
+                        .unwrap(),
+                )
                 .await
-                .unwrap_err()
-                .into_response()
-                .status(),
-            StatusCode::FORBIDDEN
-        );
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
+            let body = axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap();
+            if let Some(expected) = &expected {
+                assert_eq!(&body, expected, "{path}");
+            } else {
+                expected = Some(body);
+            }
+        }
     }
 }
 
@@ -619,6 +646,383 @@ pub(super) fn signed(body: &[u8]) -> HeaderMap {
             .parse()
             .unwrap(),
     )])
+}
+
+#[tokio::test]
+async fn bootstrap_exposes_stable_signup_contract() {
+    let (state, auth, _) = fixture().await;
+    let (_, Json(bootstrap)) = managed::bootstrap(State(state), auth, Path("whatsapp".into()))
+        .await
+        .unwrap();
+    assert_eq!(bootstrap.signup_version, Some("v4"));
+    assert_eq!(
+        bootstrap.graph_version,
+        Some(crate::services::channel_adapters::whatsapp::GRAPH_API_VERSION)
+    );
+    assert_eq!(bootstrap.signup_extras[""], json!({}));
+    assert_eq!(
+        bootstrap.signup_extras["whatsapp_business_app_onboarding"],
+        json!({ "featureType": "whatsapp_business_app_onboarding" })
+    );
+}
+
+#[tokio::test]
+async fn completion_json_and_sse_preserve_safe_error_payloads() {
+    for (scope, identity, message) in [
+        ("999", "333", "Meta token does not authorize"),
+        ("444", "999", "WhatsApp phone number identity mismatch"),
+    ] {
+        let (state, auth, server) = fixture().await;
+        graph(&server, scope, identity, 200, 200, false).await;
+        let mut json_error = None;
+        for streaming in [false, true] {
+            let headers = if streaming {
+                HeaderMap::from_iter([(
+                    "accept".parse().unwrap(),
+                    "text/event-stream".parse().unwrap(),
+                )])
+            } else {
+                HeaderMap::new()
+            };
+            let response = managed::complete(
+                State(state.clone()),
+                auth.clone(),
+                Path("whatsapp".into()),
+                headers,
+                Json(input()),
+            )
+            .await
+            .into_response();
+            assert_eq!(
+                response.status(),
+                if streaming {
+                    StatusCode::OK
+                } else {
+                    StatusCode::BAD_REQUEST
+                }
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), 16384)
+                .await
+                .unwrap();
+            let text = String::from_utf8(bytes.to_vec()).unwrap();
+            assert!(!text.contains("UPSTREAM-SECRET"));
+            let error: Value = if streaming {
+                text.lines()
+                    .filter_map(|line| line.strip_prefix("data: "))
+                    .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                    .find(|value| value.get("error_code").is_some())
+                    .unwrap()
+            } else {
+                serde_json::from_str(&text).unwrap()
+            };
+            assert!(error["message"].as_str().unwrap().contains(message));
+            assert!(error["error_code"].as_u64().unwrap() > 0);
+            if let Some(expected) = &json_error {
+                assert_eq!(&error, expected);
+            } else {
+                json_error = Some(error);
+            }
+        }
+    }
+    let internal = crate::errors::AppError::Internal("PRIVATE".into()).response_body();
+    assert_eq!(internal.message, "An internal error occurred");
+}
+
+#[tokio::test]
+async fn repair_recovers_partial_setup_and_reuses_encrypted_secrets() {
+    let (state, auth, server) = fixture().await;
+    graph(&server, "444", "333", 200, 200, false).await;
+    Mock::given(method("POST"))
+        .and(path("/v25.0/444/subscribed_apps"))
+        .respond_with(ResponseTemplate::new(400))
+        .with_priority(1)
+        .up_to_n_times(1)
+        .expect(1)
+        .mount(&server)
+        .await;
+    let (_, Json(created)) = managed::complete_inner(
+        &state,
+        &auth,
+        "whatsapp",
+        input(),
+        &ManagedProgress::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(created.managed_setup.unwrap().subscription, "failed");
+    let original = crate::services::channel_bot_service::get_bot(&state.db, &created.id)
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let Json(setup) =
+            managed::repair(State(state.clone()), auth.clone(), Path(created.id.clone()))
+                .await
+                .unwrap();
+        assert_eq!(setup.subscription, "subscribed");
+        assert_eq!(setup.webhook_override, "configured");
+        assert_eq!(setup.registration, "registered");
+    }
+    let bot = crate::services::channel_bot_service::get_bot(&state.db, &created.id)
+        .await
+        .unwrap();
+    assert_eq!(bot.webhook_secret_hash, original.webhook_secret_hash);
+    assert_eq!(bot.managed_setup.unwrap().webhook_override, "configured");
+    let requests = server.received_requests().await.unwrap();
+    let overrides: Vec<Value> = requests
+        .iter()
+        .filter_map(|r| r.body_json::<Value>().ok())
+        .filter(|v| v.get("verify_token").is_some())
+        .collect();
+    assert_eq!(overrides.len(), 2);
+    assert_eq!(overrides[0]["verify_token"], overrides[1]["verify_token"]);
+    let adapter = resolve_adapter("whatsapp", &state.token_exchange_cache).unwrap();
+    let query = [
+        ("hub.mode".into(), "subscribe".into()),
+        (
+            "hub.verify_token".into(),
+            overrides[0]["verify_token"].as_str().unwrap().to_string(),
+        ),
+        ("hub.challenge".into(), "challenge".into()),
+    ]
+    .into();
+    assert_eq!(
+        adapter.subscription_handshake(&original, &query).unwrap(),
+        "challenge"
+    );
+    let registrations: Vec<Value> = requests
+        .iter()
+        .filter(|r| r.url.path().ends_with("/register"))
+        .map(|r| r.body_json().unwrap())
+        .collect();
+    assert_eq!(registrations.len(), 3);
+    assert!(
+        registrations
+            .iter()
+            .all(|v| v["pin"] == registrations[0]["pin"])
+    );
+}
+
+#[tokio::test]
+async fn repair_migrates_hash_only_token_and_does_not_repeat_successful_coexistence_sync() {
+    let (state, auth, server) = fixture().await;
+    graph(&server, "444", "333", 200, 200, true).await;
+    Mock::given(method("POST"))
+        .and(path("/v25.0/333/smb_app_data"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "request_id": "sync" })))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let (_, Json(created)) = managed::complete_inner(
+        &state,
+        &auth,
+        "whatsapp",
+        input(),
+        &ManagedProgress::default(),
+    )
+    .await
+    .unwrap();
+    state
+        .db
+        .collection::<ChannelBot>(BOTS)
+        .update_one(
+            doc! { "_id": &created.id },
+            doc! { "$unset": { "webhook_secret_encrypted": "" } },
+        )
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let Json(setup) =
+            managed::repair(State(state.clone()), auth.clone(), Path(created.id.clone()))
+                .await
+                .unwrap();
+        assert_eq!(setup.registration, "coexistence");
+        assert!(
+            setup
+                .coexistence_sync
+                .values()
+                .all(|status| status == "requested")
+        );
+    }
+    let bot = crate::services::channel_bot_service::get_bot(&state.db, &created.id)
+        .await
+        .unwrap();
+    assert!(bot.webhook_secret_encrypted.is_some());
+    assert!(
+        !server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.url.path().ends_with("/register"))
+    );
+}
+
+#[tokio::test]
+async fn repair_checks_owner_and_shared_rate_limit() {
+    let (state, auth, server) = fixture().await;
+    graph(&server, "444", "333", 200, 200, false).await;
+    let (_, Json(created)) = managed::complete_inner(
+        &state,
+        &auth,
+        "whatsapp",
+        input(),
+        &ManagedProgress::default(),
+    )
+    .await
+    .unwrap();
+    let other = test_auth_user(&uuid::Uuid::new_v4().to_string());
+    assert!(
+        managed::repair(State(state.clone()), other, Path(created.id.clone()))
+            .await
+            .is_err()
+    );
+    let limiter = crate::mw::rate_limit::PerKeyRateLimiter::with_db(
+        state.db.clone(),
+        "channel_managed_onboarding",
+        5,
+        60,
+    );
+    for _ in 0..5 {
+        assert!(
+            limiter
+                .check_shared(&auth.user_id.to_string())
+                .await
+                .unwrap()
+        );
+    }
+    let error = managed::repair(State(state), auth, Path(created.id))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.into_response().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn managed_deletion_removes_only_unshared_override_and_tolerates_meta_failure() {
+    for (shared, status, expected) in [
+        (true, 200, "retained_shared"),
+        (false, 200, "removed"),
+        (false, 400, "failed"),
+    ] {
+        let (state, auth, server) = fixture().await;
+        graph(&server, "444", "333", 200, 200, false).await;
+        let (_, Json(created)) = managed::complete_inner(
+            &state,
+            &auth,
+            "whatsapp",
+            input(),
+            &ManagedProgress::default(),
+        )
+        .await
+        .unwrap();
+        let mut sibling = crate::services::channel_bot_service::get_bot(&state.db, &created.id)
+            .await
+            .unwrap();
+        sibling.id = uuid::Uuid::new_v4().to_string();
+        sibling.platform_bot_id = "555".into();
+        sibling.credential_source = if shared { "platform" } else { "user" }.into();
+        state
+            .db
+            .collection::<ChannelBot>(BOTS)
+            .insert_one(&sibling)
+            .await
+            .unwrap();
+        server.reset().await;
+        Mock::given(method("POST"))
+            .and(path("/v25.0/444/subscribed_apps"))
+            .and(query_param("appsecret_proof", token_proof()))
+            .and(|request: &wiremock::Request| request.body.is_empty())
+            .respond_with(
+                ResponseTemplate::new(status).set_body_json(json!({ "success": status == 200 })),
+            )
+            .expect(if shared { 0 } else { 1 })
+            .mount(&server)
+            .await;
+        let response = super::channel_bots::delete_bot(
+            State(state.clone()),
+            auth,
+            crate::telemetry::TelemetryContext::default(),
+            Path(created.id.clone()),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let audit = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(audit) = state.db.collection::<crate::models::audit_log::AuditLog>(crate::models::audit_log::COLLECTION_NAME)
+                    .find_one(doc! { "event_type": "channel_bot_deleted", "event_data.bot_id": &created.id }).await.unwrap() {
+                    break audit;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }).await.expect("deletion audit");
+        let metadata = audit.event_data.unwrap();
+        assert_eq!(metadata["managed_webhook_cleanup"], expected);
+        assert!(!metadata.to_string().contains("business-token"));
+        assert!(!metadata.to_string().contains("secret-for-test"));
+        assert!(
+            !crate::services::channel_bot_service::get_bot(&state.db, &created.id)
+                .await
+                .unwrap()
+                .is_active
+        );
+        assert!(
+            crate::services::channel_bot_service::get_bot(&state.db, &sibling.id)
+                .await
+                .unwrap()
+                .is_active
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_platform_handshake_does_not_access_database() {
+    let mut state = crate::test_utils::test_app_state_no_db().await;
+    // An unreachable database makes an accidental credential read exceed the deadline.
+    state.db =
+        mongodb::Client::with_uri_str("mongodb://127.0.0.1:1/?serverSelectionTimeoutMS=3000")
+            .await
+            .unwrap()
+            .database("unused");
+    for query in [
+        json!({}),
+        json!({ "hub.mode": "subscribe" }),
+        json!({ "hub.mode": "wrong", "hub.verify_token": "token" }),
+        json!({ "hub.mode": "subscribe", "hub.verify_token": "" }),
+    ] {
+        let response = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            super::channel_webhooks::platform_subscription(
+                State(state.clone()),
+                Path("whatsapp".into()),
+                axum::extract::Query(serde_json::from_value(query).unwrap()),
+            ),
+        )
+        .await
+        .expect("no database access");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+}
+
+#[tokio::test]
+async fn managed_limit_matches_manual_registration_message() {
+    let (mut state, auth, _) = fixture().await;
+    state.config.channel_relay_max_bots_per_user = 0;
+    let error = managed::complete_inner(
+        &state,
+        &auth,
+        "whatsapp",
+        input(),
+        &ManagedProgress::default(),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(error, crate::errors::AppError::ChannelBotLimitReached(ref message) if message == "maximum of 0 bots per user reached")
+    );
 }
 
 #[tokio::test]
@@ -683,6 +1087,13 @@ async fn platform_dispatcher_routes_two_bots_drops_unknown_and_preserves_dedup()
         .mount(&callback)
         .await;
     let owner = auth.user_id.to_string();
+    // Insert the BYO duplicate first: platform lookup must skip it before verification.
+    state.db.collection::<bson::Document>(BOTS).insert_one(doc! {
+        "_id": "byo-duplicate", "user_id": &owner, "platform": "whatsapp", "label": "BYO", "credential_source": "user",
+        "platform_bot_id": "333", "platform_bot_username": "333", "bot_token_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: vec![1] },
+        "webhook_registered": false, "webhook_secret_hash": "unused", "status": "pending_webhook", "is_active": true,
+        "created_at": bson::DateTime::now(), "updated_at": bson::DateTime::now(),
+    }).await.unwrap();
     for phone in ["333", "555"] {
         let bot_id = uuid::Uuid::new_v4().to_string();
         let agent_id = uuid::Uuid::new_v4().to_string();
@@ -755,4 +1166,8 @@ async fn platform_dispatcher_routes_two_bots_drops_unknown_and_preserves_dedup()
         2
     );
     assert_eq!(callback.received_requests().await.unwrap().len(), 2);
+    let byo = crate::services::channel_bot_service::get_bot(&state.db, "byo-duplicate")
+        .await
+        .unwrap();
+    assert_eq!(byo.status, "pending_webhook");
 }

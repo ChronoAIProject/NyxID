@@ -35,6 +35,9 @@ pub struct ManagedOnboardingDescriptor {
     pub bootstrap_fields: &'static [&'static str],
     pub completion_fields: &'static [&'static str],
     pub graph_version: &'static str,
+    pub signup_version: &'static str,
+    /// SDK extras for the selected contract; the configuration selects stable v4.
+    pub signup_extras: fn(&str) -> serde_json::Value,
     pub feature_types: &'static [&'static str],
 }
 

@@ -780,7 +780,7 @@ pub async fn delete_bot(
     let (owner_id, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
 
-    channel_bot_service::delete_bot(
+    let managed_webhook_cleanup = channel_bot_service::delete_bot(
         &state.db,
         &state.http_client,
         &state.encryption_keys,
@@ -805,6 +805,7 @@ pub async fn delete_bot(
         &auth_user,
         "channel_bot_deleted",
         Some(serde_json::json!({
+            "managed_webhook_cleanup": managed_webhook_cleanup,
             "bot_id": &bot_id,
             "platform": &bot.platform,
             "owner_user_id": &owner_id,
@@ -963,6 +964,7 @@ mod tests {
             label: "Test Lark Bot".to_string(),
             credential_source: "user".to_string(),
             registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
             managed_setup: None,
             bot_token_encrypted: vec![0; 16],
             platform_bot_id: "cli_test".to_string(),
@@ -1027,6 +1029,7 @@ mod tests {
             label: "TG Bot".to_string(),
             credential_source: "user".to_string(),
             registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
             managed_setup: None,
             bot_token_encrypted: vec![0; 8],
             platform_bot_id: "123".to_string(),

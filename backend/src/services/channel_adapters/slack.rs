@@ -593,6 +593,7 @@ mod tests {
             label: "Test Slack Bot".to_string(),
             credential_source: "user".to_string(),
             registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
             managed_setup: None,
             bot_token_encrypted: vec![0; 16],
             platform_bot_id: "B12345".to_string(),

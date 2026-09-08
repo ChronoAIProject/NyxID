@@ -17,7 +17,7 @@ use crate::services::{
 use crate::{
     AppState,
     errors::{AppError, AppResult},
-    mw::auth::{AuthMethod, AuthUser},
+    mw::auth::AuthUser,
 };
 
 #[derive(Debug, Serialize)]
@@ -26,6 +26,8 @@ pub struct BootstrapResponse {
     #[serde(flatten)]
     pub fields: BTreeMap<String, String>,
     pub graph_version: Option<&'static str>,
+    pub signup_version: Option<&'static str>,
+    pub signup_extras: BTreeMap<String, serde_json::Value>,
     pub feature_types: &'static [&'static str],
 }
 
@@ -43,21 +45,7 @@ impl std::fmt::Debug for CompleteRequest {
     }
 }
 
-fn require_human(auth: &AuthUser) -> AppResult<()> {
-    if !matches!(
-        auth.auth_method,
-        AuthMethod::Session | AuthMethod::AccessToken
-    ) || auth.oauth_client_id.is_some()
-    {
-        return Err(AppError::Forbidden(
-            "Managed onboarding requires a human session".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 async fn limit(state: &AppState, auth: &AuthUser) -> AppResult<()> {
-    require_human(auth)?;
     let limiter = crate::mw::rate_limit::PerKeyRateLimiter::with_db(
         state.db.clone(),
         "channel_managed_onboarding",
@@ -72,15 +60,16 @@ async fn limit(state: &AppState, auth: &AuthUser) -> AppResult<()> {
 
 pub async fn bootstrap(
     State(state): State<AppState>,
-    auth: AuthUser,
+    _auth: AuthUser,
     Path(platform): Path<String>,
 ) -> AppResult<(HeaderMap, Json<BootstrapResponse>)> {
-    require_human(&auth)?;
     let adapter = resolve_adapter(&platform, &state.token_exchange_cache)?;
     let mut response = BootstrapResponse {
         available: false,
         fields: BTreeMap::new(),
         graph_version: None,
+        signup_version: None,
+        signup_extras: BTreeMap::new(),
         feature_types: &[],
     };
     if let (Some(managed), Some(credentials)) =
@@ -100,6 +89,12 @@ pub async fn bootstrap(
                 }
             }
             response.graph_version = Some(managed.graph_version);
+            response.signup_version = Some(managed.signup_version);
+            response.signup_extras = managed
+                .feature_types
+                .iter()
+                .map(|feature| (feature.to_string(), (managed.signup_extras)(feature)))
+                .collect();
             response.feature_types = managed.feature_types;
         }
     }
@@ -131,7 +126,7 @@ pub async fn complete(
             let event = match complete_inner(&state, &auth, &platform, body, &progress).await {
                 Ok((_, Json(result))) => serde_json::json!({ "result": result }),
                 Err(error) => {
-                    serde_json::json!({ "error": "Managed onboarding failed. Retry signup or check your bot list before reconnecting.", "error_code": error.error_code() })
+                    serde_json::json!(error.response_body())
                 }
             };
             let _ = sender.send(event);
@@ -171,7 +166,6 @@ pub(crate) async fn complete_inner(
     body: CompleteRequest,
     progress: &channel_managed::ManagedProgress,
 ) -> AppResult<(StatusCode, Json<CreateChannelBotResponse>)> {
-    require_human(auth)?;
     let adapter = resolve_adapter(platform, &state.token_exchange_cache)?;
     let descriptor = adapter
         .managed_onboarding()
@@ -249,4 +243,32 @@ pub async fn reregister(
         Some(serde_json::json!({ "bot_id": id, "platform": bot.platform })),
     );
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn repair(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+) -> AppResult<Json<super::channel_bots::ManagedSetupResponse>> {
+    limit(&state, &auth).await?;
+    let (_, bot) = resolve_bot_owner_for_write(&state, &auth.user_id.to_string(), &id).await?;
+    let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
+    let setup = channel_bot_service::repair_managed_bot(
+        &state.db,
+        &state.config,
+        &state.encryption_keys,
+        &state.http_client,
+        adapter.as_ref(),
+        &bot,
+    )
+    .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth,
+        "channel_bot_managed_setup_repaired",
+        Some(
+            serde_json::json!({ "bot_id": id, "platform": bot.platform, "setup": super::channel_bots::ManagedSetupResponse::from(&setup) }),
+        ),
+    );
+    Ok(Json((&setup).into()))
 }

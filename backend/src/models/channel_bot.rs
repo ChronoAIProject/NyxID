@@ -15,6 +15,9 @@ pub struct ChannelBot {
     pub credential_source: String,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub registration_pin_encrypted: Option<Vec<u8>>,
+    /// Managed-only copy of the generated verify token for repeatable setup.
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    pub webhook_secret_encrypted: Option<Vec<u8>>,
     #[serde(default)]
     pub managed_setup: Option<ManagedBotSetup>,
     /// Encrypted bot token (AES-256 envelope encryption).
@@ -103,6 +106,7 @@ mod tests {
             label: "My Bot".to_string(),
             credential_source: "user".to_string(),
             registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
             managed_setup: None,
             bot_token_encrypted: vec![1, 2, 3, 4],
             platform_bot_id: "123456789".to_string(),
@@ -216,6 +220,7 @@ mod tests {
         for field in [
             "credential_source",
             "registration_pin_encrypted",
+            "webhook_secret_encrypted",
             "managed_setup",
         ] {
             old.remove(field);
@@ -223,9 +228,11 @@ mod tests {
         let legacy: ChannelBot = bson::from_document(old).unwrap();
         assert_eq!(legacy.credential_source, "user");
         assert!(legacy.registration_pin_encrypted.is_none());
+        assert!(legacy.webhook_secret_encrypted.is_none());
         assert!(legacy.managed_setup.is_none());
         bot.credential_source = "platform".to_string();
         bot.registration_pin_encrypted = Some(vec![9, 8, 7]);
+        bot.webhook_secret_encrypted = Some(vec![6, 5, 4]);
         bot.managed_setup = Some(ManagedBotSetup {
             registration: "registered".to_string(),
             ..Default::default()
@@ -238,6 +245,7 @@ mod tests {
             &[9, 8, 7]
         );
         let restored: ChannelBot = bson::from_document(stored).unwrap();
+        assert_eq!(restored.webhook_secret_encrypted, Some(vec![6, 5, 4]));
         assert_eq!(restored.managed_setup.unwrap().registration, "registered");
         assert!(!format!("{bot:?}").contains("9, 8, 7"));
     }

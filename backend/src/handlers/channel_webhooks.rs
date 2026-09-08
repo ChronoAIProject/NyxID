@@ -123,6 +123,9 @@ pub async fn platform_subscription(
     else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    if adapter.validate_platform_subscription(&query).is_err() {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     let result = async {
         let credentials = crate::services::platform_credential_service::load_decrypted(
             &state.db,
@@ -190,13 +193,12 @@ pub(super) async fn dispatch_platform_webhook(
         .await?;
     for target in targets {
         let bot = state.db.collection::<crate::models::channel_bot::ChannelBot>(crate::models::channel_bot::COLLECTION_NAME)
-            .find_one(doc! { "platform": platform, "platform_bot_id": &target, "is_active": true, "status": { "$in": ["active", "pending_webhook"] } }).await?;
+            .find_one(doc! { "platform": platform, "credential_source": "platform", "platform_bot_id": &target, "is_active": true, "status": { "$in": ["active", "pending_webhook"] } }).await?;
         let Some(bot) = bot else {
             tracing::debug!(platform, platform_bot_id = %target, "platform webhook for unknown number");
             continue;
         };
-        // Reuse per-bot verification and phone filtering; BYO bots still require
-        // their own app secret even on this shared ingress.
+        // Reuse per-bot verification and phone filtering for managed credentials.
         if handle_webhook_inner(state, &bot.id, platform, headers, body)
             .await
             .is_err()
@@ -1118,6 +1120,7 @@ mod tests {
             label: "Lark Bot".to_string(),
             credential_source: "user".to_string(),
             registration_pin_encrypted: None,
+            webhook_secret_encrypted: None,
             managed_setup: None,
             bot_token_encrypted: vec![0; 16],
             platform_bot_id: "cli_test".to_string(),

@@ -1436,19 +1436,7 @@ fn build_router_internal(
                 .patch(handlers::channel_bots::update_bot)
                 .delete(handlers::channel_bots::delete_bot),
         )
-        .route("/{id}/verify", post(handlers::channel_bots::verify_bot))
-        .route(
-            "/managed-onboarding/{platform}",
-            get(handlers::channel_managed::bootstrap),
-        )
-        .route(
-            "/managed-onboarding/{platform}/complete",
-            post(handlers::channel_managed::complete),
-        )
-        .route(
-            "/{id}/reregister",
-            post(handlers::channel_managed::reregister),
-        );
+        .route("/{id}/verify", post(handlers::channel_bots::verify_bot));
 
     let channel_conversation_routes = Router::new()
         .route(
@@ -1781,6 +1769,22 @@ fn build_router_internal(
 
     // Routes that BLOCK service account tokens (human-only endpoints)
     let api_v1_human_only = Router::new()
+        .route(
+            "/channel-bots/managed-onboarding/{platform}",
+            get(handlers::channel_managed::bootstrap),
+        )
+        .route(
+            "/channel-bots/managed-onboarding/{platform}/complete",
+            post(handlers::channel_managed::complete),
+        )
+        .route(
+            "/channel-bots/{id}/reregister",
+            post(handlers::channel_managed::reregister),
+        )
+        .route(
+            "/channel-bots/{id}/managed-setup/repair",
+            post(handlers::channel_managed::repair),
+        )
         .route(
             "/auth/agent-key/options",
             post(handlers::auth_agent_key::options),

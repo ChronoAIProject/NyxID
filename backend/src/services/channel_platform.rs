@@ -167,6 +167,31 @@ pub trait PlatformAdapter: Send + Sync {
         Err(super::channel_managed::unavailable())
     }
 
+    /// Reject malformed public handshakes before storage or decryption.
+    fn validate_platform_subscription(
+        &self,
+        _query: &std::collections::HashMap<String, String>,
+    ) -> AppResult<()> {
+        Err(super::channel_managed::unavailable())
+    }
+
+    /// Storage field and value identifying bots that share a managed callback.
+    fn managed_webhook_scope(
+        &self,
+        _bot: &crate::models::channel_bot::ChannelBot,
+    ) -> Option<(&'static str, String)> {
+        None
+    }
+
+    async fn remove_managed_webhook_override(
+        &self,
+        _http: &reqwest::Client,
+        _credentials: &BotCredentials<'_>,
+        _bot: &crate::models::channel_bot::ChannelBot,
+    ) -> AppResult<()> {
+        Err(super::channel_managed::unavailable())
+    }
+
     async fn platform_webhook_targets(
         &self,
         _credentials: &PlatformVerifySecrets,

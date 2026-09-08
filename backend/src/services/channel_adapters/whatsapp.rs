@@ -279,6 +279,23 @@ impl PlatformAdapter for WhatsAppAdapter {
     ) -> Option<crate::services::channel_managed::ManagedOnboardingDescriptor> {
         Some(super::whatsapp_managed::ONBOARDING)
     }
+    fn validate_platform_subscription(
+        &self,
+        query: &std::collections::HashMap<String, String>,
+    ) -> AppResult<()> {
+        super::whatsapp_managed::validate_handshake(query)
+    }
+    fn managed_webhook_scope(&self, bot: &ChannelBot) -> Option<(&'static str, String)> {
+        bot.app_id.clone().map(|waba| ("app_id", waba))
+    }
+    async fn remove_managed_webhook_override(
+        &self,
+        http: &reqwest::Client,
+        credentials: &BotCredentials<'_>,
+        bot: &ChannelBot,
+    ) -> AppResult<()> {
+        super::whatsapp_managed::remove_override(http, credentials, bot).await
+    }
     fn platform_webhook(&self) -> bool {
         true
     }
