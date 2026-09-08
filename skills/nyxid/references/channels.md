@@ -188,6 +188,15 @@ For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu/Slack, c
 
 ### Manage bots
 
+Managed WhatsApp is available after an admin configures Meta under Platform Credentials:
+
+```bash
+nyxid channel-bot register --platform whatsapp --managed
+nyxid channel-bot register --platform whatsapp --managed --label "Support" --org my-team
+```
+
+The CLI prints a browser URL (`/channel-bots?connect=whatsapp`) and requires no credential flags; all token/secret/identity flags conflict with `--managed`. The user completes Meta's popup, selecting a Cloud API number or an existing WhatsApp Business App number via coexistence. Customers pay Meta directly. `channel-bot show` includes credential source; the web detail includes WABA/subscription/registration state and **Re-register number** using the encrypted stored PIN. Managed credentials cannot be patched manually. Coexistence skips registration and initiates contact/history sync without importing old chats. BYO remains under **Advanced: use your own Meta app**. The manual Business App limitation above does not apply to Meta's Cloud API coexistence flow. See `docs/CHANNEL_BOT_RELAY.md` for prerequisites, the October 2026 Embedded Signup legacy flow deadline, and token/recovery behavior.
+
 ```bash
 nyxid channel-bot list                          # list registered bots
 nyxid channel-bot show <ID>                     # bot details + conversation count
