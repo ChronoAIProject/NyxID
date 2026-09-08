@@ -4,7 +4,7 @@
 // for unknown slugs.
 //
 // 2-tone discipline (checked in the test `add-key-dialog.test.tsx`):
-//  - The 33 known-slugs in `SPEC_CATALOG_SLUGS` carry `data-slug="<slug>"` on
+//  - The known slugs in `SPEC_CATALOG_SLUGS` carry `data-slug="<slug>"` on
 //    the rendered `<svg>` (or, for composites, on the brand `<svg>` nested
 //    inside the wrapper `<span>`).
 //  - `FallbackIcon` carries `data-fallback="true"` instead — it MUST NOT carry
@@ -29,6 +29,9 @@ import LlmOpenRouterIcon from "./llm-openrouter";
 import ApiFirecrawlIcon from "./api-firecrawl";
 import ApiTwitterIcon from "./api-twitter";
 import ApiGoogleIcon from "./api-google";
+import ApiGoogleWorkspaceIcon from "./api-google-workspace";
+import ApiGoogleCalendarIcon from "./api-google-calendar";
+import ApiGoogleDriveIcon from "./api-google-drive";
 import ApiGoogleCloudIcon from "./api-google-cloud";
 import ApiGithubIcon from "./api-github";
 import ApiGithubPatIcon from "./api-github-pat";
@@ -56,7 +59,7 @@ export type ServiceIconProps = { className?: string };
 
 export type IconComponent = ComponentType<ServiceIconProps>;
 
-// The 33 slugs seeded in `backend/src/services/provider_service.rs`
+// The slugs seeded in `backend/src/services/provider_service.rs`
 // (`DEFAULT_SERVICE_SEEDS`) — authoritative the test setup asserts against.
 export const SPEC_CATALOG_SLUGS = [
   "llm-openai",
@@ -72,6 +75,9 @@ export const SPEC_CATALOG_SLUGS = [
   "api-firecrawl",
   "api-twitter",
   "api-google",
+  "api-google-workspace",
+  "api-google-calendar",
+  "api-google-drive",
   "api-google-cloud",
   "api-github",
   "api-github-pat",
@@ -112,6 +118,9 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-firecrawl": ApiFirecrawlIcon,
   "api-twitter": ApiTwitterIcon,
   "api-google": ApiGoogleIcon,
+  "api-google-workspace": ApiGoogleWorkspaceIcon,
+  "api-google-calendar": ApiGoogleCalendarIcon,
+  "api-google-drive": ApiGoogleDriveIcon,
   "api-google-cloud": ApiGoogleCloudIcon,
   "api-github": ApiGithubIcon,
   "api-github-pat": ApiGithubPatIcon,

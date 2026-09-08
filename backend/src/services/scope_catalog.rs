@@ -100,13 +100,11 @@ pub fn removal_capability(slug: &str) -> ScopeRemoval {
 ///
 /// Deliberately NOT derived from the display-oriented `sensitive` flags below:
 /// Google's verification classification is a separate, manually maintained
-/// decision. Google stays identity-only until the Phase 2 verification pass.
+/// decision. Operators must configure and verify the managed Google app for
+/// the Drive and Calendar scopes before offering it in production.
 pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
     match slug {
-        // Identity only until aelf completes Google app verification; every
-        // useful Google API scope (Drive/Gmail/Sheets/Calendar) is sensitive
-        // or restricted and gated by Google review -> BYO for now.
-        "google" => Some(&["openid", "email", "profile"]),
+        "google" => Some(super::google_workspace::MANAGED_SCOPES),
         // Curated-broad: common recoverable read + authoring capabilities are
         // one-click. Excluded (-> BYO): `write:org` (alters org membership /
         // teams) and `delete_repo` (irreversible). Admin/hook/key/codespace/
@@ -1111,13 +1109,17 @@ mod tests {
     }
 
     #[test]
-    fn platform_allowlist_excludes_google_sensitive_scopes() {
-        // Phase 1 launches unverified: no Drive/Gmail/Sheets-class scopes may
-        // ride the shared platform app until the Google verification pass.
+    fn platform_allowlist_google_supports_drive_calendar_only() {
         let google = platform_scope_allowlist("google").unwrap();
         for s in [
             "https://www.googleapis.com/auth/drive",
             "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.readonly",
+        ] {
+            assert!(google.contains(&s));
+        }
+        for s in [
             "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/spreadsheets",
         ] {

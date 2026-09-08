@@ -1,0 +1,673 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Google Drive",
+    "version": "v3-nyxid-overlay",
+    "description": "NyxID-hosted Google Drive operations. NyxID injects the connected account's Google OAuth token."
+  },
+  "servers": [
+    {
+      "url": "https://www.googleapis.com"
+    }
+  ],
+  "paths": {
+    "/drive/v3/files": {
+      "get": {
+        "operationId": "drive_list_files",
+        "summary": "List or search Drive files and folders.",
+        "x-aevatar-tool": {
+          "name": "drive_list_files",
+          "description": "List or search Drive files and folders.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Drive search expression, for example trashed = false.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          },
+          {
+            "name": "pageToken",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "orderBy",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "corpora",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "driveId",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "includeItemsFromAllDrives",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "drive_create_file",
+        "summary": "Create file metadata or a folder. Upload file content with drive_upload_file.",
+        "x-aevatar-tool": {
+          "name": "drive_create_file",
+          "description": "Create file metadata or a folder. Upload file content with drive_upload_file.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "mimeType": {
+                    "type": "string",
+                    "description": "Use application/vnd.google-apps.folder to create a folder."
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "parents": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "trashed": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/drive/v3/files/{fileId}": {
+      "get": {
+        "operationId": "drive_get_file",
+        "summary": "Get file metadata, or download ordinary file content with alt=media. Use export for native Google documents.",
+        "x-aevatar-tool": {
+          "name": "drive_get_file",
+          "description": "Get file metadata, or download ordinary file content with alt=media. Use export for native Google documents.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "alt",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "json",
+                "media"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              },
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "drive_update_file",
+        "summary": "Update file metadata, rename, move, or move a file to trash.",
+        "x-aevatar-tool": {
+          "name": "drive_update_file",
+          "description": "Update file metadata, rename, move, or move a file to trash.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "addParents",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "removeParents",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "mimeType": {
+                    "type": "string",
+                    "description": "Use application/vnd.google-apps.folder to create a folder."
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "parents": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "trashed": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "drive_delete_file",
+        "summary": "Permanently delete a file or folder owned by the user.",
+        "x-aevatar-tool": {
+          "name": "drive_delete_file",
+          "description": "Permanently delete a file or folder owned by the user.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted"
+          }
+        }
+      }
+    },
+    "/drive/v3/files/{fileId}/copy": {
+      "post": {
+        "operationId": "drive_copy_file",
+        "summary": "Copy a Drive file with optional new metadata.",
+        "x-aevatar-tool": {
+          "name": "drive_copy_file",
+          "description": "Copy a Drive file with optional new metadata.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "mimeType": {
+                    "type": "string",
+                    "description": "Use application/vnd.google-apps.folder to create a folder."
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "parents": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "trashed": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/drive/v3/files/{fileId}/export": {
+      "get": {
+        "operationId": "drive_export_file",
+        "summary": "Export a native Google document to the requested MIME type.",
+        "x-aevatar-tool": {
+          "name": "drive_export_file",
+          "description": "Export a native Google document to the requested MIME type.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "mimeType",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/upload/drive/v3/files": {
+      "post": {
+        "operationId": "drive_upload_file",
+        "summary": "Upload a new file's raw content. Rename or move it with drive_update_file.",
+        "x-aevatar-tool": {
+          "name": "drive_upload_file",
+          "description": "Upload a new file's raw content. Rename or move it with drive_update_file.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "uploadType",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "media"
+              ]
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "description": "Raw file bytes. MCP callers supply the binary body using the tool's base64 encoding."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/upload/drive/v3/files/{fileId}": {
+      "patch": {
+        "operationId": "drive_upload_file_content",
+        "summary": "Replace a Drive file's raw content.",
+        "x-aevatar-tool": {
+          "name": "drive_upload_file_content",
+          "description": "Replace a Drive file's raw content.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "fileId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "uploadType",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "media"
+              ]
+            }
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "description": "Fields to return, for example files(id,name,mimeType),nextPageToken.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "supportsAllDrives",
+            "in": "query",
+            "required": false,
+            "description": "Support shared drives as well as My Drive.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "description": "Raw file bytes. MCP callers supply the binary body using the tool's base64 encoding."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

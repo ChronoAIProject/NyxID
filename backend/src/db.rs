@@ -397,10 +397,23 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "provider_config_id": 1 })
-                .options(IndexOptions::builder().sparse(true).unique(true).build())
+                .options(
+                    IndexOptions::builder()
+                        .name("service_provider_lookup".to_string())
+                        .sparse(true)
+                        .build(),
+                )
                 .build(),
         )
         .await?;
+    // Multiple Google product services share a provider. Install the lookup
+    // index before dropping the old one-to-one constraint.
+    if let Err(error) = services.drop_index("provider_config_id_1").await {
+        match error.kind.as_ref() {
+            mongodb::error::ErrorKind::Command(command) if command.code == 27 => {}
+            _ => return Err(error),
+        }
+    }
 
     // ── user_service_connections ──
     let usc = db.collection::<mongodb::bson::Document>("user_service_connections");
