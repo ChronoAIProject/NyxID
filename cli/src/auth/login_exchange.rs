@@ -6,6 +6,7 @@ use std::{
     io::{IsTerminal, Write},
     path::{Path, PathBuf},
 };
+use tokio::time::Instant;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::agent_key;
@@ -194,10 +195,35 @@ fn lock_request(path: &Path) -> Result<fs::File> {
     Ok(file)
 }
 
-fn next_poll_time(pending: &PendingLogin) -> DateTime<Utc> {
-    let now = Utc::now();
-    let remaining = (pending.expires_at - now).num_seconds().max(0) as u64;
-    now + Duration::seconds(pending.interval.min(remaining) as i64)
+fn next_poll_time(now: DateTime<Utc>, interval: u64, expires_at: DateTime<Utc>) -> DateTime<Utc> {
+    i64::try_from(interval)
+        .ok()
+        .and_then(Duration::try_seconds)
+        .and_then(|interval| now.checked_add_signed(interval))
+        .unwrap_or(expires_at)
+        .min(expires_at)
+}
+
+fn next_poll_deadline(interval: u64, expires_at: Instant) -> Instant {
+    Instant::now()
+        .checked_add(std::time::Duration::from_secs(interval))
+        .unwrap_or(expires_at)
+        .min(expires_at)
+}
+
+fn schedule_next_poll(
+    path: &Path,
+    pending: &mut PendingLogin,
+    expires_at: Instant,
+) -> Result<Instant> {
+    pending.next_poll_at = Some(next_poll_time(
+        Utc::now(),
+        pending.interval,
+        pending.expires_at,
+    ));
+    let deadline = next_poll_deadline(pending.interval, expires_at);
+    save_pending(path, pending)?;
+    Ok(deadline)
 }
 
 pub async fn run(args: LoginArgs) -> Result<()> {
@@ -366,28 +392,36 @@ async fn resume(
         return Err(state_error(&pending.state).into());
     }
     let client = build_credential_http_client(pending.profile.as_deref())?;
+    // Wall time survives process restarts; active waits use a fixed monotonic mapping.
+    let wall_now = Utc::now();
+    let monotonic_now = Instant::now();
+    let deadline = |at: DateTime<Utc>| {
+        monotonic_now
+            .checked_add((at - wall_now).to_std().unwrap_or_default())
+            .ok_or(LoginError::Missing)
+    };
+    let expires_at = deadline(pending.expires_at)?;
+    let mut next_poll_at = pending
+        .next_poll_at
+        .map(|at| deadline(at.min(pending.expires_at)))
+        .transpose()?;
     loop {
-        if Utc::now() >= pending.expires_at {
+        if Instant::now() >= expires_at || Utc::now() >= pending.expires_at {
             return finish_error(&path, &mut pending, LoginError::Expired);
         }
-        let now = Utc::now();
-        if once && pending.next_poll_at.is_some_and(|next| next > now) {
+        if once && next_poll_at.is_some_and(|next| next > Instant::now()) {
             return Err(LoginError::Pending.into());
         }
         if !once {
-            let next = pending
-                .next_poll_at
-                .unwrap_or_else(|| next_poll_time(&pending));
-            let wait = (next.min(pending.expires_at) - now)
-                .to_std()
-                .unwrap_or_default();
-            tokio::time::sleep(wait).await;
+            let next =
+                next_poll_at.unwrap_or_else(|| next_poll_deadline(pending.interval, expires_at));
+            tokio::time::sleep_until(next).await;
         }
-        if Utc::now() >= pending.expires_at {
+        if Instant::now() >= expires_at || Utc::now() >= pending.expires_at {
             return finish_error(&path, &mut pending, LoginError::Expired);
         }
-        pending.next_poll_at = Some(next_poll_time(&pending));
-        save_pending(&path, &pending)?;
+        // Retain a crash checkpoint, then restart the full interval after the response.
+        schedule_next_poll(&path, &mut pending, expires_at)?;
         let response = client
             .post(format!(
                 "{}/api/v1/auth/{}/poll",
@@ -396,11 +430,22 @@ async fn resume(
             .timeout(std::time::Duration::from_secs(30))
             .json(&serde_json::json!({"device_code": pending.device_code}))
             .send()
-            .await
-            .map_err(|_| LoginError::Unavailable)?;
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(_) => {
+                schedule_next_poll(&path, &mut pending, expires_at)?;
+                return Err(LoginError::Unavailable.into());
+            }
+        };
         if response.status().is_success() {
-            let value: serde_json::Value =
-                response.json().await.map_err(|_| LoginError::Unavailable)?;
+            let value: serde_json::Value = match response.json().await {
+                Ok(value) => value,
+                Err(_) => {
+                    schedule_next_poll(&path, &mut pending, expires_at)?;
+                    return Err(LoginError::Unavailable.into());
+                }
+            };
             let result = store_delivery(
                 &client,
                 &pending.base_url,
@@ -422,9 +467,8 @@ async fn resume(
         let (error, interval) = poll_error(response).await;
         if let Some(interval) = interval {
             pending.interval = pending.interval.saturating_add(5).max(interval);
-            pending.next_poll_at = Some(next_poll_time(&pending));
-            save_pending(&path, &pending)?;
         }
+        next_poll_at = Some(schedule_next_poll(&path, &mut pending, expires_at)?);
         if error == LoginError::Pending && !once {
             continue;
         }

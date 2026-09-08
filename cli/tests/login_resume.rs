@@ -539,6 +539,77 @@ async fn explicit_restricted_resume_rejects_account_delivery() {
 }
 
 #[tokio::test]
+async fn pending_response_completion_sets_the_persisted_resume_deadline() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    let id = begin(&server, home.path(), "--device").await;
+    let received_at = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let received = received_at.clone();
+    let delay = std::time::Duration::from_millis(350);
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/device/v2/poll"))
+        .respond_with(move |_: &wiremock::Request| {
+            *received.lock().unwrap() = Some(chrono::Utc::now());
+            ResponseTemplate::new(400)
+                .set_delay(delay)
+                .set_body_json(json!({"error_code": 11202}))
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    let args = ["login", "resume", &id, "--once", "--output", "json"];
+    let out = run(home.path(), &args).await;
+    assert_eq!(out.status.code(), Some(10));
+    let pending_path = home.path().join(format!(".nyxid/pending-logins/{id}.json"));
+    let pending: Value = serde_json::from_slice(&std::fs::read(&pending_path).unwrap()).unwrap();
+    let next_poll_at =
+        chrono::DateTime::parse_from_rfc3339(pending["next_poll_at"].as_str().unwrap()).unwrap();
+    let earliest = received_at.lock().unwrap().unwrap()
+        + chrono::Duration::from_std(delay).unwrap()
+        + chrono::Duration::seconds(5);
+    assert!(
+        next_poll_at >= earliest,
+        "deadline precedes response + interval"
+    );
+    let out = run(home.path(), &args).await;
+    assert_eq!(out.status.code(), Some(10));
+    assert_eq!(output_json(&out)["error"]["code"], "login_pending");
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&std::fs::read(pending_path).unwrap()).unwrap(),
+        pending
+    );
+}
+
+#[tokio::test]
+async fn resume_expires_without_a_final_poll_when_interval_exceeds_remaining_lifetime() {
+    let server = MockServer::start().await;
+    let home = tempfile::tempdir().unwrap();
+    let id = begin(&server, home.path(), "--device").await;
+    Mock::given(method("POST"))
+        .and(path("/api/v1/auth/device/v2/poll"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({"error_code": 11204})))
+        .expect(0)
+        .mount(&server)
+        .await;
+    let pending_path = home.path().join(format!(".nyxid/pending-logins/{id}.json"));
+    let mut pending: Value =
+        serde_json::from_slice(&std::fs::read(&pending_path).unwrap()).unwrap();
+    pending["interval"] = u64::MAX.into();
+    pending["expires_at"] = (chrono::Utc::now() + chrono::Duration::milliseconds(750))
+        .to_rfc3339()
+        .into();
+    std::fs::write(&pending_path, serde_json::to_vec(&pending).unwrap()).unwrap();
+    let out = run(home.path(), &["login", "resume", &id, "--output", "json"]).await;
+    assert_eq!(out.status.code(), Some(12));
+    assert_eq!(output_json(&out)["error"]["code"], "login_expired");
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    let pending: Value = serde_json::from_slice(&std::fs::read(pending_path).unwrap()).unwrap();
+    assert_eq!(pending["state"], "login_expired");
+    assert_eq!(pending["device_code"], "");
+}
+
+#[tokio::test]
 async fn resume_persists_server_slowdown_above_sixty_seconds() {
     let server = MockServer::start().await;
     let home = tempfile::tempdir().unwrap();
@@ -563,6 +634,13 @@ async fn resume_persists_server_slowdown_above_sixty_seconds() {
     .unwrap();
     assert_eq!(pending["interval"], 125);
     assert_eq!(pending["state"], "pending");
+    let out = run(
+        home.path(),
+        &["login", "resume", &id, "--once", "--output", "json"],
+    )
+    .await;
+    assert_eq!(out.status.code(), Some(10));
+    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
 #[tokio::test]

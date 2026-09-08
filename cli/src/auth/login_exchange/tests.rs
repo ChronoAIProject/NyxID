@@ -1,6 +1,31 @@
 use super::*;
 
 #[test]
+fn poll_deadline_preserves_fractional_expiry_and_handles_unbounded_intervals() {
+    let now = "2026-09-09T01:02:03.123456789Z"
+        .parse::<DateTime<Utc>>()
+        .unwrap();
+    let expires_at = now + Duration::seconds(130) + Duration::nanoseconds(123);
+    assert_eq!(
+        next_poll_time(now, 125, expires_at),
+        now + Duration::seconds(125)
+    );
+    for interval in [131, i64::MAX as u64, u64::MAX] {
+        assert_eq!(next_poll_time(now, interval, expires_at), expires_at);
+    }
+    let expires_at = now + Duration::milliseconds(750);
+    assert_eq!(next_poll_time(now, 5, expires_at), expires_at);
+    assert_eq!(next_poll_time(expires_at, 5, expires_at), expires_at);
+
+    let monotonic_expiry = Instant::now() + std::time::Duration::from_millis(750);
+    assert_eq!(next_poll_deadline(5, monotonic_expiry), monotonic_expiry);
+    assert_eq!(
+        next_poll_deadline(u64::MAX, monotonic_expiry),
+        monotonic_expiry
+    );
+}
+
+#[test]
 fn destination_normalization_and_error_contract() {
     assert_eq!(
         normalized_destination("https://EXAMPLE.com:443/").unwrap(),
