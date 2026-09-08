@@ -1,4 +1,7 @@
-use std::{io::Read, path::Path};
+use std::{
+    io::{Read, Write},
+    path::Path,
+};
 
 use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -283,34 +286,41 @@ fn report(
             "Connection status checked. Only usable confirms a completed request with this saved credential."
         }
     };
+    // Account and destination details belong in consent output, never diagnostics.
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
     match args.auth.output {
-        OutputFormat::Json => println!(
+        OutputFormat::Json => writeln!(
+            output,
             "{}",
             serde_json::to_string(
                 &serde_json::json!({"outcome":outcome,"instance":instance,"connection":connection,"message":message})
             )?
-        ),
+        )?,
         OutputFormat::Table => {
-            eprintln!("{message}");
+            writeln!(output, "{message}")?;
             if let Some(instance) = instance {
-                eprintln!("Instance: {instance}");
+                writeln!(output, "Instance: {instance}")?;
             }
             if let Some(connection) = connection {
-                eprintln!(
+                writeln!(
+                    output,
                     "Account: {} ({})",
                     connection.account_email, connection.account_id
-                );
-                eprintln!(
+                )?;
+                writeln!(
+                    output,
                     "State: {}",
                     serde_json::to_value(&connection.status)?
                         .as_str()
                         .unwrap_or("saved")
-                );
+                )?;
                 if let Some(version) = &connection.connection {
-                    eprintln!(
+                    writeln!(
+                        output,
                         "Connection: {} (version {})",
                         version.id, version.state_version
-                    );
+                    )?;
                 }
             }
         }
