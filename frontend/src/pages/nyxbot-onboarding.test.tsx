@@ -16,7 +16,10 @@ const { get, post, redirect, auth } = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   redirect: vi.fn(),
-  auth: { user: { id: "owner" }, isAuthenticated: true },
+  auth: {
+    user: { id: "owner", display_name: "Avery", email: "avery@example.com" },
+    isAuthenticated: true,
+  },
 }));
 vi.mock("@/lib/api-client", () => ({ api: { get, post } }));
 vi.mock("@/lib/navigation", () => ({
@@ -117,6 +120,30 @@ async function toChannel() {
 }
 
 describe("Nyxbot onboarding", () => {
+  it("opens the data-source step for the signed-in account without treating sign-in as Drive and Calendar consent", async () => {
+    keys = [];
+    mount();
+    await screen.findByRole("heading", { name: "Connect a data source" });
+    expect(screen.getByText("Signed in to NyxID")).toBeVisible();
+    expect(screen.getByText("Avery")).toBeVisible();
+    expect(screen.getByText("Google Drive")).toBeVisible();
+    expect(screen.getByText("Google Calendar")).toBeVisible();
+    expect(
+      screen.getByText(/This permission is separate from signing in to NyxID/),
+    ).toBeVisible();
+    expect(screen.getByText("Data source").closest("li")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(
+      screen.queryByText("Google Workspace connected"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Continue with Google" }),
+    ).not.toBeInTheDocument();
+    expect(post).not.toHaveBeenCalled();
+    expect(redirect).not.toHaveBeenCalled();
+  });
   it.each([
     ["google", "Google"],
     ["github", "GitHub"],
@@ -304,7 +331,9 @@ describe("Nyxbot onboarding", () => {
       ] as unknown as typeof GOOGLE_WORKSPACE_SCOPES,
     };
     mount();
-    await screen.findByText(/Google Workspace authorization is not available/);
+    await screen.findByText(
+      /Google Drive and Calendar authorization is not available/,
+    );
     expect(
       screen.getByRole("button", { name: "Connect Google" }),
     ).toBeDisabled();
@@ -322,17 +351,15 @@ describe("Nyxbot onboarding", () => {
   });
   it("opens contextual help and switches the feature's language", async () => {
     mount();
-    await screen.findByText("Google Workspace connected");
+    await toChannel();
     await userEvent.click(
       screen.getByRole("button", { name: "Why this step?" }),
     );
-    await screen.findByText(
-      /Connect Google Workspace to authorize Drive and Calendar together/,
-    );
+    await screen.findByText(/Connect your business's customer-facing channel/);
     fireEvent.change(screen.getByLabelText("Language"), {
       target: { value: "zh-CN" },
     });
-    await screen.findByRole("heading", { name: "连接数据源" });
+    await screen.findByRole("heading", { name: "设置渠道" });
   });
 
   it("lets the owner recover when a previously registered bot was deleted", async () => {

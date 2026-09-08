@@ -9,13 +9,8 @@ import {
   type NyxbotChannel,
 } from "@/schemas/nyxbot-onboarding";
 import { nyxbotI18n } from "@/features/nyxbot-onboarding/i18n";
-import { BrandIcon } from "@/features/nyxbot-onboarding/brand-icon";
-import {
-  BackButton,
-  OnboardingShell,
-  OnboardingNotice,
-  StepHelp,
-} from "@/features/nyxbot-onboarding/onboarding-shell";
+import { OnboardingNotice } from "@/features/nyxbot-onboarding/onboarding-shell";
+import { DataSourceStep } from "@/features/nyxbot-onboarding/data-source-step";
 import { SignInStep } from "@/features/nyxbot-onboarding/sign-in-step";
 import { ChannelStep } from "@/features/nyxbot-onboarding/channel-step";
 import { SpendingCapStep } from "@/features/nyxbot-onboarding/spending-cap-step";
@@ -24,10 +19,12 @@ import "@/features/nyxbot-onboarding/onboarding.css";
 
 function ConnectedOnboarding({
   userId,
+  accountName,
   referral,
   callbackFailed,
 }: {
   readonly userId: string;
+  readonly accountName: string;
   readonly referral?: NyxbotChannel;
   readonly callbackFailed: boolean;
 }) {
@@ -80,47 +77,18 @@ function ConnectedOnboarding({
       />
     );
   return (
-    <OnboardingShell
-      title={t("sourceTitle")}
-      step={2}
-      actions={
-        <>
-          <Button
-            className="nb-primary"
-            isLoading={flow.connectGoogle.isPending}
-            disabled={
-              loading || loadError || (!sourceReady && !flow.googleAvailable)
-            }
-            onClick={() =>
-              sourceReady
-                ? setView(flow.progress.botId ? "link" : "channel")
-                : flow.connectGoogle.mutate()
-            }
-          >
-            {t(sourceReady ? "continue" : "connectGoogle")}
-          </Button>
-          <BackButton
-            onClick={() => setView("account")}
-            disabled={flow.connectGoogle.isPending}
-          />
-        </>
+    <DataSourceStep
+      accountName={accountName}
+      ready={sourceReady}
+      connecting={flow.connectGoogle.isPending}
+      disabled={loading || loadError || (!sourceReady && !flow.googleAvailable)}
+      onConnect={() =>
+        sourceReady
+          ? setView(flow.progress.botId ? "link" : "channel")
+          : flow.connectGoogle.mutate()
       }
+      onBack={() => setView("account")}
     >
-      <p className="nb-intro">
-        {t("sourceIntro")} <StepHelp>{t("sourceHelp")}</StepHelp>
-      </p>
-      <div className="nb-tiles">
-        <div className="nb-tile" data-selected="true">
-          <BrandIcon brand="google" />
-          <strong>{t("workspace")}</strong>
-          <span>{t("workspaceServices")}</span>
-        </div>
-        <div className="nb-tile nb-tile-unavailable" aria-disabled="true">
-          <BrandIcon brand="notion" />
-          <strong>Notion</strong>
-          <span>{t("comingSoon")}</span>
-        </div>
-      </div>
       {loading && <OnboardingNotice>{t("loading")}</OnboardingNotice>}
       {loadError && (
         <OnboardingNotice error>
@@ -159,7 +127,7 @@ function ConnectedOnboarding({
       {flow.connectGoogle.isError && (
         <OnboardingNotice error>{t("googleCancelled")}</OnboardingNotice>
       )}
-    </OnboardingShell>
+    </DataSourceStep>
   );
 }
 
@@ -177,6 +145,7 @@ export function NyxbotOnboardingPage() {
         <ConnectedOnboarding
           key={user.id}
           userId={user.id}
+          accountName={user.display_name?.trim() || user.email}
           referral={search.channel}
           callbackFailed={search.status === "error"}
         />

@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
-import { CircleHelp, Moon, Sun } from "lucide-react";
+import { Check, CircleHelp, Moon, Sun } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/popover";
 import { useApplyTheme, useResolvedTheme } from "@/hooks/use-theme";
 import { useThemeStore } from "@/stores/theme-store";
+import { BrandIcon } from "./brand-icon";
 
 export function StepHelp({ children }: { readonly children: ReactNode }) {
   const { t } = useTranslation();
@@ -58,12 +59,14 @@ export function OnboardingShell({
   step,
   children,
   actions,
+  variant = "compact",
 }: {
   readonly title: string;
   readonly subtitle?: string;
   readonly step: 1 | 2 | 3;
   readonly children: ReactNode;
   readonly actions: ReactNode;
+  readonly variant?: "compact" | "setup";
 }) {
   const { t, i18n } = useTranslation();
   useApplyTheme();
@@ -74,6 +77,67 @@ export function OnboardingShell({
     heading.current?.focus({ preventScroll: true });
     window.scrollTo(0, 0);
   }, [title]);
+
+  if (variant === "setup") {
+    const steps = [t("accountStep"), t("dataSourceStep"), t("channelStep")];
+    return (
+      <div className="nyxbot-onboarding nb-setup" lang={i18n.resolvedLanguage}>
+        <header className="nb-setup-topbar">
+          <div className="nb-setup-topbar-inner">
+            <div className="nb-setup-brand">
+              <span className="nb-setup-logo" aria-hidden="true">
+                NB
+              </span>
+              <strong>Nyxbot</strong>
+              <span>{t("setup")}</span>
+            </div>
+            <button
+              type="button"
+              className="nb-setup-return"
+              disabled
+              aria-label={t("backToNyxbot")}
+              title={t("nyxbotReturnUnavailable")}
+            >
+              <BrandIcon brand="telegram" />
+              <span>{t("backToNyxbot")}</span>
+            </button>
+          </div>
+        </header>
+        <div className="nb-setup-shell">
+          <nav className="nb-setup-steps" aria-label={t("title")}>
+            <ol>
+              {steps.map((label, index) => (
+                <li
+                  key={label}
+                  data-state={
+                    index + 1 < step
+                      ? "complete"
+                      : index + 1 === step
+                        ? "current"
+                        : "pending"
+                  }
+                  aria-current={index + 1 === step ? "step" : undefined}
+                >
+                  <span className="nb-setup-step-number" aria-hidden="true">
+                    {index + 1 < step ? <Check size={12} /> : index + 1}
+                  </span>
+                  <span>{label}</span>
+                </li>
+              ))}
+            </ol>
+          </nav>
+          <main className="nb-setup-content">
+            <h1 ref={heading} tabIndex={-1}>
+              {title}
+            </h1>
+            {subtitle && <p className="nb-setup-subtitle">{subtitle}</p>}
+            {children}
+          </main>
+          <footer className="nb-setup-footer">{actions}</footer>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="nyxbot-onboarding" lang={i18n.resolvedLanguage}>
