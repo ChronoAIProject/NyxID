@@ -4643,6 +4643,13 @@ pub enum ChannelBotCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Retry managed subscription, webhook override, and number setup
+    Repair {
+        /// Bot ID
+        id: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Manage conversation routes
     Route {
         #[command(subcommand)]

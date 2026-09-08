@@ -410,6 +410,25 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             Ok(())
         }
 
+        ChannelBotCommands::Repair { id, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let setup: Value = api
+                .post(
+                    &format!("/channel-bots/{id}/managed-setup/repair"),
+                    &serde_json::json!({}),
+                )
+                .await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&setup)?),
+                OutputFormat::Table => {
+                    for field in ["subscription", "webhook_override", "registration"] {
+                        eprintln!("{field}: {}", setup[field].as_str().unwrap_or("-"));
+                    }
+                }
+            }
+            Ok(())
+        }
+
         ChannelBotCommands::Delete { id, yes, auth } => {
             if !yes {
                 eprint!("Delete bot {id}? This will also remove all conversation routes. [y/N] ");
@@ -1123,6 +1142,34 @@ mod tests {
         })
         .await
         .expect("delete should succeed");
+    }
+
+    #[tokio::test]
+    async fn repair_posts_to_managed_setup_and_reports_errors() {
+        for status in [200, 403, 429] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).and(path("/api/v1/channel-bots/bot-1/managed-setup/repair"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(if status == 200 {
+                    serde_json::json!({ "subscription": "subscribed", "webhook_override": "configured", "registration": "registered" })
+                } else { serde_json::json!({ "error": "forbidden", "error_code": 1003, "message": "Request denied" }) }))
+                .expect(1).mount(&server).await;
+            let result = run(ChannelBotCommands::Repair {
+                id: "bot-1".into(),
+                auth: mock_auth(server.uri()),
+            })
+            .await;
+            assert_eq!(result.is_ok(), status == 200);
+        }
+    }
+
+    #[test]
+    fn repair_cli_requires_bot_id() {
+        use clap::Parser;
+        assert!(crate::cli::Cli::try_parse_from(["nyxid", "channel-bot", "repair"]).is_err());
+        assert!(
+            matches!(crate::cli::Cli::try_parse_from(["nyxid", "channel-bot", "repair", "bot-1"]).unwrap().command,
+            crate::cli::Commands::ChannelBot { command: ChannelBotCommands::Repair { id, .. } } if id == "bot-1")
+        );
     }
 
     // --- Route subcommands ---
