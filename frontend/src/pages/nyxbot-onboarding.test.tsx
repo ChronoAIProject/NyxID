@@ -46,6 +46,7 @@ const catalog = {
 };
 let keys: object[];
 let catalogResponse: typeof catalog;
+let publicConfig: { social_providers: string[]; email_auth_enabled: boolean };
 let client: QueryClient;
 function mount() {
   client = new QueryClient({
@@ -65,16 +66,16 @@ beforeEach(async () => {
   auth.isAuthenticated = true;
   keys = [googleKey];
   catalogResponse = catalog;
+  publicConfig = {
+    social_providers: ["google", "github", "apple"],
+    email_auth_enabled: false,
+  };
   await nyxbotI18n.changeLanguage("en");
   get.mockImplementation(async (path: string) => {
     if (path === "/keys") return { keys };
     if (path === "/keys/google-1") return keys[0];
     if (path === "/catalog/api-google") return catalogResponse;
-    if (path === "/public/config")
-      return {
-        social_providers: ["google", "github", "apple"],
-        email_auth_enabled: false,
-      };
+    if (path === "/public/config") return publicConfig;
     if (path.startsWith("/providers/google-provider/connect/oauth"))
       return {
         authorization_url:
@@ -116,18 +117,73 @@ async function toChannel() {
 }
 
 describe("Nyxbot onboarding", () => {
-  it("hands off social login with a same-origin return URL preserving channel", async () => {
+  it.each([
+    ["google", "Google"],
+    ["github", "GitHub"],
+    ["apple", "Apple"],
+  ])(
+    "hands off configured %s login with the onboarding return URL",
+    async (id, name) => {
+      auth.isAuthenticated = false;
+      mount();
+      const provider = await screen.findByRole("button", {
+        name: `Continue with ${name}`,
+      });
+      await waitFor(() =>
+        expect(provider).toHaveAttribute("aria-disabled", "false"),
+      );
+      await userEvent.click(provider);
+      const target = new URL(
+        redirect.mock.calls[0]![0],
+        window.location.origin,
+      );
+      expect(target.pathname).toBe(`/api/v1/auth/social/${id}`);
+      expect(target.searchParams.get("return_to")).toBe(
+        `${window.location.origin}/onboarding?channel=telegram`,
+      );
+      expect(post).not.toHaveBeenCalled();
+    },
+  );
+  it("keeps all four design sign-in methods visible when social providers are unconfigured", async () => {
     auth.isAuthenticated = false;
+    publicConfig = { social_providers: [], email_auth_enabled: true };
     mount();
-    await userEvent.click(
-      await screen.findByRole("button", { name: "Continue with Google" }),
+    await screen.findByRole("link", { name: "Sign in with email" });
+    expect(
+      screen.getByRole("heading", { name: "Sign in to NyxID" }),
+    ).toBeVisible();
+    expect(screen.getByText("Continue to Nyxbot")).toBeVisible();
+    for (const name of ["Google", "GitHub", "Apple", "the NyxID app"]) {
+      expect(
+        screen.getByRole("button", { name: `Continue with ${name}` }),
+      ).toBeVisible();
+    }
+    expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(screen.queryByRole("contentinfo")).not.toBeInTheDocument();
+    const google = screen.getByRole("button", { name: "Continue with Google" });
+    expect(google).toHaveAttribute("aria-disabled", "true");
+    await userEvent.click(google);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Google sign-in is not available in this environment yet",
     );
-    const target = new URL(redirect.mock.calls[0]![0], window.location.origin);
-    expect(target.pathname).toBe("/api/v1/auth/social/google");
-    expect(target.searchParams.get("return_to")).toBe(
-      `${window.location.origin}/onboarding?channel=telegram`,
-    );
+    expect(redirect).not.toHaveBeenCalled();
     expect(post).not.toHaveBeenCalled();
+  });
+  it("only redirects enabled sign-in methods while retaining the other rows", async () => {
+    auth.isAuthenticated = false;
+    publicConfig.social_providers = ["github"];
+    mount();
+    const github = screen.getByRole("button", { name: "Continue with GitHub" });
+    await waitFor(() =>
+      expect(github).toHaveAttribute("aria-disabled", "false"),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Continue with Apple" }),
+    );
+    expect(redirect).not.toHaveBeenCalled();
+    await userEvent.click(github);
+    expect(redirect).toHaveBeenCalledTimes(1);
+    expect(redirect.mock.calls[0]![0]).toContain("/api/v1/auth/social/github?");
   });
   it("preselects a referral, registers Telegram once, and never fabricates a pairing code", async () => {
     mount();

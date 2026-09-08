@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useNavigate } from "@tanstack/react-router";
 import QRCode from "qrcode";
 import {
@@ -25,6 +25,7 @@ interface WebDeviceLoginProps {
   readonly isOpen?: boolean;
   readonly onOpenChange?: (open: boolean) => void;
   readonly triggerLabel?: string;
+  readonly triggerIcon?: ReactNode;
 }
 
 export const LOGIN_PROVIDER_ROW_CLASS =
@@ -35,6 +36,7 @@ export function WebDeviceLogin({
   isOpen: controlledOpen,
   onOpenChange,
   triggerLabel = "Continue with the NyxID app",
+  triggerIcon,
 }: WebDeviceLoginProps) {
   const navigate = useNavigate();
   const [internalOpen, setInternalOpen] = useState(false);
@@ -127,9 +129,11 @@ export function WebDeviceLogin({
         className={LOGIN_PROVIDER_ROW_CLASS}
         aria-label={triggerLabel}
       >
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-overlay-strong">
-          <NyxidIcon alt="" className="h-4 w-4 object-contain" />
-        </span>
+        {triggerIcon ?? (
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-[8px] bg-overlay-strong">
+            <NyxidIcon alt="" className="h-4 w-4 object-contain" />
+          </span>
+        )}
         {triggerLabel}
         <ChevronRight className="ml-auto size-4 text-muted-foreground" />
       </button>

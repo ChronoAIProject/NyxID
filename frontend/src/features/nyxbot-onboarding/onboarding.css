@@ -40,6 +40,57 @@
   display: flex;
   flex-direction: column;
 }
+.nb-auth-header {
+  border-bottom: 1px solid var(--nb-subtle);
+}
+.nb-auth-brand {
+  max-width: 420px;
+  margin: 0 auto;
+  padding: max(16px, env(safe-area-inset-top)) 24px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.nb-auth-brand strong {
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 28px;
+}
+.nb-auth-logo {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background: #a672fb;
+}
+.nb-auth-logo img {
+  width: 20px;
+  height: 20px;
+}
+.nb-auth-content {
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 56px 24px max(32px, env(safe-area-inset-bottom));
+}
+.nb-auth-content h1 {
+  margin: 0;
+  font-family: inherit;
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.33;
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+.nb-auth-content h1:focus {
+  outline: none;
+}
+.nb-auth-subtitle {
+  margin: 20px 0;
+  color: var(--nb-muted);
+  font-size: 14px;
+}
 .nb-tools {
   display: flex;
   align-items: center;
@@ -193,21 +244,23 @@
 }
 .nb-provider-list {
   display: grid;
-  gap: 10px;
+  gap: 20px;
 }
 .nyxbot-onboarding .nb-provider {
   display: flex;
   justify-content: flex-start;
-  gap: 12px;
+  gap: 14px;
   width: 100%;
   height: auto;
-  min-height: 56px;
+  min-height: 54px;
   padding: 10px 12px;
   border: 1px solid var(--nb-line);
-  border-radius: 11px;
+  border-radius: 6px;
   background: var(--nb-bg);
   color: var(--nb-text);
-  font-size: 13px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.5;
   white-space: normal;
   text-align: left;
 }
@@ -215,13 +268,15 @@
   flex: 1;
 }
 .nb-provider > svg:last-child {
+  width: 16px;
+  height: 16px;
   margin-left: auto;
   flex-shrink: 0;
   color: var(--nb-muted);
 }
 .nyxbot-onboarding .nb-provider .nb-brand-icon {
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
 }
 .nb-brand-icon {
   width: 38px;
@@ -281,24 +336,30 @@
   color: #0866ff !important;
 }
 .nb-device-login > button {
-  min-height: 56px;
+  min-height: 54px;
   height: auto;
   padding: 10px 12px;
   border-color: var(--nb-line);
   background: var(--nb-bg);
   color: var(--nb-text);
-  border-radius: 11px;
-  font-size: 13px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.5;
+  gap: 14px;
+  white-space: normal;
+  text-align: left;
 }
 .nb-signup {
-  margin: 18px 0 0;
-  text-align: center;
-  font-size: 12px;
+  margin: 22px 0 0;
+  font-size: 13px;
   color: var(--nb-muted);
 }
 .nb-signup a {
-  color: var(--nb-text);
-  font-weight: 600;
+  color: inherit;
+}
+.nb-signup a:hover {
+  text-decoration: underline;
 }
 .nb-tiles {
   display: grid;

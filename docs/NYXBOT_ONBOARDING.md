@@ -5,6 +5,7 @@
 - Implemented inside the existing React frontend at `/onboarding`, outside the dashboard's unrelated AI Services onboarding takeover.
 - `/onboarding?channel=telegram` and `?channel=whatsapp` preselect the corresponding channel. This is a frontend entry convention to give the bot team, not an existing bot session protocol. Direct visits have no preselection.
 - Authentication uses NyxID's existing social endpoints, registration/login routes, trusted same-origin `return_to`, and NyxID app device login. Email, invite codes and MFA remain in the existing authentication pages.
+- The sign-in screen always shows Google, GitHub, Apple and NyxID app in that order. `/public/config` controls whether a social button can begin OAuth, not whether its row exists. An unavailable method explains its state without navigating or creating a fake login. The optional email link follows `email_auth_enabled`.
 - Google Workspace uses the real `api-google` catalog entry, `POST /keys`, provider OAuth initiation with the placeholder key ID, and the existing authorization status query. Both Drive file access and Calendar management must actually be granted. A callback URL saying `status=success` is insufficient.
 - Existing personal Google connections with the required scopes can be reused. Organization connections are excluded because this flow has no organization selector or organization ownership contract.
 - Telegram uses the existing channel token schema, `useAppForm` and `POST /channel-bots`. The default label is `Nyxbot Telegram`, under the signed-in user's personal account. The returned channel ID is read back for webhook readiness; a stored bot is not assumed to be live.
@@ -17,7 +18,7 @@ Inspected Figma file `Ee1gMJqg6DTv02PEzLqbZH`, page `Nyxbot / Prototype aligned 
 
 | Page | Figma frame |
 | --- | --- |
-| Account | `17:117` |
+| Original account step (superseded by the supplied X01 sign-in reference) | `17:117` |
 | Data source | `17:225` |
 | Telegram channel | `17:312` |
 | Telegram chat linking | `17:453` |
@@ -29,6 +30,8 @@ Inspected Figma file `Ee1gMJqg6DTv02PEzLqbZH`, page `Nyxbot / Prototype aligned 
 Help frames: `17:904`, `17:910`, `17:916`, `17:922`, `17:928`, `17:934`, `17:940`.
 
 The implementation renders the web content, excluding the 352 x 706 device shell and browser/address-bar illustration. It uses the inspected white surfaces, compact headings, source/channel grids, contextual help and bottom actions. Inter and action/spacing values also follow the linked PRD's web surface. Local assets avoid a runtime font or brand-image CDN dependency.
+
+The account screen follows the user's subsequent `X01 / External / NyxID sign-in` screenshot: a NyxID brand header, left-aligned title and continuation subtitle, four provider rows and a sign-up link. This authentication screen has no onboarding progress bar or sticky Continue/Back footer. Existing locale and theme state still apply; their onboarding toolbar resumes on the subsequent steps.
 
 Rules added for states absent from the supplied frames: a centered content width up to 420 px on desktop; scrollable content with a sticky action footer on short screens; existing theme tokens for dark mode; explicit loading, failed authorization, missing permissions and unavailable-integration notices. Authentication back-navigation preserves the signed-in account.
 
