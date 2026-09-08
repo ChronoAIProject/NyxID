@@ -53,6 +53,10 @@ vi.mock("@/hooks/use-nodes", () => ({
 }));
 
 // Heavy children — stubbed to assert wiring (open state, presence), not driven.
+vi.mock("@/components/providers/codex-connection", () => ({
+  CodexConnectionSection: () => <div data-testid="codex-connection" />,
+}));
+
 vi.mock("@/components/dashboard/add-key-dialog", () => ({
   AddKeyDialog: ({
     open,

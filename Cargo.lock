@@ -3979,7 +3979,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4053,7 +4053,7 @@ dependencies = [
 
 [[package]]
 name = "nyxid-cli"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4079,6 +4079,7 @@ dependencies = [
  "nyxid-cloud-auth",
  "nyxid-crypto",
  "open",
+ "plist",
  "rand 0.8.5",
  "reqwest 0.12.28",
  "rpassword",
@@ -4092,6 +4093,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "shlex",
  "sigstore",
  "tar",
  "tempfile",
@@ -4642,6 +4644,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "plist"
+version = "1.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7da1d65da6dd5d1e44199ac0f58712d241c0f439f80adea8924d832384087f85"
+dependencies = [
+ "base64 0.22.1",
+ "indexmap 2.13.0",
+ "quick-xml 0.41.0",
+ "serde",
+ "time",
+]
+
+[[package]]
 name = "png"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4942,6 +4957,15 @@ name = "quick-xml"
 version = "0.38.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b66c2058c55a409d601666cffe35f04333cf1013010882cec174a7467cd4e21c"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
  "memchr",
 ]
@@ -5802,7 +5826,7 @@ dependencies = [
  "http 1.4.0",
  "indicatif",
  "log",
- "quick-xml",
+ "quick-xml 0.38.4",
  "regex",
  "reqwest 0.13.3",
  "self-replace",

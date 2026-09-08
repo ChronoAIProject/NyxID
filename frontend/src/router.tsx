@@ -272,6 +272,13 @@ const loginDeviceRoute = createRoute({
   component: LoginDevicePage,
 });
 
+const loginCodeRoute = createRoute({
+  path: "/login/code",
+  getParentRoute: () => rootRoute,
+  validateSearch: (): Record<string, never> => ({}),
+  component: () => <LoginAgentKeyPage mint />,
+});
+
 const connectLinkRoute = createRoute({
   path: "/connect/$token",
   getParentRoute: () => rootRoute,
@@ -923,6 +930,7 @@ const routeTree = rootRoute.addChildren([
   cliAuthRoute,
   cliPairRoute,
   loginDeviceRoute,
+  loginCodeRoute,
   loginAgentKeyRoute,
   connectLinkRoute,
   connectLinkReturnRoute,

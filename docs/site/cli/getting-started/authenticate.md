@@ -11,20 +11,75 @@ The CLI authenticates once and reuses a locally stored session for every subsequ
 nyxid login --base-url <BASE_URL>
 ```
 
-`nyxid login` opens your browser, completes sign-in, and stores the session under `~/.nyxid/`. Use the API base URL for `<BASE_URL>`:
+`nyxid login` opens human approval in your browser and stores the selected identity under `~/.nyxid/`. The approver chooses a full account session or a restricted Agent Key. Use the API base URL for `<BASE_URL>`:
 
 - **Hosted:** `https://nyx-api.chrono-ai.fun`
 - **Self-host:** `http://localhost:3001` (the API runs on 3001; the web console is on 3000)
 
 ### Headless / SSH / no browser
 
-If `nyxid login` can't open a browser (SSH session, container, WSL without `$DISPLAY`), it auto-falls back to the **device-code flow**: the CLI prints a one-time code + a URL, you open the URL on any signed-in browser (phone, laptop), type the code, review the requester IP and time, then approve or reject. Approval completes the CLI login; rejection stops it immediately. You can also force the flow explicitly:
+Plain `nyxid login` starts the selectable **device-code flow** and offers to open its approval page when a browser is available. In SSH sessions, containers, or CI, the CLI prints the same one-time code and bare URL. Open the URL on a phone or another computer, type the code, review the requester IP and time, then approve or reject. Approval completes the CLI login; rejection stops it immediately. You can also select the flow explicitly:
 
 ```bash
 nyxid login --device --base-url <BASE_URL>
 ```
 
-Set `NYXID_LOGIN_NO_DEVICE_FALLBACK=1` to opt out of the auto-fallback (you'll get the old "hang on browser callback" behavior instead). For non-interactive CI use, generate an API key with `nyxid api-key create` and authenticate via the `nyxid_ag_…` token — `nyxid login` itself short-circuits with an api-key hint when it detects `CI` / `GITHUB_ACTIONS` / `BUILDKITE` / `CIRCLECI` / `JENKINS_URL` / `GITLAB_CI`.
+Set `NYXID_LOGIN_NO_DEVICE_FALLBACK=1` to retain the legacy browser-callback strategy for plain blocking login, including its established browser-open fallback behavior. Explicit `--device`, `--agent-key`, and `--no-wait` use the new exchange. CI can wait for human approval; unattended jobs should normally use a pre-issued Agent Key.
+
+### Agent-driven login and resume
+
+```bash
+nyxid login --no-wait --profile work --base-url <BASE_URL> --output json
+nyxid login resume <REQUEST_ID> --profile work --output json
+nyxid login resume <REQUEST_ID> --profile work --once --output json
+```
+
+The first command creates one request and returns its human code, bare verification
+URL, expiry, poll interval and nonsecret local resume handle. It opens no browser
+and never waits for approval. The poll secret stays in a mode-0600 local pending
+file. A handle works only on the same machine/profile/destination; it cannot
+redeem a login remotely. `--once` performs at most one eligible poll and preserves
+the server's backoff and next poll deadline.
+
+Resume returns one JSON result. Authentication reports `auth_kind` as
+`account_session` or `agent_key`; no credential is printed. Stable errors have
+the shape `{"error":{"code":"login_pending","message":"..."}}`:
+
+| Exit | Code |
+|---|---|
+| 10 | `login_pending` |
+| 11 | `login_denied` |
+| 12 | `login_expired` |
+| 13 | `login_already_delivered` |
+| 14 | `login_rate_limited` |
+| 15 | `login_resume_busy` |
+| 16 | `login_request_not_found` |
+| 17 | `login_destination_mismatch` |
+| 18 | `login_code_invalid` |
+| 19 | `login_unavailable` |
+| 20 | `login_unsupported` |
+| 21 | `login_storage_failed` |
+
+### Login with a one-time code
+
+Open **Settings > Create login code** on the web, or the equivalent account-settings
+action in the mobile app. Choose account access or select/create a restricted key
+and confirm its permissions. Enter the displayed five-minute code on the intended
+machine:
+
+```bash
+nyxid login --code --profile work --base-url <BASE_URL>
+```
+
+The command prompts for the code without displaying it. The optional argument
+form `--code XXXX-XXXX` supports automation but may enter shell history.
+Codes are consumed once. The issuing screen shows redemption and requester
+context; Cancel stops a pending code, while Revoke invalidates its delivered
+session or child credential. Neither the code nor a poll secret belongs in URLs
+or browser storage. A browser-owned QR login approved as restricted returns a
+one-time CLI handoff code instead of an account cookie.
+Creating that handoff extends the initial 60-second delivery window to five
+minutes after approval. Repeated handoff requests never extend the fixed deadline.
 
 ### Non-interactive credentials
 
@@ -50,7 +105,7 @@ Approval issues a new login credential bound to the selected key. Selecting an e
 
 Identity output includes the credential's hostname/profile label. `status` then lists the account, AI services, API keys, and nodes; sections denied by the key's scope display "unavailable with this key's scope". JSON output includes an `auth` object and uses `null` for unavailable sections. A missing local credential prompts reauthorization for that profile; a server rejection still fails the command.
 
-`nyxid logout --profile home-agent` attempts to revoke this login credential and always clears the local credential, reporting whether server revocation succeeded. In the web console, open the key's **Login credentials** section to revoke a specific CLI login. Revoking or rotating the key invalidates every credential issued under it. Revocation and expiry take effect on subsequent authenticated requests. Abandoned approvals expire after a 60-second delivery window and their credentials are revoked automatically.
+`nyxid logout --profile home-agent` attempts bounded server revocation and clears the matching local login, reporting whether revocation succeeded. A newer concurrent login is preserved. In the web console, open the key's **Login credentials** section to revoke a specific CLI login. Revoking or rotating the key invalidates every credential issued under it. Revocation and expiry take effect on subsequent authenticated requests. Abandoned approvals expire after a 60-second delivery window and their credentials are revoked automatically; a browser-owned device handoff uses the fixed five-minute deadline described above. A parent created for an abandoned request remains as key configuration with no disclosed primary secret; cleanup revokes only that request's child so another approved consumer remains usable.
 
 `--agent-key` cannot be combined with `--device` or `--password`. It supports headless polling, including a human authorizing a waiting CI job; unattended jobs should normally use a pre-issued credential through the existing environment-variable options.
 

@@ -240,7 +240,7 @@ async fn request_hmac_context_models_and_legacy_defaults() {
     assert!(!format!("{doc:?}").contains(&request.user_code));
     assert!(!format!("{row:?} {request:?}").contains(&row.device_code_hmac));
     assert_eq!(row.context.client_label.as_deref(), Some("workstation"));
-    assert_eq!(row.requested_profile.as_deref(), Some("profile"));
+    assert_eq!(row.context.requested_profile.as_deref(), Some("profile"));
     let mut legacy = doc;
     for field in [
         "requested_profile",
@@ -255,7 +255,7 @@ async fn request_hmac_context_models_and_legacy_defaults() {
     let restored: AgentKeyLoginRequest = bson::from_document(legacy).unwrap();
     assert_eq!(restored.slow_down_increments, 0);
     assert!(!restored.key_was_created);
-    assert!(restored.requested_profile.is_none());
+    assert!(restored.context.requested_profile.is_none());
 }
 
 #[tokio::test]
@@ -619,7 +619,7 @@ async fn poll_preview_and_sweep_expiry_revoke_undelivered_credentials() {
             .find_one(doc! {"_id": row.api_key_id.unwrap()})
             .await
             .unwrap()
-            .is_none()
+            .is_some()
     );
 }
 
@@ -674,6 +674,138 @@ async fn failed_delivery_preparation_remains_sweepable() {
         child.revoked_reason,
         Some(CredentialRevokedReason::UndeliveredExpired)
     );
+}
+
+#[tokio::test]
+async fn rolling_cleanup_markers_preserve_new_parents_and_reserve_old_pending_parents() {
+    let (db, actor, _, _) = fixture("akl_rolling_cleanup").await;
+    let encryption = test_encryption_keys();
+    let request = start(&db).await;
+    approve(
+        &db,
+        &encryption,
+        HMAC_KEY,
+        &actor,
+        &request.user_code,
+        new_selection(serde_json::json!({})),
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let rows = db.collection::<AgentKeyLoginRequest>(COLLECTION_NAME);
+    let row = rows
+        .find_one(doc! {"device_code_hmac":code_hash(HMAC_KEY, &request.device_code)})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !row.key_was_created,
+        "an old sweeper must not consider this parent deletable"
+    );
+    assert!(row.key_created_by_approval);
+    let parent = row.api_key_id.as_deref().unwrap();
+    assert!(eligible_key(&db, &actor, parent).await.is_ok());
+    assert_eq!(
+        rows.count_documents(doc! {"_id":&row.id,"key_was_created":true})
+            .await
+            .unwrap(),
+        0
+    );
+
+    // Emulate an approval written by the preceding release. New consumers
+    // cannot reuse its parent while that release can still delete it.
+    rows.update_one(
+        doc! {"_id":&row.id},
+        doc! {"$set":{"key_was_created":true,"key_created_by_approval":false}},
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        eligible_key(&db, &actor, parent).await,
+        Err(AppError::AgentKeyLoginKeyIneligible)
+    ));
+    let delivery = poll(&db, &encryption, HMAC_KEY, &request.device_code)
+        .await
+        .unwrap();
+    assert!(
+        key_service::validate_api_key(&db, &delivery.credential)
+            .await
+            .is_ok()
+    );
+    assert!(eligible_key(&db, &actor, parent).await.is_ok());
+}
+
+#[tokio::test]
+async fn abandoned_new_parent_survives_reuse_and_concurrent_issuance() {
+    let (db, actor, _, _) = fixture("akl_reused_parent_cleanup").await;
+    let encryption = test_encryption_keys();
+    for concurrent in [false, true] {
+        let first = start(&db).await;
+        approve(
+            &db,
+            &encryption,
+            HMAC_KEY,
+            &actor,
+            &first.user_code,
+            new_selection(serde_json::json!({})),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let row = expire_request(&db, &first.user_code).await;
+        let second = start(&db).await;
+        let approval = approve(
+            &db,
+            &encryption,
+            HMAC_KEY,
+            &actor,
+            &second.user_code,
+            Selection::Existing {
+                api_key_id: row.api_key_id.clone().unwrap(),
+            },
+            None,
+            None,
+        );
+        let approved = if concurrent {
+            let (approved, swept) = tokio::join!(approval, sweep_expired(&db));
+            assert_eq!(swept.unwrap().failed, 0);
+            approved
+        } else {
+            let approved = approval.await;
+            assert_eq!(sweep_expired(&db).await.unwrap().failed, 0);
+            approved
+        };
+        if !concurrent {
+            assert!(approved.is_ok());
+        }
+        if approved.is_ok() {
+            let delivery = poll(&db, &encryption, HMAC_KEY, &second.device_code)
+                .await
+                .unwrap();
+            assert!(
+                key_service::validate_api_key(&db, &delivery.credential)
+                    .await
+                    .is_ok()
+            );
+        } else {
+            assert_eq!(
+                db.collection::<ApiKeyCredential>(CREDENTIALS)
+                    .count_documents(doc! {"api_key_id": &row.api_key_id, "is_active": true})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        let child = db
+            .collection::<ApiKeyCredential>(CREDENTIALS)
+            .find_one(doc! {"_id": row.credential_id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!child.is_active);
+    }
 }
 
 #[tokio::test]

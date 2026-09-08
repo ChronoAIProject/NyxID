@@ -66,7 +66,12 @@ async fn main() {
         // consent — different concern).
         let mut consent =
             telemetry::consent::resolve_consent_preferring_profile(profile.as_deref());
-        let _ = telemetry::consent::prompt_if_needed_interactive(None, &mut consent);
+        let machine_login = matches!(&cli.command, Commands::Login(args)
+            if args.no_wait || matches!(args.output, cli::OutputFormat::Json))
+            || matches!(&cli.command, Commands::Update(args) if args.command.is_some());
+        if !machine_login {
+            let _ = telemetry::consent::prompt_if_needed_interactive(None, &mut consent);
+        }
         if consent.enabled {
             telemetry::TelemetryClient::init(profile.as_deref())
         } else {
@@ -105,6 +110,14 @@ async fn main() {
     }
 
     if let Err(e) = result {
+        if let Some(error) = e.downcast_ref::<auth::login_exchange::LoginError>() {
+            if json_output_from_argv {
+                println!("{}", error.json());
+            } else {
+                eprintln!("{error}");
+            }
+            std::process::exit(error.exit_code());
+        }
         eprintln!("{}", error_format::render_error(&e, json_output_from_argv));
         // 3: a human must log in again; 4: renewal outcome unknown, retry later.
         let code = if e.downcast_ref::<auth::ReauthRequired>().is_some() {

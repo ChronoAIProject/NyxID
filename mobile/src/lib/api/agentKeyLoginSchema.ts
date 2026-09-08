@@ -101,7 +101,7 @@ export const agentKeyApproveSchema = z
       if (!code) {
         ctx.addIssue({
           code: "custom",
-          message: "Enter a valid eight-character code",
+          message: "Enter a valid login code",
         });
         return z.NEVER;
       }

@@ -193,6 +193,72 @@ const requestResponse = {
 };
 
 describe("useWebAuthDeviceLogin", () => {
+  const restrictedDelivery = {
+    ok: false,
+    auth_kind: "agent_key",
+    login_code: { request_id: "handoff", code: "JKLM-NPQR", expires_at: "2026-08-20T10:00:10Z" },
+  };
+
+  it("clears the restricted handoff at its own expiry and permits regeneration", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    mockPost.mockResolvedValueOnce(requestResponse).mockResolvedValueOnce(restrictedDelivery);
+    const { result } = renderHook(() => useWebAuthDeviceLogin());
+    await act(async () => { result.current.start(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(result.current.phase).toBe("restricted");
+    expect(result.current.loginCode?.code).toBe("JKLM-NPQR");
+    expect(mockCheckAuth).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(result.current.phase).toBe("expired");
+    expect(result.current.loginCode).toBeNull();
+    mockPost.mockResolvedValueOnce({ ...requestResponse, device_code: "nyx_adc_new" });
+    await act(async () => { result.current.generateNew(); });
+    expect(result.current.phase).toBe("pending");
+    expect(result.current.request?.device_code).toBe("nyx_adc_new");
+  });
+
+  it.each(["restricted", "account", "error"])("ignores an old %s poll after close and restart", async (outcome) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    let finish!: (value: unknown) => void;
+    let fail!: (error: unknown) => void;
+    mockPost.mockResolvedValueOnce(requestResponse).mockImplementationOnce(() =>
+      new Promise((resolve, reject) => { finish = resolve; fail = reject; }));
+    const { result } = renderHook(() => useWebAuthDeviceLogin());
+    await act(async () => { result.current.start(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    act(() => result.current.close());
+    mockPost.mockResolvedValueOnce({ ...requestResponse, device_code: "nyx_adc_new" });
+    await act(async () => { result.current.start(); });
+    await act(async () => {
+      if (outcome === "error") fail({ errorCode: 11204 });
+      else finish(outcome === "restricted" ? restrictedDelivery : { ok: true });
+    });
+    expect(result.current.phase).toBe("pending");
+    expect(result.current.request?.device_code).toBe("nyx_adc_new");
+    expect(result.current.loginCode).toBeNull();
+    expect(mockCheckAuth).not.toHaveBeenCalled();
+  });
+
+  it("does not finish a replaced request after checkAuth resolves", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-20T10:00:00Z"));
+    let finish!: () => void;
+    mockCheckAuth.mockImplementationOnce(() => new Promise<void>((resolve) => { finish = resolve; }));
+    mockPost.mockResolvedValueOnce(requestResponse).mockResolvedValueOnce({ ok: true });
+    const { result } = renderHook(() => useWebAuthDeviceLogin());
+    await act(async () => { result.current.start(); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(mockCheckAuth).toHaveBeenCalledOnce();
+    act(() => result.current.close());
+    mockPost.mockResolvedValueOnce({ ...requestResponse, device_code: "nyx_adc_new" });
+    await act(async () => { result.current.start(); });
+    await act(async () => { finish(); });
+    expect(result.current.phase).toBe("pending");
+    expect(result.current.request?.device_code).toBe("nyx_adc_new");
+  });
+
   it("does not request on mount and starts only after explicit activation", async () => {
     const { result } = renderHook(() => useWebAuthDeviceLogin());
     expect(mockPost).not.toHaveBeenCalled();
@@ -205,7 +271,7 @@ describe("useWebAuthDeviceLogin", () => {
 
     await waitFor(() => expect(result.current.phase).toBe("pending"));
     expect(mockPost).toHaveBeenCalledWith(
-      "/auth/device/request",
+      "/auth/device/v2/request",
       expect.objectContaining({
         client_label: expect.stringMatching(/ on /),
         client_user_agent: expect.any(String),

@@ -451,6 +451,45 @@ fn update_check_section() -> DoctorSection {
         },
     ));
 
+    match update::auto::local_policy() {
+        Ok(policy) => {
+            rows.push(row(
+                "Automatic upgrades",
+                if !policy.enabled {
+                    "disabled"
+                } else if policy.held_version.is_some() {
+                    "held"
+                } else {
+                    "enabled (inspect scheduler with nyxid update auto status)"
+                },
+                DoctorStatus::Pass,
+            ));
+            rows.push(row(
+                "Upgrade result",
+                policy.last_result.as_deref().unwrap_or("never attempted"),
+                if policy
+                    .last_result
+                    .as_deref()
+                    .is_some_and(|r| r.contains("failed") || r.contains("timed_out"))
+                {
+                    DoctorStatus::Warn
+                } else {
+                    DoctorStatus::Pass
+                },
+            ));
+            rows.push(row(
+                "Node adoption",
+                "deferred until operator restart",
+                DoctorStatus::Pass,
+            ));
+        }
+        Err(error) => rows.push(row(
+            "Automatic upgrades",
+            error.to_string(),
+            DoctorStatus::Warn,
+        )),
+    }
+
     DoctorSection {
         title: "Update check".to_string(),
         rows,

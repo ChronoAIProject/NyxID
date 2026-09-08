@@ -166,7 +166,7 @@ describe("Agent Key login page and hooks", () => {
       selection: { kind: "existing", api_key_id: "key" },
     });
     expect(
-      screen.getByText("Approved - return to your terminal"),
+      screen.getByText("Approved - return to the requesting device"),
     ).toBeInTheDocument();
     expect(screen.queryByText("home-agent")).not.toBeInTheDocument();
     await click("Sign out of this browser");
