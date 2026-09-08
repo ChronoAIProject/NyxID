@@ -704,7 +704,7 @@ pub async fn seed_default_providers(
                 style: "rfc7009".to_string(),
                 url: "https://oauth2.googleapis.com/revoke".to_string(),
                 auth: "none".to_string(),
-                revokes_grant: false,
+                revokes_grant: true,
             }),
             default_scopes: Some(vec![
                 "openid".to_string(),
@@ -2134,7 +2134,7 @@ const REVOCATION_SEED_UPGRADES: &[RevocationSeedUpgrade] = &[
         style: "rfc7009",
         url: "https://oauth2.googleapis.com/revoke",
         auth: "none",
-        revokes_grant: false,
+        revokes_grant: true,
         revocation_url: Some("https://oauth2.googleapis.com/revoke"),
     },
     RevocationSeedUpgrade {
@@ -2295,6 +2295,21 @@ async fn backfill_provider_revocation(
         }
     }
 
+    // Google's revoke endpoint invalidates the account's project-wide grant.
+    // Upgrade the old official seed so deleting one product uses cascade confirmation.
+    collection
+        .update_many(
+            doc! {
+                "slug": "google", "created_by": "system",
+                "authorization_url": "https://accounts.google.com/o/oauth2/v2/auth",
+                "token_url": "https://oauth2.googleapis.com/token",
+                "revocation.url": "https://oauth2.googleapis.com/revoke",
+                "revocation.style": "rfc7009",
+                "revocation.revokes_grant": false,
+            },
+            doc! { "$set": { "revocation.revokes_grant": true, "updated_at": &now } },
+        )
+        .await?;
     Ok(())
 }
 
@@ -2310,7 +2325,15 @@ fn is_lark_family_slug(slug: &str) -> bool {
 const LARK_FAMILY_REQUIRED_PERMISSIONS: &[&str] = &["bitable:app:readonly"];
 
 fn seed_required_permissions(slug: &str) -> Option<&'static [&'static str]> {
-    is_lark_family_slug(slug).then_some(LARK_FAMILY_REQUIRED_PERMISSIONS)
+    match slug {
+        "api-google-workspace" => Some(&[
+            super::google_workspace::DRIVE,
+            super::google_workspace::CALENDAR,
+        ]),
+        "api-google-calendar" => Some(&[super::google_workspace::CALENDAR]),
+        "api-google-drive" => Some(&[super::google_workspace::DRIVE]),
+        _ => is_lark_family_slug(slug).then_some(LARK_FAMILY_REQUIRED_PERMISSIONS),
+    }
 }
 
 struct DefaultServiceSeed {
@@ -2367,6 +2390,18 @@ struct SeededHeader {
 /// capability flags to clients.
 fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
     match slug {
+        "api-google-workspace" | "api-google-calendar" | "api-google-drive" => Some((
+            ServiceCapabilities {
+                supports_proxy_read: true,
+                supports_proxy_write: true,
+                supports_proxy_binary_upload: slug != "api-google-calendar",
+                supports_direct_downstream_auth: true,
+                supports_authoring_via_nyx: true,
+                supports_websocket: false,
+                supports_streaming: false,
+            },
+            false,
+        )),
         // OpenClaw Gateway speaks native WebSocket to its CLI/TUI
         // clients. The HTTP proxy path is supported but not all
         // downstream instances expose OpenAI-compatible HTTP endpoints,
@@ -2694,6 +2729,73 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         homepage_url: None,
         auth_notes: None,
         known_limitations: None,
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-workspace",
+        service_name: "Google Workspace",
+        base_url: "https://www.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some("Google Drive files and folders, calendars, events, and availability."),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://workspace.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access, including creating files, folders, and calendars.",
+        ),
+        known_limitations: Some(
+            "Workspace bundles Drive and Calendar only. Gmail, Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-calendar",
+        service_name: "Google Calendar",
+        base_url: "https://www.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Read, create, edit, and delete calendars and events; check availability.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://calendar.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Calendar access, including creating secondary calendars.",
+        ),
+        known_limitations: Some(
+            "API access is limited to the published Calendar operations. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-drive",
+        service_name: "Google Drive",
+        base_url: "https://www.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Read, upload, create, edit, export, and delete Google Drive files and folders.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://drive.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive access to existing and newly created files, subject to the account's file permissions.",
+        ),
+        known_limitations: Some(
+            "API access is limited to the published Drive operations. Native Docs/Sheets document editing requires their separate APIs. Google may revoke sibling connections using the same account and client together.",
+        ),
     },
     DefaultServiceSeed {
         provider_slug: "github",
@@ -3336,7 +3438,8 @@ async fn backfill_missing_service_provider_requirements(
             service_id: service.id.clone(),
             provider_config_id: provider_id,
             required: true,
-            scopes: None,
+            scopes: super::google_workspace::GoogleProduct::from_slug(seed.service_slug)
+                .map(|product| product.default_scopes()),
             injection_method: seed.injection_method.to_string(),
             injection_key: Some(seed.injection_key.to_string()),
             created_at: now,
@@ -3800,10 +3903,14 @@ pub async fn seed_default_services(
             None => continue, // Provider not seeded yet, skip
         };
 
-        // Check if a downstream service already exists for this provider
-        let existing = service_col
-            .find_one(doc! { "provider_config_id": &provider.id })
-            .await?;
+        // Google product entries share one provider. Preserve the historical
+        // one-service-per-provider check for all other seeds.
+        let existing_filter = if seed.provider_slug == "google" {
+            doc! { "slug": seed.service_slug }
+        } else {
+            doc! { "provider_config_id": &provider.id }
+        };
+        let existing = service_col.find_one(existing_filter).await?;
 
         if existing.is_some() {
             continue; // Already seeded
@@ -3913,7 +4020,11 @@ pub async fn seed_default_services(
             developer_app_ids: None,
             token_exchange_config,
             anonymous_endpoints: Vec::new(),
-            proxy_operation_policy: None,
+            proxy_operation_policy: super::google_workspace::GoogleProduct::from_slug(
+                seed.service_slug,
+            )
+            .map(|product| product.operation_policy())
+            .transpose()?,
             created_at: now,
             updated_at: now,
         };
@@ -3936,7 +4047,8 @@ pub async fn seed_default_services(
                 service_id: service_id.clone(),
                 provider_config_id: provider.id.clone(),
                 required: true,
-                scopes: None,
+                scopes: super::google_workspace::GoogleProduct::from_slug(seed.service_slug)
+                    .map(|product| product.default_scopes()),
                 injection_method: seed.injection_method.to_string(),
                 injection_key: Some(seed.injection_key.to_string()),
                 created_at: now,
@@ -7815,7 +7927,7 @@ mod tests {
         let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
         let expected = [
             ("twitter", "rfc7009", "inherit", false),
-            ("google", "rfc7009", "none", false),
+            ("google", "rfc7009", "none", true),
             ("github", "github", "inherit", true),
             ("facebook", "facebook_deauth", "inherit", true),
             ("discord", "rfc7009", "inherit", false),
@@ -8326,6 +8438,119 @@ mod tests {
         assert_eq!(
             req_count_1, req_count_2,
             "idempotent: requirement count must not change"
+        );
+    }
+
+    #[tokio::test]
+    async fn google_products_share_existing_client_and_survive_reseeding() {
+        use crate::services::google_workspace::GoogleProduct;
+        let db = connect_test_database("google_product_seed")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let providers = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        let provider = providers
+            .find_one(doc! { "slug": "google" })
+            .await
+            .unwrap()
+            .unwrap();
+        let client_id = enc.encrypt(b"shared-google-client").await.unwrap();
+        let secret = enc.encrypt(b"shared-google-secret").await.unwrap();
+        providers.update_one(doc! { "_id": &provider.id }, doc! { "$set": {
+            "client_id_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: client_id.clone() },
+            "client_secret_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: secret.clone() },
+            "revocation.revokes_grant": false,
+        }}).await.unwrap();
+        // Start with the pre-existing generic Google catalog row.
+        let mut legacy = crate::models::downstream_service::test_helpers::dummy_service();
+        legacy.slug = "api-google".into();
+        legacy.provider_config_id = Some(provider.id.clone());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&legacy)
+            .await
+            .unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .create_index(
+                mongodb::IndexModel::builder()
+                    .keys(doc! { "provider_config_id": 1 })
+                    .options(
+                        mongodb::options::IndexOptions::builder()
+                            .sparse(true)
+                            .unique(true)
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .unwrap();
+
+        for _ in 0..2 {
+            crate::db::ensure_indexes(&db).await.unwrap();
+            super::seed_default_providers(&db, &enc).await.unwrap();
+            super::seed_default_services(&db, &enc).await.unwrap();
+            let entries = crate::services::catalog_service::list_catalog(&db, &enc, "reader")
+                .await
+                .unwrap();
+            for slug in [
+                "api-google-workspace",
+                "api-google-calendar",
+                "api-google-drive",
+            ] {
+                let product = GoogleProduct::from_slug(slug).unwrap();
+                let entry = entries.iter().find(|entry| entry.slug == slug).unwrap();
+                assert_eq!(
+                    entry.provider_config_id.as_deref(),
+                    Some(provider.id.as_str())
+                );
+                assert_eq!(
+                    entry.oauth_client_id.as_deref(),
+                    Some("shared-google-client")
+                );
+                assert!(entry.has_platform_oauth_credentials);
+                assert_eq!(entry.revokes_grant, Some(true));
+                assert_eq!(entry.default_scopes, Some(product.default_scopes()));
+                assert_eq!(
+                    entry.platform_scope_allowlist,
+                    Some(product.allowed_scopes())
+                );
+                assert!(
+                    entry
+                        .scope_catalog
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .all(|entry| product.allowed_scopes().contains(&entry.scope))
+                );
+                let svc = db
+                    .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                    .find_one(doc! { "slug": slug })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(svc.proxy_operation_policy.is_some());
+                let req = db
+                    .collection::<ServiceProviderRequirement>(REQUIREMENTS)
+                    .find_one(doc! { "service_id": &svc.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(req.scopes, Some(product.default_scopes()));
+            }
+        }
+        let stored = providers
+            .find_one(doc! { "_id": &provider.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.client_id_encrypted, Some(client_id));
+        assert_eq!(stored.client_secret_encrypted, Some(secret));
+        assert_eq!(
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .count_documents(doc! { "provider_config_id": &provider.id })
+                .await
+                .unwrap(),
+            4
         );
     }
 
