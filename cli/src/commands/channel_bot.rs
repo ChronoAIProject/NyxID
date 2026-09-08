@@ -413,6 +413,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                         for (field, label) in [
                             ("connection_id", "Connection"),
                             ("last_polled_at", "Last polled"),
+                            ("last_poll_notice", "Last poll notice"),
                             ("next_poll_at", "Next poll"),
                             ("poll_cursor", "Cursor"),
                             ("poll_backoff_until", "Backoff until"),

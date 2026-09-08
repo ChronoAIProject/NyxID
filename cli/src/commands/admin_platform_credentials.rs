@@ -1,5 +1,6 @@
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
+use std::fmt::Write;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -34,12 +35,35 @@ fn print(row: &Value, output: OutputFormat) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(row)?);
         return Ok(());
     }
-    eprintln!("Provider: {}", row["provider"].as_str().unwrap_or("-"));
-    if let Some(provider) = row["backing"]["provider_slug"].as_str() {
-        eprintln!("Shared with the {provider} provider.");
+    eprint!("{}", human_output(row)?);
+    Ok(())
+}
+
+fn shared_provider(row: &Value) -> Option<&str> {
+    (row["backing"]["type"] == "provider_oauth")
+        .then(|| row["backing"]["provider_slug"].as_str())
+        .flatten()
+}
+
+fn shared_clear_warning(provider: &str) -> String {
+    format!(
+        "These credentials are shared with the {provider} provider. Clearing them stops all of its OAuth connections and logins until credentials are restored."
+    )
+}
+
+fn human_output(row: &Value) -> Result<String> {
+    let mut output = String::new();
+    writeln!(
+        output,
+        "Provider: {}",
+        row["provider"].as_str().unwrap_or("-")
+    )?;
+    if let Some(provider) = shared_provider(row) {
+        writeln!(output, "Shared with the {provider} provider.")?;
     }
     for field in row["fields"].as_array().into_iter().flatten() {
-        eprintln!(
+        writeln!(
+            output,
             "{}: {}",
             field["label"].as_str().unwrap_or("Field"),
             if field["configured"] == true {
@@ -47,15 +71,15 @@ fn print(row: &Value, output: OutputFormat) -> Result<()> {
             } else {
                 "Not configured"
             }
-        );
+        )?;
     }
     if let Some(url) = row["callback_url"].as_str() {
-        eprintln!("Platform Callback URL: {url}");
+        writeln!(output, "Platform Callback URL: {url}")?;
     }
     if let Some(token) = row["webhook_verify_token"].as_str() {
-        eprintln!("Platform Verify Token: {token}");
+        writeln!(output, "Platform Verify Token: {token}")?;
     }
-    Ok(())
+    Ok(output)
 }
 
 pub async fn run(command: AdminPlatformCredentialsCommands) -> Result<()> {
@@ -120,10 +144,18 @@ pub async fn run(command: AdminPlatformCredentialsCommands) -> Result<()> {
         AdminPlatformCredentialsCommands::Clear {
             provider,
             fields,
+            confirm_shared_provider,
             auth,
         } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let descriptor = descriptor(&mut api, &provider).await?;
+            if let Some(shared) = shared_provider(&descriptor) {
+                let warning = shared_clear_warning(shared);
+                eprintln!("{warning}");
+                if !confirm_shared_provider {
+                    bail!("{warning} Pass --confirm-shared-provider to confirm.");
+                }
+            }
             let path = format!(
                 "/admin/platform-credentials/{}",
                 urlencoding::encode(&provider)
@@ -197,6 +229,7 @@ mod tests {
             run(AdminPlatformCredentialsCommands::Clear {
                 provider: "meta".into(),
                 fields,
+                confirm_shared_provider: false,
                 auth: mock_auth(server.uri()),
             })
             .await
@@ -245,8 +278,14 @@ mod tests {
     async fn x_show_and_set_use_the_same_multi_provider_commands() {
         let _guard = env_lock().lock().unwrap();
         let server = MockServer::start().await;
-        let descriptor = json!({"provider": "x", "backing": {"kind": "provider_oauth", "provider_slug": "twitter"},
+        let descriptor = json!({"provider": "x", "backing": {"type": "provider_oauth", "provider_slug": "twitter"},
             "fields": [{"name": "client_id", "secret": true}, {"name": "client_secret", "secret": true}]});
+        assert!(
+            human_output(&descriptor)
+                .unwrap()
+                .lines()
+                .any(|line| line == "Shared with the twitter provider.")
+        );
         Mock::given(method("GET"))
             .and(path("/api/v1/admin/platform-credentials"))
             .respond_with(
@@ -288,5 +327,58 @@ mod tests {
             std::env::remove_var("NYXID_TEST_X_SECRET");
         }
         result.unwrap();
+    }
+
+    #[tokio::test]
+    async fn shared_provider_clears_require_explicit_confirmation_for_fields_and_provider() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/admin/platform-credentials"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{
+                "provider": "x", "backing": {"type": "provider_oauth", "provider_slug": "twitter"},
+                "fields": [{"name": "client_secret", "secret": true}]
+            }])))
+            .expect(4)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/admin/platform-credentials/x"))
+            .and(body_json(json!({"fields": {"client_secret": null}})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/admin/platform-credentials/x"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        for fields in [vec!["client_secret".into()], vec![]] {
+            let command = |confirmed| AdminPlatformCredentialsCommands::Clear {
+                provider: "x".into(),
+                fields: fields.clone(),
+                confirm_shared_provider: confirmed,
+                auth: mock_auth(server.uri()),
+            };
+            let error = run(command(false)).await.unwrap_err().to_string();
+            assert!(error.contains(&shared_clear_warning("twitter")));
+            assert!(error.contains("--confirm-shared-provider"));
+            run(command(true)).await.unwrap();
+        }
+    }
+
+    #[test]
+    fn clear_accepts_shared_provider_confirmation_flag() {
+        use clap::Parser;
+        let cli = crate::cli::Cli::try_parse_from([
+            "nyxid",
+            "admin",
+            "platform-credentials",
+            "clear",
+            "x",
+            "--confirm-shared-provider",
+        ]);
+        assert!(cli.is_ok());
     }
 }

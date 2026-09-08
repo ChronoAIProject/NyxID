@@ -321,6 +321,9 @@ pub enum AdminPlatformCredentialsCommands {
         provider: String,
         #[arg(long = "field")]
         fields: Vec<String>,
+        /// Confirm that all OAuth connections and logins for the shared provider stop working
+        #[arg(long)]
+        confirm_shared_provider: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
