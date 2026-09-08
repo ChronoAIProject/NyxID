@@ -23,6 +23,8 @@ pub struct PollOutcome {
     pub messages: Vec<InboundMessage>,
     pub cursor: Option<String>,
     pub backoff: Option<std::time::Duration>,
+    /// Locally authored operational notice, never upstream response text.
+    pub notice: Option<String>,
 }
 
 impl std::fmt::Debug for PollOutcome {

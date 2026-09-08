@@ -107,6 +107,7 @@ pub struct RegistrationDescriptor {
     pub automatic_webhook: bool,
     pub webhook_ingestion: bool,
     pub managed_only: bool,
+    pub managed_only_message: &'static str,
     pub webhook_secret_label: Option<&'static str>,
     pub setup_instructions: &'static [&'static str],
 }
@@ -128,6 +129,7 @@ impl Default for RegistrationDescriptor {
             automatic_webhook: false,
             webhook_ingestion: true,
             managed_only: false,
+            managed_only_message: "This platform requires managed onboarding",
             webhook_secret_label: None,
             setup_instructions: &[],
         }

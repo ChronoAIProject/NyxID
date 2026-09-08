@@ -84,7 +84,7 @@ pub async fn bootstrap(
         (adapter.managed_onboarding(), adapter.platform_credentials())
     {
         response.flow = Some(managed.flow);
-        let row = platform_credential_service::load(&state.db, managed.provider).await?;
+        let row = platform_credential_service::load(&state.db, &credentials).await?;
         response.available = platform_credential_service::configured(row.as_ref(), &credentials);
         if let crate::services::channel_platform::CredentialResolution::OAuthConnection {
             provider_slug,

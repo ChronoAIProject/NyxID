@@ -147,7 +147,9 @@ pub async fn create_bot(
 ) -> AppResult<CreateBotResult> {
     let descriptor = adapter.registration();
     if descriptor.managed_only {
-        return Err(super::channel_managed::unavailable());
+        return Err(AppError::ValidationError(
+            descriptor.managed_only_message.to_string(),
+        ));
     }
     descriptor.validate(fields, false)?;
     // Validate label
@@ -274,6 +276,7 @@ async fn persist_verified_bot(
             .and_then(|(_, outcome)| outcome.backoff)
             .map(|d| now + chrono::Duration::seconds(d.as_secs().min(86400) as i64)),
         poll_error_count: 0,
+        last_poll_notice: None,
         error: None,
         registration_pin_encrypted: match managed {
             Some((pin, _)) => Some(encryption_keys.encrypt(pin.as_bytes()).await?),
@@ -342,13 +345,16 @@ pub async fn create_managed_bot(
     input: &super::channel_managed::ManagedOnboardingInput,
     progress: &super::channel_managed::ManagedProgress,
 ) -> AppResult<CreateBotResult> {
-    let descriptor = adapter
+    let managed = adapter
         .managed_onboarding()
         .ok_or_else(super::channel_managed::unavailable)?;
     let credential_descriptor = adapter
         .platform_credentials()
         .ok_or_else(super::channel_managed::unavailable)?;
-    let row = super::platform_credential_service::load(db, descriptor.provider).await?;
+    if managed.provider != credential_descriptor.provider {
+        return Err(super::channel_managed::unavailable());
+    }
+    let row = super::platform_credential_service::load(db, &credential_descriptor).await?;
     if !super::platform_credential_service::configured(row.as_ref(), &credential_descriptor) {
         return Err(super::channel_managed::unavailable());
     }
@@ -418,7 +424,8 @@ pub async fn create_managed_bot(
         .await;
     }
     let platform =
-        super::platform_credential_service::load_decrypted(db, keys, descriptor.provider).await?;
+        super::platform_credential_service::load_decrypted(db, keys, &credential_descriptor)
+            .await?;
     progress.stage("exchanging");
     let result = adapter
         .complete_managed_onboarding(http, &platform, input)
@@ -523,29 +530,39 @@ pub async fn reconnect_bot(
             "Reconnect the same platform account to preserve its conversation routes".to_string(),
         ));
     }
-    let outcome = adapter
-        .poll_inbound(
-            http,
-            &BotCredentials {
-                token: &token,
-                platform_bot_id: Some(&identity.platform_bot_id),
-                platform_secrets: None,
-            },
+    let (cursor, backoff, last_polled_at) = if let Some(cursor) = &bot.poll_cursor {
+        // Resume from the last committed event so DMs received during failure remain eligible.
+        (
+            cursor.clone(),
             None,
+            bot.last_polled_at.map(bson::DateTime::from_chrono),
         )
-        .await?;
-    let cursor = outcome.cursor.ok_or_else(|| {
-        AppError::ChannelPlatformError(
-            "Initial channel poll was rate limited; retry later".to_string(),
-        )
-    })?;
+    } else {
+        let outcome = adapter
+            .poll_inbound(
+                http,
+                &BotCredentials {
+                    token: &token,
+                    platform_bot_id: Some(&identity.platform_bot_id),
+                    platform_secrets: None,
+                },
+                None,
+            )
+            .await?;
+        let cursor = outcome.cursor.ok_or_else(|| {
+            AppError::ChannelPlatformError(
+                "Initial channel poll was rate limited; retry later".to_string(),
+            )
+        })?;
+        (cursor, outcome.backoff, Some(bson::DateTime::now()))
+    };
     let result = db.collection::<ChannelBot>(COLLECTION_NAME).update_one(
-        doc! { "_id": &bot.id, "user_id": &bot.user_id, "is_active": true, "connection_id": &bot.connection_id, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
+        doc! { "_id": &bot.id, "user_id": &bot.user_id, "is_active": true, "connection_id": &bot.connection_id, "poll_cursor": &bot.poll_cursor, "updated_at": bson::DateTime::from_chrono(bot.updated_at) },
         doc! { "$set": {
             "connection_id": connection_id, "platform_bot_username": identity.platform_bot_username,
             "poll_cursor": cursor, "poll_lease_until": null, "poll_error_count": 0,
-            "poll_backoff_until": outcome.backoff.map(|d| bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(d.as_secs().min(86400) as i64))),
-            "last_polled_at": bson::DateTime::now(), "status": "active", "error": null, "updated_at": bson::DateTime::now(),
+            "poll_backoff_until": backoff.map(|d| bson::DateTime::from_chrono(Utc::now() + chrono::Duration::seconds(d.as_secs().min(86400) as i64))),
+            "last_polled_at": last_polled_at, "status": "active", "error": null, "updated_at": bson::DateTime::now(),
         } },
     ).await?;
     if result.matched_count == 0 {
@@ -566,11 +583,11 @@ pub async fn reregister_managed_bot(
     if bot.credential_source != "platform" || !bot.is_active {
         return Err(super::channel_managed::unavailable());
     }
-    let provider = adapter
+    let descriptor = adapter
         .platform_credentials()
-        .ok_or_else(super::channel_managed::unavailable)?
-        .provider;
-    let platform = super::platform_credential_service::load_decrypted(db, keys, provider).await?;
+        .ok_or_else(super::channel_managed::unavailable)?;
+    let platform =
+        super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
     let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, bot).await?);
     let pin_bytes = zeroize::Zeroizing::new(
         keys.decrypt(
@@ -613,11 +630,11 @@ pub async fn repair_managed_bot(
     if bot.credential_source != "platform" || !bot.is_active {
         return Err(super::channel_managed::unavailable());
     }
-    let provider = adapter
+    let descriptor = adapter
         .platform_credentials()
-        .ok_or_else(super::channel_managed::unavailable)?
-        .provider;
-    let platform = super::platform_credential_service::load_decrypted(db, keys, provider).await?;
+        .ok_or_else(super::channel_managed::unavailable)?;
+    let platform =
+        super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
     let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, bot).await?);
     let pin = zeroize::Zeroizing::new(
         keys.decrypt(
@@ -931,11 +948,11 @@ async fn cleanup_managed_webhook(
     {
         return Ok("retained_shared");
     }
-    let provider = adapter
+    let descriptor = adapter
         .platform_credentials()
-        .ok_or_else(super::channel_managed::unavailable)?
-        .provider;
-    let platform = super::platform_credential_service::load_decrypted(db, keys, provider).await?;
+        .ok_or_else(super::channel_managed::unavailable)?;
+    let platform =
+        super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
     let token = zeroize::Zeroizing::new(decrypt_bot_token(keys, bot).await?);
     let credentials = BotCredentials {
         token: &token,
@@ -1062,6 +1079,7 @@ mod tests {
             last_polled_at: None,
             poll_backoff_until: None,
             poll_error_count: 0,
+            last_poll_notice: None,
             error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,

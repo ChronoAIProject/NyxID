@@ -35,8 +35,10 @@ pub fn descriptor(
         .ok_or_else(|| AppError::NotFound("Unknown platform credential provider".to_string()))
 }
 
-pub async fn load(db: &mongodb::Database, provider: &str) -> AppResult<Option<PlatformCredential>> {
-    let (_, descriptor) = descriptor(&Arc::new(TokenExchangeCache::new()), provider)?;
+pub async fn load(
+    db: &mongodb::Database,
+    descriptor: &PlatformCredentialDescriptor,
+) -> AppResult<Option<PlatformCredential>> {
     if let PlatformCredentialBacking::ProviderOAuth { provider_slug } = descriptor.backing {
         let row = db
             .collection::<crate::models::provider_config::ProviderConfig>(
@@ -46,7 +48,7 @@ pub async fn load(db: &mongodb::Database, provider: &str) -> AppResult<Option<Pl
             .await?;
         return Ok(row.map(|row| PlatformCredential {
             id: row.id,
-            provider: provider.to_string(),
+            provider: descriptor.provider.to_string(),
             fields: BTreeMap::new(),
             secrets: [
                 ("client_id", row.client_id_encrypted),
@@ -71,7 +73,7 @@ pub async fn load(db: &mongodb::Database, provider: &str) -> AppResult<Option<Pl
     }
     Ok(db
         .collection::<PlatformCredential>(COLLECTION_NAME)
-        .find_one(doc! { "provider": provider })
+        .find_one(doc! { "provider": descriptor.provider })
         .await?)
 }
 
@@ -97,10 +99,10 @@ pub fn configured(
 pub async fn load_decrypted(
     db: &mongodb::Database,
     keys: &EncryptionKeys,
-    provider: &str,
+    descriptor: &PlatformCredentialDescriptor,
 ) -> AppResult<PlatformVerifySecrets> {
     let mut result = PlatformVerifySecrets::default();
-    if let Some(row) = load(db, provider).await? {
+    if let Some(row) = load(db, descriptor).await? {
         for (name, value) in row.fields {
             result.insert(&name, value);
         }
@@ -226,8 +228,10 @@ pub async fn update(
     Ok(())
 }
 
-pub async fn delete(db: &mongodb::Database, provider: &str) -> AppResult<()> {
-    let (_, descriptor) = descriptor(&Arc::new(TokenExchangeCache::new()), provider)?;
+pub async fn delete(
+    db: &mongodb::Database,
+    descriptor: &PlatformCredentialDescriptor,
+) -> AppResult<()> {
     if let PlatformCredentialBacking::ProviderOAuth { provider_slug } = descriptor.backing {
         db.collection::<bson::Document>(crate::models::provider_config::COLLECTION_NAME)
             .update_one(
@@ -241,7 +245,7 @@ pub async fn delete(db: &mongodb::Database, provider: &str) -> AppResult<()> {
         return Ok(());
     }
     db.collection::<PlatformCredential>(COLLECTION_NAME)
-        .delete_one(doc! { "provider": provider })
+        .delete_one(doc! { "provider": descriptor.provider })
         .await?;
     Ok(())
 }

@@ -2696,6 +2696,12 @@ pub async fn refresh_expiring_oauth_keys(
     window: Duration,
     notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<RefreshSweepReport> {
+    if super::user_api_key_service::expire_pending_channel_connections(db)
+        .await
+        .is_err()
+    {
+        tracing::warn!("Pending channel connection expiry failed; continuing OAuth refresh sweep");
+    }
     let deadline = Utc::now() + window;
     let candidates: Vec<UserApiKey> = db
         .collection::<UserApiKey>(USER_API_KEYS)

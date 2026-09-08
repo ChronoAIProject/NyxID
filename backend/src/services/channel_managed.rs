@@ -108,8 +108,7 @@ pub async fn build_verify_secrets(
     if bot.credential_source == "platform" {
         let descriptor = adapter.platform_credentials().ok_or_else(unavailable)?;
         let credentials =
-            super::platform_credential_service::load_decrypted(db, keys, descriptor.provider)
-                .await?;
+            super::platform_credential_service::load_decrypted(db, keys, &descriptor).await?;
         for field in adapter.registration().fields {
             if secrets.get(field.name).is_none()
                 && let Some(fallback) = field.platform_fallback

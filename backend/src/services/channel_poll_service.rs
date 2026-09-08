@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use bson::doc;
 use chrono::Utc;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt, stream};
 use mongodb::options::ReturnDocument;
 
 use super::channel_inbound_service::{InboundDeps, process_inbound_messages};
@@ -42,9 +42,17 @@ pub(crate) async fn sweep_with_adapters(
             .await?
             .try_collect()
             .await?;
-        for bot in bots {
-            poll_bot(state, adapter.as_ref(), &bot.id, min_interval_secs).await?;
-        }
+        let adapter = adapter.as_ref();
+        stream::iter(bots)
+            .for_each_concurrent(8, |bot| async move {
+                if poll_bot(state, adapter, &bot.id, min_interval_secs)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(bot_id = %bot.id, "Channel poll failed; continuing sweep");
+                }
+            })
+            .await;
     }
     Ok(())
 }
@@ -140,6 +148,9 @@ pub(crate) async fn poll_bot(
     let mut set = doc! { "last_polled_at": bson::DateTime::now(), "poll_lease_until": null };
     let failure = match result {
         Ok(outcome) => {
+            if let Some(notice) = outcome.notice {
+                set.insert("last_poll_notice", notice);
+            }
             set.insert("poll_cursor", outcome.cursor);
             set.insert(
                 "poll_backoff_until",

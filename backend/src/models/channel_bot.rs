@@ -26,6 +26,9 @@ pub struct ChannelBot {
     pub poll_backoff_until: Option<DateTime<Utc>>,
     #[serde(default)]
     pub poll_error_count: u32,
+    /// Most recent locally authored polling notice; retained across successful polls.
+    #[serde(default)]
+    pub last_poll_notice: Option<String>,
     /// Locally authored operational cause, never upstream error prose.
     #[serde(default)]
     pub error: Option<String>,
@@ -124,6 +127,7 @@ mod tests {
         bot.last_polled_at = Some(now);
         bot.poll_backoff_until = Some(now);
         bot.poll_error_count = 2;
+        bot.last_poll_notice = Some("Older DMs were skipped".into());
         let mut document = bson::to_document(&bot).unwrap();
         for field in ["poll_lease_until", "last_polled_at", "poll_backoff_until"] {
             assert_eq!(document.get_datetime(field).unwrap().to_chrono(), now);
@@ -132,6 +136,7 @@ mod tests {
         assert_eq!(restored.connection_id, bot.connection_id);
         assert_eq!(restored.poll_cursor, bot.poll_cursor);
         assert_eq!(restored.poll_error_count, 2);
+        assert_eq!(restored.last_poll_notice, bot.last_poll_notice);
         for field in [
             "connection_id",
             "poll_cursor",
@@ -139,6 +144,7 @@ mod tests {
             "last_polled_at",
             "poll_backoff_until",
             "poll_error_count",
+            "last_poll_notice",
             "error",
         ] {
             document.remove(field);
@@ -150,6 +156,7 @@ mod tests {
         assert!(legacy.last_polled_at.is_none());
         assert!(legacy.poll_backoff_until.is_none());
         assert!(legacy.error.is_none());
+        assert!(legacy.last_poll_notice.is_none());
         assert_eq!(legacy.poll_error_count, 0);
     }
 
@@ -166,6 +173,7 @@ mod tests {
             last_polled_at: None,
             poll_backoff_until: None,
             poll_error_count: 0,
+            last_poll_notice: None,
             error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,

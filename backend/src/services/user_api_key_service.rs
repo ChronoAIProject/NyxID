@@ -942,6 +942,19 @@ pub async fn fail_oauth_placeholders(
     }
 }
 
+/// Expire abandoned channel attempts without touching completed OAuth connections.
+pub async fn expire_pending_channel_connections(db: &mongodb::Database) -> AppResult<u64> {
+    let result = db.collection::<UserApiKey>(COLLECTION_NAME)
+        .delete_many(doc! {
+            "source": "channel_onboarding",
+            "credential_type": "oauth2",
+            "status": "pending_auth",
+            "created_at": { "$lt": bson::DateTime::from_chrono(Utc::now() - chrono::Duration::hours(1)) },
+        })
+        .await?;
+    Ok(result.deleted_count)
+}
+
 /// Lazy reconciliation of a single `pending_auth` OAuth placeholder. Called
 /// from the wizard's polling endpoint (`GET /api/v1/keys/{id}`) so each poll
 /// is a chance to converge the placeholder to a terminal status without

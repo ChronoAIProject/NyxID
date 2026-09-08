@@ -271,6 +271,7 @@ impl PlatformAdapter for XAdapter {
             extra_fields: &[],
             token_fields: &[],
             managed_only: true,
+            managed_only_message: "X accounts are connected through Connect X account; developer credentials are not accepted",
             webhook_ingestion: false,
             preserve_subscription_on_verify: true,
             ..Default::default()
@@ -389,6 +390,7 @@ impl PlatformAdapter for XAdapter {
                     messages: vec![],
                     cursor: cursor.map(String::from),
                     backoff,
+                    notice: None,
                 });
             }
             let body = response_json(response).await?;
@@ -416,6 +418,7 @@ impl PlatformAdapter for XAdapter {
                         messages: vec![],
                         cursor: Some(newest.unwrap_or_else(|| "0".to_string())),
                         backoff,
+                        notice: None,
                     });
                 }
             }
@@ -436,12 +439,14 @@ impl PlatformAdapter for XAdapter {
             let next = body["meta"]["next_token"]
                 .as_str()
                 .filter(|s| !s.is_empty());
-            if reached_cursor || next.is_none() {
+            let truncated = page + 1 == MAX_PAGES && !reached_cursor && next.is_some();
+            if reached_cursor || next.is_none() || truncated {
                 messages.reverse();
                 return Ok(PollOutcome {
                     messages,
                     cursor: newest,
                     backoff,
+                    notice: truncated.then(|| "Older X DMs were skipped because the backlog exceeded the 10-page polling window.".to_string()),
                 });
             }
             if backoff.is_some() {
@@ -450,6 +455,7 @@ impl PlatformAdapter for XAdapter {
                     messages: vec![],
                     cursor: cursor.map(String::from),
                     backoff,
+                    notice: None,
                 });
             }
             let next = next
@@ -457,7 +463,7 @@ impl PlatformAdapter for XAdapter {
                 .ok_or_else(protocol_error)?;
             pagination = Some(next.to_string());
         }
-        Err(AppError::ChannelPlatformError("X DM backlog exceeds the bounded polling window; reconnect to resume from current messages".to_string()))
+        unreachable!("the final page always returns a bounded batch")
     }
 
     fn supports_reply_metadata(&self, metadata: &Value) -> bool {

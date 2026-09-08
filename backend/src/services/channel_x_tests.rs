@@ -666,7 +666,7 @@ async fn admin_lists_both_providers_and_updates_only_the_shared_provider_config(
         .await
         .unwrap();
     assert!(!platform_credential_service::configured(
-        platform_credential_service::load(&state.db, "x")
+        platform_credential_service::load(&state.db, &adapter.platform_credentials().unwrap())
             .await
             .unwrap()
             .as_ref(),
@@ -706,6 +706,7 @@ async fn reconnect_requires_same_identity_and_fences_stale_failure() {
         .and(path("/2/dm_events"))
         .and(header("authorization", "Bearer live-access-token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{"id": "200"}]})))
+        .expect(0)
         .mount(&server)
         .await;
     channel_bot_service::reconnect_bot(
@@ -725,7 +726,7 @@ async fn reconnect_requires_same_identity_and_fences_stale_failure() {
         .await
         .unwrap();
     assert_eq!(current.status, "active");
-    assert_eq!(current.poll_cursor.as_deref(), Some("200"));
+    assert_eq!(current.poll_cursor.as_deref(), Some("100"));
     channel_bot_service::delete_bot(
         &state.db,
         &state.http_client,
@@ -746,3 +747,6 @@ async fn reconnect_requires_same_identity_and_fences_stale_failure() {
             .is_some()
     );
 }
+
+#[path = "channel_x_review_tests.rs"]
+mod review;

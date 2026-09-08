@@ -483,7 +483,13 @@ async fn platform_credentials_mask_rotate_clear_and_fallback_on_demand() {
     assert!(!serialized.to_string().contains("secret-for-test"));
     assert!(!format!("{list:?}").contains(list[0].webhook_verify_token.as_ref().unwrap()));
     assert!(!serialized.to_string().contains("test_graph_base"));
-    let original = credentials::load(&state.db, "meta").await.unwrap().unwrap();
+    let credential_descriptor = credentials::descriptor(&state.token_exchange_cache, "meta")
+        .unwrap()
+        .1;
+    let original = credentials::load(&state.db, &credential_descriptor)
+        .await
+        .unwrap()
+        .unwrap();
     assert!(
         uuid::Uuid::parse_str(&original.id)
             .unwrap()
@@ -553,7 +559,7 @@ async fn platform_credentials_mask_rotate_clear_and_fallback_on_demand() {
         .await
         .unwrap();
     assert!(
-        credentials::load(&state.db, "meta")
+        credentials::load(&state.db, &credential_descriptor)
             .await
             .unwrap()
             .is_none()
@@ -1035,9 +1041,13 @@ async fn platform_dispatcher_handshake_signature_and_multinumber_targets() {
     let (state, auth, server) = fixture().await;
     let (_, Json(rows)) = admin::list(State(state.clone()), auth).await.unwrap();
     let adapter = resolve_adapter("whatsapp", &state.token_exchange_cache).unwrap();
-    let secrets = credentials::load_decrypted(&state.db, &state.encryption_keys, "meta")
-        .await
-        .unwrap();
+    let secrets = credentials::load_decrypted(
+        &state.db,
+        &state.encryption_keys,
+        &adapter.platform_credentials().unwrap(),
+    )
+    .await
+    .unwrap();
     let mut query = [
         ("hub.mode".to_string(), "subscribe".to_string()),
         (

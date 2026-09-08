@@ -229,8 +229,8 @@ pub async fn start_connection(
             oauth_client_id: None,
             oauth_client_secret: None,
             status: "pending_auth",
-            source: Some("user_created"),
-            source_id: None,
+            source: Some("channel_onboarding"),
+            source_id: Some(&connection),
         },
     )
     .await?;

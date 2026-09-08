@@ -105,7 +105,7 @@ pub async fn platform_subscription(
         let credentials = crate::services::platform_credential_service::load_decrypted(
             &state.db,
             &state.encryption_keys,
-            descriptor.provider,
+            &descriptor,
         )
         .await?;
         adapter.platform_subscription_handshake(&credentials, &query)
@@ -160,7 +160,7 @@ pub(super) async fn dispatch_platform_webhook(
     let credentials = crate::services::platform_credential_service::load_decrypted(
         &state.db,
         &state.encryption_keys,
-        descriptor.provider,
+        &descriptor,
     )
     .await?;
     let targets = adapter
@@ -878,6 +878,7 @@ mod tests {
             last_polled_at: None,
             poll_backoff_until: None,
             poll_error_count: 0,
+            last_poll_notice: None,
             error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,

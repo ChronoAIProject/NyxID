@@ -324,6 +324,7 @@ pub struct ChannelConnectionState {
     pub next_poll_at: Option<String>,
     pub poll_backoff_until: Option<String>,
     pub poll_error_count: u32,
+    pub last_poll_notice: Option<String>,
     pub error: Option<String>,
 }
 
@@ -362,6 +363,7 @@ impl ChannelConnectionState {
             next_poll_at: next,
             poll_backoff_until: bot.poll_backoff_until.map(|d| d.to_rfc3339()),
             poll_error_count: bot.poll_error_count,
+            last_poll_notice: bot.last_poll_notice.clone(),
             error: bot.error.clone(),
         }
     }
@@ -504,6 +506,11 @@ pub async fn create_bot(
 
     let adapter = resolve_adapter(&body.platform, &state.token_exchange_cache)?;
     let descriptor = adapter.registration();
+    if descriptor.managed_only {
+        return Err(AppError::ValidationError(
+            descriptor.managed_only_message.to_string(),
+        ));
+    }
     let label = body.label.trim();
     if label.is_empty() || label.len() > 128 {
         return Err(AppError::ValidationError(
@@ -1029,6 +1036,7 @@ mod tests {
             last_polled_at: None,
             poll_backoff_until: None,
             poll_error_count: 0,
+            last_poll_notice: None,
             error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
@@ -1101,6 +1109,7 @@ mod tests {
             last_polled_at: None,
             poll_backoff_until: None,
             poll_error_count: 0,
+            last_poll_notice: None,
             error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,

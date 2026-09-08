@@ -300,6 +300,7 @@ mod tests {
             last_polled_at: None,
             poll_backoff_until: None,
             poll_error_count: 0,
+            last_poll_notice: None,
             error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
