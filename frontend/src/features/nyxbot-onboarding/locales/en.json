@@ -39,6 +39,7 @@
   "connectGoogle": "Connect Google",
   "googleConnected": "Google Workspace connected",
   "googleCancelled": "Google authorization was cancelled or could not be completed. Your sign-in is preserved. Please retry.",
+  "googleConnectFailed": "We couldn't open Google authorization. Your sign-in is preserved. Please retry.",
   "googleIncomplete": "Drive and Calendar access is still required. Connect Google and grant both permissions to continue.",
   "googleUnavailable": "Google Drive and Calendar authorization is not available yet. Your account is signed in, but access to your files and calendar has not been granted.",
   "loadError": "We couldn't load your connections. Please retry.",

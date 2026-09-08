@@ -2,6 +2,7 @@ import { useState } from "react";
 import { I18nextProvider, useTranslation } from "react-i18next";
 import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { ApiError } from "@/lib/api-client";
 import { useAuthStore } from "@/stores/auth-store";
 import { useNyxbotOnboarding } from "@/hooks/use-nyxbot-onboarding";
 import {
@@ -81,7 +82,12 @@ function ConnectedOnboarding({
       accountName={accountName}
       ready={sourceReady}
       connecting={flow.connectGoogle.isPending}
-      disabled={loading || loadError || (!sourceReady && !flow.googleAvailable)}
+      disabled={
+        loading ||
+        loadError ||
+        flow.connectGoogle.isPending ||
+        (!sourceReady && !flow.googleAvailable)
+      }
       onConnect={() =>
         sourceReady
           ? setView(flow.progress.botId ? "link" : "channel")
@@ -125,7 +131,12 @@ function ConnectedOnboarding({
         <OnboardingNotice error>{t("googleIncomplete")}</OnboardingNotice>
       )}
       {flow.connectGoogle.isError && (
-        <OnboardingNotice error>{t("googleCancelled")}</OnboardingNotice>
+        <OnboardingNotice error>
+          {t("googleConnectFailed")}
+          {flow.connectGoogle.error instanceof ApiError && (
+            <p>{flow.connectGoogle.error.message}</p>
+          )}
+        </OnboardingNotice>
       )}
     </DataSourceStep>
   );

@@ -117,6 +117,11 @@ on every startup. Therefore:
   initiation fails with a clear error. Launch allowlists: google = `openid email
   profile`; github = `read:user user:email` (+ `repo` if product wants it at launch).
   BYO flows keep today's free-form behavior (the user consents on their own app).
+- Nyxbot onboarding additionally permits `https://www.googleapis.com/auth/drive.file`
+  and `https://www.googleapis.com/auth/calendar` for explicit data-source consent.
+  Default identity scopes do not change. Deploying this shared-app extension requires
+  the Google project's corresponding API, consent-screen and verification/test-user
+  configuration; the code allowlist does not establish Google approval or a user grant.
 - The scope catalog's `sensitive` flag is a display hint and MUST NOT be used as the
   verification gate — Google's sensitive/restricted classification is a separate,
   manually maintained list (it does not match our `sensitive` booleans; e.g. Drive

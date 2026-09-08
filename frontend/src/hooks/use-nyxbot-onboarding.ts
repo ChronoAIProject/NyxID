@@ -47,17 +47,8 @@ export function useNyxbotOnboarding(
       ? pendingKey
       : keys.data?.find(hasWorkspaceAuthorization);
   const entry = catalog.data;
-  const scopesAllowed =
-    !entry?.platform_scope_allowlist ||
-    GOOGLE_WORKSPACE_SCOPES.every((scope) =>
-      entry.platform_scope_allowlist?.includes(scope),
-    );
-  const googleAvailable = Boolean(
-    entry?.provider_config_id &&
-    entry.credential_mode !== "user" &&
-    entry.has_platform_oauth_credentials &&
-    scopesAllowed,
-  );
+  // Let initiation resolve credentials and enforce its current scope policy.
+  const googleAvailable = Boolean(entry?.provider_config_id);
 
   const connectGoogle = useMutation({
     mutationFn: async () => {

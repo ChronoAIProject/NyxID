@@ -39,6 +39,7 @@
   "connectGoogle": "连接 Google",
   "googleConnected": "Google Workspace 已连接",
   "googleCancelled": "Google 授权已取消或未能完成。你的登录状态已保留，请重试。",
+  "googleConnectFailed": "未能打开 Google 授权页面。你的登录状态已保留，请重试。",
   "googleIncomplete": "仍需要云端硬盘和日历权限。请连接 Google 并授予这两项权限后继续。",
   "googleUnavailable": "Google Drive 和 Calendar 授权暂不可用。你的账号已登录，但尚未授予文件和日历的访问权限。",
   "loadError": "无法加载你的连接，请重试。",

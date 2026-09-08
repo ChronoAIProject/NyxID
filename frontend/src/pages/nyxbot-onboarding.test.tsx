@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -11,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NyxbotOnboardingPage } from "./nyxbot-onboarding";
 import { nyxbotI18n } from "@/features/nyxbot-onboarding/i18n";
 import { GOOGLE_WORKSPACE_SCOPES } from "@/schemas/nyxbot-onboarding";
+import { ApiError } from "@/lib/api-client";
 
 const { get, post, redirect, auth } = vi.hoisted(() => ({
   get: vi.fn(),
@@ -21,7 +23,10 @@ const { get, post, redirect, auth } = vi.hoisted(() => ({
     isAuthenticated: true,
   },
 }));
-vi.mock("@/lib/api-client", () => ({ api: { get, post } }));
+vi.mock("@/lib/api-client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api-client")>()),
+  api: { get, post },
+}));
 vi.mock("@/lib/navigation", () => ({
   hardRedirect: redirect,
   openExternal: redirect,
@@ -320,16 +325,89 @@ describe("Nyxbot onboarding", () => {
         .googleKeyId,
     ).toBe("google-1");
   });
-  it("does not create a placeholder when the platform permits identity-only Google scopes", async () => {
+  it("requests Drive and Calendar consent on click without using catalog configuration as a grant prerequisite", async () => {
     keys = [];
     catalogResponse = {
       ...catalog,
+      credential_mode: "user",
+      has_platform_oauth_credentials: false,
       platform_scope_allowlist: [
         "openid",
         "email",
         "profile",
       ] as unknown as typeof GOOGLE_WORKSPACE_SCOPES,
     };
+    mount();
+    const button = screen.getByRole("button", { name: "Connect Google" });
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(post).not.toHaveBeenCalled();
+    await userEvent.click(button);
+    await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
+    const oauthCall = get.mock.calls.find(([path]) =>
+      String(path).startsWith("/providers/google-provider/connect/oauth"),
+    );
+    const url = new URL(oauthCall![0], "http://localhost");
+    expect(url.searchParams.get("scope_override")?.split(",")).toEqual([
+      ...GOOGLE_WORKSPACE_SCOPES,
+    ]);
+    expect(redirect).toHaveBeenCalledWith(
+      "https://accounts.google.com/o/oauth2/v2/auth?state=test",
+    );
+  });
+  it("shows an initiation rejection and retries the same connection without claiming user cancellation or consent", async () => {
+    keys = [];
+    const message =
+      "Requested scopes are not enabled for the shared Google OAuth app.";
+    const previousGet = get.getMockImplementation()!;
+    let attempts = 0;
+    let rejectInitiation: (() => void) | undefined;
+    get.mockImplementation((path: string) => {
+      if (
+        path.startsWith("/providers/google-provider/connect/oauth") &&
+        attempts++ === 0
+      ) {
+        return new Promise((_, reject) => {
+          rejectInitiation = () =>
+            reject(
+              new ApiError(400, {
+                error: "validation_error",
+                error_code: 1008,
+                message,
+              }),
+            );
+        });
+      }
+      return previousGet(path);
+    });
+    mount();
+    const button = screen.getByRole("button", { name: "Connect Google" });
+    await waitFor(() => expect(button).toBeEnabled());
+    await userEvent.click(button);
+    await waitFor(() => expect(rejectInitiation).toBeTypeOf("function"));
+    expect(button).toBeDisabled();
+    await userEvent.click(button);
+    expect(attempts).toBe(1);
+    await act(async () => rejectInitiation?.());
+    await screen.findByText(message);
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "We couldn't open Google authorization.",
+    );
+    expect(screen.getByText("Signed in to NyxID")).toBeVisible();
+    expect(
+      screen.queryByText(/authorization was cancelled/),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Google Workspace connected"),
+    ).not.toBeInTheDocument();
+    expect(redirect).not.toHaveBeenCalled();
+    await waitFor(() => expect(button).toBeEnabled());
+    await userEvent.click(button);
+    await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+  it("requires a Google OAuth provider route before starting consent", async () => {
+    keys = [];
+    catalogResponse = { ...catalog, provider_config_id: "" };
     mount();
     await screen.findByText(
       /Google Drive and Calendar authorization is not available/,
