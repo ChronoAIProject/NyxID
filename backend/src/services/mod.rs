@@ -31,12 +31,17 @@ pub mod catalog_spec_sync;
 pub mod chain_verify_service;
 pub mod channel_adapters;
 pub mod channel_bot_service;
+pub mod channel_credentials;
 pub mod channel_event_service;
+pub mod channel_inbound_service;
 pub mod channel_managed;
 pub mod channel_platform;
+pub mod channel_poll_service;
 pub mod channel_registration;
 pub mod channel_relay_service;
 pub mod channel_routing_service;
+#[cfg(test)]
+mod channel_x_tests;
 pub mod chatgpt_translator;
 pub mod cli_pairing_service;
 pub mod cloud_credential_verify;

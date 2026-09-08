@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
-import { ManagedWhatsApp } from "@/components/channels/managed-whatsapp";
+import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
 import { useWatch } from "react-hook-form";
 import { useAppForm } from "@/components/ui/form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -115,7 +115,7 @@ function BotRow({
         </Badge>
       </TableCell>
       <TableCell>
-        {bot.webhook_registered ? (
+        {CHANNEL_PLATFORMS[bot.platform].webhookIngestion === false ? <span className="text-xs text-muted-foreground">Polling</span> : bot.webhook_registered ? (
           <div className="flex items-center gap-1 text-xs text-muted-foreground">
             <Check className="h-3 w-3 text-success" />
             Registered
@@ -180,7 +180,7 @@ function BotCard({
         </Badge>
       </div>
       <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground">
-        <span>{bot.webhook_registered ? "Webhook registered" : "No webhook"}</span>
+        <span>{CHANNEL_PLATFORMS[bot.platform].webhookIngestion === false ? "Polling" : bot.webhook_registered ? "Webhook registered" : "No webhook"}</span>
         <span>{formatDate(bot.created_at)}</span>
       </div>
     </div>
@@ -322,6 +322,8 @@ function CreateBotDialog({
   const managed = useManagedOnboarding(platform, open && Boolean(CHANNEL_PLATFORMS[platform].managedFlow));
   const [advanced, setAdvanced] = useState(false);
   const managedAvailable = Boolean(CHANNEL_PLATFORMS[platform].managedFlow && managed.data?.available);
+  const managedFlow = CHANNEL_PLATFORMS[platform].managedFlow;
+  const ManagedConnect = managedFlow ? MANAGED_FLOW_COMPONENTS[managedFlow].Connect : undefined;
 
   function onSubmit(data: CreateChannelBotFormData) {
     const payload = channelBotRegistrationPayload(data);
@@ -441,14 +443,17 @@ function CreateBotDialog({
             )}
           </div>
 
-          {managedAvailable && managed.data && <>
-            <ManagedWhatsApp key={platform} bootstrap={managed.data} label={label} orgId={targetOrgId} onConnected={(bot) => {
+          {CHANNEL_PLATFORMS[platform].managedOnly && !managedAvailable && (
+            <p role="status" className="text-xs text-muted-foreground">{managed.isLoading ? "Loading account connection..." : managed.isError ? "Unable to load account connection settings. Retry shortly." : `Not available until an admin configures ${platformLabel(platform)}.`}</p>
+          )}
+          {managedAvailable && managed.data && ManagedConnect && <>
+            <ManagedConnect key={`${platform}:${targetOrgId ?? "personal"}`} platform={platform} bootstrap={managed.data} label={label} orgId={targetOrgId} onConnected={(bot) => {
               onOpenChange(false);
               void navigate({ to: "/channel-bots/$botId", params: { botId: bot.id } });
             }} />
-            <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)} className="border-t border-border pt-4"><summary className="cursor-pointer text-xs text-muted-foreground">{CHANNEL_PLATFORMS[platform].advancedLabel}</summary></details>
+            {!CHANNEL_PLATFORMS[platform].managedOnly && <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)} className="border-t border-border pt-4"><summary className="cursor-pointer text-xs text-muted-foreground">{CHANNEL_PLATFORMS[platform].advancedLabel}</summary></details>}
           </>}
-          {(!managedAvailable || advanced) && <>
+          {!CHANNEL_PLATFORMS[platform].managedOnly && (!managedAvailable || advanced) && <>
           {setupNote && (
             <div className="space-y-1 rounded-lg border border-border/70 bg-muted/30 p-4">
               <p className="text-[12px] font-medium">{setupNote.title}</p>
@@ -486,9 +491,11 @@ function CreateBotDialog({
 
 function DeleteBotDialog({
   botId,
+  deletionNote,
   onClose,
 }: {
   readonly botId: string | null;
+  readonly deletionNote?: string;
   readonly onClose: () => void;
 }) {
   const deleteMutation = useDeleteChannelBot();
@@ -515,6 +522,7 @@ function DeleteBotDialog({
           <DialogDescription>
             This will permanently delete this bot and all its conversation
             routes. This action cannot be undone.
+            {deletionNote && ` ${deletionNote}`}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
@@ -1044,7 +1052,7 @@ export function ChannelBotsPage() {
         onOpenChange={setCreateDeviceOpen}
         defaultOrgId={scopeOrgId}
       />
-      <DeleteBotDialog botId={deleteTarget} onClose={() => setDeleteTarget(null)} />
+      <DeleteBotDialog botId={deleteTarget} deletionNote={(() => { const bot = bots?.find((bot) => bot.id === deleteTarget); return bot && bot.credential_source !== "user" ? CHANNEL_PLATFORMS[bot.platform].deletionNote : undefined; })()} onClose={() => setDeleteTarget(null)} />
     </div>
   );
 }

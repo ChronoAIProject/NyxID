@@ -190,6 +190,20 @@ For Telegram, NyxID auto-registers the webhook. For Discord/Lark/Feishu/Slack, c
 
 Managed WhatsApp is available after an admin configures Meta under Platform Credentials:
 
+Managed platforms are discovered through the server bootstrap; `--managed` is not restricted to a platform name. X is available after an admin configures its shared OAuth app in Platform Credentials:
+
+```bash
+nyxid channel-bot register --platform x --managed --label "DM Support"
+nyxid channel-bot register --platform x --managed --org my-team
+nyxid channel-bot show BOT_ID
+```
+
+X opens `/channel-bots?connect=x` for OAuth consent to `tweet.read users.read dm.read dm.write offline.access`; no user developer credentials are required. The bot references the owner's `UserApiKey`, refreshes it live, and starts active without a webhook. Old connections without DM scopes require re-consent. Personal credentials cannot back org bots. Replies go only to conversations with an inbound message and never initiate unsolicited DMs.
+
+X polls no faster than 60 seconds through the generic leased sweep (`CHANNEL_POLL_INTERVAL_SECS=30`; `0` disables). Onboarding starts at the newest event, with no history replay. Normal latency is about 60-90 seconds plus callback time; rate limits/backlogs can delay it. Show includes connection ID, cursor, last/next poll and failure cause. Revoked/deleted credentials or permanent refresh failure stop the bot; five consecutive polling errors also stop it. Reconnect on the detail page signs in again to the same X account and preserves the cursor to process the failure-period backlog. Only a missing cursor gets a fresh baseline. Backlogs exceeding ten pages emit the fetched messages, advance the cursor, and leave a persistent notice that older DMs were skipped, without failing the bot. Delete leaves the OAuth connection in place. Media URLs may require the user's bearer token, which callbacks never include. Current paid usage credits and app caps are shared by all NyxID customers. See `docs/CHANNEL_BOT_RELAY.md#x-dm-accounts` for pricing, consent, bounds and recovery.
+
+Managed WhatsApp commands:
+
 ```bash
 nyxid channel-bot register --platform whatsapp --managed
 nyxid channel-bot register --platform whatsapp --managed --label "Support" --org my-team

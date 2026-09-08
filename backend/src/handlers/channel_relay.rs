@@ -710,7 +710,13 @@ pub async fn async_reply(
     // message downstream.
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
     validate_reply_for_adapter(&body.reply, adapter.as_ref())?;
-    let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
+    let bot_token = crate::services::channel_credentials::resolve_bot_token(
+        &state.db,
+        &state.encryption_keys,
+        adapter.as_ref(),
+        &bot,
+    )
+    .await?;
 
     // Use the actual platform conversation ID from the original inbound message
     // (not the route's configured value, which may be "*" for default routes).
@@ -846,7 +852,13 @@ pub async fn update_reply(
 
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
     validate_reply_for_adapter(&body.reply, adapter.as_ref())?;
-    let bot_token = channel_bot_service::decrypt_bot_token(&state.encryption_keys, &bot).await?;
+    let bot_token = crate::services::channel_credentials::resolve_bot_token(
+        &state.db,
+        &state.encryption_keys,
+        adapter.as_ref(),
+        &bot,
+    )
+    .await?;
     let edit = OutboundEdit {
         text: body.reply.text,
         metadata: body.reply.metadata,
@@ -1216,6 +1228,14 @@ mod tests {
             platform: "telegram".to_string(),
             label: "Test Bot".to_string(),
             credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            last_poll_notice: None,
+            error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,
@@ -1679,6 +1699,14 @@ mod tests {
             platform: "lark".to_string(),
             label: "Aevatar2".to_string(),
             credential_source: "user".to_string(),
+            connection_id: None,
+            poll_cursor: None,
+            poll_lease_until: None,
+            last_polled_at: None,
+            poll_backoff_until: None,
+            poll_error_count: 0,
+            last_poll_notice: None,
+            error: None,
             registration_pin_encrypted: None,
             webhook_secret_encrypted: None,
             managed_setup: None,

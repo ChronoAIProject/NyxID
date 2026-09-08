@@ -20,6 +20,7 @@ use crate::services::channel_managed::{
 use crate::services::channel_platform::{BotCredentials, BotIdentity, PlatformVerifySecrets};
 
 pub const CREDENTIALS: PlatformCredentialDescriptor = PlatformCredentialDescriptor {
+    backing: crate::services::channel_managed::PlatformCredentialBacking::Stored,
     provider: "meta",
     label: "Meta",
     fields: &[
@@ -61,6 +62,7 @@ pub const CREDENTIALS: PlatformCredentialDescriptor = PlatformCredentialDescript
 };
 
 pub const ONBOARDING: ManagedOnboardingDescriptor = ManagedOnboardingDescriptor {
+    flow: "meta_embedded_signup",
     provider: "meta",
     bootstrap_fields: &["app_id", "embedded_signup_config_id"],
     completion_fields: &["code", "phone_number_id", "waba_id", "business_id"],

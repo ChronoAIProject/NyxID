@@ -18,6 +18,10 @@ export const platformCredentialFieldSchema = z
 
 export const platformCredentialsSchema = z.object({
   provider: z.string(),
+  backing: z.discriminatedUnion("type", [
+    z.object({ type: z.literal("stored") }),
+    z.object({ type: z.literal("provider_oauth"), provider_slug: z.string() }),
+  ]).optional(),
   label: z.string(),
   platform: z.string(),
   available: z.boolean(),

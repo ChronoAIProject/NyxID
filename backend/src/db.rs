@@ -1800,6 +1800,14 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    user_api_keys
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "source": 1, "status": 1, "created_at": 1 })
+                .build(),
+        )
+        .await?;
+
     // Multi-connection OAuth: partial unique on `connection_id` where the
     // field exists. The field is mint-once-per-add (UUID v4) for new
     // OAuth/device-code services that need independent per-connection
@@ -1969,6 +1977,14 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "platform": 1, "platform_bot_id": 1 })
+                .build(),
+        )
+        .await?;
+
+    channel_bots
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "platform": 1, "is_active": 1, "status": 1, "last_polled_at": 1 })
                 .build(),
         )
         .await?;

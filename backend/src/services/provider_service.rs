@@ -2053,6 +2053,20 @@ pub async fn seed_default_providers(
 
     backfill_provider_revocation(&collection).await?;
 
+    for adapter in super::channel_adapters::registered_adapters(&std::sync::Arc::new(
+        super::provider_token_exchange_service::TokenExchangeCache::new(),
+    )) {
+        if let super::channel_platform::CredentialResolution::OAuthConnection {
+            provider_slug,
+            required_scopes,
+        } = adapter.credential_resolution()
+        {
+            collection.update_one(doc! { "slug": provider_slug }, vec![doc! { "$set": {
+                "default_scopes": { "$setUnion": [{ "$ifNull": ["$default_scopes", []] }, required_scopes] },
+            } }]).await?;
+        }
+    }
+
     if seeded_count > 0 {
         tracing::info!(count = seeded_count, "Default provider seeding complete");
     }

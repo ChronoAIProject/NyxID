@@ -3,6 +3,10 @@ import { z } from "zod";
 const metaId = z.string().regex(/^\d{1,32}$/);
 export const managedBootstrapSchema = z.object({
   available: z.boolean(),
+  flow: z.enum(["meta_embedded_signup", "oauth_connection"]).nullable().optional(),
+  provider_slug: z.string().nullable().optional(),
+  required_scopes: z.array(z.string()).default([]),
+  authorize_start_url: z.string().nullable().optional(),
   app_id: metaId.optional(),
   embedded_signup_config_id: metaId.optional(),
   graph_version: z.string().nullable().optional(),
@@ -13,13 +17,20 @@ export const managedBootstrapSchema = z.object({
   feature_types: z.array(z.string()).default([]),
 });
 export type ManagedBootstrap = z.infer<typeof managedBootstrapSchema>;
-export const managedCompleteSchema = z.object({
+const embeddedSignupCompleteSchema = z.object({
   code: z.string().min(1).max(8192),
   phone_number_id: metaId.optional(),
   waba_id: metaId,
   business_id: metaId.optional(),
   label: z.string().trim().min(1).max(128),
   target_org_id: z.string().optional(),
+});
+export const oauthConnectionCompleteSchema = z.object({
+  connection_id: z.uuid(), label: z.string().trim().min(1).max(128), target_org_id: z.string().optional(),
+}).strict();
+export const managedCompleteSchema = z.union([embeddedSignupCompleteSchema, oauthConnectionCompleteSchema]);
+export const managedOAuthStartSchema = z.object({
+  connection_id: z.uuid(), authorization_url: z.url(), attempt_nonce: z.uuid(),
 });
 export type ManagedCompleteInput = z.infer<typeof managedCompleteSchema>;
 export const embeddedSignupEventSchema = z.object({

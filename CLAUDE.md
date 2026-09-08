@@ -309,6 +309,10 @@ Top-level: `/health`, `/.well-known/openid-configuration`, `/oauth/*`, `/mcp`, `
 
 ## Channel Bot Notes
 
+Platform Credentials is an adapter-described provider inventory: `Stored` backing keeps encrypted fields in `platform_credentials` (Meta); `ProviderOAuth { provider_slug }` reads/writes the provider config's encrypted client credentials (X shares `twitter`). Admin API, CLI and forms consume those descriptors. Managed UI components are selected through the `meta_embedded_signup` / `oauth_connection` flow registry.
+
+X DMs use managed OAuth user connections (`credential_source = "connection"`, `connection_id` is an owner-bound `UserApiKey`), with live refresh through the existing OAuth machinery. The X adapter owns protocol, scopes, rate handling and newest-first pagination; generic ingestion/credential hooks drive a MongoDB-leased poll sweep and the shared inbound pipeline. `CHANNEL_POLL_INTERVAL_SECS=30` schedules sweeps; `0` disables them. X polls no faster than 60 seconds, starts at the newest event without replaying history, and fails after five consecutive errors. A backlog exceeding ten pages is truncated with a persistent `last_poll_notice`, without failing the bot. Reconnect validates the same account and preserves an existing cursor so the next sweep processes the backlog; deletion retains the OAuth connection. Current X pricing uses paid usage credits, shared across NyxID's app. See `docs/CHANNEL_BOT_RELAY.md` for limits and recovery.
+
 Managed WhatsApp Embedded Signup v4 uses adapter-owned credential/onboarding/dispatcher hooks and SDK launch descriptors, with encrypted `platform_credentials` configured at Admin > Platform Credentials. Legacy bots default to `credential_source = "user"`; managed bots use `"platform"`, resolve app-secret fallback on demand, and store their PIN and Verify Token encrypted for setup repair. Coexistence skips number registration and requests contact/history sync without historical chat import; repair preserves successful one-shot requests. Platform and WABA-override callbacks fan out through managed-only lookup and existing per-bot verification/dedup. Deletion best-effort clears unshared WABA overrides while leaving the Meta subscription. No new environment variables. See `docs/CHANNEL_BOT_RELAY.md` for prerequisites and recovery. The manual setup below describes BYO credentials.
 
 Lark / Feishu developer-console fields serve different purposes -- do not conflate:
@@ -388,6 +392,7 @@ CHAIN_VERIFY_INTERVAL_SECS=3600     # Automatic rolling verification sweep for b
 CHANNEL_RELAY_CALLBACK_TIMEOUT_SECS=30
 CHANNEL_RELAY_MAX_BOTS_PER_USER=5
 CHANNEL_RELAY_MESSAGE_TTL_DAYS=30
+CHANNEL_POLL_INTERVAL_SECS=30       # Adapter-driven poll sweep; 0 disables (X minimum interval: 60s)
 CHANNEL_RELAY_EDIT_RATE_LIMIT_PER_SECOND=10   # Per-platform-message edit rate limit
 CHANNEL_RELAY_EDIT_RATE_LIMIT_BURST=20
 
