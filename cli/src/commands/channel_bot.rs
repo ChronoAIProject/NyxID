@@ -13,6 +13,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
     match command {
         ChannelBotCommands::Register {
             platform,
+            managed,
             bot_token,
             token_env,
             label,
@@ -27,6 +28,57 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             org,
             auth,
         } => {
+            if managed {
+                if platform != "whatsapp" {
+                    bail!("Managed onboarding is not supported for this platform");
+                }
+                if [
+                    bot_token.as_ref(),
+                    token_env.as_ref(),
+                    app_id.as_ref(),
+                    app_secret.as_ref(),
+                    app_secret_env.as_ref(),
+                    verification_token.as_ref(),
+                    encrypt_key.as_ref(),
+                    public_key.as_ref(),
+                    phone_number_id.as_ref(),
+                    waba_id.as_ref(),
+                ]
+                .iter()
+                .any(|value| value.is_some())
+                {
+                    bail!("--managed cannot be combined with credential flags");
+                }
+                let frontend = crate::auth::fetch_frontend_url(
+                    &auth.resolved_base_url()?,
+                    auth.profile.as_deref(),
+                )
+                .await?;
+                let mut url = reqwest::Url::parse(&format!("{frontend}/channel-bots"))?;
+                url.query_pairs_mut().append_pair("connect", &platform);
+                if let Some(label) = label {
+                    url.query_pairs_mut().append_pair("label", &label);
+                }
+                if let Some(org) = org {
+                    let mut api = ApiClient::from_auth_checked(&auth).await?;
+                    let id = resolve_org_id(&mut api, &org).await?;
+                    url.query_pairs_mut().append_pair("target_org_id", &id);
+                }
+                match auth.output {
+                    OutputFormat::Json => println!(
+                        "{}",
+                        serde_json::json!({ "connect_url": url.as_str(), "browser_required": true })
+                    ),
+                    OutputFormat::Table => {
+                        println!("{url}");
+                        eprintln!(
+                            "Open this URL, sign in to NyxID, and complete Connect with Meta in your browser. Meta will ask you to choose a business and phone number."
+                        );
+                    }
+                }
+                return Ok(());
+            }
+            let label = label.ok_or_else(|| anyhow::anyhow!("--label is required"))?;
             let token = resolve_secret(bot_token.as_deref(), token_env.as_deref(), "bot token")?;
             let resolved_app_secret =
                 resolve_optional_secret(app_secret.as_deref(), app_secret_env.as_deref())?;
@@ -339,6 +391,10 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
 
                     eprintln!("ID:             {bot_id}");
                     eprintln!("Platform:       {platform}");
+                    eprintln!(
+                        "Credentials:    {}",
+                        bot["credential_source"].as_str().unwrap_or("user")
+                    );
                     eprintln!("Label:          {label}");
                     eprintln!("Bot ID:         {bot_user_id}");
                     eprintln!("Username:       {username}");
@@ -785,6 +841,38 @@ mod tests {
 
     const ORG_UUID: &str = "00000000-0000-0000-0000-0000000000bb";
 
+    #[tokio::test]
+    async fn managed_signup_discovers_browser_url_without_posting_credentials() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/public/config"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "frontend_url": "https://nyxid.example" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut command = register(server.uri(), "whatsapp", None, None);
+        if let ChannelBotCommands::Register { managed, label, .. } = &mut command {
+            *managed = true;
+            *label = None;
+        }
+        run(command).await.unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        let mut command = register(server.uri(), "telegram", None, None);
+        if let ChannelBotCommands::Register { managed, .. } = &mut command {
+            *managed = true;
+        }
+        assert!(
+            run(command)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("not supported")
+        );
+    }
+
     fn register(
         uri: String,
         platform: &str,
@@ -793,11 +881,12 @@ mod tests {
     ) -> ChannelBotCommands {
         ChannelBotCommands::Register {
             phone_number_id: None,
+            managed: false,
             waba_id: None,
             platform: platform.to_string(),
             bot_token: bot_token.map(str::to_string),
             token_env: None,
-            label: "support".to_string(),
+            label: Some("support".to_string()),
             app_id: None,
             app_secret: None,
             app_secret_env: None,
@@ -1161,11 +1250,12 @@ mod tests {
 
         run(ChannelBotCommands::Register {
             phone_number_id: None,
+            managed: false,
             waba_id: None,
             platform: "lark".to_string(),
             bot_token: Some("tok".to_string()),
             token_env: None,
-            label: "support".to_string(),
+            label: Some("support".to_string()),
             app_id: Some("cli_app".to_string()),
             app_secret: Some("secret-x".to_string()),
             app_secret_env: None,
@@ -1197,11 +1287,12 @@ mod tests {
 
         run(ChannelBotCommands::Register {
             phone_number_id: None,
+            managed: false,
             waba_id: None,
             platform: "telegram".to_string(),
             bot_token: Some("tok".to_string()),
             token_env: None,
-            label: "support".to_string(),
+            label: Some("support".to_string()),
             app_id: None,
             app_secret: None,
             app_secret_env: None,

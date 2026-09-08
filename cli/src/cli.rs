@@ -270,6 +270,11 @@ pub struct RepoArgs {
 
 #[derive(Subcommand)]
 pub enum AdminCommands {
+    /// Manage NyxID-owned messaging platform credentials
+    PlatformCredentials {
+        #[command(subcommand)]
+        command: AdminPlatformCredentialsCommands,
+    },
     /// Manage invite codes used to gate new user registration
     InviteCode {
         #[command(subcommand)]
@@ -279,6 +284,45 @@ pub enum AdminCommands {
     User {
         #[command(subcommand)]
         command: AdminUserCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminPlatformCredentialsCommands {
+    /// Show field configuration and platform webhook setup
+    Show {
+        provider: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Set or rotate fields. Secret values must come from environment variables
+    Set {
+        provider: String,
+        /// Plain field in NAME=VALUE form (repeatable)
+        #[arg(long = "field")]
+        fields: Vec<String>,
+        /// Read a secret field from NAME=ENV_VAR (repeatable)
+        #[arg(long = "field-env")]
+        field_envs: Vec<String>,
+        #[arg(long)]
+        app_id: Option<String>,
+        #[arg(long)]
+        embedded_signup_config_id: Option<String>,
+        /// Read the Meta app secret from this environment variable
+        #[arg(long)]
+        app_secret_env: Option<String>,
+        #[arg(long)]
+        regenerate_verify_token: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Clear named fields, or remove all credentials when no fields are given
+    Clear {
+        provider: String,
+        #[arg(long = "field")]
+        fields: Vec<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
     },
 }
 
@@ -2309,6 +2353,64 @@ pub enum NodeDaemonCommands {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn managed_channel_signup_rejects_all_credential_flags() {
+        let args = [
+            "nyxid",
+            "channel-bot",
+            "register",
+            "--platform",
+            "whatsapp",
+            "--managed",
+        ];
+        assert!(Cli::try_parse_from(args).is_ok());
+        for flag in [
+            "--bot-token",
+            "--token-env",
+            "--app-id",
+            "--app-secret",
+            "--app-secret-env",
+            "--verification-token",
+            "--encrypt-key",
+            "--public-key",
+            "--phone-number-id",
+            "--waba-id",
+        ] {
+            assert!(
+                Cli::try_parse_from(args.into_iter().chain([flag, "value"])).is_err(),
+                "{flag}"
+            );
+        }
+        assert!(
+            Cli::try_parse_from(["nyxid", "channel-bot", "register", "--platform", "whatsapp"])
+                .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "admin",
+                "platform-credentials",
+                "set",
+                "meta",
+                "--app-secret-env",
+                "META_APP_SECRET"
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "nyxid",
+                "admin",
+                "platform-credentials",
+                "set",
+                "meta",
+                "--app-secret",
+                "secret"
+            ])
+            .is_err()
+        );
+    }
 
     #[test]
     fn oracle_worker_install_accepts_pool_and_profile() {
@@ -4420,6 +4522,9 @@ pub enum ChannelBotCommands {
         /// Platform: telegram, discord, lark, feishu, slack, whatsapp (Meta Cloud API)
         #[arg(long)]
         platform: String,
+        /// Complete managed onboarding in your browser
+        #[arg(long, conflicts_with_all = ["bot_token", "token_env", "app_secret", "app_secret_env", "app_id", "verification_token", "encrypt_key", "public_key", "phone_number_id", "waba_id"])]
+        managed: bool,
         /// Bot token (hidden from help -- use --token-env instead).
         /// Slack: pass the `xoxb-` bot user OAuth token.
         #[arg(long, hide = true)]
@@ -4428,8 +4533,8 @@ pub enum ChannelBotCommands {
         #[arg(long)]
         token_env: Option<String>,
         /// Label for this bot
-        #[arg(long)]
-        label: String,
+        #[arg(long, required_unless_present = "managed")]
+        label: Option<String>,
         /// Platform app ID (required for Lark/Feishu)
         #[arg(long)]
         app_id: Option<String>,
