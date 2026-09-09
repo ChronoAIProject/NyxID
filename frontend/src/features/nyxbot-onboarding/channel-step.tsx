@@ -31,6 +31,7 @@ import {
   StepHelp,
 } from "./onboarding-shell";
 import { BrandIcon } from "./brand-icon";
+import { AEVATAR_CHANNELS_URL } from "@/lib/nyxbot-aevatar-auth";
 
 const CHANNEL_AVAILABILITY: Record<NyxbotChannel, boolean> = {
   telegram: true,
@@ -58,28 +59,33 @@ export function ChannelStep({
       ? preferredChannel
       : null;
   const [showToken, setShowToken] = useState(false);
+  const [needsConsent, setNeedsConsent] = useState(false);
   const submitting = useRef(false);
   const createBot = useRegisterNyxbotTelegram();
   const managed = useManagedOnboarding("whatsapp", channel === "whatsapp");
+  const telegramSchema = createNyxbotTelegramSchema({
+    required: t("tokenRequired"),
+    invalid: t("tokenInvalid"),
+  });
   const form = useAppForm<NyxbotTelegramForm>({
-    resolver: zodResolver(
-      createNyxbotTelegramSchema({
-        required: t("tokenRequired"),
-        invalid: t("tokenInvalid"),
-      }),
-    ),
+    resolver: zodResolver(telegramSchema),
     defaultValues: { bot_token: "" },
     mode: "onChange",
   });
   async function submit(values: NyxbotTelegramForm) {
     if (submitting.current || channel !== "telegram") return;
     submitting.current = true;
+    setNeedsConsent(false);
     try {
       const result = await createBot.mutateAsync(values.bot_token);
       form.reset();
       createBot.reset();
       onConnected(result);
     } catch (error) {
+      setNeedsConsent(
+        error instanceof NyxbotChannelError &&
+          error.code === "channelConsentRequired",
+      );
       // Do not echo provider errors that might contain submitted credentials.
       form.setError("bot_token", {
         message: t(
@@ -112,7 +118,7 @@ export function ChannelStep({
               isLoading={createBot.isPending}
               disabled={
                 channel !== "telegram" ||
-                !form.formState.isValid ||
+                !telegramSchema.safeParse(form.watch()).success ||
                 createBot.isPending
               }
             >
@@ -150,6 +156,7 @@ export function ChannelStep({
               onChange={() => {
                 form.reset();
                 setShowToken(false);
+                setNeedsConsent(false);
                 onSelect(option);
               }}
             />
@@ -235,6 +242,17 @@ export function ChannelStep({
               />
             </form>
           </Form>
+          {needsConsent && (
+            <p className="nb-small">
+              <a
+                href={AEVATAR_CHANNELS_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                {t("authorizeAevatar")} <ExternalLink size={12} />
+              </a>
+            </p>
+          )}
           <p className="nb-small">{t("tokenNote")}</p>
         </>
       )}

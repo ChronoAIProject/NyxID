@@ -1,10 +1,15 @@
 import { z } from "zod";
 import { ApiError, apiClient } from "@/lib/api-client";
+import {
+  AEVATAR_ORIGIN,
+  AevatarAuthError,
+  clearAevatarAuthorization,
+  getAevatarAuthorization,
+} from "@/lib/nyxbot-aevatar-auth";
 
 export const AEVATAR_CHANNELS_PATH =
   "/proxy/s/aevatar/api/channels/registrations";
-export const AEVATAR_WEBHOOK_BASE_URL =
-  "https://aevatar-console-backend-api.aevatar.ai";
+export const AEVATAR_WEBHOOK_BASE_URL = AEVATAR_ORIGIN;
 
 const telegramIdentitySchema = z.object({
   ok: z.literal(true),
@@ -35,11 +40,26 @@ export class NyxbotChannelError extends Error {
       | "tokenRejected"
       | "telegramUnavailable"
       | "channelAuthRequired"
+      | "channelConsentRequired"
       | "channelRegistrationFailed",
   ) {
     super(code);
     this.name = "NyxbotChannelError";
   }
+}
+
+function botLabel(name: string): string {
+  const suffix = "_nyxid_bot";
+  const normalized = name.replace(/\s+/g, "_").replace(/(?:_nyxid_bot)+$/, "");
+  const encoder = new TextEncoder();
+  let prefix = "";
+  let bytes = suffix.length;
+  for (const character of normalized) {
+    bytes += encoder.encode(character).length;
+    if (bytes > 200) break; // NyxID validates the UTF-8 byte length.
+    prefix += character;
+  }
+  return `${prefix}${suffix}`;
 }
 
 export async function getTelegramBotName(botToken: string): Promise<string> {
@@ -86,22 +106,26 @@ export async function registerNyxbotTelegram(
   const token = botToken.trim();
   const botName = await getTelegramBotName(token);
   try {
-    // Reuse NyxID's session-authenticated proxy. Aevatar must support the proxy's
-    // authentication contract; never extract browser cookies or mint CLI credentials.
     // Aevatar owns bot creation and relay provisioning; do not create a second NyxID bot.
+    const authorization = await getAevatarAuthorization();
     const response = await apiClient<unknown>(AEVATAR_CHANNELS_PATH, {
       method: "POST",
+      headers: { Authorization: authorization },
       body: {
         platform: "telegram",
         webhook_base_url: AEVATAR_WEBHOOK_BASE_URL,
         bot_token: token,
-        label: botName.replace(/\s+/g, "_"),
+        label: botLabel(botName),
       },
       preserveSessionOn401: true,
       signal: AbortSignal.timeout(60_000),
     });
     return registrationSchema.parse(response);
   } catch (error) {
+    if (error instanceof AevatarAuthError)
+      throw new NyxbotChannelError(error.code);
+    if (error instanceof ApiError && error.status === 401)
+      clearAevatarAuthorization();
     throw new NyxbotChannelError(
       error instanceof ApiError &&
         (error.status === 401 || error.status === 403)
@@ -112,9 +136,16 @@ export async function registerNyxbotTelegram(
 }
 
 export async function getNyxbotRegistrationStatus(registrationId: string) {
-  const response = await apiClient<unknown>(
-    `${AEVATAR_CHANNELS_PATH}/${encodeURIComponent(registrationId)}/status`,
-    { preserveSessionOn401: true },
-  );
-  return registrationStatusSchema.parse(response);
+  try {
+    const authorization = await getAevatarAuthorization();
+    const response = await apiClient<unknown>(
+      `${AEVATAR_CHANNELS_PATH}/${encodeURIComponent(registrationId)}/status`,
+      { preserveSessionOn401: true, headers: { Authorization: authorization } },
+    );
+    return registrationStatusSchema.parse(response);
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 401)
+      clearAevatarAuthorization();
+    throw error;
+  }
 }

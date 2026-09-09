@@ -13,19 +13,33 @@ import { NyxbotOnboardingPage } from "./nyxbot-onboarding";
 import { nyxbotI18n } from "@/features/nyxbot-onboarding/i18n";
 import { GOOGLE_WORKSPACE_SCOPES } from "@/schemas/nyxbot-onboarding";
 import { ApiError } from "@/lib/api-client";
+import { AevatarAuthError } from "@/lib/nyxbot-aevatar-auth";
 import {
   AEVATAR_CHANNELS_PATH,
   AEVATAR_WEBHOOK_BASE_URL,
 } from "@/lib/nyxbot-channels";
 
-const { get, post, redirect, auth, telegram } = vi.hoisted(() => ({
+const { get, post, redirect, auth, telegram, authorizer } = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   redirect: vi.fn(),
   telegram: vi.fn(),
+  authorizer: vi.fn(),
   auth: {
     user: { id: "owner", display_name: "Avery", email: "avery@example.com" },
     isAuthenticated: true,
+  },
+}));
+vi.mock("@/lib/nyxbot-aevatar-auth", () => ({
+  AEVATAR_ORIGIN: "https://aevatar-console-backend-api.aevatar.ai",
+  AEVATAR_CHANNELS_URL:
+    "https://aevatar-console-backend-api.aevatar.ai/channels",
+  getAevatarAuthorization: authorizer,
+  clearAevatarAuthorization: vi.fn(),
+  AevatarAuthError: class extends Error {
+    constructor(readonly code: string) {
+      super(code);
+    }
   },
 }));
 vi.mock("@/lib/api-client", async (importOriginal) => ({
@@ -86,6 +100,7 @@ function mount() {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  authorizer.mockReset().mockResolvedValue("Bearer test-oauth-access");
   vi.stubGlobal("fetch", telegram);
   telegram.mockResolvedValue({
     ok: true,
@@ -419,7 +434,7 @@ describe("Nyxbot onboarding", () => {
     await screen.findByRole("heading", { name: "Almost there" });
     expect(post).toHaveBeenCalledWith(AEVATAR_CHANNELS_PATH, {
       platform: "telegram",
-      label: "My_Shop_Bot",
+      label: "My_Shop_Bot_nyxid_bot",
       bot_token: telegramToken,
       webhook_base_url: AEVATAR_WEBHOOK_BASE_URL,
     });
@@ -511,6 +526,31 @@ describe("Nyxbot onboarding", () => {
     expect(post).toHaveBeenCalledTimes(1);
     await act(async () => resolveRegistration?.(registrationReceipt));
     await screen.findByRole("heading", { name: "Almost there" });
+  });
+  it("offers first-time Aevatar consent and allows retry with the same bot token", async () => {
+    authorizer.mockRejectedValueOnce(
+      new AevatarAuthError("channelConsentRequired"),
+    );
+    mount();
+    await toChannel();
+    await userEvent.type(
+      screen.getByLabelText("Bot token", { exact: true }),
+      telegramToken,
+    );
+    const submit = screen.getByRole("button", { name: "Connect channel" });
+    await userEvent.click(submit);
+    expect(
+      await screen.findByRole("link", { name: "Authorize Aevatar" }),
+    ).toHaveAttribute(
+      "href",
+      "https://aevatar-console-backend-api.aevatar.ai/channels",
+    );
+    expect(post).not.toHaveBeenCalled();
+    expect(submit).toBeEnabled();
+    expect(auth.isAuthenticated).toBe(true);
+    await userEvent.click(submit);
+    await screen.findByRole("heading", { name: "Almost there" });
+    expect(post).toHaveBeenCalledTimes(1);
   });
   it("leaves the channel unselected for a direct visitor and ignores the disabled WhatsApp option", async () => {
     window.history.replaceState(null, "", "/onboarding");

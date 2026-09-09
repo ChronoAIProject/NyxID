@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api-client";
+import { AevatarAuthError } from "./nyxbot-aevatar-auth";
 import {
   AEVATAR_CHANNELS_PATH,
   AEVATAR_WEBHOOK_BASE_URL,
@@ -7,9 +8,16 @@ import {
   registerNyxbotTelegram,
 } from "./nyxbot-channels";
 
-const { request, telegram } = vi.hoisted(() => ({
+const { request, telegram, authorize, clearAuth } = vi.hoisted(() => ({
   request: vi.fn(),
   telegram: vi.fn(),
+  authorize: vi.fn(),
+  clearAuth: vi.fn(),
+}));
+vi.mock("./nyxbot-aevatar-auth", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./nyxbot-aevatar-auth")>()),
+  getAevatarAuthorization: authorize,
+  clearAevatarAuthorization: clearAuth,
 }));
 vi.mock("@/lib/api-client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api-client")>()),
@@ -35,6 +43,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", telegram);
   telegram.mockResolvedValue(json(identity));
   request.mockResolvedValue(receipt);
+  authorize.mockResolvedValue("Bearer test-oauth-access");
 });
 afterEach(() => vi.unstubAllGlobals());
 
@@ -59,10 +68,11 @@ describe("Nyxbot Telegram registration", () => {
     );
     expect(request).toHaveBeenCalledExactlyOnceWith(AEVATAR_CHANNELS_PATH, {
       method: "POST",
+      headers: { Authorization: "Bearer test-oauth-access" },
       body: {
         platform: "telegram",
         bot_token: token,
-        label: "My_Shop_Bot",
+        label: "My_Shop_Bot_nyxid_bot",
         webhook_base_url: AEVATAR_WEBHOOK_BASE_URL,
       },
       preserveSessionOn401: true,
@@ -125,9 +135,43 @@ describe("Nyxbot Telegram registration", () => {
     expect(request).toHaveBeenCalledWith(
       AEVATAR_CHANNELS_PATH,
       expect.objectContaining({
-        body: expect.objectContaining({ label: "客服_助手" }),
+        body: expect.objectContaining({ label: "客服_助手_nyxid_bot" }),
       }),
     );
+  });
+  it.each(["Test01", "Test01_nyxid_bot"])(
+    "uses one suffix for %s",
+    async (name) => {
+      telegram.mockResolvedValue(
+        json({ ...identity, result: { ...identity.result, first_name: name } }),
+      );
+      await registerNyxbotTelegram(token);
+      expect(request).toHaveBeenCalledWith(
+        AEVATAR_CHANNELS_PATH,
+        expect.objectContaining({
+          body: expect.objectContaining({ label: "Test01_nyxid_bot" }),
+        }),
+      );
+    },
+  );
+  it("bounds Unicode labels to NyxID's UTF-8 byte limit including suffix", async () => {
+    telegram.mockResolvedValue(
+      json({
+        ...identity,
+        result: { ...identity.result, first_name: "助".repeat(128) },
+      }),
+    );
+    await registerNyxbotTelegram(token);
+    const label = request.mock.calls[0]![1].body.label as string;
+    expect(new TextEncoder().encode(label).length).toBeLessThanOrEqual(200);
+    expect(label).toMatch(/^助+_nyxid_bot$/);
+  });
+  it("requires existing Aevatar consent before registration", async () => {
+    authorize.mockRejectedValue(new AevatarAuthError("channelConsentRequired"));
+    await expect(registerNyxbotTelegram(token)).rejects.toMatchObject({
+      code: "channelConsentRequired",
+    });
+    expect(request).not.toHaveBeenCalled();
   });
   it("drops credential-bearing network errors and does not register", async () => {
     telegram.mockRejectedValue(
@@ -154,6 +198,7 @@ describe("Nyxbot Telegram registration", () => {
         message: "channelAuthRequired",
       });
       expect(request).toHaveBeenCalledTimes(1);
+      expect(clearAuth).toHaveBeenCalledTimes(status === 401 ? 1 : 0);
     },
   );
   it.each([
@@ -181,7 +226,10 @@ describe("Nyxbot Telegram registration", () => {
     });
     expect(request).toHaveBeenCalledWith(
       `${AEVATAR_CHANNELS_PATH}/aevatar-id/status`,
-      { preserveSessionOn401: true },
+      {
+        preserveSessionOn401: true,
+        headers: { Authorization: "Bearer test-oauth-access" },
+      },
     );
   });
 });

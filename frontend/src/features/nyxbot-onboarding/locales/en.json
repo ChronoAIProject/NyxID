@@ -63,6 +63,8 @@
   "tokenRejected": "Telegram rejected this token. Copy the current token from BotFather and try again.",
   "telegramUnavailable": "We couldn't verify your bot with Telegram. Please try again.",
   "channelAuthRequired": "Your current sign-in couldn't authorize channel registration. Please try again later.",
+  "channelConsentRequired": "First, authorize Aevatar to use your NyxID account. Then return here and connect your channel.",
+  "authorizeAevatar": "Authorize Aevatar",
   "channelRegistrationFailed": "Your bot was verified, but channel registration couldn't be confirmed. Check Channels in Aevatar before retrying.",
   "channelRegistrationPending": "Your channel registration was accepted. We're still waiting for it to be ready. Retry to check its status.",
   "showToken": "Show bot token",
