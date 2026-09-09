@@ -476,7 +476,13 @@ settings and restarts supervision.
 the last 90 seconds) with label, bundle version, login state, current task,
 Chrome state, and desired state. Offline workers are hidden and counted in a
 footer; pass `--all` to include them with their last-seen age. JSON output
-carries the same filter plus a `hidden_offline` count. `worker show <pool> <label>` also shows the sanitized last error,
+carries the same filter plus a `hidden_offline` count.
+
+`nyxid oracle pool list` shows each pool's `Online` worker count (heartbeat
+within the last 120 seconds, the same window `oracle status` uses) next to
+`Max tasks`, the pool's dispatch concurrency cap (`max_workers`). The two are
+unrelated: a pool can cap dispatch at 20 with a single worker online. The pool
+API responses carry this as `online_workers`. `worker show <pool> <label>` also shows the sanitized last error,
 platform, and recent command results.
 
 Managers can queue these commands for any worker; eligible members can queue

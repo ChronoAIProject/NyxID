@@ -372,7 +372,8 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
                         "Slug",
                         "Name",
                         "Visibility",
-                        "Workers",
+                        "Online",
+                        "Max tasks",
                         "Active",
                         "Manage",
                         "Join",
@@ -382,6 +383,9 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
                             p["slug"].as_str().unwrap_or("-").to_string(),
                             p["name"].as_str().unwrap_or("-").to_string(),
                             p["visibility"].as_str().unwrap_or("-").to_string(),
+                            p["online_workers"]
+                                .as_u64()
+                                .map_or_else(|| "-".to_string(), |n| n.to_string()),
                             p["max_workers"].as_u64().unwrap_or(0).to_string(),
                             yes_no(p["is_active"].as_bool().unwrap_or(false)),
                             yes_no(p["can_manage"].as_bool().unwrap_or(false)),
@@ -411,7 +415,13 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
                         "Allow extract: {}",
                         yes_no(p["allow_extract"].as_bool().unwrap_or(false))
                     );
-                    eprintln!("Max workers: {}", p["max_workers"].as_u64().unwrap_or(0));
+                    eprintln!(
+                        "Online:      {}",
+                        p["online_workers"]
+                            .as_u64()
+                            .map_or_else(|| "-".to_string(), |n| n.to_string())
+                    );
+                    eprintln!("Max tasks:   {}", p["max_workers"].as_u64().unwrap_or(0));
                     eprintln!(
                         "Can join:    {}",
                         yes_no(p["can_enroll"].as_bool().unwrap_or(false))

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::{Duration, Utc};
 use futures::TryStreamExt;
@@ -402,6 +402,47 @@ pub async fn ensure_instance_matches(
         }
         Err(error) => Err(error.into()),
     }
+}
+
+/// Count workers per pool whose heartbeat is newer than `window_secs`,
+/// matching the recency window `pool_status` uses for `active_workers`.
+/// One aggregation for all pools; pools with no online worker are absent.
+pub async fn count_online_workers_by_pool(
+    db: &mongodb::Database,
+    pool_ids: &[String],
+    window_secs: i64,
+) -> AppResult<HashMap<String, u32>> {
+    if pool_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let cutoff = Utc::now() - Duration::seconds(window_secs);
+    let pipeline = vec![
+        doc! { "$match": {
+            "pool_id": { "$in": pool_ids },
+            "last_seen_at": { "$gte": bson::DateTime::from_chrono(cutoff) },
+        }},
+        doc! { "$group": { "_id": "$pool_id", "count": { "$sum": 1 } } },
+    ];
+    let mut cursor = db
+        .collection::<Document>(ORACLE_WORKERS)
+        .aggregate(pipeline)
+        .await?;
+    let mut counts = HashMap::new();
+    while let Some(row) = cursor.try_next().await? {
+        let pool_id = row.get_str("_id").unwrap_or_default().to_string();
+        let count = row.get_i32("count").map(|n| n.max(0) as u32).unwrap_or(0);
+        counts.insert(pool_id, count);
+    }
+    Ok(counts)
+}
+
+pub async fn count_online_workers(
+    db: &mongodb::Database,
+    pool_id: &str,
+    window_secs: i64,
+) -> AppResult<u32> {
+    let counts = count_online_workers_by_pool(db, &[pool_id.to_string()], window_secs).await?;
+    Ok(counts.get(pool_id).copied().unwrap_or(0))
 }
 
 pub async fn list_workers(db: &mongodb::Database, pool_id: &str) -> AppResult<Vec<OracleWorker>> {
@@ -877,6 +918,47 @@ mod tests {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    #[tokio::test]
+    async fn online_worker_counts_use_the_recency_window_per_pool() {
+        let Some(db) = connect_test_database("oracle_worker_online_counts").await else {
+            return;
+        };
+        let busy = pool();
+        let idle = pool();
+        let fresh = allocate_worker(&db, &busy, None).await.unwrap().worker;
+        let stale = allocate_worker(&db, &busy, None).await.unwrap().worker;
+        report_presence(
+            &db,
+            &busy,
+            WorkerPresenceInput {
+                worker_label: fresh.worker_label.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        db.collection::<Document>(ORACLE_WORKERS)
+            .update_one(
+                doc! { "_id": worker_doc_id(&busy.id, &stale.worker_label) },
+                doc! { "$set": { "last_seen_at": bson::DateTime::from_chrono(
+                    Utc::now() - Duration::seconds(600)
+                ) } },
+            )
+            .await
+            .unwrap();
+
+        let counts =
+            count_online_workers_by_pool(&db, &[busy.id.clone(), idle.id.clone()], 120)
+                .await
+                .unwrap();
+        assert_eq!(counts.get(&busy.id).copied(), Some(1));
+        assert_eq!(counts.get(&idle.id), None);
+        assert_eq!(count_online_workers(&db, &busy.id, 120).await.unwrap(), 1);
+        assert_eq!(count_online_workers(&db, &idle.id, 120).await.unwrap(), 0);
+        assert_eq!(count_online_workers(&db, &busy.id, 900).await.unwrap(), 2);
+        assert!(count_online_workers_by_pool(&db, &[], 120).await.unwrap().is_empty());
     }
 
     #[tokio::test]
