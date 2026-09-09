@@ -2,6 +2,18 @@
 
 This document covers the release path for the `nyxid` CLI binaries produced by CI.
 
+## Codex Onboarding Rollout
+
+Ship the Codex recommendation only with a release that provides
+`nyxid provider connect-codex --help` and canonical `~/.agents/skills` installation.
+Release `v0.16.0` introduces these capabilities; the original published `v0.15.0`
+predates them. Do not infer availability from version text
+or replace an existing published tag. Deploy the compatible provider-connection
+backend routes before the landing prompt; verify installer -> skill registration
+-> optional consent -> saved connection verification using isolated fixtures.
+Older releases must offer upgrade or separate provider authorization, never
+manual credential inspection. Installation must remain successful when skipped.
+
 ## Release Trigger
 
 Releases are tag-driven. From an up-to-date `main` checkout:
@@ -68,7 +80,7 @@ https://github.com/ChronoAIProject/NyxID/.github/workflows/release.yml@refs/tags
 6. Extracts `nyxid` or `nyxid.exe`.
 7. On Unix, installs the binary into the versioned install root and atomically retargets the active symlink.
 8. On Windows, keeps the legacy `self-replace` in-place swap because native symlinks require Developer Mode or elevated privileges.
-9. Re-execs the newly-installed versioned binary with `nyxid update --skills-only` so the new binary owns skill updates.
+9. Runs the newly-installed binary with `nyxid ai-setup update` as a bounded child process while retaining the update lock.
 
 If no compatible prebuilt asset exists for the host target, the updater clearly falls back to:
 
@@ -104,7 +116,17 @@ On every successful Unix prebuilt update, the updater:
 
 - Writes the new binary to `{install-root}/{tag}/nyxid` with mode `0755`.
 - Creates a temporary symlink in the active binary's directory and renames it over the active path, so retargeting is atomic on POSIX systems.
-- Keeps the active version plus the two most recent previous version directories, for three retained versions total.
+- Keeps the active version plus the two most recent previous version directories,
+  plus additional versions pinned by installed node service definitions.
+
+Archive extraction is staged before publication and always publishes the flat
+`{tag}/nyxid` layout. Retention and rollback also recognize older nested
+`{tag}/nyxid-cli-{target}/nyxid` installations. Reinstalling an active tag replaces
+the directory entry atomically instead of truncating the running executable.
+
+Opt-in automatic upgrades use the same verifier, activation and retention paths.
+See [automatic upgrade operations](site/cli/getting-started/install.md#automatic-upgrades)
+for scheduling, holds, controller recovery, skills, and deferred node adoption.
 
 Legacy single-file installs migrate automatically. If the active path is a regular file, the first successful prebuilt update writes the versioned binary and replaces that regular file with the symlink. The updater does not try to reconstruct old versions that it did not install itself.
 

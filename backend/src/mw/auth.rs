@@ -452,6 +452,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
     matches!(
         segments.as_slice(),
         ["providers", "callback"]
+            | ["providers", "codex-connection"]
             | ["providers", _, "callback"]
             | ["providers", _, "connect", "oauth"]
     )
@@ -855,9 +856,31 @@ impl FromRequestParts<AppState> for AuthUser {
                         (true, true, vec![], vec![], None, None)
                     };
 
+                    let session_id = if auth_method == AuthMethod::AccessToken
+                        && claims.client_id.is_none()
+                    {
+                        if let Some(id) = claims.sid.as_deref() {
+                            let id = Uuid::parse_str(id)
+                                .map_err(|_| AppError::Unauthorized("Invalid session".into()))?;
+                            let live = state.db.collection::<Session>(SESSIONS).find_one(doc! {
+                                "_id": id.to_string(), "user_id": &user_id_str, "revoked": false,
+                                "expires_at": {"$gt": bson::DateTime::from_chrono(chrono::Utc::now())}
+                            }).await?;
+                            if live.is_none() {
+                                return Err(AppError::Unauthorized(
+                                    "Session expired or revoked".into(),
+                                ));
+                            }
+                            Some(id)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
                     return Ok(AuthUser {
                         user_id,
-                        session_id: None,
+                        session_id,
                         scope: claims.scope.clone(),
                         acting_client_id: claims.act.map(|a| a.sub),
                         oauth_client_id: claims.client_id.clone(),

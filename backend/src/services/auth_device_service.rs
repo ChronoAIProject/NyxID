@@ -19,11 +19,16 @@ use crate::errors::{AppError, AppResult};
 use crate::models::auth_device_code::AuthDeviceInitiatingOriginStatus;
 use crate::models::auth_device_code::{
     AuthDeviceClientIpAttribution, AuthDeviceCode, AuthDeviceCodeStatus,
-    COLLECTION_NAME as AUTH_DEVICE_CODES,
+    COLLECTION_NAME as AUTH_DEVICE_CODES, V2_COLLECTION_NAME,
 };
 #[cfg(test)]
 use crate::services::login_client_context::CLIENT_DISPLAY_MAX_LEN;
 use crate::services::{audit_service, token_service};
+
+#[cfg(test)]
+mod grant_tests;
+mod grants;
+pub use grants::{approve_with_agent_key, options, poll_agent_key, sweep_expired};
 
 type HmacSha256 = Hmac<sha2::Sha256>;
 
@@ -52,6 +57,8 @@ pub enum PollClaim {
     Denied,
     Expired,
     AlreadyDelivered,
+    AgentKey,
+    Account(Box<AccountDelivery>),
     Ready {
         encrypted_access: Vec<u8>,
         encrypted_refresh: Vec<u8>,
@@ -59,6 +66,21 @@ pub enum PollClaim {
         approved_user_id: String,
         approved_session_id: String,
     },
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub struct AccountDelivery {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_in: i64,
+    pub user_id: String,
+    pub session_id: String,
+}
+
+impl std::fmt::Debug for AccountDelivery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountDelivery").finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -100,6 +122,18 @@ pub async fn initiate(
     initiate_with_user_code_generator(db, hmac_key, input, generate_user_code).await
 }
 
+/// New grants live outside the legacy TTL and delivery protocol during rollout.
+pub async fn initiate_v2(
+    db: &Database,
+    hmac_key: &[u8],
+    input: InitiateInput,
+) -> AppResult<InitiateOutput> {
+    initiate_with_user_code_generator(db, hmac_key, sanitize_context(input), || {
+        format!("2{}", generate_user_code())
+    })
+    .await
+}
+
 async fn initiate_with_user_code_generator<F>(
     db: &Database,
     hmac_key: &[u8],
@@ -111,18 +145,35 @@ where
 {
     for attempt in 0..=AUTH_DEVICE_USER_CODE_WRITE_RETRIES {
         let now = Utc::now();
-        let device_code = generate_device_code();
         let user_code_normalized = user_code_generator();
+        let supports_grant_choice = is_v2_user_code(&user_code_normalized);
+        let device_code = if supports_grant_choice {
+            generate_device_code().replacen(AUTH_DEVICE_CODE_PREFIX, "nyx_adc2_", 1)
+        } else {
+            generate_device_code()
+        };
+        let collection = collection_for_user_code(db, &user_code_normalized);
         let user_code = format_user_code(&user_code_normalized);
+        let user_code_hmac = hmac_hex(hmac_key, user_code_normalized.as_bytes());
+        if collection
+            .find_one(doc! {"user_code_hmac": &user_code_hmac})
+            .await?
+            .is_some()
+        {
+            continue;
+        }
 
         let row = AuthDeviceCode {
+            supports_grant_choice,
             id: Uuid::new_v4().to_string(),
             device_code_hmac: hmac_hex(hmac_key, device_code.as_bytes()),
-            user_code_hmac: hmac_hex(hmac_key, user_code_normalized.as_bytes()),
+            user_code_hmac: user_code_hmac.clone(),
+            user_code_reservation_hmac: Some(user_code_hmac),
             status: AuthDeviceCodeStatus::Pending,
             poll_interval_secs: AUTH_DEVICE_POLL_INTERVAL_SECS,
             slow_down_increments: 0,
             client_label: input.client_label.clone(),
+            requested_profile: input.requested_profile.clone(),
             client_user_agent: input.client_user_agent.clone(),
             client_ip: input.client_ip.clone(),
             client_ip_attribution: input.client_ip_attribution,
@@ -151,6 +202,8 @@ where
             last_polled_at: None,
             approved_user_id: None,
             approved_session_id: None,
+            agent_key_grant: None,
+            purge_at: None,
             approver_ip_hmac: None,
             delivery_access_token_encrypted: None,
             delivery_refresh_token_encrypted: None,
@@ -163,7 +216,7 @@ where
             expires_at: now + Duration::seconds(AUTH_DEVICE_EXPIRES_IN_SECS),
         };
 
-        match collection(db).insert_one(&row).await {
+        match collection.insert_one(&row).await {
             Ok(_) => {
                 tracing::Span::current().record("row_id", row.id.as_str());
                 tracing::info!(row_id = %row.id, "auth_device.initiate");
@@ -195,7 +248,99 @@ pub async fn poll_and_claim(
     hmac_key: &[u8],
     device_code: &str,
 ) -> AppResult<PollClaim> {
-    let collection = collection(db);
+    poll_internal(db, hmac_key, device_code, None, true).await
+}
+
+pub async fn poll_and_prepare(
+    db: &Database,
+    encryption: &EncryptionKeys,
+    hmac_key: &[u8],
+    device_code: &str,
+) -> AppResult<PollClaim> {
+    poll_internal(db, hmac_key, device_code, Some(encryption), true).await
+}
+
+/// Convert an approved account grant to a browser session in the same commit
+/// that consumes delivery. Cookie headers must be prepared before this call.
+pub async fn poll_for_browser(
+    db: &Database,
+    encryption: &EncryptionKeys,
+    hmac_key: &[u8],
+    device_code: &str,
+    cookie_hash: &str,
+    ip: &str,
+    user_agent: Option<&str>,
+) -> AppResult<PollClaim> {
+    use crate::models::{
+        refresh_token::{COLLECTION_NAME as REFRESH_TOKENS, RefreshToken},
+        session::{COLLECTION_NAME as SESSIONS, Session},
+    };
+    use crate::services::api_key_mutation_service as mutations;
+    let claim = poll_internal(db, hmac_key, device_code, Some(encryption), false).await?;
+    let PollClaim::Account(mut delivery) = claim else {
+        return Ok(claim);
+    };
+    let now = Utc::now();
+    let browser = Session {
+        id: Uuid::new_v4().to_string(),
+        user_id: delivery.user_id.clone(),
+        token_hash: cookie_hash.to_owned(),
+        ip_address: Some(ip.to_owned()),
+        user_agent: user_agent.map(str::to_owned),
+        expires_at: now + Duration::seconds(token_service::SESSION_TTL_SECS),
+        revoked: false,
+        created_at: now,
+        last_active_at: now,
+    };
+    let browser_id = browser.id.clone();
+    let original_id = delivery.session_id.clone();
+    let device_hash = hmac_hex(hmac_key, device_code.as_bytes());
+    let codes = collection_for_device_code(db, device_code);
+    let request_id = codes
+        .find_one(doc! {"device_code_hmac": &device_hash})
+        .await?
+        .ok_or(AppError::AuthDeviceCodeNotFound)?
+        .id;
+    let db_owned = db.clone();
+    let transaction_codes = codes.clone();
+    let mut transaction = db.client().start_session().await?;
+    let result = transaction.start_transaction().and_run2(async move |session| {
+        let db = &db_owned;
+        let result: AppResult<()> = async {
+            let now = Utc::now();
+            let claimed = transaction_codes.find_one_and_update(doc! {
+                "device_code_hmac": &device_hash, "status": "approved", "agent_key_grant": Bson::Null,
+                "expires_at": {"$gt": bson::DateTime::from_chrono(now)}
+            }, doc! {"$set": {"status": "delivered", "delivered_at": bson::DateTime::from_chrono(now),
+                "purge_at": bson::DateTime::from_chrono(now + Duration::days(1))},
+                "$unset": {"delivery_access_token_encrypted": "", "delivery_refresh_token_encrypted": ""}})
+                .session(&mut *session).await?;
+            if claimed.is_none() { return Err(AppError::AuthDeviceCodeAlreadyDelivered); }
+            db.collection::<Session>(SESSIONS).update_one(doc! {"_id": &original_id},
+                doc! {"$set": {"revoked": true}}).session(&mut *session).await?;
+            db.collection::<RefreshToken>(REFRESH_TOKENS).update_many(doc! {"session_id": &original_id},
+                doc! {"$set": {"revoked": true}}).session(&mut *session).await?;
+            db.collection::<Session>(SESSIONS).insert_one(&browser).session(&mut *session).await?;
+            Ok(())
+        }.await;
+        mutations::transaction_result(result)
+    }).await.map_err(mutations::map_transaction_error);
+    if matches!(result, Err(AppError::AuthDeviceCodeAlreadyDelivered)) {
+        return current_poll_outcome(&codes, &request_id).await;
+    }
+    result?;
+    delivery.session_id = browser_id;
+    Ok(PollClaim::Account(delivery))
+}
+
+async fn poll_internal(
+    db: &Database,
+    hmac_key: &[u8],
+    device_code: &str,
+    encryption: Option<&EncryptionKeys>,
+    consume: bool,
+) -> AppResult<PollClaim> {
+    let collection = collection_for_device_code(db, device_code);
     let now = Utc::now();
     let device_code_hmac = hmac_hex(hmac_key, device_code.as_bytes());
     let row = collection
@@ -205,8 +350,13 @@ pub async fn poll_and_claim(
 
     tracing::Span::current().record("row_id", row.id.as_str());
 
-    if row.expires_at < now {
-        mark_expired(&collection, &row.id, now).await?;
+    if row.expires_at <= now
+        && !matches!(
+            row.status,
+            AuthDeviceCodeStatus::Delivered | AuthDeviceCodeStatus::Denied
+        )
+    {
+        grants::expire(db, &row).await?;
         record_poll_outcome(&row.id, "expired");
         return Ok(PollClaim::Expired);
     }
@@ -237,7 +387,9 @@ pub async fn poll_and_claim(
         AuthDeviceCodeStatus::Denied => PollClaim::Denied,
         AuthDeviceCodeStatus::Expired => PollClaim::Expired,
         AuthDeviceCodeStatus::Delivered => PollClaim::AlreadyDelivered,
-        AuthDeviceCodeStatus::Approved => deliver_approved_claim(&collection, &row, now).await?,
+        AuthDeviceCodeStatus::Approved => {
+            deliver_approved_claim(&collection, &row, now, encryption, consume).await?
+        }
     };
 
     record_poll_outcome(&row.id, poll_claim_outcome(&outcome));
@@ -254,13 +406,15 @@ pub async fn preview(
 ) -> AppResult<PreviewOutput> {
     let normalized = normalize_user_code(user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
-    let row = collection(db)
+    let row = collection_for_user_code(db, &normalized)
         .find_one(doc! { "user_code_hmac": user_code_hmac })
+        .sort(doc! {"created_at": -1})
         .await?
         .ok_or(AppError::AuthDeviceUserCodeInvalid)?;
 
     tracing::Span::current().record("row_id", row.id.as_str());
     let context = InitiateInput {
+        requested_profile: row.requested_profile,
         client_label: row.client_label,
         client_user_agent: row.client_user_agent,
         client_ip: row.client_ip,
@@ -310,63 +464,68 @@ pub async fn approve(
     let started_at = std::time::Instant::now();
     let normalized = normalize_user_code(&input.user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
-    let collection = collection(db);
+    let collection = collection_for_user_code(db, &normalized);
     let now = Utc::now();
 
     let row = collection
         .find_one(doc! { "user_code_hmac": user_code_hmac })
+        .sort(doc! {"created_at": -1})
         .await?
         .ok_or(AppError::AuthDeviceUserCodeInvalid)?;
 
     tracing::Span::current().record("row_id", row.id.as_str());
 
-    if row.expires_at < now {
-        return Err(AppError::AuthDeviceCodeExpired);
-    }
-
     if row.status != AuthDeviceCodeStatus::Pending {
         return Err(non_pending_approve_error(row.status));
     }
+    if row.expires_at <= now {
+        return Err(AppError::AuthDeviceCodeExpired);
+    }
 
+    let mut transaction = db.client().start_session().await?;
     let user_agent = approve_session_user_agent(input.approver_user_agent.as_deref());
-    let tokens = token_service::create_session_and_issue_tokens(
+    let mut prepared = token_service::prepare_session_tokens(
         db,
         config,
         jwt_keys,
         &input.user_id,
         input.approver_ip.as_deref(),
-        Some(user_agent.as_str()),
+        Some(&user_agent),
     )
     .await?;
-    tracing::Span::current().record("session_id", tokens.session_id.as_str());
-    let session_id = tokens.session_id.clone();
-
-    let access_plaintext = Zeroizing::new(tokens.access_token.into_bytes());
-    let refresh_plaintext = Zeroizing::new(tokens.refresh_token.into_bytes());
-    let encrypted_access = match encryption_keys.encrypt(access_plaintext.as_slice()).await {
-        Ok(encrypted) => encrypted,
-        Err(error) => {
-            cleanup_issued_session(db, &session_id).await;
-            return Err(error);
-        }
-    };
-    let encrypted_refresh = match encryption_keys.encrypt(refresh_plaintext.as_slice()).await {
-        Ok(encrypted) => encrypted,
-        Err(error) => {
-            cleanup_issued_session(db, &session_id).await;
-            return Err(error);
-        }
-    };
-
-    let approved_status = bson::to_bson(&AuthDeviceCodeStatus::Approved)
-        .map_err(|e| AppError::Internal(format!("serialize auth device status: {e}")))?;
-    let approved_at = Utc::now();
-    let delivery_expires_at = approved_at + Duration::seconds(60);
+    let access = Zeroizing::new(std::mem::take(&mut prepared.tokens.access_token));
+    let refresh = Zeroizing::new(std::mem::take(&mut prepared.tokens.refresh_token));
+    let encrypted_access = encryption_keys.encrypt(access.as_bytes()).await?;
+    let encrypted_refresh = encryption_keys.encrypt(refresh.as_bytes()).await?;
     let approver_ip_hmac = input
         .approver_ip
         .as_deref()
         .map(|ip| hmac_hex(hmac_key, ip.as_bytes()));
+    let session_id = {
+        let db_owned = db.clone();
+        let input = input.clone();
+        let row = row.clone();
+        let collection = collection.clone();
+        transaction.start_transaction().and_run2(async move |session| {
+    let db = &db_owned;
+    let operation: AppResult<String> = async {
+    let claimed = collection.find_one_and_update(
+        doc! {"_id": &row.id, "status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(Utc::now())}},
+        doc! {"$set": {"status": "approved"}},
+    ).session(&mut *session).await?;
+    if claimed.is_none() {
+        return Err(current_decision_error(&collection, &row.id).await?);
+    }
+    token_service::insert_prepared_session(db, &prepared, &mut *session).await?;
+    let tokens = &prepared.tokens;
+    tracing::Span::current().record("session_id", tokens.session_id.as_str());
+    let session_id = tokens.session_id.clone();
 
+    let approved_status = bson::to_bson(&AuthDeviceCodeStatus::Approved)
+        .map_err(|e| AppError::Internal(format!("serialize auth device status: {e}")))?;
+    let approved_at = Utc::now();
+    if row.expires_at <= approved_at { return Err(AppError::AuthDeviceCodeExpired); }
+    let delivery_expires_at = approved_at + Duration::seconds(60);
     let mut set_doc = doc! {
         "status": approved_status,
         "approved_user_id": &input.user_id,
@@ -374,16 +533,16 @@ pub async fn approve(
         "approved_at": bson::DateTime::from_chrono(approved_at),
         "delivery_access_token_encrypted": Bson::Binary(Binary {
             subtype: BinarySubtype::Generic,
-            bytes: encrypted_access,
+            bytes: encrypted_access.clone(),
         }),
         "delivery_refresh_token_encrypted": Bson::Binary(Binary {
             subtype: BinarySubtype::Generic,
-            bytes: encrypted_refresh,
+            bytes: encrypted_refresh.clone(),
         }),
         "delivery_access_token_expires_in": tokens.access_expires_in,
         "expires_at": bson::DateTime::from_chrono(delivery_expires_at),
     };
-    match approver_ip_hmac {
+    match &approver_ip_hmac {
         Some(ip_hmac) => {
             set_doc.insert("approver_ip_hmac", ip_hmac);
         }
@@ -392,18 +551,19 @@ pub async fn approve(
         }
     }
 
-    let updated = collection
+    collection
         .find_one_and_update(
-            doc! { "_id": &row.id, "status": "pending" },
+            doc! { "_id": &row.id, "status": "approved" },
             doc! { "$set": set_doc },
         )
         .return_document(ReturnDocument::After)
+        .session(&mut *session)
         .await?;
-
-    if updated.is_none() {
-        cleanup_issued_session(db, &session_id).await;
-        return Err(current_decision_error(&collection, &row.id).await?);
-    }
+    Ok(session_id)
+    }.await;
+    crate::services::api_key_mutation_service::transaction_result(operation)
+    }).await.map_err(crate::services::api_key_mutation_service::map_transaction_error)?
+    };
 
     audit_service::log_async(
         db.clone(),
@@ -411,7 +571,7 @@ pub async fn approve(
         "auth_device_code_approved".to_string(),
         Some(serde_json::json!({
             "session_id": session_id,
-            "user_code_redacted": redact_user_code(&normalized),
+            "request_id": row.id,
         })),
         input.approver_ip.clone(),
         input.approver_user_agent.clone(),
@@ -439,34 +599,35 @@ pub async fn approve(
 pub async fn deny(db: &Database, hmac_key: &[u8], input: DenyInput) -> AppResult<()> {
     let normalized = normalize_user_code(&input.user_code)?;
     let user_code_hmac = hmac_hex(hmac_key, normalized.as_bytes());
-    let collection = collection(db);
+    let collection = collection_for_user_code(db, &normalized);
     let now = Utc::now();
 
     let row = collection
         .find_one(doc! { "user_code_hmac": user_code_hmac })
+        .sort(doc! {"created_at": -1})
         .await?
         .ok_or(AppError::AuthDeviceUserCodeInvalid)?;
 
     tracing::Span::current().record("row_id", row.id.as_str());
 
-    if row.expires_at < now {
-        return Err(AppError::AuthDeviceCodeExpired);
-    }
-
     if row.status != AuthDeviceCodeStatus::Pending {
         return Err(non_pending_approve_error(row.status));
+    }
+    if row.expires_at <= now {
+        return Err(AppError::AuthDeviceCodeExpired);
     }
 
     let denied_status = bson::to_bson(&AuthDeviceCodeStatus::Denied)
         .map_err(|e| AppError::Internal(format!("serialize auth device status: {e}")))?;
     let updated = collection
         .find_one_and_update(
-            doc! { "_id": &row.id, "status": "pending" },
+            doc! { "_id": &row.id, "status": "pending", "expires_at": {"$gt": bson::DateTime::from_chrono(now)} },
             doc! {
                 "$set": {
                     "status": denied_status,
                     "denied_at": bson::DateTime::from_chrono(now),
                     "denied_by_user_id": &input.user_id,
+                    "purge_at": bson::DateTime::from_chrono(now + Duration::days(1)),
                 }
             },
         )
@@ -482,7 +643,7 @@ pub async fn deny(db: &Database, hmac_key: &[u8], input: DenyInput) -> AppResult
         Some(input.user_id.clone()),
         "auth_device_code_denied".to_string(),
         Some(serde_json::json!({
-            "user_code_redacted": redact_user_code(&normalized),
+            "request_id": row.id,
         })),
         input.denier_ip,
         input.denier_user_agent,
@@ -537,7 +698,7 @@ pub fn normalize_user_code(raw: &str) -> Result<String, AppError> {
         normalized.push(ch);
     }
 
-    if normalized.len() == AUTH_DEVICE_USER_CODE_LEN {
+    if normalized.len() == AUTH_DEVICE_USER_CODE_LEN || is_v2_user_code(&normalized) {
         Ok(normalized)
     } else {
         Err(AppError::AuthDeviceUserCodeInvalid)
@@ -545,6 +706,9 @@ pub fn normalize_user_code(raw: &str) -> Result<String, AppError> {
 }
 
 pub fn format_user_code(normalized: &str) -> String {
+    if is_v2_user_code(normalized) {
+        return format!("2-{}-{}", &normalized[1..5], &normalized[5..]);
+    }
     if normalized.len() <= 4 {
         return normalized.to_string();
     }
@@ -553,6 +717,29 @@ pub fn format_user_code(normalized: &str) -> String {
 
 fn collection(db: &Database) -> Collection<AuthDeviceCode> {
     db.collection::<AuthDeviceCode>(AUTH_DEVICE_CODES)
+}
+
+pub fn is_v2_user_code(normalized: &str) -> bool {
+    normalized.len() == AUTH_DEVICE_USER_CODE_LEN + 1 && normalized.starts_with('2')
+}
+
+fn collection_for_user_code(db: &Database, normalized: &str) -> Collection<AuthDeviceCode> {
+    collection_for_protocol(db, is_v2_user_code(normalized))
+}
+
+pub(super) fn collection_for_device_code(db: &Database, code: &str) -> Collection<AuthDeviceCode> {
+    collection_for_protocol(db, code.starts_with("nyx_adc2_"))
+}
+
+fn collection_for_protocol(
+    db: &Database,
+    supports_grant_choice: bool,
+) -> Collection<AuthDeviceCode> {
+    db.collection(if supports_grant_choice {
+        V2_COLLECTION_NAME
+    } else {
+        AUTH_DEVICE_CODES
+    })
 }
 
 fn generate_device_code() -> String {
@@ -613,10 +800,28 @@ async fn current_decision_error(
         .find_one(doc! { "_id": row_id })
         .await?
         .ok_or(AppError::AuthDeviceCodeAlreadyDelivered)?;
-    if row.expires_at < Utc::now() {
+    if matches!(
+        row.status,
+        AuthDeviceCodeStatus::Delivered | AuthDeviceCodeStatus::Denied
+    ) {
+        return Ok(non_pending_approve_error(row.status));
+    }
+    if row.expires_at <= Utc::now() {
         return Ok(AppError::AuthDeviceCodeExpired);
     }
     Ok(non_pending_approve_error(row.status))
+}
+
+async fn current_poll_outcome(
+    collection: &Collection<AuthDeviceCode>,
+    row_id: &str,
+) -> AppResult<PollClaim> {
+    match current_decision_error(collection, row_id).await? {
+        AppError::AuthDeviceCodeExpired => Ok(PollClaim::Expired),
+        AppError::AuthDeviceCodeDenied => Ok(PollClaim::Denied),
+        AppError::AuthDeviceCodeAlreadyDelivered => Ok(PollClaim::AlreadyDelivered),
+        error => Err(error),
+    }
 }
 
 fn redact_user_code(normalized: &str) -> String {
@@ -673,12 +878,13 @@ async fn claim_approved_delivery(
 
     let claimed = collection
         .find_one_and_update(
-            doc! { "_id": row_id, "status": "approved" },
+            doc! { "_id": row_id, "status": "approved", "agent_key_grant": Bson::Null, "expires_at": {"$gt": bson::DateTime::from_chrono(now)} },
             doc! {
                 "$set": {
                     "status": delivered_status,
                     "delivered_at": bson::DateTime::from_chrono(now),
                     "last_polled_at": bson::DateTime::from_chrono(now),
+                    "purge_at": bson::DateTime::from_chrono(now + Duration::days(1)),
                 },
                 "$unset": {
                     "delivery_access_token_encrypted": "",
@@ -697,9 +903,51 @@ async fn deliver_approved_claim(
     collection: &Collection<AuthDeviceCode>,
     row: &AuthDeviceCode,
     now: DateTime<Utc>,
+    encryption: Option<&EncryptionKeys>,
+    consume: bool,
 ) -> AppResult<PollClaim> {
-    match claim_approved_delivery(collection, &row.id, now).await? {
+    if row.agent_key_grant.is_some() {
+        return Ok(PollClaim::AgentKey);
+    }
+    let prepared = if let Some(encryption) = encryption {
+        let (access_token, refresh_token) = decrypt_tokens(
+            encryption,
+            row.delivery_access_token_encrypted
+                .as_deref()
+                .ok_or_else(|| AppError::Internal("Missing account delivery".into()))?,
+            row.delivery_refresh_token_encrypted
+                .as_deref()
+                .ok_or_else(|| AppError::Internal("Missing account delivery".into()))?,
+        )
+        .await?;
+        Some(AccountDelivery {
+            access_token,
+            refresh_token,
+            expires_in: row
+                .delivery_access_token_expires_in
+                .ok_or_else(|| AppError::Internal("Missing account expiry".into()))?,
+            user_id: row
+                .approved_user_id
+                .clone()
+                .ok_or_else(|| AppError::Internal("Missing account owner".into()))?,
+            session_id: row
+                .approved_session_id
+                .clone()
+                .ok_or_else(|| AppError::Internal("Missing account session".into()))?,
+        })
+    } else {
+        None
+    };
+    if !consume {
+        return prepared
+            .map(|delivery| PollClaim::Account(Box::new(delivery)))
+            .ok_or_else(|| AppError::Internal("Missing prepared delivery".into()));
+    }
+    match claim_approved_delivery(collection, &row.id, Utc::now()).await? {
         Some(claimed) => {
+            if let Some(delivery) = prepared {
+                return Ok(PollClaim::Account(Box::new(delivery)));
+            }
             let encrypted_access = claimed.delivery_access_token_encrypted.ok_or_else(|| {
                 AppError::Internal(
                     "approved auth-device row missing encrypted access token".to_string(),
@@ -732,7 +980,7 @@ async fn deliver_approved_claim(
                 approved_session_id,
             })
         }
-        None => Ok(PollClaim::AlreadyDelivered),
+        None => current_poll_outcome(collection, &row.id).await,
     }
 }
 
@@ -748,6 +996,8 @@ fn poll_claim_outcome(outcome: &PollClaim) -> &'static str {
         PollClaim::Denied => "denied",
         PollClaim::Expired => "expired",
         PollClaim::AlreadyDelivered => "already_delivered",
+        PollClaim::AgentKey => "agent_key_ready",
+        PollClaim::Account(_) => "delivered",
         PollClaim::Ready { .. } => "delivered",
     }
 }
@@ -1357,9 +1607,9 @@ mod tests {
             audit
                 .event_data
                 .as_ref()
-                .and_then(|data| data.get("user_code_redacted"))
+                .and_then(|data| data.get("request_id"))
                 .and_then(serde_json::Value::as_str),
-            Some("AB****34")
+            Some(row.id.as_str())
         );
         assert!(
             !audit
@@ -1662,10 +1912,19 @@ mod tests {
             audit
                 .event_data
                 .as_ref()
-                .and_then(|data| data.get("user_code_redacted"))
+                .and_then(|data| data.get("request_id"))
                 .and_then(serde_json::Value::as_str),
-            Some("AB****GH")
+            Some(updated.id.as_str())
         );
+        let audit_data = audit.event_data.as_ref().unwrap().to_string();
+        for forbidden in [
+            "ABCDEFGH",
+            "user_code",
+            updated.user_code_hmac.as_str(),
+            updated.device_code_hmac.as_str(),
+        ] {
+            assert!(!audit_data.contains(forbidden));
+        }
         assert_eq!(
             audit
                 .event_data
@@ -2087,9 +2346,12 @@ mod tests {
             AuthDeviceCodeStatus::Approved | AuthDeviceCodeStatus::Delivered
         );
         let row = AuthDeviceCode {
+            supports_grant_choice: false,
             id: Uuid::new_v4().to_string(),
             device_code_hmac: hmac_hex(TEST_HMAC_KEY, b"device-code"),
             user_code_hmac: hmac_hex(TEST_HMAC_KEY, b"ABCD1234"),
+            requested_profile: None,
+            user_code_reservation_hmac: None,
             status,
             poll_interval_secs: AUTH_DEVICE_POLL_INTERVAL_SECS,
             slow_down_increments: 0,
@@ -2119,6 +2381,8 @@ mod tests {
             last_polled_at: None,
             approved_user_id: has_approval.then(|| "approved-user-id".to_string()),
             approved_session_id: has_approval.then(|| "approved-session-id".to_string()),
+            agent_key_grant: None,
+            purge_at: None,
             approver_ip_hmac: None,
             delivery_access_token_encrypted: Some(b"encrypted-access".to_vec()),
             delivery_refresh_token_encrypted: Some(b"encrypted-refresh".to_vec()),
@@ -2166,9 +2430,12 @@ mod tests {
     fn make_debug_row() -> AuthDeviceCode {
         let now = Utc::now();
         AuthDeviceCode {
+            supports_grant_choice: false,
             id: Uuid::new_v4().to_string(),
             device_code_hmac: "abc123ff".repeat(8),
             user_code_hmac: "def456aa".repeat(8),
+            requested_profile: None,
+            user_code_reservation_hmac: None,
             status: AuthDeviceCodeStatus::Pending,
             poll_interval_secs: 5,
             slow_down_increments: 0,
@@ -2198,6 +2465,8 @@ mod tests {
             last_polled_at: Some(now),
             approved_user_id: Some(Uuid::new_v4().to_string()),
             approved_session_id: Some(Uuid::new_v4().to_string()),
+            agent_key_grant: None,
+            purge_at: None,
             approver_ip_hmac: Some("33334444".repeat(8)),
             delivery_access_token_encrypted: Some(vec![0xab, 0xcd, 0xef]),
             delivery_refresh_token_encrypted: Some(vec![0x12, 0x34, 0x56]),

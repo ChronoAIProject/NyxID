@@ -963,6 +963,12 @@ async fn main() {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
+                if let Err(error) = services::auth_device_service::sweep_expired(&sweep_db).await {
+                    tracing::error!(
+                        error_code = error.error_code(),
+                        "Device login expiry sweep failed"
+                    );
+                }
                 if let Err(error) =
                     services::auth_agent_key_login_service::sweep_expired(&sweep_db).await
                 {

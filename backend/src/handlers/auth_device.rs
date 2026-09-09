@@ -15,16 +15,19 @@ use crate::AppState;
 use crate::errors::{AppError, AppResult};
 use crate::handlers::auth::apply_browser_session_cookies;
 use crate::mw::auth::AuthUser;
+use crate::services::audit_service;
 use crate::services::auth_device_service::{
     self, ApproveInput, DenyInput, PollClaim, PreviewOutput,
 };
-use crate::services::{audit_service, token_service};
+use crate::services::{api_key_validation, auth_agent_key_login_service as agent_key};
 use crate::telemetry::{TelemetryContext, TelemetryEvent, emit_event};
 
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AuthDeviceRequestBody {
+    #[serde(default)]
+    pub requested_profile: Option<String>,
     #[serde(default)]
     pub client_label: Option<String>,
     #[serde(default)]
@@ -68,17 +71,33 @@ pub struct AuthDevicePollBody {
     pub device_code: String,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
-pub struct AuthDevicePollResponse {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub token_type: &'static str,
-    pub expires_in: i64,
+#[derive(Serialize, ToSchema)]
+#[serde(tag = "auth_kind", rename_all = "snake_case")]
+pub enum AuthDevicePollResponse {
+    AccountSession {
+        access_token: String,
+        refresh_token: String,
+        token_type: &'static str,
+        expires_in: i64,
+    },
+    AgentKey {
+        #[serde(flatten)]
+        delivery: Box<super::auth_agent_key::DeliveryResponse>,
+    },
+}
+
+impl std::fmt::Debug for AuthDevicePollResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthDevicePollResponse")
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AuthDeviceApproveBody {
     pub user_code: String,
+    pub selection: Option<agent_key::Selection>,
+    pub credential_expires_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -91,6 +110,14 @@ pub struct AuthDeviceDecisionResponse {
     pub ok: bool,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct AuthDeviceWebDeliveryResponse {
+    pub ok: bool,
+    pub auth_kind: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login_code: Option<super::login_code::MintResponse>,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AuthDevicePreviewBody {
     pub user_code: String,
@@ -98,6 +125,7 @@ pub struct AuthDevicePreviewBody {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct AuthDevicePreviewResponse {
+    pub requested_profile: Option<String>,
     pub client_label: Option<String>,
     pub client_user_agent: Option<String>,
     pub client_ip: Option<String>,
@@ -147,6 +175,27 @@ pub async fn request_auth_device(
     headers: HeaderMap,
     Json(body): Json<AuthDeviceRequestBody>,
 ) -> AppResult<Json<AuthDeviceRequestResponse>> {
+    request_device(state, addr, headers, body, false).await
+}
+
+#[utoipa::path(post, path = "/api/v1/auth/device/v2/request", request_body = AuthDeviceRequestBody,
+    responses((status = 200, body = AuthDeviceRequestResponse), (status = 429, body = crate::errors::ErrorResponse)), tag = "Auth Device Login")]
+pub async fn request_auth_device_v2(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<AuthDeviceRequestBody>,
+) -> AppResult<Json<AuthDeviceRequestResponse>> {
+    request_device(state, addr, headers, body, true).await
+}
+
+async fn request_device(
+    state: AppState,
+    addr: SocketAddr,
+    headers: HeaderMap,
+    body: AuthDeviceRequestBody,
+    supports_grant_choice: bool,
+) -> AppResult<Json<AuthDeviceRequestResponse>> {
     let resolved_client = resolve_client_context(&headers, addr, &state)?;
     let client_ip = resolved_client.ip;
     let client_ip_hash = client_ip_hash(&state, client_ip);
@@ -161,12 +210,14 @@ pub async fn request_auth_device(
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
 
-    let initiated = auth_device_service::initiate(
-        &state.db,
-        state.auth_device_hmac_key.as_slice(),
-        capture_client_context(&headers, addr, &state, body)?,
-    )
-    .await?;
+    let context = capture_client_context(&headers, addr, &state, body)?;
+    let initiated = if supports_grant_choice {
+        auth_device_service::initiate_v2(&state.db, state.auth_device_hmac_key.as_slice(), context)
+            .await?
+    } else {
+        auth_device_service::initiate(&state.db, state.auth_device_hmac_key.as_slice(), context)
+            .await?
+    };
 
     let (verification_uri, verification_uri_complete) =
         build_verification_uris(&state.config.frontend_url, &initiated.user_code)?;
@@ -185,6 +236,33 @@ pub async fn request_auth_device(
         expires_in: initiated.expires_in,
         interval: initiated.interval,
     }))
+}
+
+#[utoipa::path(post, path = "/api/v1/auth/device/v2/poll", request_body = AuthDevicePollBody,
+    responses((status = 200, body = AuthDevicePollResponse), (status = 400, body = crate::errors::ErrorResponse),
+        (status = 403, body = crate::errors::ErrorResponse), (status = 410, body = crate::errors::ErrorResponse),
+        (status = 429, body = crate::errors::ErrorResponse)), tag = "Auth Device Login")]
+pub async fn poll_auth_device_v2(
+    state: State<AppState>,
+    addr: ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Json<AuthDevicePollBody>,
+) -> AppResult<Json<AuthDevicePollResponse>> {
+    poll_auth_device(state, addr, headers, body).await
+}
+
+#[utoipa::path(post, path = "/api/v1/auth/device/v2/poll-web", request_body = AuthDevicePollBody,
+    responses((status = 200, body = AuthDeviceWebDeliveryResponse), (status = 400, body = crate::errors::ErrorResponse),
+        (status = 403, body = crate::errors::ErrorResponse), (status = 410, body = crate::errors::ErrorResponse),
+        (status = 429, body = crate::errors::ErrorResponse)), tag = "Auth Device Login")]
+pub async fn poll_auth_device_web_v2(
+    state: State<AppState>,
+    addr: ConnectInfo<SocketAddr>,
+    telemetry: TelemetryContext,
+    headers: HeaderMap,
+    body: Json<AuthDevicePollBody>,
+) -> AppResult<(HeaderMap, Json<AuthDeviceWebDeliveryResponse>)> {
+    poll_auth_device_web(state, addr, telemetry, headers, body).await
 }
 
 #[utoipa::path(
@@ -221,8 +299,9 @@ pub async fn poll_auth_device(
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
 
-    let claim = auth_device_service::poll_and_claim(
+    let claim = auth_device_service::poll_and_prepare(
         &state.db,
+        &state.encryption_keys,
         state.auth_device_hmac_key.as_slice(),
         &body.device_code,
     )
@@ -249,32 +328,39 @@ pub async fn poll_auth_device(
             trace_poll_error(&client_ip_hash, "already_delivered");
             Err(AppError::AuthDeviceCodeAlreadyDelivered)
         }
-        PollClaim::Ready {
-            encrypted_access,
-            encrypted_refresh,
-            expires_in,
-            ..
-        } => {
-            let (access_token, refresh_token) = auth_device_service::decrypt_tokens(
+        PollClaim::AgentKey => {
+            let delivery = auth_device_service::poll_agent_key(
+                &state.db,
                 &state.encryption_keys,
-                &encrypted_access,
-                &encrypted_refresh,
+                state.auth_device_hmac_key.as_slice(),
+                &body.device_code,
             )
             .await?;
-
+            Ok(Json(AuthDevicePollResponse::AgentKey {
+                delivery: Box::new(super::auth_agent_key::DeliveryResponse {
+                    credential: delivery.credential.to_string(),
+                    credential_id: delivery.credential_id,
+                    credential_expires_at: delivery.credential_expires_at,
+                    label: delivery.label,
+                    api_key: delivery.api_key,
+                }),
+            }))
+        }
+        PollClaim::Account(delivery) => {
             tracing::info!(
                 client_ip_hash = %client_ip_hash,
                 outcome = "delivered",
                 "auth_device.handler.poll"
             );
 
-            Ok(Json(AuthDevicePollResponse {
-                access_token,
-                refresh_token,
+            Ok(Json(AuthDevicePollResponse::AccountSession {
+                access_token: delivery.access_token,
+                refresh_token: delivery.refresh_token,
                 token_type: "Bearer",
-                expires_in,
+                expires_in: delivery.expires_in,
             }))
         }
+        PollClaim::Ready { .. } => Err(AppError::Internal("Unprepared account delivery".into())),
     }
 }
 
@@ -283,7 +369,7 @@ pub async fn poll_auth_device(
     path = "/api/v1/auth/device/poll-web",
     request_body = AuthDevicePollBody,
     responses(
-        (status = 200, body = AuthDeviceDecisionResponse),
+        (status = 200, body = AuthDeviceWebDeliveryResponse),
         (status = 400, body = crate::errors::ErrorResponse),
         (status = 403, body = crate::errors::ErrorResponse),
         (status = 404, body = crate::errors::ErrorResponse),
@@ -299,7 +385,7 @@ pub async fn poll_auth_device_web(
     telemetry: TelemetryContext,
     headers: HeaderMap,
     Json(body): Json<AuthDevicePollBody>,
-) -> AppResult<(HeaderMap, Json<AuthDeviceDecisionResponse>)> {
+) -> AppResult<(HeaderMap, Json<AuthDeviceWebDeliveryResponse>)> {
     let client_ip = resolve_client_ip(&headers, addr, &state)?;
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
@@ -313,10 +399,24 @@ pub async fn poll_auth_device_web(
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
 
-    let claim = auth_device_service::poll_and_claim(
+    let browser_user_agent = user_agent(&headers);
+    let browser_ip = client_ip.to_string();
+    let cookie = zeroize::Zeroizing::new(crate::crypto::token::generate_random_token());
+    let mut response_headers = HeaderMap::new();
+    apply_browser_session_cookies(
+        &mut response_headers,
+        &cookie,
+        state.config.use_secure_cookies(),
+        state.config.cookie_domain(),
+    )?;
+    let claim = auth_device_service::poll_for_browser(
         &state.db,
+        &state.encryption_keys,
         state.auth_device_hmac_key.as_slice(),
         &body.device_code,
+        &crate::crypto::token::hash_token(&cookie),
+        &browser_ip,
+        browser_user_agent.as_deref(),
     )
     .await?;
 
@@ -341,43 +441,34 @@ pub async fn poll_auth_device_web(
             trace_poll_error(&client_ip_hash, "already_delivered");
             return Err(AppError::AuthDeviceCodeAlreadyDelivered);
         }
-        PollClaim::Ready {
-            approved_user_id,
-            approved_session_id,
-            ..
-        } => (approved_user_id, approved_session_id),
+        PollClaim::AgentKey => {
+            let handoff = crate::services::login_code_service::browser_handoff(
+                &state.db,
+                state.auth_device_hmac_key.as_slice(),
+                &body.device_code,
+            )
+            .await?;
+            return Ok((
+                HeaderMap::new(),
+                Json(AuthDeviceWebDeliveryResponse {
+                    ok: false,
+                    auth_kind: "agent_key",
+                    login_code: Some(handoff.into()),
+                }),
+            ));
+        }
+        PollClaim::Account(delivery) => (delivery.user_id, delivery.session_id),
+        PollClaim::Ready { .. } => {
+            return Err(AppError::Internal("Unprepared account delivery".into()));
+        }
     };
-
-    token_service::revoke_session(&state.db, &approved_session_id, Some(&state.mcp_sessions))
-        .await?;
-
-    let browser_user_agent = user_agent(&headers);
-    let browser_ip = client_ip.to_string();
-    let browser_session = token_service::create_session(
-        &state.db,
-        &approved_user_id,
-        Some(browser_ip.as_str()),
-        browser_user_agent.as_deref(),
-    )
-    .await?;
-
-    let mut response_headers = HeaderMap::new();
-    if let Err(error) = apply_browser_session_cookies(
-        &mut response_headers,
-        &browser_session.session_token,
-        state.config.use_secure_cookies(),
-        state.config.cookie_domain(),
-    ) {
-        cleanup_web_delivery_session(&state, &browser_session.session_id).await;
-        return Err(error);
-    }
 
     audit_service::log_async(
         state.db.clone(),
         Some(approved_user_id.clone()),
         "login".to_string(),
         Some(serde_json::json!({
-            "session_id": &browser_session.session_id,
+            "session_id": &approved_session_id,
             "method": "device_code_web",
         })),
         Some(browser_ip),
@@ -400,8 +491,7 @@ pub async fn poll_auth_device_web(
     tracing::info!(
         client_ip_hash = %client_ip_hash,
         user_id = %approved_user_id,
-        session_id = %browser_session.session_id,
-        revoked_session_id = %approved_session_id,
+        session_id = %approved_session_id,
         audit_logged = true,
         outcome = "delivered",
         "auth_device.handler.poll_web"
@@ -409,20 +499,44 @@ pub async fn poll_auth_device_web(
 
     Ok((
         response_headers,
-        Json(AuthDeviceDecisionResponse { ok: true }),
+        Json(AuthDeviceWebDeliveryResponse {
+            ok: true,
+            auth_kind: "account_session",
+            login_code: None,
+        }),
     ))
 }
 
-async fn cleanup_web_delivery_session(state: &AppState, session_id: &str) {
-    if let Err(error) =
-        token_service::revoke_session(&state.db, session_id, Some(&state.mcp_sessions)).await
+#[tracing::instrument(skip_all)]
+#[utoipa::path(post, path = "/api/v1/auth/device/options", request_body = AuthDevicePreviewBody,
+    responses((status = 200, body = agent_key::LoginOptions), (status = 403, body = crate::errors::ErrorResponse)),
+    security(("bearer_auth" = [])), tag = "Auth Device Login")]
+pub async fn auth_device_options(
+    State(state): State<AppState>,
+    user: AuthUser,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<AuthDevicePreviewBody>,
+) -> AppResult<Json<agent_key::LoginOptions>> {
+    require_first_party_human(&user)?;
+    let ip = resolve_client_ip(&headers, addr, &state)?;
+    if !state.auth_device_approve_limiter.check_shared(ip).await?
+        || !state
+            .auth_device_approve_per_user_limiter
+            .check_shared(&format!("user:{}", user.user_id))
+            .await?
     {
-        tracing::error!(
-            session_id,
-            error = %error,
-            "failed to revoke browser session after auth-device cookie failure"
-        );
+        return Err(AppError::AuthDeviceCodeRateLimited);
     }
+    Ok(Json(
+        auth_device_service::options(
+            &state.db,
+            state.auth_device_hmac_key.as_slice(),
+            &user.user_id.to_string(),
+            &body.user_code,
+        )
+        .await?,
+    ))
 }
 
 #[utoipa::path(
@@ -448,6 +562,48 @@ pub async fn approve_auth_device(
     headers: HeaderMap,
     Json(body): Json<AuthDeviceApproveBody>,
 ) -> AppResult<Json<AuthDeviceDecisionResponse>> {
+    require_first_party_human(&user)?;
+    if body.selection.is_some() || body.credential_expires_at.is_some() {
+        return Err(AppError::ValidationError(
+            "Restricted approval requires /auth/device/approve-agent-key".into(),
+        ));
+    }
+    approve_device_grant(state, user, addr, headers, body).await
+}
+
+#[utoipa::path(post, path = "/api/v1/auth/device/approve-agent-key",
+    request_body = super::auth_agent_key::ApproveBody,
+    responses((status = 200, body = AuthDeviceDecisionResponse), (status = 403, body = crate::errors::ErrorResponse)),
+    security(("bearer_auth" = [])), tag = "Auth Device Login")]
+pub async fn approve_auth_device_agent_key(
+    State(state): State<AppState>,
+    user: AuthUser,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(body): Json<super::auth_agent_key::ApproveBody>,
+) -> AppResult<Json<AuthDeviceDecisionResponse>> {
+    approve_device_grant(
+        state,
+        user,
+        addr,
+        headers,
+        AuthDeviceApproveBody {
+            user_code: body.user_code,
+            selection: Some(body.selection),
+            credential_expires_at: body.credential_expires_at,
+        },
+    )
+    .await
+}
+
+async fn approve_device_grant(
+    state: AppState,
+    user: AuthUser,
+    addr: SocketAddr,
+    headers: HeaderMap,
+    body: AuthDeviceApproveBody,
+) -> AppResult<Json<AuthDeviceDecisionResponse>> {
+    require_first_party_human(&user)?;
     let client_ip = resolve_client_ip(&headers, addr, &state)?;
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
@@ -471,20 +627,44 @@ pub async fn approve_auth_device(
         return Err(AppError::AuthDeviceCodeRateLimited);
     }
 
-    auth_device_service::approve(
-        &state.db,
-        &state.config,
-        &state.jwt_keys,
-        &state.encryption_keys,
-        state.auth_device_hmac_key.as_slice(),
-        ApproveInput {
-            user_id: user.user_id.to_string(),
-            user_code: body.user_code,
-            approver_ip: Some(client_ip.to_string()),
-            approver_user_agent: user_agent(&headers),
-        },
-    )
-    .await?;
+    let input = ApproveInput {
+        user_id: user.user_id.to_string(),
+        user_code: body.user_code,
+        approver_ip: Some(client_ip.to_string()),
+        approver_user_agent: user_agent(&headers),
+    };
+    if let Some(selection) = body.selection {
+        let expiry = body
+            .credential_expires_at
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(api_key_validation::parse_expires_at)
+            .transpose()?;
+        auth_device_service::approve_with_agent_key(
+            &state.db,
+            &state.encryption_keys,
+            state.auth_device_hmac_key.as_slice(),
+            input,
+            selection,
+            expiry,
+        )
+        .await?;
+    } else {
+        if body.credential_expires_at.is_some() {
+            return Err(AppError::ValidationError(
+                "credential_expires_at requires an Agent Key selection".into(),
+            ));
+        }
+        auth_device_service::approve(
+            &state.db,
+            &state.config,
+            &state.jwt_keys,
+            &state.encryption_keys,
+            state.auth_device_hmac_key.as_slice(),
+            input,
+        )
+        .await?;
+    }
 
     tracing::info!(
         client_ip_hash = %client_ip_hash,
@@ -519,6 +699,7 @@ pub async fn deny_auth_device(
     headers: HeaderMap,
     Json(body): Json<AuthDeviceDenyBody>,
 ) -> AppResult<Json<AuthDeviceDecisionResponse>> {
+    require_first_party_human(&user)?;
     let client_ip = resolve_client_ip(&headers, addr, &state)?;
     let client_ip_hash = client_ip_hash(&state, client_ip);
     tracing::Span::current().record("client_ip_hash", client_ip_hash.as_str());
@@ -656,6 +837,7 @@ fn user_agent(headers: &HeaderMap) -> Option<String> {
 
 pub(super) fn preview_response(preview: PreviewOutput) -> AuthDevicePreviewResponse {
     AuthDevicePreviewResponse {
+        requested_profile: preview.requested_profile,
         client_label: preview.client_label,
         client_user_agent: preview.client_user_agent,
         client_ip: preview.client_ip,
@@ -915,6 +1097,7 @@ mod tests {
     fn preview_response_maps_verbose_fields_additively() {
         let now = chrono::Utc::now();
         let response = preview_response(PreviewOutput {
+            requested_profile: None,
             client_label: Some("workstation".to_string()),
             client_user_agent: Some("nyxid-cli/1.4.2 (macos; aarch64)".to_string()),
             client_ip: Some("8.8.8.8".to_string()),
@@ -1191,7 +1374,9 @@ mod tests {
             .to_string();
 
         let body = response.json::<Value>().await.expect("web poll response");
-        assert_eq!(body, serde_json::json!({ "ok": true }));
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["auth_kind"], "account_session");
+        assert!(body.get("login_code").is_none_or(Value::is_null));
         assert!(body.get("access_token").is_none());
         assert!(body.get("refresh_token").is_none());
 
@@ -1432,7 +1617,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn auth_device_web_poll_cookie_failure_revokes_both_sessions() {
+    async fn auth_device_web_poll_cookie_failure_keeps_delivery_retryable() {
         let Some(db) = connect_test_database("auth_device_web_poll_cookie_failure").await else {
             return;
         };
@@ -1472,7 +1657,7 @@ mod tests {
             .await
             .expect("query approval session")
             .expect("approval session");
-        assert!(approval_session.revoked);
+        assert!(!approval_session.revoked);
         assert_eq!(
             state
                 .db
@@ -1480,7 +1665,7 @@ mod tests {
                 .count_documents(doc! { "user_id": &user_id, "revoked": false })
                 .await
                 .expect("count active sessions"),
-            0
+            1
         );
         assert_eq!(
             state
@@ -1489,7 +1674,7 @@ mod tests {
                 .count_documents(doc! { "user_id": &user_id, "revoked": true })
                 .await
                 .expect("count revoked sessions"),
-            2
+            0
         );
         let approval_refresh = state
             .db
@@ -1498,17 +1683,124 @@ mod tests {
             .await
             .expect("query approval refresh token")
             .expect("approval refresh token");
-        assert!(approval_refresh.revoked);
+        assert!(!approval_refresh.revoked);
+
+        let pending = state
+            .db
+            .collection::<AuthDeviceCode>(AUTH_DEVICE_CODES)
+            .find_one(doc! {})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pending.status,
+            crate::models::auth_device_code::AuthDeviceCodeStatus::Approved
+        );
+        assert!(pending.delivery_access_token_encrypted.is_some());
+        let repaired =
+            crate::test_utils::test_app_state_with_config(state.db.clone(), test_app_config());
+        let repaired_server = spawn_test_server(repaired).await;
 
         let (status, json) = post_json(
-            &server,
-            "/api/v1/auth/device/poll",
+            &repaired_server,
+            "/api/v1/auth/device/poll-web",
             None,
             serde_json::json!({ "device_code": request_json["device_code"] }),
         )
         .await;
-        assert_eq!(status, StatusCode::GONE);
-        assert_error(&json, "auth_device_already_delivered", 11205);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["auth_kind"], "account_session");
+        assert_eq!(
+            state
+                .db
+                .collection::<Session>(SESSIONS)
+                .count_documents(doc! {"revoked": false})
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .db
+                .collection::<Session>(SESSIONS)
+                .count_documents(doc! {"revoked": true})
+                .await
+                .unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn restricted_approval_uses_a_distinct_route_and_legacy_route_rejects_selection() {
+        let Some(state) = setup_state("device_restricted_route").await else {
+            return;
+        };
+        let user = Uuid::new_v4().to_string();
+        insert_user(&state, &user).await;
+        let token = access_token(&state, &user);
+        let server = spawn_test_server(state.clone()).await;
+        let (_, legacy) = post_json(
+            &server,
+            "/api/v1/auth/device/request",
+            None,
+            serde_json::json!({}),
+        )
+        .await;
+        let (status, _) = post_json(&server, "/api/v1/auth/device/approve-agent-key", Some(&token),
+            serde_json::json!({"user_code":legacy["user_code"], "selection":{"kind":"new", "name":"Legacy", "scopes":"proxy"}})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (_, request) = post_json(
+            &server,
+            "/api/v1/auth/device/v2/request",
+            None,
+            serde_json::json!({}),
+        )
+        .await;
+        let approval = serde_json::json!({"user_code": request["user_code"], "selection": {"kind":"new", "name":"Fixture", "scopes":"proxy"}});
+        let (status, _) = post_json(
+            &server,
+            "/api/v1/auth/device/approve",
+            Some(&token),
+            approval.clone(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            state
+                .db
+                .collection::<Session>(SESSIONS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+        let (status, _) = post_json(
+            &server,
+            "/api/v1/auth/device/approve-agent-key",
+            Some(&token),
+            approval,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, delivery) = post_json(
+            &server,
+            "/api/v1/auth/device/v2/poll",
+            None,
+            serde_json::json!({"device_code":request["device_code"]}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(delivery["auth_kind"], "agent_key");
+        assert!(delivery.get("access_token").is_none());
+        assert_eq!(
+            state
+                .db
+                .collection::<Session>(SESSIONS)
+                .count_documents(doc! {})
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]
@@ -1787,9 +2079,13 @@ mod tests {
 
     #[tokio::test]
     async fn auth_device_untrusted_forwarded_for_cannot_bypass_request_rate_limit() {
-        let Some(state) = setup_state("auth_device_spoof_xff").await else {
+        let Some(mut state) = setup_state("auth_device_spoof_xff").await else {
             return;
         };
+        // This test isolates trusted-source key selection from shared DB window
+        // boundaries. The adjacent test exercises the production shared limiter.
+        state.auth_device_request_limiter =
+            crate::mw::rate_limit::PerIpRateLimiter::new(5, 600).into();
         let server = spawn_test_server(state).await;
         let mut last = (StatusCode::OK, Value::Null);
         for i in 0..6 {

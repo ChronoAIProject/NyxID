@@ -421,6 +421,74 @@ pub async fn create_login_api_key(
     .await
 }
 
+/// Validate a future login key without creating a credential or parent row.
+pub async fn validate_login_api_key(
+    db: &mongodb::Database,
+    actor: &str,
+    input: &crate::models::login_grant::NewKeyInput,
+) -> AppResult<Option<chrono::DateTime<Utc>>> {
+    if input.name.is_empty() || input.name.len() > 200 {
+        return Err(AppError::ValidationError(
+            "API key name must be between 1 and 200 characters".into(),
+        ));
+    }
+    validate_api_key_scopes(&input.scopes)?;
+    validate_platform(input.platform.as_deref())?;
+    let owner =
+        api_key_scope_service::resolve_scope_owner_id(db, actor, input.target_org_id.as_deref())
+            .await?;
+    let expiry = input
+        .expires_at
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .map(super::api_key_validation::parse_expires_at)
+        .transpose()?;
+    super::api_key_validation::resolve_create_allow_all(
+        &input.allowed_service_ids,
+        Some(input.allow_all_services),
+        "allow_all_services",
+        "allowed_service_ids",
+    )?;
+    super::api_key_validation::resolve_create_allow_all(
+        &input.allowed_node_ids,
+        Some(input.allow_all_nodes),
+        "allow_all_nodes",
+        "allowed_node_ids",
+    )?;
+    if !input.allow_all_services {
+        api_key_scope_service::validate_service_ids(
+            db,
+            &owner,
+            &input.allowed_service_ids,
+            ScopeAuthorization::for_actor(Some(actor)),
+        )
+        .await?;
+    }
+    if !input.allow_all_nodes {
+        api_key_scope_service::validate_node_ids(
+            db,
+            &owner,
+            &input.allowed_node_ids,
+            ScopeAuthorization::for_actor(Some(actor)),
+        )
+        .await?;
+    }
+    if let Some(digest) = &input.scope_plan_digest {
+        api_key_scope_service::verify_scope_plan_precondition(
+            db,
+            actor,
+            &owner,
+            &input.allowed_service_ids,
+            &input.allowed_node_ids,
+            input.allow_all_services,
+            input.allow_all_nodes,
+            digest,
+        )
+        .await?;
+    }
+    Ok(expiry)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn create_api_key_with_security_class_and_id(
     db: &mongodb::Database,

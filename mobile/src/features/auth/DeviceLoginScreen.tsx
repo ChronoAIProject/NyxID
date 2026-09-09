@@ -286,7 +286,7 @@ function ManualCodeModal({
               autoCapitalize="characters"
               autoCorrect={false}
               textContentType="oneTimeCode"
-              maxLength={9}
+              maxLength={11}
               returnKeyType="done"
               selectionColor={colors.primary}
               placeholder="ABCD-EFGH"
@@ -621,7 +621,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 autoCapitalize="characters"
                 autoCorrect={false}
                 textContentType="oneTimeCode"
-                maxLength={9}
+                maxLength={11}
                 returnKeyType="done"
                 onSubmitEditing={() => {
                   if (normalizeAuthDeviceUserCode(userCode))
@@ -825,7 +825,17 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
               </View>
 
               {isAuthenticated ? (
-                <View style={styles.decisionRow}>
+                <View style={{ gap: spacing.md }}>
+                  {normalizeAuthDeviceUserCode(confirmedCode ?? userCode)?.length === 9 && <PrimaryButton label="Restricted Agent Key" kind="ghost"
+                    disabled={isPending || isExpired}
+                    onPress={() => navigation.navigate("AgentKeyLogin", {
+                      user_code: confirmedCode ?? userCode, flow: "device",
+                    })} />}
+                  <Text style={styles.cautionText}>
+                    A full account session grants this machine your account, service,
+                    credential, and organization access. A restricted Agent Key grants
+                    only the permissions and resources you confirm next.
+                  </Text>
                   <View style={styles.decisionButton}>
                     <PrimaryButton
                       label={
@@ -841,7 +851,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                       label={
                         decisionPending === "approve"
                           ? "Approving..."
-                          : "Approve"
+                          : "Approve full account session"
                       }
                       disabled={isPending || isExpired}
                       onPress={() => void handleDecision("approve")}

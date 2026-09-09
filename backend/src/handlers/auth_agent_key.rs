@@ -74,7 +74,6 @@ fn private_json<T>(value: T) -> PrivateJson<T> {
 pub struct RequestBody {
     #[serde(flatten)]
     pub context: AuthDeviceRequestBody,
-    pub requested_profile: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -136,7 +135,6 @@ pub struct DeliveryResponse {
 pub struct PreviewResponse {
     #[serde(flatten)]
     pub context: AuthDevicePreviewResponse,
-    pub requested_profile: Option<String>,
     pub interval: u32,
 }
 
@@ -198,6 +196,7 @@ async fn decision_limit(
     addr: SocketAddr,
     route: &str,
 ) -> AppResult<String> {
+    super::login_client_context::require_first_party_human(user)?;
     if !matches!(
         user.auth_method,
         AuthMethod::Session | AuthMethod::AccessToken
@@ -281,11 +280,12 @@ pub async fn request(
                 "Agent Key verification URI is invalid".into(),
             ));
         }
+        let requested_profile = body.context.requested_profile.clone();
         let request = service::request(
             &state.db,
             state.auth_device_hmac_key.as_slice(),
             capture_client_context(&headers, addr, &state, body.context)?,
-            body.requested_profile,
+            requested_profile,
         )
         .await?;
         Ok(private_json(RequestResponse {
@@ -350,7 +350,6 @@ pub async fn preview(
         .await?;
         Ok(private_json(PreviewResponse {
             context: preview_response(result.context),
-            requested_profile: result.requested_profile,
             interval: result.interval,
         }))
     }
