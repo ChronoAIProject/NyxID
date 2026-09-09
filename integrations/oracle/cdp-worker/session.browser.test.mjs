@@ -125,10 +125,10 @@ function workerProcess(fixture, args, extraEnv = {}) {
   return { child, output: () => output };
 }
 
-async function apiFixture(t, handle) {
+async function apiFixture(t, handle, expectedToken = token) {
   const server = createServer(async (req, res) => {
     try {
-      assert.equal(req.headers.authorization, `Bearer ${token}`);
+      assert.equal(req.headers.authorization, `Bearer ${expectedToken}`);
       let raw = "";
       for await (const chunk of req) raw += chunk;
       const body = raw ? JSON.parse(raw) : null;
@@ -152,6 +152,36 @@ async function apiFixture(t, handle) {
 }
 
 const options = { skip: !chromeExecutable, timeout: 30000 };
+
+test("an enrolled member worker uses its own account and polls the shared queue without shared-login access", options, async (t) => {
+  const fixture = await browserFixture(t, true);
+  await fixture.context.addCookies([{
+    name: "session", value: "contributor-account", domain: ".chatgpt.com", path: "/", secure: true,
+  }]);
+  const credential = `nyx_owi_${randomBytes(32).toString("hex")}`;
+  const heartbeats = [];
+  const routes = [];
+  const base = await apiFixture(t, (url, body) => {
+    routes.push(url.pathname);
+    if (url.pathname.endsWith("/heartbeat")) {
+      heartbeats.push(body);
+      return { status: "ok" };
+    }
+    if (url.pathname.endsWith("/task")) return { status: "idle" };
+    throw new Error(`Unexpected enrolled worker route ${url.pathname}`);
+  }, credential);
+  const process = workerProcess(fixture, [], { NYXID_BASE_URL: base, NYXID_WORKER_TOKEN: credential });
+  await waitUntil(() => heartbeats.length >= 3 && routes.filter(route => route.endsWith("/task")).length >= 3);
+  assert.ok(heartbeats.some(heartbeat => heartbeat.logged_in === true));
+  for (const heartbeat of heartbeats) {
+    assert.equal(heartbeat.worker, "browser-test");
+    assert.match(heartbeat.instance_id, /^[0-9a-f-]{36}$/);
+    assert.deepEqual(heartbeat.capabilities, ["commands_v1", "upgrade_v1", "attempt_fencing_v1"]);
+  }
+  assert.equal(routes.some(route => route.includes("login-profile") || route.includes("login-snapshot")), false);
+  assert.equal((await fixture.context.cookies()).find(cookie => cookie.name === "session")?.value, "contributor-account");
+  assert.equal(process.output().includes(credential), false);
+});
 
 async function savedLoginApi(t, replaceExisting = false) {
   const snapshot = {

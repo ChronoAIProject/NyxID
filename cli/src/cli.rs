@@ -5229,16 +5229,16 @@ pub enum OracleWorkerCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// Install and start a worker on this machine
+    /// Join a pool and start a worker using your NyxID login (no shared token needed)
     Install {
         #[arg(long)]
         pool: String,
-        /// Read the raw pool worker token from this file
+        /// Use an existing shared pool token instead of automatic enrollment
         #[arg(long, value_name = "PATH")]
         worker_token_file: Option<String>,
         /// Choose the worker label (letters, digits, '-', '_'; default: server-generated).
-        /// An existing legacy worker's label is adopted; a label bound to another
-        /// managed installation is refused.
+        /// Labels already in use are refused. With a shared pool token, an
+        /// existing legacy worker's label can be adopted.
         #[arg(long)]
         label: Option<String>,
         /// Import this saved login on first startup (existing accounts are preserved)

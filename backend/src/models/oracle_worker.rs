@@ -16,6 +16,8 @@ pub struct OracleWorker {
     pub pool_id: String,
     /// Tab-chosen label (e.g. "tab_1"), unique within the pool.
     pub worker_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub last_seen_at: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -32,6 +34,8 @@ pub struct OracleWorker {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instance_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enrollment: Option<OracleWorkerEnrollment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
@@ -43,6 +47,25 @@ pub struct OracleWorker {
     pub chrome_alive: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct OracleWorkerEnrollment {
+    pub owner_user_id: String,
+    pub credential_hash: String,
+    pub pool_token_hash: String,
+    pub membership_id: Option<String>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub membership_created_at: Option<DateTime<Utc>>,
+}
+
+impl std::fmt::Debug for OracleWorkerEnrollment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OracleWorkerEnrollment")
+            .field("owner_user_id", &self.owner_user_id)
+            .field("credentials", &"[REDACTED]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -94,6 +117,7 @@ mod tests {
             id: worker_doc_id("pool-1", "tab_1"),
             pool_id: "pool-1".to_string(),
             worker_label: "tab_1".to_string(),
+            generation: None,
             last_seen_at: Utc::now(),
             current_task_id: Some("t1".to_string()),
             script_version: Some("nyxid-1.0".to_string()),
@@ -101,6 +125,7 @@ mod tests {
             first_seen_at: Some(Utc::now()),
             provisioned_at: None,
             instance_id: Some("process-1".to_string()),
+            enrollment: None,
             platform: Some("macos-arm64".to_string()),
             capabilities: vec!["commands_v1".to_string()],
             desired_state: OracleWorkerDesiredState::Active,

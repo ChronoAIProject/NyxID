@@ -32,7 +32,17 @@ import {
   seedProfileName,
   shouldLeaveTabAlone,
   taskRecoveryDecision,
+  workerCapabilities,
 } from "./worker.mjs";
+
+test("member enrollment retains task and control capabilities without offering pool-token login imports", () => {
+  const own = workerCapabilities(`nyx_owi_${"a".repeat(64)}`);
+  assert.deepEqual(own, ["commands_v1", "upgrade_v1", "attempt_fencing_v1"]);
+  const legacy = workerCapabilities(`nyx_owk_${"a".repeat(64)}`);
+  for (const capability of [...own, "session_import_v1", "saved_login_v1"]) {
+    assert.ok(legacy.includes(capability));
+  }
+});
 
 test("saved account fingerprints bind both identity and pool without storing upstream identifiers", () => {
   const fingerprint = accountFingerprint("synthetic-account-a", "synthetic-pool-token");

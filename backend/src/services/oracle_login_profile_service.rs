@@ -219,6 +219,7 @@ pub async fn unbind(db: &mongodb::Database, pool_id: &str, label: &str) -> AppRe
     remove_binding(db, pool_id, label, false).await
 }
 
+#[cfg(test)]
 pub async fn forget_binding_and_worker(
     db: &mongodb::Database,
     pool_id: &str,
@@ -280,6 +281,11 @@ pub async fn bind(
 ) -> AppResult<OracleLoginBinding> {
     validate_name(name)?;
     let worker = oracle_worker_service::get_worker(db, &pool.id, label).await?;
+    if worker.enrollment.is_some() {
+        return Err(AppError::OracleWorkerCapabilityUnsupported(
+            "contributed workers use their own browser login".into(),
+        ));
+    }
     let instance_id = match (worker.instance_id.as_deref(), installation_id) {
         (Some(existing), Some(requested)) if existing != requested => return Err(conflict()),
         (Some(existing), _) => existing,
@@ -319,7 +325,7 @@ pub async fn bind(
                 let locked = db
                     .collection::<Document>(WORKERS)
                     .update_one(
-                        doc! { "_id": &worker.id, "instance_id": &worker.instance_id },
+                        doc! { "_id": &worker.id, "instance_id": &worker.instance_id, "enrollment": null },
                         doc! { "$inc": { "login_binding_epoch": 1_i64 } },
                     )
                     .session(&mut *session)
