@@ -762,6 +762,13 @@
 .nb-tile-unavailable {
   opacity: 0.45;
 }
+.nb-channel-tiles {
+  grid-auto-rows: 1fr;
+}
+/* Keep global label-to-input spacing out of the channel grid. */
+.nb-channel-tiles > .nb-tile {
+  margin: 0;
+}
 .nb-channel-tiles label {
   cursor: pointer;
 }
