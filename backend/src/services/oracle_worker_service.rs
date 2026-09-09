@@ -949,16 +949,20 @@ mod tests {
             .await
             .unwrap();
 
-        let counts =
-            count_online_workers_by_pool(&db, &[busy.id.clone(), idle.id.clone()], 120)
-                .await
-                .unwrap();
+        let counts = count_online_workers_by_pool(&db, &[busy.id.clone(), idle.id.clone()], 120)
+            .await
+            .unwrap();
         assert_eq!(counts.get(&busy.id).copied(), Some(1));
         assert_eq!(counts.get(&idle.id), None);
         assert_eq!(count_online_workers(&db, &busy.id, 120).await.unwrap(), 1);
         assert_eq!(count_online_workers(&db, &idle.id, 120).await.unwrap(), 0);
         assert_eq!(count_online_workers(&db, &busy.id, 900).await.unwrap(), 2);
-        assert!(count_online_workers_by_pool(&db, &[], 120).await.unwrap().is_empty());
+        assert!(
+            count_online_workers_by_pool(&db, &[], 120)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
