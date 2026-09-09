@@ -237,8 +237,14 @@ pub async fn current(
     headers: HeaderMap,
     Query(query): Query<WorkerLoginQuery>,
 ) -> AppResult<Json<WorkerLoginResponse>> {
-    let pool = super::oracle_worker::authenticate_worker(&state, &headers).await?;
-    let current = profiles::current(&state.db, &pool, &query.worker, &query.instance_id).await?;
+    let worker_auth = super::oracle_worker::authenticate_worker(&state, &headers).await?;
+    worker_auth.ensure_identity(&query.worker, Some(&query.instance_id))?;
+    let pool = worker_auth.pool;
+    let current = if worker_auth.installation.is_some() {
+        None
+    } else {
+        profiles::current(&state.db, &pool, &query.worker, &query.instance_id).await?
+    };
     let Some((profile, binding)) = current else {
         return Ok(Json(WorkerLoginResponse {
             status: "unbound".into(),
@@ -297,7 +303,10 @@ pub async fn refresh(
     headers: HeaderMap,
     Json(body): Json<RefreshLoginRequest>,
 ) -> AppResult<Json<LoginProfileInfo>> {
-    let pool = super::oracle_worker::authenticate_worker(&state, &headers).await?;
+    let worker_auth = super::oracle_worker::authenticate_worker(&state, &headers).await?;
+    worker_auth.ensure_identity(&body.worker, Some(&body.instance_id))?;
+    worker_auth.ensure_pool_credential()?;
+    let pool = worker_auth.pool;
     let profile = profiles::refresh(
         &state.db,
         &state.encryption_keys,

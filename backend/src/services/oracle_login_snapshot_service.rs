@@ -137,7 +137,7 @@ pub async fn create_and_fanout(
                 .capabilities
                 .iter()
                 .any(|capability| capability == "session_import_v1");
-        if !capable {
+        if !capable || worker.enrollment.is_some() {
             skipped_workers.push(worker.worker_label);
             continue;
         }

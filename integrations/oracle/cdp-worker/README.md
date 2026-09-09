@@ -15,15 +15,23 @@ then run:
 nyxid oracle worker install --pool <pool-slug> [--label <name>]
 ```
 
-The command asks for the raw pool worker token with hidden input. Pass
-`--worker-token-file <path>` to read it from a file instead. The server cannot
-return an existing token because it stores only the SHA-256 hash.
+Active Member/Admin users can join their organization's org-visible pool using
+their NyxID login. Pool owners and org admins can also join pools they manage.
+The command enrolls automatically with no shared-token prompt. Complete ChatGPT
+login in the dedicated Chrome window; this worker contributes its own account
+to the pool's shared queue.
+
+Existing pool-token installations retain their configuration. For a new
+manager-operated worker that should receive shared saved logins, pass
+`--worker-token-file <path>` or `--login-profile <name>` during install. Saved
+profiles require the raw pool token. Use a separate `--profile` for shared-login
+workers alongside an automatically enrolled installation.
 
 Install performs these actions:
 
-1. Allocates a label that is unique within the pool (server-generated, or
-   `--label <name>` to keep your own naming; an existing legacy worker's
-   label is adopted, a label bound to another managed install is refused).
+1. Reserves a unique label (server-generated or `--label <name>`). Automatic
+   enrollment refuses labels used by any other worker. Pool-token installs
+   retain the legacy label-adoption path.
 2. Downloads the worker source embedded in the NyxID backend and verifies its
    SHA-256.
 3. Installs the exact `playwright-core` version from the bundle manifest without
@@ -50,7 +58,11 @@ nyxid oracle worker uninstall --pool <pool>
 `uninstall` removes the service definition but retains the installation files,
 Chrome profile, and token.
 
-## Log in every worker remotely
+## Log in shared-account workers remotely
+
+This flow applies to manager-operated pool-token installations. Automatically
+enrolled workers use their own local ChatGPT accounts and cannot receive these
+shared logins.
 
 Run this command on one machine where you can complete the ChatGPT login:
 
@@ -95,6 +107,15 @@ nyxid oracle worker upgrade --pool <pool> [--label <label>]
 ```
 
 Commands travel through worker heartbeats. The worker has no inbound listener.
+Members can list and manage their own contributed workers; org admins manage
+all workers. Removing membership or changing it to Viewer revokes the worker's
+access. Pool-token rotation also invalidates enrollment. Once access is restored,
+run `worker install --force --pool <pool>` with the original profile to renew
+automatically, retaining the browser account and worker label. Forgetting an
+enrolled worker revokes its credential and frees its enrollment slot. Pools
+allow up to 256 enrolled installations; `max_workers` separately limits task
+concurrency.
+
 Drain, restart, browser relaunch, session import, and upgrade wait for the
 current task unless a logged-out task needs an immediate session import to
 continue. Command IDs and terminal results persist locally, so a delivery lease
@@ -218,7 +239,7 @@ only. The deployed userscript is unchanged and simply omits generic files.
 | Variable | Default | Meaning |
 |---|---|---|
 | `NYXID_BASE_URL` | required | NyxID server base URL. |
-| `NYXID_WORKER_TOKEN_FILE` | none | Preferred path to the pool token file. |
+| `NYXID_WORKER_TOKEN_FILE` | none | Path to the private installation credential or shared pool token file. Managed by CLI installs. |
 | `NYXID_WORKER_TOKEN` | none | Inline token fallback. This can appear in shell history and process environments. |
 | `NYXID_WORKER_LABEL` | `tab_1` | Worker identity within the pool. CLI installs allocate this value. |
 | `NYXID_WORKER_STATE_FILE` | `~/.nyxid-oracle/worker-state.json` | Durable recovery and command journal. |
@@ -245,9 +266,11 @@ only. The deployed userscript is unchanged and simply omits generic files.
 - The Chrome debug port is an unauthenticated local control channel. Keep it on
   loopback and use a dedicated Chrome profile. Do not reuse that profile for
   unrelated sensitive logins.
-- Treat the worker token as a long-lived pool credential. Prefer a mode `0600`
-  token file. Rotate the pool token if it leaks, then update every installed
-  worker and userscript.
+- The CLI stores its installation credential privately with mode `0600`; the
+  backend binds it to one worker and the contributing user's current membership.
+  Shared pool tokens retain their existing broader access. Rotate the pool token
+  if it leaks, update pool-token workers and userscripts, and renew enrolled
+  workers with `install --force`.
 - The state file contains no session or task bodies. Worker logs use stable
   error codes and task metadata. They do not print prompts, responses,
   transcripts, cookies, storage, raw tokens, conversation URLs, attachment

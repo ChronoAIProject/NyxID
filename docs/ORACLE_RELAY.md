@@ -42,7 +42,7 @@ for free.
 | **Worker** | A CDP daemon or userscript tab, identified by a label unique within its pool. New CDP installations also bind the label to a stable installation ID. |
 | **Task** | One prompt → one answer (`OracleTask`). Async: submit returns a `task_id`; the answer arrives later. |
 | **Session** | A multi-turn conversation (`OracleSession`), addressed by `conversation_id` (`conv_…`). |
-| **Worker token** | `nyx_owk_<64 hex>`. Minted at pool creation, rotatable, SHA-256-hashed at rest, shown once. Sent as `Authorization: Bearer`. |
+| **Worker credential** | Normal CLI installs enroll automatically using a private installation credential. Existing shared-token workers use the pool's `nyx_owk_<64 hex>` token. Both authenticate through `Authorization: Bearer`; only hashes are stored on the server. |
 | **Command** | A manager request delivered through the next capable-worker heartbeat. Commands have delivery leases, bounded redelivery, and a terminal result code. |
 
 ### Visibility
@@ -57,13 +57,48 @@ A pool's `visibility` controls who may submit:
 Management (update settings, rotate token) is always restricted to the
 owner or an org admin, regardless of visibility.
 
+For an org-visible pool, active org members with Member or Admin role can
+contribute workers and manage their own installations. Viewers may submit to
+the pool but cannot enroll workers. Pool owners and org admins may also enroll
+in pools they manage. Pool list/show returns `can_enroll`, displayed as `Join`
+in the CLI list and `Can join` in the detail view.
+
+### Join an organization's pool
+
+On the worker machine, sign in to the NyxID CLI, then run:
+
+```bash
+nyxid login
+nyxid oracle pool list
+nyxid oracle worker install --pool <org-pool> --label <my-worker>
+```
+
+No shared token is requested. Complete ChatGPT login in the dedicated Chrome
+window that opens. Your worker serves the same pool queue as the other
+contributors; consumers keep using that pool for all requests. Members can
+list, inspect, drain, resume, restart, upgrade, and forget their own workers.
+Org admins can manage all workers. Worker responses include `owner_user_id`,
+`credential_type`, and `can_manage` so clients can show the available actions.
+
+Each contributed worker uses its own browser account. Shared saved-login
+profiles and pool-wide login uploads continue to serve installations configured
+with the pool token; they never replace a contributor's browser account.
+
+Enrollment is limited to 256 installations per pool. This inventory limit is
+separate from `max_workers`, which limits concurrent task dispatch. Forget an
+unused installation to release its slot. Removing a member, changing their role
+to Viewer, disabling their account or organization, or rotating the pool token
+invalidates their worker access. After access is restored, the contributor runs
+`worker install --force --pool <org-pool>` with the original `--profile`, if any,
+to renew enrollment while retaining the Chrome profile and worker label.
+
 ---
 
 ## Quickstart (pool owner)
 
 You have ChatGPT Pro and want to share it.
 
-1. **Create a pool** and capture the one-time worker token:
+1. **Create a pool**:
 
    ```bash
    nyxid oracle pool create chatgpt-pro \
@@ -83,9 +118,8 @@ You have ChatGPT Pro and want to share it.
    nyxid oracle worker install --pool chatgpt-pro
    ```
 
-   The command asks for the one-time pool worker token with hidden input. You
-   can also pass `--worker-token-file`. It verifies Node 18 or newer, npm, and
-   Chrome or Chromium. It then allocates a unique worker label (server-generated,
+   The command enrolls using your NyxID login. It verifies Node 18 or newer,
+   npm, and Chrome or Chromium. It reserves a unique worker label (server-generated,
    or your own with `--label share-account-8`; see below), verifies the
    server-embedded bundle checksum, installs the exact `playwright-core`
    version from the bundle manifest, writes mode `0600` config and token files,
@@ -96,13 +130,14 @@ You have ChatGPT Pro and want to share it.
    **Choosing labels.** Labels are how you address a worker (`worker show`,
    `drain`, `upgrade --label`). Pass `--label <name>` (letters, digits, `-`,
    `_`; max 64) to keep a naming convention such as `share-account-8`. The
-   server still guarantees uniqueness: a label already bound to another
-   managed installation is refused (error 11014). A label that only a
-   legacy worker uses (no installation binding) is **adopted** — the managed
+   server refuses any label already used by another worker (error 11014).
+   When explicitly installing with the pool token, a label that only a
+   legacy worker uses (no installation binding) can be **adopted** — the managed
    install takes it over and the legacy process is rejected on its next poll
    with 11014, so unload that legacy worker after the managed one reports
    online. This is the in-place migration path for existing named workers.
-   Renaming an existing install (`install --force --label <new>`) leaves the
+   Automatic enrollment keeps its label; use a separate profile for a new
+   identity. Renaming a pool-token install (`install --force --label <new>`) leaves the
    old label row bound to this installation; it shows as offline in
    `worker list` until it ages out of interest.
 
@@ -110,19 +145,8 @@ You have ChatGPT Pro and want to share it.
    Its token stays in a mode `0600` file. The service environment contains only
    the token file path.
 
-3. **Log every worker in from one machine.** Run this on a machine where you
-   can complete the ChatGPT login:
-
-   ```bash
-   nyxid oracle login chatgpt-pro
-   ```
-
-   The command opens a local dedicated Chrome profile for password, OTP, SSO,
-   and Cloudflare checks. After login, the CLI captures and encrypts the
-   session locally, uploads the sealed envelope, terminates the capture Chrome,
-   deletes the temporary profile, then waits for each capable worker to import
-   and verify it. See [Pool-wide ChatGPT login](#pool-wide-chatgpt-login) for
-   the security model and device-binding limitation.
+3. **Log in to ChatGPT** in the worker's dedicated Chrome window. The profile
+   is retained across worker restarts and upgrades.
 
 4. **Verify** worker presence:
 
@@ -130,9 +154,17 @@ You have ChatGPT Pro and want to share it.
    nyxid oracle worker list chatgpt-pro
    ```
 
+For a manager-operated worker that should receive shared saved logins, pass
+`--worker-token-file <path>` at installation, then use
+`nyxid oracle login chatgpt-pro --worker-token-file <path>` for remote login,
+or `--login-profile <name>` to bind a saved profile during install. Existing
+pool-token installs keep that path on `install --force`. Use a separate
+`--profile` when adding a shared-login installation alongside an enrolled one.
+See [Pool-wide ChatGPT login](#pool-wide-chatgpt-login).
+
 The Tampermonkey userscript remains supported without changes. Install
 `integrations/oracle/nyxid_oracle.user.js`, then configure a distinct label and
-the same pool token. Userscript workers submit tasks but do not receive manager
+the same pool token. Userscript workers execute tasks but do not receive manager
 commands or login snapshots.
 
 ### Rotating the token
@@ -141,8 +173,11 @@ commands or login snapshots.
 nyxid oracle pool rotate-token chatgpt-pro
 ```
 
-This invalidates the old token immediately. Replace every installed worker
-token file and re-paste the token into every userscript. Worker install and
+This invalidates the old pool token and enrolled installation credentials
+immediately. For automatically enrolled workers, sign in and run
+`worker install --force --pool chatgpt-pro` with the original profile to renew;
+no shared token needs to be copied. For pool-token workers, replace their token
+files and re-paste the token into every userscript. Worker install and
 `oracle login` never rotate the token implicitly. The server stores only its
 SHA-256 hash, so an existing raw token must come from an installed token file,
 `--worker-token-file`, `NYXID_WORKER_TOKEN_FILE`, `NYXID_WORKER_TOKEN`, or the
@@ -217,15 +252,16 @@ bound based on the 512 KiB decoded envelope cap.
 |---|---|
 | `POST /pools` | Create a pool. Returns the pool + one-time `worker_token`. |
 | `GET /pools` | List visible pools (platform + owned + your orgs'). |
-| `GET /pools/{id_or_slug}` | Pool detail (`can_manage` reflects the caller). |
+| `GET /pools/{id_or_slug}` | Pool detail (`can_manage` and `can_enroll` reflect the caller). |
 | `PATCH /pools/{id_or_slug}` | Update settings (owner / org admin only). |
 | `POST /pools/{id_or_slug}/rotate-token` | New worker token, shown once. |
-| `GET /pools/{id_or_slug}/workers` | Manager-only worker presence list. |
-| `DELETE /pools/{id_or_slug}/workers/{label}/commands/{command_id}` | Manager-only withdrawal of a queued or delivered-but-unexecuted command (status `cancelled`, result `cancelled_by_manager`). Settled commands return 409. |
-| `DELETE /pools/{id_or_slug}/workers/{label}?force=` | Manager-only removal of a worker's presence row and command history; releases session affinity owned by the label. Refuses an online worker or one with a task in flight unless `force=true`. |
+| `GET /pools/{id_or_slug}/workers` | All workers for managers; own contributed workers for eligible members. |
+| `DELETE /pools/{id_or_slug}/workers/{label}/commands/{command_id}` | Manager or contributing owner withdraws a queued or delivered-but-unexecuted command (status `cancelled`, result `cancelled_by_manager`). Settled commands return 409. |
+| `DELETE /pools/{id_or_slug}/workers/{label}?force=` | Manager or contributing owner removes a worker and command history and releases session affinity atomically. Refuses an online worker or one with a task in flight unless `force=true`. An enrolled credential loses access immediately. |
 | `POST /pools/{id_or_slug}/workers/allocate` | Manager-only worker label allocation. Body `{"label": "..."}` requests a specific label; `null`/empty body generates one. Returns `{label, adopted}`. |
-| `GET /pools/{id_or_slug}/workers/{label}` | Manager-only worker detail. |
-| `GET, POST /pools/{id_or_slug}/workers/{label}/commands` | Manager-only command history and enqueue. |
+| `POST /pools/{id_or_slug}/workers/enroll` | Enroll using the caller's NyxID authentication. Body: UUID `installation_id`, optional `label`, and client-generated `credential`. Returns `pool_id`, `pool_slug`, `label`, `installation_id`, and `credential_type: "installation"`; no secret. |
+| `GET /pools/{id_or_slug}/workers/{label}` | Manager or contributing owner's worker detail. |
+| `GET, POST /pools/{id_or_slug}/workers/{label}/commands` | Manager or contributing owner's command history and enqueue. |
 | `POST /pools/{id_or_slug}/login-snapshots` | Validate and fan out an opaque encrypted login snapshot. |
 | `GET /pools/{id_or_slug}/login-profiles` | Manager-only metadata: name, generation, revision, status, retention deadline, and bound worker labels. Never returns ciphertext. |
 | `PUT /pools/{id_or_slug}/login-profiles/{name}` | Save a named E2E envelope with the snapshot fields and `expected_generation` (null to create). An intervening human save returns 409; bindings remain. |
@@ -441,7 +477,8 @@ online or last-seen status, login state, current task, Chrome state, and desired
 state. `worker show <pool> <label>` also shows the sanitized last error,
 platform, and recent command results.
 
-Managers can queue these commands:
+Managers can queue these commands for any worker; eligible members can queue
+them for their own contributed workers:
 
 | CLI command | Worker behavior |
 |---|---|
@@ -450,8 +487,8 @@ Managers can queue these commands:
 | `worker restart <pool> <label>` | Finish the current task, report, then exit for supervisor restart. |
 | `worker relaunch-browser <pool> <label>` | Recreate the dedicated Chrome process and tab. |
 | `worker cancel-command <pool> <label> <command-id>` | Withdraw a queued or delivered-but-unexecuted command (ids from `worker show`). A worker holding a delivered one drops it on its next heartbeat. Use this to stop a pushed upgrade before it runs. |
-| `worker forget <pool> <label> [--force]` | Remove a stale worker from `worker list` (presence + commands; releases its session affinity). Live or busy workers are refused without `--force`; a live worker re-registers on its next heartbeat anyway. |
-| `worker relogin <pool> <label>` | Open the ChatGPT login page on the worker's own screen (someone at that machine must finish it). For remote login from your computer use `oracle login`, which pushes the session to the pool. While logged out or on a login page the worker leaves its tab untouched and claims no tasks. |
+| `worker forget <pool> <label> [--force]` | Remove presence and commands and release session affinity. Live or busy workers are refused without `--force`. An enrolled worker must enroll again; a running pool-token worker can re-register on its next heartbeat. |
+| `worker relogin <pool> <label>` | Open ChatGPT login on the worker's own screen. For a shared pool-token installation, `oracle login` can instead push a login from another machine. While logged out or on a login page the worker leaves its tab untouched and claims no tasks. |
 | `worker upgrade --pool <pool>` | Upgrade the installed local profile. The CLI waits for task drain, verifies the local source, version, dependency manifest, and restarted worker presence. |
 | `worker upgrade --pool <pool> --label <label>` | Queue an asynchronous remote upgrade. The worker drains, verifies, replaces the bundle, and exits for supervisor restart. |
 
@@ -460,6 +497,28 @@ and result metadata. It never audits command payload bodies or session
 material. A command has a 60-second delivery lease, at most 10 deliveries, a
 24-hour deadline, and seven-day terminal retention. The worker journals command
 IDs before side effects, so redelivery returns the stored result.
+
+Commands bind to an immutable worker generation as well as its label and
+installation. A forgotten worker's commands cannot migrate to a replacement
+that reuses the label. Enqueue, cancellation, and forget validate the
+authorized worker inside their database transaction.
+
+### Enrollment credential lifecycle
+
+The CLI generates `nyx_owi_` plus 32 random bytes encoded as lowercase hex.
+It atomically persists a private pending credential and the server/pool/
+installation identity before enrollment. Interrupted installs reuse that
+pending request. The server stores only the credential hash. Enrollment
+responses use `Cache-Control: no-store` and the request body is capped at
+4096 bytes.
+
+Every installation-authenticated worker endpoint checks current account and
+organization activity, Member/Admin eligibility, the membership ID and join
+timestamp, the pool token epoch, and the enrolled worker identity. Authenticated
+re-enrollment after a membership or pool-token epoch change requires a new
+credential (409, code 11016); the CLI persists one and retries once. Raw worker
+credentials cannot renew their own authority. Worker bundle responses include
+the pool ID so installation can reject a credential for a different pool.
 
 Local service controls mirror `nyxid node daemon`:
 
@@ -475,6 +534,11 @@ or systemd service but retains the worker files, Chrome profile, and token.
 
 `nyxid oracle login <pool>` performs the human login only on the CLI machine.
 It does not ask the user to visit each worker.
+
+This manager flow targets shared pool-token installations. Automatically
+enrolled workers keep their contributor's local browser account and cannot
+read these envelopes or saved login profiles. Their capabilities exclude both
+login-import protocols, and the backend enforces that boundary independently.
 
 1. The CLI obtains the existing raw pool worker token from a local install,
    `--worker-token-file`, an environment variable, or hidden input. It never
@@ -661,11 +725,12 @@ beyond the NyxID backend, the npm registry, and TLS.
 
 ## Security & privacy
 
-- Worker tokens are 32-byte random values; only SHA-256 hashes are stored;
-  the raw token is shown once at create/rotate. Deactivating a pool
+- Worker credentials are 32-byte random values; only SHA-256 hashes are stored.
+  Shared pool tokens are shown once at create/rotate; installation credentials
+  are generated and stored privately by the CLI. Deactivating a pool
   (`--active false`) detaches all workers immediately.
-- Worker endpoints are reachable by anyone holding the token, so the token
-  is the pool's trust boundary — treat it like a node auth token.
+- Shared pool tokens authorize pool-wide worker access. Installation credentials
+  authorize only the enrolled worker and require live contributor eligibility.
 - Consumer access is gated by visibility ACL + per-API-key rate limiting +
   `allowed_service_ids`-style scoping on agent keys.
 - **Prompt and response bodies live only on the task document** (and are
@@ -728,6 +793,7 @@ Oracle errors occupy the **11000–11099** block (see
 | 11013 | `oracle_worker_command_not_found` | 404 |
 | 11014 | `oracle_worker_label_unavailable` | 409 |
 | 11015 | `oracle_login_snapshot_not_found` | 404 |
+| 11016 | `oracle_worker_credential_renewal_required` | 409 |
 
 ---
 
@@ -742,6 +808,13 @@ The deployed userscript remains unchanged. The server accepts requests without
 installation IDs or attempt IDs, preserves the legacy acknowledgement shape,
 and omits commands unless the worker advertises a matching capability. The CDP
 worker and userscript can continue to share one pool.
+
+New backend fields and credential types are additive. Old CLIs keep using pool
+tokens. The new CLI preserves existing pool-token installations and allows
+manager installation against an older backend through the prior token flow.
+Member enrollment requires the new backend; an older server produces upgrade
+guidance without requesting the organization's shared token. Existing rows and
+commands without a worker generation remain valid for their original worker.
 
 ## Relationship to the local oracle servers
 

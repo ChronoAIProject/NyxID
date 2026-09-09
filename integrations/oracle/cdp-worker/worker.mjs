@@ -137,7 +137,12 @@ const NPM_EXECUTABLE = resolveNpmExecutable({ configured: process.env.NYXID_NPM_
 const NPM_INSTALL_TIMEOUT_MS = Number(
   process.env.NYXID_NPM_INSTALL_TIMEOUT_MS || 5 * 60 * 1000
 );
-const CAPABILITIES = ["commands_v1", "upgrade_v1", "session_import_v1", "attempt_fencing_v1", "saved_login_v1"];
+export function workerCapabilities(token) {
+  const capabilities = ["commands_v1", "upgrade_v1", "attempt_fencing_v1"];
+  if (!String(token).startsWith("nyx_owi_")) capabilities.push("session_import_v1", "saved_login_v1");
+  return capabilities;
+}
+const CAPABILITIES = workerCapabilities(TOKEN);
 const SAVED_LOGIN_POLL_MS = Number(process.env.NYXID_SAVED_LOGIN_POLL_MS || 60000);
 const SAVED_LOGIN_REFRESH_MS = Number(process.env.NYXID_SAVED_LOGIN_REFRESH_MS || 300000);
 // Result-image caps (the server re-validates and caps lower-or-equal). Kept
@@ -2647,6 +2652,7 @@ async function processPendingCommand(runtime, allowSessionImportDuringLoggedOutT
         resultCode = "login_page_opened";
         break;
       case "session_import":
+        if (!CAPABILITIES.includes("session_import_v1")) throw new TaskFailure("command_unsupported");
         resultCode = await importLoginSnapshot(runtime, command);
         break;
       case "upgrade":
@@ -2851,6 +2857,7 @@ export function savedLoginDecision(state, desired, loggedIn, now = Date.now()) {
 }
 
 async function processSavedLogin(runtime, force = false) {
+  if (!CAPABILITIES.includes("saved_login_v1")) return;
   if (!force && Date.now() - (runtime.lastSavedLoginPollAt || 0) < SAVED_LOGIN_POLL_MS) return;
   runtime.lastSavedLoginPollAt = Date.now();
   const identity = { worker: LABEL, instance_id: runtime.state.instance_id };

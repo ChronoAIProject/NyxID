@@ -1657,6 +1657,15 @@ fn build_router_internal(
                 get(handlers::oracle_workers::list_workers),
             )
             .route(
+                "/pools/{id_or_slug}/workers/enroll",
+                post(handlers::oracle_workers::enroll_worker)
+                    .layer(DefaultBodyLimit::max(4096))
+                    .layer(middleware::map_response(|mut response: axum::response::Response| async move {
+                        response.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+                        response
+                    })),
+            )
+            .route(
                 "/pools/{id_or_slug}/workers/allocate",
                 post(handlers::oracle_workers::allocate_worker),
             )
