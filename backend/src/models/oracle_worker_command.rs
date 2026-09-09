@@ -49,6 +49,8 @@ pub struct OracleWorkerCommand {
     pub id: String,
     pub pool_id: String,
     pub worker_label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_generation: Option<String>,
     pub kind: OracleWorkerCommandKind,
     pub status: OracleWorkerCommandStatus,
     pub created_by_user_id: String,

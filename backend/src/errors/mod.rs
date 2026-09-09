@@ -544,6 +544,9 @@ pub enum AppError {
     #[error("Oracle login snapshot not found: {0}")]
     OracleLoginSnapshotNotFound(String),
 
+    #[error("Installation credential expired; enroll with a fresh credential")]
+    OracleWorkerCredentialRenewalRequired,
+
     #[error("Service pool not found: {0}")]
     ServicePoolNotFound(String),
 
@@ -734,6 +737,7 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => StatusCode::NOT_FOUND,
             Self::OracleWorkerLabelUnavailable(_) => StatusCode::CONFLICT,
             Self::OracleLoginSnapshotNotFound(_) => StatusCode::NOT_FOUND,
+            Self::OracleWorkerCredentialRenewalRequired => StatusCode::CONFLICT,
             Self::ServicePoolNotFound(_) => StatusCode::NOT_FOUND,
             Self::ServicePoolSlugTaken(_) => StatusCode::CONFLICT,
             Self::ServicePoolMemberInvalid(_) => StatusCode::BAD_REQUEST,
@@ -914,6 +918,7 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => 11013,
             Self::OracleWorkerLabelUnavailable(_) => 11014,
             Self::OracleLoginSnapshotNotFound(_) => 11015,
+            Self::OracleWorkerCredentialRenewalRequired => 11016,
             Self::ServicePoolNotFound(_) => 11400,
             Self::ServicePoolSlugTaken(_) => 11401,
             Self::ServicePoolMemberInvalid(_) => 11402,
@@ -1130,6 +1135,9 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => "oracle_worker_command_not_found",
             Self::OracleWorkerLabelUnavailable(_) => "oracle_worker_label_unavailable",
             Self::OracleLoginSnapshotNotFound(_) => "oracle_login_snapshot_not_found",
+            Self::OracleWorkerCredentialRenewalRequired => {
+                "oracle_worker_credential_renewal_required"
+            }
             Self::ServicePoolNotFound(_) => "service_pool_not_found",
             Self::ServicePoolSlugTaken(_) => "service_pool_slug_taken",
             Self::ServicePoolMemberInvalid(_) => "service_pool_member_invalid",
@@ -1651,6 +1659,7 @@ mod tests {
             AppError::OracleWorkerCommandNotFound("".into()).error_code(),
             AppError::OracleWorkerLabelUnavailable("".into()).error_code(),
             AppError::OracleLoginSnapshotNotFound("".into()).error_code(),
+            AppError::OracleWorkerCredentialRenewalRequired.error_code(),
             AppError::GrantCascadeConfirmationRequired(Box::new(GrantCascadePayload {
                 provider_slug: "github".into(),
                 provider_name: "GitHub".into(),
