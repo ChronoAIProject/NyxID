@@ -6418,6 +6418,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -6467,6 +6470,7 @@ mod tests {
         provider.slug = "github".to_string();
         provider.name = "GitHub".to_string();
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "github".to_string(),
             url: "https://api.github.com/applications".to_string(),
             auth: "basic".to_string(),
@@ -6680,6 +6684,7 @@ mod tests {
 
         let mut provider = multi_conn_provider("oauth2");
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "self_bearer".to_string(),
             url: format!("http://{address}/revoke"),
             auth: "none".to_string(),
@@ -6782,6 +6787,7 @@ mod tests {
         provider.slug = "facebook".to_string();
         provider.name = "Facebook".to_string();
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "facebook_deauth".to_string(),
             url: "https://graph.facebook.com/me/permissions".to_string(),
             auth: "post".to_string(),
@@ -7752,6 +7758,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,

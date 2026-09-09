@@ -24,6 +24,10 @@ const SPEC_PATH_SUFFIX: &str = "/openapi.json";
 /// URL path.
 const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
     (
+        "notion",
+        include_str!("../../specs/catalog/notion.openapi.json"),
+    ),
+    (
         "anthropic",
         include_str!("../../specs/catalog/anthropic.openapi.json"),
     ),
@@ -131,6 +135,7 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
 
 /// Catalog service slug -> spec key.
 const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
+    ("api-notion", "notion"),
     ("api-discord", "discord"),
     ("api-discord-bot", "discord-bot"),
     ("api-elevenlabs", "elevenlabs"),

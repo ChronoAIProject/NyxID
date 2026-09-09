@@ -317,6 +317,15 @@ describe("KeyDetailPage — core rendering", () => {
     );
   });
 
+  it.each([true, false])("gates permission editing on supports_oauth_scopes=%s", (supported) => {
+    hooks.key.data = makeKey({ status: "active", credential_type: "oauth2" });
+    hooks.catalogEntry = { slug: "api-notion", provider_type: "oauth2", supports_oauth_scopes: supported };
+    render(<KeyDetailPage />);
+    const manage = screen.queryByRole("button", { name: /Manage permissions/i });
+    if (supported) expect(manage).toBeInTheDocument();
+    else expect(manage).not.toBeInTheDocument();
+  });
+
   it("uses continue authentication copy for pending OAuth-backed services", async () => {
     const user = userEvent.setup();
     hooks.key.data = makeKey({

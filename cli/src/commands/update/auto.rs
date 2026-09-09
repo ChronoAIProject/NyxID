@@ -348,7 +348,7 @@ async fn perform_update_using(
         policy.activation_intent = Some(tag.clone());
         write_in(root, policy)?;
         super::retarget_active_symlink(&binary, &versioned)?;
-        super::retarget_secondary_symlinks(&versioned, &binary);
+        super::retarget_secondary_symlinks(root, &versioned, &binary);
         reconcile_activation(root, policy, &tag)?;
         finish_installation(root, policy, &versioned, &tag, &None).await?;
         Ok(format!("installed {tag}; skills refreshed; nodes deferred"))

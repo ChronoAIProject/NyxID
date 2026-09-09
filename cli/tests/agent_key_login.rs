@@ -22,6 +22,7 @@ fn command(home: &Path) -> Command {
         .env_remove("NYXID_API_KEY")
         .env_remove("NYXID_ACCESS_TOKEN")
         .env_remove("NYXID_PROFILE")
+        .env_remove("NYXID_URL")
         .env_remove("NYXID_BASE_URL")
         .env_remove("NYXID_TELEMETRY_DSN")
         .env_remove("NYXID_SHARE_ANALYTICS")

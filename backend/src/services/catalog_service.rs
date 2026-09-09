@@ -50,6 +50,7 @@ pub struct CatalogEntry {
     pub device_verification_url: Option<String>,
     pub device_token_url: Option<String>,
     pub default_scopes: Option<Vec<String>>,
+    pub supports_oauth_scopes: bool,
     /// Curated menu of notable available scopes for this provider (NyxID#917),
     /// keyed off the provider slug via `scope_catalog::for_provider`. `None`
     /// for providers with no curated catalog. The connect UIs render these as
@@ -62,6 +63,8 @@ pub struct CatalogEntry {
     pub supports_pkce: bool,
     pub device_code_format: Option<String>,
     pub token_endpoint_auth_method: Option<String>,
+    pub token_request_encoding: Option<String>,
+    pub oauth_request_headers: HashMap<String, String>,
     pub extra_auth_params: Option<HashMap<String, String>>,
     pub oauth_client_id: Option<String>,
     pub client_id_param_name: Option<String>,
@@ -182,12 +185,25 @@ fn build_catalog_entry(
         device_verification_url: provider.and_then(|p| p.device_verification_url.clone()),
         device_token_url: provider.and_then(|p| p.device_token_url.clone()),
         default_scopes,
+        supports_oauth_scopes: provider.is_none_or(|p| p.supports_oauth_scopes),
         scope_catalog,
         scope_removal: provider
             .map(|p| crate::services::scope_catalog::removal_capability(&p.slug)),
         supports_pkce: provider.is_some_and(|p| p.supports_pkce),
         device_code_format: provider.map(|p| p.device_code_format.clone()),
         token_endpoint_auth_method: provider.map(|p| p.token_endpoint_auth_method.clone()),
+        token_request_encoding: provider.and_then(|p| p.token_request_encoding.clone()),
+        oauth_request_headers: provider
+            .map(|p| {
+                p.oauth_request_headers
+                    .iter()
+                    .filter(|(name, value)| {
+                        crate::models::provider_config::is_public_oauth_header(name, value)
+                    })
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
         extra_auth_params: provider.and_then(|p| p.extra_auth_params.clone()),
         oauth_client_id,
         client_id_param_name: provider.and_then(|p| p.client_id_param_name.clone()),

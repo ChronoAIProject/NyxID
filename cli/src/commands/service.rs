@@ -3900,7 +3900,7 @@ mod branch_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn rotate_credential_reads_env_var() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/keys/svc-1"))
@@ -3969,7 +3969,7 @@ mod branch_tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn credentials_reads_env_vars() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/catalog/lark"))

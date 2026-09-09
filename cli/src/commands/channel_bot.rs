@@ -1113,7 +1113,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn register_lark_without_verification_token_fails() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         // SAFETY: env mutation serialized by env_lock.
         unsafe {
@@ -1158,7 +1158,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn update_with_no_fields_fails() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         // SAFETY: env mutation serialized by env_lock.
         unsafe {
@@ -1355,7 +1355,7 @@ mod tests {
 
     #[test]
     fn resolve_secret_reads_env_var() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         // SAFETY: env mutation serialized by env_lock.
         unsafe {
             std::env::set_var("NYXID_TEST_BOT_TOKEN", "from-env");
@@ -1488,7 +1488,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn update_blank_verification_token_is_rejected() {
-        let _guard = env_lock().lock().expect("env lock");
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         // SAFETY: env mutation serialized by env_lock.
         unsafe {

@@ -381,7 +381,7 @@ async fn update_skills(base_url: &Option<String>) -> Result<()> {
         && let Ok(canonical_exe) = current_exe.canonicalize()
         && canonical_exe.starts_with(&canonical_root)
     {
-        retarget_secondary_symlinks(&canonical_exe, Path::new(""));
+        retarget_secondary_symlinks(&versions_root, &canonical_exe, Path::new(""));
     }
 
     // Reuse the ai-setup update logic (updates all installed tools)
@@ -556,17 +556,13 @@ fn install_release_binary(archive_path: &Path, tag: &str) -> Result<PathBuf> {
 
     #[cfg(unix)]
     {
-        let versioned_bin = extract_binary_to_version_dir(archive_path, tag)?;
+        let versions_root = install_versions_root()?;
+        let versioned_bin = extract_binary_to_version_root(archive_path, tag, &versions_root)?;
         let active_path = active_binary_path()?;
         retarget_active_symlink(&active_path, &versioned_bin)?;
-        retarget_secondary_symlinks(&versioned_bin, &active_path);
+        retarget_secondary_symlinks(&versions_root, &versioned_bin, &active_path);
         Ok(versioned_bin)
     }
-}
-
-#[cfg(unix)]
-fn extract_binary_to_version_dir(archive_path: &Path, tag: &str) -> Result<PathBuf> {
-    extract_binary_to_version_root(archive_path, tag, &install_versions_root()?)
 }
 
 #[cfg(unix)]
@@ -813,22 +809,27 @@ fn paths_equivalent(left: &Path, right: &Path) -> bool {
 /// Failures on individual entries are logged and skipped — a permission-denied
 /// PATH dir should never abort the update.
 #[cfg(unix)]
-fn retarget_secondary_symlinks(versioned_bin: &Path, primary: &Path) {
-    retarget_secondary_symlinks_with_policy(versioned_bin, primary, false);
+fn retarget_secondary_symlinks(versions_root: &Path, versioned_bin: &Path, primary: &Path) {
+    retarget_secondary_symlinks_with_policy(versions_root, versioned_bin, primary, false);
 }
 
 #[cfg(unix)]
 fn retarget_secondary_symlinks_with_policy(
+    versions_root: &Path,
     versioned_bin: &Path,
     primary: &Path,
     allow_downgrade: bool,
 ) {
-    let Ok(versions_root) = install_versions_root() else {
-        return;
-    };
     let Ok(canonical_versions) = versions_root.canonicalize() else {
         return;
     };
+    let Ok(canonical_binary) = versioned_bin.canonicalize() else {
+        return;
+    };
+    // Both ends of an alias update must belong to this installation.
+    if !canonical_binary.starts_with(&canonical_versions) {
+        return;
+    }
     let Some(path_env) = std::env::var_os("PATH") else {
         return;
     };
@@ -865,12 +866,7 @@ fn retarget_secondary_symlinks_with_policy(
         // `versions/v0.5.2/.../nyxid update --skills-only`) could silently
         // downgrade every legacy symlink in PATH.
         let target_tag = tag_for_path_in_versions(&target, &canonical_versions);
-        let new_tag = versioned_bin
-            .canonicalize()
-            .ok()
-            .as_deref()
-            .and_then(|v| tag_for_path_in_versions(v, &canonical_versions))
-            .or_else(|| tag_for_path_in_versions(versioned_bin, &canonical_versions));
+        let new_tag = tag_for_path_in_versions(&canonical_binary, &canonical_versions);
         if !allow_downgrade
             && let (Some(existing), Some(new_tag)) = (target_tag.as_deref(), new_tag.as_deref())
             && matches!(
@@ -1165,7 +1161,7 @@ fn rollback_cli() -> Result<PathBuf> {
         };
         auto::hold_for_rollback(&target.tag)?;
         retarget_active_symlink(&active_path, &target.binary)?;
-        retarget_secondary_symlinks_with_policy(&target.binary, &active_path, true);
+        retarget_secondary_symlinks_with_policy(&root, &target.binary, &active_path, true);
         Ok(target.binary.clone())
     }
 }
@@ -1852,6 +1848,38 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn retarget_secondary_symlinks_cannot_cross_installation_roots() {
+        let _lock = crate::test_support::env_lock()
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("versions");
+        let first = write_version_binary(&root, "v0.1.0");
+        let active = tmp.path().join("bin/nyxid");
+        let alias = tmp.path().join("legacy/nyxid");
+        retarget_active_symlink(&active, &first).unwrap();
+        retarget_active_symlink(&alias, &first).unwrap();
+        let _install = EnvGuard::set(INSTALL_ROOT_ENV, root.as_os_str());
+        let _path = EnvGuard::set("PATH", alias.parent().unwrap().as_os_str());
+
+        // Automatic update owns another root while a rollback owns the env lock.
+        let other_root = tmp.path().join("other-versions");
+        let other_binary = write_version_binary(&other_root, "v0.2.0");
+        let other_active = tmp.path().join("other-bin/nyxid");
+        retarget_active_symlink(&other_active, &other_binary).unwrap();
+        retarget_secondary_symlinks(&other_root, &other_binary, &other_active);
+
+        assert!(paths_equivalent(&fs::read_link(&alias).unwrap(), &first));
+        assert!(paths_equivalent(&fs::read_link(&active).unwrap(), &first));
+
+        retarget_secondary_symlinks(&root, &other_binary, &other_active);
+
+        assert!(paths_equivalent(&fs::read_link(&alias).unwrap(), &first));
+        assert!(paths_equivalent(&fs::read_link(&active).unwrap(), &first));
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn rollback_errors_with_one_version_and_succeeds_with_two() {
         let _lock = crate::test_support::env_lock()
             .lock()
@@ -1975,7 +2003,7 @@ mod tests {
         let path_value = std::env::join_paths([&primary_dir, &legacy_dir, &other_dir]).unwrap();
         let _path = EnvGuard::set("PATH", &path_value);
 
-        retarget_secondary_symlinks(&new_bin, &primary);
+        retarget_secondary_symlinks(&versions_root, &new_bin, &primary);
 
         assert_eq!(fs::read_link(&primary).unwrap(), new_bin);
         assert_eq!(fs::read_link(&legacy).unwrap(), new_bin);
@@ -2005,7 +2033,7 @@ mod tests {
 
         // Simulate a stray hand-off from the older versioned binary --
         // versioned_bin is the older path, primary is meaningless.
-        retarget_secondary_symlinks(&older, Path::new(""));
+        retarget_secondary_symlinks(&versions_root, &older, Path::new(""));
 
         // Legacy symlink must still point at the newer binary.
         assert_eq!(fs::read_link(&legacy).unwrap(), newer);
@@ -2030,7 +2058,7 @@ mod tests {
         let _path = EnvGuard::set("PATH", path_dir.as_os_str());
 
         let bogus_primary = tmp.path().join("nonexistent-primary");
-        retarget_secondary_symlinks(&new_bin, &bogus_primary);
+        retarget_secondary_symlinks(&versions_root, &new_bin, &bogus_primary);
 
         let meta = fs::symlink_metadata(&regular).unwrap();
         assert!(meta.file_type().is_file());

@@ -1574,12 +1574,14 @@ function OAuthStep({
   const [activeLaunchId, setActiveLaunchId] = useState<string | null>(null);
   const submittedScopes = useMemo(
     () =>
-      platformScopeAllowlist
+      catalogEntry.supports_oauth_scopes === false
+        ? []
+        : platformScopeAllowlist
         ? selectedScopes.filter((scope) =>
             platformScopeAllowlist.includes(scope),
           )
         : selectedScopes,
-    [platformScopeAllowlist, selectedScopes],
+    [catalogEntry.supports_oauth_scopes, platformScopeAllowlist, selectedScopes],
   );
 
   useEffect(() => {
@@ -1995,17 +1997,19 @@ function OAuthStep({
         description="This service uses OAuth to authenticate. Click the button below to connect your account."
       />
 
-      <UpstreamScopePicker
-        catalog={catalogEntry.scope_catalog ?? []}
-        defaultScopes={catalogEntry.default_scopes ?? []}
-        value={selectedScopes}
-        onChange={setSelectedScopes}
-        lockedScopes={lockedScopes}
-        grantedScopes={reconnectMode ? grantedScopes : undefined}
-        providerName={catalogEntry.name}
-        platformAllowlist={platformScopeAllowlist}
-        idPrefix="oauth-scope"
-      />
+      {catalogEntry.supports_oauth_scopes !== false && (
+        <UpstreamScopePicker
+          catalog={catalogEntry.scope_catalog ?? []}
+          defaultScopes={catalogEntry.default_scopes ?? []}
+          value={selectedScopes}
+          onChange={setSelectedScopes}
+          lockedScopes={lockedScopes}
+          grantedScopes={reconnectMode ? grantedScopes : undefined}
+          providerName={catalogEntry.name}
+          platformAllowlist={platformScopeAllowlist}
+          idPrefix="oauth-scope"
+        />
+      )}
 
       {error && (
         <div className="rounded-lg bg-destructive/10 p-3 text-[12px] text-destructive">
@@ -2338,7 +2342,8 @@ function DeviceCodeStep({
       // providers reject a `scope` parameter at the backend, so omit the
       // override there entirely. Otherwise send the picker's complete set.
       const scopeOverride =
-        catalogEntry.device_code_format === "openai"
+        catalogEntry.device_code_format === "openai" ||
+        catalogEntry.supports_oauth_scopes === false
           ? undefined
           : selectedScopes;
       const response = await initiateMutation.mutateAsync({
@@ -2417,7 +2422,8 @@ function DeviceCodeStep({
     // Hide the scope input for those and show a short note instead, so the
     // user never enters something the backend will reject.
     const supportsAdditionalScopes =
-      catalogEntry.device_code_format !== "openai";
+      catalogEntry.device_code_format !== "openai" &&
+      catalogEntry.supports_oauth_scopes !== false;
 
     return (
       <div className="space-y-4">

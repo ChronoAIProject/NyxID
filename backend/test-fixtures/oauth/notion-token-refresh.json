@@ -1,0 +1,11 @@
+{
+  "access_token": "notion-access",
+  "token_type": "bearer",
+  "refresh_token": "notion-refresh",
+  "bot_id": "a66a1ede-1e47-4e3c-905b-161f5c73a437",
+  "workspace_id": "6a4426e1-7c9d-43ae-bc28-c37290ec9a7a",
+  "workspace_name": null,
+  "workspace_icon": null,
+  "owner": { "type": "workspace", "workspace": true },
+  "duplicated_template_id": null
+}
