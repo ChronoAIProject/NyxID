@@ -23,11 +23,27 @@ export const nyxbotProgressSchema = z.object({
 });
 export type NyxbotProgress = z.infer<typeof nyxbotProgressSchema>;
 
-// Use the same token validation as the channel management form.
-export const nyxbotTelegramSchema = z.object({
-  bot_token: createChannelBotSchema.shape.bot_token,
-});
-export type NyxbotTelegramForm = z.infer<typeof nyxbotTelegramSchema>;
+// Only check syntax here; the existing registration API verifies with Telegram getMe.
+export function createNyxbotTelegramSchema(messages: {
+  required: string;
+  invalid: string;
+}) {
+  return z.object({
+    bot_token: z
+      .string()
+      .trim()
+      .min(1, messages.required)
+      .refine(
+        (value) =>
+          createChannelBotSchema.shape.bot_token.safeParse(value).success &&
+          /^[0-9]+:[A-Za-z0-9_-]+$/.test(value),
+        messages.invalid,
+      ),
+  });
+}
+export type NyxbotTelegramForm = z.infer<
+  ReturnType<typeof createNyxbotTelegramSchema>
+>;
 
 export function isPersonalGoogleKey(key: KeyInfo): boolean {
   return (

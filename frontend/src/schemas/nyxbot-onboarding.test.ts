@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { KeyInfo } from "@/types/keys";
 import {
   GOOGLE_WORKSPACE_SCOPES,
+  createNyxbotTelegramSchema,
   hasWorkspaceAuthorization,
   nyxbotSearchSchema,
   readNyxbotProgress,
@@ -17,6 +18,46 @@ const key = {
 } as unknown as KeyInfo;
 
 beforeEach(() => sessionStorage.clear());
+
+describe("Nyxbot Telegram token validation", () => {
+  const schema = createNyxbotTelegramSchema({
+    required: "required",
+    invalid: "invalid",
+  });
+  const token = `123456:${"aB_9-".repeat(7)}`;
+
+  it("normalizes pasted surrounding whitespace before submission", () => {
+    expect(schema.parse({ bot_token: ` \n${token}\t ` })).toEqual({
+      bot_token: token,
+    });
+  });
+  it.each(["", " \n\t "])("requires a nonblank token: %j", (value) => {
+    const result = schema.safeParse({ bot_token: value });
+    expect(result.success).toBe(false);
+    if (!result.success)
+      expect(result.error.issues[0]?.message).toBe("required");
+  });
+  it.each([
+    "@example_bot",
+    "random-text",
+    "123456",
+    "123456:",
+    ":abc",
+    "bot123456:abc",
+    "１２３４５６:abc",
+    "123456:abc:def",
+    "123456:abc def",
+    "123456:abc\ndef",
+    "123456:abc/def",
+    `https://api.telegram.org/bot${token}/getMe`,
+    `123456:${"a".repeat(506)}`,
+  ])("rejects malformed or overlong tokens: %j", (value) => {
+    const result = schema.safeParse({ bot_token: value });
+    expect(result.success).toBe(false);
+    if (!result.success)
+      expect(result.error.issues[0]?.message).toBe("invalid");
+  });
+});
 
 describe("Nyxbot authorization boundaries", () => {
   it("requires both Drive file access and Calendar access, not identity sign-in", () => {

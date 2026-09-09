@@ -58,6 +58,8 @@
   "telegramPaste": "Copy the bot token and paste it below.",
   "token": "Bot token",
   "tokenPlaceholder": "Paste your BotFather token",
+  "tokenRequired": "Paste the bot token from BotFather.",
+  "tokenInvalid": "Invalid Telegram bot token format. Copy the complete token from BotFather and try again.",
   "showToken": "Show bot token",
   "hideToken": "Hide bot token",
   "tokenNote": "Your token is stored securely in NyxID.",

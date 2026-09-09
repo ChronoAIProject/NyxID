@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { Eye, EyeOff, ExternalLink } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -16,7 +16,7 @@ import {
 import { useCreateChannelBot } from "@/hooks/use-channel-bots";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
 import {
-  nyxbotTelegramSchema,
+  createNyxbotTelegramSchema,
   type NyxbotTelegramForm,
   type NyxbotChannel,
 } from "@/schemas/nyxbot-onboarding";
@@ -55,19 +55,27 @@ export function ChannelStep({
       ? preferredChannel
       : null;
   const [showToken, setShowToken] = useState(false);
+  const submitting = useRef(false);
   const createBot = useCreateChannelBot();
   const managed = useManagedOnboarding("whatsapp", channel === "whatsapp");
   const form = useAppForm<NyxbotTelegramForm>({
-    resolver: zodResolver(nyxbotTelegramSchema),
+    resolver: zodResolver(
+      createNyxbotTelegramSchema({
+        required: t("tokenRequired"),
+        invalid: t("tokenInvalid"),
+      }),
+    ),
     defaultValues: { bot_token: "" },
     mode: "onChange",
   });
   async function submit(values: NyxbotTelegramForm) {
+    if (submitting.current || channel !== "telegram") return;
+    submitting.current = true;
     try {
       const result = await createBot.mutateAsync({
         platform: "telegram",
         label: "Nyxbot Telegram",
-        bot_token: values.bot_token.trim(),
+        bot_token: values.bot_token,
       });
       form.reset();
       createBot.reset();
@@ -75,6 +83,8 @@ export function ChannelStep({
     } catch {
       // Do not echo provider errors that might contain submitted credentials.
       form.setError("bot_token", { message: t("channelFailed") });
+    } finally {
+      submitting.current = false;
     }
   }
   return (
@@ -97,7 +107,11 @@ export function ChannelStep({
               type="submit"
               className="nb-primary"
               isLoading={createBot.isPending}
-              disabled={channel !== "telegram" || !form.formState.isValid}
+              disabled={
+                channel !== "telegram" ||
+                !form.formState.isValid ||
+                createBot.isPending
+              }
             >
               {t("connectChannel")}
             </Button>
@@ -212,7 +226,7 @@ export function ChannelStep({
                         {showToken ? <EyeOff size={16} /> : <Eye size={16} />}
                       </button>
                     </div>
-                    <FormMessage />
+                    <FormMessage role="alert" />
                   </FormItem>
                 )}
               />

@@ -54,6 +54,8 @@ const catalog = {
   has_platform_oauth_credentials: true,
   platform_scope_allowlist: GOOGLE_WORKSPACE_SCOPES,
 };
+// Synthetic, syntax-valid fixture; API calls in these tests are mocked.
+const telegramToken = `123456:${"aB_9-".repeat(7)}`;
 let keys: object[];
 let catalogResponse: typeof catalog;
 let publicConfig: { social_providers: string[]; email_auth_enabled: boolean };
@@ -384,13 +386,13 @@ describe("Nyxbot onboarding", () => {
     expect(submit).toBeDisabled();
     const token = screen.getByLabelText("Bot token", { exact: true });
     expect(token).toHaveAttribute("type", "password");
-    await userEvent.type(token, "123456:test-token");
+    await userEvent.type(token, `  ${telegramToken}  `);
     await userEvent.click(submit);
     await screen.findByRole("heading", { name: "Almost there" });
     expect(post).toHaveBeenCalledWith("/channel-bots", {
       platform: "telegram",
       label: "Nyxbot Telegram",
-      bot_token: "123456:test-token",
+      bot_token: telegramToken,
     });
     expect(post).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "Copy code" })).toBeDisabled();
@@ -399,11 +401,80 @@ describe("Nyxbot onboarding", () => {
     ).toBeDisabled();
     expect(screen.getByPlaceholderText("Not available yet")).toHaveValue("");
     expect(sessionStorage.getItem("nyxbot-onboarding:owner")).not.toContain(
-      "test-token",
+      telegramToken,
     );
     expect(
       await screen.findByRole("link", { name: "Manage channel" }),
     ).toHaveAttribute("href", "/channel-bots/business-bot");
+  });
+  it.each(["en", "zh-CN"])(
+    "blocks invalid tokens, shows localized feedback and accepts correction in %s",
+    async (language) => {
+      await nyxbotI18n.changeLanguage(language);
+      const t = nyxbotI18n.t.bind(nyxbotI18n);
+      mount();
+      await screen.findByRole("heading", { name: t("channelTitle") });
+      const token = screen.getByLabelText(t("token"), { exact: true });
+      const submit = screen.getByRole("button", { name: t("connectChannel") });
+      expect(submit).toBeDisabled();
+
+      await userEvent.type(token, "not-a-bot-token");
+      expect(await screen.findByRole("alert")).toHaveTextContent(
+        t("tokenInvalid"),
+      );
+      expect(token).toHaveAttribute("aria-invalid", "true");
+      expect(submit).toBeDisabled();
+      await userEvent.type(token, "{Enter}");
+      // The resolver also guards form submission independently of the disabled button.
+      fireEvent.submit(token.closest("form")!);
+      await waitFor(() => expect(submit).toBeDisabled());
+      expect(post).not.toHaveBeenCalled();
+
+      await userEvent.clear(token);
+      await waitFor(() =>
+        expect(screen.getByRole("alert")).toHaveTextContent(t("tokenRequired")),
+      );
+      await userEvent.type(token, telegramToken);
+      await waitFor(() => expect(submit).toBeEnabled());
+      expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+      expect(post).not.toHaveBeenCalled();
+    },
+  );
+  it("waits for server verification and prevents duplicate submissions", async () => {
+    let resolveRegistration: ((value: object) => void) | undefined;
+    post.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRegistration = resolve;
+        }),
+    );
+    mount();
+    await toChannel();
+    const token = screen.getByLabelText("Bot token", { exact: true });
+    const submit = screen.getByRole("button", { name: "Connect channel" });
+    await userEvent.type(token, telegramToken);
+    await userEvent.click(submit);
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1));
+    expect(submit).toBeDisabled();
+    expect(token).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
+    expect(
+      screen.getByRole("heading", { name: "Set up channel" }),
+    ).toBeVisible();
+    await userEvent.click(submit);
+    await act(async () => {
+      fireEvent.submit(token.closest("form")!);
+      fireEvent.submit(token.closest("form")!);
+    });
+    expect(post).toHaveBeenCalledTimes(1);
+    await act(async () =>
+      resolveRegistration?.({
+        id: "business-bot",
+        platform: "telegram",
+        status: "active",
+      }),
+    );
+    await screen.findByRole("heading", { name: "Almost there" });
   });
   it("leaves the channel unselected for a direct visitor and ignores the disabled WhatsApp option", async () => {
     window.history.replaceState(null, "", "/onboarding");
@@ -427,12 +498,12 @@ describe("Nyxbot onboarding", () => {
     );
   });
   it("preserves Google authorization when token verification fails and redacts provider errors", async () => {
-    post.mockRejectedValueOnce(new Error("Bad token: secret-test-value"));
+    post.mockRejectedValueOnce(new Error(`Bad token: ${telegramToken}`));
     mount();
     await toChannel();
     await userEvent.type(
       screen.getByLabelText("Bot token", { exact: true }),
-      "secret-test-value",
+      telegramToken,
     );
     await userEvent.click(
       screen.getByRole("button", { name: "Connect channel" }),
@@ -441,8 +512,12 @@ describe("Nyxbot onboarding", () => {
       "Your channel could not be connected. Check the token and retry.",
     );
     expect(
-      screen.queryByText("Bad token: secret-test-value"),
+      screen.queryByText(`Bad token: ${telegramToken}`),
     ).not.toBeInTheDocument();
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(
+      screen.getByRole("heading", { name: "Set up channel" }),
+    ).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     await screen.findByText("Google Workspace connected");
   });
