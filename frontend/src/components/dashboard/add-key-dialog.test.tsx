@@ -772,6 +772,28 @@ describe("AddKeyDialog — reconnect path", () => {
     expect(screen.getByRole("status")).toHaveTextContent(/Waiting for GitHub/i);
   });
 
+  it("hides OAuth scopes and ignores prefills for a provider without scope support", async () => {
+    catalog.entries = [
+      { ...OAUTH_ENTRY, name: "Notion", supports_oauth_scopes: false } as CatalogEntry,
+    ];
+    const user = userEvent.setup();
+    render(
+      <AddKeyDialog
+        open
+        onOpenChange={vi.fn()}
+        reconnectKey={makeReconnectKey()}
+        prefillScopes={["unsupported:scope"]}
+      />,
+    );
+    expect(document.getElementById("oauth-scope-custom")).not.toBeInTheDocument();
+    expect(screen.queryByText("unsupported:scope")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /Connect with Notion/i }));
+    await waitFor(() => expect(initiateOAuthMutateAsync).toHaveBeenCalledOnce());
+    expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(
+      expect.objectContaining({ scopeOverride: [] }),
+    );
+  });
+
   it("merges granted and assistant-requested scopes for OAuth reconnect", async () => {
     catalog.entries = [OAUTH_ENTRY];
     const user = userEvent.setup();

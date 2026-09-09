@@ -177,6 +177,7 @@ export interface CatalogEntry {
   readonly token_url: string | null;
   readonly device_code_url: string | null;
   readonly default_scopes: readonly string[] | null;
+  readonly supports_oauth_scopes?: boolean;
   /**
    * Curated menu of notable available scopes for this provider (NyxID#917).
    * The connect UIs render these as selectable pills (defaults pre-selected)

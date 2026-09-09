@@ -73,6 +73,7 @@ pub struct CatalogEntryResponse {
     pub device_token_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_scopes: Option<Vec<String>>,
+    pub supports_oauth_scopes: bool,
     /// Curated menu of notable available scopes for this provider (NyxID#917).
     /// Connect UIs render these as selectable pills; defaults are pre-selected
     /// and a free-form field covers anything not listed. `None` for providers
@@ -323,6 +324,7 @@ fn catalog_entry_response(
         device_verification_url: entry.device_verification_url,
         device_token_url: entry.device_token_url,
         default_scopes: entry.default_scopes,
+        supports_oauth_scopes: entry.supports_oauth_scopes,
         scope_catalog: entry.scope_catalog,
         scope_removal: entry.scope_removal,
         supports_pkce,
@@ -885,6 +887,7 @@ mod tests {
             device_verification_url: None,
             device_token_url: None,
             default_scopes: None,
+            supports_oauth_scopes: true,
             scope_catalog: None,
             scope_removal: None,
             supports_pkce: false,

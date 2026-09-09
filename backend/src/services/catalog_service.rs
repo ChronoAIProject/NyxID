@@ -50,6 +50,7 @@ pub struct CatalogEntry {
     pub device_verification_url: Option<String>,
     pub device_token_url: Option<String>,
     pub default_scopes: Option<Vec<String>>,
+    pub supports_oauth_scopes: bool,
     /// Curated menu of notable available scopes for this provider (NyxID#917),
     /// keyed off the provider slug via `scope_catalog::for_provider`. `None`
     /// for providers with no curated catalog. The connect UIs render these as
@@ -182,6 +183,7 @@ fn build_catalog_entry(
         device_verification_url: provider.and_then(|p| p.device_verification_url.clone()),
         device_token_url: provider.and_then(|p| p.device_token_url.clone()),
         default_scopes,
+        supports_oauth_scopes: provider.is_none_or(|p| p.supports_oauth_scopes),
         scope_catalog,
         scope_removal: provider
             .map(|p| crate::services::scope_catalog::removal_capability(&p.slug)),

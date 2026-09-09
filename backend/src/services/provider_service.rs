@@ -86,6 +86,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -186,6 +189,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "openai".to_string(),
             client_id_param_name: None,
@@ -232,6 +238,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -275,6 +284,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -321,6 +333,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -364,6 +379,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -407,6 +425,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -454,6 +475,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -503,6 +527,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -550,6 +577,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -576,6 +606,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://api.x.com/2/oauth2/token".to_string()),
             revocation_url: Some("https://api.x.com/2/oauth2/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://api.x.com/2/oauth2/revoke".to_string(),
                 auth: "inherit".to_string(),
@@ -608,6 +639,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_basic".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -701,6 +735,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: Some("https://oauth2.googleapis.com/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://oauth2.googleapis.com/revoke".to_string(),
                 auth: "none".to_string(),
@@ -730,6 +765,9 @@ pub async fn seed_default_providers(
             // SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS above.
             credential_mode: "both".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: Some(HashMap::from([
                 ("access_type".to_string(), "offline".to_string()),
                 ("prompt".to_string(), "consent".to_string()),
@@ -760,6 +798,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://github.com/login/oauth/access_token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "github".to_string(),
                 url: "https://api.github.com/applications".to_string(),
                 auth: "inherit".to_string(),
@@ -783,6 +822,9 @@ pub async fn seed_default_providers(
             // SEEDED_USER_CREDENTIAL_OAUTH_PROVIDER_SLUGS above.
             credential_mode: "both".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -838,6 +880,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -864,6 +909,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://graph.facebook.com/v21.0/oauth/access_token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "facebook_deauth".to_string(),
                 url: "https://graph.facebook.com/v21.0/me/permissions".to_string(),
                 auth: "inherit".to_string(),
@@ -886,6 +932,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -913,6 +962,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://discord.com/api/oauth2/token".to_string()),
             revocation_url: Some("https://discord.com/api/oauth2/token/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://discord.com/api/oauth2/token/revoke".to_string(),
                 auth: "inherit".to_string(),
@@ -935,6 +985,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -982,6 +1035,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1010,6 +1066,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://www.linkedin.com/oauth/v2/accessToken".to_string()),
             revocation_url: Some("https://www.linkedin.com/oauth/v2/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://www.linkedin.com/oauth/v2/revoke".to_string(),
                 auth: "inherit".to_string(),
@@ -1036,6 +1093,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1063,6 +1123,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://slack.com/api/oauth.v2.access".to_string()),
             revocation_url: Some("https://slack.com/api/auth.revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "self_bearer".to_string(),
                 url: "https://slack.com/api/auth.revoke".to_string(),
                 auth: "inherit".to_string(),
@@ -1086,6 +1147,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1139,6 +1203,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1165,6 +1232,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://open.tiktokapis.com/v2/oauth/token/".to_string()),
             revocation_url: Some("https://open.tiktokapis.com/v2/oauth/revoke/".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://open.tiktokapis.com/v2/oauth/revoke/".to_string(),
                 auth: "inherit".to_string(),
@@ -1187,6 +1255,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: Some("client_key".to_string()),
@@ -1214,6 +1285,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://id.twitch.tv/oauth2/token".to_string()),
             revocation_url: Some("https://id.twitch.tv/oauth2/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://id.twitch.tv/oauth2/revoke".to_string(),
                 auth: "client_id".to_string(),
@@ -1234,6 +1306,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1261,6 +1336,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://www.reddit.com/api/v1/access_token".to_string()),
             revocation_url: Some("https://www.reddit.com/api/v1/revoke_token".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://www.reddit.com/api/v1/revoke_token".to_string(),
                 auth: "inherit".to_string(),
@@ -1281,6 +1357,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_basic".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: Some(HashMap::from([(
                 "duration".to_string(),
                 "permanent".to_string(),
@@ -1376,6 +1455,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1425,6 +1507,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1469,6 +1554,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1515,6 +1603,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1572,6 +1663,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1626,6 +1720,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1682,6 +1779,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1739,6 +1839,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1782,6 +1885,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1833,6 +1939,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1880,6 +1989,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -1895,24 +2007,9 @@ pub async fn seed_default_providers(
     }
 
     // 25. Notion (OAuth2)
-    //
-    // Notion public integrations use a plain authorization-code flow with
-    // no `scope` parameter -- capabilities are chosen in the Notion
-    // integration settings and the pages/databases a token can reach are
-    // chosen by the user in Notion's own consent picker. Consequences:
-    //   * `default_scopes: None` -- `resolve_scope_param` then omits the
-    //     parameter entirely, which is what Notion expects.
-    //   * No `platform_scope_allowlist` entry (see `scope_catalog.rs`).
-    //     The spec D5 allowlist exists to stop a shared platform app from
-    //     requesting un-vetted scopes; with no scope parameter there is
-    //     nothing to gate, and `None` correctly skips the check.
-    //   * `owner=user` is REQUIRED on the authorize URL; Notion rejects
-    //     the request without it.
-    //   * Token exchange is HTTP Basic (`client_secret_basic`).
-    //   * PKCE is not supported by Notion's OAuth implementation.
-    // Access tokens are long-lived and the token response carries no
-    // `refresh_token` / `expires_in`; both are already `Option` on the
-    // callback path, so the token simply persists without an expiry.
+    // Capabilities and page access are chosen in Notion, not via scopes.
+    // OAuth uses JSON + Basic auth and rotates refresh tokens. Notion does
+    // not document expires_in; persist it only when actually returned.
     if !slug_exists!("notion") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1929,6 +2026,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://api.notion.com/v1/oauth/token".to_string()),
             revocation_url: Some("https://api.notion.com/v1/oauth/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "json".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://api.notion.com/v1/oauth/revoke".to_string(),
                 // "inherit" resolves to HTTP Basic here because
@@ -1951,9 +2049,7 @@ pub async fn seed_default_providers(
             api_key_instructions: None,
             api_key_url: None,
             icon_url: None,
-            documentation_url: Some(
-                "https://developers.notion.com/docs/authorization".to_string(),
-            ),
+            documentation_url: Some("https://developers.notion.com/docs/authorization".to_string()),
             is_active: true,
             // "both": BYO wins when present, otherwise the ops-provisioned
             // platform OAuth app (one-click connect). Deliberately NOT added
@@ -1961,10 +2057,13 @@ pub async fn seed_default_providers(
             // update to this row survives restarts.
             credential_mode: "both".to_string(),
             token_endpoint_auth_method: "client_secret_basic".to_string(),
-            extra_auth_params: Some(HashMap::from([(
-                "owner".to_string(),
-                "user".to_string(),
-            )])),
+            token_request_encoding: Some("json".to_string()),
+            oauth_request_headers: HashMap::from([(
+                "Notion-Version".to_string(),
+                "2022-06-28".to_string(),
+            )]),
+            supports_oauth_scopes: false,
+            extra_auth_params: Some(HashMap::from([("owner".to_string(), "user".to_string())])),
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
             requires_gateway_url: false,
@@ -1978,6 +2077,31 @@ pub async fn seed_default_providers(
         tracing::info!(slug = "notion", "Seeded default provider: Notion");
         seeded_count += 1;
     }
+
+    // Repair rows from the initial Notion seed, without replacing operator settings.
+    for (field, value) in [
+        (
+            "token_request_encoding",
+            bson::Bson::String("json".to_string()),
+        ),
+        (
+            "oauth_request_headers",
+            bson::Bson::Document(doc! { "Notion-Version": "2022-06-28" }),
+        ),
+        ("supports_oauth_scopes", bson::Bson::Boolean(false)),
+    ] {
+        collection
+            .update_many(
+                doc! { "slug": "notion", "created_by": "system", field: { "$exists": false } },
+                doc! { "$set": { field: value } },
+            )
+            .await?;
+    }
+    collection.update_many(
+        doc! { "slug": "notion", "created_by": "system", "revocation.url": "https://api.notion.com/v1/oauth/revoke",
+            "revocation.request_encoding": { "$exists": false } },
+        doc! { "$set": { "revocation.request_encoding": "json" } },
+    ).await?;
 
     // Cloud billing providers (NyxID#716, #778). AWS uses direct sigv4
     // injection (non-delegated). Google Cloud uses the standard OAuth2
@@ -2030,6 +2154,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -2067,6 +2194,7 @@ pub async fn seed_default_providers(
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: Some("https://oauth2.googleapis.com/revoke".to_string()),
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://oauth2.googleapis.com/revoke".to_string(),
                 auth: "none".to_string(),
@@ -2089,6 +2217,9 @@ pub async fn seed_default_providers(
             is_active: true,
             credential_mode: "user".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             // Google only returns a refresh_token when the auth request carries
             // access_type=offline + prompt=consent. Without these the user gets
             // a 1-hour access token and broker calls start failing the moment
@@ -2296,6 +2427,7 @@ pub async fn validate_revocation_config(
     provider_type: &str,
     revocation: &RevocationConfig,
 ) -> AppResult<()> {
+    validate_oauth_request_options(Some(&revocation.request_encoding), None)?;
     if matches!(provider_type, "api_key" | "telegram_widget") {
         return Err(AppError::ValidationError(
             "revocation is only supported for oauth2 and device_code providers".to_string(),
@@ -2316,6 +2448,58 @@ pub async fn validate_revocation_config(
         )));
     }
     validate_revocation_url(&revocation.url).await
+}
+
+pub fn validate_oauth_request_options(
+    encoding: Option<&str>,
+    headers: Option<&HashMap<String, String>>,
+) -> AppResult<()> {
+    if encoding.is_some_and(|value| !["form", "json"].contains(&value)) {
+        return Err(AppError::ValidationError(
+            "OAuth request encoding must be one of: form, json".to_string(),
+        ));
+    }
+    if let Some(headers) = headers {
+        if headers.len() > 20 {
+            return Err(AppError::ValidationError(
+                "Too many OAuth request headers (maximum 20)".to_string(),
+            ));
+        }
+        for (name, value) in headers {
+            let header =
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                    AppError::ValidationError("Invalid OAuth request header name".to_string())
+                })?;
+            if [
+                "authorization",
+                "proxy-authorization",
+                "cookie",
+                "set-cookie",
+                "host",
+                "content-type",
+                "content-length",
+                "transfer-encoding",
+                "connection",
+                "accept",
+            ]
+            .contains(&header.as_str())
+            {
+                return Err(AppError::ValidationError(
+                    "OAuth request headers must not override authentication or transport headers"
+                        .to_string(),
+                ));
+            }
+            if name.len() > 256
+                || value.len() > 4096
+                || reqwest::header::HeaderValue::from_str(value).is_err()
+            {
+                return Err(AppError::ValidationError(
+                    "Invalid OAuth request header value".to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_seeded_provider_revocation(provider: &ProviderConfig) -> AppResult<()> {
@@ -2554,15 +2738,12 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
             },
             false,
         )),
-        // Notion is request/response JSON only: no WebSocket surface, no
-        // streaming responses, and file content is uploaded to a signed S3
-        // URL returned by Notion rather than through the proxy, so binary
-        // upload is not a capability of this service.
+        // Notion accepts multipart file uploads on api.notion.com.
         "api-notion" => Some((
             ServiceCapabilities {
                 supports_proxy_read: true,
                 supports_proxy_write: true,
-                supports_proxy_binary_upload: false,
+                supports_proxy_binary_upload: true,
                 supports_direct_downstream_auth: true,
                 supports_authoring_via_nyx: true,
                 supports_websocket: false,
@@ -2574,13 +2755,6 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
     }
 }
 
-/// Required Anthropic API headers. `anthropic-version` is mandatory on every
-/// request (rejected with 400 if missing); `content-type` is required for
-/// the JSON-bodied endpoints that make up the vast majority of the API.
-/// Both are `overridable: true` so SDKs that send their own
-/// `anthropic-version` (every official SDK) and clients that already set
-/// `content-type` continue to win -- the defaults only kick in when the
-/// caller omits them.
 /// Required Notion API headers. `Notion-Version` is mandatory on every
 /// request (Notion returns 400 without it), and `content-type` covers the
 /// JSON-bodied endpoints. Both are `overridable: true` so a caller pinning
@@ -2601,6 +2775,13 @@ const NOTION_DEFAULT_HEADERS: &[SeededHeader] = &[
     },
 ];
 
+/// Required Anthropic API headers. `anthropic-version` is mandatory on every
+/// request (rejected with 400 if missing); `content-type` is required for
+/// the JSON-bodied endpoints that make up the vast majority of the API.
+/// Both are `overridable: true` so SDKs that send their own
+/// `anthropic-version` (every official SDK) and clients that already set
+/// `content-type` continue to win -- the defaults only kick in when the
+/// caller omits them.
 const ANTHROPIC_DEFAULT_HEADERS: &[SeededHeader] = &[
     SeededHeader {
         name: "anthropic-version",
@@ -2977,8 +3158,8 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
             "Only content the user explicitly shared with the integration is \
              reachable; newly created pages must be shared separately. Notion \
              enforces roughly three requests per second per integration. File \
-             uploads go to a signed URL returned by Notion, not through the \
-             proxy. Access tokens do not expire and are not refreshed.",
+             uploads require multipart/form-data with a boundary. OAuth refresh \
+             tokens rotate; no access-token lifetime is assumed.",
         ),
     },
     DefaultServiceSeed {
@@ -4243,6 +4424,26 @@ pub async fn seed_default_services(
 
     reconcile_firecrawl_seed_metadata(&service_col, now).await?;
 
+    // Replace only the incorrect metadata shipped by the initial Notion seed.
+    let old_notion_limitations = "Only content the user explicitly shared with the integration is \
+        reachable; newly created pages must be shared separately. Notion \
+        enforces roughly three requests per second per integration. File \
+        uploads go to a signed URL returned by Notion, not through the \
+        proxy. Access tokens do not expire and are not refreshed.";
+    if let Some(seed) = DEFAULT_SERVICE_SEEDS
+        .iter()
+        .find(|seed| seed.service_slug == "api-notion")
+    {
+        service_col.update_one(
+            doc! { "slug": "api-notion", "created_by": "system", "known_limitations": old_notion_limitations },
+            doc! { "$set": {
+                "known_limitations": seed.known_limitations,
+                "capabilities.supports_proxy_binary_upload": true,
+                "updated_at": bson::DateTime::from_chrono(now),
+            } },
+        ).await?;
+    }
+
     // Migration: update name + description on existing seeded services
     // whose description still matches a known auto-generated or previously
     // seeded value. Lets existing deployments pick up richer catalog
@@ -4762,6 +4963,9 @@ pub struct TelegramWidgetProviderInput {
 /// Fields that can be updated on a provider config.
 #[derive(Default)]
 pub struct ProviderUpdateInput {
+    pub token_request_encoding: Option<String>,
+    pub oauth_request_headers: Option<HashMap<String, String>>,
+    pub supports_oauth_scopes: Option<bool>,
     pub name: Option<String>,
     pub description: Option<String>,
     pub is_active: Option<bool>,
@@ -4837,6 +5041,9 @@ pub async fn create_provider(
         device_code_format,
         client_id_param_name,
         None,
+        None,
+        HashMap::new(),
+        true,
     )
     .await
 }
@@ -4862,7 +5069,14 @@ pub async fn create_provider_with_revocation(
     device_code_format: Option<&str>,
     client_id_param_name: Option<&str>,
     revocation: Option<RevocationConfig>,
+    token_request_encoding: Option<String>,
+    oauth_request_headers: HashMap<String, String>,
+    supports_oauth_scopes: bool,
 ) -> AppResult<ProviderConfig> {
+    validate_oauth_request_options(
+        token_request_encoding.as_deref(),
+        Some(&oauth_request_headers),
+    )?;
     let valid_types = ["oauth2", "api_key", "device_code", "telegram_widget"];
     if !valid_types.contains(&provider_type) {
         return Err(AppError::ValidationError(format!(
@@ -4890,6 +5104,7 @@ pub async fn create_provider_with_revocation(
     let revocation = match (revocation, oauth_config.as_ref()) {
         (Some(revocation), _) => Some(revocation),
         (None, Some(oauth)) => oauth.revocation_url.as_ref().map(|url| RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "rfc7009".to_string(),
             url: url.clone(),
             auth: "inherit".to_string(),
@@ -5019,6 +5234,9 @@ pub async fn create_provider_with_revocation(
         is_active: true,
         credential_mode: credential_mode.to_string(),
         token_endpoint_auth_method: token_endpoint_auth_method.to_string(),
+        token_request_encoding,
+        oauth_request_headers,
+        supports_oauth_scopes,
         extra_auth_params,
         device_code_format: device_code_format.unwrap_or("rfc8628").to_string(),
         client_id_param_name: normalized_client_id_param_name,
@@ -5100,6 +5318,7 @@ pub async fn update_provider(
         Some(explicit) => Some(explicit),
         None => updates.revocation_url.as_ref().map(|url| {
             Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: url.clone(),
                 auth: "inherit".to_string(),
@@ -5278,6 +5497,25 @@ pub async fn update_provider(
         }
         set_doc.insert("token_endpoint_auth_method", method.as_str());
     }
+    validate_oauth_request_options(
+        updates.token_request_encoding.as_deref(),
+        updates.oauth_request_headers.as_ref(),
+    )?;
+    if let Some(ref encoding) = updates.token_request_encoding {
+        set_doc.insert("token_request_encoding", encoding);
+    }
+    if let Some(ref headers) = updates.oauth_request_headers {
+        set_doc.insert(
+            "oauth_request_headers",
+            headers
+                .iter()
+                .map(|(key, value)| (key.clone(), bson::Bson::String(value.clone())))
+                .collect::<bson::Document>(),
+        );
+    }
+    if let Some(supported) = updates.supports_oauth_scopes {
+        set_doc.insert("supports_oauth_scopes", supported);
+    }
 
     if let Some(ref params) = updates.extra_auth_params {
         set_doc.insert(
@@ -5425,9 +5663,8 @@ pub async fn delete_provider(db: &mongodb::Database, provider_id: &str) -> AppRe
 mod tests {
     use super::{
         ANTHROPIC_DEFAULT_HEADERS, DEFAULT_SERVICE_SEEDS, NOTION_DEFAULT_HEADERS,
-        OPENROUTER_DEFAULT_HEADERS, SeededHeader,
-        normalize_telegram_bot_token, normalize_telegram_bot_username, reconcile_seeded_headers,
-        seed_capability_override,
+        OPENROUTER_DEFAULT_HEADERS, SeededHeader, normalize_telegram_bot_token,
+        normalize_telegram_bot_username, reconcile_seeded_headers, seed_capability_override,
     };
     use crate::errors::AppError;
     use crate::models::default_request_header::DefaultRequestHeader;
@@ -5658,6 +5895,7 @@ mod tests {
             .iter()
             .find(|h| h.name.eq_ignore_ascii_case("notion-version"))
             .expect("Notion-Version present");
+        assert_eq!(version.value, "2022-06-28");
         assert!(
             version.overridable,
             "Notion-Version must be overridable so a caller pinning another API version wins"
@@ -5681,17 +5919,17 @@ mod tests {
             "Notion responses are not streamed"
         );
         assert!(
-            !caps.supports_proxy_binary_upload,
-            "Notion file uploads go to a signed URL, not through the proxy"
+            caps.supports_proxy_binary_upload,
+            "Notion accepts multipart uploads through api.notion.com"
         );
         assert!(!streaming);
     }
 
     #[tokio::test]
     async fn seed_default_providers_seeds_notion_for_managed_oauth() {
-        let Some(db) = seed_default_catalog("prov_seed_notion").await else {
-            return;
-        };
+        let db = seed_default_catalog("prov_seed_notion")
+            .await
+            .expect("Notion seed test requires MongoDB");
         let provider = db
             .collection::<ProviderConfig>(COLLECTION_NAME)
             .find_one(doc! { "slug": "notion" })
@@ -5706,6 +5944,16 @@ mod tests {
         assert_eq!(provider.credential_mode, "both");
         // Notion authenticates the token endpoint with HTTP Basic.
         assert_eq!(provider.token_endpoint_auth_method, "client_secret_basic");
+        assert_eq!(provider.token_request_encoding.as_deref(), Some("json"));
+        assert_eq!(
+            provider.oauth_request_headers["Notion-Version"],
+            "2022-06-28"
+        );
+        assert!(!provider.supports_oauth_scopes);
+        assert_eq!(
+            provider.revocation.as_ref().unwrap().request_encoding,
+            "json"
+        );
         // Notion's OAuth implementation has no PKCE support.
         assert!(!provider.supports_pkce);
         // Notion has no scope parameter at all -- capabilities are fixed on
@@ -5730,9 +5978,98 @@ mod tests {
         );
         // No platform scope allowlist is required precisely because there is
         // no scope parameter to gate (spec D5).
-        assert!(
-            crate::services::scope_catalog::platform_scope_allowlist("notion").is_none()
+        assert!(crate::services::scope_catalog::platform_scope_allowlist("notion").is_none());
+    }
+
+    #[tokio::test]
+    async fn notion_seed_repairs_initial_rows_and_preserves_admin_oauth_settings() {
+        let db = seed_default_catalog("notion_seed_upgrade")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let providers = db.collection::<ProviderConfig>(COLLECTION_NAME);
+        providers.update_one(doc! { "slug": "notion" }, doc! { "$unset": {
+            "token_request_encoding": "", "oauth_request_headers": "", "supports_oauth_scopes": "", "revocation.request_encoding": ""
+        } }).await.unwrap();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        let repaired = providers
+            .find_one(doc! { "slug": "notion" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(repaired.token_request_encoding.as_deref(), Some("json"));
+        assert_eq!(
+            repaired.oauth_request_headers["Notion-Version"],
+            "2022-06-28"
         );
+        assert!(!repaired.supports_oauth_scopes);
+        assert_eq!(
+            repaired.revocation.as_ref().unwrap().request_encoding,
+            "json"
+        );
+        let headers = std::collections::HashMap::from([(
+            "Notion-Version".to_string(),
+            "2026-03-11".to_string(),
+        )]);
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &repaired.id,
+            super::ProviderUpdateInput {
+                token_request_encoding: Some("form".into()),
+                oauth_request_headers: Some(headers.clone()),
+                supports_oauth_scopes: Some(true),
+                credential_mode: Some("admin".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.token_request_encoding.as_deref(), Some("form"));
+        for _ in 0..2 {
+            super::seed_default_providers(&db, &enc).await.unwrap();
+        }
+        let preserved = providers
+            .find_one(doc! { "_id": &repaired.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(preserved.token_request_encoding.as_deref(), Some("form"));
+        assert_eq!(preserved.oauth_request_headers, headers);
+        assert!(preserved.supports_oauth_scopes);
+        assert_eq!(preserved.credential_mode, "admin");
+        let err = super::update_provider(
+            &db,
+            &enc,
+            &repaired.id,
+            super::ProviderUpdateInput {
+                token_request_encoding: Some("xml".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, crate::errors::AppError::ValidationError(_)));
+    }
+
+    #[test]
+    fn oauth_request_options_reject_invalid_encoding_and_unsafe_headers() {
+        for encoding in ["form", "json"] {
+            assert!(super::validate_oauth_request_options(Some(encoding), None).is_ok());
+        }
+        for encoding in ["", "JSON", "xml"] {
+            assert!(super::validate_oauth_request_options(Some(encoding), None).is_err());
+        }
+        for (name, value) in [
+            ("Authorization", "Basic forbidden"),
+            ("Content-Type", "text/plain"),
+            ("Host", "elsewhere.example"),
+            ("Bad Header", "value"),
+            ("Notion-Version", "2022-06-28\r\nInjected: value"),
+        ] {
+            let headers = std::collections::HashMap::from([(name.to_string(), value.to_string())]);
+            assert!(super::validate_oauth_request_options(None, Some(&headers)).is_err());
+        }
     }
 
     #[test]
@@ -5912,6 +6249,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -6985,6 +7325,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -7058,6 +7401,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -7102,6 +7448,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -7178,6 +7527,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: Some("invalid_mode".to_string()),
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -7246,6 +7598,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: Some("user".to_string()),
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -7299,6 +7654,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: Some("user".to_string()),
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -7367,6 +7725,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: Some("bearer_magic".to_string()),
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -7435,6 +7796,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: Some("magic".to_string()),
                 client_id_param_name: None,
@@ -7512,6 +7876,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -7595,6 +7962,9 @@ mod tests {
                 documentation_url: Some("https://new.example.com/docs".to_string()),
                 credential_mode: Some("both".to_string()),
                 token_endpoint_auth_method: Some("client_secret_basic".to_string()),
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: Some(std::collections::HashMap::from([(
                     "prompt".to_string(),
                     "consent".to_string(),
@@ -7693,6 +8063,9 @@ mod tests {
             None,
             None,
             revocation,
+            None,
+            Default::default(),
+            true,
         )
         .await
         .expect("provider should be created")
@@ -7709,6 +8082,7 @@ mod tests {
             &db,
             None,
             Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://example.com/revoke-rfc7009".to_string(),
                 auth: "post".to_string(),
@@ -7727,6 +8101,7 @@ mod tests {
             &db,
             Some("https://example.com/deprecated-alias"),
             Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "github".to_string(),
                 url: "https://api.github.com/applications".to_string(),
                 auth: "inherit".to_string(),
@@ -7763,6 +8138,7 @@ mod tests {
             make_test_provider(&format!("revocation-update-{}", Uuid::new_v4()), "oauth2");
         provider.revocation_url = Some("https://example.com/original".to_string());
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "rfc7009".to_string(),
             url: "https://example.com/original".to_string(),
             auth: "inherit".to_string(),
@@ -7794,6 +8170,7 @@ mod tests {
             &provider.id,
             super::ProviderUpdateInput {
                 revocation: Some(Some(RevocationConfig {
+                    request_encoding: "form".to_string(),
                     style: "github".to_string(),
                     url: "https://api.github.com/applications".to_string(),
                     auth: "basic".to_string(),
@@ -7814,6 +8191,7 @@ mod tests {
             &provider.id,
             super::ProviderUpdateInput {
                 revocation: Some(Some(RevocationConfig {
+                    request_encoding: "form".to_string(),
                     style: "rfc7009".to_string(),
                     url: "https://example.com/new-rfc7009".to_string(),
                     auth: "none".to_string(),
@@ -7866,6 +8244,7 @@ mod tests {
     #[tokio::test]
     async fn validate_revocation_config_rejects_invalid_admin_input() {
         let valid = RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "rfc7009".to_string(),
             url: "https://example.com/revoke".to_string(),
             auth: "inherit".to_string(),
@@ -7891,6 +8270,7 @@ mod tests {
             ("rfc7009", "inherit", "https://127.0.0.1/revoke"),
         ] {
             let config = RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: style.to_string(),
                 url: url.to_string(),
                 auth: auth.to_string(),
@@ -7907,6 +8287,7 @@ mod tests {
     fn trusted_seed_revocation_validation_does_not_require_dns() {
         let mut provider = make_test_provider("offline-revocation-seed", "oauth2");
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "rfc7009".to_string(),
             url: "https://does-not-resolve.invalid/revoke".to_string(),
             auth: "none".to_string(),
@@ -9038,6 +9419,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: Some(params.clone()),
                 device_code_format: None,
                 client_id_param_name: None,
@@ -9118,6 +9502,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: Some("user".to_string()),
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -9155,6 +9542,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: Some("both".to_string()),
                 token_endpoint_auth_method: None,
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,
@@ -9227,6 +9617,9 @@ mod tests {
                     documentation_url: None,
                     credential_mode: None,
                     token_endpoint_auth_method: None,
+                    token_request_encoding: None,
+                    oauth_request_headers: None,
+                    supports_oauth_scopes: None,
                     extra_auth_params: None,
                     device_code_format: Some(format.to_string()),
                     client_id_param_name: None,
@@ -9407,6 +9800,9 @@ mod tests {
                 documentation_url: None,
                 credential_mode: None,
                 token_endpoint_auth_method: Some("client_secret_basic".to_string()),
+                token_request_encoding: None,
+                oauth_request_headers: None,
+                supports_oauth_scopes: None,
                 extra_auth_params: None,
                 device_code_format: None,
                 client_id_param_name: None,

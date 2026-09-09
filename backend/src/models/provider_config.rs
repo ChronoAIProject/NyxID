@@ -25,8 +25,19 @@ fn default_revocation_auth() -> String {
     "inherit".to_string()
 }
 
+pub fn default_request_encoding() -> String {
+    "form".to_string()
+}
+
+fn default_supports_oauth_scopes() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationConfig {
+    /// RFC 7009 form encoding, or a JSON token object without the optional hint.
+    #[serde(default = "default_request_encoding")]
+    pub request_encoding: String,
     #[serde(default = "default_revocation_style")]
     pub style: String,
     pub url: String,
@@ -102,9 +113,20 @@ pub struct ProviderConfig {
     #[serde(default = "default_credential_mode")]
     pub credential_mode: String,
     /// How client credentials are sent to the token endpoint:
-    /// "client_secret_post" (form body, default) | "client_secret_basic" (HTTP Basic Auth)
+    /// "client_secret_post" (request body, default) | "client_secret_basic" (HTTP Basic Auth)
     #[serde(default = "default_token_endpoint_auth_method")]
     pub token_endpoint_auth_method: String,
+
+    /// "form" | "json". Missing values retain the legacy Lark/Feishu JSON
+    /// behavior; all other providers default to form encoding.
+    #[serde(default)]
+    pub token_request_encoding: Option<String>,
+    /// Non-secret headers sent to OAuth token and revocation endpoints.
+    #[serde(default)]
+    pub oauth_request_headers: HashMap<String, String>,
+    /// False for providers whose permissions are configured outside OAuth scopes.
+    #[serde(default = "default_supports_oauth_scopes")]
+    pub supports_oauth_scopes: bool,
 
     /// Provider-specific extra auth URL parameters (e.g., {"access_type": "offline"} for Google)
     /// Blocklist: client_id, client_secret, redirect_uri, response_type, state, code,
@@ -156,6 +178,7 @@ mod tests {
             token_url: Some("https://oauth2.googleapis.com/token".to_string()),
             revocation_url: None,
             revocation: Some(RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: "https://oauth2.googleapis.com/revoke".to_string(),
                 auth: "none".to_string(),
@@ -176,6 +199,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -223,6 +249,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -256,6 +285,9 @@ mod tests {
         assert_eq!(restored.credential_mode, "admin");
         assert!(restored.revocation.is_none());
         assert_eq!(restored.revocation_seed_version, 0);
+        assert_eq!(restored.token_request_encoding, None);
+        assert!(restored.oauth_request_headers.is_empty());
+        assert!(restored.supports_oauth_scopes);
     }
 
     #[test]
@@ -266,9 +298,11 @@ mod tests {
         .expect("deserialize defaults");
         assert_eq!(revocation.style, "rfc7009");
         assert_eq!(revocation.auth, "inherit");
+        assert_eq!(revocation.request_encoding, "form");
         assert!(!revocation.revokes_grant);
 
         let unknown = RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "future_style".to_string(),
             url: "https://example.com/future-revoke".to_string(),
             auth: "future_auth".to_string(),

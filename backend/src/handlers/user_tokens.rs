@@ -1653,6 +1653,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -2994,6 +2997,7 @@ mod tests {
         let endpoint_id = Uuid::new_v4().to_string();
         let mut provider = test_provider_config(&provider_id);
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "github".to_string(),
             url: "https://api.github.com/applications".to_string(),
             auth: "basic".to_string(),

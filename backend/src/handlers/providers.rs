@@ -43,6 +43,9 @@ pub struct CreateProviderRequest {
     pub documentation_url: Option<String>,
     // Auth method
     pub token_endpoint_auth_method: Option<String>,
+    pub token_request_encoding: Option<String>,
+    pub oauth_request_headers: Option<std::collections::HashMap<String, String>>,
+    pub supports_oauth_scopes: Option<bool>,
     // Generic OAuth edge case fields
     pub extra_auth_params: Option<std::collections::HashMap<String, String>>,
     pub device_code_format: Option<String>,
@@ -91,6 +94,9 @@ pub struct UpdateProviderRequest {
     pub documentation_url: Option<String>,
     pub credential_mode: Option<String>,
     pub token_endpoint_auth_method: Option<String>,
+    pub token_request_encoding: Option<String>,
+    pub oauth_request_headers: Option<std::collections::HashMap<String, String>>,
+    pub supports_oauth_scopes: Option<bool>,
     pub extra_auth_params: Option<std::collections::HashMap<String, String>>,
     pub device_code_format: Option<String>,
     pub client_id_param_name: Option<String>,
@@ -101,6 +107,8 @@ pub struct UpdateProviderRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct RevocationConfigRequest {
+    #[serde(default = "crate::models::provider_config::default_request_encoding")]
+    pub request_encoding: String,
     pub style: String,
     pub url: String,
     pub auth: String,
@@ -111,6 +119,7 @@ pub struct RevocationConfigRequest {
 impl From<RevocationConfigRequest> for crate::models::provider_config::RevocationConfig {
     fn from(value: RevocationConfigRequest) -> Self {
         Self {
+            request_encoding: value.request_encoding,
             style: value.style,
             url: value.url,
             auth: value.auth,
@@ -178,6 +187,9 @@ pub struct ProviderResponse {
     pub is_active: bool,
     pub credential_mode: String,
     pub token_endpoint_auth_method: String,
+    pub token_request_encoding: Option<String>,
+    pub oauth_request_headers: std::collections::HashMap<String, String>,
+    pub supports_oauth_scopes: bool,
     pub extra_auth_params: Option<std::collections::HashMap<String, String>>,
     pub device_code_format: String,
     pub client_id_param_name: Option<String>,
@@ -188,6 +200,7 @@ pub struct ProviderResponse {
 
 #[derive(Debug, Serialize)]
 pub struct RevocationConfigResponse {
+    pub request_encoding: String,
     pub style: String,
     pub url: String,
     pub auth: String,
@@ -215,6 +228,7 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         description: p.description,
         provider_type: p.provider_type,
         revocation: revocation.map(|revocation| RevocationConfigResponse {
+            request_encoding: revocation.request_encoding,
             style: revocation.style,
             url: revocation.url,
             auth: revocation.auth,
@@ -234,6 +248,9 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         is_active: p.is_active,
         credential_mode: p.credential_mode,
         token_endpoint_auth_method: p.token_endpoint_auth_method,
+        token_request_encoding: p.token_request_encoding,
+        oauth_request_headers: p.oauth_request_headers,
+        supports_oauth_scopes: p.supports_oauth_scopes,
         extra_auth_params: p.extra_auth_params,
         device_code_format: p.device_code_format,
         client_id_param_name: p.client_id_param_name,
@@ -326,6 +343,7 @@ pub async fn create_provider(
         body.revocation_url
             .as_ref()
             .map(|url| crate::models::provider_config::RevocationConfig {
+                request_encoding: "form".to_string(),
                 style: "rfc7009".to_string(),
                 url: url.clone(),
                 auth: "inherit".to_string(),
@@ -366,6 +384,11 @@ pub async fn create_provider(
             valid_auth_methods.join(", ")
         )));
     }
+
+    provider_service::validate_oauth_request_options(
+        body.token_request_encoding.as_deref(),
+        body.oauth_request_headers.as_ref(),
+    )?;
 
     if let Some(ref format) = body.device_code_format
         && !["rfc8628", "openai"].contains(&format.as_str())
@@ -547,6 +570,9 @@ pub async fn create_provider(
         body.device_code_format.as_deref(),
         body.client_id_param_name.as_deref(),
         revocation,
+        body.token_request_encoding,
+        body.oauth_request_headers.unwrap_or_default(),
+        body.supports_oauth_scopes.unwrap_or(true),
     )
     .await?;
 
@@ -629,6 +655,9 @@ pub async fn update_provider(
         documentation_url: body.documentation_url,
         credential_mode: body.credential_mode,
         token_endpoint_auth_method: body.token_endpoint_auth_method,
+        token_request_encoding: body.token_request_encoding,
+        oauth_request_headers: body.oauth_request_headers,
+        supports_oauth_scopes: body.supports_oauth_scopes,
         extra_auth_params: body.extra_auth_params,
         device_code_format: body.device_code_format,
         client_id_param_name: body.client_id_param_name,
@@ -708,6 +737,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -813,6 +845,7 @@ mod tests {
             .flatten()
             .expect("structured revocation should be present");
         assert_eq!(configured.style, "github");
+        assert_eq!(configured.request_encoding, "form");
         assert!(configured.revokes_grant);
     }
 
@@ -820,6 +853,7 @@ mod tests {
     fn provider_response_exposes_dedicated_revocation_shape() {
         let mut provider = make_provider("oauth2");
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "github".to_string(),
             url: "https://api.github.com/applications".to_string(),
             auth: "inherit".to_string(),
@@ -831,6 +865,7 @@ mod tests {
         assert_eq!(
             response.get("revocation"),
             Some(&serde_json::json!({
+                "request_encoding": "form",
                 "style": "github",
                 "url": "https://api.github.com/applications",
                 "auth": "inherit",
@@ -849,6 +884,7 @@ mod tests {
         assert_eq!(
             response.get("revocation"),
             Some(&serde_json::json!({
+                "request_encoding": "form",
                 "style": "rfc7009",
                 "url": "https://example.com/revoke",
                 "auth": "inherit",
