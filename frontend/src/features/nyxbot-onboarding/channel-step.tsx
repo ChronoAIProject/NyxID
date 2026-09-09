@@ -29,8 +29,13 @@ import {
 } from "./onboarding-shell";
 import { BrandIcon } from "./brand-icon";
 
+const CHANNEL_AVAILABILITY: Record<NyxbotChannel, boolean> = {
+  telegram: true,
+  whatsapp: false,
+};
+
 export function ChannelStep({
-  channel,
+  channel: preferredChannel,
   referral,
   onSelect,
   onBack,
@@ -45,6 +50,10 @@ export function ChannelStep({
   readonly onSpendingCap: () => void;
 }) {
   const { t } = useTranslation();
+  const channel =
+    preferredChannel && CHANNEL_AVAILABILITY[preferredChannel]
+      ? preferredChannel
+      : null;
   const [showToken, setShowToken] = useState(false);
   const createBot = useCreateChannelBot();
   const managed = useManagedOnboarding("whatsapp", channel === "whatsapp");
@@ -107,7 +116,11 @@ export function ChannelStep({
         <legend className="sr-only">{t("channelTitle")}</legend>
         {(["telegram", "whatsapp"] as const).map((option) => (
           <label
-            className="nb-tile"
+            className={
+              CHANNEL_AVAILABILITY[option]
+                ? "nb-tile"
+                : "nb-tile nb-tile-unavailable"
+            }
             data-selected={channel === option}
             key={option}
           >
@@ -115,6 +128,7 @@ export function ChannelStep({
               type="radio"
               name="channel"
               value={option}
+              disabled={!CHANNEL_AVAILABILITY[option]}
               checked={channel === option}
               onChange={() => {
                 form.reset();
@@ -126,11 +140,13 @@ export function ChannelStep({
             <strong>{t(option)}</strong>
             <span>
               {t(
-                channel === option
-                  ? referral === option
-                    ? "preselected"
-                    : "selected"
-                  : "available",
+                !CHANNEL_AVAILABILITY[option]
+                  ? "comingSoon"
+                  : channel === option
+                    ? referral === option
+                      ? "preselected"
+                      : "selected"
+                    : "available",
               )}
             </span>
           </label>

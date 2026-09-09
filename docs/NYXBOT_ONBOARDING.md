@@ -61,8 +61,8 @@ The owner confirmed on 8 September 2026 that the Nyxbot session, chat-pairing an
 ## Current Integration Limits
 
 - Telegram registration can be completed when the backend and a properly scoped Google connection are available. Chat linking displays an unavailable state; code copying and chat opening remain disabled because no real code/destination contract exists.
-- WhatsApp reads the existing managed-onboarding readiness endpoint. Meta launch and completion are deliberately disabled: the existing completion endpoint activates the bot immediately and accepts no budget. The real Meta SDK and completion implementation remain in `components/channels/managed-whatsapp.tsx` for integration once activation ordering is defined.
-- A temporary **Review spending cap** action opens the designed cap choices without implying Meta authorization. **Set cap & connect** remains disabled and nothing is saved. Replace this blocked-state action with the designed Meta-to-cap sequence when the contracts above exist.
+- WhatsApp is temporarily disabled in the onboarding channel picker at the owner's request. Its tile remains visible with the existing unavailable styling and **Coming soon** label; it cannot be selected by pointer or keyboard. Query and saved WhatsApp preselection do not activate its setup panel, readiness request or spending-cap action. Telegram remains available.
+- The existing WhatsApp readiness, Meta and cap implementation is retained for future integration. Before re-enabling, define budget persistence before activation: the existing completion endpoint activates the bot immediately and accepts no budget. No monthly cap is saved by this onboarding.
 - No remote OAuth consent, real Telegram registration, or paid Meta activation was performed during development. Automated tests use isolated API responses; they do not prove a deployed service integration.
 
 ## Local Preview Against Hosted NyxID

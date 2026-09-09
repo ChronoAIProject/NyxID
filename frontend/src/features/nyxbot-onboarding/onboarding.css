@@ -773,6 +773,10 @@
   inset: 0;
   cursor: pointer;
 }
+.nb-channel-tiles label:has(input:disabled),
+.nb-channel-tiles input:disabled {
+  cursor: not-allowed;
+}
 .nb-channel-tiles label:has(input:focus-visible) {
   outline: 2px solid var(--nb-accent);
   outline-offset: 3px;

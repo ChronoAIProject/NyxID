@@ -405,7 +405,7 @@ describe("Nyxbot onboarding", () => {
       await screen.findByRole("link", { name: "Manage channel" }),
     ).toHaveAttribute("href", "/channel-bots/business-bot");
   });
-  it("leaves the channel unselected for a direct visitor and clears a token on channel switch", async () => {
+  it("leaves the channel unselected for a direct visitor and ignores the disabled WhatsApp option", async () => {
     window.history.replaceState(null, "", "/onboarding");
     mount();
     await userEvent.click(
@@ -420,8 +420,11 @@ describe("Nyxbot onboarding", () => {
       "unsent-token",
     );
     await userEvent.click(screen.getByRole("radio", { name: /WhatsApp/ }));
-    await userEvent.click(screen.getByRole("radio", { name: /Telegram/ }));
-    expect(screen.getByLabelText("Bot token", { exact: true })).toHaveValue("");
+    expect(screen.getByRole("radio", { name: /Telegram/ })).toBeChecked();
+    expect(screen.getByRole("radio", { name: /WhatsApp/ })).not.toBeChecked();
+    expect(screen.getByLabelText("Bot token", { exact: true })).toHaveValue(
+      "unsent-token",
+    );
   });
   it("preserves Google authorization when token verification fails and redacts provider errors", async () => {
     post.mockRejectedValueOnce(new Error("Bad token: secret-test-value"));
@@ -443,23 +446,45 @@ describe("Nyxbot onboarding", () => {
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     await screen.findByText("Google Workspace connected");
   });
-  it("keeps WhatsApp activation disabled without a server-enforced spending cap", async () => {
-    mount();
-    await toChannel();
-    await userEvent.click(screen.getByRole("radio", { name: /WhatsApp/ }));
-    expect(
-      screen.getByRole("button", { name: "Connect WhatsApp" }),
-    ).toBeDisabled();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Review spending cap" }),
-    );
-    expect(screen.getByRole("radio", { name: /SGD 120/ })).toBeChecked();
-    await userEvent.click(screen.getByRole("radio", { name: /SGD 250/ }));
-    expect(
-      screen.getByRole("button", { name: "Set cap & connect" }),
-    ).toBeDisabled();
-    expect(post).not.toHaveBeenCalled();
-  });
+  it.each(["referral", "saved"])(
+    "disables WhatsApp setup even with a %s preselection",
+    async (entry) => {
+      if (entry === "referral") {
+        window.history.replaceState(
+          null,
+          "",
+          "/onboarding?step=source&channel=whatsapp",
+        );
+      } else {
+        sessionStorage.setItem(
+          "nyxbot-onboarding:owner",
+          JSON.stringify({ channel: "whatsapp" }),
+        );
+      }
+      mount();
+      await toChannel();
+      const whatsapp = screen.getByRole("radio", { name: /WhatsApp/ });
+      expect(whatsapp).toBeDisabled();
+      expect(whatsapp).not.toBeChecked();
+      expect(whatsapp.closest("label")).toHaveTextContent("coming soon");
+      await userEvent.click(whatsapp);
+      expect(
+        screen.queryByRole("button", { name: "Connect WhatsApp" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Review spending cap" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Connect channel" }),
+      ).toBeDisabled();
+      expect(get).not.toHaveBeenCalledWith(
+        "/channel-bots/managed-onboarding/whatsapp",
+      );
+      await userEvent.click(screen.getByRole("radio", { name: /Telegram/ }));
+      expect(screen.getByLabelText("Bot token", { exact: true })).toBeVisible();
+      expect(post).not.toHaveBeenCalled();
+    },
+  );
   it.each(["status", "provider_status"])(
     "checks real scopes after OAuth instead of trusting %s=success",
     async (parameter) => {
