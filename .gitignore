@@ -31,6 +31,10 @@ keys/
 *~
 .DS_Store
 
+# ─── Python ───
+__pycache__/
+*.pyc
+
 # ─── Logs ───
 *.log
 logs/

@@ -175,7 +175,56 @@ export function createSeededAssistantFixtureConversations(): AssistantFixtureCon
       ],
       14,
     ),
+    (() => {
+      const seeded = conversation(
+        "conversation-task-plan",
+        "Historical task plan",
+        [
+          storedMessage(
+            "message-task-plan-user",
+            "user",
+            "Publish a weekly update once the plan is confirmed.",
+            now - 4 * 86_400_000,
+          ),
+          storedMessage(
+            "message-task-plan-assistant",
+            "assistant",
+            "Here is the task plan.",
+            now - 4 * 86_400_000 + 60_000,
+          ),
+        ],
+        4,
+      );
+      seeded.activeTask = historicalConfirmGateTask(
+        "conversation-task-plan",
+        "turn-task-plan",
+      );
+      seeded.activeTurn = {
+        turnId: "turn-task-plan",
+        taskId: "task-turn-task-plan",
+        status: "active",
+      };
+      seeded.stateVersion = 7;
+      seeded.progressSequence = 7;
+      return seeded;
+    })(),
   ];
+}
+
+export function historicalConfirmGateTask(actorId: string, turnId: string) {
+  return {
+    ...activeTaskFixture(actorId, turnId),
+    title: "Publish a weekly update",
+    gate: {
+      mode: "confirm",
+      status: "pending",
+      requestId: "plan-gate-historical",
+      taskId: `task-${turnId}`,
+      planId: `plan-${turnId}`,
+      planRevision: 1,
+      reason: "Confirm the planned write steps.",
+    },
+  };
 }
 
 export function activeTaskFixture(actorId: string, turnId: string) {

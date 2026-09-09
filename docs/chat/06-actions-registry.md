@@ -1,6 +1,7 @@
 # Assistant Actions Registry
 
-Last verified against the `service.reauthorize` implementation (2026-08-17).
+Last verified against Aevatar `feature/integrate` at
+`e5bba2e9719ad5132004b882744caa3875db1123` (2026-09-03).
 
 `GET /api/v1/assistant/actions` publishes the immutable action vocabulary that Aevatar may compose into typed NyxIdChat turns. It is a public, static JSON endpoint with an exact-path exemption from the global rate limiter. It does not depend on a session, database row, user scope, or model state.
 
@@ -8,7 +9,10 @@ The NyxID source is `backend/src/handlers/assistant_actions.rs`. The route is mo
 
 ## Response
 
-The response content type is `application/json`. The current body is equivalent to:
+The response content type is `application/json`. The default body begins with
+the four descriptors whose contracts Aevatar pins. It also includes the
+additive descriptors listed in
+`tests/fixtures/assistant/aevatar-pinned-actions-by-revision.json`.
 
 ```json
 {
@@ -130,46 +134,69 @@ The response content type is `application/json`. The current body is equivalent 
 
 The default (no-query) serialized body is created once through `LazyLock<String>` and reused. Per-revision compositions are pre-serialized the same way. The handler has no service/model layer because the manifest is compile-time product metadata.
 
-### Revision negotiation
+### Consumer load contract
+
+Aevatar loads the default `GET /api/v1/assistant/actions` body. `schema_version`
+is the only registry-wide compatibility gate. The `revision` string is an
+observability label. A future or unlabeled revision still loads. Unknown action
+names are skipped silently. A known action whose descriptor is malformed or
+divergent from its pinned contract is skipped on its own and recorded. The rest
+of the registry stays enabled.
+
+Startup fetch retries three times. If every attempt fails, Aevatar pins a
+disabled fallback registry and keeps retrying in the background. Recovery may
+replace exactly that fallback with a served registry once. A served registry is
+never replaced afterwards.
+
+NyxID still accepts `?revision=` as its own historical composition selector.
+That query is not Aevatar's load gate.
 
 `GET /api/v1/assistant/actions?revision=<r>`:
 
 | Request | Response |
 | --- | --- |
-| No `revision` query param | Latest body, byte-identical to the default composition (`schema_version` 4, `revision` `nyxid-assistant-actions.v8`, including dormant Wave-2 descriptors). Current consumers are unchanged. |
-| Known `<r>` | A composition whose `revision` field is exactly `<r>` and whose `actions` are **that revision's action-name set**, serialized with **the `params_schema` Aevatar's `ValidatePinnedContract` selects for that revision**. Aevatar does per-revision schema selection, then `JsonNode.DeepEquals` against the chosen compiled constant — a local "current bytes only" rule cannot override the deployed validator. Descriptions use the current live text (Aevatar does not pin descriptions). Schema overrides live in the revision map (`PARAMS_SCHEMA_OVERRIDES_BY_REVISION`); a future split is a data row, not a compose-path branch. For `key.create` the split is identical on `origin/dev` and `origin/feature/integrate`: **v4, v5** → `KeyCreateParamsSchema` (no `minItems` / `maxItems` / `uniqueItems` on `allowedServiceIds`); **v6, v7, v8** → `LeastScopeKeyCreateParamsSchema` (the current live descriptor). v4 pins only `service.connect`, so `key.create` is not served there at all. The live consumer ask is `?revision={SupportedRegistryRevision}` (v7 on `origin/dev`, v8 on `origin/feature/integrate`); both of those select the least-scope schema. |
+| No `revision` query param | Latest body, byte-identical to the default composition (`schema_version` 4, `revision` `nyxid-assistant-actions.v8`, including all additive descriptors). This is the body Aevatar fetches. |
+| Known `<r>` | A composition whose `revision` field is exactly `<r>` and whose `actions` are that revision's action-name set. Schema overrides live in `PARAMS_SCHEMA_OVERRIDES_BY_REVISION`. |
 | Unknown `<r>` | `404` with the stable `not_found` / `1003` error body. No manifest fields. |
 | Malformed `<r>` (more than 128 characters, or any control character) | `400` with the stable `validation_error` / `1008` error body. |
 
-Known revisions are the static `revision → action-name set` map mirroring Aevatar `PinnedActionsByRevision` (`origin/dev` accepts `{v4, v5, v6, v7}`; `origin/feature/integrate` accepts those plus `v8`). v7's set is `{service.connect, key.create, key.rotate}` — not a prefix of the current default array (`service.reauthorize` sits at index 1). `aevatar-nyxid-actions.v1` is Aevatar's own composition namespace, not a NyxID-published revision; NyxID returns 404 for it. The checked-in file `tests/fixtures/assistant/aevatar-pinned-actions-by-revision.json` is a **manually synced mirror** of both `PinnedActionsByRevision` and `ExecutableActionsByRevision` per lineage; CI does not read the Aevatar clone, so a green test is not evidence that upstream has not moved.
+`aevatar-nyxid-actions.v1` is Aevatar's own composition namespace, not a
+NyxID-published revision; NyxID returns 404 for it. The checked-in file
+`tests/fixtures/assistant/aevatar-pinned-actions-by-revision.json` records three
+consumer-contract inputs for NyxID tests. They are the supported action names
+at the pinned source head, the additive default name golden, and the unknown
+action used to test skipping. The file is not a drift detector for upstream
+revision maps.
 
 The rate-limit exemption is exact-path (`/api/v1/assistant/actions`). Query strings do not change the path.
 
 #### Published-revision contract
 
-- **Immutable.** Once a revision is published, its action-name set and the `params_schema` served for each pinned action are never edited. A live-descriptor schema change is a new revision plus a historical override row, not a silent rewrite of an old composition.
-- **Monotone (each ⊆ the next), waves only append.** A new wave adds names under the current string as dormant descriptors, then a later revision-bump PR adds a new map entry whose set is the previous pin plus those names. Historical exception, frozen in Aevatar's pin map and not to be repeated: v5 (`WaveOneDraft`) listed `service.reauthorize` and `key.rotate`, then v6 (`LeastScope`) dropped them. From v6 onward the served sets are append-only.
-- **Dormant descriptors** (today: the 12 Wave-2 verbs) appear only in the default latest body. They are absent from every pinned revision set until a future revision pins them. No wave PR bumps `ASSISTANT_ACTIONS_REVISION`.
+- **Immutable.** Once a NyxID revision composition is published, its action-name set and the `params_schema` served for each named action are never edited. A live-descriptor schema change is a new revision plus a historical override row, not a silent rewrite of an old composition.
+- **Monotone (each ⊆ the next), waves only append.** A new wave adds names under the current string as additive descriptors, then a later revision-bump PR adds a new map entry whose set is the previous pin plus those names. One frozen historical exception must not be repeated. v5 listed `service.reauthorize` and `key.rotate`, then v6 dropped them. From v6 onward the served sets are append-only.
+- **Additive descriptors** appear in the default latest body. Aevatar skips names it does not know. No wave PR bumps `ASSISTANT_ACTIONS_REVISION` only to publish an additive descriptor.
 
-### Upstream consumer ask (Aevatar)
+### Upstream consumer fetch (Aevatar)
 
-Startup fetch should request:
+Startup fetch requests the bare path:
 
 ```text
-{Aevatar:NyxId:ApiBaseUrl}/api/v1/assistant/actions?revision={SupportedRegistryRevision}
+{Aevatar:NyxId:ApiBaseUrl}/api/v1/assistant/actions
 ```
 
-On `404` (older NyxID without negotiation), fall back to the bare path and existing set-membership validation. One URL-builder change plus fallback; NyxID and Aevatar can then deploy independently.
+The consumer does not require `?revision=`. NyxID may still serve historical
+compositions for its own clients.
 
 ## Top-level contract
 
 | Field | Value | Meaning |
 | --- | --- | --- |
-| `schema_version` | `4` | action request/report envelope generation |
-| `revision` | `nyxid-assistant-actions.v8` | exact composition snapshot expected by the pinned Aevatar client |
-| `actions` | descriptor array | actions that are both shipped by NyxID and executable by this Aevatar composition |
+| `schema_version` | `4` | action request/report envelope generation. A mismatch fails the whole registry |
+| `revision` | `nyxid-assistant-actions.v8` | observability label on the served composition |
+| `actions` | descriptor array | additive descriptors. Unknown or divergent entries degrade per action |
 
-Schema version and revision are independent checks. Aevatar rejects a version mismatch and rejects a revision mismatch. The registry is startup-pinned; a running host does not periodically refresh or replace it.
+The registry is startup-pinned. A running host retries only while the disabled
+fallback is installed.
 
 ## Shipped actions
 
@@ -193,12 +220,13 @@ The manifest schema defines structure. Aevatar and the browser apply additional 
 
 ### Where the browser is stricter than the published schema
 
-The manifest is the contract, and it is pinned byte-for-byte: Aevatar compares
-each published `params_schema` with `JsonNode.DeepEquals`, so a refinement
-added to the manifest to describe a browser-side rule would fail the pin and
-disable the whole registry. The rules below therefore live only in the browser
-and are invisible from the manifest. They are recorded here because a request
-that satisfies the published schema can still be refused.
+The manifest is the contract. Aevatar compares each known published
+`params_schema` with `JsonNode.DeepEquals` and skips that action when the
+descriptor diverges. A refinement added to the manifest to describe a
+browser-side rule would disable that one action, not the whole registry. The
+rules below therefore live only in the browser and are invisible from the
+manifest. They are recorded here because a request that satisfies the published
+schema can still be refused.
 
 | Parameter | Published schema | Browser rule (`frontend/src/schemas/assistant-actions.ts`) |
 | --- | --- | --- |
@@ -281,22 +309,34 @@ When `Aevatar:NyxId:AssistantActions:Enabled` is `true`, Aevatar registers a sta
 {Aevatar:NyxId:ApiBaseUrl}/api/v1/assistant/actions
 ```
 
-Once the consumer-ask above lands, that fetch appends `?revision={SupportedRegistryRevision}` and falls back to this bare path on 404.
-
 The source accepts an absolute HTTP or HTTPS NyxID base URL. It builds the registry URL from the configured origin and base path, performs one GET with response-header streaming, and enforces a 1 MiB limit from both `Content-Length` and bytes read.
 
-Startup then parses the JSON and validates at least:
+The loader rejects the whole response only when the top-level JSON is invalid,
+`schema_version` is not `4`, or `actions` is not an array. A missing, invalid,
+or future `revision` becomes an empty or preserved observability label. It does
+not reject the registry.
 
-- valid JSON object shape;
-- `schema_version == 4`;
-- `revision == "nyxid-assistant-actions.v8"`;
-- `actions` is an array;
-- action names, tier, risk, remember policy, description, and parameter-schema shape;
-- no duplicate action descriptor;
-- supported schema constructs; and
-- presence of every action this Aevatar version marks executable: `service.connect`, `service.reauthorize`, `key.create`, and `key.rotate` for the v8 composition.
+The loader evaluates each descriptor independently:
 
-Enabled startup fails if fetch, size, JSON, schema, revision, or required-action validation fails. The host therefore does not accept typed chat work with a partially loaded or ambiguous registry.
+- unknown action names are ignored.
+- a known action with an invalid tier, risk, remember policy, description,
+  parameter schema, or pinned descriptor contract is recorded and skipped.
+- a duplicate known action leaves the first valid entry loaded and records the
+  duplicate as a skipped descriptor.
+- missing or skipped known actions stay unavailable while valid actions remain
+  loaded.
+
+The executable set is the intersection of valid loaded descriptors and
+Aevatar's closed executable-action set. At the pinned source head that set is
+`service.connect`, `key.create`, and `key.rotate`. The loader knows the
+`service.reauthorize` descriptor contract, but Aevatar does not emit that
+action.
+
+Startup fetches at most three times with a one-second delay. If all three
+attempts fail, Aevatar installs an immutable disabled fallback and starts
+background recovery. Recovery starts at 30 seconds, doubles its delay to a
+five-minute ceiling, and may replace only that fallback with the first valid
+served registry. A served registry is never replaced.
 
 When the feature is disabled, Aevatar injects an immutable empty registry instead of running the fetch service. No action is executable, and attempts to resolve action requests fail closed as unsupported.
 
@@ -311,7 +351,7 @@ The upstream implementation anchors are:
 
 Risk and remember eligibility come from the pinned registry definition. An action request cannot override them. Aevatar rejects caller-supplied risk or remember-policy values during request validation.
 
-Unknown manifest actions that are not compiled into Aevatar do not become executable merely because NyxID publishes them. Conversely, Aevatar refuses startup if an action it requires for the current executable set is missing. Shipping a new action therefore requires coordinated support in:
+Unknown manifest actions that are not compiled into Aevatar do not become executable merely because NyxID publishes them. A missing or divergent known descriptor disables only that action. Shipping a new executable action therefore requires coordinated support in:
 
 - NyxID's static manifest;
 - Aevatar's compiled action contract and typed producer;

@@ -154,10 +154,6 @@ export type ChatActorStep = {
 export type ChatPlanGate = {
   readonly mode: "auto" | "confirm";
   readonly status?: "pending" | "satisfied" | "rejected";
-  readonly requestId?: string;
-  readonly taskId?: string;
-  readonly planId?: string;
-  readonly planRevision?: number;
   readonly reason?: string;
   readonly decidedAt?: string;
 };
@@ -297,7 +293,7 @@ export function decodeChatTaskPlan(input: unknown): ChatTaskPlan {
       : {}),
     ...(value.gate === undefined || value.gate === null
       ? {}
-      : { gate: decodeGate(value.gate, taskId, planId, planRevision) }),
+      : { gate: decodeGate(value.gate) }),
     steps: ordered,
   };
 }
@@ -440,14 +436,9 @@ function decodeApprovalObservation(input: unknown): ChatApprovalObservation {
   };
 }
 
-function decodeGate(
-  input: unknown,
-  taskId: string,
-  planId: string,
-  planRevision: number,
-): ChatPlanGate {
+function decodeGate(input: unknown): ChatPlanGate {
   const value = record(input, "plan gate");
-  const gate: ChatPlanGate = {
+  return {
     mode: closed(value.mode, ["auto", "confirm"] as const, "gate.mode"),
     ...(value.status !== undefined
       ? {
@@ -458,18 +449,6 @@ function decodeGate(
           ),
         }
       : {}),
-    ...(optionalIdentity(value.requestId)
-      ? { requestId: optionalIdentity(value.requestId) }
-      : {}),
-    ...(optionalIdentity(value.taskId)
-      ? { taskId: optionalIdentity(value.taskId) }
-      : {}),
-    ...(optionalIdentity(value.planId)
-      ? { planId: optionalIdentity(value.planId) }
-      : {}),
-    ...(optionalInteger(value.planRevision, 1) !== undefined
-      ? { planRevision: optionalInteger(value.planRevision, 1) }
-      : {}),
     ...(optionalString(value.reason)
       ? { reason: optionalString(value.reason) }
       : {}),
@@ -477,19 +456,6 @@ function decodeGate(
       ? { decidedAt: optionalString(value.decidedAt) }
       : {}),
   };
-  if (gate.mode === "confirm" && gate.status === "pending") {
-    if (
-      !gate.requestId ||
-      gate.taskId !== taskId ||
-      gate.planId !== planId ||
-      gate.planRevision !== planRevision
-    ) {
-      throw invalid(
-        "Pending plan gate does not bind the exact TaskPlan identity.",
-      );
-    }
-  }
-  return gate;
 }
 
 function decodeRevision(input: unknown): ChatPlanRevision {

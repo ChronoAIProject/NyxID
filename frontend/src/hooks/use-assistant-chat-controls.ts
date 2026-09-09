@@ -12,7 +12,6 @@ import type {
 import { createClientId, stringField } from "@/lib/assistant/chat-session-state";
 import { currentActorTurnId, ReaderStoppedError } from "@/lib/assistant/chat-session-runtime";
 import type { ChatSessionState } from "@/lib/assistant/chat-types";
-import type { ChatPlanGate } from "@/lib/assistant/chat-task-plan";
 import type { ActionReport } from "@/schemas/assistant-actions";
 
 type ControlCommand = Exclude<ChatCommand, { readonly type: "text" }>;
@@ -77,33 +76,6 @@ export function useAssistantChatControls({
         clientRequestId: createClientId(),
         approved,
         ...(reason?.trim() ? { reason: reason.trim() } : {}),
-        expectedStateVersion: context.state.stateVersion,
-      });
-    },
-    [controlContext, dispatchAcceptedCommand],
-  );
-
-  const resolvePlan = useCallback(
-    async (confirmed: boolean, gate: ChatPlanGate) => {
-      const context = controlContext();
-      if (
-        !context ||
-        gate.mode !== "confirm" ||
-        gate.status !== "pending" ||
-        !gate.requestId ||
-        !gate.taskId ||
-        !gate.planId ||
-        gate.planRevision === undefined
-      ) return;
-      await dispatchAcceptedCommand(context.key, {
-        type: "plan.resolve",
-        conversationId: context.conversationId,
-        taskId: gate.taskId,
-        planId: gate.planId,
-        requestId: gate.requestId,
-        clientRequestId: createClientId(),
-        planRevision: gate.planRevision,
-        confirmed,
         expectedStateVersion: context.state.stateVersion,
       });
     },
@@ -208,7 +180,6 @@ export function useAssistantChatControls({
     reportAction,
     resolveApproval,
     resolveInput,
-    resolvePlan,
     steer,
     stop,
   } as const;

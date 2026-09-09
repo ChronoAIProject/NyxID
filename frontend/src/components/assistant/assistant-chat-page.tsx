@@ -196,7 +196,6 @@ export function AssistantChatPage() {
       actionOverrides={chat.actionOverrides}
       onResolveInput={chat.resolveInput}
       onResolveApproval={chat.resolveApproval}
-      onResolvePlan={chat.resolvePlan}
       onStop={chat.stop}
       onControlStep={chat.controlStep}
       onActionProgress={(requestId, active) =>

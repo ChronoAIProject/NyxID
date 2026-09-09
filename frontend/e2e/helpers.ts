@@ -18,6 +18,10 @@ export const SEEDED = {
   },
   github: { id: "conversation-github", title: "Rotate GitHub deploy key" },
   weekly: { id: "conversation-weekly", title: "Weekly usage report" },
+  taskPlan: {
+    id: "conversation-task-plan",
+    title: "Historical task plan",
+  },
 } as const;
 
 /** Final text every scripted mock turn streams (createScriptedTurn). */

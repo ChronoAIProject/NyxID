@@ -1022,7 +1022,6 @@ describe("useAssistantChat", () => {
     const projection = result.current.projection!;
     const input = projection.pendingInput!;
     const approval = projection.pendingApproval!;
-    const gate = projection.task!.gate!;
     const step = projection.steps.get("step-active")!;
 
     await act(async () =>
@@ -1035,7 +1034,6 @@ describe("useAssistantChat", () => {
         "Not now",
       ),
     );
-    await act(async () => result.current.resolvePlan(true, gate));
     await act(async () => result.current.steer("Keep the current scope"));
     await act(async () => result.current.controlStep("step.retry", step));
     await act(async () => result.current.controlStep("step.skip", step));
@@ -1051,20 +1049,19 @@ describe("useAssistantChat", () => {
     expect(commands.map((command) => command.type)).toEqual([
       "input.resolve",
       "approval.resolve",
-      "plan.resolve",
       "task.steer",
       "step.retry",
       "step.skip",
       "task.stop",
       "action.continue",
     ]);
-    for (const command of commands.slice(0, 7)) {
+    for (const command of commands.slice(0, 6)) {
       expect(command.expectedStateVersion).toBe(7);
     }
     expect(commands[1]).toMatchObject({ approved: false, reason: "Not now" });
+    expect(commands[3]).toMatchObject({ expectedOperationGeneration: 4 });
     expect(commands[4]).toMatchObject({ expectedOperationGeneration: 4 });
-    expect(commands[5]).toMatchObject({ expectedOperationGeneration: 4 });
-    expect(stateReads).toBeGreaterThanOrEqual(10);
+    expect(stateReads).toBeGreaterThanOrEqual(9);
     expect(
       result.current.session?.messages.some(
         (message) => message.content === "NyxID action update: declined.",
@@ -1158,9 +1155,6 @@ describe("useAssistantChat", () => {
         projection.pendingApproval!.approvalRequestId,
         true,
       ),
-    );
-    await act(async () =>
-      result.current.resolvePlan(true, projection.task!.gate!),
     );
     await act(async () => result.current.steer("Do not send"));
     await act(async () =>

@@ -248,12 +248,6 @@ pub fn canonical_state_path(conversation_id: &str) -> AppResult<String> {
     ))
 }
 
-/// `v1/chat/completions` -- OpenAI-compatible surface. Scope-free: the
-/// endpoint is stateless and carries its history in the request body.
-pub fn completions_path() -> String {
-    "v1/chat/completions".to_string()
-}
-
 /// `api/chat` -- typed NyxIdChat create-and-first-turn stream.
 ///
 /// Aevatar selects the typed NyxIdChat producer from the discriminated body
@@ -309,12 +303,22 @@ pub enum AssistantChatCommand {
     InputResolve(InputResolveCommand),
     ActionContinue(ActionContinueCommand),
     ApprovalResolve(ApprovalResolveCommand),
-    PlanResolve(PlanResolveCommand),
     TaskStop(TaskStopCommand),
     TaskSteer(TaskSteerCommand),
     StepRetry(StepRetryCommand),
     StepSkip(StepSkipCommand),
 }
+
+const ASSISTANT_CHAT_COMMAND_TYPES: [&str; 8] = [
+    "text",
+    "input.resolve",
+    "action.continue",
+    "approval.resolve",
+    "task.stop",
+    "task.steer",
+    "step.retry",
+    "step.skip",
+];
 
 impl AssistantChatCommand {
     pub fn conversation_id(&self) -> Option<&str> {
@@ -323,7 +327,6 @@ impl AssistantChatCommand {
             Self::InputResolve(command) => Some(&command.conversation_id),
             Self::ActionContinue(command) => Some(&command.conversation_id),
             Self::ApprovalResolve(command) => Some(&command.conversation_id),
-            Self::PlanResolve(command) => Some(&command.conversation_id),
             Self::TaskStop(command) => Some(&command.conversation_id),
             Self::TaskSteer(command) => Some(&command.conversation_id),
             Self::StepRetry(command) => Some(&command.conversation_id),
@@ -384,18 +387,6 @@ pub struct ApprovalResolveCommand {
     pub request_id: String,
     pub approved: bool,
     pub reason: Option<String>,
-    pub expected_state_version: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PlanResolveCommand {
-    pub conversation_id: String,
-    pub task_id: String,
-    pub plan_id: String,
-    pub request_id: String,
-    pub client_request_id: String,
-    pub plan_revision: i64,
-    pub confirmed: bool,
     pub expected_state_version: i64,
 }
 
@@ -628,21 +619,6 @@ struct RawApprovalResolveCommand {
     approved: bool,
     #[serde(default)]
     reason: Option<String>,
-    expected_state_version: i64,
-}
-
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RawPlanResolveCommand {
-    #[serde(rename = "type")]
-    _command_type: String,
-    conversation_id: String,
-    task_id: String,
-    plan_id: String,
-    request_id: String,
-    client_request_id: String,
-    plan_revision: i64,
-    confirmed: bool,
     expected_state_version: i64,
 }
 
@@ -904,6 +880,11 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
             AppError::BadRequest("Assistant chat commands require a type.".to_string())
         })?;
     reject_secret_shaped_command(&value)?;
+    if !ASSISTANT_CHAT_COMMAND_TYPES.contains(&command_type) {
+        return Err(AppError::BadRequest(
+            "Unsupported assistant chat command.".to_string(),
+        ));
+    }
 
     match command_type {
         "text" => {
@@ -918,28 +899,6 @@ pub fn parse_assistant_chat_command(bytes: &[u8]) -> AppResult<AssistantChatComm
                 prompt: raw.prompt,
                 client_request_id: raw.client_request_id,
                 conversation_id: raw.conversation_id,
-            }))
-        }
-        "plan.resolve" => {
-            let raw: RawPlanResolveCommand = serde_json::from_value(value).map_err(|e| {
-                AppError::BadRequest(format!("Invalid plan resolution request: {e}"))
-            })?;
-            validate_typed_conversation_id(&raw.conversation_id)?;
-            validate_control_identity(&raw.task_id, "taskId")?;
-            validate_control_identity(&raw.plan_id, "planId")?;
-            validate_control_identity(&raw.request_id, "requestId")?;
-            validate_control_identity(&raw.client_request_id, "clientRequestId")?;
-            validate_positive(raw.plan_revision, "planRevision")?;
-            validate_positive(raw.expected_state_version, "expectedStateVersion")?;
-            Ok(AssistantChatCommand::PlanResolve(PlanResolveCommand {
-                conversation_id: raw.conversation_id,
-                task_id: raw.task_id,
-                plan_id: raw.plan_id,
-                request_id: raw.request_id,
-                client_request_id: raw.client_request_id,
-                plan_revision: raw.plan_revision,
-                confirmed: raw.confirmed,
-                expected_state_version: raw.expected_state_version,
             }))
         }
         "input.resolve" => {
@@ -1284,21 +1243,6 @@ pub fn prepare_assistant_chat_command(
                 response_kind: AssistantChatResponseKind::Json,
             })
         }
-        AssistantChatCommand::PlanResolve(command) => Ok(PreparedAssistantChatCommand {
-            body: serde_json::json!({
-                "type": "plan.resolve",
-                "conversationId": command.conversation_id,
-                "taskId": command.task_id,
-                "planId": command.plan_id,
-                "requestId": command.request_id,
-                "clientRequestId": command.client_request_id,
-                "planRevision": command.plan_revision,
-                "confirmed": command.confirmed,
-                "expectedStateVersion": command.expected_state_version,
-            }),
-            client_request_id: command.client_request_id.clone(),
-            response_kind: AssistantChatResponseKind::Json,
-        }),
         AssistantChatCommand::TaskStop(command) => Ok(PreparedAssistantChatCommand {
             body: serde_json::json!({
                 "type": "task.stop",
@@ -1371,6 +1315,22 @@ mod tests {
         parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).unwrap()
     }
 
+    fn command_type_is_recognized(command_type: &str) -> bool {
+        let body = json!({ "type": command_type });
+        !matches!(
+            parse_assistant_chat_command(&serde_json::to_vec(&body).unwrap()),
+            Err(AppError::BadRequest(message))
+                if message == "Unsupported assistant chat command."
+        )
+    }
+
+    fn contract_pin() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/assistant/aevatar-chat-contract-pin.json"
+        ))
+        .expect("AC-0 pin must parse")
+    }
+
     macro_rules! command_contract_test {
         ($name:ident, $variant:ident, $body:expr, $response_kind:expr) => {
             #[test]
@@ -1437,23 +1397,6 @@ mod tests {
             "clientRequestId": "client-text-1"
         }),
         AssistantChatResponseKind::Stream
-    );
-
-    command_contract_test!(
-        plan_resolve_command_matches_the_typed_contract,
-        PlanResolve,
-        json!({
-            "type": "plan.resolve",
-            "conversationId": CONV,
-            "taskId": "task-alpha",
-            "planId": "plan-alpha",
-            "requestId": "plan-gate-alpha",
-            "clientRequestId": "client-plan-alpha",
-            "planRevision": 3,
-            "confirmed": true,
-            "expectedStateVersion": 23
-        }),
-        AssistantChatResponseKind::Json
     );
 
     command_contract_test!(
@@ -1713,7 +1656,6 @@ mod tests {
             ConversationResourceFamily::Legacy
         );
         assert_eq!(typed_chat_path(), "api/chat");
-        assert_eq!(completions_path(), "v1/chat/completions");
     }
 
     #[test]
@@ -1757,29 +1699,6 @@ mod tests {
     }
 
     #[test]
-    fn plan_resolve_requires_an_explicit_confirmed_decision() {
-        let error = parse_assistant_chat_command(
-            &serde_json::to_vec(&json!({
-                "type": "plan.resolve",
-                "conversationId": CONV,
-                "taskId": "task-alpha",
-                "planId": "plan-alpha",
-                "requestId": "plan-gate-alpha",
-                "clientRequestId": "client-plan-alpha",
-                "planRevision": 3,
-                "expectedStateVersion": 23
-            }))
-            .unwrap(),
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            axum::response::IntoResponse::into_response(error).status(),
-            axum::http::StatusCode::BAD_REQUEST
-        );
-    }
-
-    #[test]
     fn legacy_conversation_ids_are_rejected_by_every_typed_verb() {
         let mut commands = vec![
             json!({
@@ -1787,17 +1706,6 @@ mod tests {
                 "prompt": "continue",
                 "clientRequestId": "client-text-1",
                 "conversationId": WORKFLOW_CONV
-            }),
-            json!({
-                "type": "plan.resolve",
-                "conversationId": WORKFLOW_CONV,
-                "taskId": "task-1",
-                "planId": "plan-1",
-                "requestId": "gate-1",
-                "clientRequestId": "client-plan-1",
-                "planRevision": 1,
-                "confirmed": true,
-                "expectedStateVersion": 1
             }),
             json!({
                 "type": "input.resolve",
@@ -1886,6 +1794,48 @@ mod tests {
             .unwrap(),
         )
         .unwrap_err();
+
+        assert_eq!(
+            axum::response::IntoResponse::into_response(error).status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn accepted_command_types_match_aevatar_chat_contract_pin() {
+        let pin = contract_pin();
+        let expected: Vec<&str> = pin["public_commands"]
+            .as_array()
+            .expect("pin public_commands")
+            .iter()
+            .map(|value| value.as_str().expect("command name"))
+            .collect();
+        assert_eq!(ASSISTANT_CHAT_COMMAND_TYPES.as_slice(), expected);
+        assert!(
+            ASSISTANT_CHAT_COMMAND_TYPES
+                .iter()
+                .all(|command_type| command_type_is_recognized(command_type))
+        );
+        assert!(!command_type_is_recognized("plan.resolve"));
+    }
+
+    #[test]
+    fn plan_resolve_is_rejected_at_the_typed_boundary() {
+        let error = parse_assistant_chat_command(
+            &serde_json::to_vec(&json!({
+                "type": "plan.resolve",
+                "conversationId": CONV,
+                "taskId": "task-alpha",
+                "planId": "plan-alpha",
+                "requestId": "plan-gate-alpha",
+                "clientRequestId": "client-plan-alpha",
+                "planRevision": 3,
+                "confirmed": true,
+                "expectedStateVersion": 23
+            }))
+            .unwrap(),
+        )
+        .expect_err("plan.resolve must fail at NyxID's typed boundary");
 
         assert_eq!(
             axum::response::IntoResponse::into_response(error).status(),
@@ -2435,92 +2385,6 @@ mod tests {
                 "approved": true,
                 "expectedStateVersion": 21,
                 "stateVersion": 21
-            }),
-        ] {
-            assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());
-        }
-    }
-
-    #[test]
-    fn parses_and_rebuilds_exact_plan_resolution() {
-        let prepared = prepare_assistant_chat_command(&parse_command(json!({
-            "type": "plan.resolve",
-            "conversationId": CONV,
-            "taskId": "task-alpha",
-            "planId": "plan-alpha",
-            "requestId": "plan-gate-alpha",
-            "clientRequestId": "client-plan-alpha",
-            "planRevision": 3,
-            "confirmed": true,
-            "expectedStateVersion": 23
-        })))
-        .unwrap();
-
-        assert_eq!(prepared.response_kind, AssistantChatResponseKind::Json);
-        assert_eq!(prepared.client_request_id, "client-plan-alpha");
-        assert_eq!(
-            prepared.body,
-            json!({
-                "type": "plan.resolve",
-                "conversationId": CONV,
-                "taskId": "task-alpha",
-                "planId": "plan-alpha",
-                "requestId": "plan-gate-alpha",
-                "clientRequestId": "client-plan-alpha",
-                "planRevision": 3,
-                "confirmed": true,
-                "expectedStateVersion": 23
-            })
-        );
-    }
-
-    #[test]
-    fn plan_resolution_requires_exact_positive_identities_and_versions() {
-        for value in [
-            json!({
-                "type": "plan.resolve",
-                "conversationId": CONV,
-                "taskId": "task-alpha",
-                "planId": "plan-alpha",
-                "requestId": "plan-gate-alpha",
-                "clientRequestId": "client-plan-alpha",
-                "planRevision": 0,
-                "confirmed": true,
-                "expectedStateVersion": 23
-            }),
-            json!({
-                "type": "plan.resolve",
-                "conversationId": CONV,
-                "taskId": "task-alpha",
-                "planId": "bad/plan",
-                "requestId": "plan-gate-alpha",
-                "clientRequestId": "client-plan-alpha",
-                "planRevision": 3,
-                "confirmed": false,
-                "expectedStateVersion": 23
-            }),
-            json!({
-                "type": "plan.resolve",
-                "conversationId": CONV,
-                "taskId": "task-alpha",
-                "planId": "plan-alpha",
-                "requestId": "plan-gate-alpha",
-                "clientRequestId": "client-plan-alpha",
-                "planRevision": 3,
-                "confirmed": true,
-                "expectedStateVersion": 0
-            }),
-            json!({
-                "type": "plan.resolve",
-                "conversationId": CONV,
-                "taskId": "task-alpha",
-                "planId": "plan-alpha",
-                "requestId": "plan-gate-alpha",
-                "clientRequestId": "client-plan-alpha",
-                "planRevision": 3,
-                "confirmed": true,
-                "expectedStateVersion": 23,
-                "stateVersion": 23
             }),
         ] {
             assert!(parse_assistant_chat_command(&serde_json::to_vec(&value).unwrap()).is_err());

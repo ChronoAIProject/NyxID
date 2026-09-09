@@ -1,77 +1,84 @@
 {
-  "sync": {
-    "kind": "manually_synced_mirror",
-    "not_a_drift_detector": true,
-    "source_file": "agents/Aevatar.GAgents.NyxidChat/NyxIdAssistantActionRegistry.cs",
-    "maps": ["PinnedActionsByRevision", "ExecutableActionsByRevision"],
-    "verified_at": "2026-08-20",
-    "verified_revs": {
-      "origin/dev": "f3e1e81500bcaef8d26acbe6ed28452089edc2e4",
-      "origin/feature/integrate": "7d16dbcc5be96ace03e48bf80fdeae20547cf22e"
-    },
-    "note": "Checked-in copy of Aevatar's per-revision pinned and executable sets. CI does not read the Aevatar clone; if upstream changes a set, this file stays green until a human re-syncs it."
-  },
-  "lineages": {
-    "origin/dev": {
-      "supported_revision": "nyxid-assistant-actions.v7",
-      "revisions": {
-        "nyxid-assistant-actions.v4": {
-          "pinned": ["service.connect"],
-          "executable": ["service.connect"]
-        },
-        "nyxid-assistant-actions.v5": {
-          "pinned": [
-            "service.connect",
-            "service.reauthorize",
-            "key.create",
-            "key.rotate"
-          ],
-          "executable": ["service.connect"]
-        },
-        "nyxid-assistant-actions.v6": {
-          "pinned": ["service.connect", "key.create"],
-          "executable": ["service.connect", "key.create"]
-        },
-        "nyxid-assistant-actions.v7": {
-          "pinned": ["service.connect", "key.create", "key.rotate"],
-          "executable": ["service.connect", "key.create", "key.rotate"]
-        }
-      }
-    },
-    "origin/feature/integrate": {
-      "supported_revision": "nyxid-assistant-actions.v8",
-      "revisions": {
-        "nyxid-assistant-actions.v4": {
-          "pinned": ["service.connect"],
-          "executable": ["service.connect"]
-        },
-        "nyxid-assistant-actions.v5": {
-          "pinned": [
-            "service.connect",
-            "service.reauthorize",
-            "key.create",
-            "key.rotate"
-          ],
-          "executable": ["service.connect"]
-        },
-        "nyxid-assistant-actions.v6": {
-          "pinned": ["service.connect", "key.create"],
-          "executable": ["service.connect", "key.create"]
-        },
-        "nyxid-assistant-actions.v7": {
-          "pinned": ["service.connect", "key.create", "key.rotate"],
-          "executable": ["service.connect", "key.create", "key.rotate"]
-        },
-        "nyxid-assistant-actions.v8": {
-          "pinned": [
-            "service.connect",
-            "service.reauthorize",
-            "key.create",
-            "key.rotate"
-          ],
-          "executable": ["service.connect", "key.create", "key.rotate"]
-        }
-      }
-    }
-  }
+  "consumer_supported_actions": [
+    "service.connect",
+    "service.reauthorize",
+    "key.create",
+    "key.rotate",
+    "provider.set_app_credentials",
+    "node.register_token",
+    "node.rotate_token",
+    "node.inject_credential",
+    "device.onboard",
+    "account.mfa_setup",
+    "service_account.create",
+    "service_account.rotate_secret",
+    "developer_app.create",
+    "developer_app.rotate_secret"
+  ],
+  "pinned_descriptor_actions": [
+    "service.connect",
+    "service.reauthorize",
+    "key.create",
+    "key.rotate"
+  ],
+  "unknown_action": "workflow.launch",
+  "default_action_names": [
+    "service.connect",
+    "service.reauthorize",
+    "key.create",
+    "key.rotate",
+    "key.update",
+    "key.delete",
+    "key.extend_scope",
+    "key.bind_credential",
+    "service.update",
+    "service.delete",
+    "service.route",
+    "service.rotate_credential",
+    "endpoint.update",
+    "endpoint.delete",
+    "external_key.rotate",
+    "external_key.delete",
+    "connection.revoke",
+    "provider.disconnect",
+    "provider.set_app_credentials",
+    "node.register_token",
+    "node.rotate_token",
+    "node.delete",
+    "node.transfer",
+    "node.inject_credential",
+    "pending_credential.push",
+    "pending_credential.cancel",
+    "device.onboard",
+    "org.create",
+    "org.update",
+    "org.delete",
+    "org.member_add",
+    "org.member_remove",
+    "org.member_update_role",
+    "org.invite",
+    "org.set_primary",
+    "account.profile_update",
+    "account.revoke_consent",
+    "account.delete",
+    "account.mfa_setup",
+    "approval.configure",
+    "approval.enable",
+    "approval.disable",
+    "approval.revoke_grant",
+    "notifications.update",
+    "notifications.telegram_link",
+    "notifications.telegram_disconnect",
+    "service_account.create",
+    "service_account.update",
+    "service_account.delete",
+    "service_account.rotate_secret",
+    "service_account.revoke_tokens",
+    "developer_app.create",
+    "developer_app.update",
+    "developer_app.delete",
+    "developer_app.rotate_secret",
+    "external_key.add_gcp_service_account",
+    "openclaw.connect"
+  ]
 }
