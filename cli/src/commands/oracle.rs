@@ -25,7 +25,10 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::api::ApiClient;
-use crate::cli::{OracleCommands, OraclePoolCommands, OracleWorkerCommands, OutputFormat};
+use crate::cli::{
+    OracleCommands, OracleLoginProfileCommands, OraclePoolCommands, OracleWorkerCommands,
+    OutputFormat,
+};
 use crate::commands::oracle_worker_daemon::{self, OracleWorkerConfig};
 use crate::org_resolver::resolve_org_id;
 
@@ -241,10 +244,12 @@ pub async fn run(command: OracleCommands) -> Result<()> {
         OracleCommands::Worker { command } => run_worker(command).await,
         OracleCommands::Login {
             pool,
+            save_as,
             worker_token_file,
             wait,
             auth,
-        } => run_login(pool, worker_token_file, wait, auth).await,
+        } => run_login(pool, save_as, worker_token_file, wait, auth).await,
+        OracleCommands::LoginProfile { command } => run_login_profile(command).await,
         OracleCommands::Sessions { pool, limit, auth } => {
             let output = auth.output;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
@@ -488,8 +493,101 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
     }
 }
 
+fn validate_login_profile_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        bail!("Login profile name must be 1-64 letters, digits, '-' or '_'");
+    }
+    Ok(())
+}
+
+async fn run_login_profile(command: OracleLoginProfileCommands) -> Result<()> {
+    match command {
+        OracleLoginProfileCommands::List { pool, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let response: Value = api
+                .get(&format!(
+                    "/oracle/pools/{}/login-profiles",
+                    urlencoding::encode(&pool)
+                ))
+                .await?;
+            if matches!(auth.output, OutputFormat::Json) {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                let mut table = Table::new();
+                table.load_preset(UTF8_FULL_CONDENSED);
+                table.set_header(["Name", "Status", "Retained Until", "Workers"]);
+                for row in response["profiles"].as_array().into_iter().flatten() {
+                    let workers = row["workers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    table.add_row([
+                        text_field(row, "name"),
+                        text_field(row, "status"),
+                        text_field(row, "expires_at"),
+                        workers,
+                    ]);
+                }
+                println!("{table}");
+            }
+            Ok(())
+        }
+        OracleLoginProfileCommands::Delete { pool, name, auth } => {
+            validate_login_profile_name(&name)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            api.delete_empty(&format!(
+                "/oracle/pools/{}/login-profiles/{}",
+                urlencoding::encode(&pool),
+                urlencoding::encode(&name)
+            ))
+            .await?;
+            eprintln!("Deleted saved login '{name}' and its bindings.");
+            Ok(())
+        }
+    }
+}
+
 async fn run_worker(command: OracleWorkerCommands) -> Result<()> {
     match command {
+        OracleWorkerCommands::BindLogin {
+            pool,
+            label,
+            login_profile,
+            replace_existing,
+            auth,
+        } => {
+            validate_login_profile_name(&login_profile)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let response: Value = api.put(&format!("{}/login-profile", worker_path(&pool, &label)),
+                &serde_json::json!({ "login_profile": login_profile, "replace_existing": replace_existing })).await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                OutputFormat::Table => {
+                    eprintln!("Worker '{label}' is bound to saved login '{login_profile}'.")
+                }
+            }
+            if response["requires_upgrade"].as_bool() == Some(true) {
+                eprintln!(
+                    "This worker needs an upgrade before it can use the saved login: nyxid oracle worker upgrade --pool {pool} --label {label}"
+                );
+            }
+            Ok(())
+        }
+        OracleWorkerCommands::UnbindLogin { pool, label, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            api.delete_empty(&format!("{}/login-profile", worker_path(&pool, &label)))
+                .await?;
+            eprintln!("Saved login unbound from worker '{label}'.");
+            Ok(())
+        }
         OracleWorkerCommands::List { pool, auth } => {
             let output = auth.output;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
@@ -513,9 +611,10 @@ async fn run_worker(command: OracleWorkerCommands) -> Result<()> {
             pool,
             worker_token_file,
             label,
+            login_profile,
             force,
             auth,
-        } => install_worker(pool, worker_token_file, label, force, auth).await,
+        } => install_worker(pool, worker_token_file, label, login_profile, force, auth).await,
         OracleWorkerCommands::Start { pool, profile } => {
             oracle_worker_daemon::start(&pool, profile.as_deref())
         }
@@ -888,9 +987,13 @@ async fn install_worker(
     pool: String,
     worker_token_file: Option<String>,
     requested_label: Option<String>,
+    login_profile: Option<String>,
     force: bool,
     auth: crate::cli::AuthArgs,
 ) -> Result<()> {
+    if let Some(name) = login_profile.as_deref() {
+        validate_login_profile_name(name)?;
+    }
     let profile = auth.profile.clone();
     let base_url = auth.resolved_base_url()?;
     let mut api = ApiClient::from_auth_checked(&auth).await?;
@@ -961,6 +1064,12 @@ async fn install_worker(
             format!("{}\n", uuid::Uuid::new_v4()).as_bytes(),
         )?;
     }
+    if let Some(name) = login_profile.as_deref() {
+        let installation_id = fs::read_to_string(&installation_id_file)?;
+        let _: Value = api.put(&format!("{}/login-profile", worker_path(&pool, &label)),
+            &serde_json::json!({ "login_profile": name, "installation_id": installation_id.trim(),
+                "replace_existing": false })).await?;
+    }
     let config = OracleWorkerConfig {
         pool: pool.clone(),
         label: label.clone(),
@@ -984,7 +1093,13 @@ async fn install_worker(
     oracle_worker_daemon::start(&pool, profile.as_deref())?;
 
     eprintln!("Installed oracle worker '{label}' for pool '{pool}'.");
-    eprintln!("Complete ChatGPT login in the dedicated Chrome window.");
+    if let Some(name) = login_profile {
+        eprintln!(
+            "Worker will claim saved login '{name}'; an existing logged-in account is preserved."
+        );
+    } else {
+        eprintln!("Complete ChatGPT login in the dedicated Chrome window.");
+    }
     eprintln!(
         "Check registration with: nyxid oracle worker list {pool}{}",
         profile
@@ -1344,6 +1459,7 @@ fn set_private_dir(path: &Path) -> Result<()> {
 
 async fn run_login(
     pool: String,
+    save_as: Option<String>,
     worker_token_file: Option<String>,
     wait_secs: u64,
     auth: crate::cli::AuthArgs,
@@ -1351,6 +1467,22 @@ async fn run_login(
     let output = auth.output;
     let profile = auth.profile.clone();
     let mut api = ApiClient::from_auth_checked(&auth).await?;
+    let expected_generation = if let Some(name) = save_as.as_deref() {
+        validate_login_profile_name(name)?;
+        let profiles: Value = api
+            .get(&format!(
+                "/oracle/pools/{}/login-profiles",
+                urlencoding::encode(&pool)
+            ))
+            .await?;
+        profiles["profiles"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["name"].as_str() == Some(name)))
+            .and_then(|row| row["generation"].as_str())
+            .map(str::to_owned)
+    } else {
+        None
+    };
     let token = read_worker_token(
         &pool,
         profile.as_deref(),
@@ -1378,10 +1510,13 @@ async fn run_login(
     wait_for_cdp(port, Duration::from_secs(30))?;
 
     eprintln!("Complete the ChatGPT login in the Chrome window that just opened.");
-    eprintln!(
-        "The session is captured locally once ChatGPT shows as logged in, then pushed to the pool \
-         (up to {wait_secs}s)."
-    );
+    if let Some(name) = save_as.as_deref() {
+        eprintln!("The session will be captured and saved as '{name}' (up to {wait_secs}s).");
+    } else {
+        eprintln!(
+            "The session is captured locally once ChatGPT shows as logged in, then pushed to the pool (up to {wait_secs}s)."
+        );
+    }
     let capture_file = capture_dir.join("session.json");
     let status = Command::new(&node)
         .arg(capture_dir.join("worker.mjs"))
@@ -1413,24 +1548,46 @@ async fn run_login(
         encrypt_login_snapshot(plaintext.as_slice(), token.as_bytes())?
     });
     let verifier = hex::encode(Sha256::digest(token.as_bytes()));
-    let response: Value = api
-        .post(
+    let mut body = serde_json::json!({
+        "format_version": SESSION_FORMAT_VERSION, "worker_token_sha256": verifier,
+        "sealed_blob_base64": base64::engine::general_purpose::STANDARD.encode(sealed.as_slice()),
+    });
+    let response: Value = if let Some(name) = save_as.as_deref() {
+        body["expected_generation"] = serde_json::json!(expected_generation);
+        api.put(
+            &format!(
+                "/oracle/pools/{}/login-profiles/{}",
+                urlencoding::encode(&pool),
+                urlencoding::encode(name)
+            ),
+            &body,
+        )
+        .await?
+    } else {
+        api.post(
             &format!(
                 "/oracle/pools/{}/login-snapshots",
                 urlencoding::encode(&pool)
             ),
-            &serde_json::json!({
-                "format_version": SESSION_FORMAT_VERSION,
-                "worker_token_sha256": verifier,
-                "sealed_blob_base64": base64::engine::general_purpose::STANDARD.encode(sealed.as_slice()),
-            }),
+            &body,
         )
-        .await?;
+        .await?
+    };
     drop(sealed);
     capture_browser.stop()?;
     capture_workspace
         .close()
         .context("Could not remove the temporary login-capture profile")?;
+    if let Some(name) = save_as {
+        match output {
+            OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+            OutputFormat::Table => eprintln!(
+                "Saved login '{name}' until {}. Bound workers will claim it when idle.",
+                text_field(&response, "expires_at")
+            ),
+        }
+        return Ok(());
+    }
     let outcomes = wait_for_login_imports(&mut api, &pool, &response, wait_secs).await?;
     let all_verified = !outcomes.is_empty()
         && outcomes.iter().all(|result| {
@@ -2120,6 +2277,77 @@ mod tests {
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    #[tokio::test]
+    async fn saved_login_binding_and_lifecycle_use_manager_routes_without_fanout() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path(
+                "/api/v1/oracle/pools/pool/workers/remote/login-profile",
+            ))
+            .and(body_json(
+                serde_json::json!({ "login_profile": "account-b", "replace_existing": false }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "binding_id": "binding" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        run_worker(OracleWorkerCommands::BindLogin {
+            pool: "pool".into(),
+            label: "remote".into(),
+            login_profile: "account-b".into(),
+            replace_existing: false,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/oracle/pools/pool/login-profiles"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "profiles": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        run_login_profile(OracleLoginProfileCommands::List {
+            pool: "pool".into(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .unwrap();
+        Mock::given(method("DELETE"))
+            .and(path(
+                "/api/v1/oracle/pools/pool/workers/remote/login-profile",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run_worker(OracleWorkerCommands::UnbindLogin {
+            pool: "pool".into(),
+            label: "remote".into(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .unwrap();
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/oracle/pools/pool/login-profiles/account-b"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run_login_profile(OracleLoginProfileCommands::Delete {
+            pool: "pool".into(),
+            name: "account-b".into(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 4);
+    }
+
     #[test]
     fn resolve_prompt_prefers_argument() {
         assert_eq!(resolve_prompt(Some("hi"), None).unwrap(), "hi");
@@ -2184,6 +2412,33 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn oracle_worker_refresh_envelope_decrypts_with_cli_wire_protocol() {
+        // Generated with worker.mjs encryptSessionEnvelope and the same synthetic
+        // token used by its Rust-to-JavaScript compatibility fixture.
+        let salt = base64::engine::general_purpose::STANDARD
+            .decode("8pNIaLZ7V9x8Oyqw7qxkeNKdkiYWgnHEKdaxmRsMLRM=")
+            .unwrap();
+        let nonce = base64::engine::general_purpose::STANDARD
+            .decode("lXR4kcu5lWEei4xA")
+            .unwrap();
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode("PMxiUrEsPgghSXT0gPCRMYrP/qqEN4iU6xdmmbavD8/lpvVypnwCPd5hna07M0+BTAJsBS4uEg==")
+            .unwrap();
+        let token = ["nyx_owk_", "test-token-material"].concat();
+        let cipher = snapshot_cipher(&salt, token.as_bytes()).unwrap();
+        let restored = cipher
+            .decrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: &ciphertext,
+                    aad: SESSION_INFO,
+                },
+            )
+            .unwrap();
+        assert_eq!(restored, br#"{"version":1,"cookies":[],"origins":[]}"#);
     }
 
     #[test]

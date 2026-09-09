@@ -25,10 +25,13 @@
 
 import { chromium } from "playwright-core";
 import {
+  createCipheriv,
   createDecipheriv,
   createHash,
+  createHmac,
   hkdfSync,
   randomUUID,
+  randomBytes,
 } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import {
@@ -134,7 +137,9 @@ const NPM_EXECUTABLE = resolveNpmExecutable({ configured: process.env.NYXID_NPM_
 const NPM_INSTALL_TIMEOUT_MS = Number(
   process.env.NYXID_NPM_INSTALL_TIMEOUT_MS || 5 * 60 * 1000
 );
-const CAPABILITIES = ["commands_v1", "upgrade_v1", "session_import_v1", "attempt_fencing_v1"];
+const CAPABILITIES = ["commands_v1", "upgrade_v1", "session_import_v1", "attempt_fencing_v1", "saved_login_v1"];
+const SAVED_LOGIN_POLL_MS = Number(process.env.NYXID_SAVED_LOGIN_POLL_MS || 60000);
+const SAVED_LOGIN_REFRESH_MS = Number(process.env.NYXID_SAVED_LOGIN_REFRESH_MS || 300000);
 // Result-image caps (the server re-validates and caps lower-or-equal). Kept
 // below the 16 MiB worker body cap once base64-inflated (~33%).
 const MAX_IMAGES = Math.min(Number(process.env.NYXID_MAX_IMAGES || 4), 8);
@@ -443,7 +448,7 @@ function transientHttpStatus(status) {
   return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
-async function apiRequest(method, path, body) {
+async function apiRequest(method, path, body, retry = true) {
   let attempt = 0;
   for (;;) {
     const controller = new AbortController();
@@ -468,6 +473,7 @@ async function apiRequest(method, path, body) {
       }
       return await res.json();
     } catch (error) {
+      if (!retry) throw error;
       if (error?.status && !error.transient) throw error;
       const delay = backoffDelay(attempt++);
       if (attempt === 1 || attempt % 5 === 0) {
@@ -798,6 +804,50 @@ export function isAuthFlowUrl(u) {
   return /^(chatgpt\.com|chat\.openai\.com)$/i.test(url.hostname) && /^\/auth(\/|$)/.test(url.pathname);
 }
 
+export function isAccountChangeUrl(value, navigation = false) {
+  let url;
+  try { url = new URL(value); } catch { return false; }
+  if (navigation && isAuthFlowUrl(value)) return true;
+  if (!/^(chatgpt\.com|chat\.openai\.com|auth\.openai\.com|auth0\.openai\.com)$/i.test(url.hostname)) return false;
+  return /(?:^|\/)(?:login|logout|signin|signout|switch-account|switch_account)(?:\/|$)/i.test(url.pathname);
+}
+
+export function invalidateSavedLogin(state, status) {
+  const local = state.saved_login;
+  if (!local || (local.status !== "verified" && !(local.status === "untrusted" && status === "external_login"))) return false;
+  local.status = status;
+  local.pending_publication_id = null;
+  return true;
+}
+
+async function observeSavedLoginTrust(runtime, loggedIn) {
+  if (runtime.applyingLogin || loggedIn !== false || !isChatGptUrl(runtime.page?.url())) return;
+  const loggedOut = await runtime.page.evaluate(() => Array.from(document.querySelectorAll("a,button"))
+    .some((element) => /^(log in|sign up|登录|注册)$/i.test((element.textContent || "").trim()))).catch(() => false);
+  if (loggedOut && invalidateSavedLogin(runtime.state, "untrusted")) saveState(runtime.state);
+}
+
+function watchLoginChanges(runtime) {
+  const context = runtime.context;
+  const watch = (page) => {
+    const changed = (url, navigation) => {
+      if (!runtime.applyingLogin && isAccountChangeUrl(url, navigation) &&
+          invalidateSavedLogin(runtime.state, "external_login")) saveState(runtime.state);
+    };
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) changed(frame.url(), true);
+    });
+    page.on("request", (request) => {
+      try {
+        if (request.frame() === page.mainFrame()) changed(request.url(), request.isNavigationRequest());
+      } catch {}
+    });
+    changed(page.url(), true);
+  };
+  context.pages().forEach(watch);
+  context.on("page", watch);
+}
+
 // Decide whether the worker keeps its hands off the tab: a live page that is
 // mid-login, or a ChatGPT page the last heartbeat saw logged out, belongs to
 // the human (or a pending session import) until it is authenticated again.
@@ -968,6 +1018,7 @@ async function connectChrome(runtime) {
   });
   runtime.browser = browser;
   runtime.context = browser.contexts()[0] || (await browser.newContext());
+  watchLoginChanges(runtime);
   runtime.page = await getChatPage(runtime.context);
   runtime.health.cdp = 0;
   markChatPageRecovered(runtime);
@@ -1573,6 +1624,7 @@ async function handlePrompt(runtime, page, task, recovering) {
     conversation_url: page.url(),
   });
   await ack(runtime, task, "page_ready");
+  if (await recoverPreSendLogin(runtime)) throw new TaskRestart();
 
   if (recovering && !["claimed", "page_ready", "ready_to_send"].includes(priorPhase)) {
     await sleep(1500);
@@ -1682,7 +1734,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
       await heartbeat(runtime);
       if (
         runtime.state.pending_command?.command === "session_import" &&
-        runtime.loggedIn === false
+        runtime.loggedIn === false && canImportLogin(runtime.state, runtime.loggedIn)
       ) {
         await processPendingCommand(runtime, true);
         throw new TaskRestart();
@@ -2237,6 +2289,7 @@ async function heartbeat(runtime) {
     loggedIn = await detectLoggedIn(runtime.page);
   }
   runtime.loggedIn = loggedIn;
+  await observeSavedLoginTrust(runtime, loggedIn);
   const reports = [...(runtime.state.pending_reports || [])].slice(0, 16);
   const response = await apiPost("/heartbeat", {
     worker: LABEL,
@@ -2246,7 +2299,7 @@ async function heartbeat(runtime) {
     logged_in: loggedIn,
     current_task_id: runtime.state.current_task?.task_id || null,
     chrome_alive: runtime.chromeAlive,
-    last_error: runtime.lastError || null,
+    last_error: runtime.lastError || runtime.state.saved_login_error || null,
     command_reports: reports,
   });
   if (reports.length) {
@@ -2282,14 +2335,15 @@ export function decryptSessionEnvelope(sealedBytes, token) {
   if (salt.length !== 32 || nonce.length !== 12 || ciphertext.length < 16) {
     throw new TaskFailure("session_envelope_invalid");
   }
+  const key = Buffer.from(hkdfSync("sha256", Buffer.from(token), salt, SESSION_INFO, 32));
+  let plaintext;
   try {
-    const key = Buffer.from(hkdfSync("sha256", Buffer.from(token), salt, SESSION_INFO, 32));
     const body = ciphertext.subarray(0, ciphertext.length - 16);
     const tag = ciphertext.subarray(ciphertext.length - 16);
     const decipher = createDecipheriv("aes-256-gcm", key, nonce);
     decipher.setAAD(SESSION_AAD);
     decipher.setAuthTag(tag);
-    const plaintext = Buffer.concat([decipher.update(body), decipher.final()]);
+    plaintext = Buffer.concat([decipher.update(body), decipher.final()]);
     if (plaintext.length > MAX_SESSION_PLAINTEXT_BYTES) {
       throw new TaskFailure("session_plaintext_too_large");
     }
@@ -2297,6 +2351,33 @@ export function decryptSessionEnvelope(sealedBytes, token) {
   } catch (error) {
     if (error instanceof TaskFailure) throw error;
     throw new TaskFailure("session_decrypt_failed");
+  } finally {
+    key.fill(0);
+    plaintext?.fill(0);
+  }
+}
+
+export function encryptSessionEnvelope(snapshot, token) {
+  const plaintext = Buffer.from(JSON.stringify(snapshot));
+  if (!plaintext.length || plaintext.length > MAX_SESSION_PLAINTEXT_BYTES) {
+    plaintext.fill(0);
+    throw new TaskFailure("session_plaintext_too_large");
+  }
+  const salt = randomBytes(32);
+  const nonce = randomBytes(12);
+  const key = Buffer.from(hkdfSync("sha256", Buffer.from(token), salt, SESSION_INFO, 32));
+  try {
+    const cipher = createCipheriv("aes-256-gcm", key, nonce);
+    cipher.setAAD(SESSION_AAD);
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]);
+    const envelope = Buffer.from(JSON.stringify({ version: SESSION_FORMAT_VERSION,
+      salt_base64: salt.toString("base64"), nonce_base64: nonce.toString("base64"),
+      ciphertext_base64: ciphertext.toString("base64") }));
+    if (envelope.length > MAX_SESSION_SNAPSHOT_BYTES) throw new TaskFailure("session_envelope_size_invalid");
+    return envelope;
+  } finally {
+    key.fill(0);
+    plaintext.fill(0);
   }
 }
 
@@ -2318,22 +2399,91 @@ function allowedSessionOrigin(origin) {
 
 async function importLoginSnapshot(runtime, command) {
   const payload = await apiGet(`/login-snapshots/${encodeURIComponent(command.snapshot_id || "")}`);
+  if (runtime.state.saved_login) {
+    runtime.state.saved_login.status = "external_login";
+    saveState(runtime.state);
+  }
+  return importSessionPayload(runtime, payload);
+}
+
+export function validateSessionSnapshot(snapshot) {
+  if (snapshot?.version !== SESSION_FORMAT_VERSION || !Array.isArray(snapshot.cookies) ||
+      snapshot.cookies.length > 512 || Buffer.byteLength(JSON.stringify(snapshot)) > MAX_SESSION_PLAINTEXT_BYTES) {
+    throw new TaskFailure("session_snapshot_invalid");
+  }
+  const cookies = snapshot.cookies.filter(allowedSessionCookie).map((cookie) => {
+    if (typeof cookie.path !== "string" || !cookie.path.startsWith("/") || cookie.path.length > 2048 ||
+        typeof cookie.expires !== "number" || !Number.isFinite(cookie.expires) ||
+        typeof cookie.httpOnly !== "boolean" || typeof cookie.secure !== "boolean" ||
+        !["Strict", "Lax", "None"].includes(cookie.sameSite)) {
+      throw new TaskFailure("session_snapshot_invalid");
+    }
+    return { name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path,
+      expires: cookie.expires, httpOnly: cookie.httpOnly, secure: cookie.secure, sameSite: cookie.sameSite,
+      ...(typeof cookie.partitionKey === "string" ? { partitionKey: cookie.partitionKey } : {}) };
+  });
+  if (!cookies.length) throw new TaskFailure("session_snapshot_no_cookies");
+  if (snapshot.origins !== undefined && !Array.isArray(snapshot.origins)) throw new TaskFailure("session_snapshot_invalid");
+  const origins = (snapshot.origins || []).filter((entry) => allowedSessionOrigin(entry?.origin));
+  if (origins.length > 2 || new Set(origins.map((entry) => entry.origin)).size !== origins.length) {
+    throw new TaskFailure("session_snapshot_invalid");
+  }
+  for (const origin of origins) {
+    for (const kind of ["local_storage", "session_storage"]) {
+      if (origin[kind] !== undefined && (!Array.isArray(origin[kind]) || origin[kind].length > 1024 ||
+          origin[kind].some((item) => typeof item?.name !== "string" || typeof item?.value !== "string" ||
+            item.name.length > 1024 || item.value.length > MAX_SESSION_PLAINTEXT_BYTES))) {
+        throw new TaskFailure("session_snapshot_invalid");
+      }
+    }
+  }
+  return { version: SESSION_FORMAT_VERSION, cookies, origins };
+}
+
+export function canImportLogin(state, loggedIn) {
+  if (!state.current_task) return true;
+  return loggedIn === false && ["claimed", "page_ready", "ready_to_send"].includes(state.current_task.phase);
+}
+
+async function importSessionPayload(runtime, payload) {
   if (payload.format_version !== SESSION_FORMAT_VERSION) {
     throw new TaskFailure("session_snapshot_version_unsupported");
   }
-  const snapshot = decryptSessionEnvelope(
+  const snapshot = validateSessionSnapshot(decryptSessionEnvelope(
     Buffer.from(payload.sealed_blob_base64 || "", "base64"),
     TOKEN
-  );
-  if (snapshot?.version !== SESSION_FORMAT_VERSION || !Array.isArray(snapshot.cookies)) {
-    throw new TaskFailure("session_snapshot_invalid");
+  ));
+  return applySessionSnapshot(runtime, snapshot);
+}
+
+async function applySessionSnapshot(runtime, snapshot) {
+  runtime.applyingLogin = true;
+  try {
+    return await applySessionSnapshotInner(runtime, snapshot);
+  } finally {
+    runtime.applyingLogin = false;
   }
+}
+
+async function applySessionSnapshotInner(runtime, snapshot) {
   await ensureChatPage(runtime);
-  await runtime.context.clearCookies({ domain: /(^|\.)chatgpt\.com$/ }).catch(() => {});
-  await runtime.context.clearCookies({ domain: /(^|\.)openai\.com$/ }).catch(() => {});
-  const cookies = snapshot.cookies.filter(allowedSessionCookie).slice(0, 512);
-  if (!cookies.length) throw new TaskFailure("session_snapshot_no_cookies");
-  await runtime.context.addCookies(cookies);
+  // Stop old account pages before clearing their storage, so running scripts
+  // cannot restore the account we are explicitly replacing.
+  for (const page of runtime.context.pages()) {
+    if (allowedSessionOrigin(new URL(page.url()).origin)) {
+      await page.evaluate(() => sessionStorage.clear());
+      await page.goto("about:blank");
+    }
+  }
+  const cdp = await runtime.context.newCDPSession(runtime.page);
+  try {
+    for (const origin of ["https://chatgpt.com", "https://auth.openai.com"]) {
+      await cdp.send("Storage.clearDataForOrigin", { origin, storageTypes: "all" });
+    }
+  } finally { await cdp.detach(); }
+  await runtime.context.clearCookies({ domain: /(^|\.)chatgpt\.com$/ });
+  await runtime.context.clearCookies({ domain: /(^|\.)openai\.com$/ });
+  await runtime.context.addCookies(snapshot.cookies);
   for (const storage of (snapshot.origins || []).filter((entry) => allowedSessionOrigin(entry?.origin))) {
     await runtime.page.goto(storage.origin, { waitUntil: "domcontentloaded", timeout: 60000 });
     if (new URL(runtime.page.url()).origin !== storage.origin) continue;
@@ -2471,7 +2621,8 @@ async function processPendingCommand(runtime, allowSessionImportDuringLoggedOutT
   if (
     !command ||
     (runtime.state.current_task &&
-      !(allowSessionImportDuringLoggedOutTask && command.command === "session_import"))
+      !(allowSessionImportDuringLoggedOutTask && command.command === "session_import" &&
+        canImportLogin(runtime.state, runtime.loggedIn)))
   ) {
     return false;
   }
@@ -2488,6 +2639,10 @@ async function processPendingCommand(runtime, allowSessionImportDuringLoggedOutT
         resultCode = "browser_relaunched";
         break;
       case "relogin":
+        if (runtime.state.saved_login) {
+          runtime.state.saved_login.status = "external_login";
+          saveState(runtime.state);
+        }
         await ensureChatPage(runtime, "https://chatgpt.com/auth/login");
         resultCode = "login_page_opened";
         break;
@@ -2501,7 +2656,7 @@ async function processPendingCommand(runtime, allowSessionImportDuringLoggedOutT
       default:
         throw new TaskFailure("command_unsupported");
     }
-    runtime.state.draining = command.command === "restart" || command.command === "upgrade";
+    runtime.state.draining = Boolean(runtime.state.drain_requested) || command.command === "restart" || command.command === "upgrade";
     runtime.lastError = null;
     addCommandReport(runtime.state, command, true, resultCode);
     await heartbeat(runtime);
@@ -2513,7 +2668,7 @@ async function processPendingCommand(runtime, allowSessionImportDuringLoggedOutT
   } catch (error) {
     const code = stableErrorCode(error);
     runtime.lastError = code;
-    runtime.state.draining = false;
+    runtime.state.draining = Boolean(runtime.state.drain_requested);
     addCommandReport(runtime.state, command, false, code);
     await heartbeat(runtime);
     return false;
@@ -2556,6 +2711,10 @@ async function executeTask(runtime, task, recovering) {
         clearTaskState(runtime.state);
         return;
       }
+      if (await recoverPreSendLogin(runtime)) {
+        recovering = true;
+        continue;
+      }
       const failureCount = (runtime.state.current_task?.recovery_failures || 0) + 1;
       updateTaskState(runtime.state, { recovery_failures: failureCount });
       const recovery = taskRecoveryDecision({
@@ -2579,6 +2738,20 @@ async function executeTask(runtime, task, recovering) {
   }
 }
 
+async function recoverPreSendLogin(runtime) {
+  if (!runtime.page || runtime.page.isClosed() || !canImportLogin(runtime.state, false)) return false;
+  runtime.loggedIn = await detectLoggedIn(runtime.page);
+  await observeSavedLoginTrust(runtime, runtime.loggedIn);
+  if (runtime.loggedIn !== false) return false;
+  await heartbeat(runtime);
+  if (runtime.state.pending_command?.command === "session_import") {
+    await processPendingCommand(runtime, true);
+    runtime.loggedIn = await detectLoggedIn(runtime.page);
+    if (runtime.loggedIn) return true;
+  }
+  return Boolean(await processSavedLogin(runtime, true));
+}
+
 async function captureStorage(page) {
   const origin = new URL(page.url()).origin;
   if (!allowedSessionOrigin(origin)) return null;
@@ -2598,28 +2771,240 @@ async function captureSession(outputPath) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline && !(await detectLoggedIn(page))) await sleep(1000);
     if (!(await detectLoggedIn(page))) throw new TaskFailure("login_capture_timeout");
-    const cookies = (await context.cookies([
-      "https://chatgpt.com/",
-      "https://auth.openai.com/",
-    ])).filter(allowedSessionCookie);
-    const origins = [];
-    for (const candidate of context.pages()) {
-      const storage = await captureStorage(candidate).catch(() => null);
-      if (storage && !origins.some((item) => item.origin === storage.origin)) origins.push(storage);
-    }
-    const snapshot = Buffer.from(
-      JSON.stringify({ version: SESSION_FORMAT_VERSION, captured_at: new Date().toISOString(), cookies, origins }),
-      "utf8"
-    );
-    if (!cookies.length || snapshot.length > MAX_SESSION_PLAINTEXT_BYTES) {
-      throw new TaskFailure(!cookies.length ? "login_capture_no_cookies" : "login_capture_too_large");
-    }
+    const snapshot = Buffer.from(JSON.stringify(await captureBrowserSession(context, page)));
     mkdirSync(dirname(outputPath), { recursive: true, mode: 0o700 });
     writeFileSync(outputPath, snapshot, { mode: 0o600 });
     chmodSync(outputPath, 0o600);
   } finally {
     await browser.close().catch(() => {});
   }
+}
+
+async function captureBrowserSession(context, page) {
+  if (!(await detectLoggedIn(page))) throw new TaskFailure("login_capture_logged_out");
+  const cookies = (await context.cookies()).filter(allowedSessionCookie);
+  const storageState = await context.storageState();
+  const origins = storageState.origins.filter((entry) => allowedSessionOrigin(entry.origin))
+    .map((entry) => ({ origin: entry.origin, local_storage: entry.localStorage, session_storage: [] }));
+  for (const candidate of context.pages()) {
+    const storage = await captureStorage(candidate);
+    if (!storage) continue;
+    const existing = origins.find((item) => item.origin === storage.origin);
+    if (existing) existing.session_storage = storage.session_storage;
+    else origins.push(storage);
+  }
+  if (!(await detectLoggedIn(page))) throw new TaskFailure("login_capture_logged_out");
+  return validateSessionSnapshot({ version: SESSION_FORMAT_VERSION, cookies, origins });
+}
+
+export function accountFingerprint(accountId, token) {
+  return createHmac("sha256", token).update("nyxid-oracle-account-v1\0").update(accountId).digest("hex");
+}
+
+async function browserAccountFingerprint(runtime) {
+  if (!runtime.page || new URL(runtime.page.url()).origin !== "https://chatgpt.com") return null;
+  const accountId = await runtime.page.evaluate(async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch("/api/auth/session", { credentials: "same-origin", cache: "no-store", redirect: "error", signal: controller.signal });
+      if (!response.ok || !response.body) return null;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let size = 0;
+      let body = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 64 * 1024) { await reader.cancel(); return null; }
+        body += decoder.decode(value, { stream: true });
+      }
+      body += decoder.decode();
+      const id = JSON.parse(body)?.user?.id;
+      return typeof id === "string" && id.length > 0 && id.length <= 256 ? id : null;
+    } catch { return null; }
+    finally { clearTimeout(timeout); }
+  }).catch(() => null);
+  return accountId ? accountFingerprint(accountId, TOKEN) : null;
+}
+
+export function savedLoginDecision(state, desired, loggedIn, now = Date.now()) {
+  if (desired.status !== "available") return "unavailable";
+  if (!canImportLogin(state, loggedIn)) return "defer";
+  const local = state.saved_login;
+  const sameBinding = local?.profile_id === desired.profile.id && local?.binding_id === desired.binding.binding_id;
+  const sameGeneration = sameBinding && local.generation === desired.profile.generation;
+  if (!sameBinding && loggedIn === true && !desired.binding.replace_existing) return "preserve_existing";
+  if (sameGeneration && local.status === "external_login") return "preserve_existing";
+  if (sameGeneration && local.status === "untrusted") return loggedIn === false ? "import" : "preserve_existing";
+  if (sameGeneration && local.attempted_revision === desired.profile.revision && local.status !== "verified") return "failed_revision";
+  if (sameGeneration && ["failed", "importing"].includes(local.status) && local.attempted_revision !== desired.profile.revision) return "import";
+  if (!sameGeneration || (loggedIn === false && local.attempted_revision !== desired.profile.revision)) return "import";
+  if (local.status !== "verified" || loggedIn !== true) return "defer";
+  if (local.source_revision !== desired.profile.revision) {
+    const updated = Date.parse(desired.profile.updated_at);
+    if (!state.current_task && Number.isFinite(updated) && now - updated >= 3 * SAVED_LOGIN_REFRESH_MS) return "import";
+    return "sibling_revision";
+  }
+  return state.current_task ? "defer" : "refresh";
+}
+
+async function processSavedLogin(runtime, force = false) {
+  if (!force && Date.now() - (runtime.lastSavedLoginPollAt || 0) < SAVED_LOGIN_POLL_MS) return;
+  runtime.lastSavedLoginPollAt = Date.now();
+  const identity = { worker: LABEL, instance_id: runtime.state.instance_id };
+  const local = runtime.state.saved_login;
+  const query = new URLSearchParams(identity);
+  const observedRevision = runtime.savedLoginObservedRevision || local?.source_revision || local?.attempted_revision;
+  if (observedRevision) query.set("known_revision", observedRevision);
+  try {
+    // Saved-login maintenance uses one bounded HTTP attempt. A failed refresh
+    // must not prevent an otherwise healthy browser from serving tasks.
+    let desired = await apiRequest("GET", `/login-profile?${query}`, undefined, false);
+    if (desired.status === "unbound") {
+      if (local) { runtime.state.saved_login = null; saveState(runtime.state); }
+      setSavedLoginError(runtime, null);
+      return;
+    }
+    if (desired.status !== "available") {
+      setSavedLoginError(runtime, `saved_login_${desired.status === "expired" ? "expired" : "token_changed"}`);
+      return;
+    }
+    runtime.savedLoginObservedRevision = desired.profile.revision;
+    runtime.loggedIn = await detectLoggedIn(runtime.page);
+    await observeSavedLoginTrust(runtime, runtime.loggedIn);
+    if (local?.pending_publication_id && desired.profile.revision === local.pending_publication_id &&
+        local.generation === desired.profile.generation && local.binding_id === desired.binding.binding_id) {
+      local.source_revision = local.pending_publication_id;
+      local.pending_publication_id = null;
+      setSavedLoginError(runtime, null);
+      saveState(runtime.state);
+    }
+    const decision = savedLoginDecision(runtime.state, desired, runtime.loggedIn);
+    if (decision === "preserve_existing") {
+      if (runtime.state.saved_login_error !== "saved_login_account_changed") setSavedLoginError(runtime, "saved_login_existing_account_preserved");
+      return;
+    }
+    if (decision === "failed_revision") return;
+    if (decision === "import") {
+      setSavedLoginError(runtime, null);
+      if (!desired.sealed_blob_base64) desired = await apiRequest("GET", `/login-profile?${new URLSearchParams(identity)}`, undefined, false);
+      runtime.loggedIn = await detectLoggedIn(runtime.page);
+      if (savedLoginDecision(runtime.state, desired, runtime.loggedIn) !== "import") return;
+      // Validate before journaling or changing any live browser state.
+      try {
+        validateSessionSnapshot(decryptSessionEnvelope(Buffer.from(desired.sealed_blob_base64 || "", "base64"), TOKEN));
+      } catch (error) {
+        runtime.state.saved_login = { profile_id: desired.profile.id, binding_id: desired.binding.binding_id,
+          generation: desired.profile.generation, source_revision: null,
+          account_fingerprint: local?.generation === desired.profile.generation ? local?.account_fingerprint : null,
+          attempted_revision: desired.profile.revision, status: "failed" };
+        saveState(runtime.state);
+        throw error;
+      }
+      const confirmed = await apiRequest("GET", `/login-profile?${new URLSearchParams({ ...identity, known_revision: desired.profile.revision })}`, undefined, false);
+      if (confirmed.status !== "available" || confirmed.profile?.revision !== desired.profile.revision ||
+          confirmed.profile?.generation !== desired.profile.generation || confirmed.binding?.binding_id !== desired.binding.binding_id) return;
+      const handover = local?.profile_id === desired.profile.id && local?.binding_id === desired.binding.binding_id &&
+        local?.generation === desired.profile.generation && runtime.loggedIn === true;
+      if (handover) {
+        const currentIdentity = await browserAccountFingerprint(runtime);
+        if (!currentIdentity || !local.account_fingerprint) { setSavedLoginError(runtime, "saved_login_identity_unavailable"); return; }
+        if (currentIdentity !== local.account_fingerprint) {
+          local.status = "external_login";
+          setSavedLoginError(runtime, "saved_login_account_changed");
+          saveState(runtime.state);
+          return;
+        }
+      }
+      const backup = handover ? await captureBrowserSession(runtime.context, runtime.page) : null;
+      if (handover && await browserAccountFingerprint(runtime) !== local.account_fingerprint) {
+        setSavedLoginError(runtime, "saved_login_identity_unavailable");
+        return;
+      }
+      runtime.state.saved_login = { profile_id: desired.profile.id, binding_id: desired.binding.binding_id,
+        generation: desired.profile.generation, source_revision: null,
+        account_fingerprint: handover ? local.account_fingerprint : null,
+        attempted_revision: desired.profile.revision, status: "importing", last_export_at: Date.now() };
+      saveState(runtime.state);
+      try {
+        await importSessionPayload(runtime, desired);
+        const fingerprint = await browserAccountFingerprint(runtime);
+        if (handover && fingerprint !== local.account_fingerprint) {
+          throw new TaskFailure(fingerprint ? "saved_login_account_mismatch" : "saved_login_identity_unavailable");
+        }
+        runtime.state.saved_login.source_revision = desired.profile.revision;
+        runtime.state.saved_login.status = "verified";
+        runtime.state.saved_login.account_fingerprint = fingerprint;
+        runtime.loggedIn = true;
+        runtime.lastError = null;
+        setSavedLoginError(runtime, fingerprint ? null : "saved_login_identity_unavailable");
+      } catch (error) {
+        runtime.state.saved_login.status = "failed";
+        let importError = stableErrorCode(error);
+        if (backup) {
+          try {
+            await applySessionSnapshot(runtime, backup);
+            runtime.loggedIn = true;
+          } catch {
+            runtime.loggedIn = false;
+            importError = "saved_login_restore_failed";
+          }
+        }
+        setSavedLoginError(runtime, importError);
+      }
+      saveState(runtime.state);
+      return runtime.state.saved_login.status === "verified";
+    }
+    if (decision !== "refresh" || Date.now() - (local.last_export_at || 0) < SAVED_LOGIN_REFRESH_MS) return;
+    local.last_export_at = Date.now();
+    saveState(runtime.state);
+    const beforeIdentity = await browserAccountFingerprint(runtime);
+    if (!local.account_fingerprint || !beforeIdentity) {
+      setSavedLoginError(runtime, "saved_login_identity_unavailable");
+      return;
+    }
+    if (beforeIdentity !== local.account_fingerprint) {
+      local.status = "external_login";
+      setSavedLoginError(runtime, "saved_login_account_changed");
+      saveState(runtime.state);
+      return;
+    }
+    const snapshot = await captureBrowserSession(runtime.context, runtime.page);
+    if (local.status !== "verified") return;
+    const afterIdentity = await browserAccountFingerprint(runtime);
+    if (!afterIdentity) { setSavedLoginError(runtime, "saved_login_identity_unavailable"); return; }
+    if (afterIdentity !== local.account_fingerprint) {
+      local.status = "external_login";
+      setSavedLoginError(runtime, "saved_login_account_changed");
+      saveState(runtime.state);
+      return;
+    }
+    const envelope = encryptSessionEnvelope(snapshot, TOKEN);
+    const publicationId = randomUUID();
+    local.pending_publication_id = publicationId;
+    saveState(runtime.state);
+    const result = await apiRequest("POST", "/login-profile", { ...identity,
+      profile_id: local.profile_id, binding_id: local.binding_id, generation: local.generation,
+      expected_revision: local.source_revision, publication_id: publicationId,
+      format_version: SESSION_FORMAT_VERSION, sealed_blob_base64: envelope.toString("base64") }, false);
+    if (result.revision === publicationId && result.generation === local.generation) {
+      local.source_revision = publicationId;
+      local.pending_publication_id = null;
+      setSavedLoginError(runtime, null);
+      saveState(runtime.state);
+    }
+  } catch (error) {
+    if (error?.status === 404) { setSavedLoginError(runtime, null); return; }
+    setSavedLoginError(runtime, `saved_login_${stableErrorCode(error)}`);
+  }
+}
+
+function setSavedLoginError(runtime, code) {
+  if ((runtime.state.saved_login_error || null) === code) return;
+  runtime.state.saved_login_error = code;
+  saveState(runtime.state);
 }
 
 // ── Main loop ────────────────────────────────────────────────────────────
@@ -2658,6 +3043,7 @@ async function main() {
     try {
       if (Date.now() - runtime.lastPresenceAt >= PRESENCE_MS) await heartbeat(runtime);
       if (await processPendingCommand(runtime)) process.exit(75);
+      await processSavedLogin(runtime);
       if (runtime.state.draining && !runtime.state.current_task) {
         await sleep(POLL_MS);
         continue;

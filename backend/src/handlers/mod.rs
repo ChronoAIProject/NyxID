@@ -72,6 +72,7 @@ pub mod notifications;
 pub mod oauth;
 pub mod oidc_discovery;
 pub mod openclaw_channel;
+pub mod oracle_login_profiles;
 pub mod oracle_pools;
 pub mod oracle_tasks;
 pub mod oracle_worker;

@@ -2578,6 +2578,90 @@ mod tests {
     }
 
     #[test]
+    fn oracle_saved_login_options_are_explicit_and_separate_from_cli_profile() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "oracle",
+            "login",
+            "pool",
+            "--save-as",
+            "account-a",
+            "--profile",
+            "operator",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Oracle {
+                command: OracleCommands::Login { save_as, auth, .. },
+            } => {
+                assert_eq!(save_as.as_deref(), Some("account-a"));
+                assert_eq!(auth.profile.as_deref(), Some("operator"));
+            }
+            _ => panic!("unexpected command"),
+        }
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "oracle",
+            "worker",
+            "install",
+            "--pool",
+            "pool",
+            "--login-profile",
+            "account-a",
+        ])
+        .unwrap();
+        assert!(
+            matches!(cli.command, Commands::Oracle { command: OracleCommands::Worker {
+            command: OracleWorkerCommands::Install { login_profile: Some(name), .. }
+        } } if name == "account-a")
+        );
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "oracle",
+            "worker",
+            "bind-login",
+            "pool",
+            "remote",
+            "--login-profile",
+            "account-b",
+            "--replace-existing",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Oracle {
+                command: OracleCommands::Worker {
+                    command: OracleWorkerCommands::BindLogin {
+                        replace_existing: true,
+                        ..
+                    }
+                }
+            }
+        ));
+        for args in [
+            vec!["nyxid", "oracle", "login-profile", "list", "pool"],
+            vec![
+                "nyxid",
+                "oracle",
+                "login-profile",
+                "delete",
+                "pool",
+                "account-a",
+            ],
+            vec![
+                "nyxid",
+                "oracle",
+                "worker",
+                "unbind-login",
+                "pool",
+                "remote",
+            ],
+        ] {
+            Cli::try_parse_from(args).unwrap();
+        }
+    }
+
+    #[test]
     fn oracle_result_accepts_artifact_directory() {
         let cli = Cli::try_parse_from([
             "nyxid",
@@ -5063,6 +5147,9 @@ pub enum OracleCommands {
     Login {
         /// Pool slug or id
         pool: String,
+        /// Retain a named login for explicitly bound workers; skips pool-wide fanout
+        #[arg(long)]
+        save_as: Option<String>,
         /// Read the raw pool worker token from this file
         #[arg(long, value_name = "PATH")]
         worker_token_file: Option<String>,
@@ -5075,6 +5162,11 @@ pub enum OracleCommands {
         wait: u64,
         #[command(flatten)]
         auth: AuthArgs,
+    },
+    /// Manage saved ChatGPT logins
+    LoginProfile {
+        #[command(subcommand)]
+        command: OracleLoginProfileCommands,
     },
     /// List your multi-turn conversations
     Sessions {
@@ -5105,6 +5197,25 @@ pub enum OracleCommands {
 
 #[derive(Subcommand)]
 pub enum OracleWorkerCommands {
+    /// Bind this installation to a saved login profile
+    BindLogin {
+        pool: String,
+        label: String,
+        #[arg(long)]
+        login_profile: String,
+        /// Explicitly replace any account already logged in on this worker
+        #[arg(long)]
+        replace_existing: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Stop saved-login import and refresh for this worker; keep its local browser
+    UnbindLogin {
+        pool: String,
+        label: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// List worker presence for a pool
     List {
         pool: String,
@@ -5130,6 +5241,9 @@ pub enum OracleWorkerCommands {
         /// managed installation is refused.
         #[arg(long)]
         label: Option<String>,
+        /// Import this saved login on first startup (existing accounts are preserved)
+        #[arg(long)]
+        login_profile: Option<String>,
         /// Replace an existing installation for this pool/profile
         #[arg(long)]
         force: bool,
@@ -5240,6 +5354,23 @@ pub enum OracleWorkerCommands {
     Relogin {
         pool: String,
         label: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OracleLoginProfileCommands {
+    /// List saved login status, bindings and retention deadlines
+    List {
+        pool: String,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Delete the retained login and its bindings; local worker sessions remain
+    Delete {
+        pool: String,
+        name: String,
         #[command(flatten)]
         auth: AuthArgs,
     },
