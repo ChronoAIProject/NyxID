@@ -33,8 +33,8 @@ function ConnectedOnboarding({
 }) {
   const { t } = useTranslation();
   const flow = useNyxbotOnboarding(userId, referral);
-  const [view, setView] = useState<"source" | "channel" | "cap" | "link">(
-    "source",
+  const [view, setView] = useState<"source" | "channel" | "cap" | "link">(() =>
+    flow.progress.botId ? "link" : "channel",
   );
   const loading =
     flow.keys.isPending ||
@@ -43,9 +43,9 @@ function ConnectedOnboarding({
   const loadError =
     flow.keys.isError || flow.catalog.isError || flow.authorization.isError;
   // A URL or locally remembered step never substitutes for a live authorization.
-  const sourceReady = Boolean(flow.connectedKey) && !loadError;
+  const sourceReady = Boolean(flow.connectedKey) && !loading && !loadError;
 
-  if (view === "link" && flow.progress.botId)
+  if (view === "link" && flow.progress.botId && sourceReady)
     return (
       <LinkChannelStep
         botId={flow.progress.botId}
@@ -82,11 +82,10 @@ function ConnectedOnboarding({
         flow.connectGoogle.isPending ||
         (!sourceReady && !flow.googleAvailable)
       }
-      onConnect={() =>
-        sourceReady
-          ? setView(flow.progress.botId ? "link" : "channel")
-          : flow.connectGoogle.mutate()
-      }
+      onConnect={() => {
+        setView(flow.progress.botId ? "link" : "channel");
+        if (!sourceReady) flow.connectGoogle.mutate();
+      }}
       onBack={onBackToAccount}
     >
       {loading && <OnboardingNotice>{t("loading")}</OnboardingNotice>}
@@ -142,9 +141,10 @@ export function NyxbotOnboardingPage() {
   const search = nyxbotSearchSchema.parse(
     Object.fromEntries(new URLSearchParams(window.location.search)),
   );
+  const callbackStatus = search.provider_status ?? search.status;
   // Return hints select a view; authentication and data grants are still checked.
   const [accountConfirmed, setAccountConfirmed] = useState(
-    () => search.step === "source" || Boolean(search.status),
+    () => search.step === "source" || Boolean(callbackStatus),
   );
   const returnUrl = new URL("/onboarding", window.location.origin);
   returnUrl.searchParams.set("step", "source");
@@ -157,7 +157,7 @@ export function NyxbotOnboardingPage() {
           userId={user.id}
           accountName={user.display_name?.trim() || user.email}
           referral={search.channel}
-          callbackFailed={search.status === "error"}
+          callbackFailed={callbackStatus === "error"}
           onBackToAccount={() => setAccountConfirmed(false)}
         />
       ) : (
