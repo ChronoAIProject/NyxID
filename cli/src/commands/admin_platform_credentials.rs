@@ -240,7 +240,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn platform_credentials_set_reads_secret_env_and_rejects_raw_secret() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = server().await;
         let env = "NYXID_TEST_MANAGED_META_SECRET";
         unsafe {
@@ -276,7 +276,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn x_show_and_set_use_the_same_multi_provider_commands() {
-        let _guard = env_lock().lock().unwrap();
+        let _guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let server = MockServer::start().await;
         let descriptor = json!({"provider": "x", "backing": {"type": "provider_oauth", "provider_slug": "twitter"},
             "fields": [{"name": "client_id", "secret": true}, {"name": "client_secret", "secret": true}]});
