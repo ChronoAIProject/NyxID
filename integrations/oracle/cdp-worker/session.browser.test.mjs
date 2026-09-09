@@ -137,8 +137,9 @@ async function apiFixture(t, handle) {
       res.writeHead(status, { "Content-Type": "application/json" });
       res.end(JSON.stringify(payload));
     } catch (error) {
+      t.diagnostic(error instanceof Error ? error.message : "Unexpected mock API failure");
       res.writeHead(400, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: String(error) }));
+      res.end(JSON.stringify({ error: "Invalid mock API request" }));
     }
   });
   server.listen(0, "127.0.0.1");

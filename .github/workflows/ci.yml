@@ -180,6 +180,8 @@ jobs:
 
   oracle-worker-test:
     name: Oracle Worker Test
+    permissions:
+      contents: read
     needs: changes
     if: inputs.force-all || needs.changes.outputs.ci == 'true' || needs.changes.outputs.oracle_worker == 'true'
     runs-on: ubuntu-latest
