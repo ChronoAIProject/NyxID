@@ -603,7 +603,7 @@ async fn run_worker(command: OracleWorkerCommands) -> Result<()> {
             eprintln!("Saved login unbound from worker '{label}'.");
             Ok(())
         }
-        OracleWorkerCommands::List { pool, auth } => {
+        OracleWorkerCommands::List { pool, all, auth } => {
             let output = auth.output;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let response: Value = api
@@ -612,7 +612,7 @@ async fn run_worker(command: OracleWorkerCommands) -> Result<()> {
                     urlencoding::encode(&pool)
                 ))
                 .await?;
-            print_workers(output, &response)
+            print_workers(output, &response, all)
         }
         OracleWorkerCommands::Show { pool, label, auth } => {
             let output = auth.output;
@@ -892,14 +892,39 @@ fn installed_bundle_matches(config: &OracleWorkerConfig, bundle: &WorkerBundle) 
         && playwright_version == bundle.playwright_core_version
 }
 
-fn print_workers(output: OutputFormat, response: &Value) -> Result<()> {
+/// Split the server's worker list into the rows to display and the number of
+/// offline rows hidden. With `include_offline` every row is shown.
+fn select_workers(response: &Value, include_offline: bool) -> (Vec<Value>, usize) {
+    let workers = response["workers"].as_array().cloned().unwrap_or_default();
+    if include_offline {
+        return (workers, 0);
+    }
+    let total = workers.len();
+    let online: Vec<Value> = workers
+        .into_iter()
+        .filter(|worker| worker["online"].as_bool().unwrap_or(false))
+        .collect();
+    let hidden = total - online.len();
+    (online, hidden)
+}
+
+fn print_workers(output: OutputFormat, response: &Value, include_offline: bool) -> Result<()> {
+    let (workers, hidden) = select_workers(response, include_offline);
     if matches!(output, OutputFormat::Json) {
-        println!("{}", serde_json::to_string_pretty(response)?);
+        let mut body = response.clone();
+        body["workers"] = Value::Array(workers);
+        body["hidden_offline"] = Value::from(hidden);
+        println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
     }
-    let workers = response["workers"].as_array().cloned().unwrap_or_default();
     if workers.is_empty() {
-        eprintln!("No workers have registered with this pool.");
+        if hidden > 0 {
+            eprintln!(
+                "No workers are online in this pool ({hidden} offline hidden; pass --all to show them)."
+            );
+        } else {
+            eprintln!("No workers have registered with this pool.");
+        }
         return Ok(());
     }
     let mut table = Table::new();
@@ -933,6 +958,9 @@ fn print_workers(output: OutputFormat, response: &Value) -> Result<()> {
         ]);
     }
     println!("{table}");
+    if hidden > 0 {
+        eprintln!("{hidden} offline worker(s) hidden; pass --all to show them.");
+    }
     Ok(())
 }
 
@@ -2421,6 +2449,22 @@ mod tests {
     use crate::test_support::mock_auth_with_output;
     use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn worker_list_hides_offline_rows_unless_all_is_requested() {
+        let response = serde_json::json!({ "workers": [
+            { "label": "tab_1", "online": true },
+            { "label": "tab_2", "online": false },
+            { "label": "legacy" },
+        ]});
+        let (shown, hidden) = select_workers(&response, false);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0]["label"], "tab_1");
+        assert_eq!(hidden, 2);
+        let (shown, hidden) = select_workers(&response, true);
+        assert_eq!(shown.len(), 3);
+        assert_eq!(hidden, 0);
+    }
 
     #[test]
     fn org_members_join_without_token_input_and_legacy_installs_keep_their_path() {
