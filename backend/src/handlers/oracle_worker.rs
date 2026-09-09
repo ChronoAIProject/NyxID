@@ -27,7 +27,10 @@ use crate::services::{
     oracle_login_snapshot_service, oracle_pool_service, oracle_task_service, oracle_worker_service,
 };
 
-async fn authenticate_worker(state: &AppState, headers: &HeaderMap) -> AppResult<OraclePool> {
+pub(super) async fn authenticate_worker(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> AppResult<OraclePool> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())

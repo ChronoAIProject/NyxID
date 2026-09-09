@@ -1682,6 +1682,23 @@ fn build_router_internal(
                 ),),
             )
             .route(
+                "/pools/{id_or_slug}/login-profiles",
+                get(handlers::oracle_login_profiles::list),
+            )
+            .route(
+                "/pools/{id_or_slug}/login-profiles/{name}",
+                put(handlers::oracle_login_profiles::save)
+                    .delete(handlers::oracle_login_profiles::delete)
+                    .layer(DefaultBodyLimit::max(
+                        crate::services::oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS + 4096,
+                    )),
+            )
+            .route(
+                "/pools/{id_or_slug}/workers/{label}/login-profile",
+                put(handlers::oracle_login_profiles::bind)
+                    .delete(handlers::oracle_login_profiles::unbind),
+            )
+            .route(
                 "/worker-bundle",
                 get(handlers::oracle_worker_bundle::get_bundle),
             )
@@ -2018,6 +2035,14 @@ fn build_router_internal(
             Router::new()
                 .route("/task", get(handlers::oracle_worker::poll_task))
                 .route("/heartbeat", post(handlers::oracle_worker::heartbeat))
+                .route(
+                    "/login-profile",
+                    get(handlers::oracle_login_profiles::current)
+                        .post(handlers::oracle_login_profiles::refresh)
+                        .layer(DefaultBodyLimit::max(
+                            crate::services::oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS + 4096,
+                        )),
+                )
                 .route(
                     "/login-snapshots/{snapshot_id}",
                     get(handlers::oracle_worker::fetch_login_snapshot),

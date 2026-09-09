@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  accountFingerprint,
   artifactBudgetDecision,
   artifactFileId,
   backoffDelay,
@@ -11,7 +12,13 @@ import {
   decidePromptResume,
   daemonPath,
   decryptSessionEnvelope,
+  encryptSessionEnvelope,
+  validateSessionSnapshot,
+  canImportLogin,
+  savedLoginDecision,
   installedDependencyVersion,
+  invalidateSavedLogin,
+  isAccountChangeUrl,
   isAuthFlowUrl,
   isTrustedArtifactUrl,
   markChatPageRecovered,
@@ -26,6 +33,102 @@ import {
   shouldLeaveTabAlone,
   taskRecoveryDecision,
 } from "./worker.mjs";
+
+test("saved account fingerprints bind both identity and pool without storing upstream identifiers", () => {
+  const fingerprint = accountFingerprint("synthetic-account-a", "synthetic-pool-token");
+  assert.match(fingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(fingerprint, accountFingerprint("synthetic-account-a", "synthetic-pool-token"));
+  assert.notEqual(fingerprint, accountFingerprint("synthetic-account-b", "synthetic-pool-token"));
+  assert.notEqual(fingerprint, accountFingerprint("synthetic-account-a", "another-pool-token"));
+  assert.equal(fingerprint.includes("synthetic-account-a"), false);
+});
+
+test("account-change detection excludes normal session refresh and unrelated hosts", () => {
+  for (const url of ["https://chatgpt.com/api/auth/signout", "https://chatgpt.com/auth/login", "https://auth.openai.com/logout", "https://chat.openai.com/switch-account"]) {
+    assert.equal(isAccountChangeUrl(url), true, url);
+  }
+  assert.equal(isAccountChangeUrl("https://accounts.google.com/", true), true);
+  for (const url of ["https://chatgpt.com/api/auth/session", "https://auth.openai.com/api/auth/refresh", "https://chatgpt.com/backend-api/conversation", "https://unrelated.example/login", "https://chatgpt.com.evil.example/logout", "invalid"]) {
+    assert.equal(isAccountChangeUrl(url), false, url);
+  }
+  assert.equal(isAccountChangeUrl("https://accounts.google.com/", false), false);
+});
+
+test("observed account changes revoke publication authority while retaining the original fingerprint", () => {
+  const state = { saved_login: { status: "verified", account_fingerprint: "original", source_revision: "revision", pending_publication_id: "publication" } };
+  assert.equal(invalidateSavedLogin(state, "untrusted"), true);
+  assert.equal(state.saved_login.pending_publication_id, null);
+  assert.equal(state.saved_login.account_fingerprint, "original");
+  assert.equal(state.saved_login.source_revision, "revision");
+  assert.equal(invalidateSavedLogin(state, "external_login"), true);
+  assert.equal(invalidateSavedLogin(state, "untrusted"), false);
+  assert.equal(state.saved_login.status, "external_login");
+  assert.equal(invalidateSavedLogin({}, "external_login"), false);
+  assert.equal(invalidateSavedLogin({ saved_login: { status: "importing" } }, "external_login"), false);
+});
+
+test("saved login import fences every post-send phase and permits only logged-out pre-send recovery", () => {
+  for (const phase of ["send_attempted", "sent", "waiting_response", "settling", "scraping", "unknown"]) {
+    assert.equal(canImportLogin({ current_task: { phase } }, false), false, phase);
+  }
+  for (const phase of ["claimed", "page_ready", "ready_to_send"]) {
+    assert.equal(canImportLogin({ current_task: { phase } }, false), true);
+    assert.equal(canImportLogin({ current_task: { phase } }, true), false);
+  }
+  assert.equal(canImportLogin({}, true), true);
+});
+
+test("saved login tracks imported revision separately from sibling publications and human generation", () => {
+  const now = Date.now();
+  const desired = { status: "available", profile: { id: "profile", generation: "human-1", revision: "revision-2", updated_at: new Date(now).toISOString() },
+    binding: { binding_id: "binding", replace_existing: false } };
+  const state = { saved_login: { profile_id: "profile", binding_id: "binding", generation: "human-1",
+    source_revision: "revision-1", attempted_revision: "revision-1", status: "verified" } };
+  assert.equal(savedLoginDecision({}, desired, true), "preserve_existing");
+  assert.equal(savedLoginDecision({}, desired, false), "import");
+  assert.equal(savedLoginDecision(state, desired, true), "sibling_revision");
+  assert.equal(state.saved_login.source_revision, "revision-1");
+  assert.equal(savedLoginDecision(state, desired, true, now + 16 * 60 * 1000), "import");
+  assert.equal(savedLoginDecision({ ...state, current_task: { phase: "sent" } }, desired, false), "defer");
+  assert.equal(savedLoginDecision(state, { ...desired, profile: { ...desired.profile, generation: "human-2" } }, true), "import");
+  state.saved_login.source_revision = "revision-2";
+  assert.equal(savedLoginDecision(state, desired, true), "refresh");
+  state.saved_login.status = "untrusted";
+  assert.equal(savedLoginDecision(state, desired, true), "preserve_existing");
+  assert.equal(savedLoginDecision(state, desired, false), "import");
+  state.saved_login.status = "external_login";
+  assert.equal(savedLoginDecision(state, desired, true), "preserve_existing");
+  assert.equal(savedLoginDecision(state, desired, false), "preserve_existing");
+  assert.equal(savedLoginDecision(state, { ...desired, profile: { ...desired.profile, generation: "human-2" } }, true), "import");
+  state.saved_login.status = "failed";
+  state.saved_login.attempted_revision = "revision-2";
+  assert.equal(savedLoginDecision(state, desired, false), "failed_revision");
+  assert.equal(savedLoginDecision(state, { ...desired, profile: { ...desired.profile, revision: "revision-3" } }, true), "import");
+  assert.equal(savedLoginDecision(state, { ...desired, status: "token_changed" }, true), "unavailable");
+});
+
+test("worker export envelope authenticates token, bytes, size and version", () => {
+  const snapshot = { version: 1, cookies: [], origins: [] };
+  const encrypted = encryptSessionEnvelope(snapshot, "synthetic-token");
+  assert.deepEqual(decryptSessionEnvelope(encrypted, "synthetic-token"), snapshot);
+  assert.throws(() => decryptSessionEnvelope(encrypted, "wrong-token"), /session_decrypt_failed/);
+  const changed = JSON.parse(encrypted);
+  const bytes = Buffer.from(changed.ciphertext_base64, "base64");
+  bytes[0] ^= 1;
+  changed.ciphertext_base64 = bytes.toString("base64");
+  assert.throws(() => decryptSessionEnvelope(Buffer.from(JSON.stringify(changed)), "synthetic-token"), /session_decrypt_failed/);
+  assert.throws(() => encryptSessionEnvelope({ data: "x".repeat(360000) }, "synthetic-token"), /session_plaintext_too_large/);
+});
+
+test("login snapshots validate cookies and storage before an importer mutates browser state", () => {
+  const cookie = { name: "session", value: "synthetic", domain: "auth.openai.com", path: "/api/auth",
+    expires: -1, secure: true, httpOnly: true, sameSite: "Lax" };
+  const valid = validateSessionSnapshot({ version: 1, cookies: [cookie, { ...cookie, domain: "unrelated.example" }], origins: [] });
+  assert.deepEqual(valid.cookies, [cookie]);
+  assert.throws(() => validateSessionSnapshot({ version: 1, cookies: [{ ...cookie, domain: "unrelated.example" }] }), /session_snapshot_no_cookies/);
+  assert.throws(() => validateSessionSnapshot({ version: 1, cookies: [{ ...cookie, path: "invalid" }] }), /session_snapshot_invalid/);
+  assert.throws(() => validateSessionSnapshot({ version: 1, cookies: [cookie], origins: [{ origin: "https://chatgpt.com", local_storage: "invalid" }] }), /session_snapshot_invalid/);
+});
 
 // Produced by Rust encrypt_login_snapshot for LOGIN_SNAPSHOT_FIXTURE_TOKEN.
 // This cross-language wire fixture must never be regenerated silently.

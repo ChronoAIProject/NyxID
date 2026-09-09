@@ -67,7 +67,7 @@ fn snapshot_aad(pool_id: &str, snapshot_id: &str, format_version: u32) -> String
     format!("oracle-login-snapshot:{pool_id}:{snapshot_id}:v{format_version}")
 }
 
-fn verify_worker_token_hash(pool: &OraclePool, verifier: &str) -> AppResult<()> {
+pub(super) fn verify_worker_token_hash(pool: &OraclePool, verifier: &str) -> AppResult<()> {
     let valid_shape = verifier.len() == 64
         && verifier
             .bytes()
