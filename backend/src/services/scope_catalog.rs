@@ -101,7 +101,7 @@ pub fn removal_capability(slug: &str) -> ScopeRemoval {
 /// Deliberately NOT derived from the display-oriented `sensitive` flags below:
 /// Google's verification classification is a separate, manually maintained
 /// decision. Operators must configure and verify the managed Google app for
-/// the Drive and Calendar scopes before offering it in production.
+/// the Drive, Calendar, and Gmail read/send scopes before offering it in production.
 pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
     match slug {
         "google" => Some(super::google_workspace::MANAGED_SCOPES),
@@ -1109,18 +1109,22 @@ mod tests {
     }
 
     #[test]
-    fn platform_allowlist_google_supports_drive_calendar_only() {
+    fn platform_allowlist_google_supports_drive_calendar_and_gmail_read_send() {
         let google = platform_scope_allowlist("google").unwrap();
         for s in [
             "https://www.googleapis.com/auth/drive",
             "https://www.googleapis.com/auth/drive.readonly",
             "https://www.googleapis.com/auth/calendar",
             "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
         ] {
             assert!(google.contains(&s));
         }
         for s in [
-            "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/gmail.compose",
+            "https://mail.google.com/",
             "https://www.googleapis.com/auth/spreadsheets",
         ] {
             assert!(

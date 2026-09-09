@@ -32,6 +32,7 @@ import ApiGoogleIcon from "./api-google";
 import ApiGoogleWorkspaceIcon from "./api-google-workspace";
 import ApiGoogleCalendarIcon from "./api-google-calendar";
 import ApiGoogleDriveIcon from "./api-google-drive";
+import ApiGoogleGmailIcon from "./api-google-gmail";
 import ApiNotionIcon from "./api-notion";
 import ApiGoogleCloudIcon from "./api-google-cloud";
 import ApiGithubIcon from "./api-github";
@@ -79,6 +80,7 @@ export const SPEC_CATALOG_SLUGS = [
   "api-google-workspace",
   "api-google-calendar",
   "api-google-drive",
+  "api-google-gmail",
   "api-google-cloud",
   "api-notion",
   "api-github",
@@ -123,6 +125,7 @@ export const SERVICE_ICONS: Readonly<Record<string, IconComponent>> = {
   "api-google-workspace": ApiGoogleWorkspaceIcon,
   "api-google-calendar": ApiGoogleCalendarIcon,
   "api-google-drive": ApiGoogleDriveIcon,
+  "api-google-gmail": ApiGoogleGmailIcon,
   "api-google-cloud": ApiGoogleCloudIcon,
   "api-notion": ApiNotionIcon,
   "api-github": ApiGithubIcon,
