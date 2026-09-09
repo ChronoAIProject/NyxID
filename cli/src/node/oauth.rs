@@ -17,6 +17,9 @@ use url::Url;
 use super::config::{OAuthRequestEncoding, OAuthRequestOptions};
 use super::error::{Error, Result};
 
+mod endpoint;
+use endpoint::ProviderEndpoint;
+
 /// OAuth config fetched from NyxID catalog or provided via CLI.
 #[allow(dead_code)]
 pub struct OAuthConfig {
@@ -73,14 +76,6 @@ impl OAuthRequestOptions {
             ),
         })
     }
-}
-
-fn token_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| Error::Config(format!("Failed to build OAuth client: {e}")))
 }
 
 /// Token response from OAuth token endpoint.
@@ -148,6 +143,15 @@ pub fn oauth_config_from_catalog_value(body: &serde_json::Value) -> Result<OAuth
         .as_str()
         .ok_or_else(|| Error::Config("Catalog entry has no token_url".to_string()))?
         .to_string();
+    ProviderEndpoint::parse_address(&token_url)?;
+    for field in ["device_code_url", "device_token_url", "revocation_url"] {
+        if let Some(address) = body[field].as_str() {
+            ProviderEndpoint::parse_address(address)?;
+        }
+    }
+    if let Some(address) = body["revocation"]["url"].as_str() {
+        ProviderEndpoint::parse_address(address)?;
+    }
 
     Ok(OAuthConfig {
         authorization_url: body["authorization_url"].as_str().map(String::from),
@@ -227,11 +231,17 @@ pub async fn run_device_code_flow(
     client_secret: Option<&str>,
     scopes: &str,
 ) -> Result<TokenResponse> {
-    let client = token_client()?;
     let device_code_url = config
         .device_code_url
         .as_deref()
         .ok_or_else(|| Error::Config("No device_code_url available".to_string()))?;
+    let device_endpoint = ProviderEndpoint::new(device_code_url)?;
+    let poll_endpoint = ProviderEndpoint::new(
+        config
+            .device_token_url
+            .as_deref()
+            .unwrap_or(&config.token_url),
+    )?;
     let client_id_param_name = config.client_id_param_name().to_string();
 
     // Step 1: Request device code
@@ -245,7 +255,7 @@ pub async fn run_device_code_flow(
 
     let resp = config
         .request_options
-        .encode(client.post(device_code_url), &request_form)?
+        .encode(device_endpoint.post(), &request_form)?
         .send()
         .await
         .map_err(|e| Error::Config(format!("Device code request failed: {e}")))?;
@@ -271,11 +281,6 @@ pub async fn run_device_code_flow(
     println!("  Waiting for authorization...");
 
     // Step 3: Poll for token
-    let token_poll_url = config
-        .device_token_url
-        .as_deref()
-        .unwrap_or(&config.token_url);
-
     let mut interval = std::time::Duration::from_secs(device_resp.interval.max(1));
     let deadline =
         std::time::Instant::now() + std::time::Duration::from_secs(device_resp.expires_in);
@@ -301,7 +306,7 @@ pub async fn run_device_code_flow(
 
         let resp = config
             .request_options
-            .encode(client.post(token_poll_url), &form)?
+            .encode(poll_endpoint.post(), &form)?
             .send()
             .await;
 
@@ -352,6 +357,7 @@ pub async fn run_authorization_code_flow(
     client_secret: Option<&str>,
     scopes: &str,
 ) -> Result<TokenResponse> {
+    ProviderEndpoint::parse_address(&config.token_url)?;
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|e| Error::Config(format!("Failed to bind local callback server: {e}")))?;
     let port = listener
@@ -452,10 +458,10 @@ pub async fn refresh_token(
     client_id_param_name: Option<&str>,
     request_options: &OAuthRequestOptions,
 ) -> Result<TokenResponse> {
-    let client = token_client()?;
+    let endpoint = ProviderEndpoint::new(token_url)?;
     let client_id_param_name = client_id_param_name.unwrap_or("client_id");
 
-    let mut req = client.post(token_url);
+    let mut req = endpoint.post();
 
     match auth_method {
         "client_secret_basic" => {
@@ -660,8 +666,8 @@ async fn exchange_authorization_code(
     redirect_uri: &str,
     code_verifier: Option<&str>,
 ) -> Result<TokenResponse> {
-    let client = token_client()?;
-    let mut req = client.post(&config.token_url);
+    let endpoint = ProviderEndpoint::new(&config.token_url)?;
+    let mut req = endpoint.post();
     let client_id_param_name = config.client_id_param_name().to_string();
 
     match config.token_endpoint_auth_method.as_str() {
@@ -994,6 +1000,120 @@ mod tests {
             body["token_url"] = "https://example.com/token".into();
             assert!(oauth_config_from_catalog_value(&body).is_err());
         }
+    }
+
+    #[test]
+    fn catalog_rejects_insecure_credential_endpoints() {
+        for field in [
+            "token_url",
+            "device_code_url",
+            "device_token_url",
+            "revocation_url",
+        ] {
+            let mut body = serde_json::json!({"token_url": "https://provider.example/token"});
+            body[field] = "http://provider.example/credential-endpoint".into();
+            assert!(oauth_config_from_catalog_value(&body).is_err(), "{field}");
+        }
+        let body = serde_json::json!({
+            "token_url": "https://provider.example/token",
+            "revocation": {"url": "http://provider.example/revoke"}
+        });
+        assert!(oauth_config_from_catalog_value(&body).is_err());
+    }
+
+    #[tokio::test]
+    async fn exchange_and_refresh_reject_public_http_before_sending_credentials() {
+        let mut config = oauth_config_from_catalog_value(&serde_json::json!({
+            "token_url": "https://provider.example/token"
+        }))
+        .unwrap();
+        // CLI-provided and previously persisted URLs must pass the same gate.
+        config.token_url = "http://provider.example/token".into();
+        for auth_method in ["client_secret_basic", "client_secret_post"] {
+            config.token_endpoint_auth_method = auth_method.into();
+            let error = exchange_authorization_code(
+                &config,
+                "test-client",
+                Some("test-secret"),
+                "test-code",
+                "http://localhost/callback",
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("must use HTTPS"));
+            let error = refresh_token(
+                &config.token_url,
+                "test-client",
+                Some("test-secret"),
+                "test-refresh",
+                auth_method,
+                None,
+                &config.request_options,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("must use HTTPS"));
+        }
+    }
+
+    #[tokio::test]
+    async fn device_flow_checks_both_endpoints_before_sending_credentials() {
+        let server = MockServer::start().await;
+        let mut config = oauth_config_from_catalog_value(&serde_json::json!({
+            "token_url": format!("{}/token", server.uri()),
+            "device_code_url": format!("{}/device", server.uri()),
+        }))
+        .unwrap();
+        config.device_token_url = Some("http://provider.example/token".into());
+        let error = super::run_device_code_flow(&config, "test-client", Some("test-secret"), "")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("must use HTTPS"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+
+        config.device_token_url = None;
+        config.device_code_url = Some("http://provider.example/device".into());
+        let error = super::run_device_code_flow(&config, "test-client", Some("test-secret"), "")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("must use HTTPS"));
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn device_flow_allows_loopback_polling() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/device"))
+            .and(body_string(
+                "client_id=test-client&client_secret=test-secret",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "device_code": "test-device", "user_code": "TEST", "expires_in": 30,
+                "interval": 1, "verification_uri": "https://provider.example/device"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/poll"))
+            .and(body_string("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&device_code=test-device&client_id=test-client&client_secret=test-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "access_token": "test-access"
+            })))
+            .expect(1).mount(&server).await;
+        let config = oauth_config_from_catalog_value(&serde_json::json!({
+            "token_url": format!("{}/token", server.uri()),
+            "device_code_url": format!("{}/device", server.uri()),
+            "device_token_url": format!("{}/poll", server.uri()),
+        }))
+        .unwrap();
+        let response = super::run_device_code_flow(&config, "test-client", Some("test-secret"), "")
+            .await
+            .unwrap();
+        assert_eq!(response.access_token, "test-access");
+        server.verify().await;
     }
 
     #[test]

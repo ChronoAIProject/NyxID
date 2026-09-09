@@ -53,10 +53,18 @@ pub fn encode_oauth_request(
     encoding: &str,
     params: &[(String, String)],
 ) -> AppResult<reqwest::RequestBuilder> {
-    crate::services::provider_service::validate_oauth_request_options(
-        Some(encoding),
-        Some(&provider.oauth_request_headers),
-    )?;
+    // Writes and model deserialization enforce the public-header contract.
+    // Fail closed for in-memory configs too, without propagating a validator's
+    // provider-derived result into request errors that callers may log.
+    if provider.oauth_request_headers.len() > 20
+        || provider.oauth_request_headers.iter().any(|(name, value)| {
+            !crate::models::provider_config::is_public_oauth_header(name, value)
+        })
+    {
+        return Err(AppError::ValidationError(
+            "Invalid OAuth request headers".to_string(),
+        ));
+    }
     for (name, value) in &provider.oauth_request_headers {
         request = request.header(name, value);
     }
@@ -386,6 +394,33 @@ mod tests {
         assert_eq!(token_request_encoding(&provider), "json");
         provider.token_request_encoding = Some("unsupported".into());
         assert!(token_request(&provider, "https://example.com/token", &[]).is_err());
+    }
+
+    #[test]
+    fn invalid_request_options_fail_with_fixed_errors() {
+        for (name, value) in [
+            ("X-API-Key", "credential-sentinel"),
+            ("Notion-Version", "credential-sentinel"),
+        ] {
+            let mut provider = test_provider();
+            provider
+                .oauth_request_headers
+                .insert(name.into(), value.into());
+            let error = token_request(&provider, "https://example.com/token", &[]).unwrap_err();
+            let AppError::ValidationError(message) = &error else {
+                panic!("expected validation failure");
+            };
+            assert_eq!(message, "Invalid OAuth request headers");
+            assert!(!format!("{error:?}").contains(value));
+        }
+        let mut provider = test_provider();
+        provider.token_request_encoding = Some("credential-sentinel".into());
+        let error = token_request(&provider, "https://example.com/token", &[]).unwrap_err();
+        let AppError::ValidationError(message) = &error else {
+            panic!("expected validation failure");
+        };
+        assert_eq!(message, "OAuth request encoding must be one of: form, json");
+        assert!(!format!("{error:?}").contains("credential-sentinel"));
     }
 
     #[test]

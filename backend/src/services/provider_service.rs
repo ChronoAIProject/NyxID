@@ -99,6 +99,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "openai", "Seeded default provider: OpenAI");
         seeded_count += 1;
@@ -202,6 +203,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "openai-codex",
@@ -251,6 +253,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "anthropic", "Seeded default provider: Anthropic");
         seeded_count += 1;
@@ -297,6 +300,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "google-ai",
@@ -346,6 +350,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "mistral", "Seeded default provider: Mistral AI");
         seeded_count += 1;
@@ -392,6 +397,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "cohere", "Seeded default provider: Cohere");
         seeded_count += 1;
@@ -438,6 +444,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "deepseek", "Seeded default provider: DeepSeek");
         seeded_count += 1;
@@ -488,6 +495,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "firecrawl", "Seeded default provider: Firecrawl");
         seeded_count += 1;
@@ -540,6 +548,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "elevenlabs", "Seeded default provider: ElevenLabs");
         seeded_count += 1;
@@ -590,6 +599,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "twilio", "Seeded default provider: Twilio");
         seeded_count += 1;
@@ -652,7 +662,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "twitter", "Seeded default provider: Twitter / X");
         seeded_count += 1;
@@ -781,7 +791,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "google", "Seeded default provider: Google");
         seeded_count += 1;
@@ -835,7 +845,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "github", "Seeded default provider: GitHub");
         seeded_count += 1;
@@ -893,6 +903,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "github-pat", "Seeded default provider: GitHub PAT");
         seeded_count += 1;
@@ -945,7 +956,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "facebook", "Seeded default provider: Facebook");
         seeded_count += 1;
@@ -998,7 +1009,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "discord", "Seeded default provider: Discord");
         seeded_count += 1;
@@ -1048,6 +1059,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "spotify", "Seeded default provider: Spotify");
         seeded_count += 1;
@@ -1106,7 +1118,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "linkedin", "Seeded default provider: LinkedIn");
         seeded_count += 1;
@@ -1160,7 +1172,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "slack", "Seeded default provider: Slack");
         seeded_count += 1;
@@ -1216,6 +1228,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "microsoft", "Seeded default provider: Microsoft");
         seeded_count += 1;
@@ -1268,7 +1281,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "tiktok", "Seeded default provider: TikTok");
         seeded_count += 1;
@@ -1319,7 +1332,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "twitch", "Seeded default provider: Twitch");
         seeded_count += 1;
@@ -1373,7 +1386,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "reddit", "Seeded default provider: Reddit");
         seeded_count += 1;
@@ -1468,6 +1481,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "lark", "Seeded default provider: Lark");
         seeded_count += 1;
@@ -1520,6 +1534,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "feishu", "Seeded default provider: Feishu");
         seeded_count += 1;
@@ -1567,6 +1582,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "telegram", "Seeded default provider: Telegram Login");
         seeded_count += 1;
@@ -1616,6 +1632,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "telegram-bot",
@@ -1676,6 +1693,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "lark-bot", "Seeded default provider: Lark Bot API");
         seeded_count += 1;
@@ -1733,6 +1751,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "feishu-bot",
@@ -1792,6 +1811,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "discord-bot",
@@ -1852,6 +1872,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "slack-bot", "Seeded default provider: Slack Bot API");
         seeded_count += 1;
@@ -1898,6 +1919,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "whatsapp-business",
@@ -1952,6 +1974,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "openclaw", "Seeded default provider: OpenClaw");
         seeded_count += 1;
@@ -2002,6 +2025,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "openrouter", "Seeded default provider: OpenRouter");
         seeded_count += 1;
@@ -2073,7 +2097,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "notion", "Seeded default provider: Notion");
         seeded_count += 1;
@@ -2167,6 +2191,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(slug = "aws-billing", "Seeded default provider: AWS Billing");
         seeded_count += 1;
@@ -2237,7 +2262,7 @@ pub async fn seed_default_providers(
             created_at: now,
             updated_at: now,
         };
-        validate_seeded_provider_revocation(&provider)?;
+        validate_seeded_provider_options(&provider)?;
         collection.insert_one(&provider).await?;
         tracing::info!(
             slug = "google-cloud",
@@ -2505,8 +2530,13 @@ pub fn validate_oauth_request_options(
     Ok(())
 }
 
-fn validate_seeded_provider_revocation(provider: &ProviderConfig) -> AppResult<()> {
+fn validate_seeded_provider_options(provider: &ProviderConfig) -> AppResult<()> {
+    validate_oauth_request_options(
+        provider.token_request_encoding.as_deref(),
+        Some(&provider.oauth_request_headers),
+    )?;
     if let Some(revocation) = provider.revocation.as_ref() {
+        validate_oauth_request_options(Some(&revocation.request_encoding), None)?;
         validate_revocation_url_shape(&revocation.url)?;
     }
     Ok(())
@@ -8391,8 +8421,29 @@ mod tests {
             revokes_grant: false,
         });
 
-        super::validate_seeded_provider_revocation(&provider)
+        super::validate_seeded_provider_options(&provider)
             .expect("trusted seed validation must be independent of DNS");
+    }
+
+    #[test]
+    fn trusted_seed_validation_rejects_invalid_request_options() {
+        let mut provider = make_test_provider("invalid-seed-options", "oauth2");
+        provider.token_request_encoding = Some("xml".into());
+        assert!(super::validate_seeded_provider_options(&provider).is_err());
+        provider.token_request_encoding = Some("json".into());
+        provider
+            .oauth_request_headers
+            .insert("X-API-Key".into(), "credential-sentinel".into());
+        assert!(super::validate_seeded_provider_options(&provider).is_err());
+        provider.oauth_request_headers.clear();
+        provider.revocation = Some(RevocationConfig {
+            request_encoding: "xml".into(),
+            style: "rfc7009".into(),
+            url: "https://does-not-resolve.invalid/revoke".into(),
+            auth: "inherit".into(),
+            revokes_grant: false,
+        });
+        assert!(super::validate_seeded_provider_options(&provider).is_err());
     }
 
     // ── create_provider with device_code config ────────────────────

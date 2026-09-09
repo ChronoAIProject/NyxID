@@ -186,6 +186,13 @@ providers omit `scope` from the authorize URL and reject explicit `--scope` or
 `--scopes` selections locally. Existing node credential files
 without protocol options retain form encoding and empty OAuth headers.
 
+Node OAuth credential endpoints require HTTPS, including device authorization,
+token polling, code exchange, refresh, and catalog revocation URLs. Local
+development permits HTTP only on `localhost`, `127.0.0.1`, and `[::1]`. These
+local requests bypass proxies, and `localhost` is pinned to `127.0.0.1`.
+Credential requests never follow redirects. Invalid endpoint configurations
+fail before credentials are sent.
+
 ## Overlay Drift Verification
 
 The weekly guard checks Notion against its official machine-readable spec at
