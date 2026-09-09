@@ -929,7 +929,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // intentional: serialises HOME/env mutations across tests
     async fn caller_selected_credentials_never_refresh_or_switch_identity() {
-        let _env_guard = env_lock().lock().expect("env lock");
+        let _env_guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let temp = tempfile::tempdir().expect("temp dir");
         let _home = HomeGuard::set(temp.path());
         let _env = EnvGuard::set(&[
@@ -963,7 +963,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // intentional: serialises HOME mutations across tests
     async fn proxy_request_refreshes_expired_token_and_retries() {
-        let _env_guard = env_lock().lock().expect("env lock");
+        let _env_guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let temp = tempfile::tempdir().expect("temp dir");
         let _home = HomeGuard::set(temp.path());
 
@@ -1020,7 +1020,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // intentional: serialises HOME mutations across tests
     async fn proxy_request_strips_client_authorization_header() {
-        let _env_guard = env_lock().lock().expect("env lock");
+        let _env_guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let temp = tempfile::tempdir().expect("temp dir");
         let _home = HomeGuard::set(temp.path());
 

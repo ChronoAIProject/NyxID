@@ -466,7 +466,17 @@ fn is_allowed_forward_header(name_lower: &str) -> bool {
 /// Header names are normalized by `HeaderMap`, matching remains
 /// case-insensitive, and repeated values retain their map iteration order for
 /// the existing deterministic merge rules in `merge_into_header_list`.
+#[cfg(test)]
 pub(crate) fn collect_forward_headers(headers: &http::HeaderMap) -> Vec<(String, String)> {
+    collect_forward_headers_with_defaults(headers, &[])
+}
+
+/// An overridable service default also admits the caller's value. Recheck the
+/// default-header denylist so legacy rows cannot open reserved header names.
+pub(crate) fn collect_forward_headers_with_defaults(
+    headers: &http::HeaderMap,
+    default_layers: &[&[DefaultRequestHeader]],
+) -> Vec<(String, String)> {
     // W3C Trace Context requires `tracestate` to be ignored when its
     // accompanying `traceparent` is absent or invalid. Validate before the
     // generic allowlist walk so direct and node-routed HTTP use one policy.
@@ -477,7 +487,15 @@ pub(crate) fn collect_forward_headers(headers: &http::HeaderMap) -> Vec<(String,
         .iter()
         .filter_map(|(name, value)| {
             let name_lower = name.as_str().to_ascii_lowercase();
-            if !is_allowed_forward_header(&name_lower) {
+            let overridable_default =
+                !default_request_header::is_denylisted_header_name(&name_lower)
+                    && default_layers
+                        .iter()
+                        .flat_map(|layer| layer.iter())
+                        .any(|header| {
+                            header.overridable && header.name.eq_ignore_ascii_case(&name_lower)
+                        });
+            if !is_allowed_forward_header(&name_lower) && !overridable_default {
                 return None;
             }
             if name_lower == "traceparent" && !traceparent_valid {
@@ -3541,7 +3559,13 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
     //
     // The shared builder applies this exact sequence for both direct and
     // node-routed HTTP requests.
-    let outbound_headers = collect_forward_headers(&headers);
+    let outbound_headers = collect_forward_headers_with_defaults(
+        &headers,
+        &[
+            target.catalog_default_headers.as_slice(),
+            target.user_service_default_headers.as_slice(),
+        ],
+    );
     let outbound_headers = build_effective_outbound_headers(
         target,
         outbound_headers,
@@ -4383,6 +4407,47 @@ mod tests {
     }
 
     // ---- forward header allowlist tests (NyxID#161) ----
+
+    #[test]
+    fn overridable_defaults_admit_caller_headers_without_opening_reserved_names() {
+        let mut headers = http::HeaderMap::new();
+        for name in [
+            "acme-version",
+            "custom-version",
+            "locked-version",
+            "unconfigured-version",
+            "authorization",
+            "host",
+            "x-nyxid-user-id",
+            "connection",
+        ] {
+            headers.insert(
+                http::HeaderName::from_static(name),
+                "caller".parse().unwrap(),
+            );
+        }
+        let make_default = |name: &str, overridable| DefaultRequestHeader {
+            name: name.into(),
+            value: "default".into(),
+            overridable,
+            sensitive: false,
+        };
+        let catalog = vec![
+            make_default("Acme-Version", true),
+            make_default("locked-version", false),
+            make_default("Authorization", true),
+            make_default("Host", true),
+            make_default("X-NyxID-User-Id", true),
+            make_default("Connection", true),
+        ];
+        let user = vec![make_default("Custom-Version", true)];
+        let forwarded = collect_forward_headers_with_defaults(&headers, &[&catalog, &user]);
+        assert_eq!(forwarded.len(), 2);
+        for name in ["acme-version", "custom-version"] {
+            assert!(forwarded.contains(&(name.into(), "caller".into())));
+        }
+        assert!(collect_forward_headers(&headers).is_empty());
+    }
 
     #[test]
     fn forward_allowlist_accepts_explicit_entries() {

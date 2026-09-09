@@ -2198,7 +2198,13 @@ async fn execute_proxy_inner(
     // Direct and node-routed HTTP requests share one admission policy. WS
     // handshakes retain their protocol-specific base allowlist while reusing
     // the same downstream-owned namespace rules.
-    let node_forward_headers = proxy_service::collect_forward_headers(&all_headers);
+    let node_forward_headers = proxy_service::collect_forward_headers_with_defaults(
+        &all_headers,
+        &[
+            target.catalog_default_headers.as_slice(),
+            target.user_service_default_headers.as_slice(),
+        ],
+    );
     let ws_forward_headers = collect_ws_forward_headers(&all_headers);
 
     // === Request body handling ===
@@ -8536,6 +8542,8 @@ mod proxy_resolution_integration_tests {
         body: Bytes,
     ) -> Json<serde_json::Value> {
         Json(serde_json::json!({
+            "notion_versions": headers.get_all("notion-version").iter().map(|value| value.to_str().unwrap()).collect::<Vec<_>>(),
+            "anthropic_versions": headers.get_all("anthropic-version").iter().map(|value| value.to_str().unwrap()).collect::<Vec<_>>(),
             "content_type": headers
                 .get("content-type")
                 .and_then(|value| value.to_str().ok()),
@@ -8598,7 +8606,7 @@ mod proxy_resolution_integration_tests {
                 serde_json::json!({
                     "type": "auth",
                     "node_id": node.id,
-                    "token": "test-node-auth-token",
+                    "token": format!("test-node-auth-{}", node.id),
                 })
                 .to_string()
                 .into(),
@@ -8955,12 +8963,13 @@ mod proxy_resolution_integration_tests {
             .await
             .expect("encrypt node signing secret");
         let now = Utc::now();
+        let node_id = Uuid::new_v4().to_string();
         let node = Node {
-            id: Uuid::new_v4().to_string(),
+            auth_token_hash: hash_token(&format!("test-node-auth-{node_id}")),
+            id: node_id,
             user_id: owner_user_id.to_string(),
             name: name.to_string(),
             status: NodeStatus::Online,
-            auth_token_hash: hash_token("test-node-auth-token"),
             signing_secret_encrypted: Some(signing_secret_encrypted),
             signing_secret_hash: hash_token(&raw_signing_secret),
             last_heartbeat_at: Some(now),
@@ -9112,6 +9121,133 @@ mod proxy_resolution_integration_tests {
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(resolved_slug, service.slug);
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_service_version_headers_reach_downstream_via_direct_and_node_http() {
+        use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
+        use crate::services::provider_service;
+        let db = connect_test_database("proxy_version_wire")
+            .await
+            .expect("MongoDB required");
+        let enc = crate::test_utils::test_encryption_keys();
+        provider_service::seed_default_providers(&db, &enc)
+            .await
+            .unwrap();
+        provider_service::seed_default_services(&db, &enc)
+            .await
+            .unwrap();
+        let org_id = Uuid::new_v4().to_string();
+        let member_id = Uuid::new_v4().to_string();
+        seed_org_actor(&db, &org_id, &member_id, OrgRole::Member).await;
+        let state = test_app_state(db.clone());
+        let (base_url, echo_server) = start_node_echo_downstream().await;
+        for (catalog_slug, header_name, response_field, default_version) in [
+            (
+                "api-notion",
+                "notion-version",
+                "notion_versions",
+                "2022-06-28",
+            ),
+            (
+                "llm-anthropic",
+                "anthropic-version",
+                "anthropic_versions",
+                "2023-06-01",
+            ),
+        ] {
+            let catalog = db
+                .collection::<DownstreamService>(SERVICES)
+                .find_one(doc! { "slug": catalog_slug })
+                .await
+                .unwrap()
+                .unwrap();
+            let default = catalog
+                .default_request_headers
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|header| header.name.eq_ignore_ascii_case(header_name))
+                .unwrap();
+            assert!(default.overridable);
+            assert_eq!(default.value, default_version);
+            for via_node in [false, true] {
+                for explicit_version in [None, Some("2025-09-03")] {
+                    let node = if via_node {
+                        Some(insert_online_node(&state, &org_id, "version-node").await)
+                    } else {
+                        None
+                    };
+                    let endpoint = test_user_endpoint(
+                        &Uuid::new_v4().to_string(),
+                        &org_id,
+                        "Version target",
+                        &base_url,
+                        None,
+                        Some(&catalog.id),
+                    );
+                    let service = test_user_service(
+                        &Uuid::new_v4().to_string(),
+                        &org_id,
+                        &format!("version-{}", Uuid::new_v4()),
+                        &endpoint.id,
+                        Some(&catalog.id),
+                        node.as_ref().map(|node| node.id.as_str()),
+                    );
+                    db.collection::<UserEndpoint>(USER_ENDPOINTS)
+                        .insert_one(endpoint)
+                        .await
+                        .unwrap();
+                    db.collection::<UserService>(USER_SERVICES)
+                        .insert_one(&service)
+                        .await
+                        .unwrap();
+                    let executor = if let Some(node) = node.as_ref() {
+                        Some(
+                            start_node_executor(state.clone(), node, &service.slug, &base_url)
+                                .await,
+                        )
+                    } else {
+                        None
+                    };
+                    let mut request =
+                        proxy_json_request(&format!("/proxy/s/{}/commands", service.slug), "{}");
+                    if let Some(version) = explicit_version {
+                        request.headers_mut().insert(
+                            axum::http::HeaderName::from_static(header_name),
+                            version.parse().unwrap(),
+                        );
+                    }
+                    let response = proxy_request_by_slug_inner(
+                        &state,
+                        &access_token_auth(&member_id),
+                        &service.slug,
+                        "commands",
+                        request,
+                        &mut String::new(),
+                    )
+                    .await
+                    .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::OK,
+                        "{catalog_slug}: node={via_node}, explicit={explicit_version:?}"
+                    );
+                    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+                    let observed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert_eq!(
+                        observed[response_field],
+                        serde_json::json!([explicit_version.unwrap_or(default_version)]),
+                        "{catalog_slug}: node={via_node}"
+                    );
+                    if let Some((executor, ws_server)) = executor {
+                        executor.await.unwrap();
+                        ws_server.abort();
+                    }
+                }
+            }
+        }
+        echo_server.abort();
     }
 
     #[tokio::test]

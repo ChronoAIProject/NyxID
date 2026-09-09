@@ -604,6 +604,7 @@ export interface ProviderConfig {
   readonly has_oauth_config: boolean;
   readonly credential_mode: CredentialMode;
   readonly default_scopes: readonly string[] | null;
+  readonly supports_oauth_scopes?: boolean;
   readonly supports_pkce: boolean;
   readonly device_code_url: string | null;
   readonly device_token_url: string | null;
@@ -612,6 +613,8 @@ export interface ProviderConfig {
   readonly api_key_instructions: string | null;
   readonly api_key_url: string | null;
   readonly token_endpoint_auth_method: string;
+  readonly token_request_encoding?: "form" | "json" | null;
+  readonly oauth_request_headers?: Readonly<Record<string, string>>;
   readonly extra_auth_params: Readonly<Record<string, string>> | null;
   readonly device_code_format: string;
   readonly client_id_param_name: string | null;
@@ -624,6 +627,7 @@ export interface ProviderConfig {
 }
 
 export interface ProviderRevocationConfig {
+  readonly request_encoding?: "form" | "json";
   readonly style: "rfc7009" | "github" | "self_bearer" | "facebook_deauth";
   readonly url: string;
   readonly auth: "inherit" | "none" | "client_id" | "basic" | "post";

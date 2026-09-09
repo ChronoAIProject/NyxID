@@ -28,6 +28,73 @@ pub fn expect_json_response(request: reqwest::RequestBuilder) -> reqwest::Reques
     request.header(reqwest::header::ACCEPT, "application/json")
 }
 
+pub fn token_request_encoding(provider: &ProviderConfig) -> &str {
+    provider
+        .token_request_encoding
+        .as_deref()
+        .unwrap_or_else(|| {
+            // Stored rows predating the encoding field must keep their wire format.
+            if matches!(provider.slug.as_str(), "lark" | "feishu")
+                || provider.token_url.as_deref().is_some_and(|url| {
+                    url.contains("/open-apis/authen/v2/oauth/token")
+                        && (url.contains("open.larksuite.com") || url.contains("open.feishu.cn"))
+                })
+            {
+                "json"
+            } else {
+                "form"
+            }
+        })
+}
+
+pub fn encode_oauth_request(
+    mut request: reqwest::RequestBuilder,
+    provider: &ProviderConfig,
+    encoding: &str,
+    params: &[(String, String)],
+) -> AppResult<reqwest::RequestBuilder> {
+    // Writes and model deserialization enforce the public-header contract.
+    // Fail closed for in-memory configs too, without propagating a validator's
+    // provider-derived result into request errors that callers may log.
+    if provider.oauth_request_headers.len() > 20
+        || provider.oauth_request_headers.iter().any(|(name, value)| {
+            !crate::models::provider_config::is_public_oauth_header(name, value)
+        })
+    {
+        return Err(AppError::ValidationError(
+            "Invalid OAuth request headers".to_string(),
+        ));
+    }
+    for (name, value) in &provider.oauth_request_headers {
+        request = request.header(name, value);
+    }
+    match encoding {
+        "json" => Ok(request.json(
+            &params
+                .iter()
+                .map(|(key, value)| (key, value))
+                .collect::<std::collections::BTreeMap<_, _>>(),
+        )),
+        "form" => Ok(request.form(params)),
+        _ => Err(AppError::ValidationError(
+            "OAuth request encoding must be one of: form, json".to_string(),
+        )),
+    }
+}
+
+pub fn token_request(
+    provider: &ProviderConfig,
+    token_url: &str,
+    params: &[(String, String)],
+) -> AppResult<reqwest::RequestBuilder> {
+    encode_oauth_request(
+        expect_json_response(token_exchange_client().post(token_url)),
+        provider,
+        token_request_encoding(provider),
+        params,
+    )
+}
+
 pub fn client_id_param_name(provider: &ProviderConfig) -> &str {
     provider
         .client_id_param_name
@@ -139,7 +206,14 @@ pub async fn refresh_oauth_token(
         }
     }
 
-    let mut request = expect_json_response(token_exchange_client().post(token_url)).form(&params);
+    // This store always refreshed with form encoding before the explicit field
+    // existed, including Lark-like providers. Only an operator opt-in changes it.
+    let mut request = encode_oauth_request(
+        expect_json_response(token_exchange_client().post(token_url)),
+        &provider,
+        provider.token_request_encoding.as_deref().unwrap_or("form"),
+        &params,
+    )?;
     if use_basic_auth {
         request = request.basic_auth(&client_id, client_secret.as_deref());
     }
@@ -278,6 +352,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -303,6 +380,47 @@ mod tests {
                 .expect("accept header should be set"),
             "application/json"
         );
+    }
+
+    #[test]
+    fn explicit_encoding_overrides_legacy_provider_detection() {
+        let mut provider = test_provider();
+        provider.slug = "lark".into();
+        assert_eq!(token_request_encoding(&provider), "json");
+        provider.token_request_encoding = Some("form".into());
+        assert_eq!(token_request_encoding(&provider), "form");
+        provider.slug = "custom-json-provider".into();
+        provider.token_request_encoding = Some("json".into());
+        assert_eq!(token_request_encoding(&provider), "json");
+        provider.token_request_encoding = Some("unsupported".into());
+        assert!(token_request(&provider, "https://example.com/token", &[]).is_err());
+    }
+
+    #[test]
+    fn invalid_request_options_fail_with_fixed_errors() {
+        for (name, value) in [
+            ("X-API-Key", "credential-sentinel"),
+            ("Notion-Version", "credential-sentinel"),
+        ] {
+            let mut provider = test_provider();
+            provider
+                .oauth_request_headers
+                .insert(name.into(), value.into());
+            let error = token_request(&provider, "https://example.com/token", &[]).unwrap_err();
+            let AppError::ValidationError(message) = &error else {
+                panic!("expected validation failure");
+            };
+            assert_eq!(message, "Invalid OAuth request headers");
+            assert!(!format!("{error:?}").contains(value));
+        }
+        let mut provider = test_provider();
+        provider.token_request_encoding = Some("credential-sentinel".into());
+        let error = token_request(&provider, "https://example.com/token", &[]).unwrap_err();
+        let AppError::ValidationError(message) = &error else {
+            panic!("expected validation failure");
+        };
+        assert_eq!(message, "OAuth request encoding must be one of: form, json");
+        assert!(!format!("{error:?}").contains("credential-sentinel"));
     }
 
     #[test]
