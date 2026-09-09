@@ -47,7 +47,47 @@ pub struct RevocationConfig {
     pub revokes_grant: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Only protocol version dates are public OAuth metadata. Arbitrary header
+/// values belong in encrypted credential storage, never in this map.
+pub fn is_public_oauth_header(name: &str, value: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "notion-version" | "anthropic-version"
+    ) && value.len() == 10
+        && chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .is_ok_and(|date| date.format("%Y-%m-%d").to_string() == value)
+}
+
+mod public_oauth_headers {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(
+        headers: &HashMap<String, String>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        if headers
+            .iter()
+            .any(|(name, value)| !is_public_oauth_header(name, value))
+        {
+            return Err(serde::ser::Error::custom(
+                "OAuth headers must be allowlisted version dates",
+            ));
+        }
+        headers.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<HashMap<String, String>, D::Error> {
+        let mut headers = HashMap::<String, String>::deserialize(deserializer)?;
+        // Old documents could contain arbitrary plaintext. Never expose or send
+        // those values, even before startup cleanup has visited the row.
+        headers.retain(|name, value| is_public_oauth_header(name, value));
+        Ok(headers)
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ProviderConfig {
     #[serde(rename = "_id")]
     pub id: String,
@@ -117,12 +157,13 @@ pub struct ProviderConfig {
     #[serde(default = "default_token_endpoint_auth_method")]
     pub token_endpoint_auth_method: String,
 
-    /// "form" | "json". Missing values retain the legacy Lark/Feishu JSON
-    /// behavior; all other providers default to form encoding.
+    /// "form" | "json". Missing values preserve each flow's historic encoding:
+    /// legacy provider-token refresh uses form; code exchange and multi-connection
+    /// refresh retain the Lark/Feishu JSON fallback.
     #[serde(default)]
     pub token_request_encoding: Option<String>,
     /// Non-secret headers sent to OAuth token and revocation endpoints.
-    #[serde(default)]
+    #[serde(default, with = "public_oauth_headers")]
     pub oauth_request_headers: HashMap<String, String>,
     /// False for providers whose permissions are configured outside OAuth scopes.
     #[serde(default = "default_supports_oauth_scopes")]
@@ -155,6 +196,19 @@ pub struct ProviderConfig {
     pub created_at: DateTime<Utc>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub updated_at: DateTime<Utc>,
+}
+
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderConfig")
+            .field("slug", &self.slug)
+            .field("provider_type", &self.provider_type)
+            .field("is_active", &self.is_active)
+            .field("client_id_encrypted", &"[REDACTED]")
+            .field("client_secret_encrypted", &"[REDACTED]")
+            .field("oauth_request_headers", &"[REDACTED]")
+            .finish_non_exhaustive()
+    }
 }
 
 #[cfg(test)]

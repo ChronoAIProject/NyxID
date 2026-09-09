@@ -249,7 +249,13 @@ fn provider_to_response(p: crate::models::provider_config::ProviderConfig) -> Pr
         credential_mode: p.credential_mode,
         token_endpoint_auth_method: p.token_endpoint_auth_method,
         token_request_encoding: p.token_request_encoding,
-        oauth_request_headers: p.oauth_request_headers,
+        oauth_request_headers: p
+            .oauth_request_headers
+            .into_iter()
+            .filter(|(name, value)| {
+                crate::models::provider_config::is_public_oauth_header(name, value)
+            })
+            .collect(),
         supports_oauth_scopes: p.supports_oauth_scopes,
         extra_auth_params: p.extra_auth_params,
         device_code_format: p.device_code_format,
@@ -748,6 +754,83 @@ mod tests {
             revocation_seed_version: 0,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_headers_stored_before_validation_never_reach_non_admins() {
+        use crate::models::provider_config::COLLECTION_NAME;
+        use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
+        use crate::test_utils::{connect_test_database, test_app_state, test_auth_user, test_user};
+        use mongodb::bson::{self, doc};
+        let db = connect_test_database("oauth_header_privacy")
+            .await
+            .expect("MongoDB required");
+        let user_id = uuid::Uuid::new_v4().to_string();
+        let user = test_user(&user_id, UserType::Person);
+        assert!(!user.is_admin);
+        db.collection::<User>(USERS).insert_one(user).await.unwrap();
+        let provider = make_provider("oauth2");
+        let mut stored = bson::to_document(&provider).unwrap();
+        stored.insert(
+            "oauth_request_headers",
+            doc! {
+                "X-API-Key": "private-header-sentinel",
+                "Notion-Version": "2022-06-28",
+                "Anthropic-Version": "private-version-sentinel",
+            },
+        );
+        db.collection::<bson::Document>(COLLECTION_NAME)
+            .insert_one(stored)
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let response = super::list_providers(
+            axum::extract::State(state.clone()),
+            test_auth_user(&user_id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.0.providers.len(), 1);
+        let json = serde_json::to_string(&response.0).unwrap();
+        assert!(!json.contains("private-header-sentinel"));
+        assert!(!json.contains("private-version-sentinel"));
+        assert_eq!(response.0.providers[0].oauth_request_headers.len(), 1);
+        assert_eq!(
+            response.0.providers[0].oauth_request_headers["Notion-Version"],
+            "2022-06-28"
+        );
+        super::provider_service::seed_default_providers(&db, &state.encryption_keys)
+            .await
+            .unwrap();
+        let cleaned = db
+            .collection::<bson::Document>(COLLECTION_NAME)
+            .find_one(doc! { "_id": &provider.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cleaned.get_document("oauth_request_headers").unwrap(),
+            &doc! { "Notion-Version": "2022-06-28" }
+        );
+    }
+
+    #[test]
+    fn oauth_header_model_rejects_unsafe_writes_and_redacts_debug() {
+        let mut provider = make_provider("oauth2");
+        for (name, value) in [
+            ("X-API-Key", "private-sentinel"),
+            ("Notion-Version", "private-sentinel"),
+        ] {
+            provider.oauth_request_headers =
+                std::collections::HashMap::from([(name.into(), value.into())]);
+            assert!(mongodb::bson::to_document(&provider).is_err());
+            assert!(!format!("{provider:?}").contains(value));
+            assert!(
+                provider_to_response(provider.clone())
+                    .oauth_request_headers
+                    .is_empty()
+            );
         }
     }
 

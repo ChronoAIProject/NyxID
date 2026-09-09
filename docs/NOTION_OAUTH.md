@@ -158,13 +158,41 @@ Checked against Notion's current documentation on 2026-09-09:
 - [Database query, API 2022-06-28](https://developers.notion.com/reference/post-database-query)
 
 Existing providers retain form token encoding when no encoding is configured,
-except legacy Lark/Feishu rows (including custom rows using their recognized
-token URLs), which retain JSON. An explicit `token_request_encoding` wins over
-that compatibility fallback. Both refresh stores use the same selection.
+except code exchange and multi-connection refresh for legacy Lark/Feishu rows
+(including custom rows using their recognized token URLs), which retain JSON.
+Legacy `UserProviderToken` refresh always retains its original form fallback,
+including Lark/Feishu. An explicit, validated `token_request_encoding` overrides
+each fallback; startup does not opt existing Lark/Feishu connections into JSON.
 Revocation encoding defaults independently to form, preserving existing
 RFC 7009 requests and their `token_type_hint`. JSON revocation omits that
-optional hint. OAuth headers default to empty and scope support defaults to true.
+optional hint. Updating only `revocation_url` preserves the structured encoding,
+authentication, style, and grant-revocation settings.
 
-## Follow-ups not in this change
+OAuth headers default to empty and scope support defaults to true. The only
+accepted OAuth headers are `Notion-Version` and `Anthropic-Version`, each with
+a valid `YYYY-MM-DD` date. Arbitrary names and values are rejected on writes;
+old unsafe entries are suppressed on reads and removed at startup. Provider
+debug output redacts the map and encrypted client credentials.
 
-- No brand glyph is registered in `frontend/src/components/service-icons/`.
+## Node-Native OAuth
+
+`nyxid node credentials add-oauth --service api-notion --from-catalog` fetches token encoding,
+OAuth version headers, scope support, HTTP Basic authentication, and `owner=user`
+from the catalog. Supply your public integration's client credentials locally
+and register the loopback callback with Notion. The node exchanges the code as
+JSON, saves tokens encrypted locally, and retains protocol options with the
+credential so later refreshes use the same encoding and version. Scopeless
+providers omit `scope` from the authorize URL and reject explicit `--scope` or
+`--scopes` selections locally. Existing node credential files
+without protocol options retain form encoding and empty OAuth headers.
+
+## Overlay Drift Verification
+
+The weekly guard checks Notion against its official machine-readable spec at
+<https://developers.notion.com/openapi.json>. Twelve overlay operations are
+present in the current spec. `POST /v1/databases/{database_id}/query` is versioned:
+the guard requires this overlay's exact `2022-06-28` pin and checks the live
+[official legacy reference](https://developers.notion.com/reference/post-database-query.md).
+Missing operations, changed legacy documentation, and failed upstream fetches
+fail the guard. Run `python3 scripts/check-catalog-spec-drift.py --overlay
+notion.openapi.json` to check just this overlay.

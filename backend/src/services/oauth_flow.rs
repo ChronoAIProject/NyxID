@@ -53,6 +53,10 @@ pub fn encode_oauth_request(
     encoding: &str,
     params: &[(String, String)],
 ) -> AppResult<reqwest::RequestBuilder> {
+    crate::services::provider_service::validate_oauth_request_options(
+        Some(encoding),
+        Some(&provider.oauth_request_headers),
+    )?;
     for (name, value) in &provider.oauth_request_headers {
         request = request.header(name, value);
     }
@@ -194,7 +198,14 @@ pub async fn refresh_oauth_token(
         }
     }
 
-    let mut request = token_request(&provider, token_url, &params)?;
+    // This store always refreshed with form encoding before the explicit field
+    // existed, including Lark-like providers. Only an operator opt-in changes it.
+    let mut request = encode_oauth_request(
+        expect_json_response(token_exchange_client().post(token_url)),
+        &provider,
+        provider.token_request_encoding.as_deref().unwrap_or("form"),
+        &params,
+    )?;
     if use_basic_auth {
         request = request.basic_auth(&client_id, client_secret.as_deref());
     }

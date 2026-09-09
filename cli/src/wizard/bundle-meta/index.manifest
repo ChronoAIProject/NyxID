@@ -36,6 +36,7 @@ frontend/src/components/service-icons/api-google.tsx
 frontend/src/components/service-icons/api-lark-bot.tsx
 frontend/src/components/service-icons/api-lark.tsx
 frontend/src/components/service-icons/api-microsoft.tsx
+frontend/src/components/service-icons/api-notion.tsx
 frontend/src/components/service-icons/api-reddit.tsx
 frontend/src/components/service-icons/api-slack-bot.tsx
 frontend/src/components/service-icons/api-slack.tsx

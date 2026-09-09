@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use url::Url;
 
+use super::config::{OAuthRequestEncoding, OAuthRequestOptions};
 use super::error::{Error, Result};
 
 /// OAuth config fetched from NyxID catalog or provided via CLI.
@@ -31,6 +32,55 @@ pub struct OAuthConfig {
     pub extra_auth_params: Option<HashMap<String, String>>,
     pub oauth_client_id: Option<String>,
     pub client_id_param_name: Option<String>,
+    pub request_options: OAuthRequestOptions,
+}
+
+impl OAuthRequestOptions {
+    fn validate(&self) -> Result<()> {
+        for (name, value) in &self.oauth_request_headers {
+            if !matches!(
+                name.to_ascii_lowercase().as_str(),
+                "notion-version" | "anthropic-version"
+            ) || value.len() != 10
+                || !chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+                    .is_ok_and(|date| date.format("%Y-%m-%d").to_string() == *value)
+            {
+                return Err(Error::Config(
+                    "OAuth headers must be allowlisted version dates".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn encode(
+        &self,
+        mut request: reqwest::RequestBuilder,
+        params: &[(String, String)],
+    ) -> Result<reqwest::RequestBuilder> {
+        self.validate()?;
+        request = request.header(reqwest::header::ACCEPT, "application/json");
+        for (name, value) in &self.oauth_request_headers {
+            request = request.header(name, value);
+        }
+        Ok(match self.token_request_encoding.unwrap_or_default() {
+            OAuthRequestEncoding::Form => request.form(params),
+            OAuthRequestEncoding::Json => request.json(
+                &params
+                    .iter()
+                    .map(|(key, value)| (key, value))
+                    .collect::<std::collections::BTreeMap<_, _>>(),
+            ),
+        })
+    }
+}
+
+fn token_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| Error::Config(format!("Failed to build OAuth client: {e}")))
 }
 
 /// Token response from OAuth token endpoint.
@@ -91,6 +141,9 @@ impl OAuthConfig {
 }
 
 pub fn oauth_config_from_catalog_value(body: &serde_json::Value) -> Result<OAuthConfig> {
+    let request_options: OAuthRequestOptions = serde_json::from_value(body.clone())
+        .map_err(|_| Error::Config("Invalid catalog OAuth request options".into()))?;
+    request_options.validate()?;
     let token_url = body["token_url"]
         .as_str()
         .ok_or_else(|| Error::Config("Catalog entry has no token_url".to_string()))?
@@ -128,6 +181,7 @@ pub fn oauth_config_from_catalog_value(body: &serde_json::Value) -> Result<OAuth
         }),
         oauth_client_id: body["oauth_client_id"].as_str().map(String::from),
         client_id_param_name: body["client_id_param_name"].as_str().map(String::from),
+        request_options,
     })
 }
 
@@ -173,7 +227,7 @@ pub async fn run_device_code_flow(
     client_secret: Option<&str>,
     scopes: &str,
 ) -> Result<TokenResponse> {
-    let client = reqwest::Client::new();
+    let client = token_client()?;
     let device_code_url = config
         .device_code_url
         .as_deref()
@@ -181,17 +235,17 @@ pub async fn run_device_code_flow(
     let client_id_param_name = config.client_id_param_name().to_string();
 
     // Step 1: Request device code
-    let mut request_form = vec![
-        (client_id_param_name.clone(), client_id.to_string()),
-        ("scope".to_string(), scopes.to_string()),
-    ];
+    let mut request_form = vec![(client_id_param_name.clone(), client_id.to_string())];
+    if config.request_options.supports_oauth_scopes && !scopes.is_empty() {
+        request_form.push(("scope".to_string(), scopes.to_string()));
+    }
     if let Some(secret) = client_secret {
         request_form.push(("client_secret".to_string(), secret.to_string()));
     }
 
-    let resp = client
-        .post(device_code_url)
-        .form(&request_form)
+    let resp = config
+        .request_options
+        .encode(client.post(device_code_url), &request_form)?
         .send()
         .await
         .map_err(|e| Error::Config(format!("Device code request failed: {e}")))?;
@@ -245,7 +299,11 @@ pub async fn run_device_code_flow(
             form.push(("client_secret".to_string(), secret.to_string()));
         }
 
-        let resp = client.post(token_poll_url).form(&form).send().await;
+        let resp = config
+            .request_options
+            .encode(client.post(token_poll_url), &form)?
+            .send()
+            .await;
 
         match resp {
             Ok(r) if r.status().is_success() => {
@@ -294,11 +352,6 @@ pub async fn run_authorization_code_flow(
     client_secret: Option<&str>,
     scopes: &str,
 ) -> Result<TokenResponse> {
-    let authorization_url = config
-        .authorization_url
-        .as_deref()
-        .ok_or_else(|| Error::Config("No authorization_url available".to_string()))?;
-
     let listener = TcpListener::bind("127.0.0.1:0")
         .map_err(|e| Error::Config(format!("Failed to bind local callback server: {e}")))?;
     let port = listener
@@ -313,31 +366,14 @@ pub async fn run_authorization_code_flow(
         .map(pkce_code_challenge)
         .transpose()?;
 
-    let mut url = Url::parse(authorization_url)
-        .map_err(|e| Error::Config(format!("Invalid authorization URL: {e}")))?;
-    {
-        let mut pairs = url.query_pairs_mut();
-        pairs.append_pair(config.client_id_param_name(), client_id);
-        pairs.append_pair("redirect_uri", &redirect_uri);
-        pairs.append_pair("response_type", "code");
-        pairs.append_pair("state", &state);
-        if !scopes.is_empty() {
-            pairs.append_pair("scope", scopes);
-        }
-        if let Some(ref challenge) = code_challenge {
-            pairs.append_pair("code_challenge", challenge);
-            pairs.append_pair("code_challenge_method", "S256");
-        }
-        if let Some(ref params) = config.extra_auth_params {
-            for (key, value) in params {
-                if !is_reserved_oauth_param(key) {
-                    pairs.append_pair(key, value);
-                }
-            }
-        }
-    }
-
-    let authorization_url: String = url.into();
+    let authorization_url = build_authorization_url(
+        config,
+        client_id,
+        &redirect_uri,
+        &state,
+        scopes,
+        code_challenge.as_deref(),
+    )?;
 
     println!("Opening browser for OAuth authorization...");
     println!();
@@ -359,6 +395,53 @@ pub async fn run_authorization_code_flow(
     .await
 }
 
+fn build_authorization_url(
+    config: &OAuthConfig,
+    client_id: &str,
+    redirect_uri: &str,
+    state: &str,
+    scopes: &str,
+    code_challenge: Option<&str>,
+) -> Result<String> {
+    let authorization_url = config
+        .authorization_url
+        .as_deref()
+        .ok_or_else(|| Error::Config("No authorization_url available".to_string()))?;
+    let mut url = Url::parse(authorization_url)
+        .map_err(|e| Error::Config(format!("Invalid authorization URL: {e}")))?;
+    if !config.request_options.supports_oauth_scopes {
+        let pairs: Vec<_> = url
+            .query_pairs()
+            .filter(|(name, _)| name != "scope")
+            .map(|(name, value)| (name.into_owned(), value.into_owned()))
+            .collect();
+        url.query_pairs_mut().clear().extend_pairs(pairs);
+    }
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs.append_pair(config.client_id_param_name(), client_id);
+        pairs.append_pair("redirect_uri", redirect_uri);
+        pairs.append_pair("response_type", "code");
+        pairs.append_pair("state", state);
+        if config.request_options.supports_oauth_scopes && !scopes.is_empty() {
+            pairs.append_pair("scope", scopes);
+        }
+        if let Some(challenge) = code_challenge {
+            pairs.append_pair("code_challenge", challenge);
+            pairs.append_pair("code_challenge_method", "S256");
+        }
+        if let Some(ref params) = config.extra_auth_params {
+            for (key, value) in params {
+                if !is_reserved_oauth_param(key) {
+                    pairs.append_pair(key, value);
+                }
+            }
+        }
+    }
+
+    Ok(url.into())
+}
+
 /// Refresh an OAuth token using refresh_token grant.
 pub async fn refresh_token(
     token_url: &str,
@@ -367,8 +450,9 @@ pub async fn refresh_token(
     refresh_tok: &str,
     auth_method: &str,
     client_id_param_name: Option<&str>,
+    request_options: &OAuthRequestOptions,
 ) -> Result<TokenResponse> {
-    let client = reqwest::Client::new();
+    let client = token_client()?;
     let client_id_param_name = client_id_param_name.unwrap_or("client_id");
 
     let mut req = client.post(token_url);
@@ -376,10 +460,13 @@ pub async fn refresh_token(
     match auth_method {
         "client_secret_basic" => {
             req = req.basic_auth(client_id, client_secret);
-            req = req.form(&[
-                ("grant_type", "refresh_token"),
-                ("refresh_token", refresh_tok),
-            ]);
+            req = request_options.encode(
+                req,
+                &[
+                    ("grant_type".into(), "refresh_token".into()),
+                    ("refresh_token".into(), refresh_tok.into()),
+                ],
+            )?;
         }
         _ => {
             // client_secret_post (default)
@@ -391,7 +478,7 @@ pub async fn refresh_token(
             if let Some(secret) = client_secret {
                 form.push(("client_secret".to_string(), secret.to_string()));
             }
-            req = req.form(&form);
+            req = request_options.encode(req, &form)?;
         }
     }
 
@@ -573,7 +660,7 @@ async fn exchange_authorization_code(
     redirect_uri: &str,
     code_verifier: Option<&str>,
 ) -> Result<TokenResponse> {
-    let client = reqwest::Client::new();
+    let client = token_client()?;
     let mut req = client.post(&config.token_url);
     let client_id_param_name = config.client_id_param_name().to_string();
 
@@ -591,7 +678,7 @@ async fn exchange_authorization_code(
             if let Some(verifier) = code_verifier {
                 form.push(("code_verifier".to_string(), verifier.to_string()));
             }
-            req = req.form(&form);
+            req = config.request_options.encode(req, &form)?;
         }
         _ => {
             let mut form = vec![
@@ -606,7 +693,7 @@ async fn exchange_authorization_code(
             if let Some(verifier) = code_verifier {
                 form.push(("code_verifier".to_string(), verifier.to_string()));
             }
-            req = req.form(&form);
+            req = config.request_options.encode(req, &form)?;
         }
     }
 
@@ -795,6 +882,118 @@ mod tests {
         assert!(config.default_scopes.is_empty());
         assert!(config.authorization_url.is_none());
         assert!(config.oauth_client_id.is_none());
+        assert!(config.request_options.token_request_encoding.is_none());
+        assert!(config.request_options.oauth_request_headers.is_empty());
+        assert!(config.request_options.supports_oauth_scopes);
+    }
+
+    #[tokio::test]
+    async fn notion_catalog_authorize_exchange_and_persisted_refresh_use_oauth_contract() {
+        use super::build_authorization_url;
+        use crate::node::config::CredentialConfig;
+        use wiremock::matchers::body_json;
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/catalog/api-notion"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "authorization_url": "https://api.notion.com/v1/oauth/authorize?scope=stale",
+                "token_url": format!("{}/token", server.uri()),
+                "token_endpoint_auth_method": "client_secret_basic",
+                "token_request_encoding": "json",
+                "oauth_request_headers": { "Notion-Version": "2022-06-28" },
+                "supports_oauth_scopes": false,
+                "default_scopes": ["stale-default"],
+                "extra_auth_params": { "owner": "user", "scope": "stale-extra" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let config = fetch_catalog_oauth_config(&server.uri(), None, "api-notion")
+            .await
+            .unwrap();
+        let authorize = build_authorization_url(
+            &config,
+            "client-1",
+            "http://localhost/callback",
+            "state-1",
+            "caller-scope",
+            None,
+        )
+        .unwrap();
+        let authorize = url::Url::parse(&authorize).unwrap();
+        let params: std::collections::HashMap<_, _> =
+            authorize.query_pairs().into_owned().collect();
+        assert!(!params.contains_key("scope"));
+        assert!(!params.contains_key("code_challenge"));
+        assert_eq!(params["owner"], "user");
+        assert_eq!(params["state"], "state-1");
+        Mock::given(method("POST")).and(path("/token"))
+            .and(header("authorization", "Basic Y2xpZW50LTE6c2VjcmV0LTE="))
+            .and(header("content-type", "application/json"))
+            .and(header("accept", "application/json"))
+            .and(header("notion-version", "2022-06-28"))
+            .and(body_json(serde_json::json!({
+                "grant_type": "authorization_code", "code": "code-1", "redirect_uri": "http://localhost/callback"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "access_token": "access-1", "refresh_token": "ref-1" })))
+            .expect(1).mount(&server).await;
+        let token = exchange_authorization_code(
+            &config,
+            "client-1",
+            Some("secret-1"),
+            "code-1",
+            "http://localhost/callback",
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(token.expires_in.is_none());
+        let mut credential = CredentialConfig::new_header("Authorization".into(), None, None);
+        credential.oauth_request_options = config.request_options;
+        let stored = toml::to_string(&credential).unwrap();
+        let restored: CredentialConfig = toml::from_str(&stored).unwrap();
+        assert!(!restored.oauth_request_options.supports_oauth_scopes);
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .and(header("authorization", "Basic Y2xpZW50LTE6c2VjcmV0LTE="))
+            .and(header("content-type", "application/json"))
+            .and(header("notion-version", "2022-06-28"))
+            .and(body_json(
+                serde_json::json!({ "grant_type": "refresh_token", "refresh_token": "ref-1" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "access_token": "access-2", "refresh_token": "ref-2" }),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let refreshed = refresh_token(
+            &config.token_url,
+            "client-1",
+            Some("secret-1"),
+            token.refresh_token.as_deref().unwrap(),
+            &config.token_endpoint_auth_method,
+            None,
+            &restored.oauth_request_options,
+        )
+        .await
+        .unwrap();
+        assert_eq!(refreshed.access_token, "access-2");
+        assert_eq!(refreshed.refresh_token.as_deref(), Some("ref-2"));
+        server.verify().await;
+    }
+
+    #[test]
+    fn catalog_oauth_options_reject_invalid_encoding_and_secret_headers() {
+        for options in [
+            serde_json::json!({ "token_request_encoding": "xml" }),
+            serde_json::json!({ "oauth_request_headers": { "X-API-Key": "secret-sentinel" } }),
+            serde_json::json!({ "oauth_request_headers": { "Notion-Version": "secret-sentinel" } }),
+        ] {
+            let mut body = options;
+            body["token_url"] = "https://example.com/token".into();
+            assert!(oauth_config_from_catalog_value(&body).is_err());
+        }
     }
 
     #[test]
@@ -1004,6 +1203,7 @@ mod tests {
             "ref-1",
             "client_secret_post",
             Some("client_key"),
+            &Default::default(),
         )
         .await
         .expect("refresh token");
@@ -1036,6 +1236,7 @@ mod tests {
             "ref-1",
             "client_secret_basic",
             None,
+            &Default::default(),
         )
         .await
         .expect("refresh token");
@@ -1073,6 +1274,7 @@ mod tests {
             extra_auth_params: None,
             oauth_client_id: None,
             client_id_param_name: Some("client_key".to_string()),
+            request_options: Default::default(),
         };
 
         let token = exchange_authorization_code(

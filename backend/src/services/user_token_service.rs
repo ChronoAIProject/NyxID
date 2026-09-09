@@ -4064,7 +4064,7 @@ mod tests {
 
             let requests = server.received_requests().await.unwrap();
             assert_eq!(requests.len(), 2);
-            for request in requests {
+            for (index, request) in requests.into_iter().enumerate() {
                 assert_eq!(request.headers["accept"], "application/json");
                 if slug == "notion" {
                     assert_eq!(request.headers["notion-version"], "2022-06-28");
@@ -4084,7 +4084,7 @@ mod tests {
                     expected["client_id"] = "client-id".into();
                     expected["client_secret"] = "client-secret".into();
                 }
-                if encoding == "json" {
+                if encoding == "json" && (index == 0 || slug == "notion") {
                     assert_eq!(request.headers["content-type"], "application/json");
                     assert_eq!(request.body_json::<serde_json::Value>().unwrap(), expected);
                 } else {
@@ -4099,6 +4099,138 @@ mod tests {
                 }
             }
             server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_legacy_refresh_requires_explicit_encoding_opt_in_for_lark_variants() {
+        use crate::services::provider_service::{self, ProviderUpdateInput};
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let db = connect_test_database("oauth_legacy_wire_format")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        provider_service::seed_default_providers(&db, &enc)
+            .await
+            .unwrap();
+        let server = MockServer::start().await;
+        for source in ["seed-lark", "seed-feishu", "custom-lark-url", "named-lark"] {
+            let mut provider = if source.starts_with("seed-") {
+                provider_service::get_provider_by_slug(&db, source.trim_start_matches("seed-"))
+                    .await
+                    .unwrap()
+            } else {
+                let mut provider = make_test_provider(
+                    &Uuid::new_v4().to_string(),
+                    "https://example.com/token",
+                    None,
+                    None,
+                );
+                provider.slug = if source == "named-lark" {
+                    "lark"
+                } else {
+                    "custom-lark-url"
+                }
+                .into();
+                provider
+            };
+            if source.starts_with("seed-") {
+                assert!(
+                    provider
+                        .token_url
+                        .as_ref()
+                        .unwrap()
+                        .contains("/open-apis/authen/v2/oauth/token")
+                );
+            }
+            provider.token_url = Some(if source == "custom-lark-url" {
+                format!(
+                    "{}/open-apis/authen/v2/oauth/token?upstream=open.larksuite.com",
+                    server.uri()
+                )
+            } else {
+                format!("{}/token", server.uri())
+            });
+            provider.credential_mode = "admin".into();
+            provider.client_id_encrypted = Some(enc.encrypt(b"client-id").await.unwrap());
+            provider.client_secret_encrypted = Some(enc.encrypt(b"client-secret").await.unwrap());
+            let mut document = bson::to_document(&provider).unwrap();
+            document.remove("token_request_encoding");
+            db.collection::<bson::Document>(PROVIDER_CONFIGS)
+                .replace_one(doc! { "_id": &provider.id }, document)
+                .upsert(true)
+                .await
+                .unwrap();
+            for explicit in [None, Some("json"), Some("form")] {
+                server.reset().await;
+                if let Some(encoding) = explicit {
+                    provider_service::update_provider(
+                        &db,
+                        &enc,
+                        &provider.id,
+                        ProviderUpdateInput {
+                            token_request_encoding: Some(encoding.into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                Mock::given(method("POST"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "access_token": "rotated-access", "refresh_token": "rotated-refresh"
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let mut token = make_oauth_token(
+                    &enc,
+                    &Uuid::new_v4().to_string(),
+                    &provider.id,
+                    "old-access",
+                    "active",
+                    None,
+                )
+                .await;
+                token.refresh_token_encrypted = Some(enc.encrypt(b"stored-refresh").await.unwrap());
+                insert_test_token(&db, &token).await;
+                assert_eq!(
+                    oauth_flow::refresh_oauth_token(&db, &enc, &token)
+                        .await
+                        .unwrap(),
+                    "rotated-access"
+                );
+                let requests = server.received_requests().await.unwrap();
+                assert_eq!(requests.len(), 1, "{source}: {explicit:?}");
+                let request = &requests[0];
+                let params = if explicit == Some("json") {
+                    assert_eq!(
+                        request.headers["content-type"], "application/json",
+                        "{source}"
+                    );
+                    request.body_json::<serde_json::Value>().unwrap()
+                } else {
+                    assert_eq!(
+                        request.headers["content-type"], "application/x-www-form-urlencoded",
+                        "{source}: {explicit:?}"
+                    );
+                    serde_json::to_value(
+                        url::form_urlencoded::parse(&request.body)
+                            .into_owned()
+                            .collect::<HashMap<_, _>>(),
+                    )
+                    .unwrap()
+                };
+                assert_eq!(
+                    params,
+                    serde_json::json!({
+                        "grant_type": "refresh_token", "refresh_token": "stored-refresh",
+                        "client_id": "client-id", "client_secret": "client-secret"
+                    })
+                );
+                server.verify().await;
+            }
         }
     }
 

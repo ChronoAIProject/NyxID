@@ -47,6 +47,7 @@ pub async fn seed_default_providers(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
 ) -> AppResult<()> {
+    remove_unsafe_oauth_headers(db).await?;
     let collection = db.collection::<ProviderConfig>(COLLECTION_NAME);
     let now = Utc::now();
 
@@ -2450,6 +2451,34 @@ pub async fn validate_revocation_config(
     validate_revocation_url(&revocation.url).await
 }
 
+async fn remove_unsafe_oauth_headers(db: &mongodb::Database) -> AppResult<()> {
+    let collection = db.collection::<bson::Document>(COLLECTION_NAME);
+    let mut rows = collection
+        .find(doc! { "oauth_request_headers": { "$type": "object" } })
+        .await?;
+    while let Some(row) = rows.try_next().await? {
+        let headers = row
+            .get_document("oauth_request_headers")
+            .map_err(|_| AppError::Internal("Invalid OAuth header document".into()))?;
+        let sanitized: bson::Document = headers
+            .iter()
+            .filter(|(name, value)| {
+                value.as_str().is_some_and(|value| {
+                    crate::models::provider_config::is_public_oauth_header(name, value)
+                })
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        if &sanitized != headers {
+            collection.update_one(
+                doc! { "_id": row.get("_id").cloned().unwrap_or_default(), "oauth_request_headers": headers.clone() },
+                doc! { "$set": { "oauth_request_headers": sanitized } },
+            ).await?;
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_oauth_request_options(
     encoding: Option<&str>,
     headers: Option<&HashMap<String, String>>,
@@ -2466,35 +2495,9 @@ pub fn validate_oauth_request_options(
             ));
         }
         for (name, value) in headers {
-            let header =
-                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
-                    AppError::ValidationError("Invalid OAuth request header name".to_string())
-                })?;
-            if [
-                "authorization",
-                "proxy-authorization",
-                "cookie",
-                "set-cookie",
-                "host",
-                "content-type",
-                "content-length",
-                "transfer-encoding",
-                "connection",
-                "accept",
-            ]
-            .contains(&header.as_str())
-            {
+            if !crate::models::provider_config::is_public_oauth_header(name, value) {
                 return Err(AppError::ValidationError(
-                    "OAuth request headers must not override authentication or transport headers"
-                        .to_string(),
-                ));
-            }
-            if name.len() > 256
-                || value.len() > 4096
-                || reqwest::header::HeaderValue::from_str(value).is_err()
-            {
-                return Err(AppError::ValidationError(
-                    "Invalid OAuth request header value".to_string(),
+                    "OAuth headers only support Notion-Version and Anthropic-Version with YYYY-MM-DD dates".to_string(),
                 ));
             }
         }
@@ -5318,11 +5321,17 @@ pub async fn update_provider(
         Some(explicit) => Some(explicit),
         None => updates.revocation_url.as_ref().map(|url| {
             Some(RevocationConfig {
-                request_encoding: "form".to_string(),
-                style: "rfc7009".to_string(),
                 url: url.clone(),
-                auth: "inherit".to_string(),
-                revokes_grant: false,
+                ..existing
+                    .revocation
+                    .clone()
+                    .unwrap_or_else(|| RevocationConfig {
+                        request_encoding: "form".to_string(),
+                        style: "rfc7009".to_string(),
+                        url: url.clone(),
+                        auth: "inherit".to_string(),
+                        revokes_grant: false,
+                    })
             })
         }),
     };
@@ -6065,11 +6074,99 @@ mod tests {
             ("Content-Type", "text/plain"),
             ("Host", "elsewhere.example"),
             ("Bad Header", "value"),
+            ("X-API-Key", "credential-sentinel"),
+            ("Notion-Version", "credential-sentinel"),
+            ("Notion-Version", "2022-02-30"),
             ("Notion-Version", "2022-06-28\r\nInjected: value"),
         ] {
             let headers = std::collections::HashMap::from([(name.to_string(), value.to_string())]);
             assert!(super::validate_oauth_request_options(None, Some(&headers)).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn oauth_header_updates_reject_secrets_without_changing_stored_metadata() {
+        let db = seed_default_catalog("oauth_headers_update")
+            .await
+            .expect("MongoDB required");
+        let provider = super::get_provider_by_slug(&db, "notion").await.unwrap();
+        for (name, value) in [
+            ("X-API-Key", "credential-sentinel"),
+            ("Notion-Version", "credential-sentinel"),
+        ] {
+            let error = super::update_provider(
+                &db,
+                &test_encryption_keys(),
+                &provider.id,
+                super::ProviderUpdateInput {
+                    oauth_request_headers: Some(std::collections::HashMap::from([(
+                        name.into(),
+                        value.into(),
+                    )])),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error, crate::errors::AppError::ValidationError(_)));
+            assert_eq!(
+                super::get_provider(&db, &provider.id)
+                    .await
+                    .unwrap()
+                    .oauth_request_headers,
+                provider.oauth_request_headers
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_revocation_url_update_preserves_options_and_allows_explicit_encoding() {
+        let db = seed_default_catalog("revocation_url_options")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let provider = super::get_provider_by_slug(&db, "notion").await.unwrap();
+        let mut config = provider.revocation.unwrap();
+        config.auth = "basic".into();
+        config.revokes_grant = true;
+        super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                revocation: Some(Some(config.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        config.url = "https://api.notion.com/v1/oauth/revoke?updated=1".into();
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                revocation_url: Some(config.url.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.revocation.as_ref(), Some(&config));
+        assert_eq!(updated.revocation_url, Some(config.url.clone()));
+        config.request_encoding = "form".into();
+        let updated = super::update_provider(
+            &db,
+            &enc,
+            &provider.id,
+            super::ProviderUpdateInput {
+                revocation: Some(Some(config.clone())),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated.revocation, Some(config));
     }
 
     #[test]

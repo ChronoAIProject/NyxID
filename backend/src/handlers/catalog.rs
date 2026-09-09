@@ -91,6 +91,9 @@ pub struct CatalogEntryResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_endpoint_auth_method: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_request_encoding: Option<String>,
+    pub oauth_request_headers: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_auth_params: Option<HashMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_client_id: Option<String>,
@@ -330,6 +333,8 @@ fn catalog_entry_response(
         supports_pkce,
         device_code_format: entry.device_code_format,
         token_endpoint_auth_method: entry.token_endpoint_auth_method,
+        token_request_encoding: entry.token_request_encoding,
+        oauth_request_headers: entry.oauth_request_headers,
         extra_auth_params: entry.extra_auth_params,
         oauth_client_id: entry.oauth_client_id,
         client_id_param_name: entry.client_id_param_name,
@@ -893,6 +898,8 @@ mod tests {
             supports_pkce: false,
             device_code_format: None,
             token_endpoint_auth_method: None,
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
             extra_auth_params: None,
             oauth_client_id: None,
             client_id_param_name: None,
@@ -914,6 +921,38 @@ mod tests {
             token_exchange_credential_fields: None,
             default_request_headers: None,
         }
+    }
+
+    #[tokio::test]
+    async fn notion_oauth_catalog_response_carries_node_protocol_options() {
+        let db = crate::test_utils::connect_test_database("notion_node_catalog")
+            .await
+            .expect("MongoDB required");
+        let enc = crate::test_utils::test_encryption_keys();
+        crate::services::provider_service::seed_default_providers(&db, &enc)
+            .await
+            .unwrap();
+        crate::services::provider_service::seed_default_services(&db, &enc)
+            .await
+            .unwrap();
+        let entry = crate::services::catalog_service::get_catalog_entry(
+            &db,
+            &enc,
+            &uuid::Uuid::new_v4().to_string(),
+            "api-notion",
+        )
+        .await
+        .unwrap();
+        let response = super::catalog_entry_response(&crate::test_utils::test_app_config(), entry);
+        let json = serde_json::to_value(response).unwrap();
+        assert_eq!(json["token_request_encoding"], "json");
+        assert_eq!(
+            json["oauth_request_headers"]["Notion-Version"],
+            "2022-06-28"
+        );
+        assert_eq!(json["supports_oauth_scopes"], false);
+        assert_eq!(json["token_endpoint_auth_method"], "client_secret_basic");
+        assert_eq!(json["extra_auth_params"]["owner"], "user");
     }
 
     #[test]
