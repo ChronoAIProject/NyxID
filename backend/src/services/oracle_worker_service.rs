@@ -765,8 +765,7 @@ pub async fn forget_worker(
         )
         .await?
         .modified_count;
-    db.collection::<OracleWorker>(ORACLE_WORKERS)
-        .delete_one(doc! { "_id": &worker.id })
+    crate::services::oracle_login_profile_service::forget_binding_and_worker(db, &pool.id, label)
         .await?;
     Ok(ForgetOutcome {
         commands_removed,

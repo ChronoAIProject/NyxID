@@ -227,6 +227,11 @@ bound based on the 512 KiB decoded envelope cap.
 | `GET /pools/{id_or_slug}/workers/{label}` | Manager-only worker detail. |
 | `GET, POST /pools/{id_or_slug}/workers/{label}/commands` | Manager-only command history and enqueue. |
 | `POST /pools/{id_or_slug}/login-snapshots` | Validate and fan out an opaque encrypted login snapshot. |
+| `GET /pools/{id_or_slug}/login-profiles` | Manager-only metadata: name, generation, revision, status, retention deadline, and bound worker labels. Never returns ciphertext. |
+| `PUT /pools/{id_or_slug}/login-profiles/{name}` | Save a named E2E envelope with the snapshot fields and `expected_generation` (null to create). An intervening human save returns 409; bindings remain. |
+| `DELETE /pools/{id_or_slug}/login-profiles/{name}` | Delete saved material and bindings. Local browser sessions remain. |
+| `PUT /pools/{id_or_slug}/workers/{label}/login-profile` | Bind one installation using `login_profile`, optional install-time `installation_id`, and `replace_existing` (default false). |
+| `DELETE /pools/{id_or_slug}/workers/{label}/login-profile` | Stop saved-login import and publication for this worker. |
 | `GET /worker-bundle` | Authenticated embedded worker source, version, SHA-256, and exact `playwright-core` version. |
 | `POST /pools/{id_or_slug}/tasks` | Submit a task. Returns `task_id` + `queue_position`. |
 | `POST /pools/{id_or_slug}/attach` | Attach an existing conversation by `{chatgpt_url, tag?}`. Returns `conversation_id` + `task_id` (a `scrape` task). |
@@ -319,6 +324,8 @@ fields remain valid. New fields are additive.
 | `POST /transcript` | Task identity, turns, URL, optional attempt fences | `{status:"imported"\|"ignored", imported_pairs}`. |
 | `GET /bundle` | None | Worker-token-authenticated embedded worker source, version, SHA-256, and exact `playwright-core` version. |
 | `GET /login-snapshots/{snapshot_id}` | None | The still end-to-end-sealed login envelope for the authenticated pool. |
+| `GET /login-profile` | `worker`, `instance_id`, optional `known_revision` | Bound profile metadata and E2E envelope, only for the matching installation with `saved_login_v1`. Status is `unbound`, `available`, `expired`, or `token_changed`; unavailable and known-revision responses omit the envelope. |
+| `POST /login-profile` | Worker/installation, profile/binding IDs, human generation, expected revision, fresh publication UUID, format version, E2E envelope | Publish refreshed browser state by compare-and-swap. Retrying the same publication is idempotent while it remains current. |
 
 A `task` poll carries `kind` (`"prompt"`, `"scrape"`, or `"extract"`): on
 `"scrape"` the worker navigates to `conversation_url`, extracts the full
@@ -486,9 +493,9 @@ It does not ask the user to visit each worker.
    server-side envelope encryption. The row expires after one hour.
 6. The server queues `session_import` only for workers that advertise both
    `commands_v1` and `session_import_v1`.
-7. A worker with an active task defers the import until settlement. If the task
-   cannot proceed because the worker is logged out, it imports immediately and
-   then reclaims the task. The worker decrypts locally, injects only allowlisted
+7. A worker with an active task defers the import until settlement. A logged-out
+   task may import only in a known pre-send phase. A sent or uncertain prompt
+   never permits login import to navigate away from its conversation. The worker decrypts locally, injects only allowlisted
    cookies and storage through CDP, reloads ChatGPT, and reports a stable result
    code after DOM verification.
 8. The CLI polls each command and prints one result per worker. The command
@@ -508,6 +515,124 @@ ChatGPT can bind a session cookie to device or risk context. An import that the
 site rejects reports `session_import_verification_failed`; it never reports a
 successful login based only on cookie injection. The worker list continues to
 show that worker as logged out.
+
+## Saved login profiles
+
+Saved profiles are opt-in and scoped to a pool. They keep different accounts
+separate even when their workers share one pool token. Existing workers are
+never enrolled automatically. `--profile` still selects the NyxID CLI/local
+installation profile; `--save-as` and `--login-profile` select a saved browser
+login.
+
+```bash
+# Complete each human login in a fresh local Chrome window.
+nyxid oracle login chatgpt-pro --save-as account-a
+nyxid oracle login chatgpt-pro --save-as account-b
+
+# Join on a remote machine, including after the old one-hour snapshot TTL.
+nyxid oracle worker install --pool chatgpt-pro --login-profile account-a
+
+# Bind an existing installation. An already logged-in account is preserved.
+nyxid oracle worker bind-login chatgpt-pro remote-a --login-profile account-a
+# Explicitly authorize replacing the account already on that worker.
+nyxid oracle worker bind-login chatgpt-pro remote-a --login-profile account-a --replace-existing
+
+nyxid oracle login-profile list chatgpt-pro
+nyxid oracle worker unbind-login chatgpt-pro remote-a
+nyxid oracle login-profile delete chatgpt-pro account-a
+```
+
+`login --save-as` uses the same temporary Chrome capture, cleanup, domain/origin
+allowlists, and E2E envelope as the one-hour fanout. It stores a named login
+without sending a pool-wide command. Only explicitly bound installations pull
+it. The binding includes a fresh UUID and installation ID; rebinding or
+forgetting a worker invalidates its previous publication authority. Account
+switches and removal use MongoDB transactions so a failed switch preserves the
+previous binding. A profile supports at most 256 bindings.
+
+Assignments require a worker advertising `saved_login_v1`. Binding an older
+installation is allowed, but the CLI reports that it needs an upgrade before
+it can use the saved login. Install-time binding works before the first
+heartbeat. `login-profile list` returns metadata only, including `expires_at`
+and whether the stored material is available, expired, or tied to an old token.
+
+A saved envelope is retained for 30 days after the latest successful human
+save or worker publication. This is storage retention, not a promise that
+ChatGPT will accept its cookies for 30 days. Chrome performs normal upstream
+refresh. NyxID does not implement an OAuth refresh flow for browser cookies.
+Workers capture all browser cookies, then filter by the ChatGPT/OpenAI domain
+allowlist, preserving path-scoped and subdomain cookies. Storage is restricted
+to the two existing allowed origins, and captures retain the 350 KiB plaintext
+and 512 KiB sealed limits.
+
+Workers poll their assigned profile every minute and publish authenticated
+browser state while idle, at most once every five minutes. A human save creates
+a new generation. A worker publication changes only the revision. Workers
+import new human generations when their task state permits it; they do not
+reimport every sibling cookie update. Publication is fenced to the exact
+profile, binding, installation, human generation, token hash, and revision
+actually imported. Observing a newer revision never authorizes a worker to
+overwrite it with older local cookies. A journaled publication UUID resolves a
+lost HTTP response without repeating the import.
+
+If the current publisher stops updating for 15 minutes, an idle worker may
+take over by importing and verifying the latest revision before publishing.
+Automatic takeover keeps an in-memory backup of a healthy local session and
+restores it if the saved login is rejected. Failed import revisions are
+journaled and not retried until the revision or human generation changes.
+Import and refresh failures appear in worker `last_error`, including after
+restart; transient refresh failures do not stop task processing. An explicit
+local `worker relogin` or legacy snapshot import stops publication of that
+browser's state to its saved profile until a new human generation or binding
+reestablishes the source.
+
+Saved publication also checks account identity before and after capture, and
+before automatic takeover. After a verified saved import, the worker reads
+only `user.id` from the browser's `/api/auth/session` response and persists a
+pool-keyed HMAC fingerprint in its private state file. The lookup bypasses
+cache and has time and response-size bounds; upstream access tokens and the
+full response stay in the browser. A changed account, including a GUI switch
+while the worker was stopped, preserves that browser and blocks publication
+to the old saved profile. Observed human login/logout flows likewise suspend
+publication and leave the login tab alone. An observed logged-out browser can
+recover by verifying a saved import when its task is still before Send.
+
+An unavailable identity lookup blocks publication without blocking tasks and
+retains the original fingerprint for retry. If identity was unavailable during
+the initial import, the worker cannot learn a baseline from an arbitrary later
+browser session; a new human generation or explicit binding with
+`--replace-existing` must establish it through another verified import.
+Automatic takeover also restores its backup when the imported identity is
+missing or differs from the original account. Refresh diagnostics remain
+visible until successful publication or an explicit recovery action.
+
+When refresh cannot recover, run `oracle login <pool> --save-as <same-name>`
+from any machine. It replaces that saved login and existing bound workers pull
+the new generation, including workers returning later. The CLI reads the
+generation before opening Chrome; an intervening human save causes a conflict
+instead of overwriting the newer login. Expiry immediately blocks fetch and
+publication. An hourly cleanup deletes expired encrypted material while
+retaining names and bindings, so the same relogin workflow revives expired
+profiles. Token rotation likewise blocks old-key material until a fresh human
+save under the new token; it cannot re-encrypt the old E2E envelope on its own.
+
+Deleting a profile revokes server delivery and publication, and removes its
+bindings. It does not log out already authenticated Chrome profiles or revoke
+the upstream account's sessions. Recreating a deleted name creates a new
+profile identity and requires new bindings.
+
+### Local verification
+
+The worker unit tests run with `npm test` in `integrations/oracle/cdp-worker`.
+Browser tests use only synthetic login pages, an isolated temporary profile,
+and a local mock Oracle API:
+
+```bash
+NYXID_TEST_CHROME_EXECUTABLE="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" npm run test:browser
+```
+
+CI installs the pinned Playwright Chromium and runs with
+`NYXID_TEST_BROWSER=1`. No real account, Chrome profile, or login state is needed.
 
 ## Bundle distribution and trust
 
@@ -550,7 +675,9 @@ beyond the NyxID backend, the npm registry, and TLS.
 - Login captures exist as plaintext only in a mode `0600` temporary file on
   the CLI machine and in zeroizing CLI memory. The CLI deletes the temporary
   profile and file after upload, including on error paths. The server accepts
-  only the end-to-end-sealed envelope. Audit and tracing record the snapshot ID, byte
+  only the end-to-end-sealed envelope. Saved profiles add the same outer server
+  encryption and bind its AAD to pool, profile, human generation, and revision.
+  Audit and tracing record the snapshot/profile ID, byte
   count, target count, and outcome codes. They never record the sealed blob,
   cookies, storage, raw token, prompt, response, transcript, conversation URL,
   attachment filename, signed image URL, generated file body, or generated

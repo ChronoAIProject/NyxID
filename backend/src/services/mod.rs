@@ -100,6 +100,7 @@ pub mod oauth_service;
 pub mod openapi_parser;
 pub mod openclaw_channel_service;
 pub mod operation_descriptor;
+pub mod oracle_login_profile_service;
 pub mod oracle_login_snapshot_service;
 pub mod oracle_pool_service;
 pub mod oracle_session_service;

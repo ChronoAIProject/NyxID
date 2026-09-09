@@ -131,7 +131,7 @@ pub struct UploadLoginSnapshotResponse {
     pub skipped_workers: Vec<String>,
 }
 
-fn decode_login_snapshot_envelope(encoded: &str) -> AppResult<Zeroizing<Vec<u8>>> {
+pub(super) fn decode_login_snapshot_envelope(encoded: &str) -> AppResult<Zeroizing<Vec<u8>>> {
     if encoded.len() > oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS {
         return Err(AppError::OraclePayloadTooLarge(format!(
             "login snapshot must be at most {} base64 characters",

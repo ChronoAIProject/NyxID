@@ -2792,6 +2792,8 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         )
         .await?;
 
+    crate::services::oracle_login_profile_service::ensure_indexes(db).await?;
+
     // ── oracle_login_snapshots ──
     let oracle_login_snapshots =
         db.collection::<Document>(crate::models::oracle_login_snapshot::COLLECTION_NAME);
