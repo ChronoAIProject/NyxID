@@ -79,6 +79,9 @@ describe("probePathForSlug — registry uses seeded service_slug forms", () => {
     expect(probePathForSlug("api-google-drive-2")).toBe(
       "drive/v3/files?pageSize=1&fields=files(id)",
     );
+    expect(probePathForSlug("api-google-gmail-2")).toBe(
+      "gmail/v1/users/me/messages?maxResults=1",
+    );
     // Bases with version/api segment → recipe drops the duplicated prefix
     expect(probePathForSlug("api-discord-bot")).toBe("users/@me");
     expect(probePathForSlug("api-discord")).toBe("users/@me");

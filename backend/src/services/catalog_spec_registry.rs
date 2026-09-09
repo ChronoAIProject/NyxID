@@ -76,6 +76,10 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
         include_str!("../../specs/catalog/google-calendar.openapi.json"),
     ),
     (
+        "google-gmail",
+        include_str!("../../specs/catalog/google-gmail.openapi.json"),
+    ),
+    (
         "google-drive",
         include_str!("../../specs/catalog/google-drive.openapi.json"),
     ),
@@ -149,6 +153,7 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-google-workspace", "google-workspace"),
     ("api-google-calendar", "google-calendar"),
     ("api-google-drive", "google-drive"),
+    ("api-google-gmail", "google-gmail"),
     ("api-lark", "lark"),
     ("api-lark-bot", "lark-bot"),
     ("api-microsoft", "microsoft-graph"),
@@ -181,20 +186,23 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> =
                 (*key, Arc::new(parsed))
             })
             .collect();
-        // Workspace publishes the same operations as its two product entries.
+        // Workspace publishes the same operations as its individual products.
         let mut workspace = (*specs["google-drive"]).clone();
         workspace["info"]["title"] = "Google Workspace".into();
         workspace["info"]["description"] =
-            "Google Drive and Calendar operations using one Google OAuth client.".into();
-        workspace["paths"]
-            .as_object_mut()
-            .expect("Drive paths")
-            .extend(
-                specs["google-calendar"]["paths"]
-                    .as_object()
-                    .expect("Calendar paths")
-                    .clone(),
-            );
+            "Google Drive, Calendar, and Gmail read/send operations using one Google OAuth client."
+                .into();
+        for key in ["google-calendar", "google-gmail"] {
+            workspace["paths"]
+                .as_object_mut()
+                .expect("Drive paths")
+                .extend(
+                    specs[key]["paths"]
+                        .as_object()
+                        .expect("Product paths")
+                        .clone(),
+                );
+        }
         specs.insert("google-workspace", Arc::new(workspace));
         specs
     });
@@ -262,17 +270,19 @@ mod tests {
     }
 
     #[test]
-    fn google_workspace_is_the_union_of_drive_and_calendar() {
+    fn google_workspace_is_the_union_of_drive_calendar_and_gmail() {
         let workspace = spec_for_slug("api-google-workspace").unwrap();
         let drive = spec_for_slug("api-google-drive").unwrap();
         let calendar = spec_for_slug("api-google-calendar").unwrap();
+        let gmail = spec_for_slug("api-google-gmail").unwrap();
         let paths = workspace["paths"].as_object().unwrap();
         assert_eq!(
             paths.len(),
             drive["paths"].as_object().unwrap().len()
                 + calendar["paths"].as_object().unwrap().len()
+                + gmail["paths"].as_object().unwrap().len()
         );
-        for spec in [drive, calendar] {
+        for spec in [drive, calendar, gmail] {
             for (path, item) in spec["paths"].as_object().unwrap() {
                 assert_eq!(&paths[path], item);
             }

@@ -5,6 +5,8 @@ use crate::models::downstream_service::{ProxyOperationPolicy, ProxyOperationRule
 
 pub const DRIVE: &str = "https://www.googleapis.com/auth/drive";
 pub const CALENDAR: &str = "https://www.googleapis.com/auth/calendar";
+pub const GMAIL_READONLY: &str = "https://www.googleapis.com/auth/gmail.readonly";
+pub const GMAIL_SEND: &str = "https://www.googleapis.com/auth/gmail.send";
 pub const MANAGED_SCOPES: &[&str] = &[
     "openid",
     "email",
@@ -14,6 +16,8 @@ pub const MANAGED_SCOPES: &[&str] = &[
     DRIVE,
     "https://www.googleapis.com/auth/drive.readonly",
     "https://www.googleapis.com/auth/drive.file",
+    GMAIL_READONLY,
+    GMAIL_SEND,
     CALENDAR,
     "https://www.googleapis.com/auth/calendar.readonly",
 ];
@@ -23,6 +27,7 @@ pub enum GoogleProduct {
     Workspace,
     Calendar,
     Drive,
+    Gmail,
 }
 
 impl GoogleProduct {
@@ -31,17 +36,18 @@ impl GoogleProduct {
             "api-google-workspace" => Some(Self::Workspace),
             "api-google-calendar" => Some(Self::Calendar),
             "api-google-drive" => Some(Self::Drive),
+            "api-google-gmail" => Some(Self::Gmail),
             _ => None,
         }
     }
 
     pub fn default_scopes(self) -> Vec<String> {
         let mut scopes = vec!["openid", "email", "profile"];
-        if self != Self::Calendar {
-            scopes.push(DRIVE);
-        }
-        if self != Self::Drive {
-            scopes.push(CALENDAR);
+        match self {
+            Self::Workspace => scopes.extend([DRIVE, CALENDAR, GMAIL_READONLY]),
+            Self::Calendar => scopes.push(CALENDAR),
+            Self::Drive => scopes.push(DRIVE),
+            Self::Gmail => scopes.push(GMAIL_READONLY),
         }
         scopes.into_iter().map(String::from).collect()
     }
@@ -49,10 +55,22 @@ impl GoogleProduct {
     pub fn allowed_scopes(self) -> Vec<String> {
         MANAGED_SCOPES
             .iter()
-            .filter(|scope| match self {
-                Self::Workspace => true,
-                Self::Calendar => !scope.starts_with(DRIVE),
-                Self::Drive => !scope.starts_with(CALENDAR),
+            .filter(|scope| {
+                let identity = matches!(
+                    **scope,
+                    "openid"
+                        | "email"
+                        | "profile"
+                        | "https://www.googleapis.com/auth/userinfo.email"
+                        | "https://www.googleapis.com/auth/userinfo.profile"
+                );
+                identity
+                    || match self {
+                        Self::Workspace => true,
+                        Self::Calendar => scope.starts_with(CALENDAR),
+                        Self::Drive => scope.starts_with(DRIVE),
+                        Self::Gmail => matches!(**scope, GMAIL_READONLY | GMAIL_SEND),
+                    }
             })
             .map(|scope| (*scope).to_string())
             .collect()
@@ -77,6 +95,7 @@ impl GoogleProduct {
             Self::Workspace => "google-workspace",
             Self::Calendar => "google-calendar",
             Self::Drive => "google-drive",
+            Self::Gmail => "google-gmail",
         }
     }
 
@@ -115,31 +134,45 @@ mod tests {
             GoogleProduct::Workspace,
             GoogleProduct::Calendar,
             GoogleProduct::Drive,
+            GoogleProduct::Gmail,
         ] {
             product
                 .validate_scopes(Some(&product.default_scopes().join(" ")))
                 .unwrap();
-            assert!(
-                product
-                    .validate_scopes(Some("https://www.googleapis.com/auth/gmail.modify"))
-                    .is_err()
-            );
-            assert!(
-                product
-                    .validate_scopes(Some("https://www.googleapis.com/auth/cloud-platform"))
-                    .is_err()
-            );
+            for scope in [
+                "https://www.googleapis.com/auth/gmail.modify",
+                "https://www.googleapis.com/auth/gmail.compose",
+                "https://mail.google.com/",
+                "https://www.googleapis.com/auth/cloud-platform",
+            ] {
+                assert!(product.validate_scopes(Some(scope)).is_err());
+            }
+            for (scope, allowed) in [
+                (
+                    DRIVE,
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Drive),
+                ),
+                (
+                    CALENDAR,
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Calendar),
+                ),
+                (
+                    GMAIL_READONLY,
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail),
+                ),
+                (
+                    GMAIL_SEND,
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail),
+                ),
+            ] {
+                assert_eq!(
+                    product.validate_scopes(Some(scope)).is_ok(),
+                    allowed,
+                    "{product:?} {scope}"
+                );
+            }
+            assert!(!product.default_scopes().contains(&GMAIL_SEND.to_string()));
         }
-        assert!(
-            GoogleProduct::Calendar
-                .validate_scopes(Some(DRIVE))
-                .is_err()
-        );
-        assert!(
-            GoogleProduct::Drive
-                .validate_scopes(Some(CALENDAR))
-                .is_err()
-        );
     }
 
     #[test]
@@ -148,45 +181,73 @@ mod tests {
             GoogleProduct::Workspace,
             GoogleProduct::Calendar,
             GoogleProduct::Drive,
+            GoogleProduct::Gmail,
         ] {
             let policy = product.operation_policy().unwrap();
             for (method, path, allowed) in [
                 (
                     "POST",
                     "/calendar/v3/calendars",
-                    product != GoogleProduct::Drive,
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Calendar),
                 ),
                 (
                     "PATCH",
                     "/calendar/v3/calendars/user@example.com/events/event1",
-                    product != GoogleProduct::Drive,
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Calendar),
                 ),
                 (
                     "POST",
                     "/calendar/v3/freeBusy",
-                    product != GoogleProduct::Drive,
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Calendar),
                 ),
                 (
                     "POST",
                     "/drive/v3/files",
-                    product != GoogleProduct::Calendar,
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Drive),
                 ),
                 (
                     "PATCH",
                     "/upload/drive/v3/files/file1",
-                    product != GoogleProduct::Calendar,
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Drive),
                 ),
                 (
                     "GET",
                     "/drive/v3/files/file1/export",
-                    product != GoogleProduct::Calendar,
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Drive),
                 ),
                 (
                     "DELETE",
                     "/drive/v3/files/file1",
-                    product != GoogleProduct::Calendar,
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Drive),
                 ),
-                ("GET", "/gmail/v1/users/me/messages", false),
+                (
+                    "GET",
+                    "/gmail/v1/users/me/messages",
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail),
+                ),
+                (
+                    "GET",
+                    "/gmail/v1/users/me/messages/message1",
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail),
+                ),
+                (
+                    "POST",
+                    "/gmail/v1/users/me/messages/send",
+                    matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail),
+                ),
+                ("DELETE", "/gmail/v1/users/me/messages/message1", false),
+                ("POST", "/gmail/v1/users/me/messages/message1/trash", false),
+                ("POST", "/gmail/v1/users/me/messages/message1/modify", false),
+                ("POST", "/gmail/v1/users/me/messages/batchDelete", false),
+                ("POST", "/gmail/v1/users/me/messages/batchModify", false),
+                ("DELETE", "/gmail/v1/users/me/threads/thread1", false),
+                ("POST", "/gmail/v1/users/me/threads/thread1/trash", false),
+                ("POST", "/gmail/v1/users/me/threads/thread1/modify", false),
+                ("POST", "/gmail/v1/users/me/drafts", false),
+                ("DELETE", "/gmail/v1/users/me/drafts/draft1", false),
+                ("POST", "/gmail/v1/users/me/labels", false),
+                ("GET", "/gmail/v1/users/other@example.com/messages", false),
+                ("POST", "/batch/gmail/v1", false),
                 ("POST", "/batch", false),
                 ("POST", "/batch/drive/v3", false),
                 ("POST", "/calendar/v3/calendars/primary/acl", false),

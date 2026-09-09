@@ -5044,7 +5044,9 @@ mod tests {
     async fn google_product_oauth_resolves_connection_scopes_and_owner() {
         use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
         use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
-        use crate::services::google_workspace::{CALENDAR, DRIVE, GoogleProduct};
+        use crate::services::google_workspace::{
+            CALENDAR, DRIVE, GMAIL_READONLY, GMAIL_SEND, GoogleProduct,
+        };
 
         let db = connect_test_database("google_product_oauth")
             .await
@@ -5070,6 +5072,7 @@ mod tests {
             "api-google-workspace",
             "api-google-calendar",
             "api-google-drive",
+            "api-google-gmail",
         ] {
             let product = GoogleProduct::from_slug(slug).unwrap();
             let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
@@ -5129,10 +5132,47 @@ mod tests {
                 assert_eq!(query["access_type"], "offline");
                 assert_eq!(query["code_challenge_method"], "S256");
             }
+            if matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail) {
+                for use_override in [false, true] {
+                    let extra = vec![GMAIL_SEND.to_string()];
+                    let readonly = vec!["openid".to_string(), GMAIL_READONLY.to_string()];
+                    let (additional, scope_override) = if use_override {
+                        (&[][..], Some(readonly.as_slice()))
+                    } else {
+                        (extra.as_slice(), None)
+                    };
+                    let result = super::initiate_oauth_connect(
+                        &db,
+                        &enc,
+                        "http://localhost:3001",
+                        &key.user_id,
+                        &provider.id,
+                        None,
+                        None,
+                        additional,
+                        scope_override,
+                        conn,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    let url = url::Url::parse(&result.authorization_url).unwrap();
+                    let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                    let scopes: Vec<_> = query["scope"].split_whitespace().collect();
+                    assert!(scopes.contains(&GMAIL_READONLY));
+                    assert_eq!(scopes.contains(&GMAIL_SEND), !use_override);
+                    if use_override {
+                        assert_eq!(scopes, vec!["openid", GMAIL_READONLY]);
+                    }
+                }
+            }
             let forbidden = match product {
                 GoogleProduct::Calendar => DRIVE,
                 GoogleProduct::Drive => CALENDAR,
-                GoogleProduct::Workspace => "https://www.googleapis.com/auth/gmail.modify",
+                GoogleProduct::Workspace | GoogleProduct::Gmail => {
+                    "https://www.googleapis.com/auth/gmail.modify"
+                }
             };
             for use_override in [false, true] {
                 let scopes = vec![forbidden.to_string()];
@@ -5163,6 +5203,80 @@ mod tests {
                 .await
                 .unwrap_err();
             assert!(matches!(err, AppError::NotFound(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn google_managed_connections_refresh_with_rotated_shared_secret() {
+        let db = connect_test_database("google_shared_secret_rotation")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::<HashMap<String, String>>::new()));
+        let captured = requests.clone();
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(
+                move |axum::Form(form): axum::Form<HashMap<String, String>>| {
+                    captured.lock().unwrap().push(form);
+                    async {
+                        axum::Json(serde_json::json!({
+                            "access_token": "refreshed-google-access", "expires_in": 3600,
+                        }))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let token_url = format!("http://{}/token", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut provider = make_test_provider(
+            &Uuid::new_v4().to_string(),
+            &token_url,
+            Some(enc.encrypt(b"shared-google-client").await.unwrap()),
+            Some(enc.encrypt(b"old-secret").await.unwrap()),
+        );
+        provider.slug = "google".into();
+        let providers = db.collection::<ProviderConfig>(PROVIDER_CONFIGS);
+        providers.insert_one(&provider).await.unwrap();
+        let mut keys = Vec::new();
+        for _ in 0..2 {
+            keys.push(insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await);
+        }
+        providers
+            .update_one(
+                doc! { "_id": &provider.id },
+                doc! { "$set": {
+                    "client_secret_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: enc.encrypt(b"rotated-secret").await.unwrap(),
+                    },
+                }},
+            )
+            .await
+            .unwrap();
+        for key in &keys {
+            let refreshed = super::refresh_user_api_key_in_place(&db, &enc, key, None)
+                .await
+                .unwrap();
+            assert_eq!(refreshed.status, "active");
+            assert_eq!(
+                enc.decrypt(refreshed.access_token_encrypted.as_ref().unwrap())
+                    .await
+                    .unwrap(),
+                b"refreshed-google-access"
+            );
+            assert_eq!(refreshed.credential_epoch, key.credential_epoch);
+        }
+        server.abort();
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        for form in captured.iter() {
+            assert_eq!(form["client_id"], "shared-google-client");
+            assert_eq!(form["client_secret"], "rotated-secret");
+            assert_eq!(form["grant_type"], "refresh_token");
         }
     }
 

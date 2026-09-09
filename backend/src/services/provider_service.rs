@@ -2645,9 +2645,11 @@ fn seed_required_permissions(slug: &str) -> Option<&'static [&'static str]> {
         "api-google-workspace" => Some(&[
             super::google_workspace::DRIVE,
             super::google_workspace::CALENDAR,
+            super::google_workspace::GMAIL_READONLY,
         ]),
         "api-google-calendar" => Some(&[super::google_workspace::CALENDAR]),
         "api-google-drive" => Some(&[super::google_workspace::DRIVE]),
+        "api-google-gmail" => Some(&[super::google_workspace::GMAIL_READONLY]),
         _ => is_lark_family_slug(slug).then_some(LARK_FAMILY_REQUIRED_PERMISSIONS),
     }
 }
@@ -2706,11 +2708,17 @@ struct SeededHeader {
 /// capability flags to clients.
 fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
     match slug {
-        "api-google-workspace" | "api-google-calendar" | "api-google-drive" => Some((
+        "api-google-workspace"
+        | "api-google-calendar"
+        | "api-google-drive"
+        | "api-google-gmail" => Some((
             ServiceCapabilities {
                 supports_proxy_read: true,
                 supports_proxy_write: true,
-                supports_proxy_binary_upload: slug != "api-google-calendar",
+                supports_proxy_binary_upload: matches!(
+                    slug,
+                    "api-google-workspace" | "api-google-drive"
+                ),
                 supports_direct_downstream_auth: true,
                 supports_authoring_via_nyx: true,
                 supports_websocket: false,
@@ -3088,16 +3096,18 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         injection_key: "Authorization",
         service_auth_method: None,
         service_auth_key_name: None,
-        description: Some("Google Drive files and folders, calendars, events, and availability."),
+        description: Some(
+            "Google Drive files and folders, calendars, events, availability, and Gmail read/send access.",
+        ),
         default_request_headers: None,
         service_category: "connection",
         requires_user_credential: true,
         homepage_url: Some("https://workspace.google.com"),
         auth_notes: Some(
-            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access, including creating files, folders, and calendars.",
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access plus Gmail read access. Select gmail.send to send or reply to email.",
         ),
         known_limitations: Some(
-            "Workspace bundles Drive and Calendar only. Gmail, Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together.",
+            "Workspace bundles Drive, Calendar, and Gmail read/send access. Gmail deletion, trash, mailbox changes, and draft management are not supported. Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together.",
         ),
     },
     DefaultServiceSeed {
@@ -3144,6 +3154,27 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
         known_limitations: Some(
             "API access is limited to the published Drive operations. Native Docs/Sheets document editing requires their separate APIs. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-gmail",
+        service_name: "Gmail",
+        base_url: "https://www.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some("Read and search Gmail messages; optionally send messages and replies."),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://mail.google.com"),
+        auth_notes: Some(
+            "Connect using NyxID's existing managed Google app or your own OAuth client. Requests gmail.readonly by default; select gmail.send to send messages and replies. Existing connections need renewed consent for added scopes.",
+        ),
+        known_limitations: Some(
+            "Only published message list, read, and send operations are available. No deletion, trash, mailbox changes, or draft management. Replies require threadId and matching Subject, In-Reply-To, and References MIME headers. Google may revoke sibling connections using the same account and client together.",
         ),
     },
     DefaultServiceSeed {
@@ -4164,6 +4195,73 @@ async fn reconcile_firecrawl_seed_metadata(
     Ok(())
 }
 
+/// Upgrade the original Workspace preset without broadening an admin's policy
+/// or replacing customized metadata/scopes. Existing Google tokens still require
+/// user consent before the newly published Gmail operations can succeed.
+async fn reconcile_google_workspace_seed(
+    db: &mongodb::Database,
+    now: chrono::DateTime<Utc>,
+) -> AppResult<()> {
+    use super::google_workspace::{CALENDAR, DRIVE, GoogleProduct};
+    use crate::models::downstream_service::ProxyOperationPolicy;
+
+    let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+    let Some(service) = services
+        .find_one(doc! { "slug": "api-google-workspace", "created_by": "system" })
+        .await?
+    else {
+        return Ok(());
+    };
+    let seed = DEFAULT_SERVICE_SEEDS
+        .iter()
+        .find(|seed| seed.service_slug == "api-google-workspace")
+        .expect("Workspace seed");
+    for (field, old, new) in [
+        (
+            "description",
+            "Google Drive files and folders, calendars, events, and availability.",
+            seed.description,
+        ),
+        (
+            "auth_notes",
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access, including creating files, folders, and calendars.",
+            seed.auth_notes,
+        ),
+        (
+            "known_limitations",
+            "Workspace bundles Drive and Calendar only. Gmail, Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together.",
+            seed.known_limitations,
+        ),
+    ] {
+        services
+            .update_one(
+                doc! { "_id": &service.id, field: old },
+                doc! { "$set": { field: new, "updated_at": bson::DateTime::from_chrono(now) } },
+            )
+            .await?;
+    }
+
+    let mut old_rules = GoogleProduct::Drive.operation_policy()?.rules;
+    old_rules.extend(GoogleProduct::Calendar.operation_policy()?.rules);
+    let old_policy =
+        super::proxy_authorization::normalize_policy(ProxyOperationPolicy { rules: old_rules })?;
+    let old_policy = bson::to_bson(&old_policy)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize Workspace policy: {e}")))?;
+    let new_policy = bson::to_bson(&GoogleProduct::Workspace.operation_policy()?)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize Workspace policy: {e}")))?;
+    services.update_one(
+        doc! { "_id": &service.id, "proxy_operation_policy": old_policy },
+        doc! { "$set": { "proxy_operation_policy": new_policy, "updated_at": bson::DateTime::from_chrono(now) } },
+    ).await?;
+
+    db.collection::<ServiceProviderRequirement>(REQUIREMENTS).update_many(
+        doc! { "service_id": &service.id, "provider_config_id": &service.provider_config_id,
+            "scopes": ["openid", "email", "profile", DRIVE, CALENDAR] },
+        doc! { "$set": { "scopes": GoogleProduct::Workspace.default_scopes(), "updated_at": bson::DateTime::from_chrono(now) } },
+    ).await?;
+    Ok(())
+}
+
 /// Seed downstream services for each default provider (idempotent).
 ///
 /// Creates a `DownstreamService` and a `ServiceProviderRequirement` for each
@@ -4456,6 +4554,7 @@ pub async fn seed_default_services(
     }
 
     reconcile_firecrawl_seed_metadata(&service_col, now).await?;
+    reconcile_google_workspace_seed(db, now).await?;
 
     // Replace only the incorrect metadata shipped by the initial Notion seed.
     let old_notion_limitations = "Only content the user explicitly shared with the integration is \
@@ -9247,6 +9346,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn google_workspace_gmail_upgrade_preserves_customizations() {
+        use crate::models::downstream_service::ProxyOperationPolicy;
+        use crate::services::google_workspace::{CALENDAR, DRIVE, GoogleProduct};
+
+        let db = connect_test_database("workspace_gmail_upgrade")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        super::seed_default_providers(&db, &enc).await.unwrap();
+        super::seed_default_services(&db, &enc).await.unwrap();
+        let services = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
+        let requirements = db.collection::<ServiceProviderRequirement>(REQUIREMENTS);
+        let service = services
+            .find_one(doc! { "slug": "api-google-workspace" })
+            .await
+            .unwrap()
+            .unwrap();
+        let mut old_policy = GoogleProduct::Workspace.operation_policy().unwrap();
+        old_policy
+            .rules
+            .retain(|rule| !rule.path_template.starts_with("/gmail/"));
+        let old_scopes = vec!["openid", "email", "profile", DRIVE, CALENDAR];
+        for customized in [false, true] {
+            let policy = if customized {
+                ProxyOperationPolicy { rules: vec![] }
+            } else {
+                old_policy.clone()
+            };
+            let description = if customized {
+                "Custom Workspace"
+            } else {
+                "Google Drive files and folders, calendars, events, and availability."
+            };
+            let notes = if customized {
+                "Custom auth notes"
+            } else {
+                "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive and Calendar access, including creating files, folders, and calendars."
+            };
+            let limitations = if customized {
+                "Custom limits"
+            } else {
+                "Workspace bundles Drive and Calendar only. Gmail, Docs editing, Sheets editing, and Workspace administration are not included. API access is limited to the published operations. Google may revoke sibling connections using the same account and client together."
+            };
+            let scopes = if customized {
+                vec!["openid", CALENDAR]
+            } else {
+                old_scopes.clone()
+            };
+            services.update_one(doc! { "_id": &service.id }, doc! { "$set": {
+                "proxy_operation_policy": bson::to_bson(&policy).unwrap(),
+                "description": description, "auth_notes": notes, "known_limitations": limitations,
+            }}).await.unwrap();
+            requirements
+                .update_one(
+                    doc! { "service_id": &service.id },
+                    doc! { "$set": { "scopes": &scopes }},
+                )
+                .await
+                .unwrap();
+            for _ in 0..2 {
+                super::seed_default_services(&db, &enc).await.unwrap();
+                let updated = services
+                    .find_one(doc! { "_id": &service.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let req = requirements
+                    .find_one(doc! { "service_id": &service.id })
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let expected_policy = if customized {
+                    policy.clone()
+                } else {
+                    GoogleProduct::Workspace.operation_policy().unwrap()
+                };
+                assert_eq!(updated.proxy_operation_policy, Some(expected_policy));
+                if customized {
+                    assert_eq!(updated.description.as_deref(), Some(description));
+                    assert_eq!(updated.auth_notes.as_deref(), Some(notes));
+                    assert_eq!(updated.known_limitations.as_deref(), Some(limitations));
+                    assert_eq!(req.scopes.unwrap(), scopes);
+                } else {
+                    assert!(updated.description.unwrap().contains("Gmail"));
+                    assert!(updated.auth_notes.unwrap().contains("gmail.send"));
+                    assert!(
+                        updated
+                            .known_limitations
+                            .unwrap()
+                            .contains("Gmail deletion")
+                    );
+                    assert_eq!(req.scopes, Some(GoogleProduct::Workspace.default_scopes()));
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn google_products_share_existing_client_and_survive_reseeding() {
         use crate::services::google_workspace::GoogleProduct;
         let db = connect_test_database("google_product_seed")
@@ -9301,6 +9498,7 @@ mod tests {
                 "api-google-workspace",
                 "api-google-calendar",
                 "api-google-drive",
+                "api-google-gmail",
             ] {
                 let product = GoogleProduct::from_slug(slug).unwrap();
                 let entry = entries.iter().find(|entry| entry.slug == slug).unwrap();
@@ -9355,7 +9553,7 @@ mod tests {
                 .count_documents(doc! { "provider_config_id": &provider.id })
                 .await
                 .unwrap(),
-            4
+            5
         );
     }
 

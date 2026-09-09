@@ -31,6 +31,7 @@ frontend/src/components/service-icons/api-github.tsx
 frontend/src/components/service-icons/api-google-calendar.tsx
 frontend/src/components/service-icons/api-google-cloud.tsx
 frontend/src/components/service-icons/api-google-drive.tsx
+frontend/src/components/service-icons/api-google-gmail.tsx
 frontend/src/components/service-icons/api-google-workspace.tsx
 frontend/src/components/service-icons/api-google.tsx
 frontend/src/components/service-icons/api-lark-bot.tsx
