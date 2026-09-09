@@ -13,11 +13,16 @@ import { NyxbotOnboardingPage } from "./nyxbot-onboarding";
 import { nyxbotI18n } from "@/features/nyxbot-onboarding/i18n";
 import { GOOGLE_WORKSPACE_SCOPES } from "@/schemas/nyxbot-onboarding";
 import { ApiError } from "@/lib/api-client";
+import {
+  AEVATAR_CHANNELS_PATH,
+  AEVATAR_WEBHOOK_BASE_URL,
+} from "@/lib/nyxbot-channels";
 
-const { get, post, redirect, auth } = vi.hoisted(() => ({
+const { get, post, redirect, auth, telegram } = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   redirect: vi.fn(),
+  telegram: vi.fn(),
   auth: {
     user: { id: "owner", display_name: "Avery", email: "avery@example.com" },
     isAuthenticated: true,
@@ -26,6 +31,8 @@ const { get, post, redirect, auth } = vi.hoisted(() => ({
 vi.mock("@/lib/api-client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api-client")>()),
   api: { get, post },
+  apiClient: (path: string, options?: { method?: string; body?: unknown }) =>
+    options?.method === "POST" ? post(path, options.body) : get(path),
 }));
 vi.mock("@/lib/navigation", () => ({
   hardRedirect: redirect,
@@ -56,6 +63,12 @@ const catalog = {
 };
 // Synthetic, syntax-valid fixture; API calls in these tests are mocked.
 const telegramToken = `123456:${"aB_9-".repeat(7)}`;
+const registrationReceipt = {
+  status: "accepted",
+  registration_id: "aevatar-registration",
+  nyx_channel_bot_id: "business-bot",
+  platform: "telegram",
+};
 let keys: object[];
 let catalogResponse: typeof catalog;
 let publicConfig: { social_providers: string[]; email_auth_enabled: boolean };
@@ -73,6 +86,15 @@ function mount() {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  vi.stubGlobal("fetch", telegram);
+  telegram.mockResolvedValue({
+    ok: true,
+    status: 200,
+    json: async () => ({
+      ok: true,
+      result: { id: 123456, is_bot: true, first_name: "My Shop Bot" },
+    }),
+  });
   sessionStorage.clear();
   window.history.replaceState(
     null,
@@ -107,6 +129,12 @@ beforeEach(async () => {
         is_active: true,
         webhook_registered: true,
       };
+    if (path === `${AEVATAR_CHANNELS_PATH}/aevatar-registration/status`)
+      return {
+        registration_id: "aevatar-registration",
+        nyx_channel_bot_id: "business-bot",
+        status: "active",
+      };
     throw new Error(`Unexpected request: ${path}`);
   });
   post.mockImplementation(async (path: string) => {
@@ -114,14 +142,14 @@ beforeEach(async () => {
       keys = [{ ...googleKey, status: "pending_auth", granted_scopes: [] }];
       return keys[0];
     }
-    if (path === "/channel-bots")
-      return { id: "business-bot", platform: "telegram", status: "active" };
+    if (path === AEVATAR_CHANNELS_PATH) return registrationReceipt;
     throw new Error(`Unexpected mutation: ${path}`);
   });
 });
 afterEach(() => {
   cleanup();
   client?.clear();
+  vi.unstubAllGlobals();
 });
 
 async function toChannel() {
@@ -389,10 +417,11 @@ describe("Nyxbot onboarding", () => {
     await userEvent.type(token, `  ${telegramToken}  `);
     await userEvent.click(submit);
     await screen.findByRole("heading", { name: "Almost there" });
-    expect(post).toHaveBeenCalledWith("/channel-bots", {
+    expect(post).toHaveBeenCalledWith(AEVATAR_CHANNELS_PATH, {
       platform: "telegram",
-      label: "Nyxbot Telegram",
+      label: "My_Shop_Bot",
       bot_token: telegramToken,
+      webhook_base_url: AEVATAR_WEBHOOK_BASE_URL,
     });
     expect(post).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "Copy code" })).toBeDisabled();
@@ -404,8 +433,20 @@ describe("Nyxbot onboarding", () => {
       telegramToken,
     );
     expect(
+      JSON.parse(sessionStorage.getItem("nyxbot-onboarding:owner")!),
+    ).toMatchObject({
+      botId: "business-bot",
+      registrationId: "aevatar-registration",
+    });
+    expect(get).toHaveBeenCalledWith(
+      `${AEVATAR_CHANNELS_PATH}/aevatar-registration/status`,
+    );
+    expect(telegram.mock.invocationCallOrder[0]).toBeLessThan(
+      post.mock.invocationCallOrder[0]!,
+    );
+    expect(
       await screen.findByRole("link", { name: "Manage channel" }),
-    ).toHaveAttribute("href", "/channel-bots/business-bot");
+    ).toHaveAttribute("href", `${AEVATAR_WEBHOOK_BASE_URL}/channels`);
   });
   it.each(["en", "zh-CN"])(
     "blocks invalid tokens, shows localized feedback and accepts correction in %s",
@@ -429,6 +470,7 @@ describe("Nyxbot onboarding", () => {
       fireEvent.submit(token.closest("form")!);
       await waitFor(() => expect(submit).toBeDisabled());
       expect(post).not.toHaveBeenCalled();
+      expect(telegram).not.toHaveBeenCalled();
 
       await userEvent.clear(token);
       await waitFor(() =>
@@ -467,13 +509,7 @@ describe("Nyxbot onboarding", () => {
       fireEvent.submit(token.closest("form")!);
     });
     expect(post).toHaveBeenCalledTimes(1);
-    await act(async () =>
-      resolveRegistration?.({
-        id: "business-bot",
-        platform: "telegram",
-        status: "active",
-      }),
-    );
+    await act(async () => resolveRegistration?.(registrationReceipt));
     await screen.findByRole("heading", { name: "Almost there" });
   });
   it("leaves the channel unselected for a direct visitor and ignores the disabled WhatsApp option", async () => {
@@ -509,7 +545,7 @@ describe("Nyxbot onboarding", () => {
       screen.getByRole("button", { name: "Connect channel" }),
     );
     await screen.findByText(
-      "Your channel could not be connected. Check the token and retry.",
+      "Your bot was verified, but channel registration couldn't be confirmed. Check Channels in Aevatar before retrying.",
     );
     expect(
       screen.queryByText(`Bad token: ${telegramToken}`),
@@ -520,6 +556,60 @@ describe("Nyxbot onboarding", () => {
     ).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     await screen.findByText("Google Workspace connected");
+  });
+  it("stops at the token field when Telegram rejects the token, without calling Aevatar", async () => {
+    telegram.mockResolvedValue({ ok: false, status: 401 });
+    mount();
+    await toChannel();
+    await userEvent.type(
+      screen.getByLabelText("Bot token", { exact: true }),
+      telegramToken,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Connect channel" }),
+    );
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Telegram rejected this token.",
+    );
+    expect(post).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("heading", { name: "Set up channel" }),
+    ).toBeVisible();
+    expect(
+      sessionStorage.getItem("nyxbot-onboarding:owner") ?? "",
+    ).not.toContain(telegramToken);
+  });
+  it("waits for Aevatar status after acceptance and retries only status reads", async () => {
+    let ready = false;
+    const previousGet = get.getMockImplementation()!;
+    get.mockImplementation((path: string) =>
+      path === `${AEVATAR_CHANNELS_PATH}/aevatar-registration/status`
+        ? Promise.resolve({
+            ...registrationReceipt,
+            status: ready ? "active" : "pending_webhook",
+          })
+        : previousGet(path),
+    );
+    mount();
+    await toChannel();
+    await userEvent.type(
+      screen.getByLabelText("Bot token", { exact: true }),
+      telegramToken,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Connect channel" }),
+    );
+    await screen.findByText(
+      "Your channel registration was accepted. We're still waiting for it to be ready. Retry to check its status.",
+    );
+    expect(
+      screen.queryByText(/^Your channel is saved/),
+    ).not.toBeInTheDocument();
+    ready = true;
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText(/^Your channel is saved/);
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(telegram).toHaveBeenCalledTimes(1);
   });
   it.each(["referral", "saved"])(
     "disables WhatsApp setup even with a %s preselection",

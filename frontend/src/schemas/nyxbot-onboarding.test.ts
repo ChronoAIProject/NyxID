@@ -130,12 +130,14 @@ describe("Nyxbot authorization boundaries", () => {
       channel: "telegram",
       googleKeyId: "g",
       botId: "b",
+      registrationId: "aevatar-b",
       bot_token: "secret",
     } as never);
     expect(readNyxbotProgress("a")).toEqual({
       channel: "telegram",
       googleKeyId: "g",
       botId: "b",
+      registrationId: "aevatar-b",
     });
     expect(readNyxbotProgress("b").botId).toBeNull();
     expect(sessionStorage.getItem("nyxbot-onboarding:a")).not.toContain(

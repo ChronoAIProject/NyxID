@@ -13,14 +13,17 @@ import {
   FormControl,
   FormMessage,
 } from "@/components/ui/form";
-import { useCreateChannelBot } from "@/hooks/use-channel-bots";
+import { useRegisterNyxbotTelegram } from "@/hooks/use-nyxbot-channels";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
 import {
   createNyxbotTelegramSchema,
   type NyxbotTelegramForm,
   type NyxbotChannel,
 } from "@/schemas/nyxbot-onboarding";
-import type { CreateChannelBotResponse } from "@/types/channels";
+import {
+  NyxbotChannelError,
+  type NyxbotChannelRegistration,
+} from "@/lib/nyxbot-channels";
 import {
   BackButton,
   OnboardingNotice,
@@ -46,7 +49,7 @@ export function ChannelStep({
   readonly referral?: NyxbotChannel;
   readonly onSelect: (channel: NyxbotChannel) => void;
   readonly onBack: () => void;
-  readonly onConnected: (bot: CreateChannelBotResponse) => void;
+  readonly onConnected: (registration: NyxbotChannelRegistration) => void;
   readonly onSpendingCap: () => void;
 }) {
   const { t } = useTranslation();
@@ -56,7 +59,7 @@ export function ChannelStep({
       : null;
   const [showToken, setShowToken] = useState(false);
   const submitting = useRef(false);
-  const createBot = useCreateChannelBot();
+  const createBot = useRegisterNyxbotTelegram();
   const managed = useManagedOnboarding("whatsapp", channel === "whatsapp");
   const form = useAppForm<NyxbotTelegramForm>({
     resolver: zodResolver(
@@ -72,17 +75,17 @@ export function ChannelStep({
     if (submitting.current || channel !== "telegram") return;
     submitting.current = true;
     try {
-      const result = await createBot.mutateAsync({
-        platform: "telegram",
-        label: "Nyxbot Telegram",
-        bot_token: values.bot_token,
-      });
+      const result = await createBot.mutateAsync(values.bot_token);
       form.reset();
       createBot.reset();
       onConnected(result);
-    } catch {
+    } catch (error) {
       // Do not echo provider errors that might contain submitted credentials.
-      form.setError("bot_token", { message: t("channelFailed") });
+      form.setError("bot_token", {
+        message: t(
+          error instanceof NyxbotChannelError ? error.code : "channelFailed",
+        ),
+      });
     } finally {
       submitting.current = false;
     }

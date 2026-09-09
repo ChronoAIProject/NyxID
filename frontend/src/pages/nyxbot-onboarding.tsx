@@ -49,8 +49,10 @@ function ConnectedOnboarding({
     return (
       <LinkChannelStep
         botId={flow.progress.botId}
+        registrationId={flow.progress.registrationId}
         onBack={(missing) => {
-          if (missing) flow.updateProgress({ botId: null });
+          if (missing)
+            flow.updateProgress({ botId: null, registrationId: null });
           setView("source");
         }}
       />
@@ -65,8 +67,11 @@ function ConnectedOnboarding({
         onSelect={(channel) => flow.updateProgress({ channel })}
         onBack={() => setView("source")}
         onSpendingCap={() => setView("cap")}
-        onConnected={(bot) => {
-          flow.updateProgress({ botId: bot.id });
+        onConnected={(registration) => {
+          flow.updateProgress({
+            botId: registration.nyx_channel_bot_id,
+            registrationId: registration.registration_id,
+          });
           setView("link");
         }}
       />

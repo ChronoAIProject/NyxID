@@ -20,10 +20,11 @@ export const nyxbotProgressSchema = z.object({
   channel: z.enum(["telegram", "whatsapp"]).nullable().default(null),
   googleKeyId: z.string().max(128).nullable().default(null),
   botId: z.string().max(128).nullable().default(null),
+  registrationId: z.string().max(128).nullable().default(null),
 });
 export type NyxbotProgress = z.infer<typeof nyxbotProgressSchema>;
 
-// Only check syntax here; the existing registration API verifies with Telegram getMe.
+// Syntax only; the submit flow obtains the bot identity from Telegram getMe.
 export function createNyxbotTelegramSchema(messages: {
   required: string;
   invalid: string;
