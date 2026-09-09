@@ -17,6 +17,7 @@
   "signupIntro": "Don't have an account?",
   "signup": "Sign up",
   "signedIn": "You're signed in to NyxID. Continue to connect your data and channel.",
+  "continueAs": "Continue as {{name}}",
   "emailSignin": "Sign in with email",
   "signinUnavailable": "Sign-in options could not be loaded. Please retry.",
   "sourceTitle": "Connect a data source",

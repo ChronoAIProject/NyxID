@@ -367,7 +367,12 @@
     flex: 0 1 260px;
   }
 }
+.nb-auth {
+  display: flex;
+  flex-direction: column;
+}
 .nb-auth-header {
+  flex-shrink: 0;
   border-bottom: 1px solid var(--nb-subtle);
 }
 .nb-auth-brand {
@@ -397,7 +402,9 @@
   height: 20px;
 }
 .nb-auth-content {
+  width: 100%;
   max-width: 420px;
+  flex: 1;
   margin: 0 auto;
   padding: 56px 24px max(32px, env(safe-area-inset-bottom));
 }
@@ -410,13 +417,41 @@
   letter-spacing: 0;
   overflow-wrap: anywhere;
 }
-.nb-auth-content h1:focus {
+.nyxbot-onboarding.nb-auth .nb-auth-content h1:focus {
   outline: none;
 }
 .nb-auth-subtitle {
   margin: 20px 0;
   color: var(--nb-muted);
   font-size: 14px;
+}
+.nb-auth-footer {
+  width: 100%;
+  max-width: 420px;
+  margin: 0 auto;
+  padding: 0 24px max(24px, env(safe-area-inset-bottom));
+}
+.nyxbot-onboarding .nb-auth-footer .nb-secondary {
+  min-height: 48px;
+  border-radius: 6px;
+  font-size: 14px;
+  gap: 10px;
+}
+.nyxbot-onboarding .nb-auth-footer .nb-secondary:disabled {
+  opacity: 0.65;
+}
+.nyxbot-onboarding .nb-auth-footer svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  color: var(--nb-muted);
+}
+.nb-current-account {
+  margin-top: 20px;
+}
+.nb-current-account > span:nth-child(2) {
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 .nb-tools {
   display: flex;

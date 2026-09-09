@@ -35,7 +35,9 @@ vi.mock("@/stores/auth-store", () => ({
   useAuthStore: (selector: (s: typeof auth) => unknown) => selector(auth),
 }));
 vi.mock("@/components/auth/web-device-login", () => ({
-  WebDeviceLogin: () => <button>Continue with the NyxID app</button>,
+  WebDeviceLogin: ({ returnTo }: { returnTo: string }) => (
+    <button data-return-to={returnTo}>Continue with the NyxID app</button>
+  ),
 }));
 
 const googleKey = {
@@ -70,7 +72,11 @@ function mount() {
 beforeEach(async () => {
   vi.clearAllMocks();
   sessionStorage.clear();
-  window.history.replaceState(null, "", "/onboarding?channel=telegram");
+  window.history.replaceState(
+    null,
+    "",
+    "/onboarding?step=source&channel=telegram",
+  );
   auth.isAuthenticated = true;
   keys = [googleKey];
   catalogResponse = catalog;
@@ -125,9 +131,23 @@ async function toChannel() {
 }
 
 describe("Nyxbot onboarding", () => {
-  it("opens the data-source step for the signed-in account without treating sign-in as Drive and Calendar consent", async () => {
+  it("starts with all account choices and enters data source only after explicit account continuation", async () => {
+    window.history.replaceState(null, "", "/onboarding?channel=telegram");
     keys = [];
     mount();
+    await screen.findByRole("heading", { name: "Sign in to NyxID" });
+    for (const provider of ["Google", "GitHub", "Apple", "the NyxID app"]) {
+      expect(
+        screen.getByRole("button", { name: `Continue with ${provider}` }),
+      ).toBeVisible();
+    }
+    expect(get).not.toHaveBeenCalledWith("/keys");
+    expect(
+      screen.queryByRole("heading", { name: "Connect a data source" }),
+    ).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Continue as Avery" }),
+    );
     await screen.findByRole("heading", { name: "Connect a data source" });
     expect(screen.getByText("Signed in to NyxID")).toBeVisible();
     expect(screen.getByText("Avery")).toBeVisible();
@@ -148,6 +168,43 @@ describe("Nyxbot onboarding", () => {
     ).not.toBeInTheDocument();
     expect(post).not.toHaveBeenCalled();
     expect(redirect).not.toHaveBeenCalled();
+  });
+  it("returns to account from data source and keeps the account-data-channel order", async () => {
+    window.history.replaceState(null, "", "/onboarding");
+    mount();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Continue as Avery" }),
+    );
+    await toChannel();
+    await userEvent.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByRole("heading", { name: "Connect a data source" });
+    await userEvent.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByRole("heading", { name: "Sign in to NyxID" });
+    expect(
+      screen.getByRole("button", { name: "Continue as Avery" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Continue with Google" }),
+    ).toBeVisible();
+    expect(post).not.toHaveBeenCalled();
+  });
+  it("keeps an unauthenticated return on account and points QR and registration back to data source", async () => {
+    auth.isAuthenticated = false;
+    mount();
+    await screen.findByRole("heading", { name: "Sign in to NyxID" });
+    const returnTo = `${window.location.origin}/onboarding?step=source&channel=telegram`;
+    expect(
+      screen.getByRole("button", { name: "Continue with the NyxID app" }),
+    ).toHaveAttribute("data-return-to", returnTo);
+    const registration = new URL(
+      screen.getByRole("link", { name: "Sign up" }).getAttribute("href")!,
+      window.location.origin,
+    );
+    expect(registration.searchParams.get("return_to")).toBe(returnTo);
+    expect(
+      screen.queryByRole("button", { name: /Continue as/ }),
+    ).not.toBeInTheDocument();
+    expect(get).not.toHaveBeenCalledWith("/keys");
   });
   it.each([
     ["google", "Google"],
@@ -171,7 +228,7 @@ describe("Nyxbot onboarding", () => {
       );
       expect(target.pathname).toBe(`/api/v1/auth/social/${id}`);
       expect(target.searchParams.get("return_to")).toBe(
-        `${window.location.origin}/onboarding?channel=telegram`,
+        `${window.location.origin}/onboarding?step=source&channel=telegram`,
       );
       expect(post).not.toHaveBeenCalled();
     },
@@ -191,7 +248,10 @@ describe("Nyxbot onboarding", () => {
       ).toBeVisible();
     }
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
-    expect(screen.queryByRole("contentinfo")).not.toBeInTheDocument();
+    expect(screen.getByRole("contentinfo")).toHaveTextContent("Back to Nyxbot");
+    expect(
+      screen.getByRole("button", { name: "Back to Nyxbot" }),
+    ).toBeDisabled();
     const google = screen.getByRole("button", { name: "Continue with Google" });
     expect(google).toHaveAttribute("aria-disabled", "true");
     await userEvent.click(google);
@@ -249,6 +309,9 @@ describe("Nyxbot onboarding", () => {
   it("leaves the channel unselected for a direct visitor and clears a token on channel switch", async () => {
     window.history.replaceState(null, "", "/onboarding");
     mount();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Continue as Avery" }),
+    );
     await toChannel();
     expect(screen.getByRole("radio", { name: /Telegram/ })).not.toBeChecked();
     expect(screen.getByRole("radio", { name: /WhatsApp/ })).not.toBeChecked();
@@ -319,7 +382,9 @@ describe("Nyxbot onboarding", () => {
     expect(url.searchParams.get("scope_override")?.split(",")).toEqual([
       ...GOOGLE_WORKSPACE_SCOPES,
     ]);
-    expect(url.searchParams.get("redirect_path")).toBe("/onboarding");
+    expect(url.searchParams.get("redirect_path")).toBe(
+      "/onboarding?step=source",
+    );
     expect(
       JSON.parse(sessionStorage.getItem("nyxbot-onboarding:owner")!)
         .googleKeyId,
@@ -417,12 +482,22 @@ describe("Nyxbot onboarding", () => {
     ).toBeDisabled();
     expect(post).not.toHaveBeenCalled();
   });
-  it("restores the saved channel from the API after a refresh", async () => {
+  it("keeps account and data source before resuming a saved channel", async () => {
+    window.history.replaceState(null, "", "/onboarding");
     sessionStorage.setItem(
       "nyxbot-onboarding:owner",
       JSON.stringify({ botId: "business-bot", channel: "telegram" }),
     );
     mount();
+    await screen.findByRole("heading", { name: "Sign in to NyxID" });
+    expect(get).not.toHaveBeenCalledWith("/channel-bots/business-bot");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Continue as Avery" }),
+    );
+    await screen.findByText("Google Workspace connected");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Continue", exact: true }),
+    );
     await screen.findByText(/Your channel is saved/);
     expect(get).toHaveBeenCalledWith("/channel-bots/business-bot");
     expect(post).not.toHaveBeenCalled();
@@ -452,6 +527,10 @@ describe("Nyxbot onboarding", () => {
         : previousGet(path),
     );
     mount();
+    await screen.findByText("Google Workspace connected");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Continue", exact: true }),
+    );
     await screen.findByText("We couldn't load your connections. Please retry.");
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     await toChannel();

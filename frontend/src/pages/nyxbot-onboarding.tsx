@@ -23,17 +23,19 @@ function ConnectedOnboarding({
   accountName,
   referral,
   callbackFailed,
+  onBackToAccount,
 }: {
   readonly userId: string;
   readonly accountName: string;
   readonly referral?: NyxbotChannel;
   readonly callbackFailed: boolean;
+  readonly onBackToAccount: () => void;
 }) {
   const { t } = useTranslation();
   const flow = useNyxbotOnboarding(userId, referral);
-  const [view, setView] = useState<
-    "account" | "source" | "channel" | "cap" | "link"
-  >(() => (flow.progress.botId ? "link" : "source"));
+  const [view, setView] = useState<"source" | "channel" | "cap" | "link">(
+    "source",
+  );
   const loading =
     flow.keys.isPending ||
     flow.catalog.isPending ||
@@ -42,14 +44,6 @@ function ConnectedOnboarding({
     flow.keys.isError || flow.catalog.isError || flow.authorization.isError;
   // A URL or locally remembered step never substitutes for a live authorization.
   const sourceReady = Boolean(flow.connectedKey) && !loadError;
-
-  if (view === "account")
-    return (
-      <SignInStep
-        returnTo={window.location.href}
-        onContinue={() => setView("source")}
-      />
-    );
 
   if (view === "link" && flow.progress.botId)
     return (
@@ -93,7 +87,7 @@ function ConnectedOnboarding({
           ? setView(flow.progress.botId ? "link" : "channel")
           : flow.connectGoogle.mutate()
       }
-      onBack={() => setView("account")}
+      onBack={onBackToAccount}
     >
       {loading && <OnboardingNotice>{t("loading")}</OnboardingNotice>}
       {loadError && (
@@ -148,20 +142,36 @@ export function NyxbotOnboardingPage() {
   const search = nyxbotSearchSchema.parse(
     Object.fromEntries(new URLSearchParams(window.location.search)),
   );
+  // Return hints select a view; authentication and data grants are still checked.
+  const [accountConfirmed, setAccountConfirmed] = useState(
+    () => search.step === "source" || Boolean(search.status),
+  );
   const returnUrl = new URL("/onboarding", window.location.origin);
+  returnUrl.searchParams.set("step", "source");
   if (search.channel) returnUrl.searchParams.set("channel", search.channel);
   return (
     <I18nextProvider i18n={nyxbotI18n}>
-      {authenticated && user ? (
+      {authenticated && user && accountConfirmed ? (
         <ConnectedOnboarding
           key={user.id}
           userId={user.id}
           accountName={user.display_name?.trim() || user.email}
           referral={search.channel}
           callbackFailed={search.status === "error"}
+          onBackToAccount={() => setAccountConfirmed(false)}
         />
       ) : (
-        <SignInStep returnTo={returnUrl.href} />
+        <SignInStep
+          returnTo={returnUrl.href}
+          accountName={
+            authenticated && user
+              ? user.display_name?.trim() || user.email
+              : undefined
+          }
+          onContinue={
+            authenticated && user ? () => setAccountConfirmed(true) : undefined
+          }
+        />
       )}
     </I18nextProvider>
   );

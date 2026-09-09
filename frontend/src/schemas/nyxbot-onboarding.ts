@@ -9,6 +9,7 @@ export const GOOGLE_WORKSPACE_SCOPES = [
 ] as const;
 
 export const nyxbotSearchSchema = z.object({
+  step: z.enum(["account", "source"]).optional().catch(undefined),
   channel: z.enum(["telegram", "whatsapp"]).optional().catch(undefined),
   status: z.enum(["success", "error"]).optional().catch(undefined),
 });

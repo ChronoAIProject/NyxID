@@ -17,6 +17,7 @@
   "signupIntro": "还没有账号？",
   "signup": "注册",
   "signedIn": "你已登录 NyxID，可以继续连接数据源和渠道。",
+  "continueAs": "以 {{name}} 的身份继续",
   "emailSignin": "使用邮箱登录",
   "signinUnavailable": "无法加载登录方式，请重试。",
   "sourceTitle": "连接数据源",

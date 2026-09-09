@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { ChevronRight } from "lucide-react";
+import { ArrowLeft, ChevronRight } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { WebDeviceLogin } from "@/components/auth/web-device-login";
@@ -17,9 +17,11 @@ const SIGN_IN_PROVIDERS = [
 
 export function SignInStep({
   returnTo,
+  accountName,
   onContinue,
 }: {
   readonly returnTo: string;
+  readonly accountName?: string;
   readonly onContinue?: () => void;
 }) {
   const { t, i18n } = useTranslation();
@@ -51,94 +53,101 @@ export function SignInStep({
           {t("signinTitle")}
         </h1>
         <p className="nb-auth-subtitle">{t("signinSubtitle")}</p>
-        {onContinue ? (
-          <>
-            <OnboardingNotice>{t("signedIn")}</OnboardingNotice>
-            <Button className="nb-primary nb-full" onClick={onContinue}>
-              {t("continue")}
-            </Button>
-          </>
-        ) : (
-          <>
-            {config.isPending && (
-              <OnboardingNotice>{t("loading")}</OnboardingNotice>
-            )}
-            {config.isError && (
-              <OnboardingNotice error>
-                {t("signinUnavailable")}{" "}
-                <Button onClick={() => void config.refetch()}>
-                  {t("retry")}
-                </Button>
-              </OnboardingNotice>
-            )}
-            <div className="nb-provider-list">
-              {!deviceOpen &&
-                SIGN_IN_PROVIDERS.map((p) => {
-                  const available =
-                    config.isSuccess &&
-                    config.data.social_providers.includes(p.id);
-                  return (
-                    <Button
-                      type="button"
-                      className="nb-provider"
-                      key={p.id}
-                      aria-disabled={!available}
-                      title={
-                        available
-                          ? undefined
-                          : t("providerUnavailable", { provider: p.name })
-                      }
-                      onClick={() => {
-                        if (!available) {
-                          setUnavailableProvider(p.name);
-                          return;
-                        }
-                        setUnavailableProvider(null);
-                        openExternal(authLink(`/api/v1/auth/social/${p.id}`));
-                      }}
-                    >
-                      <BrandIcon brand={p.id} />
-                      <span>{t("provider", { provider: p.name })}</span>
-                      <ChevronRight size={16} />
-                    </Button>
-                  );
-                })}
-              <div className="nb-device-login">
-                <WebDeviceLogin
-                  returnTo={returnTo}
-                  isOpen={deviceOpen}
-                  onOpenChange={(open) => {
-                    setUnavailableProvider(null);
-                    setDeviceOpen(open);
-                  }}
-                  triggerLabel={t("appProvider")}
-                  triggerIcon={
-                    <span className="nb-auth-logo">
-                      <img src="/nyxid-icon-white.svg" alt="" />
-                    </span>
+        {config.isPending && (
+          <OnboardingNotice>{t("loading")}</OnboardingNotice>
+        )}
+        {config.isError && (
+          <OnboardingNotice error>
+            {t("signinUnavailable")}{" "}
+            <Button onClick={() => void config.refetch()}>{t("retry")}</Button>
+          </OnboardingNotice>
+        )}
+        <div className="nb-provider-list">
+          {!deviceOpen &&
+            SIGN_IN_PROVIDERS.map((p) => {
+              const available =
+                config.isSuccess && config.data.social_providers.includes(p.id);
+              return (
+                <Button
+                  type="button"
+                  className="nb-provider"
+                  key={p.id}
+                  aria-disabled={!available}
+                  title={
+                    available
+                      ? undefined
+                      : t("providerUnavailable", { provider: p.name })
                   }
-                />
-              </div>
-            </div>
-            {!deviceOpen && unavailableProvider && (
-              <OnboardingNotice>
-                {t("providerUnavailable", { provider: unavailableProvider })}
-              </OnboardingNotice>
-            )}
-            {!deviceOpen && (
-              <p className="nb-signup">
-                {t("signupIntro")}{" "}
-                <a href={authLink("/register")}>{t("signup")}</a>
-              </p>
-            )}
-            {!deviceOpen && config.data?.email_auth_enabled && (
-              <p className="nb-signup">
-                <a href={authLink("/login")}>{t("emailSignin")}</a>
-              </p>
-            )}
-          </>
+                  onClick={() => {
+                    if (!available) {
+                      setUnavailableProvider(p.name);
+                      return;
+                    }
+                    setUnavailableProvider(null);
+                    openExternal(authLink(`/api/v1/auth/social/${p.id}`));
+                  }}
+                >
+                  <BrandIcon brand={p.id} />
+                  <span>{t("provider", { provider: p.name })}</span>
+                  <ChevronRight size={16} />
+                </Button>
+              );
+            })}
+          <div className="nb-device-login">
+            <WebDeviceLogin
+              returnTo={returnTo}
+              isOpen={deviceOpen}
+              onOpenChange={(open) => {
+                setUnavailableProvider(null);
+                setDeviceOpen(open);
+              }}
+              triggerLabel={t("appProvider")}
+              triggerIcon={
+                <span className="nb-auth-logo">
+                  <img src="/nyxid-icon-white.svg" alt="" />
+                </span>
+              }
+            />
+          </div>
+        </div>
+        {!deviceOpen && unavailableProvider && (
+          <OnboardingNotice>
+            {t("providerUnavailable", { provider: unavailableProvider })}
+          </OnboardingNotice>
+        )}
+        {!deviceOpen && (
+          <p className="nb-signup">
+            {t("signupIntro")} <a href={authLink("/register")}>{t("signup")}</a>
+          </p>
+        )}
+        {!deviceOpen && config.data?.email_auth_enabled && (
+          <p className="nb-signup">
+            <a href={authLink("/login")}>{t("emailSignin")}</a>
+          </p>
+        )}
+        {!deviceOpen && onContinue && accountName && (
+          <Button
+            className="nb-provider nb-current-account"
+            onClick={onContinue}
+          >
+            <span className="nb-auth-logo" aria-hidden="true">
+              <img src="/nyxid-icon-white.svg" alt="" />
+            </span>
+            <span>{t("continueAs", { name: accountName })}</span>
+            <ChevronRight size={16} aria-hidden="true" />
+          </Button>
         )}
       </main>
+      <footer className="nb-auth-footer">
+        <Button
+          className="nb-secondary nb-full"
+          disabled
+          title={t("nyxbotReturnUnavailable")}
+        >
+          <ArrowLeft size={20} aria-hidden="true" />
+          {t("backToNyxbot")}
+        </Button>
+      </footer>
     </div>
   );
 }

@@ -78,6 +78,12 @@ describe("Nyxbot authorization boundaries", () => {
       nyxbotSearchSchema.parse({ channel: "instagram" }).channel,
     ).toBeUndefined();
   });
+  it("only accepts account and source return hints, never a channel or completion shortcut", () => {
+    expect(nyxbotSearchSchema.parse({ step: "source" }).step).toBe("source");
+    expect(nyxbotSearchSchema.parse({ step: "account" }).step).toBe("account");
+    expect(nyxbotSearchSchema.parse({ step: "channel" }).step).toBeUndefined();
+    expect(nyxbotSearchSchema.parse({ step: "complete" }).step).toBeUndefined();
+  });
   it("isolates progress by user and persists only non-secret resource references", () => {
     saveNyxbotProgress("a", {
       channel: "telegram",
