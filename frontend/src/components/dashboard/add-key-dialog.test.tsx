@@ -727,6 +727,55 @@ describe("AddKeyDialog — platform one-click path (credential_mode=both)", () =
 });
 
 describe("AddKeyDialog — reconnect path", () => {
+  it.each(["api-google-gmail", "api-google-workspace"])(
+    "adds required send permission when reconnecting %s with an old read-only grant",
+    async (slug) => {
+      const read = "https://www.googleapis.com/auth/gmail.readonly";
+      const send = "https://www.googleapis.com/auth/gmail.send";
+      catalog.entries = [
+        {
+          ...OAUTH_ENTRY,
+          slug,
+          name: "Google mail",
+          default_scopes: [read, send],
+          scope_catalog: [
+            {
+              scope: send,
+              label: "Gmail (send)",
+              description: "Send email.",
+              required: true,
+            },
+          ],
+        },
+      ];
+      const user = userEvent.setup();
+      render(
+        <AddKeyDialog
+          open
+          onOpenChange={vi.fn()}
+          reconnectKey={makeReconnectKey({
+            slug,
+            catalog_service_slug: slug,
+            granted_scopes: ["openid", read],
+          })}
+        />,
+      );
+      expect(
+        screen.getByRole("button", { name: /Gmail \(send\)/ }),
+      ).toBeDisabled();
+      await user.click(
+        screen.getByRole("button", { name: /Connect with Google mail/ }),
+      );
+      await waitFor(() =>
+        expect(initiateOAuthMutateAsync).toHaveBeenCalledWith(
+          expect.objectContaining({
+            scopeOverride: ["openid", read, send],
+          }),
+        ),
+      );
+    },
+  );
+
   it("starts OAuth reconnect with the existing key id and detail redirect without creating or deleting a key", async () => {
     catalog.entries = [OAUTH_ENTRY];
     const user = userEvent.setup();

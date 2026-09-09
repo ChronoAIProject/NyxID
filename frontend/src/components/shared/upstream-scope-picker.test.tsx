@@ -49,6 +49,39 @@ function Harness({
 }
 
 describe("UpstreamScopePicker", () => {
+  it("locks required permissions and retains them when other scopes change", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <Harness
+        catalog={[
+          ...CATALOG,
+          {
+            scope: "gmail.send",
+            label: "Gmail (send)",
+            description: "Send email.",
+            required: true,
+          },
+        ]}
+        onChangeSpy={onChange}
+      />,
+    );
+    const send = screen.getByRole("button", { name: /Gmail \(send\)/ });
+    expect(send).toHaveAttribute("aria-pressed", "true");
+    expect(send).toBeDisabled();
+    expect(send).toHaveTextContent("required");
+    await user.click(send);
+    expect(onChange).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: /Read posts/ }));
+    expect(onChange).toHaveBeenLastCalledWith(["gmail.send"]);
+    await user.type(
+      screen.getByPlaceholderText(/custom.scope/),
+      "another.scope",
+    );
+    await user.click(screen.getByRole("button", { name: /^Add$/ }));
+    expect(onChange).toHaveBeenLastCalledWith(["gmail.send", "another.scope"]);
+  });
+
   it("renders catalog scopes as pills, defaults marked and pre-selected", () => {
     render(<Harness />);
     const readPosts = screen.getByRole("button", { name: /Read posts/i });

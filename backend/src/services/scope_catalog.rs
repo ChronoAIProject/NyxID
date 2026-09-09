@@ -38,6 +38,9 @@ pub struct ScopeCatalogEntry {
     /// Write/admin/DM-grade scope — UI may emphasize it. No server effect.
     #[serde(default)]
     pub sensitive: bool,
+    /// Required by this catalog service when starting or completing OAuth.
+    #[serde(default)]
+    pub required: bool,
 }
 
 /// How safely a granted scope can be *removed* from an existing connection.
@@ -159,6 +162,7 @@ pub fn for_provider(slug: &str) -> Option<Vec<ScopeCatalogEntry>> {
                 label: (*label).to_string(),
                 description: (*description).to_string(),
                 sensitive: *sensitive,
+                required: false,
             })
             .collect(),
     )

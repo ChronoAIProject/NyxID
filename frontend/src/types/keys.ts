@@ -147,6 +147,7 @@ export interface ScopeCatalogEntry {
   readonly label: string;
   readonly description: string;
   readonly sensitive?: boolean;
+  readonly required?: boolean;
 }
 
 export interface CatalogEntry {

@@ -16,6 +16,7 @@ import {
 } from "@/hooks/use-providers";
 import { ApiError, api } from "@/lib/api-client";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
+import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
 import { copyToClipboard } from "@/lib/utils";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -1526,13 +1527,17 @@ function OAuthStep({
   // editing an existing connection, otherwise the provider's defaults (all
   // pre-selected) so an unedited add requests today's scopes. The full
   // selection is sent as `scopeOverride`.
-  const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
+  const [scopeSelection, setSelectedScopes] = useState<readonly string[]>(
     mergeScopes(
       grantedScopes.length > 0
         ? grantedScopes
         : (catalogEntry.default_scopes ?? []),
       prefillScopes,
     ),
+  );
+  const selectedScopes = includeRequiredScopes(
+    scopeSelection,
+    catalogEntry.scope_catalog ?? [],
   );
   // In-dialog authorization handoff. The whole-tab `hardRedirect` this
   // replaced destroyed any surface hosting the dialog — fatal for the

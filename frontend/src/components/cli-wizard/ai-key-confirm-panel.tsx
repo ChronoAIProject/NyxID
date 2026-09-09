@@ -19,6 +19,7 @@ import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
+import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
 import type { ScopeCatalogEntry } from "@/types/keys";
 import { Building2, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
@@ -401,11 +402,17 @@ function ManageScopesPanel({
       : null;
   const seedScopes = cliSet ?? (granted.length > 0 ? granted : defaultScopes);
   const [override, setOverride] = useState<readonly string[] | null>(null);
-  const selectedScopes = override ?? seedScopes;
+  const selectedScopes = includeRequiredScopes(
+    override ?? seedScopes,
+    entry?.scope_catalog ?? [],
+  );
   const scopeOverride =
-    override !== null
-      ? override
-      : (cliSet ?? (granted.length > 0 ? granted : undefined));
+    override !== null ||
+    cliSet !== null ||
+    granted.length > 0 ||
+    entry?.scope_catalog?.some((scope) => scope.required)
+      ? selectedScopes
+      : undefined;
   const setSelectedScopes = setOverride;
 
   const [authFlowActive, setAuthFlowActive] = useState(false);
@@ -930,8 +937,12 @@ function CatalogConfirmForm({
   // Seeded with the provider's defaults (all pre-selected) so an unedited
   // submit requests exactly today's scopes; the picker lets the user drop a
   // default or add custom scopes. Passed to the sub-flow as `scopeOverride`.
-  const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
+  const [scopeSelection, setSelectedScopes] = useState<readonly string[]>(
     entry.default_scopes ?? [],
+  );
+  const selectedScopes = includeRequiredScopes(
+    scopeSelection,
+    entry.scope_catalog ?? [],
   );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
