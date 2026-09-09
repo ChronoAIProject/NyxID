@@ -44,12 +44,35 @@ impl GoogleProduct {
     pub fn default_scopes(self) -> Vec<String> {
         let mut scopes = vec!["openid", "email", "profile"];
         match self {
-            Self::Workspace => scopes.extend([DRIVE, CALENDAR, GMAIL_READONLY]),
+            Self::Workspace => scopes.extend([DRIVE, CALENDAR, GMAIL_READONLY, GMAIL_SEND]),
             Self::Calendar => scopes.push(CALENDAR),
             Self::Drive => scopes.push(DRIVE),
-            Self::Gmail => scopes.push(GMAIL_READONLY),
+            Self::Gmail => scopes.extend([GMAIL_READONLY, GMAIL_SEND]),
         }
         scopes.into_iter().map(String::from).collect()
+    }
+
+    pub fn required_scopes(self) -> &'static [&'static str] {
+        match self {
+            Self::Workspace | Self::Gmail => &[GMAIL_SEND],
+            Self::Calendar | Self::Drive => &[],
+        }
+    }
+
+    pub fn validate_required_scopes(self, scopes: Option<&str>) -> AppResult<()> {
+        for required in self.required_scopes() {
+            if !scopes
+                .unwrap_or_default()
+                .split_whitespace()
+                .any(|scope| scope == *required)
+            {
+                return Err(AppError::ValidationError(format!(
+                    "Gmail send permission ({required}) is required for this Google service. \
+                     Reconnect and approve Gmail sending access."
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub fn allowed_scopes(self) -> Vec<String> {
@@ -87,7 +110,7 @@ impl GoogleProduct {
                 "Scope {scope} is not supported by this Google service"
             )));
         }
-        Ok(())
+        self.validate_required_scopes(scopes)
     }
 
     pub fn spec_key(self) -> &'static str {
@@ -166,12 +189,43 @@ mod tests {
                 ),
             ] {
                 assert_eq!(
-                    product.validate_scopes(Some(scope)).is_ok(),
+                    product
+                        .validate_scopes(Some(&format!(
+                            "{} {scope}",
+                            product.required_scopes().join(" ")
+                        )))
+                        .is_ok(),
                     allowed,
                     "{product:?} {scope}"
                 );
             }
-            assert!(!product.default_scopes().contains(&GMAIL_SEND.to_string()));
+            assert_eq!(
+                product.default_scopes().contains(&GMAIL_SEND.to_string()),
+                matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail)
+            );
+        }
+    }
+
+    #[test]
+    fn gmail_send_is_required_for_workspace_and_gmail_authorization() {
+        for product in [GoogleProduct::Workspace, GoogleProduct::Gmail] {
+            for scopes in [
+                None,
+                Some(""),
+                Some(GMAIL_READONLY),
+                Some("openid email profile"),
+            ] {
+                assert!(product.validate_scopes(scopes).is_err());
+                assert!(product.validate_required_scopes(scopes).is_err());
+            }
+            product.validate_scopes(Some(GMAIL_SEND)).unwrap();
+            // Google may return broader grants from the shared project.
+            product
+                .validate_required_scopes(Some(&format!("{GMAIL_SEND} {DRIVE}")))
+                .unwrap();
+        }
+        for product in [GoogleProduct::Drive, GoogleProduct::Calendar] {
+            product.validate_required_scopes(None).unwrap();
         }
     }
 
