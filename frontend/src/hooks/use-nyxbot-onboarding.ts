@@ -20,7 +20,7 @@ import {
   type NyxbotProgress,
 } from "@/schemas/nyxbot-onboarding";
 
-export function useNyxbotOnboarding(
+export function useNyxbotProgress(
   userId: string,
   referral: NyxbotChannel | undefined,
 ) {
@@ -33,6 +33,14 @@ export function useNyxbotOnboarding(
     saveNyxbotProgress(userId, next);
     setProgress(next);
   }
+  return { progress, updateProgress };
+}
+
+// Mount only on Data source so later steps do not observe or poll Google keys.
+export function useNyxbotDataSource(
+  progress: NyxbotProgress,
+  updateProgress: (patch: Partial<NyxbotProgress>) => void,
+) {
   const keys = useKeys();
   const catalog = useCatalogEntry(GOOGLE_WORKSPACE_SLUG);
   const authorization = useKeyAuthorizationStatus(progress.googleKeyId, true);
@@ -62,7 +70,7 @@ export function useNyxbotOnboarding(
         }));
       updateProgress({ googleKeyId: key.id });
       const params = new URLSearchParams();
-      params.set("step", "channel");
+      params.set("step", "source");
       if (progress.channel) params.set("channel", progress.channel);
       const result = await initiateOAuth.mutateAsync({
         providerId: entry.provider_config_id,
@@ -81,8 +89,6 @@ export function useNyxbotOnboarding(
     },
   });
   return {
-    progress,
-    updateProgress,
     keys,
     catalog,
     authorization,
