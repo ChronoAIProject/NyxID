@@ -21,9 +21,6 @@ export const CliPairPage = lazy(() =>
 export const LoginAgentKeyPage = lazy(() =>
   import("./login-agent-key").then((m) => ({ default: m.LoginAgentKeyPage })),
 );
-export const LoginCodePage = lazy(() =>
-  import("./login-code").then((m) => ({ default: m.LoginCodePage })),
-);
 export const LoginDevicePage = lazy(() =>
   import("@/pages/login-device").then((m) => ({
     default: m.LoginDevicePage,

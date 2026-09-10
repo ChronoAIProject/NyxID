@@ -68,6 +68,7 @@ export type WebAuthDevicePhase =
   | "requesting"
   | "pending"
   | "success"
+  | "restricted"
   | "denied"
   | "expired"
   | "used"
@@ -79,6 +80,7 @@ interface WebAuthDeviceError {
 }
 
 export interface WebAuthDeviceLoginState {
+  readonly loginCode?: { request_id: string; code: string; expires_at: string } | null;
   readonly phase: WebAuthDevicePhase;
   readonly request: AuthDeviceRequestResponse | null;
   readonly remainingSeconds: number | null;
@@ -126,6 +128,7 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
 } {
   const checkAuth = useAuthStore((state) => state.checkAuth);
   const [phase, setPhase] = useState<WebAuthDevicePhase>("idle");
+  const [loginCode, setLoginCode] = useState<WebAuthDeviceLoginState["loginCode"]>(null);
   const [request, setRequest] =
     useState<AuthDeviceRequestResponse | null>(null);
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null);
@@ -178,11 +181,20 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
       const body = pollBodySchema.parse({
         device_code: activeRequest.device_code,
       });
-      const response = await api.post<unknown>("/auth/device/poll-web", body);
+      const response = await api.post<unknown>("/auth/device/v2/poll-web", body);
       if (!isCurrent()) return;
-      pollWebResponseSchema.parse(response);
+      const delivery = pollWebResponseSchema.parse(response);
       consecutiveFailuresRef.current = 0;
       stopPolling();
+      if (delivery.auth_kind === "agent_key") {
+        setLoginCode(delivery.login_code);
+        expiresAtRef.current = Date.parse(delivery.login_code.expires_at);
+        requestRef.current = null;
+        setRequest(null);
+        setCurrentPhase("restricted");
+        setError(null);
+        return;
+      }
       await checkAuth();
       if (!isCurrent()) return;
       setCurrentPhase("success");
@@ -243,6 +255,7 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
     requestRef.current = null;
     expiresAtRef.current = null;
     setRequest(null);
+    setLoginCode(null);
     setRemainingSeconds(null);
     setError(null);
     consecutiveFailuresRef.current = 0;
@@ -259,7 +272,7 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
       }
       const body = requestBodySchema.parse(browserContext);
       const response = requestResponseSchema.parse(
-        await api.post<unknown>("/auth/device/request", body),
+        await api.post<unknown>("/auth/device/v2/request", body),
       );
       if (requestGenerationRef.current !== requestGeneration) return;
       requestRef.current = response;
@@ -282,14 +295,15 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
   }, [setCurrentPhase, stopPolling]);
 
   useEffect(() => {
-    if (phase !== "pending" || expiresAtRef.current === null) return;
+    if ((phase !== "pending" && phase !== "restricted") || expiresAtRef.current === null) return;
     const updateCountdown = () => {
       const expiresAt = expiresAtRef.current;
       if (expiresAt === null) return;
       const seconds = Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000));
       setRemainingSeconds(seconds);
-      if (seconds === 0 && phaseRef.current === "pending") {
+      if (seconds === 0 && (phaseRef.current === "pending" || phaseRef.current === "restricted")) {
         stopPolling();
+        setLoginCode(null);
         requestRef.current = null;
         setRequest(null);
         setCurrentPhase("expired");
@@ -318,6 +332,7 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
     requestRef.current = null;
     expiresAtRef.current = null;
     setRequest(null);
+    setLoginCode(null);
     setRemainingSeconds(null);
     setError(null);
     setCurrentPhase("idle");
@@ -325,6 +340,7 @@ export function useWebAuthDeviceLogin(): WebAuthDeviceLoginState & {
 
   return {
     phase,
+    loginCode,
     request,
     remainingSeconds,
     error,

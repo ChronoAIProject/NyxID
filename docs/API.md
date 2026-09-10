@@ -642,16 +642,13 @@ clients persist server backoff and stop on terminal outcomes.
 
 Browser account delivery returns `{"ok":true,"auth_kind":"account_session"}`
 and a cookie. Claim, bearer-session revocation and cookie-session insertion are
-one transaction. A restricted v2 approval polled through `/auth/device/v2/poll-web`
-returns
+one transaction. Browser restricted delivery returns
 `{"ok":false,"auth_kind":"agent_key","login_code":{"request_id":"<UUID>","code":"XXXX-XXXX","expires_at":"<RFC3339>"}}`.
 This code hands the credential to `nyxid login --code`; it never establishes an
 account cookie. Creating the handoff extends the initial 60-second delivery
 window to five minutes after approval; repeated handoff calls never extend that
-fixed deadline. Browser handoff and direct CLI delivery race atomically, with
-exactly one recipient. The first-party login page does not use this path: its
-QR sign-in calls the legacy `/auth/device/request` and `/auth/device/poll-web`
-routes and therefore always yields an account session.
+fixed deadline. Browser
+handoff and direct CLI delivery race atomically, with exactly one recipient.
 
 KMS failure before delivery preserves retryability. Abandoned approvals revoke
 their issued session or child; parent key configuration and other consumers
