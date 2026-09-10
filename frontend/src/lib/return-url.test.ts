@@ -29,6 +29,13 @@ describe("resolveTrustedAuthReturnTo", () => {
     );
   });
 
+  it.each(["device", "agent-key"])("preserves the code query in a same-origin %s approval return_to", (flow) => {
+    const path = `/login/${flow}?user_code=2ABCDEFGH`;
+    const absolute = `${window.location.origin}${path}`;
+    expect(resolveTrustedAuthReturnTo(path)).toBe(absolute);
+    expect(resolveTrustedAuthReturnTo(absolute)).toBe(absolute);
+  });
+
   it("accepts a configured backend origin", () => {
     vi.stubEnv("VITE_BACKEND_URL", "https://api.example.test/api/v1/");
 

@@ -320,6 +320,15 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
               )}
               {preview && (
                 <View style={styles.previewSection}>
+                  <DetailRow
+                    label="User code"
+                    value={formatAuthDeviceUserCode(code)}
+                    mono
+                    styles={styles}
+                  />
+                  <Text style={styles.cautionText}>
+                    Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match.
+                  </Text>
                   {origin && (
                     <DetailRow
                       label="Started from"

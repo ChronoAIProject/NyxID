@@ -486,7 +486,7 @@ grant. This route remains compatible with existing account-only clients.
 }
 ```
 
-The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance.
+The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance. QR/deep links using `verification_uri_complete` prefill the web approval page and mobile app; they never trigger preview or approval. The web page validates before formatting, seeds once, and removes `user_code` from the URL with replace navigation. Malformed codes leave an empty input with an explanation. After Continue, review echoes the code and asks the human to match it against the requesting device or terminal and reject a mismatch (RFC 8628 §§3.3.1, 5.4). Decisions remain explicit and throttled at >=750 ms. `/login/code` only mints codes and has no prefill input.
 
 #### POST /api/v1/auth/device/poll
 
@@ -602,6 +602,8 @@ Atomically reject a pending request. No tokens are minted, and the requester's n
 Approve and deny use the same pending-status guard, so exactly one wins a concurrent decision. API-key, service-account, delegated, and relay credentials are rejected before either decision handler runs. Integrators should direct users to `verification_uri`; these are first-party review endpoints.
 
 #### Selectable Device Login V2
+
+Plain `nyxid login` deliberately defaults to this exchange: it provides requester attribution (IP, timezone, origin, screen) and human choice of account access or a restricted Agent Key. `nyxid login --callback` opts into the legacy local callback, which grants full account access without requester review. The CLI prints/opens only the bare verification URI for manual code entry; `--clipboard` copies the user code for pasting, except in JSON/no-wait modes, which do not copy or open a browser.
 
 New clients start with `POST /api/v1/auth/device/v2/request`, using the same
 client-context body as the legacy request, plus optional `requested_profile`.

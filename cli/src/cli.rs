@@ -598,6 +598,12 @@ pub struct LoginArgs {
     /// Use RFC 8628 device-code login instead of opening the browser
     #[arg(long, conflicts_with = "password")]
     pub device: bool,
+    /// Use the local browser-callback login: opens the web console and completes with a full account session, no code entry; incompatible with --output json or login resume
+    #[arg(long, conflicts_with_all = ["password", "device", "agent_key", "code", "no_wait"])]
+    pub callback: bool,
+    /// Copy the user code before browser opening (best-effort); incompatible with --password or --code; --output json and --no-wait only print it, without copying or opening a browser
+    #[arg(short = 'c', long, conflicts_with_all = ["password", "code"])]
+    pub clipboard: bool,
     /// Authorize this CLI with an Agent Key chosen or created in the web UI (no account session is stored)
     #[arg(long, conflicts_with_all = ["password", "device"])]
     pub agent_key: bool,

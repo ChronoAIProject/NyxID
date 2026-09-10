@@ -23,7 +23,7 @@ const key = {
   created_now: false,
 };
 
-async function fixture(page: Page, authenticated: boolean) {
+async function fixture(page: Page, authenticated: boolean, mfa = false) {
   const requests: { path: string; body: unknown }[] = [];
   await page.addInitScript(() => {
     const writes: string[] = [];
@@ -85,8 +85,19 @@ async function fixture(page: Page, authenticated: boolean) {
       ].includes(path)
     ) {
       body = { ok: true };
+    } else if (path === "/api/v1/auth/login") {
+      if (mfa) {
+        status = 403;
+        body = { error: "mfa_required", error_code: 2002, message: "MFA required", session_token: "fixture-mfa" };
+      } else {
+        authenticated = true;
+        body = { ok: true };
+      }
+    } else if (path === "/api/v1/auth/mfa/verify") {
+      authenticated = true;
+      body = { ok: true };
     } else if (path === "/api/v1/public/config") {
-      body = { telemetry_dsn: null, telemetry_share_analytics: false };
+      body = { telemetry_dsn: null, telemetry_share_analytics: false, email_auth_enabled: true, social_providers: [] };
     } else {
       status = 404;
       body = { message: "Not found" };
@@ -128,8 +139,11 @@ for (const grant of ["account", "agent-key"] as const) {
   }, info) => {
     const requests = await fixture(page, true);
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto("/login/device");
-    await page.getByLabel("User code").fill("2-ABCD-EFGH");
+    await page.goto("/login/device?user_code=2abcd%20efgh");
+    await expect(page.getByLabel("User code")).toHaveValue("2-ABCD-EFGH");
+    await expect(page.getByLabel("User code")).toHaveAttribute("placeholder", "2-XXXX-XXXX");
+    await expect(page).toHaveURL(/\/login\/device$/);
+    expect(requests).toEqual([]);
     await page.getByRole("button", { name: "Continue", exact: true }).click();
     await expect(
       page.getByRole("button", { name: "Full account session", exact: true }),
@@ -137,6 +151,7 @@ for (const grant of ["account", "agent-key"] as const) {
     await expect(
       page.getByRole("button", { name: "Restricted Agent Key", exact: true }),
     ).toBeVisible();
+    await expect(page.getByText("2-ABCD-EFGH", { exact: true })).toBeVisible();
     await page.waitForTimeout(800);
     if (grant === "account") {
       await page
@@ -156,6 +171,8 @@ for (const grant of ["account", "agent-key"] as const) {
         page.getByRole("heading", { name: "Confirm effective permissions" }),
       ).toBeVisible();
     }
+    await expect(page.getByText("2-ABCD-EFGH", { exact: true })).toBeVisible();
+    await expect(page.getByText(/Reject if it does not match/)).toBeVisible();
     expect(
       requests.filter((request) => request.path.includes("/approve")),
     ).toEqual([]);
@@ -220,3 +237,32 @@ test("legacy device requests offer only account access", async ({ page }) => {
     requests.filter((request) => request.path.includes("/approve")),
   ).toEqual([]);
 });
+
+
+for (const mfa of [false, true]) {
+  test(`sign-in preserves the approval code through ${mfa ? "MFA" : "password login"} without automatic preview`, async ({ page }) => {
+    const requests = await fixture(page, false, mfa);
+    await page.goto("/login/device?user_code=2-abcd-efgh");
+    await expect(page.getByLabel("User code")).toHaveValue("2-ABCD-EFGH");
+    expect(requests).toEqual([]);
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    await page.getByRole("link", { name: "Approve on this computer" }).click();
+    expect(new URL(page.url()).searchParams.get("return_to")).toBe("/login/device?user_code=2ABCDEFGH");
+    await page.getByPlaceholder("you@example.com").fill("human@example.com");
+    await page.getByPlaceholder("Enter your password").fill("fixture-password");
+    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    if (mfa) {
+      await expect(page.getByRole("heading", { name: "MFA verification" })).toBeVisible();
+      await page.getByLabel("Enter 6-digit verification code").fill("654321");
+      await page.getByRole("button", { name: "Verify", exact: true }).click();
+    }
+    await expect(page).toHaveURL(/\/login\/device$/);
+    await expect(page.getByLabel("User code")).toHaveValue("2-ABCD-EFGH");
+    expect(requests).toEqual([{ path: "/api/v1/auth/device/preview", body: { user_code: "2ABCDEFGH" } }]);
+    await page.getByRole("button", { name: "Continue", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Full account session", exact: true })).toBeVisible();
+    expect(requests.map(({ path }) => path)).toEqual([
+      "/api/v1/auth/device/preview", "/api/v1/auth/device/preview",
+    ]);
+  });
+}

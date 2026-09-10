@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate, useSearch } from "@tanstack/react-router";
 import QRCode from "qrcode";
 import {
   ArrowLeft,
@@ -44,6 +44,7 @@ import { LoginCodeStatus } from "@/components/auth/login-code-status";
 import type { LoginCode } from "@/schemas/login-code";
 import {
   formatAuthDeviceUserCodeInput,
+  authDeviceUserCodePlaceholder,
   userCodeSchema,
 } from "@/schemas/auth-device";
 import {
@@ -180,17 +181,33 @@ function PhoneApproval({
 }
 
 export function LoginAgentKeyPage({ flow = "agent-key", mint = false }: { flow?: LoginFlow; mint?: boolean } = {}) {
+  const search = useSearch({ strict: false }) as { user_code?: string };
+  const navigate = useNavigate();
+  useEffect(() => {
+    if (!mint && search.user_code !== undefined) {
+      void navigate({ to: `/login/${flow}`, search: {}, replace: true });
+    }
+  }, [flow, mint, navigate, search.user_code]);
   const { user, isAuthenticated, logout } = useAuthStore();
   const [step, setStep] = useState<Step>(mint ? "review" : "enter-code");
   const [issued, setIssued] = useState<LoginCode | null>(null);
   const mintCode = useMintLoginCode();
   const clearIssuedCode = useCallback(() => setIssued((value) => value?.code ? { ...value, code: "" } : value), []);
-  const [code, setCode] = useState("");
+  const [code, setCode] = useState(() => {
+    if (mint || search.user_code === undefined) return "";
+    // Validate before the input formatter can strip garbage or truncate a code.
+    const parsed = userCodeSchema.safeParse(search.user_code);
+    return parsed.success ? formatAuthDeviceUserCodeInput(parsed.data) : "";
+  });
   const [context, setContext] = useState<AgentKeyPreview | null>(null);
   const [deadline, setDeadline] = useState<number | null>(null);
   const [now, setNow] = useState(Date.now);
   const [terminal, setTerminal] = useState<Terminal | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(() =>
+    !mint && search.user_code !== undefined && !userCodeSchema.safeParse(search.user_code).success
+      ? "The code in this link was not valid. Enter the code manually."
+      : null,
+  );
   const [choice, setChoice] = useState<string>("");
   const [selection, setSelection] = useState<
     AgentKeyApprove["selection"] | null
@@ -397,6 +414,12 @@ export function LoginAgentKeyPage({ flow = "agent-key", mint = false }: { flow?:
                 ? "Login rejected"
                 : "Login request expired"}
           </h2>
+          {!mint && <Button variant="outline" onClick={() => {
+            setTerminal(null);
+            setStep("enter-code");
+          }}>
+            Enter another code
+          </Button>}
           {isAuthenticated && terminal === "approved" && (
             <Button
               variant="outline"
@@ -438,7 +461,7 @@ export function LoginAgentKeyPage({ flow = "agent-key", mint = false }: { flow?:
                 autoComplete="off"
                 value={code}
                 maxLength={11}
-                placeholder="ABCD-EFGH"
+                placeholder={authDeviceUserCodePlaceholder(flow)}
                 disabled={pending}
                 className="h-12 text-center font-mono text-[22px]"
                 onChange={(event) =>
@@ -460,7 +483,7 @@ export function LoginAgentKeyPage({ flow = "agent-key", mint = false }: { flow?:
           )}
           {context && (
             <>
-              <PreviewPanel preview={context} remainingSeconds={remaining} />
+              <PreviewPanel preview={context} remainingSeconds={remaining} userCode={code} />
               <p className="text-[12px]">
                 <span className="text-muted-foreground">
                   Requested profile:{" "}
@@ -488,7 +511,13 @@ export function LoginAgentKeyPage({ flow = "agent-key", mint = false }: { flow?:
                 </Button>
               ) : !isAuthenticated ? (
                 <Button asChild>
-                  <Link to="/login" search={{ return_to: mint ? "/login/code" : `/login/${flow}` }}>
+                  <Link to="/login" search={{
+                    return_to: mint
+                      ? "/login/code"
+                      : normalized.success
+                        ? `/login/${flow}?user_code=${encodeURIComponent(normalized.data)}`
+                        : `/login/${flow}`,
+                  }}>
                     <Monitor className="size-3" />
                     Approve on this computer
                   </Link>

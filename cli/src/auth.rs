@@ -940,6 +940,11 @@ async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Resu
 // ---- Login ----
 
 pub async fn run_login(args: LoginArgs) -> Result<()> {
+    if args.callback
+        && (matches!(args.output, crate::cli::OutputFormat::Json) || args.command.is_some())
+    {
+        bail!("--callback cannot be combined with --output json or login resume.");
+    }
     if args.password && args.command.is_some() {
         return Err(login_exchange::LoginError::DestinationMismatch.into());
     }
@@ -966,8 +971,7 @@ trait LoginStrategies {
 
     fn run_device_code_login<'a>(
         &'a self,
-        base_url: &'a str,
-        profile: Option<&'a str>,
+        args: LoginArgs,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
     fn run_browser_login<'a>(
@@ -991,15 +995,9 @@ impl LoginStrategies for RealLoginStrategies {
 
     fn run_device_code_login<'a>(
         &'a self,
-        base_url: &'a str,
-        profile: Option<&'a str>,
+        args: LoginArgs,
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
-        Box::pin(login_exchange::run(LoginArgs {
-            base_url: Some(base_url.into()),
-            profile: profile.map(str::to_owned),
-            device: true,
-            ..Default::default()
-        }))
+        Box::pin(login_exchange::run(args))
     }
 
     fn run_browser_login<'a>(
@@ -1007,23 +1005,12 @@ impl LoginStrategies for RealLoginStrategies {
         base_url: &'a str,
         profile: Option<&'a str>,
     ) -> Pin<Box<dyn Future<Output = std::result::Result<(), BrowserLoginError>> + Send + 'a>> {
-        Box::pin(async move {
-            if std::env::var_os("NYXID_LOGIN_NO_DEVICE_FALLBACK").is_some() {
-                return run_browser_login(base_url, profile).await;
-            }
-            login_exchange::run(LoginArgs {
-                base_url: Some(base_url.into()),
-                profile: profile.map(str::to_owned),
-                ..Default::default()
-            })
-            .await
-            .map_err(BrowserLoginError::Other)
-        })
+        Box::pin(run_browser_login(base_url, profile))
     }
 }
 
 async fn run_login_with_strategies(
-    args: LoginArgs,
+    mut args: LoginArgs,
     strategies: &impl LoginStrategies,
 ) -> Result<()> {
     let profile = args.profile.as_deref();
@@ -1034,10 +1021,13 @@ async fn run_login_with_strategies(
             .await;
     }
     if args.device {
-        return strategies.run_device_code_login(base_url, profile).await;
+        return strategies.run_device_code_login(args).await;
     }
 
-    if std::env::var_os("NYXID_LOGIN_NO_DEVICE_FALLBACK").is_none() {
+    // The environment variable is the legacy spelling of --callback. Explicit
+    // device mode above keeps precedence over it.
+    args.callback |= std::env::var_os("NYXID_LOGIN_NO_DEVICE_FALLBACK").is_some();
+    if !args.callback {
         if is_ci_environment() {
             bail!(
                 "Detected CI environment (CI / GITHUB_ACTIONS / BUILDKITE / CIRCLECI / \
@@ -1046,15 +1036,18 @@ async fn run_login_with_strategies(
             );
         }
         if !crate::wizard::is_wizard_eligible() && stderr_is_tty() {
-            return strategies.run_device_code_login(base_url, profile).await;
+            args.device = true;
         }
+        return strategies.run_device_code_login(args).await;
     }
 
     match strategies.run_browser_login(base_url, profile).await {
         Ok(()) => Ok(()),
         Err(BrowserLoginError::CannotOpenBrowser(_)) => {
             eprintln!("Couldn't open a browser. Falling back to device-code login.");
-            strategies.run_device_code_login(base_url, profile).await
+            args.callback = false;
+            args.device = true;
+            strategies.run_device_code_login(args).await
         }
         Err(e) => Err(e.into()),
     }
@@ -2139,6 +2132,7 @@ mod tests {
         password_calls: AtomicUsize,
         device_calls: AtomicUsize,
         browser_calls: AtomicUsize,
+        clipboard: std::sync::atomic::AtomicBool,
     }
 
     impl LoginStrategies for MockLoginStrategies {
@@ -2156,11 +2150,11 @@ mod tests {
 
         fn run_device_code_login<'a>(
             &'a self,
-            _base_url: &'a str,
-            _profile: Option<&'a str>,
+            args: crate::cli::LoginArgs,
         ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
             Box::pin(async move {
                 self.device_calls.fetch_add(1, Ordering::SeqCst);
+                self.clipboard.store(args.clipboard, Ordering::SeqCst);
                 Ok(())
             })
         }
@@ -2194,80 +2188,144 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn browser_open_failure_falls_back_to_device_flow() {
-        // Must clear CI env vars so the dispatcher reaches the browser branch
-        // — on GitHub Actions runners CI=true is preset.
-        let _guard = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let ci_keys = [
-            "CI",
-            "GITHUB_ACTIONS",
-            "BUILDKITE",
-            "CIRCLECI",
-            "JENKINS_URL",
-            "GITLAB_CI",
-            "NYXID_LOGIN_NO_DEVICE_FALLBACK",
-        ];
-        let prev: Vec<_> = ci_keys.iter().map(|k| (*k, std::env::var_os(k))).collect();
-        unsafe {
-            for k in &ci_keys {
-                std::env::remove_var(k);
+    struct LoginEnvironment {
+        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl LoginEnvironment {
+        fn set(callback: bool, ci: bool) -> Self {
+            let guard = crate::test_support::env_lock()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let keys = [
+                "CI",
+                "GITHUB_ACTIONS",
+                "BUILDKITE",
+                "CIRCLECI",
+                "JENKINS_URL",
+                "GITLAB_CI",
+                "NYXID_LOGIN_NO_DEVICE_FALLBACK",
+            ];
+            let previous = keys
+                .iter()
+                .map(|key| (*key, std::env::var_os(key)))
+                .collect();
+            unsafe {
+                for key in keys {
+                    std::env::remove_var(key);
+                }
+                if callback {
+                    std::env::set_var("NYXID_LOGIN_NO_DEVICE_FALLBACK", "1");
+                }
+                if ci {
+                    std::env::set_var("CI", "1");
+                }
+            }
+            Self {
+                previous,
+                _guard: guard,
             }
         }
+    }
 
-        let strategies = MockLoginStrategies {
-            browser_result: Mutex::new(Some(Err(BrowserLoginError::CannotOpenBrowser(
-                std::io::Error::new(std::io::ErrorKind::NotFound, "browser"),
-            )))),
-            ..Default::default()
-        };
-
-        let result = run_login_with_strategies(login_args(), &strategies).await;
-
-        unsafe {
-            for (k, v) in &prev {
-                match v {
-                    Some(val) => std::env::set_var(k, val),
-                    None => std::env::remove_var(k),
+    impl Drop for LoginEnvironment {
+        fn drop(&mut self) {
+            for (key, value) in &self.previous {
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
                 }
             }
         }
-
-        result.expect("fallback succeeds");
-        assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
-    async fn explicit_device_flag_skips_browser_flow() {
+    async fn plain_login_defaults_to_selectable_device_flow_and_preserves_clipboard() {
+        let _env = LoginEnvironment::set(false, false);
         let strategies = MockLoginStrategies::default();
         let mut args = login_args();
-        args.device = true;
-
+        args.clipboard = true;
         run_login_with_strategies(args, &strategies)
             .await
             .expect("device login");
-
         assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 0);
         assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 1);
+        assert!(strategies.clipboard.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
-    #[allow(clippy::await_holding_lock)]
-    async fn ci_short_circuit_fires_before_network_or_browser() {
-        let _guard = crate::test_support::env_lock()
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev_ci = std::env::var_os("CI");
-        let prev_disable = std::env::var_os("NYXID_LOGIN_NO_DEVICE_FALLBACK");
-        unsafe {
-            std::env::set_var("CI", "1");
-            std::env::remove_var("NYXID_LOGIN_NO_DEVICE_FALLBACK");
+    async fn callback_flag_and_environment_alias_use_browser_flow() {
+        for environment_alias in [false, true] {
+            let _env = LoginEnvironment::set(environment_alias, false);
+            let strategies = MockLoginStrategies::default();
+            let mut args = login_args();
+            args.callback = !environment_alias;
+            run_login_with_strategies(args, &strategies)
+                .await
+                .expect("callback login");
+            assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 0);
         }
+    }
 
+    #[tokio::test]
+    async fn browser_open_failure_falls_back_to_device_flow() {
+        for environment_alias in [false, true] {
+            let _env = LoginEnvironment::set(environment_alias, false);
+            let strategies = MockLoginStrategies {
+                browser_result: Mutex::new(Some(Err(BrowserLoginError::CannotOpenBrowser(
+                    std::io::Error::new(std::io::ErrorKind::NotFound, "browser"),
+                )))),
+                ..Default::default()
+            };
+            let mut args = login_args();
+            args.callback = !environment_alias;
+            args.clipboard = true;
+            run_login_with_strategies(args, &strategies)
+                .await
+                .expect("fallback succeeds");
+            assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 1);
+            assert!(strategies.clipboard.load(Ordering::SeqCst));
+        }
+    }
+
+    #[tokio::test]
+    async fn other_browser_errors_do_not_fall_back() {
+        let _env = LoginEnvironment::set(false, false);
+        let strategies = MockLoginStrategies {
+            browser_result: Mutex::new(Some(Err(BrowserLoginError::Other(anyhow::anyhow!(
+                "callback failed"
+            ))))),
+            ..Default::default()
+        };
+        let mut args = login_args();
+        args.callback = true;
+        assert!(run_login_with_strategies(args, &strategies).await.is_err());
+        assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_device_flag_skips_browser_flow_even_with_environment_alias() {
+        for environment_alias in [false, true] {
+            let _env = LoginEnvironment::set(environment_alias, false);
+            let strategies = MockLoginStrategies::default();
+            let mut args = login_args();
+            args.device = true;
+            run_login_with_strategies(args, &strategies)
+                .await
+                .expect("device login");
+            assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 0);
+            assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn ci_short_circuit_fires_before_network_or_browser() {
+        let _env = LoginEnvironment::set(false, true);
         let strategies = MockLoginStrategies::default();
         let err = run_login_with_strategies(login_args(), &strategies)
             .await
@@ -2280,16 +2338,5 @@ mod tests {
         );
         assert_eq!(strategies.browser_calls.load(Ordering::SeqCst), 0);
         assert_eq!(strategies.device_calls.load(Ordering::SeqCst), 0);
-
-        unsafe {
-            match prev_ci {
-                Some(value) => std::env::set_var("CI", value),
-                None => std::env::remove_var("CI"),
-            }
-            match prev_disable {
-                Some(value) => std::env::set_var("NYXID_LOGIN_NO_DEVICE_FALLBACK", value),
-                None => std::env::remove_var("NYXID_LOGIN_NO_DEVICE_FALLBACK"),
-            }
-        }
     }
 }

@@ -260,12 +260,7 @@ pub async fn run(args: LoginArgs) -> Result<()> {
         });
         return redeem(&base_url, args.profile.as_deref(), &code, args.output).await;
     }
-    if !args.device
-        && !args.agent_key
-        && !args.no_wait
-        && super::is_ci_environment()
-        && std::env::var_os("NYXID_LOGIN_NO_DEVICE_FALLBACK").is_none()
-    {
+    if !args.device && !args.agent_key && !args.no_wait && super::is_ci_environment() {
         anyhow::bail!(
             "Use nyxid login --device --no-wait for human-approved CI login, or configure NYXID_API_KEY."
         );
@@ -334,6 +329,9 @@ pub async fn run(args: LoginArgs) -> Result<()> {
         return Ok(());
     }
     if !matches!(args.output, OutputFormat::Json) {
+        if args.clipboard {
+            crate::clipboard::copy_user_code(&challenge.user_code);
+        }
         let interactive = std::io::stdin().is_terminal() && std::io::stderr().is_terminal();
         let open = if !args.device && !args.agent_key {
             true

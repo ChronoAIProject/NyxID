@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod browser;
 mod cli;
+mod clipboard;
 mod commands;
 mod error_format;
 pub mod node;
@@ -343,6 +344,68 @@ mod tests {
 
         let info = Cli::parse_from(["nyxid", "info"]);
         assert!(extract_profile(&info.command).is_none());
+    }
+
+    #[test]
+    fn login_callback_conflicts_with_other_login_modes() {
+        for mode in [
+            "--password",
+            "--device",
+            "--agent-key",
+            "--code",
+            "--no-wait",
+        ] {
+            let err = match Cli::try_parse_from(["nyxid", "login", "--callback", mode]) {
+                Ok(_) => panic!("--callback must conflict with {mode}"),
+                Err(err) => err,
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn login_accepts_callback_and_clipboard_flags() {
+        for flag in ["-c", "--clipboard"] {
+            let cli = Cli::parse_from(["nyxid", "login", "--callback", flag]);
+            let Commands::Login(args) = cli.command else {
+                panic!("login");
+            };
+            assert!(args.callback);
+            assert!(args.clipboard);
+        }
+    }
+
+    #[tokio::test]
+    async fn login_callback_rejects_json_output_and_resume_before_dispatch() {
+        for args in [
+            vec!["nyxid", "login", "--callback", "--output", "json"],
+            vec!["nyxid", "login", "--callback", "resume", "request-id"],
+        ] {
+            let cli = Cli::parse_from(args);
+            let Commands::Login(args) = cli.command else {
+                panic!("login");
+            };
+            let error = auth::run_login(args)
+                .await
+                .expect_err("incompatible callback mode");
+            assert_eq!(
+                error.to_string(),
+                "--callback cannot be combined with --output json or login resume."
+            );
+        }
+    }
+
+    #[test]
+    fn login_clipboard_conflicts_with_password_and_code() {
+        for flag in ["-c", "--clipboard"] {
+            for mode in ["--password", "--code"] {
+                let error = match Cli::try_parse_from(["nyxid", "login", flag, mode]) {
+                    Ok(_) => panic!("{flag} must conflict with {mode}"),
+                    Err(error) => error,
+                };
+                assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+            }
+        }
     }
 
     #[test]

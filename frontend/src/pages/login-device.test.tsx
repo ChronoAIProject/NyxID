@@ -20,6 +20,7 @@ const {
   previewMutate: vi.fn(),
   previewReset: vi.fn(),
   previewState: {
+    search: {} as { user_code?: string },
     data: undefined as PreviewAuthDeviceResponse | undefined,
   },
 }));
@@ -29,6 +30,7 @@ vi.mock("@tanstack/react-router", () => ({
     <a href="/">{children}</a>
   ),
   useNavigate: () => navigate,
+  useSearch: () => previewState.search,
 }));
 
 vi.mock("@/stores/auth-store", () => ({
@@ -67,7 +69,7 @@ function render(element: React.ReactNode) {
   return testingRender(<QueryClientProvider client={new QueryClient({defaultOptions: {queries: {retry: false}}})}>{element}</QueryClientProvider>);
 }
 function renderRequester() {
-  render(<><PreviewPanel preview={previewState.data!} remainingSeconds={previewState.data!.seconds_remaining} /><ApprovalCaution /></>);
+  render(<><PreviewPanel userCode="2ABCDEFGH" preview={previewState.data!} remainingSeconds={previewState.data!.seconds_remaining} /><ApprovalCaution /></>);
 }
 async function enterPreview(code = "ABCD-EFGH") {
   render(<LoginDevicePage />);
@@ -116,6 +118,7 @@ function makePreview(
 beforeEach(() => {
   vi.clearAllMocks();
   previewState.data = undefined;
+  previewState.search = {};
   previewMutate.mockImplementation(async () => ({requested_profile: null, interval: 5, ...(previewState.data ?? makePreview())}));
 });
 
@@ -138,6 +141,41 @@ describe("LoginDevicePage", () => {
     await user.click(screen.getByRole("button", { name: "Continue" }));
     expect(previewMutate).toHaveBeenCalledTimes(1);
     expect(previewMutate).toHaveBeenCalledWith("ABCDEFGH");
+  });
+
+  it("prefills v2 once, strips the URL, and echoes the code through account confirmation", async () => {
+    vi.useFakeTimers();
+    previewState.search = { user_code: "2-abcd efgh" };
+    render(<LoginDevicePage />);
+    const input = screen.getByLabelText("User code");
+    expect(input).toHaveValue("2-ABCD-EFGH");
+    expect(input).toHaveAttribute("placeholder", "2-XXXX-XXXX");
+    expect(navigate).toHaveBeenCalledWith({ to: "/login/device", search: {}, replace: true });
+    expect(previewMutate).not.toHaveBeenCalled();
+    expect(approveMutate).not.toHaveBeenCalled();
+    expect(denyMutate).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Continue" })); });
+    expect(previewMutate).toHaveBeenCalledWith("2ABCDEFGH");
+    expect(screen.getByText("2-ABCD-EFGH")).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+    fireEvent.click(screen.getByRole("button", { name: "Full account session" }));
+    expect(screen.getByText("Confirm full account access")).toBeInTheDocument();
+    expect(screen.getByText("2-ABCD-EFGH")).toBeInTheDocument();
+    expect(screen.getByText(/Reject if it does not match/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Approve full account session" }));
+    expect(approveMutate).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Approve full account session" })); });
+    expect(approveMutate).toHaveBeenCalledExactlyOnceWith("2ABCDEFGH");
+  });
+
+  it.each(["2-ABCD-EFGH!", "2-ABCD-EFGHX", "2-ABCD"])("rejects malformed device link %s before formatting", (user_code) => {
+    previewState.search = { user_code };
+    render(<LoginDevicePage />);
+    expect(screen.getByLabelText("User code")).toHaveValue("");
+    expect(screen.getByText(/Enter the code manually/)).toBeInTheDocument();
+    expect(navigate).toHaveBeenCalledWith({ to: "/login/device", search: {}, replace: true });
+    expect(previewMutate).not.toHaveBeenCalled();
   });
 
   it("presents requester facts and device claims as neutral detail rows", async () => {
@@ -397,7 +435,10 @@ describe("LoginDevicePage", () => {
     "does not offer decisions for a %s preview",
     async (status, expectedMessage) => {
       previewState.data = makePreview({ status });
-      await enterPreview();
+      previewState.search = { user_code: "2-abcd-efgh" };
+      render(<LoginDevicePage />);
+      expect(previewMutate).not.toHaveBeenCalled();
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Continue" })); });
 
       expect(screen.getByText(expectedMessage)).toBeInTheDocument();
       expect(
@@ -406,6 +447,11 @@ describe("LoginDevicePage", () => {
       expect(
         screen.queryByRole("button", { name: "Reject" }),
       ).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Enter another code" }));
+      expect(screen.getByLabelText("User code")).toHaveValue("");
+      expect(screen.queryByText(expectedMessage)).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Enter another code" })).not.toBeInTheDocument();
+      expect(previewMutate).toHaveBeenCalledTimes(1);
     },
   );
 });
