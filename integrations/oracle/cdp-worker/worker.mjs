@@ -77,7 +77,8 @@ const SCRIPT_VERSION = (() => {
   return `cdp+${SOURCE_SHA256.slice(0, 12)}`;
 })();
 const POLL_MS = Number(process.env.NYXID_POLL_MS || 5000);
-const STABLE_INTERVAL_MS = 8000;
+const STABLE_INTERVAL_MS = Math.max(100, Math.min(60000,
+  Number(process.env.NYXID_STABLE_INTERVAL_MS) || 8000));
 const MAX_WAIT_MS = Number(process.env.NYXID_MAX_WAIT_MS || 2 * 60 * 60 * 1000); // 2h
 // Wedge guard: if ChatGPT has clearly stopped (not generating) yet produced
 // nothing extractable after this long, fail the task fast and free the slot
@@ -772,7 +773,45 @@ window.__nyx = (function () {
     return { rendered: nodes.length, turns };
   }
 
-  return { isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText };
+  // A picker interaction owns only menus newly visible after its trigger.
+  // Element identity matters: a sidebar listbox can outlive every task, and
+  // a picker can reuse a previously hidden menu node without changing counts.
+  let modelPickerId = null;
+  let preexistingModelMenus = new WeakSet();
+  function pickerElementVisible(el) {
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+  }
+  function visibleModelMenus() {
+    return [...document.querySelectorAll('[role="menu"], [role="listbox"]')].filter(pickerElementVisible);
+  }
+  function beginModelPicker(id) {
+    modelPickerId = id;
+    preexistingModelMenus = new WeakSet(visibleModelMenus());
+    return true;
+  }
+  function modelPickerMenus(id) {
+    if (!id || id !== modelPickerId) return [];
+    return visibleModelMenus().filter((menu) => !preexistingModelMenus.has(menu));
+  }
+  function modelPickerItems(id) {
+    const menus = modelPickerMenus(id);
+    return [...document.querySelectorAll('[role="menuitemradio"], [role="menuitem"], [role="option"]')]
+      .filter((el) => pickerElementVisible(el) && menus.includes(el.closest('[role="menu"], [role="listbox"]')))
+      .slice(0, 64);
+  }
+  function modelPickerTrigger(id) {
+    return modelPickerMenus(id).flatMap((menu) => [...menu.querySelectorAll('[data-testid="composer-intelligence-pro-thinking-effort-trigger"]')])
+      .find((el) => pickerElementVisible(el) && modelPickerMenus(id).includes(el.closest('[role="menu"], [role="listbox"]'))) || null;
+  }
+  function modelPickerItem(id, index, text) {
+    const item = modelPickerItems(id)[index];
+    return item && (item.innerText || item.textContent || "").trim() === text ? item : null;
+  }
+
+  return { isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
+    beginModelPicker, modelPickerMenus, modelPickerItems, modelPickerTrigger, modelPickerItem };
 })();
 `;
 
@@ -1126,7 +1165,7 @@ async function ensureChatPage(runtime, targetUrl) {
 // ── Prompt flow ──────────────────────────────────────────────────────────
 // Map a requested model label to the ChatGPT picker's reasoning levels. The
 // current UI exposes Instant/Medium/High/Extra High/Pro as role="menuitemradio"
-// entries; "-pro" (the pool default `chatgpt-5.5-pro`) selects the Pro level.
+// entries; "-pro" (the pool default `chatgpt-6-pro`) selects the Pro level.
 // Chinese labels are kept so either localisation matches. The first entry is
 // the canonical display name.
 export function modelLevelTargets(label) {
@@ -1134,8 +1173,12 @@ export function modelLevelTargets(label) {
   if (!raw) return [];
   const lower = raw.toLowerCase();
   const compact = lower.replace(/^(chatgpt|openai)-/, "").replace(/[\s._-]+/g, "");
-  if (/\bpro\b|pro$|扩展|extended/.test(lower) || compact.endsWith("pro")) {
-    return ["Pro", "Pro 扩展", "扩展"];
+  // Pro plans may split Pro into "Pro Standard" and "Pro Extended" entries.
+  // The canonical level stays "Pro" (verification and phase_detail use it);
+  // the alias order decides which entry the exact pass prefers.
+  if (/扩展|extended/.test(lower)) return ["Pro", "Pro Extended", "Pro 扩展", "扩展"];
+  if (/\bpro\b|pro$/.test(lower) || compact.endsWith("pro")) {
+    return ["Pro", "Pro Standard", "Pro 扩展", "扩展"];
   }
   if (/extra\s*high|ultra|超高/.test(lower)) return ["Extra High", "超高"];
   if (/\bhigh\b|高级|advanced/.test(lower)) return ["High", "高级"];
@@ -1153,98 +1196,22 @@ export function modelItemMatches(itemText, targets, exact) {
   const candidate = normalizeMenuText(itemText);
   if (!candidate) return false;
   const wanted = (targets || []).map(normalizeMenuText).filter(Boolean);
+  if (!exact && MODEL_LEVELS.some((aliases) => aliases[0] === targets?.[0]) &&
+      detectPillLevel(itemText) !== targets[0]) return false;
   return exact
     ? wanted.some((w) => candidate === w)
     : wanted.some((w) => candidate.includes(w) || w.includes(candidate));
 }
 
-async function waitForModelMenu(page, timeout = 5000) {
-  try {
-    await page.locator('[role="menu"], [role="listbox"]').first().waitFor({ state: "visible", timeout });
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
+const MODEL_SELECT_TIMEOUT_MS = Math.max(1, Math.min(25000,
+  Number(process.env.NYXID_MODEL_SELECT_TIMEOUT_MS) || 25000));
+const LOG_PICKER_LABELS = process.env.NYXID_ORACLE_LOG_PICKER_LABELS === "1";
+const PRE_SEND_ACTION_MS = 5000;
+const COMPOSER_SELECTOR = "#prompt-textarea, div[contenteditable='true'][role='textbox'], textarea[data-testid='prompt-textarea']";
+const SEND_SELECTOR = "button[data-testid='send-button'], button[aria-label='Send prompt'], button[aria-label='发送提示']";
+const PILL_SELECTOR = 'button.__composer-pill[aria-haspopup="menu"]:visible';
+const COMPOSER_REGION_XPATH = "xpath=ancestor::*[.//button[@data-testid='send-button' or @aria-label='Send prompt' or @aria-label='发送提示']][1]";
 
-async function clickMatchingLevel(page, targets) {
-  const items = page.locator('[role="menuitemradio"], [role="menuitem"], [role="option"]');
-  const count = await items.count();
-  for (const exact of [true, false]) {
-    for (let i = 0; i < count; i++) {
-      const item = items.nth(i);
-      let text = "";
-      try {
-        if (!(await item.isVisible())) continue;
-        text = ((await item.innerText({ timeout: 1000 })) || "").trim();
-      } catch (e) {
-        continue;
-      }
-      if (!modelItemMatches(text, targets, exact)) continue;
-      await item.click({ timeout: 5000 });
-      return text;
-    }
-  }
-  return null;
-}
-
-const MODEL_SELECT_TIMEOUT_MS = Number(process.env.NYXID_MODEL_SELECT_TIMEOUT_MS || 25000);
-
-async function visibleMenuTexts(page) {
-  try {
-    return await page.evaluate(() => {
-      const visible = (el) => {
-        const r = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-      };
-      return Array.from(
-        document.querySelectorAll('[role="menuitemradio"], [role="menuitem"], [role="option"]')
-      )
-        .filter(visible)
-        .map((el) => (el.innerText || el.textContent || "").trim().replace(/\s+/g, " "))
-        .filter(Boolean)
-        .slice(0, 24);
-    });
-  } catch {
-    return [];
-  }
-}
-
-async function menuIsOpen(page) {
-  try {
-    return await page.locator('[role="menu"], [role="listbox"]').first().isVisible();
-  } catch {
-    return false;
-  }
-}
-
-// Text of the composer's model pill (the picker trigger), used to skip the
-// menu when the level is already right and to verify a selection took.
-async function modelPillText(page) {
-  try {
-    return await page.evaluate(() => {
-      const visible = (el) => {
-        const r = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-      };
-      const pill =
-        document.querySelector('button.__composer-pill[aria-haspopup="menu"]') ||
-        Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find((btn) => {
-          const text = (btn.innerText || btn.textContent || "").trim();
-          return visible(btn) && text.length > 0 && text.length < 40 &&
-            /instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text);
-        });
-      return pill && visible(pill) ? (pill.innerText || pill.textContent || "").trim() : "";
-    });
-  } catch {
-    return "";
-  }
-}
-
-// Canonical picker levels, longest aliases first so "Extra High" is detected
-// before "High" and "Pro 扩展" before "扩展".
 const MODEL_LEVELS = [
   ["Extra High", "超高"],
   ["Pro", "Pro 扩展", "扩展"],
@@ -1253,142 +1220,394 @@ const MODEL_LEVELS = [
   ["Instant", "极速"],
 ];
 
-// Which canonical level a pill/menu label shows, or null.
+// Canonical levels only, with word boundaries so e.g. "Profile" is not Pro.
+// Preserve the existing Chinese aliases; structural discovery handles locale.
 export function detectPillLevel(text) {
-  const hay = normalizeMenuText(text);
-  if (!hay) return null;
+  const label = String(text || "").toLowerCase().replace(/[._-]+/g, " ");
   for (const aliases of MODEL_LEVELS) {
-    if (aliases.some((alias) => hay.includes(normalizeMenuText(alias)))) return aliases[0];
+    const english = aliases[0].toLowerCase().replace(/ /g, "\\s*");
+    if (new RegExp(`(?:^|[^a-z])${english}(?:$|[^a-z])`).test(label) ||
+        aliases.slice(1).some((alias) => label.includes(alias.toLowerCase()))) return aliases[0];
   }
   return null;
 }
 
-// Whether a pill/menu label reflects the wanted level. Known levels compare
-// canonically ("Extra High" never satisfies "High"); custom labels fall back
-// to a containment check.
 export function pillShowsLevel(pillText, targets) {
   const canonical = (targets || [])[0];
   if (!canonical || !pillText) return false;
-  const known = MODEL_LEVELS.some((aliases) => aliases[0] === canonical);
-  if (known) return detectPillLevel(pillText) === canonical;
+  if (MODEL_LEVELS.some((aliases) => aliases[0] === canonical)) {
+    return detectPillLevel(pillText) === canonical;
+  }
   return normalizeMenuText(pillText).includes(normalizeMenuText(canonical));
 }
 
-async function closeOpenMenus(page) {
-  for (let i = 0; i < 3 && (await menuIsOpen(page)); i += 1) {
-    await page.keyboard.press("Escape").catch(() => {});
-    await sleep(250);
+// Index in a snapshot of visible entries. Never commit an arbitrary first
+// item, even if checked. A submenu may contain account actions, not levels.
+export function chooseNestedLevelEntry(items, targets, allowChecked = true) {
+  const recognized = (item) => detectPillLevel(item.text) !== null;
+  // Exact pass walks aliases in priority order so "Pro Standard" beats
+  // "Pro Extended" for a plain Pro label regardless of menu order.
+  for (const target of targets || []) {
+    const index = items.findIndex((item) => recognized(item) && modelItemMatches(item.text, [target], true));
+    if (index >= 0) return index;
   }
+  const fuzzy = items.findIndex((item) => recognized(item) && modelItemMatches(item.text, targets, false));
+  if (fuzzy >= 0) return fuzzy;
+  return allowChecked ? items.findIndex((item) => recognized(item) && item.checked) : -1;
 }
 
-// Select the reasoning level for a task. Returns the pill text after a
-// verified selection, or null when the picker was unavailable or the level
-// could not be verified, in which case the current level is used. Selection
-// is best-effort and time-bounded: it must never leave a menu covering the
-// composer (that blocked prompt delivery and burned the task's retry budget)
-// and never throws into the task flow. All clicks are REAL Playwright pointer
-// clicks; the picker is a Radix menu that ignores synthetic element.click().
-async function selectModel(page, modelLabel) {
-  const targets = modelLevelTargets(modelLabel);
-  if (!targets.length) return null;
+export function reportedPromptModel(task) {
+  // model_selected is exclusively an observed pill label, never a clicked
+  // item or a claim of verification. Retain the request when no pill is read.
+  return task.model_selected || task.model;
+}
+
+export function modelSelectionDetail(result) {
+  const level = MODEL_LEVELS.some((aliases) => aliases[0] === result.level) ? result.level : "custom";
+  if (result.reason === "timeout") return "timeout";
+  if (result.verified) return `selected=${level}`;
+  if (result.reason === "unverified") return `unverified=${level}`;
+  return result.reason;
+}
+
+// Use the same preference for structural pills and composer-local fallbacks.
+export function preferredModelPillIndex(labels) {
+  if (!labels.length) return -1;
+  const recognized = labels.findIndex((text) => detectPillLevel(text) !== null);
+  if (recognized >= 0) return recognized;
+  const legacy = labels.findIndex((text) => /instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text));
+  return legacy >= 0 ? legacy : 0;
+}
+
+export function modelSelectionDiagnostics(snapshot) {
+  const source = snapshot?.pill ? (snapshot.pill.structural ? "structural" : "fallback") : "none";
+  const observed = snapshot?.observed || "";
+  const items = snapshot?.items || [];
+  const recognized = [...new Set(items.map((item) => detectPillLevel(item.text)).filter(Boolean))];
+  return `pill_source=${source} pill_level=${detectPillLevel(observed) || "unrecognized"} ` +
+    `pill_text_length=${observed.length} items=${items.length} recognized=[${recognized.join(",")}]`;
+}
+
+// Opt-in, local diagnostics only. Call with the composer picker's snapshot,
+// never page-wide text; JSON escaping keeps every label on one log line.
+export function formatPickerLabels(snapshot) {
+  const truncate = (label) => [...String(label ?? "")].slice(0, 40).join("");
+  const encode = (value) => JSON.stringify(value).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  const items = (snapshot?.items || []).slice(0, 24).map((item) => truncate(item.text));
+  return `picker_labels pill=${encode(truncate(snapshot?.observed))} items=${encode(items)}`;
+}
+
+function interactionDeadlineError() {
+  return Object.assign(new Error("interaction_deadline"), { code: "interaction_deadline" });
+}
+
+export function requireInteractionRead(value) {
+  if (value === null) throw interactionDeadlineError();
+  return value;
+}
+
+export function modelSelectionFailureReason(error, { deadline, aborted }, now) {
+  if (aborted || now >= deadline) return "timeout";
+  return error?.code === "interaction_deadline" ? "interaction_deadline" : "selection_failed";
+}
+
+function interactionBudget(duration, picker = null) {
+  return { deadline: Date.now() + duration, controller: new AbortController(), picker };
+}
+
+function interactionOptions(budget, maximum = 3000) {
+  const remaining = budget.deadline - Date.now();
+  if (remaining <= 0 || budget.controller.signal.aborted) {
+    budget.controller.abort();
+    throw interactionDeadlineError();
+  }
+  return { timeout: Math.max(1, Math.min(maximum, remaining)), signal: budget.controller.signal };
+}
+
+async function budgetPause(budget, ms) {
+  await sleep(interactionOptions(budget, ms).timeout);
+  interactionOptions(budget);
+}
+
+// Locator.evaluate's timeout covers resolution, not the evaluation itself.
+// Bound read-only evaluations too; their browser callback checks the same
+// deadline before reading DOM, and no continuation may act after abort.
+async function boundedRead(budget, read) {
+  const { timeout, signal } = interactionOptions(budget, 1000);
   let timer;
-  const timeout = new Promise((resolveTimeout) => {
-    timer = setTimeout(() => resolveTimeout("timeout"), MODEL_SELECT_TIMEOUT_MS);
-  });
+  let abort;
   try {
-    const outcome = await Promise.race([selectModelInner(page, modelLabel, targets), timeout]);
-    if (outcome === "timeout") {
-      log(`model selection for "${modelLabel}" timed out after ${MODEL_SELECT_TIMEOUT_MS}ms; using current`);
-      await closeOpenMenus(page);
-      return null;
-    }
-    return outcome;
-  } catch (err) {
-    log(`model "${modelLabel}" selection failed (${stableErrorCode(err)}); using current`);
-    await closeOpenMenus(page);
-    return null;
+    return requireInteractionRead(await Promise.race([
+      read(timeout),
+      new Promise((_, reject) => {
+        abort = () => reject(interactionDeadlineError());
+        signal.addEventListener("abort", abort, { once: true });
+        timer = setTimeout(abort, timeout);
+      }),
+    ]));
   } finally {
     clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
   }
 }
 
-async function selectModelInner(page, modelLabel, targets) {
-  await page.bringToFront().catch(() => {});
-  const before = await modelPillText(page);
-  if (pillShowsLevel(before, targets)) {
-    log(`model already "${before}" for "${modelLabel}"; no picker interaction`);
-    return before;
+// Synchronous, read-only snapshots avoid N per-item auto-waits. Discovery is
+// restricted to the structural pill or the textarea's own composer region.
+// Raw labels are logged only with the explicit picker-label diagnostic opt-in,
+// and are never written to acknowledgement metadata.
+async function pickerSnapshot(page, budget) {
+  const snapshot = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, sendSelector, deadline, pickerId }) => {
+    if (Date.now() >= deadline) return null;
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const input = body.querySelector(composerSelector);
+    const form = input?.closest("form");
+    let region = form || input?.parentElement;
+    if (!form) while (region && !region.querySelector(sendSelector)) region = region.parentElement;
+    if (region === body || region === document.documentElement) region = null;
+    const pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]')].filter(visible);
+    const candidates = pills.length ? pills : [...(region?.querySelectorAll('button[aria-haspopup="menu"]') || [])].filter(visible);
+    const menus = window.__nyx.modelPickerMenus(pickerId);
+    const items = window.__nyx.modelPickerItems(pickerId).map((el) => ({
+      text: (el.innerText || el.textContent || "").trim(),
+      checked: el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true",
+    }));
+    return {
+      candidates: candidates.map((el) => (el.innerText || el.textContent || "").trim()),
+      structural: !!pills.length, form: !!form,
+      open: menus.length > 0, items, submenu: !!window.__nyx.modelPickerTrigger(pickerId),
+    };
+  }, { composerSelector: COMPOSER_SELECTOR, sendSelector: SEND_SELECTOR, deadline: Date.now() + timeout,
+    pickerId: budget.picker?.id }, interactionOptions(budget, 1000)));
+  interactionOptions(budget);
+  const index = preferredModelPillIndex(snapshot.candidates);
+  snapshot.pill = index < 0 ? null : { index, structural: snapshot.structural, form: snapshot.form };
+  snapshot.observed = snapshot.candidates[index] || null;
+  if (budget.picker) {
+    // Preserve the last open picker's items after Escape for diagnostics.
+    // Default logging projects canonical metadata; raw labels require opt-in.
+    const lastItems = budget.picker.snapshot?.items || [];
+    budget.picker.snapshot = { ...snapshot, items: snapshot.open ? snapshot.items : lastItems };
   }
-  log(`selecting model "${modelLabel}" -> level "${targets[0]}" (pill: "${before || "-"}")`);
+  return snapshot;
+}
 
-  let opened = false;
-  for (const selector of ['button.__composer-pill[aria-haspopup="menu"]', 'button[aria-haspopup="menu"]']) {
-    const buttons = page.locator(selector);
-    const count = await buttons.count();
-    for (let i = 0; i < count && !opened; i++) {
-      const button = buttons.nth(i);
-      try {
-        if (!(await button.isVisible())) continue;
-        const text = ((await button.innerText({ timeout: 1000 })) || "").trim();
-        if (!/instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text)) continue;
-        await button.click({ timeout: 5000 });
-        if (await waitForModelMenu(page, 5000)) opened = true;
-      } catch (e) {}
+// Clear a leftover Radix modal lock before recording pre-existing menus.
+// Persistent sidebar menus alone never trigger Escape here.
+async function clearRadixLock(page, budget) {
+  for (let escapes = 0; escapes < 3; escapes += 1) {
+    const locked = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, deadline) => {
+      if (Date.now() >= deadline) return null;
+      return getComputedStyle(body).pointerEvents === "none";
+    }, Date.now() + timeout, interactionOptions(budget, 1000)));
+    if (!locked) return;
+    await page.locator("body").press("Escape", interactionOptions(budget));
+    await budgetPause(budget, 100);
+  }
+}
+
+async function beginModelPicker(page, budget) {
+  await boundedRead(budget, (timeout) => page.locator("body").evaluate((_, { id, deadline }) => {
+    if (Date.now() >= deadline) return null;
+    return window.__nyx.beginModelPicker(id);
+  }, { id: budget.picker.id, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
+}
+
+function pickerLocator(page, pill) {
+  if (pill.structural) return page.locator(PILL_SELECTOR).nth(pill.index);
+  const region = page.locator(COMPOSER_SELECTOR).first().locator(pill.form ? "xpath=ancestor::form[1]" : COMPOSER_REGION_XPATH);
+  return region.locator('button[aria-haspopup="menu"]:visible').nth(pill.index);
+}
+
+async function clickPickerElement(page, budget, entry) {
+  let handle;
+  let acceptingHandle = true;
+  try {
+    handle = await boundedRead(budget, (timeout) => page.locator("body").evaluateHandle((_, { id, deadline, entry }) => {
+      if (Date.now() >= deadline) return "deadline";
+      return entry.trigger ? window.__nyx.modelPickerTrigger(id)
+        : window.__nyx.modelPickerItem(id, entry.index, entry.text);
+    }, { id: budget.picker.id, deadline: Date.now() + timeout, entry }, interactionOptions(budget, 1000)).then((value) => {
+      // If evaluation completed after the read/selection deadline, release its
+      // handle without allowing a late click or leaking a remote reference.
+      if (!acceptingHandle || budget.controller.signal.aborted) {
+        void value.dispose().catch(() => {});
+        throw interactionDeadlineError();
+      }
+      return value;
+    }));
+    interactionOptions(budget);
+    const element = handle.asElement();
+    if (!element) {
+      // Wrap the value: a genuine missing item returns null, which is distinct
+      // from the page-side deadline marker and valid for this lookup.
+      const { value } = await boundedRead(budget, async () => ({ value: await handle.jsonValue() }));
+      if (value === "deadline") throw interactionDeadlineError();
+      throw Object.assign(new Error("picker_changed"), { code: "picker_changed" });
     }
-    if (opened) break;
+    await element.click(interactionOptions(budget));
+  } finally {
+    acceptingHandle = false;
+    await handle?.dispose().catch(() => {});
   }
-  if (!opened) {
-    log(`model picker unavailable for "${modelLabel}", using current`);
-    await closeOpenMenus(page);
-    return null;
-  }
-  log(`model picker items: ${JSON.stringify(await visibleMenuTexts(page))}`);
+}
 
-  let clicked = await clickMatchingLevel(page, targets);
+async function clickMatchingLevel(page, targets, budget, allowChecked = false) {
+  const snapshot = await pickerSnapshot(page, budget);
+  const index = chooseNestedLevelEntry(snapshot.items, targets, allowChecked);
+  if (index < 0) return false;
+  // Revalidate innerText and membership page-side, then click that exact node.
+  // Hidden hints in textContent cannot invalidate a visible level match.
+  await clickPickerElement(page, budget, { index, text: snapshot.items[index].text });
+  return true;
+}
+
+async function closeOpenMenus(page, budget) {
+  for (let escapes = 0; escapes < 3 && (await pickerSnapshot(page, budget)).open; escapes += 1) {
+    await page.locator("body").press("Escape", interactionOptions(budget));
+    await budgetPause(budget, 100);
+  }
+}
+
+// Returns { level, verified, observed, reason }. Only the actual pill can
+// verify a level or populate observed. Selection never throws into the task
+// flow. Abort cancels Playwright actions, and the deadline is checked before
+// EVERY interaction, including after reads that resolve late. The backstop
+// drains the inner promise before menu cleanup; no detached selection loop
+// can race prompt typing or Send.
+async function selectModel(page, modelLabel) {
+  const targets = modelLevelTargets(modelLabel);
+  const result = { level: targets[0] || null, verified: false, observed: null, reason: "picker_unavailable" };
+  const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID(), snapshot: null });
+  let timer;
+  let drainTimer;
+  const inner = selectModelInner(page, targets, budget, result).catch((error) => {
+    result.reason = modelSelectionFailureReason(error, {
+      deadline: budget.deadline, aborted: budget.controller.signal.aborted,
+    }, Date.now());
+  });
+  const timeout = new Promise((resolveTimeout) => {
+    timer = setTimeout(() => {
+      budget.controller.abort(); // cancel even a click waiting for actionability
+      resolveTimeout("timeout");
+    }, MODEL_SELECT_TIMEOUT_MS);
+  });
+  try {
+    if (await Promise.race([inner, timeout]) === "timeout") {
+      await Promise.race([inner, new Promise((resolveDrain) => { drainTimer = setTimeout(resolveDrain, 3000); })]);
+      result.reason = "timeout";
+    }
+  } finally {
+    budget.controller.abort();
+    clearTimeout(timer);
+    clearTimeout(drainTimer);
+  }
+  // Cleanup gets its own small budget after the aborted selection is drained.
+  // The pre-send guard below also handles non-menu overlays and stuck Radix
+  // body pointer-events. Cleanup failure must not consume a recovery attempt.
+  const cleanup = interactionBudget(2000, budget.picker);
+  const cleanupTimer = setTimeout(() => cleanup.controller.abort(), 2000);
+  try {
+    await closeOpenMenus(page, cleanup);
+    result.observed = (await pickerSnapshot(page, cleanup)).observed;
+  } catch {} finally {
+    cleanup.controller.abort();
+    clearTimeout(cleanupTimer);
+  }
+  result.verified = pillShowsLevel(result.observed, targets);
+  if (result.verified && !["timeout", "already_selected"].includes(result.reason)) result.reason = "selected";
+  log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)} ${modelSelectionDiagnostics(budget.picker.snapshot)}`);
+  if (LOG_PICKER_LABELS && ["level_unavailable", "unverified", "menu_not_opened", "picker_unavailable"].includes(result.reason)) {
+    log(formatPickerLabels(budget.picker.snapshot));
+  }
+  return { ...result };
+}
+
+async function selectModelInner(page, targets, budget, result) {
+  const before = await pickerSnapshot(page, budget);
+  interactionOptions(budget);
+  result.observed = before.observed;
+  if (pillShowsLevel(before.observed, targets)) {
+    result.reason = "already_selected";
+    return;
+  }
+  if (!before.pill || !targets.length) return;
+  await clearRadixLock(page, budget);
+  await beginModelPicker(page, budget);
+  await pickerLocator(page, before.pill).click(interactionOptions(budget));
+  try {
+    await page.locator("body").waitForFunction((_, id) => window.__nyx.modelPickerMenus(id).length > 0,
+      budget.picker.id, interactionOptions(budget, 5000));
+  } catch (error) {
+    interactionOptions(budget);
+    if (error?.name !== "TimeoutError") throw error;
+    result.reason = "menu_not_opened";
+    return;
+  }
+  let clicked = await clickMatchingLevel(page, targets, budget);
+  if (!clicked && (await pickerSnapshot(page, budget)).submenu) {
+    await clickPickerElement(page, budget, { trigger: true });
+    await budgetPause(budget, 200);
+    clicked = await clickMatchingLevel(page, targets, budget);
+  }
   if (!clicked) {
-    // Some layouts park Pro/effort levels behind a submenu trigger.
-    const trigger = page.locator('[data-testid="composer-intelligence-pro-thinking-effort-trigger"]').first();
-    if ((await trigger.count()) && (await trigger.isVisible().catch(() => false))) {
-      await trigger.click({ timeout: 5000 }).catch(() => {});
-      await sleep(600);
-      log(`model picker submenu items: ${JSON.stringify(await visibleMenuTexts(page))}`);
-      clicked = await clickMatchingLevel(page, targets);
-    }
+    interactionOptions(budget);
+    result.reason = "level_unavailable";
+    return;
   }
-  if (!clicked) {
-    await closeOpenMenus(page);
-    log(`model "${modelLabel}" not found in picker, using current`);
-    return null;
+  await budgetPause(budget, 200);
+  if ((await pickerSnapshot(page, budget)).open) await clickMatchingLevel(page, targets, budget, true);
+  await closeOpenMenus(page, budget);
+  // Allow up to one second for the pill to reflect the click, without
+  // repeatedly reopening the picker or treating clicked text as observation.
+  const verifyUntil = Math.min(budget.deadline, Date.now() + 1000);
+  while (true) {
+    const after = await pickerSnapshot(page, budget);
+    interactionOptions(budget);
+    result.observed = after.observed;
+    if (pillShowsLevel(result.observed, targets) || Date.now() >= verifyUntil) break;
+    await budgetPause(budget, 100);
   }
-  await sleep(500);
+  result.reason = "unverified";
+}
 
-  // Clicking a level may open a nested effort submenu that stays open over
-  // the composer. Prefer the already-checked entry, else the first entry, so
-  // the level commits; then make sure nothing is left covering the composer.
-  if (await menuIsOpen(page)) {
-    const nested = await visibleMenuTexts(page);
-    log(`model picker nested items: ${JSON.stringify(nested)}`);
-    const checked = page.locator('[role="menuitemradio"][aria-checked="true"], [role="option"][aria-selected="true"]').first();
-    const first = page.locator('[role="menuitemradio"], [role="option"], [role="menuitem"]').first();
-    for (const candidate of [checked, first]) {
-      try {
-        if ((await candidate.count()) && (await candidate.isVisible())) {
-          await candidate.click({ timeout: 3000 });
-          await sleep(400);
-          break;
-        }
-      } catch (e) {}
+// Clear overlays before typing and again immediately before Send. Never force
+// a click through an obstruction: failure stays pre-send and enters the
+// existing browser recovery / infrastructure retry path.
+async function ensureComposerUnobstructed(page) {
+  const budget = interactionBudget(PRE_SEND_ACTION_MS);
+  const timer = setTimeout(() => budget.controller.abort(), PRE_SEND_ACTION_MS);
+  try {
+    await page.locator(COMPOSER_SELECTOR).first().scrollIntoViewIfNeeded(interactionOptions(budget)).catch(() => {});
+    while (true) {
+      const state = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
+        if (Date.now() >= deadline) return null;
+        const input = body.querySelector(composerSelector);
+        const rect = input?.getBoundingClientRect();
+        const hit = rect && document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        const main = body.querySelector("main");
+        const mainRect = main?.getBoundingClientRect();
+        const neutral = mainRect && document.elementFromPoint(mainRect.x + 4, mainRect.y + 4) === main;
+        return { clear: !!hit && input.contains(hit) && getComputedStyle(body).pointerEvents !== "none", neutral };
+      }, { composerSelector: COMPOSER_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
+      interactionOptions(budget);
+      if (state.clear) return;
+      await page.locator("body").press("Escape", interactionOptions(budget));
+      if (!state.clear && state.neutral) {
+        await page.locator("main").first().click({ position: { x: 4, y: 4 }, ...interactionOptions(budget) }).catch(() => {});
+      }
+      await budgetPause(budget, 100);
     }
-    await closeOpenMenus(page);
+  } catch {
+    log("composer_unobstructed_failed");
+    throw Object.assign(new Error("composer_unobstructed_failed"), { code: "composer_unobstructed_failed" });
+  } finally {
+    budget.controller.abort();
+    clearTimeout(timer);
   }
-
-  const after = await modelPillText(page);
-  if (pillShowsLevel(after, targets)) {
-    log(`model set to "${after}"`);
-    return after;
-  }
-  log(`model pill shows "${after || "-"}" after selecting "${clicked}"; using current`);
-  return after || clicked;
 }
 
 // NOTE: keep this table in sync with `fileMime` in
@@ -1426,8 +1645,8 @@ async function uploadAttachment(runtime, page, task) {
   log(`uploading attachment (${(buffer.length / 1024).toFixed(0)} KB, ${mime})`);
   let fileInput = page.locator("input[type='file']").first();
   if ((await fileInput.count()) === 0) {
-    const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button'], button[aria-haspopup='menu']").first();
-    if (await attach.count()) { await attach.click().catch(() => {}); await sleep(800); }
+    const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button']").first();
+    if (await attach.count()) { await attach.click({ timeout: PRE_SEND_ACTION_MS }).catch(() => {}); await sleep(800); }
     fileInput = page.locator("input[type='file']").first();
   }
   try {
@@ -1464,8 +1683,8 @@ async function uploadPdf(runtime, page, task) {
   log(`uploading PDF (${(buffer.length / 1024).toFixed(0)} KB)`);
   let fileInput = page.locator("input[type='file']").first();
   if ((await fileInput.count()) === 0) {
-    const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button'], button[aria-haspopup='menu']").first();
-    if (await attach.count()) { await attach.click().catch(() => {}); await sleep(800); }
+    const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button']").first();
+    if (await attach.count()) { await attach.click({ timeout: PRE_SEND_ACTION_MS }).catch(() => {}); await sleep(800); }
     fileInput = page.locator("input[type='file']").first();
   }
   try {
@@ -1582,9 +1801,8 @@ async function submitPromptResult(
       images: downloadedImages.items,
       files: downloadedFiles.items,
       chatgpt_url: page.url(),
-      // Report the level that was actually selected, so a picker regression
-      // shows up in task results instead of silently answering on Instant.
-      model: task.model_selected || task.model,
+      // The observed pill is useful even when selection was unverified.
+      model: reportedPromptModel(task),
     })
   );
   log(
@@ -1628,7 +1846,7 @@ async function handlePrompt(runtime, page, task, recovering) {
       : priorPhase,
     conversation_url: page.url(),
   });
-  await ack(runtime, task, "page_ready");
+  if (await ack(runtime, task, "page_ready")) throw new TaskFailure("cancelled");
   if (await recoverPreSendLogin(runtime)) throw new TaskRestart();
 
   if (recovering && !["claimed", "page_ready", "ready_to_send"].includes(priorPhase)) {
@@ -1674,41 +1892,54 @@ async function handlePrompt(runtime, page, task, recovering) {
   }
 
   if (task.model && task.model !== "unknown") {
-    await ack(runtime, task, "selecting_model");
+    if (await ack(runtime, task, "selecting_model")) throw new TaskFailure("cancelled");
     const selected = await selectModel(page, task.model);
-    if (selected) task.model_selected = selected;
+    task.model_selected = selected.observed;
+    if (await ack(runtime, task, "selecting_model", modelSelectionDetail(selected))) {
+      throw new TaskFailure("cancelled");
+    }
   }
 
   // Type the prompt into the composer (native — more robust than the
   // userscript's execCommand fallbacks) and send.
-  const input = page
-    .locator("#prompt-textarea, div[contenteditable='true'][role='textbox'], textarea[data-testid='prompt-textarea']")
-    .first();
+  const input = page.locator(COMPOSER_SELECTOR).first();
   await input.waitFor({ state: "visible", timeout: 60000 });
-  await input.click();
-  await input.fill(task.prompt);
-  const baseline = await page.evaluate(() => window.__nyx?.extractTranscript()?.length || 0);
+  await ensureComposerUnobstructed(page);
+  await input.click({ timeout: PRE_SEND_ACTION_MS });
+  await input.fill(task.prompt, { timeout: PRE_SEND_ACTION_MS });
+  const before = await boundedRead(interactionBudget(PRE_SEND_ACTION_MS), (timeout) =>
+    page.locator("body").evaluate(() => ({
+      baseline: window.__nyx?.extractTranscript()?.length || 0,
+      assistantCount: window.__nyx.assistantCount(),
+    }), undefined, { timeout }));
+  const baseline = before.baseline;
   updateTaskState(runtime.state, { phase: "ready_to_send", baseline_turn_count: baseline });
+  if (await ack(runtime, task, "ready_to_send")) throw new TaskFailure("cancelled");
   await sleep(300);
   // Only attach a PDF on the FIRST turn of a conversation — never re-upload it
   // into an existing chat if the server ever resends pdf_base64 on a follow-up
   // (mirrors the userscript's `!is_followup && pdf_base64` guard).
   if (!task.is_followup && task.pdf_base64) {
-    await ack(runtime, task, "uploading_pdf");
+    if (await ack(runtime, task, "uploading_pdf")) throw new TaskFailure("cancelled");
     await uploadPdf(runtime, page, task);
   }
   // Same first-turn-only guard for a general attachment (image / pdf / ...).
   if (!task.is_followup && task.attachment_base64) {
-    await ack(runtime, task, "uploading_attachment");
+    if (await ack(runtime, task, "uploading_attachment")) throw new TaskFailure("cancelled");
     await uploadAttachment(runtime, page, task);
   }
 
-  const beforeCount = await page.evaluate(() => window.__nyx.assistantCount());
-  const sendBtn = page
-    .locator("button[data-testid='send-button'], button[aria-label='Send prompt'], button[aria-label='发送提示']")
-    .first();
+  const beforeCount = before.assistantCount;
+  const sendBtn = page.locator(SEND_SELECTOR).first();
+  await ensureComposerUnobstructed(page);
+  // Resolve actionability while still pre-send. The actual click is the
+  // only operation after the durable uncertainty fence.
+  await sendBtn.click({ trial: true, timeout: PRE_SEND_ACTION_MS });
+  if (!task.is_followup && (task.pdf_base64 || task.attachment_base64)) {
+    if (await ack(runtime, task, "ready_to_send")) throw new TaskFailure("cancelled");
+  }
   updateTaskState(runtime.state, { phase: "send_attempted", baseline_turn_count: baseline });
-  await sendBtn.click({ timeout: 30000 });
+  await sendBtn.click({ timeout: PRE_SEND_ACTION_MS });
   updateTaskState(runtime.state, { phase: "sent" });
   await ack(runtime, task, "sent");
   await pinCurrentConversation(runtime, page, task);
@@ -2217,9 +2448,10 @@ async function handleExtract(runtime, page, task) {
   }
 }
 
-async function ack(runtime, task, phase) {
+async function ack(runtime, task, phase, phaseDetail) {
   const response = await apiPost("/ack", taskIdentity(runtime, task, {
     phase,
+    phase_detail: phaseDetail,
     page_url: runtime.page?.url(),
   }));
   return response.status === "cancelled";
@@ -2723,13 +2955,14 @@ async function executeTask(runtime, task, recovering) {
       }
       const failureCount = (runtime.state.current_task?.recovery_failures || 0) + 1;
       updateTaskState(runtime.state, { recovery_failures: failureCount });
+      runtime.lastError = stableErrorCode(error);
+      log(`task ${task.task_id} browser failure ${failureCount}/${MAX_TASK_RECOVERY_FAILURES} (${runtime.lastError})`);
       const recovery = taskRecoveryDecision({
         kind: task.kind,
         phase: runtime.state.current_task?.phase,
         failureCount,
       });
       runtime.chromeAlive = false;
-      runtime.lastError = stableErrorCode(error);
       if (recovery.action === "fail") {
         runtime.lastError = recovery.code;
         await settleTaskFailure(runtime, task, recovery.code);

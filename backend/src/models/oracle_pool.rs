@@ -132,7 +132,7 @@ mod tests {
             visibility: OraclePoolVisibility::Platform,
             worker_token_hash: "deadbeef".repeat(8),
             chatgpt_project_url: None,
-            default_model_label: Some("chatgpt-5.5-pro".to_string()),
+            default_model_label: Some("chatgpt-6-pro".to_string()),
             allow_extract: false,
             max_workers: DEFAULT_MAX_WORKERS,
             max_queue_length: DEFAULT_MAX_QUEUE_LENGTH,

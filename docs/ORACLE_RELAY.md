@@ -104,7 +104,7 @@ You have ChatGPT Pro and want to share it.
    nyxid oracle pool create chatgpt-pro \
      --name "ChatGPT Pro" \
      --visibility platform \
-     --model chatgpt-5.5-pro
+     --model chatgpt-6-pro
    # → prints a worker token: nyx_owk_…
    ```
 
@@ -283,7 +283,7 @@ bound based on the 512 KiB decoded envelope cap.
 ```json
 {
   "prompt": "…",                 // required
-  "model": "chatgpt-5.5-pro",    // optional; defaults to the pool's
+  "model": "chatgpt-6-pro",    // optional; defaults to the pool's
   "tag": "bedc-deep",            // optional
   "conversation_id": "",         // omit = single-shot; "" = open session; id = continue
   "pdf_base64": "…",             // optional; worker uploads on turn 1
@@ -333,9 +333,11 @@ only.
 ### Reasoning level (model label)
 
 A task's `model_label` (or the pool's `default_model_label`, e.g.
-`chatgpt-5.5-pro`) selects the ChatGPT reasoning level before the prompt is
+`chatgpt-6-pro`) selects the ChatGPT reasoning level before the prompt is
 sent. The managed worker maps the label to the picker's levels: `-pro`,
-`extended`, or `扩展` -> **Pro**; `extra high`/`ultra` -> Extra High; `high` ->
+`extended`, or `扩展` -> **Pro** (where the picker splits Pro into Standard and
+Extended entries, a plain `-pro` label prefers Standard and `extended`/`扩展`
+prefers Extended); `extra high`/`ultra` -> Extra High; `high` ->
 High; `medium`/`balanced` -> Medium; `instant`/`fast` -> Instant; anything else
 is matched literally. Selection uses real pointer clicks (the picker ignores
 synthetic clicks). The completed task's `model_label` reports the level that

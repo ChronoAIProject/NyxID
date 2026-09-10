@@ -2100,7 +2100,7 @@ mod tests {
             visibility: OraclePoolVisibility::Platform,
             worker_token_hash: "h".repeat(64),
             chatgpt_project_url: Some("https://chatgpt.com/g/g-p-x/project".to_string()),
-            default_model_label: Some("chatgpt-5.5-pro".to_string()),
+            default_model_label: Some("chatgpt-6-pro".to_string()),
             allow_extract: false,
             max_workers: 2,
             max_queue_length: 3,
@@ -2421,7 +2421,7 @@ mod tests {
             claimed.required_project_url.as_deref(),
             Some("https://chatgpt.com/g/g-p-x/project")
         );
-        assert_eq!(claimed.model.as_deref(), Some("chatgpt-5.5-pro"));
+        assert_eq!(claimed.model.as_deref(), Some("chatgpt-6-pro"));
 
         // Idempotent re-claim returns the same task (tab reload survival).
         let resumed = claim_task(&db, &pool, "tab_1", Some("v1"), None)
@@ -2472,7 +2472,7 @@ mod tests {
                 images: vec![],
                 files: vec![],
                 chatgpt_url: Some("https://chatgpt.com/c/abc"),
-                model: Some("chatgpt-5.5-pro"),
+                model: Some("chatgpt-6-pro"),
                 script_version: Some("v1"),
                 retention_days: 30,
                 dispatch_attempt_id: None,
@@ -3676,7 +3676,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(other_task.model_label.as_deref(), Some("chatgpt-5.5-pro"));
+        assert_eq!(other_task.model_label.as_deref(), Some("chatgpt-6-pro"));
 
         extract_url(
             &db,
