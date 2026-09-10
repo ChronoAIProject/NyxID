@@ -142,6 +142,29 @@ pub enum CompleteResult {
     },
 }
 
+pub fn resolve_create_callback(
+    routes: Option<&crate::config::OAuthReturnRoutes>,
+    service_slug: &str,
+    return_page: Option<&str>,
+    callback_url: Option<&str>,
+) -> AppResult<Option<String>> {
+    let Some(page) = return_page else {
+        return Ok(callback_url.map(String::from));
+    };
+    if callback_url.is_some() {
+        return Err(AppError::ValidationError(
+            "return_page and callback_url cannot be supplied together".to_string(),
+        ));
+    }
+    let routes = routes.ok_or_else(|| {
+        AppError::ValidationError("Configured OAuth return pages are not enabled".to_string())
+    })?;
+    routes
+        .resolve(service_slug.trim(), page)
+        .map(|url| Some(url.to_string()))
+        .map_err(|error| AppError::ValidationError(error.to_string()))
+}
+
 pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<CreatedLink> {
     let service = load_catalog_info_by_slug(db, &input.service_slug).await?;
     if service.service_slug.trim().is_empty() {

@@ -1,4 +1,4 @@
-import { Suspense } from "react";
+import { lazy, Suspense } from "react";
 import { managedConnectPlatform } from "@/lib/channel-platforms";
 import {
   createRouter,
@@ -366,7 +366,7 @@ const assistantApprovalsRoute = createRoute({
 const dashboardLayout = createRoute({
   id: "dashboard",
   getParentRoute: () => rootRoute,
-  beforeLoad: async () => {
+  beforeLoad: async ({ location }) => {
     if (import.meta.env.DEV) {
       const { isMockMode, getMockUser } = await import("./lib/mock-data");
       if (isMockMode()) {
@@ -384,7 +384,7 @@ const dashboardLayout = createRoute({
       // social-login `return_to` cookie both accept an absolute URL on
       // this origin. For plain `/dashboard` there's nothing useful to
       // preserve, so fall through to the bare redirect.
-      const returnPath = `${window.location.pathname}${window.location.search}`;
+      const returnPath = `${location.pathname}${location.searchStr}`;
       if (returnPath !== "/" && returnPath !== "/dashboard") {
         const returnTo = `${window.location.origin}${returnPath}`;
         window.location.assign(
@@ -915,6 +915,19 @@ const adminFeatureFlagsRoute = createRoute({
 });
 
 const routeTree = rootRoute.addChildren([
+  ...(import.meta.env.DEV
+    ? [
+        createRoute({
+          path: "/temp",
+          getParentRoute: () => rootRoute,
+          component: lazy(() =>
+            import("@/pages/temp-google-workspace").then((m) => ({
+              default: m.TempGoogleWorkspacePage,
+            })),
+          ),
+        }),
+      ]
+    : []),
   landingRoute,
   authLayout.addChildren([loginRoute, registerRoute]),
   oauthConsentRoute,

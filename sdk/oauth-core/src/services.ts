@@ -24,6 +24,8 @@ export interface CreateConnectLinkInput {
    * connect token.
    */
   readonly callbackUrl?: string;
+  /** Backend-configured page name. Mutually exclusive with callbackUrl. */
+  readonly returnPage?: string;
   readonly expiresIn?: number;
 }
 
@@ -31,6 +33,8 @@ export interface CreateConnectLinkResponse {
   readonly id: string;
   readonly connect_url: string;
   readonly expires_at: string;
+  /** Saved return destination, before terminal outcome parameters are added. */
+  readonly callback_url?: string;
 }
 
 export interface ConnectedService {
@@ -326,6 +330,7 @@ class ConnectLinksResource implements ConnectLinksApi {
           service_slug: input.serviceSlug,
           label: input.label,
           callback_url: input.callbackUrl,
+          return_page: input.returnPage,
           expires_in: input.expiresIn,
         }),
       },

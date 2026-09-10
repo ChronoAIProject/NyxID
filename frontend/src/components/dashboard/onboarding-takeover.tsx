@@ -5,6 +5,7 @@ import { ArrowRight, Cable, Github, KeyRound, ShieldCheck, User } from "lucide-r
 import { useAuthStore } from "@/stores/auth-store";
 import { useCompleteOnboarding } from "@/hooks/use-onboarding";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
+import { ConfiguredOAuthConnect } from "@/components/shared/configured-oauth-connect";
 import { Button, ButtonIcon } from "@/components/ui/button";
 import { NyxidLogo } from "@/components/brand/nyxid-logo";
 import {
@@ -127,6 +128,17 @@ export function OnboardingTakeover() {
         </div>
 
         {/* CTA */}
+        {user && (
+          <ConfiguredOAuthConnect
+            key={user.id}
+            userId={user.id}
+            serviceSlug="api-google"
+            serviceName="Google"
+            returnPage="onboarding"
+            onContinue={() => void markComplete()}
+            continuing={completeOnboarding.isPending}
+          />
+        )}
         <Button
           variant="primary"
           size="lg"

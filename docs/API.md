@@ -3448,6 +3448,20 @@ Content-Type: application/json
 
 Treat `connect_url` as a single-use secret and hand it only to the browser. The authenticated app ID and display name are recorded on the link; a request-body `requested_by` value cannot override that identity.
 
+When the backend configures `OAUTH_RETURN_ROUTES`, a caller can select a named page instead of supplying an explicit URL:
+
+```json
+{
+  "service_slug": "api-google",
+  "return_page": "onboarding",
+  "expires_in": 900
+}
+```
+
+`return_page` and `callback_url` are mutually exclusive. Exact service/page matching falls back to the service default, then the global default. `return_page: "default"` selects the service/global default. Invalid selector syntax and named requests on a backend without configuration are rejected. When neither field is supplied, legacy no-callback behavior is preserved. The resolved URL remains subject to the authenticated app's redirect-URI policy.
+
+The create response additionally includes `callback_url` when a return destination was stored. At creation this is the saved base destination, before terminal parameters are added. A named caller must verify that this acknowledgement is present before opening `connect_url`; an older backend may ignore `return_page`. The public config flag `oauth_return_routes_enabled` helps callers disable the feature before rollout. See [environment configuration](ENV.md#configured-oauth-return-pages) for the mapping format and limits.
+
 **Polling response:**
 
 ```json

@@ -26,6 +26,8 @@ pub struct CreateConnectLinkRequest {
     #[serde(default)]
     pub callback_url: Option<String>,
     #[serde(default)]
+    pub return_page: Option<String>,
+    #[serde(default)]
     pub expires_in: Option<i64>,
 }
 
@@ -34,6 +36,8 @@ pub struct CreateConnectLinkResponse {
     pub id: String,
     pub connect_url: String,
     pub expires_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -202,6 +206,12 @@ pub async fn create_connect_link(
         return Err(AppError::ConnectLinkRateLimited);
     }
 
+    let callback_url = connect_link_service::resolve_create_callback(
+        state.config.oauth_return_routes.as_ref(),
+        &body.service_slug,
+        body.return_page.as_deref(),
+        body.callback_url.as_deref(),
+    )?;
     let created = connect_link_service::create(
         &state.db,
         connect_link_service::CreateInput {
@@ -209,7 +219,7 @@ pub async fn create_connect_link(
             service_slug: body.service_slug,
             label: body.label,
             requested_by: auth_user.api_key_name.clone().or(body.requested_by),
-            callback_url: body.callback_url,
+            callback_url,
             ttl_secs: body.expires_in,
             oauth_client_id: auth_user.oauth_client_id.clone(),
         },
@@ -232,6 +242,7 @@ pub async fn create_connect_link(
     );
 
     Ok(Json(CreateConnectLinkResponse {
+        callback_url: created.link.callback_url.clone(),
         id: created.link.id,
         connect_url,
         expires_at: created
@@ -759,6 +770,147 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn named_returns_are_per_link_and_survive_config_changes() {
+        let Some(db) = connect_test_database("named_return_persistence").await else {
+            return;
+        };
+        let mut service = dummy_service();
+        service.id = uuid::Uuid::new_v4().to_string();
+        service.slug = "api-google".to_string();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let actor = uuid::Uuid::new_v4().to_string();
+        let mut state = test_app_state(db.clone());
+        state.config.oauth_return_routes = Some(crate::config::OAuthReturnRoutes::parse(r#"{
+            "default_url":"https://app.example/dashboard",
+            "services":{"api-google":{"default_url":"https://app.example/keys","pages":{
+                "onboarding":"https://app.example/onboarding?step=workspace&status=old&connect_link_id=old",
+                "local-poc":"http://127.0.0.1:3003/temp"
+            }}}
+        }"#).unwrap());
+        let mut created_links = Vec::new();
+        for page in ["onboarding", "local-poc", "unknown", "default"] {
+            let request = serde_json::from_value(
+                serde_json::json!({"service_slug":" api-google ", "return_page":page}),
+            )
+            .unwrap();
+            let Json(created) =
+                create_connect_link(State(state.clone()), test_auth_user(&actor), Json(request))
+                    .await
+                    .unwrap();
+            assert!(created.callback_url.is_some());
+            created_links.push(created);
+        }
+        assert_ne!(created_links[0].id, created_links[1].id);
+        assert_eq!(
+            created_links[1].callback_url.as_deref(),
+            Some("http://127.0.0.1:3003/temp")
+        );
+        for index in [2, 3] {
+            assert_eq!(
+                created_links[index].callback_url.as_deref(),
+                Some("https://app.example/keys")
+            );
+        }
+        let Json(legacy) = create_connect_link(
+            State(state.clone()),
+            test_auth_user(&actor),
+            Json(serde_json::from_value(serde_json::json!({"service_slug":"api-google"})).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert!(legacy.callback_url.is_none());
+        state.config.oauth_return_routes = Some(
+            crate::config::OAuthReturnRoutes::parse(
+                r#"{"default_url":"https://changed.example/"}"#,
+            )
+            .unwrap(),
+        );
+        let Json(cancelled) = cancel_connect_link(
+            State(state.clone()),
+            test_auth_user(&actor),
+            Path(created_links[0].id.clone()),
+        )
+        .await
+        .unwrap();
+        let callback = url::Url::parse(cancelled.callback_url.as_deref().unwrap()).unwrap();
+        assert_eq!(callback.host_str(), Some("app.example"));
+        let pairs: Vec<_> = callback.query_pairs().collect();
+        assert!(
+            pairs
+                .iter()
+                .any(|(key, value)| key == "step" && value == "workspace")
+        );
+        assert_eq!(pairs.iter().filter(|(key, _)| key == "status").count(), 1);
+        assert!(
+            pairs
+                .iter()
+                .any(|(key, value)| key == "status" && value == "cancelled")
+        );
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(key, _)| key == "connect_link_id")
+                .count(),
+            1
+        );
+        assert!(
+            pairs
+                .iter()
+                .any(|(key, value)| key == "connect_link_id" && value == &created_links[0].id)
+        );
+        assert!(!callback.as_str().contains("nyx_clk_"));
+        let Json(local) = get_connect_link(
+            State(state),
+            test_auth_user(&actor),
+            Path(created_links[1].id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(local.status, "pending");
+        assert!(local.callback_url.is_none());
+        let stored = db
+            .collection::<ConnectLink>(crate::models::connect_link::COLLECTION_NAME)
+            .find_one(mongodb::bson::doc! {"_id":&created_links[1].id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.callback_url.as_deref(),
+            Some("http://127.0.0.1:3003/temp")
+        );
+    }
+
+    #[tokio::test]
+    async fn named_return_validation_does_not_create_a_link() {
+        let Some(db) = connect_test_database("named_return_invalid").await else {
+            return;
+        };
+        let actor = uuid::Uuid::new_v4().to_string();
+        let state = test_app_state(db.clone());
+        for body in [
+            serde_json::json!({"service_slug":"api-google","return_page":"onboarding"}),
+            serde_json::json!({"service_slug":"api-google","return_page":"onboarding","callback_url":"https://evil.example/"}),
+        ] {
+            let request = serde_json::from_value(body).unwrap();
+            assert!(
+                create_connect_link(State(state.clone()), test_auth_user(&actor), Json(request))
+                    .await
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            db.collection::<ConnectLink>(crate::models::connect_link::COLLECTION_NAME)
+                .count_documents(mongodb::bson::doc! {})
+                .await
+                .unwrap(),
+            0
+        );
+    }
+
+    #[tokio::test]
     async fn create_and_public_preview_handler_round_trip() {
         let Some(db) = connect_test_database("connect_link_handler_round_trip").await else {
             return;
@@ -783,6 +935,7 @@ mod tests {
                 label: Some("Agent setup".to_string()),
                 requested_by: Some("handler-test".to_string()),
                 callback_url: None,
+                return_page: None,
                 expires_in: None,
             }),
         )
@@ -863,7 +1016,13 @@ mod tests {
             .insert_one(&app)
             .await
             .expect("insert app");
-        let state = test_app_state(db.clone());
+        let mut state = test_app_state(db.clone());
+        state.config.oauth_return_routes = Some(
+            crate::config::OAuthReturnRoutes::parse(
+                r#"{"default_url":"https://app.example/dashboard"}"#,
+            )
+            .unwrap(),
+        );
         let actor_id = uuid::Uuid::new_v4().to_string();
         let mut auth = test_auth_user(&actor_id);
         auth.oauth_client_id = Some(app.id.clone());
@@ -876,6 +1035,7 @@ mod tests {
                 label: None,
                 requested_by: Some("untrusted body value".to_string()),
                 callback_url: Some(callback_url.to_string()),
+                return_page: None,
                 expires_in: None,
             }),
         )
@@ -890,6 +1050,54 @@ mod tests {
         assert_eq!(stored.requesting_app_id.as_deref(), Some(app.id.as_str()));
         assert_eq!(stored.requested_by.as_deref(), Some("Desktop App"));
         assert_eq!(stored.callback_url.as_deref(), Some(callback_url));
+
+        let mut configured_state = state.clone();
+        configured_state.config.oauth_return_routes = Some(
+            crate::config::OAuthReturnRoutes::parse(
+                r#"{"default_url":"https://unregistered.example/return"}"#,
+            )
+            .unwrap(),
+        );
+        let mut configured_auth = test_auth_user(&actor_id);
+        configured_auth.oauth_client_id = Some(app.id.clone());
+        let request = serde_json::from_value(serde_json::json!({
+            "service_slug":stored.service_slug,
+            "return_page":"default",
+        }))
+        .unwrap();
+        let rejected =
+            create_connect_link(State(configured_state), configured_auth, Json(request)).await;
+        assert!(matches!(
+            rejected,
+            Err(crate::errors::AppError::InvalidRedirectUri)
+        ));
+
+        let approved_callback = "https://registered.example/return";
+        db.collection::<OauthClient>(OAUTH_CLIENTS)
+            .update_one(
+                mongodb::bson::doc! { "_id": &app.id },
+                mongodb::bson::doc! { "$set": { "redirect_uris": [approved_callback] } },
+            )
+            .await
+            .unwrap();
+        let mut approved_state = state.clone();
+        approved_state.config.oauth_return_routes = Some(
+            crate::config::OAuthReturnRoutes::parse(
+                &serde_json::json!({"default_url": approved_callback}).to_string(),
+            )
+            .unwrap(),
+        );
+        let mut approved_auth = test_auth_user(&actor_id);
+        approved_auth.oauth_client_id = Some(app.id.clone());
+        let request = serde_json::from_value(
+            serde_json::json!({"service_slug": stored.service_slug, "return_page":"default"}),
+        )
+        .unwrap();
+        let Json(approved) =
+            create_connect_link(State(approved_state), approved_auth, Json(request))
+                .await
+                .unwrap();
+        assert_eq!(approved.callback_url.as_deref(), Some(approved_callback));
 
         let raw_token = response
             .connect_url

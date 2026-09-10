@@ -3,6 +3,9 @@ use std::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
 };
 
+mod oauth_return_routes;
+pub use oauth_return_routes::OAuthReturnRoutes;
+
 const DEFAULT_INTERNAL_BIND_ADDR: &str = "127.0.0.1:3002";
 
 fn resolve_internal_advertise_url(
@@ -195,6 +198,7 @@ pub struct AppConfig {
     pub base_url: String,
     /// Frontend URL for CORS and redirects (e.g. https://nyxid.dev)
     pub frontend_url: String,
+    pub oauth_return_routes: Option<OAuthReturnRoutes>,
     /// Additional CORS allowed origins (comma-separated, e.g. "http://localhost:5847,http://localhost:3000")
     pub cors_allowed_origins: Vec<String>,
     /// Additional origins trusted for browser CSRF (comma-separated).
@@ -603,6 +607,7 @@ impl std::fmt::Debug for AppConfig {
             .field("port", &self.port)
             .field("base_url", &self.base_url)
             .field("frontend_url", &self.frontend_url)
+            .field("oauth_return_routes", &self.oauth_return_routes)
             .field("database_url", &self.database_url)
             .field("database_max_connections", &self.database_max_connections)
             .field("environment", &self.environment)
@@ -1023,6 +1028,9 @@ impl AppConfig {
                 .unwrap_or(3001),
             frontend_url: env::var("FRONTEND_URL")
                 .unwrap_or_else(|_| "http://localhost:3000".to_string()),
+            oauth_return_routes: env::var("OAUTH_RETURN_ROUTES")
+                .ok()
+                .map(|raw| OAuthReturnRoutes::parse(&raw).unwrap_or_else(|error| panic!("{error}"))),
             cors_allowed_origins: env::var("CORS_ALLOWED_ORIGINS")
                 .unwrap_or_default()
                 .split(',')
@@ -1861,6 +1869,7 @@ mod tests {
             port: 3001,
             base_url: base_url.to_string(),
             frontend_url: "http://localhost:3000".to_string(),
+            oauth_return_routes: None,
             cors_allowed_origins: vec![],
             csrf_trusted_origins: vec![],
             database_url: "mongodb://localhost:27017/nyxid".to_string(),

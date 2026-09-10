@@ -2,6 +2,10 @@ import { useMutation, useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
 import {
   completeConnectLinkResponseSchema,
+  createConnectLinkInputSchema,
+  createConnectLinkResponseSchema,
+  type CreateConnectLinkInput,
+  type CreateConnectLinkResponse,
   connectLinkPreviewSchema,
   connectLinkStatusResponseSchema,
   type CompleteConnectLinkInput,
@@ -9,6 +13,31 @@ import {
   type ConnectLinkPreview,
   type ConnectLinkStatusResponse,
 } from "@/schemas/connect-links";
+
+export async function createConnectLink(
+  input: CreateConnectLinkInput,
+): Promise<CreateConnectLinkResponse> {
+  const response = await api.post<unknown>(
+    "/connect-links",
+    createConnectLinkInputSchema.parse(input),
+  );
+  return createConnectLinkResponseSchema.parse(response);
+}
+
+export function useCreateConnectLink() {
+  return useMutation({ mutationFn: createConnectLink });
+}
+
+export function useCancelConnectLink() {
+  return useMutation({
+    mutationFn: async (id: string): Promise<ConnectLinkStatusResponse> => {
+      const response = await api.post<unknown>(
+        `/connect-links/${encodeURIComponent(id)}/cancel`,
+      );
+      return connectLinkStatusResponseSchema.parse(response);
+    },
+  });
+}
 
 export function connectLinkStorageKey(id: string): string {
   return `nyxid:connect-link:${id}`;

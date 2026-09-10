@@ -1613,6 +1613,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         port: 3001,
         base_url: "http://localhost:3001".to_string(),
         frontend_url: "http://localhost:3000".to_string(),
+        oauth_return_routes: None,
         cors_allowed_origins: vec![],
         csrf_trusted_origins: vec![],
         database_url: "mongodb://ignored-for-test".to_string(),

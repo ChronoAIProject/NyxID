@@ -5,6 +5,7 @@ import { useApiKeys } from "@/hooks/use-api-keys";
 import { useKeys } from "@/hooks/use-keys";
 import { useNodes } from "@/hooks/use-nodes";
 import { useProxyOnboarding } from "@/hooks/use-proxy-onboarding";
+import { ConfiguredOAuthConnect } from "@/components/shared/configured-oauth-connect";
 import { useRightPanel } from "@/components/layout/dashboard-layout";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Button, ButtonIcon } from "@/components/ui/button";
@@ -107,6 +108,15 @@ export function DashboardPage() {
 
   return (
     <div className="flex flex-col gap-8">
+      {user && (
+        <ConfiguredOAuthConnect
+          key={user.id}
+          userId={user.id}
+          serviceSlug="api-google"
+          serviceName="Google"
+          returnPage="dashboard"
+        />
+      )}
       {/* Onboarding checklist — guides remaining steps after first service */}
       {checklistVisible && (
         <OnboardingChecklist
