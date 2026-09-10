@@ -47,7 +47,6 @@
   "loadError": "We couldn't load your connections. Please retry.",
   "channelTitle": "Connect a customer channel",
   "channelIntro": "Where customers will message your agent.",
-  "channelConversation": "Your Nyxbot conversation stays on Telegram.",
   "channelHelp": "Connect your business's customer-facing channel. Your Telegram business bot is separate from the Nyxbot guide that sent you here. Connecting a channel does not make automated replies live.",
   "telegram": "Telegram",
   "whatsapp": "WhatsApp Business",

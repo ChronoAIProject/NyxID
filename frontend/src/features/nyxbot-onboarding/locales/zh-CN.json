@@ -47,7 +47,6 @@
   "loadError": "无法加载你的连接，请重试。",
   "channelTitle": "连接客户渠道",
   "channelIntro": "客户将通过这个渠道与你的智能体对话。",
-  "channelConversation": "你与 Nyxbot 的对话仍在 Telegram 中进行。",
   "channelHelp": "连接你的业务面向客户的渠道。此处创建的 Telegram 业务机器人与发送引导链接的 Nyxbot 不同。连接渠道不代表自动回复已经上线。",
   "telegram": "Telegram",
   "whatsapp": "WhatsApp Business",

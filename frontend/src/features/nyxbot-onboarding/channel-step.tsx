@@ -144,10 +144,6 @@ export function ChannelStep({
         </>
       }
     >
-      <p className="nb-channel-conversation">
-        <BrandIcon brand="telegram" />
-        {t("channelConversation")}
-      </p>
       <fieldset
         className="nb-tiles nb-channel-tiles"
         disabled={createBot.isPending}
