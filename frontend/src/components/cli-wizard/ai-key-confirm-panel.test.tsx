@@ -1047,6 +1047,47 @@ describe("AiKeyConfirm — manage-scopes mode (issue #917 CLI --set)", () => {
     baseProps.onSuccess = vi.fn();
   });
 
+  it("keeps required send permission when a CLI scope override omits it", async () => {
+    const user = userEvent.setup();
+    const read = "https://www.googleapis.com/auth/gmail.readonly";
+    const send = "https://www.googleapis.com/auth/gmail.send";
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === "/keys/svc-1")
+        return { ...existingKey, granted_scopes: [read] };
+      if (path === "/catalog/api-twitter")
+        return {
+          ...twitterEntry,
+          default_scopes: [read, send],
+          scope_catalog: [
+            {
+              scope: send,
+              label: "Gmail (send)",
+              description: "Send email.",
+              required: true,
+            },
+          ],
+        };
+      throw new Error(`unexpected GET ${path}`);
+    });
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{ reconnect_key_id: "svc-1", scope_override: [read] }}
+      />,
+      { wrapper: createWrapper() },
+    );
+    const reauth = await screen.findByRole("button", {
+      name: /Re-authorize with these permissions/i,
+    });
+    expect(
+      screen.getByRole("button", { name: /Gmail \(send\)/ }),
+    ).toBeDisabled();
+    await user.click(reauth);
+    expect(mockOAuthFlow).toHaveBeenCalledWith(
+      expect.objectContaining({ scopeOverride: [read, send] }),
+    );
+  });
+
   it("seeds the picker from --set scope_override and hands it to OAuthFlow", async () => {
     const user = userEvent.setup();
     render(

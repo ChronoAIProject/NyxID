@@ -135,6 +135,9 @@ fn build_catalog_entry(
     if let (Some(product), Some(catalog)) = (google_product, scope_catalog.as_mut()) {
         let allowed = product.allowed_scopes();
         catalog.retain(|entry| allowed.contains(&entry.scope));
+        for entry in catalog {
+            entry.required = product.required_scopes().contains(&entry.scope.as_str());
+        }
     }
     CatalogEntry {
         service_type: svc.service_type.clone(),
