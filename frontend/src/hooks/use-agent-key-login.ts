@@ -11,25 +11,33 @@ import {
 
 export type LoginFlow = "agent-key" | "device";
 
-export async function previewAgentKey(userCode: string, flow: LoginFlow = "agent-key") {
-  return agentKeyPreviewSchema.parse(
-    { requested_profile: null, interval: 5, ...await apiClient<Record<string, unknown>>(`/auth/${flow}/preview`, {
+export async function previewAgentKey(
+  userCode: string,
+  flow: LoginFlow = "agent-key",
+) {
+  return agentKeyPreviewSchema.parse({
+    requested_profile: null,
+    interval: 5,
+    ...(await apiClient<Record<string, unknown>>(`/auth/${flow}/preview`, {
       method: "POST",
       body: { user_code: userCodeSchema.parse(userCode) },
       credentials: "omit",
       preserveSessionOn401: true,
-    }) },
-  );
+    })),
+  });
 }
 export function usePreviewAgentKeyLogin(flow: LoginFlow = "agent-key") {
-  return useMutation({ gcTime: 0, mutationFn: (code: string) => previewAgentKey(code, flow) });
+  return useMutation({
+    gcTime: 0,
+    mutationFn: (code: string) => previewAgentKey(code, flow),
+  });
 }
-export function useAgentKeyLoginOptions(flow: LoginFlow = "agent-key", mint = false) {
+export function useAgentKeyLoginOptions(flow: LoginFlow = "agent-key") {
   return useMutation({
     gcTime: 0,
     mutationFn: async (userCode: string) =>
       agentKeyOptionsSchema.parse(
-        await api.post(`/auth/${mint ? "login-code" : flow}/options`, mint ? {} : {
+        await api.post(`/auth/${flow}/options`, {
           user_code: userCodeSchema.parse(userCode),
         }),
       ),
