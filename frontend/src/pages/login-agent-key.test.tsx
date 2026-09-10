@@ -19,6 +19,8 @@ const mocks = vi.hoisted(() => ({
   preview: vi.fn(),
   logout: vi.fn(),
   auth: { signedIn: true },
+  search: {} as { user_code?: string },
+  navigate: vi.fn(),
 }));
 vi.mock("@/lib/api-client", () => ({
   api: { post: mocks.post, get: mocks.get, delete: mocks.remove },
@@ -47,7 +49,8 @@ vi.mock("@tanstack/react-router", () => ({
       {children}
     </a>
   ),
-  useNavigate: () => vi.fn(),
+  useNavigate: () => mocks.navigate,
+  useSearch: () => mocks.search,
 }));
 vi.mock("qrcode", () => ({
   default: {
@@ -99,6 +102,7 @@ beforeEach(() => {
   vi.setSystemTime(new Date("2026-01-01T00:00:00Z"));
   vi.clearAllMocks();
   mocks.auth.signedIn = true;
+  mocks.search = {};
   mocks.preview.mockResolvedValue(preview);
   mocks.post.mockImplementation(async (path: string) =>
     path.endsWith("options") ? options : { ok: true },
@@ -114,7 +118,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 function mount(element: React.ReactNode = <LoginAgentKeyPage />) {
-  render(<QueryClientProvider client={client}>{element}</QueryClientProvider>);
+  return render(<QueryClientProvider client={client}>{element}</QueryClientProvider>);
 }
 async function click(name: string) {
   await act(async () => {
@@ -131,7 +135,11 @@ async function review() {
 
 describe("Agent Key login page and hooks", () => {
   it("makes no request on mount, focus or typing; preview is anonymous and explicit", async () => {
+    mocks.search = { user_code: "abcd efgh" };
     mount();
+    expect(screen.getByLabelText("User code")).toHaveValue("ABCD-EFGH");
+    expect(screen.getByLabelText("User code")).toHaveAttribute("placeholder", "XXXX-XXXX");
+    expect(mocks.navigate).toHaveBeenCalledWith({ to: "/login/agent-key", search: {}, replace: true });
     fireEvent.focus(screen.getByLabelText("User code"));
     fireEvent.change(screen.getByLabelText("User code"), {
       target: { value: "ABCD-EFGH" },
@@ -146,13 +154,84 @@ describe("Agent Key login page and hooks", () => {
         body: { user_code: "ABCDEFGH" },
       }),
     );
+    expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
+    expect(screen.getByText(/Confirm this matches the code shown on the requesting device or terminal/)).toBeInTheDocument();
     expect(screen.getByText("home-agent")).toBeInTheDocument();
     expect(screen.getByText("203.0.113.5")).toBeInTheDocument();
   });
+  it("seeds only once, keeping edits when search changes or disappears", () => {
+    mocks.search = { user_code: "abcd-efgh" };
+    const view = mount();
+    fireEvent.change(screen.getByLabelText("User code"), { target: { value: "WXYZ-1234" } });
+    for (const search of [{}, { user_code: "5678-ABCD" }]) {
+      mocks.search = search;
+      view.rerender(<QueryClientProvider client={client}><LoginAgentKeyPage /></QueryClientProvider>);
+      expect(screen.getByLabelText("User code")).toHaveValue("WXYZ-1234");
+    }
+    expect(mocks.preview).not.toHaveBeenCalled();
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+
+  it.each(["", "short", "ABCD-EFGHI", "ABCD-EFGH!", "<script>bad</script>"])(
+    "leaves malformed link code %s empty with an explanation", (user_code) => {
+      mocks.search = { user_code };
+      mount();
+      expect(screen.getByLabelText("User code")).toHaveValue("");
+      expect(screen.getByText("The code in this link was not valid. Enter the code manually.")).toBeInTheDocument();
+      expect(mocks.navigate).toHaveBeenCalledWith({ to: "/login/agent-key", search: {}, replace: true });
+      expect(mocks.preview).not.toHaveBeenCalled();
+      expect(mocks.post).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    [11907, "That code is not valid"],
+    [11901, "This login request has expired"],
+    [11905, "This login request was already approved"],
+  ])("reports preview error %s only after Continue and permits retry", async (errorCode, message) => {
+    mocks.search = { user_code: "abcd-efgh" };
+    mocks.preview.mockRejectedValueOnce({ errorCode });
+    mount();
+    expect(mocks.preview).not.toHaveBeenCalled();
+    await click("Continue");
+    expect(screen.getByText(new RegExp(String(message)))).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("User code"), { target: { value: "WXYZ-1234" } });
+    await click("Continue");
+    expect(screen.getByText("WXYZ-1234")).toBeInTheDocument();
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+
+  it("throttles a decision for 750 ms after the explicit prefilled preview", async () => {
+    mocks.search = { user_code: "abcd-efgh" };
+    mount();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Continue" })); });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(749);
+      fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    });
+    expect(mocks.post).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1);
+      fireEvent.click(screen.getByRole("button", { name: "Reject" }));
+    });
+    expect(mocks.post).toHaveBeenCalledTimes(1);
+    expect(mocks.post).toHaveBeenCalledWith("/auth/agent-key/deny", { user_code: "ABCDEFGH" });
+  });
+
+  it("does not prefill the mint page", () => {
+    mocks.search = { user_code: "garbage" };
+    mount(<LoginAgentKeyPage mint />);
+    expect(screen.queryByLabelText("User code")).not.toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(mocks.preview).not.toHaveBeenCalled();
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+
   it("selects an existing key, confirms issuance and approves once", async () => {
     mount();
     await review();
     await click("Approve on this computer");
+    expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("radio", { name: "Shared key" }));
     await click("Review permissions");
     expect(
@@ -160,6 +239,7 @@ describe("Agent Key login page and hooks", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Allowed service")).toBeInTheDocument();
     expect(screen.getByText("10 requests/s; burst 20")).toBeInTheDocument();
+    expect(screen.getByText("ABCD-EFGH")).toBeInTheDocument();
     await click("Approve");
     expect(mocks.post).toHaveBeenCalledWith("/auth/agent-key/approve", {
       user_code: "ABCDEFGH",

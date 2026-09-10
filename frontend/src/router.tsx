@@ -20,6 +20,7 @@ import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import { parseAuthDeviceSearch } from "@/schemas/auth-device";
 
 import {
   LandingPage,
@@ -261,20 +262,21 @@ const cliPairRoute = createRoute({
 export const loginAgentKeyRoute = createRoute({
   path: "/login/agent-key",
   getParentRoute: () => rootRoute,
-  validateSearch: (): Record<string, never> => ({}),
+  validateSearch: parseAuthDeviceSearch,
   component: LoginAgentKeyPage,
 });
 
-const loginDeviceRoute = createRoute({
+export const loginDeviceRoute = createRoute({
   path: "/login/device",
   getParentRoute: () => rootRoute,
-  validateSearch: (): Record<string, never> => ({}),
+  validateSearch: parseAuthDeviceSearch,
   component: LoginDevicePage,
 });
 
-const loginCodeRoute = createRoute({
+export const loginCodeRoute = createRoute({
   path: "/login/code",
   getParentRoute: () => rootRoute,
+  // This page mints a new login code; it has no code input to prefill.
   validateSearch: (): Record<string, never> => ({}),
   component: () => <LoginAgentKeyPage mint />,
 });

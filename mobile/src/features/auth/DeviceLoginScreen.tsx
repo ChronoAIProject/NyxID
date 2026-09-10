@@ -818,6 +818,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 />
                 <Text style={styles.cautionText}>
                   {"Only approve if you started this sign-in. "}
+                  {"Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match. "}
                   <Text style={styles.cautionDanger}>
                     If anything looks unfamiliar, reject it.
                   </Text>

@@ -1,5 +1,5 @@
 import { ChevronDown, Info } from "lucide-react";
-import type { PreviewAuthDeviceResponse } from "@/schemas/auth-device";
+import { formatAuthDeviceUserCodeInput, type PreviewAuthDeviceResponse } from "@/schemas/auth-device";
 import { formatAuthDeviceRelativeTime, formatWebAuthDeviceRemaining } from "@/lib/auth-device-time";
 import { cn } from "@/lib/utils";
 
@@ -32,9 +32,11 @@ export function ApprovalCaution() {
 export function PreviewPanel({
   preview,
   remainingSeconds,
+  userCode,
 }: {
   readonly preview: PreviewAuthDeviceResponse;
   readonly remainingSeconds: number | null;
+  readonly userCode: string;
 }) {
   const expired = remainingSeconds === 0;
   const verifiedIp = preview.client_ip_attribution === "verified";
@@ -95,6 +97,12 @@ export function PreviewPanel({
       aria-label="Request details"
     >
       <div className="divide-y divide-border/30 overflow-hidden rounded-xl border border-border/50 bg-overlay/30">
+        <div data-sensitive>
+          <ApprovalDetailRow label="User code" value={formatAuthDeviceUserCodeInput(userCode)} mono />
+          <p className="px-4 pb-3 text-[12px] text-muted-foreground">
+            Confirm this matches the code shown on the requesting device or terminal. Reject if it does not match.
+          </p>
+        </div>
         {/*
           A signal whose "good" state can be produced by an attacker choosing
           what to send must never render as a positive assurance. Origin is a

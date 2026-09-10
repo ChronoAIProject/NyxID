@@ -178,6 +178,19 @@ export type AuthDevicePollWebResponse = z.infer<typeof pollWebResponseSchema>;
 export type PreviewAuthDeviceResponse = z.infer<typeof previewResponseSchema>;
 export type AuthDeviceErrorEnvelope = z.infer<typeof errorEnvelopeSchema>;
 
+export function authDeviceUserCodePlaceholder(flow: "device" | "agent-key"): string {
+  return formatAuthDeviceUserCodeInput(flow === "device" ? "2XXXXXXXX" : "XXXXXXXX");
+}
+
+export function parseAuthDeviceSearch(
+  search: Record<string, unknown>,
+): { user_code?: string } {
+  if (search.user_code === undefined) return {};
+  // Preserve invalid input for the page's error message, including non-string
+  // values decoded by the router. Validate before the lossy input formatter.
+  return { user_code: typeof search.user_code === "string" ? search.user_code : "" };
+}
+
 export function formatAuthDeviceUserCodeInput(value: string): string {
   const compact = value
     .replace(/[-\s]/g, "")

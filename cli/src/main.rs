@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod browser;
 mod cli;
+mod clipboard;
 mod commands;
 mod error_format;
 pub mod node;
@@ -343,6 +344,35 @@ mod tests {
 
         let info = Cli::parse_from(["nyxid", "info"]);
         assert!(extract_profile(&info.command).is_none());
+    }
+
+    #[test]
+    fn login_callback_conflicts_with_other_login_modes() {
+        for mode in [
+            "--password",
+            "--device",
+            "--agent-key",
+            "--code",
+            "--no-wait",
+        ] {
+            let err = match Cli::try_parse_from(["nyxid", "login", "--callback", mode]) {
+                Ok(_) => panic!("--callback must conflict with {mode}"),
+                Err(err) => err,
+            };
+            assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn login_accepts_callback_and_clipboard_flags() {
+        for flag in ["-c", "--clipboard"] {
+            let cli = Cli::parse_from(["nyxid", "login", "--callback", flag]);
+            let Commands::Login(args) = cli.command else {
+                panic!("login");
+            };
+            assert!(args.callback);
+            assert!(args.clipboard);
+        }
     }
 
     #[test]

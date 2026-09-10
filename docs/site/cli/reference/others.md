@@ -48,7 +48,9 @@ nyxid ai-setup status                        # show which tools have skills inst
 Bootstrap and tear down the locally stored session. Day-to-day login lives in [Authenticate](/docs/cli/getting-started/authenticate).
 
 ```bash
-nyxid login --base-url <BASE_URL>        # browser sign-in; auto-falls back to device-code when headless
+nyxid login --base-url <BASE_URL>        # selectable device-code v2 approval (desktop default)
+nyxid login --callback --base-url <BASE_URL> # local browser callback; full account session without code entry/review
+nyxid login -c --base-url <BASE_URL>     # --clipboard: copy the user code before browser opening
 nyxid login --device --base-url <BASE_URL>  # force RFC 8628 device-code flow (no local browser needed)
 nyxid login --agent-key --profile agent --base-url <BASE_URL> # choose/create an Agent Key in the web UI or approve by phone QR
 nyxid login --password --email <addr>    # email + password (only if EMAIL_AUTH_ENABLED)
@@ -62,7 +64,9 @@ nyxid status                             # session + instance summary
 nyxid doctor [--json]                    # local connectivity / config diagnostics
 ```
 
-`login --agent-key` authorizes only an Agent Key credential, with no account session or fallback. It conflicts with `--password` and `--device`; `--profile` and `--base-url` select its storage and backend. `whoami` and `status` report Agent Key identity, and `logout` revokes the calling login credential before clearing it locally. See [Agent Key login](/docs/cli/getting-started/authenticate#agent-key-login).
+`login --agent-key` authorizes only an Agent Key credential, with no account session or fallback. It conflicts with `--password`, `--device`, `--callback`, and `--code`; `--profile` and `--base-url` select its storage and backend. `whoami` and `status` report Agent Key identity, and `logout` revokes the calling login credential before clearing it locally. See [Agent Key login](/docs/cli/getting-started/authenticate#agent-key-login).
+
+`--clipboard` is best-effort and copies only the user code. `--output json` and `--no-wait` print the code without copying or opening a browser. `--callback` falls back to device-code login if the browser cannot open; it conflicts with `--password`, `--device`, `--agent-key`, `--code`, and `--no-wait`.
 
 ## profile
 

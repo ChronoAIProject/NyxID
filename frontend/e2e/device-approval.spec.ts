@@ -128,8 +128,11 @@ for (const grant of ["account", "agent-key"] as const) {
   }, info) => {
     const requests = await fixture(page, true);
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto("/login/device");
-    await page.getByLabel("User code").fill("2-ABCD-EFGH");
+    await page.goto("/login/device?user_code=2abcd%20efgh");
+    await expect(page.getByLabel("User code")).toHaveValue("2-ABCD-EFGH");
+    await expect(page.getByLabel("User code")).toHaveAttribute("placeholder", "2-XXXX-XXXX");
+    await expect(page).toHaveURL(/\/login\/device$/);
+    expect(requests).toEqual([]);
     await page.getByRole("button", { name: "Continue", exact: true }).click();
     await expect(
       page.getByRole("button", { name: "Full account session", exact: true }),
@@ -137,6 +140,7 @@ for (const grant of ["account", "agent-key"] as const) {
     await expect(
       page.getByRole("button", { name: "Restricted Agent Key", exact: true }),
     ).toBeVisible();
+    await expect(page.getByText("2-ABCD-EFGH", { exact: true })).toBeVisible();
     await page.waitForTimeout(800);
     if (grant === "account") {
       await page
@@ -156,6 +160,8 @@ for (const grant of ["account", "agent-key"] as const) {
         page.getByRole("heading", { name: "Confirm effective permissions" }),
       ).toBeVisible();
     }
+    await expect(page.getByText("2-ABCD-EFGH", { exact: true })).toBeVisible();
+    await expect(page.getByText(/Reject if it does not match/)).toBeVisible();
     expect(
       requests.filter((request) => request.path.includes("/approve")),
     ).toEqual([]);
