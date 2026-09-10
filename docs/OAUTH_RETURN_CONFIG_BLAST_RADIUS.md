@@ -65,12 +65,13 @@ Backend integration checks used a dedicated temporary local MongoDB instance wit
 
 | Executed check | Result | Evidence |
 | --- | --- | --- |
+| Complete backend suite with MongoDB 8 | 5,930 passed; zero skipped | Dedicated replica set with the repository CI snapshot-history setting; the timestamp diagnostic follow-up also passes its affected handler test |
 | Configuration parser/resolver | 4 passed | Page/service/global fallback, selector and URL validation, duplicate-key rejection, size limits, redacted Debug output |
 | Connect-link handlers with MongoDB | 10 passed | Separate persisted destinations, trimmed catalog slug, config changes during an attempt, canonical terminal query fields, app-policy rejection and acceptance, explicit native callbacks and no-callback requests while configuration is enabled |
 | Connect-link service with MongoDB | 32 passed | Existing ownership, lifecycle, terminal callback, native/app, credential completion and concurrency behavior |
 | Generic provider callback with MongoDB | 10 passed | Existing OAuth callback behavior, including error and connect-link settlement cases |
 | Public configuration serialization | 5 passed | Additive capability flag and existing public configuration contract |
-| Frontend unit checks | 2,977 passed; 33 focused checks passed after the shared schema change | Full frontend suite plus affected schemas, hooks, onboarding and route helpers |
+| Frontend unit checks | 2,980 passed; 29 focused checks passed after URL validation alignment | Full frontend suite plus affected schemas, hooks, onboarding and route helpers |
 | OAuth SDK service checks | 10 passed; SDK build passed | Named request JSON and destination acknowledgement, existing service/connection API behavior |
 | Configured-return Chromium tests | 14 passed | Dashboard, AI Setup, first-run onboarding, local login continuation, fallback recovery, separate attempts, storage failures, account isolation, mixed backend versions, denial and forged or mismatched results |
 | Existing login Chromium tests | 9 passed | Agent-key login, login-code and browser device-login regressions |
@@ -93,6 +94,7 @@ The central destination-persistence and app-registration claims were executed ag
 | The local POC login URL omitted callback fields | Reauthentication could lose the returned attempt ID | QR and login-page entry share the complete `/temp` path/query. Chromium reproduced the loss before the fix and preserves the destination afterward. |
 | Page-specific storage could not restore a fallback destination | Returning to another page lost the initiating attempt | Saved attempts are indexed by account and matched by returned ID before page context. The browser test completes one request and proves another context survives. |
 | Unavailable browser storage left an unresumable setup link | Leaving the page lost request correlation | Setup stays disabled after storage failure while cancellation remains available. The browser test cancels and clears the request. |
+| Frontend URL validation required lowercase schemes | A valid configured `HTTPS://` URL was rejected after creation | Zod validates the parsed HTTP(S) protocol. Unit checks reproduce the old rejection, accept the valid destination and reject executable schemes in both navigation fields. |
 
 No identified implementation finding remains open in this scope. Production enablement consists of releasing this backend with the same valid configuration on all replicas and releasing the hosted frontend continuation fix. A production-connected local Vite page cannot install either change on production.
 

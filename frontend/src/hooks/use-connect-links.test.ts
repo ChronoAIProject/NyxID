@@ -16,19 +16,22 @@ const post = vi.mocked(api.post);
 beforeEach(() => post.mockReset());
 
 describe("connect link OAuth storage", () => {
-  it("sends only a page selector and validates the resolved destination response", async () => {
+  it.each([
+    "http://127.0.0.1:3003/temp",
+    "HTTPS://app.example/onboarding",
+  ])("accepts the configured HTTP(S) destination %s", async (callbackUrl) => {
     post.mockResolvedValue({
       id: "65dd8fe8-9ee8-4c89-af1e-b283a17bcf37",
       connect_url: "https://app.example/connect/secret",
       expires_at: "2026-09-10T12:00:00Z",
-      callback_url: "http://127.0.0.1:3003/temp",
+      callback_url: callbackUrl,
     });
     await expect(
       createConnectLink({
         service_slug: "api-google",
         return_page: "local-poc",
       }),
-    ).resolves.toMatchObject({ callback_url: "http://127.0.0.1:3003/temp" });
+    ).resolves.toMatchObject({ callback_url: callbackUrl });
     expect(post).toHaveBeenCalledWith("/connect-links", {
       service_slug: "api-google",
       return_page: "local-poc",
@@ -44,6 +47,22 @@ describe("connect link OAuth storage", () => {
     ).rejects.toThrow();
     expect(post).not.toHaveBeenCalled();
   });
+
+  it.each(["connect_url", "callback_url"])(
+    "rejects an executable scheme in %s",
+    async (field) => {
+      post.mockResolvedValue({
+        id: "65dd8fe8-9ee8-4c89-af1e-b283a17bcf37",
+        connect_url: "https://app.example/connect/secret",
+        expires_at: "2026-09-10T12:00:00Z",
+        callback_url: "http://127.0.0.1:3003/temp",
+        [field]: "javascript:alert(1)",
+      });
+      await expect(
+        createConnectLink({ service_slug: "api-google", return_page: "local-poc" }),
+      ).rejects.toThrow();
+    },
+  );
 
   it("namespaces the token by link id", () => {
     expect(connectLinkStorageKey("link-123")).toBe(

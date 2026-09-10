@@ -8,16 +8,9 @@ export const createConnectLinkInputSchema = z.object({
 
 export const createConnectLinkResponseSchema = z.object({
   id: z.string().uuid(),
-  connect_url: z
-    .string()
-    .url()
-    .refine((value) => /^https?:\/\//.test(value)),
+  connect_url: z.url({ protocol: /^https?$/ }),
   expires_at: z.string().datetime({ offset: true }),
-  callback_url: z
-    .string()
-    .url()
-    .refine((value) => /^https?:\/\//.test(value))
-    .optional(),
+  callback_url: z.url({ protocol: /^https?$/ }).optional(),
 });
 
 export type CreateConnectLinkInput = z.infer<
