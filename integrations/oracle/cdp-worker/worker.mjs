@@ -77,7 +77,8 @@ const SCRIPT_VERSION = (() => {
   return `cdp+${SOURCE_SHA256.slice(0, 12)}`;
 })();
 const POLL_MS = Number(process.env.NYXID_POLL_MS || 5000);
-const STABLE_INTERVAL_MS = 8000;
+const STABLE_INTERVAL_MS = Math.max(100, Math.min(60000,
+  Number(process.env.NYXID_STABLE_INTERVAL_MS) || 8000));
 const MAX_WAIT_MS = Number(process.env.NYXID_MAX_WAIT_MS || 2 * 60 * 60 * 1000); // 2h
 // Wedge guard: if ChatGPT has clearly stopped (not generating) yet produced
 // nothing extractable after this long, fail the task fast and free the slot
@@ -1375,6 +1376,20 @@ async function pickerSnapshot(page, budget) {
   return snapshot;
 }
 
+// Clear a leftover Radix modal lock before recording pre-existing menus.
+// Persistent sidebar menus alone never trigger Escape here.
+async function clearRadixLock(page, budget) {
+  for (let escapes = 0; escapes < 3; escapes += 1) {
+    const locked = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, deadline) => {
+      if (Date.now() >= deadline) return null;
+      return getComputedStyle(body).pointerEvents === "none";
+    }, Date.now() + timeout, interactionOptions(budget, 1000)));
+    if (!locked) return;
+    await page.locator("body").press("Escape", interactionOptions(budget));
+    await budgetPause(budget, 100);
+  }
+}
+
 async function beginModelPicker(page, budget) {
   await boundedRead(budget, (timeout) => page.locator("body").evaluate((_, { id, deadline }) => {
     if (Date.now() >= deadline) return null;
@@ -1393,7 +1408,7 @@ async function clickPickerElement(page, budget, entry) {
   let acceptingHandle = true;
   try {
     handle = await boundedRead(budget, (timeout) => page.locator("body").evaluateHandle((_, { id, deadline, entry }) => {
-      if (Date.now() >= deadline) return null;
+      if (Date.now() >= deadline) return "deadline";
       return entry.trigger ? window.__nyx.modelPickerTrigger(id)
         : window.__nyx.modelPickerItem(id, entry.index, entry.text);
     }, { id: budget.picker.id, deadline: Date.now() + timeout, entry }, interactionOptions(budget, 1000)).then((value) => {
@@ -1407,7 +1422,13 @@ async function clickPickerElement(page, budget, entry) {
     }));
     interactionOptions(budget);
     const element = handle.asElement();
-    if (!element) throw Object.assign(new Error("picker_changed"), { code: "picker_changed" });
+    if (!element) {
+      // Wrap the value: a genuine missing item returns null, which is distinct
+      // from the page-side deadline marker and valid for this lookup.
+      const { value } = await boundedRead(budget, async () => ({ value: await handle.jsonValue() }));
+      if (value === "deadline") throw interactionDeadlineError();
+      throw Object.assign(new Error("picker_changed"), { code: "picker_changed" });
+    }
     await element.click(interactionOptions(budget));
   } finally {
     acceptingHandle = false;
@@ -1492,6 +1513,7 @@ async function selectModelInner(page, targets, budget, result) {
     return;
   }
   if (!before.pill || !targets.length) return;
+  await clearRadixLock(page, budget);
   await beginModelPicker(page, budget);
   await pickerLocator(page, before.pill).click(interactionOptions(budget));
   try {
@@ -1544,20 +1566,15 @@ async function ensureComposerUnobstructed(page) {
         const input = body.querySelector(composerSelector);
         const rect = input?.getBoundingClientRect();
         const hit = rect && document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
-        const open = [...body.querySelectorAll('[role="menu"], [role="listbox"]')].some((el) => {
-          const r = el.getBoundingClientRect();
-          const s = getComputedStyle(el);
-          return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none";
-        });
         const main = body.querySelector("main");
         const mainRect = main?.getBoundingClientRect();
         const neutral = mainRect && document.elementFromPoint(mainRect.x + 4, mainRect.y + 4) === main;
-        return { clear: !!hit && input.contains(hit) && getComputedStyle(body).pointerEvents !== "none", open, neutral };
+        return { clear: !!hit && input.contains(hit) && getComputedStyle(body).pointerEvents !== "none", neutral };
       }, { composerSelector: COMPOSER_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
       interactionOptions(budget);
       if (state.clear) return;
       await page.locator("body").press("Escape", interactionOptions(budget));
-      if (!state.open && state.neutral) {
+      if (!state.clear && state.neutral) {
         await page.locator("main").first().click({ position: { x: 4, y: 4 }, ...interactionOptions(budget) }).catch(() => {});
       }
       await budgetPause(budget, 100);
@@ -2916,14 +2933,14 @@ async function executeTask(runtime, task, recovering) {
       }
       const failureCount = (runtime.state.current_task?.recovery_failures || 0) + 1;
       updateTaskState(runtime.state, { recovery_failures: failureCount });
+      runtime.lastError = stableErrorCode(error);
+      log(`task ${task.task_id} browser failure ${failureCount}/${MAX_TASK_RECOVERY_FAILURES} (${runtime.lastError})`);
       const recovery = taskRecoveryDecision({
         kind: task.kind,
         phase: runtime.state.current_task?.phase,
         failureCount,
       });
       runtime.chromeAlive = false;
-      runtime.lastError = stableErrorCode(error);
-      log(`task ${task.task_id} paused for browser recovery (${runtime.lastError})`);
       if (recovery.action === "fail") {
         runtime.lastError = recovery.code;
         await settleTaskFailure(runtime, task, recovery.code);
@@ -2931,6 +2948,7 @@ async function executeTask(runtime, task, recovering) {
         return;
       }
       runtime.health.cdp += 1;
+      log(`task ${task.task_id} paused for browser recovery (${runtime.lastError})`);
       await recoverChrome(runtime, recovery.forceRelaunch);
       recovering = true;
     }

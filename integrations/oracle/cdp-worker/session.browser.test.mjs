@@ -684,7 +684,22 @@ function reasoningPage(config) {
       if (config.blockPicker) setTimeout(() => document.querySelector('#picker-blocker').remove(), 600);
       if (config.obstructAfterFill) renderMenu();
       if (config.permanentBlock) document.body.style.pointerEvents = 'none';
+      if (config.neutralRequired) {
+        const shield = document.createElement('div');
+        shield.id = 'composer-shield';
+        shield.style.cssText = 'position:fixed;z-index:20;background:white;left:' + rect.x + 'px;top:' + rect.y +
+          'px;width:' + rect.width + 'px;height:' + rect.height + 'px';
+        document.body.append(shield);
+      }
     });
+    const main = document.querySelector('main');
+    main.addEventListener('click', event => {
+      if (event.target === main && config.neutralRequired) {
+        record('neutral');
+        document.querySelector('#composer-shield')?.remove();
+      }
+    });
+    if (config.startWithOpenPicker) renderMenu();
     document.querySelector('[data-testid=send-button]').onclick = () => {
       record('send');
       const user = document.createElement('div');
@@ -722,6 +737,27 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
         if (!body.phase_detail && config.slowPickerClick) {
           await fixture.page.evaluate(() => setTimeout(() => document.querySelector('#picker-blocker').remove(), 1400));
         }
+        if (!body.phase_detail && (config.expiredLookup || config.changedLookup)) {
+          await fixture.page.evaluate(expire => {
+            const getTrigger = window.__nyx.modelPickerTrigger;
+            window.__nyx.modelPickerTrigger = id => {
+              const trigger = getTrigger(id);
+              const items = window.__nyx.modelPickerItems(id);
+              // Snapshot has already read item labels. Change only the next
+              // element lookup, without expiring the preceding snapshot.
+              if (items.length) {
+                window.__nyx.modelPickerTrigger = getTrigger;
+                if (expire) {
+                  const now = Date.now;
+                  Date.now = () => now() + 60000;
+                } else {
+                  items.at(-1).remove();
+                }
+              }
+              return trigger;
+            };
+          }, !!config.expiredLookup);
+        }
         if (!body.phase_detail && config.expiredRead) {
           await fixture.page.evaluate(() => { const now = Date.now; Date.now = () => now() + 60000; });
         }
@@ -745,9 +781,10 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
     NYXID_BASE_URL: base, NYXID_WORKER_TOKEN: token,
     NYXID_MODEL_SELECT_TIMEOUT_MS: config.selectionTimeout || (config.blockPicker ? '350' : config.neverOpens ? '1500' : '5000'),
     NYXID_MAX_TASK_RECOVERY_FAILURES: '1',
-    // Exercise the existing final extraction after one stability poll so a
-    // whole worker/result cycle fits the per-test 30s CI limit.
+    // Exercise final extraction after one short stability poll, leaving CI
+    // time for the real browser actions and intentional failure waits.
     NYXID_MAX_WAIT_MS: '1',
+    NYXID_STABLE_INTERVAL_MS: '500',
   });
   return { ...fixture, process, acknowledgements, results, task };
 }
@@ -858,7 +895,8 @@ test('reasoning: a permanent obstruction enters pre-send recovery and exhausts s
   assert.equal(fixture.acknowledgements.filter(body => body.phase === 'page_ready').length, 1);
   assert.equal((await fixture.page.evaluate(() => window.clickLog)).some(item => item.event === 'send'), false);
   assert.match(fixture.process.output(), /composer_unobstructed_failed/);
-  assert.ok(fixture.process.output().includes('paused for browser recovery (composer_unobstructed_failed)'));
+  assert.ok(fixture.process.output().includes('task reasoning-task browser failure 1/1 (composer_unobstructed_failed)'));
+  assert.ok(!fixture.process.output().includes('paused for browser recovery'));
 });
 
 
@@ -915,6 +953,8 @@ test('reasoning: expired page-side reads carry a deadline code instead of a Type
   assert.ok(!fixture.process.output().includes('TypeError'));
   assert.ok(!fixture.process.output().includes('reason=selection_failed'));
   assert.equal(fixture.results[0].response, 'ERROR: browser_recovery_exhausted');
+  assert.ok(fixture.process.output().includes('task reasoning-task browser failure 1/1 (composer_unobstructed_failed)'));
+  assert.ok(!fixture.process.output().includes('paused for browser recovery'));
 });
 
 test('reasoning: initial composer visibility may take longer than an action timeout', options, async (t) => {
@@ -933,4 +973,42 @@ test('reasoning: the guard scrolls an off-viewport composer into view', options,
   const fixture = await reasoningFixture(t, { offscreen: true, initial: 'GPT-6 Pro' });
   await assertReasoningDelivered(fixture);
   assert.equal(await fixture.page.evaluate(() => window.composerVisibleAtFill), true);
+});
+
+
+test('reasoning: a leftover Radix lock is cleared before the picker menu baseline', options, async (t) => {
+  const fixture = await reasoningFixture(t, { startWithOpenPicker: true, sidebar: true });
+  const events = await assertReasoningDelivered(fixture);
+  assert.deepEqual(events.map(item => item.event), ['escape', 'picker', 'level:Pro', 'typed', 'send']);
+  assert.ok(events.filter(item => item.event === 'escape' && !item.typed).length <= 3);
+  assert.equal(await fixture.page.locator('#sidebar').isVisible(), true);
+});
+
+test('reasoning: neutral padding dismisses an obstruction even with a sidebar listbox', options, async (t) => {
+  const fixture = await reasoningFixture(t, { neutralRequired: true, sidebar: true });
+  const events = await assertReasoningDelivered(fixture);
+  const escape = events.findIndex(item => item.event === 'escape' && item.typed);
+  const neutral = events.findIndex(item => item.event === 'neutral');
+  assert.ok(escape >= 0 && neutral > escape);
+  assert.ok(events.findIndex(item => item.event === 'send') > neutral);
+  assert.equal(events.some(item => item.event === 'sidebar:Pro'), false);
+  assert.equal(await fixture.page.locator('#sidebar').isVisible(), true);
+  assert.equal(await fixture.page.locator('#composer-shield').count(), 0);
+});
+
+test('reasoning: an expired element lookup reports interaction_deadline instead of picker_changed', options, async (t) => {
+  const fixture = await reasoningFixture(t, { expiredLookup: true });
+  await waitUntil(() => fixture.results.length > 0, 12000);
+  assert.equal(fixture.acknowledgements.find(body => body.phase_detail)?.phase_detail, 'interaction_deadline');
+  assert.match(fixture.process.output(), /model_selection reason=interaction_deadline/);
+  assert.ok(!fixture.process.output().includes('reason=selection_failed'));
+  assert.equal(fixture.results[0].response, 'ERROR: browser_recovery_exhausted');
+  assert.equal(fixture.acknowledgements.some(body => body.phase === 'sent'), false);
+});
+
+test('reasoning: a genuinely missing picker item remains distinct from an expired lookup', options, async (t) => {
+  const fixture = await reasoningFixture(t, { changedLookup: true });
+  const events = await assertReasoningDelivered(fixture, { model: '自动', detail: 'selection_failed' });
+  assert.equal(events.some(item => item.event.startsWith('level:')), false);
+  assert.ok(!fixture.process.output().includes('interaction_deadline'));
 });

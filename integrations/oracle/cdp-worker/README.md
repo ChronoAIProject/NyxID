@@ -217,9 +217,11 @@ Selection uses real pointer clicks and exact level matches before fuzzy
 matches. High cannot match Extra High. A sticky submenu can commit only a
 recognized target entry (exact, then fuzzy), or a recognized checked level;
 otherwise it is dismissed with Escape. There is no first-item fallback.
-Before opening the pill, the worker records the identity of menus already
-visible. Picker waits, item/effort-trigger selection, and cleanup consider
-only newly visible menus, so a persistent sidebar listbox is ignored. Cleanup
+Before opening the pill, the worker clears a leftover Radix body pointer-events
+lock with at most three Escape presses, then records the identity of menus
+already visible. An unrelated sidebar menu never triggers this lock cleanup.
+Picker waits, item/effort-trigger selection, and cleanup consider only newly
+visible menus, so a persistent sidebar listbox is ignored. Cleanup
 uses at most three Escape presses per call. Selected entries are revalidated
 by visible text and picker membership, then clicked through their exact
 element handle; hidden hints in an item's text content do not affect matching.
@@ -238,26 +240,31 @@ carry an abort signal. `timeout` means the shared deadline/abort was reached;
 a shorter menu wait reports `menu_not_opened`, other step failures report
 `selection_failed`, and an expired DOM read reports `interaction_deadline`.
 On deadline expiry the worker aborts, allows up to three seconds to drain
-the inner operation, then spends
-at most two seconds closing menus. No background picker loop continues into
-prompt delivery, and selection errors do not consume browser recovery attempts.
+the inner operation, then spends at most two seconds closing menus. No
+background picker loop continues into prompt delivery, and selection errors
+do not consume browser recovery attempts.
 The initial composer visibility wait allows 60 seconds for slow page loads;
 click/fill/Send actions remain bounded to five seconds. Before typing and
 before Send, a separate five-second guard scrolls the composer into view,
 checks its hit target and body pointer events, and dismisses obstructions.
-An unrelated visible menu does not fail that check. A persistent obstruction
-raises `composer_unobstructed_failed` into existing pre-send browser recovery.
+If Escape leaves it blocked, the guard can click neutral main padding even
+when a sidebar listbox is visible. An unrelated menu does not fail the check.
+A persistent obstruction raises `composer_unobstructed_failed` into existing
+pre-send browser recovery.
 After the local recovery budget is exhausted, `browser_recovery_exhausted`
-lets the server requeue the task while infrastructure retries remain.
+lets the server requeue the task while infrastructure retries remain. Logs
+report `browser failure <n>/<max> (<code>)` for each failure; `paused for
+browser recovery` appears only when another local recovery will run.
 
 Progress acknowledgements run `page_ready` → `selecting_model` →
 `ready_to_send` → `sent`. A second `selecting_model` acknowledgement records
 the finished selection's metadata-only `phase_detail`, such as `selected=Pro`,
 `unverified=Pro`, `picker_unavailable`, `level_unavailable`, `menu_not_opened`,
 `selection_failed`, `interaction_deadline`, or `timeout`. `ready_to_send`
-refreshes the lease after filling the prompt; first-turn uploads acknowledge it again before Send. Pre-send cancellation
-replies stop delivery. Acknowledgements include `page_url` for task/worker
-protocol diagnostics; `phase_detail` stays metadata-only. Conversation URLs
+refreshes the lease after filling the prompt; first-turn uploads acknowledge
+it again before Send. Pre-send cancellation replies stop delivery.
+Acknowledgements include `page_url` for task/worker protocol diagnostics;
+`phase_detail` stays metadata-only. Conversation URLs
 remain excluded from logs and audit, not from the worker protocol.
 
 Selection logs include `model_selection reason=<code>`, pill source
@@ -315,6 +322,7 @@ only. The deployed userscript is unchanged and simply omits generic files.
 | `NYXID_NPM_EXECUTABLE` | `npm` | npm executable used by pushed upgrades. |
 | `NYXID_NPM_INSTALL_TIMEOUT_MS` | `300000` | Maximum dependency-install time during a pushed upgrade. |
 | `NYXID_MAX_WAIT_MS` | `7200000` | Maximum answer wait. |
+| `NYXID_STABLE_INTERVAL_MS` | `8000` | Response stability poll interval, clamped to 100–60000 ms. Shorter intervals also shorten the completion stability window; browser fixtures use 500 ms. |
 | `NYXID_NO_OUTPUT_IDLE_MS` | `420000` | Non-generating wait before an empty answer fails. |
 
 ## Security boundaries
