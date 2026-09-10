@@ -414,9 +414,12 @@ export function LoginAgentKeyPage({ flow = "agent-key", mint = false }: { flow?:
                 ? "Login rejected"
                 : "Login request expired"}
           </h2>
-          <Button variant="outline" onClick={() => setStep("enter-code")}>
+          {!mint && <Button variant="outline" onClick={() => {
+            setTerminal(null);
+            setStep("enter-code");
+          }}>
             Enter another code
-          </Button>
+          </Button>}
           {isAuthenticated && terminal === "approved" && (
             <Button
               variant="outline"
@@ -508,7 +511,13 @@ export function LoginAgentKeyPage({ flow = "agent-key", mint = false }: { flow?:
                 </Button>
               ) : !isAuthenticated ? (
                 <Button asChild>
-                  <Link to="/login" search={{ return_to: mint ? "/login/code" : `/login/${flow}` }}>
+                  <Link to="/login" search={{
+                    return_to: mint
+                      ? "/login/code"
+                      : normalized.success
+                        ? `/login/${flow}?user_code=${encodeURIComponent(normalized.data)}`
+                        : `/login/${flow}`,
+                  }}>
                     <Monitor className="size-3" />
                     Approve on this computer
                   </Link>

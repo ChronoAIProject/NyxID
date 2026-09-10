@@ -66,7 +66,7 @@ nyxid doctor [--json]                    # local connectivity / config diagnosti
 
 `login --agent-key` authorizes only an Agent Key credential, with no account session or fallback. It conflicts with `--password`, `--device`, `--callback`, and `--code`; `--profile` and `--base-url` select its storage and backend. `whoami` and `status` report Agent Key identity, and `logout` revokes the calling login credential before clearing it locally. See [Agent Key login](/docs/cli/getting-started/authenticate#agent-key-login).
 
-`--clipboard` is best-effort and copies only the user code. `--output json` and `--no-wait` print the code without copying or opening a browser. `--callback` falls back to device-code login if the browser cannot open; it conflicts with `--password`, `--device`, `--agent-key`, `--code`, and `--no-wait`.
+`--clipboard` is best-effort and copies only the user code. It conflicts with `--password` and `--code`, and is allowed with `--callback` for its device-code fallback. `--output json` and `--no-wait` print the code without copying or opening a browser. `--callback` falls back to device-code login if the browser cannot open; it conflicts with `--password`, `--device`, `--agent-key`, `--code`, and `--no-wait`, and explicitly rejects `--output json` and `login resume`.
 
 ## profile
 

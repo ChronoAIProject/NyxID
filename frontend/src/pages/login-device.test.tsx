@@ -449,6 +449,9 @@ describe("LoginDevicePage", () => {
       ).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole("button", { name: "Enter another code" }));
       expect(screen.getByLabelText("User code")).toHaveValue("");
+      expect(screen.queryByText(expectedMessage)).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Enter another code" })).not.toBeInTheDocument();
+      expect(previewMutate).toHaveBeenCalledTimes(1);
     },
   );
 });

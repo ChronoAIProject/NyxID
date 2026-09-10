@@ -159,6 +159,22 @@ describe("Agent Key login page and hooks", () => {
     expect(screen.getByText("home-agent")).toBeInTheDocument();
     expect(screen.getByText("203.0.113.5")).toBeInTheDocument();
   });
+  it.each([
+    ["agent-key", "abcd efgh", "ABCDEFGH"],
+    ["device", "2-abcd-efgh", "2ABCDEFGH"],
+  ] as const)("carries the normalized %s code through the sign-in return link", async (flow, user_code, normalized) => {
+    mocks.auth.signedIn = false;
+    mocks.search = { user_code };
+    mount(<LoginAgentKeyPage flow={flow} />);
+    expect(mocks.preview).not.toHaveBeenCalled();
+    await click("Continue");
+    const returnTo = `/login/${flow}?user_code=${encodeURIComponent(normalized)}`;
+    expect(screen.getByRole("link", { name: "Approve on this computer" })).toHaveAttribute(
+      "href", `/login?return_to=${encodeURIComponent(returnTo)}`,
+    );
+    expect(mocks.post).not.toHaveBeenCalled();
+  });
+
   it("seeds only once, keeping edits when search changes or disappears", () => {
     mocks.search = { user_code: "abcd-efgh" };
     const view = mount();
@@ -220,7 +236,10 @@ describe("Agent Key login page and hooks", () => {
 
   it("does not prefill the mint page", () => {
     mocks.search = { user_code: "garbage" };
+    mocks.auth.signedIn = false;
     mount(<LoginAgentKeyPage mint />);
+    expect(screen.getByRole("link", { name: "Approve on this computer" })).toHaveAttribute("href", "/login?return_to=%2Flogin%2Fcode");
+    expect(screen.queryByRole("button", { name: "Enter another code" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("User code")).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(mocks.preview).not.toHaveBeenCalled();
@@ -322,7 +341,7 @@ describe("Agent Key login page and hooks", () => {
       await review();
       expect(
         screen.getByRole("link", { name: "Approve on this computer" }),
-      ).toHaveAttribute("href", "/login?return_to=%2Flogin%2Fagent-key");
+      ).toHaveAttribute("href", "/login?return_to=%2Flogin%2Fagent-key%3Fuser_code%3DABCDEFGH");
       await click("Approve from your phone");
       expect(
         screen.getByAltText("Agent Key login QR code"),
@@ -353,6 +372,15 @@ describe("Agent Key login page and hooks", () => {
     await click("Continue");
     expect(screen.getByText("Login request expired")).toBeInTheDocument();
   });
+  it("hides terminal code-entry recovery when the page is used for minting", async () => {
+    mocks.preview.mockResolvedValueOnce({ ...preview, status: "expired" });
+    const view = mount();
+    await review();
+    expect(screen.getByRole("button", { name: "Enter another code" })).toBeInTheDocument();
+    view.rerender(<QueryClientProvider client={client}><LoginAgentKeyPage mint /></QueryClientProvider>);
+    expect(screen.queryByRole("button", { name: "Enter another code" })).not.toBeInTheDocument();
+  });
+
   it("clears review context and grants when its deadline expires", async () => {
     mount();
     await review();

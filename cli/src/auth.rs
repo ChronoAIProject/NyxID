@@ -940,6 +940,11 @@ async fn handle_dead_session(auth: &AuthArgs, reason: DeadSessionReason) -> Resu
 // ---- Login ----
 
 pub async fn run_login(args: LoginArgs) -> Result<()> {
+    if args.callback
+        && (matches!(args.output, crate::cli::OutputFormat::Json) || args.command.is_some())
+    {
+        bail!("--callback cannot be combined with --output json or login resume.");
+    }
     if args.password && args.command.is_some() {
         return Err(login_exchange::LoginError::DestinationMismatch.into());
     }

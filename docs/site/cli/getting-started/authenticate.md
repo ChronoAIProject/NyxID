@@ -27,9 +27,9 @@ nyxid login --clipboard --base-url <BASE_URL>
 nyxid login --callback --base-url <BASE_URL>
 ```
 
-`--clipboard` copies only the user code before browser opening, using the system clipboard tool. Copy failures produce one stderr message and login continues normally. With `--output json` or `--no-wait`, the CLI prints the code without copying it or opening a browser; JSON mode still polls unless `--no-wait` is also set.
+`--clipboard` copies only the user code before browser opening, using the system clipboard tool. Copy failures produce one stderr message and login continues normally. `--clipboard` conflicts with `--password` and `--code`; it is allowed with `--callback` so the browser-failure device-code fallback can copy its code. With `--output json` or `--no-wait`, the CLI prints the code without copying it or opening a browser; JSON mode still polls unless `--no-wait` is also set.
 
-`--callback` uses the local browser-callback login: it opens the web console and completes with a full account session, with no code entry or requester review. If the browser cannot open, it falls back to device-code login. It conflicts with `--password`, `--device`, `--agent-key`, `--code`, and `--no-wait`. `NYXID_LOGIN_NO_DEVICE_FALLBACK=1` remains the legacy equivalent of `--callback` for plain blocking login. Explicit device, Agent Key, one-time-code, resume, and structured JSON modes keep their existing exchange behavior.
+`--callback` uses the local browser-callback login: it opens the web console and completes with a full account session, with no code entry or requester review. If the browser cannot open, it falls back to device-code login. It conflicts with `--password`, `--device`, `--agent-key`, `--code`, and `--no-wait`; combining it with `--output json` or `login resume` returns an explicit error because callback login has neither a JSON contract nor a resumable exchange. `NYXID_LOGIN_NO_DEVICE_FALLBACK=1` remains the legacy equivalent of `--callback` for plain blocking login. Without `--callback`, explicit device, Agent Key, one-time-code, resume, and structured JSON modes keep their existing exchange behavior.
 
 ### Headless / SSH / no browser
 
@@ -41,7 +41,7 @@ nyxid login --device --base-url <BASE_URL>
 
 Open the printed bare URL, enter the code, press **Continue**, and review the requesting device before choosing access and approving or rejecting. Explicit device/Agent Key login prompts to open a browser when stdin and stderr are TTYs; without a TTY it prints the challenge and polls. Plain login in CI requires an explicit mode such as `--device --no-wait`; unattended jobs should normally use a pre-issued Agent Key.
 
-The approval page's phone QR/deep link prefills both the web page (including an ordinary camera scan) and the mobile app. The web page formats the code once and immediately removes it from the URL; malformed codes leave an empty input with an explanation. Prefill makes no request or decision. Press **Continue**, confirm the echoed code matches the requesting device or terminal, and reject a mismatch. Approval always requires review and an explicit decision.
+The approval page's phone QR/deep link prefills both the web page (including an ordinary camera scan) and the mobile app. The web page formats the code once and immediately removes it from the URL; malformed codes leave an empty input with an explanation. Prefill makes no request or decision. Press **Continue**, confirm the echoed code matches the requesting device or terminal, and reject a mismatch. If you need to sign in on this computer, the return link carries the normalized code back to the approval page for the same prefill and URL-removal behavior. Approval always requires review and an explicit decision.
 
 ### Agent-driven login and resume
 
