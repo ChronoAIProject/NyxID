@@ -138,8 +138,8 @@ You have ChatGPT Pro and want to share it.
    online. This is the in-place migration path for existing named workers.
    Automatic enrollment keeps its label; use a separate profile for a new
    identity. Renaming a pool-token install (`install --force --label <new>`) leaves the
-   old label row bound to this installation; it shows as offline in
-   `worker list` until it ages out of interest.
+   old label row bound to this installation; it stays offline and is hidden
+   from `worker list` (visible with `--all`) until it ages out of interest.
 
    The installed service uses KeepAlive on macOS or `Restart=always` on Linux.
    Its token stays in a mode `0600` file. The service environment contains only
@@ -472,9 +472,17 @@ settings and restarts supervision.
 
 ## Worker presence and control
 
-`nyxid oracle worker list <pool>` shows the worker label, bundle version,
-online or last-seen status, login state, current task, Chrome state, and desired
-state. `worker show <pool> <label>` also shows the sanitized last error,
+`nyxid oracle worker list <pool>` shows the online workers (heartbeat within
+the last 90 seconds) with label, bundle version, login state, current task,
+Chrome state, and desired state. Offline workers are hidden and counted in a
+footer; pass `--all` to include them with their last-seen age. JSON output
+carries the same filter plus a `hidden_offline` count.
+
+`nyxid oracle pool list` shows each pool's `Online` worker count (heartbeat
+within the last 120 seconds, the same window `oracle status` uses) next to
+`Max tasks`, the pool's dispatch concurrency cap (`max_workers`). The two are
+unrelated: a pool can cap dispatch at 20 with a single worker online. The pool
+API responses carry this as `online_workers`. `worker show <pool> <label>` also shows the sanitized last error,
 platform, and recent command results.
 
 Managers can queue these commands for any worker; eligible members can queue

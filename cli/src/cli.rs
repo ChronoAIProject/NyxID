@@ -5216,9 +5216,12 @@ pub enum OracleWorkerCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
-    /// List worker presence for a pool
+    /// List active (online) workers in a pool
     List {
         pool: String,
+        /// Include offline workers that have not sent a heartbeat recently
+        #[arg(long)]
+        all: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
