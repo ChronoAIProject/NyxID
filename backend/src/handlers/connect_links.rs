@@ -968,7 +968,7 @@ mod tests {
         ] {
             assert!(
                 timestamp.ends_with('Z') && !timestamp.contains('+'),
-                "wire timestamps must use the Z suffix, got {timestamp}"
+                "wire timestamps must use the Z suffix"
             );
         }
     }
