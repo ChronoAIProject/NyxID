@@ -10,7 +10,10 @@ import {
   type NyxbotChannel,
 } from "@/schemas/nyxbot-onboarding";
 import { nyxbotI18n } from "@/features/nyxbot-onboarding/i18n";
-import { OnboardingNotice } from "@/features/nyxbot-onboarding/onboarding-shell";
+import {
+  OnboardingLoading,
+  OnboardingNotice,
+} from "@/features/nyxbot-onboarding/onboarding-shell";
 import { DataSourceStep } from "@/features/nyxbot-onboarding/data-source-step";
 import { SignInStep } from "@/features/nyxbot-onboarding/sign-in-step";
 import { ChannelStep } from "@/features/nyxbot-onboarding/channel-step";
@@ -44,6 +47,16 @@ function ConnectedOnboarding({
     flow.keys.isError || flow.catalog.isError || flow.authorization.isError;
   // A URL or locally remembered step never substitutes for a live authorization.
   const sourceReady = Boolean(flow.connectedKey) && !loading && !loadError;
+
+  // Resolve the destination before rendering a step. Explicit Back navigation
+  // and an in-progress Google connection keep their data-source view.
+  if (
+    loading &&
+    !loadError &&
+    view !== "source" &&
+    !flow.connectGoogle.isPending
+  )
+    return <OnboardingLoading />;
 
   if (view === "link" && flow.progress.botId && sourceReady)
     return (
@@ -143,6 +156,7 @@ function ConnectedOnboarding({
 export function NyxbotOnboardingPage() {
   const user = useAuthStore((s) => s.user);
   const authenticated = useAuthStore((s) => s.isAuthenticated);
+  const authLoading = useAuthStore((s) => s.isLoading);
   const search = nyxbotSearchSchema.parse(
     Object.fromEntries(new URLSearchParams(window.location.search)),
   );
@@ -156,7 +170,9 @@ export function NyxbotOnboardingPage() {
   if (search.channel) returnUrl.searchParams.set("channel", search.channel);
   return (
     <I18nextProvider i18n={nyxbotI18n}>
-      {authenticated && user && accountConfirmed ? (
+      {authLoading && !authenticated ? (
+        <OnboardingLoading />
+      ) : authenticated && user && accountConfirmed ? (
         <ConnectedOnboarding
           key={user.id}
           userId={user.id}

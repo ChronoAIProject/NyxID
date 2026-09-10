@@ -40,7 +40,7 @@
   display: flex;
   flex-direction: column;
 }
-/* Figma M02 (30:179) and D02 (30:940), scoped to the data-source layout. */
+/* Shared setup layout for the Figma data-source and customer-channel steps. */
 .nb-setup {
   --nb-accent: #7352d6;
   --nb-selected: #f3effb;
@@ -839,6 +839,132 @@
   font-size: 11px;
   line-height: 1.5;
   margin-top: 10px;
+}
+.nb-setup-loading {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+  color: var(--nb-muted);
+}
+.nb-setup-loading svg {
+  flex-shrink: 0;
+}
+.nb-setup .nb-channel-conversation {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 0;
+  color: #008bda;
+  font-size: 12px;
+  line-height: 18px;
+}
+.nb-channel-conversation .nb-brand-icon {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+}
+.nb-setup .nb-telegram {
+  color: #2aabee;
+  background: #fff;
+}
+.nb-setup .nb-telegram svg {
+  width: 100%;
+  height: 100%;
+}
+.nb-setup .nb-channel-tiles {
+  gap: 12px;
+  margin: 20px 0 16px;
+  padding: 0;
+  border: 0;
+}
+.nb-setup .nb-channel-tiles > .nb-tile {
+  min-height: 92px;
+  padding: 12px;
+  align-items: flex-start;
+  justify-content: flex-start;
+  gap: 4px;
+  border-radius: 6px;
+  text-align: left;
+}
+.nb-setup .nb-channel-tiles .nb-brand-icon {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+}
+.nb-setup .nb-channel-tiles strong {
+  font-size: 12px;
+  line-height: 18px;
+}
+.nb-setup .nb-channel-tiles .nb-tile > span:last-child {
+  line-height: 16px;
+}
+.nb-setup .nb-channel-tiles > div.nb-tile {
+  flex-direction: row;
+  gap: 8px;
+}
+.nb-setup .nb-channel-tiles > div.nb-tile .nb-brand-icon {
+  width: 20px;
+  height: 20px;
+}
+.nb-setup .nb-channel-tiles .nb-instagram {
+  border-radius: 6px;
+}
+.nb-setup .nb-channel-tiles .nb-instagram svg {
+  width: 16px;
+  height: 16px;
+}
+.nb-channel-unavailable-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.nb-channel-unavailable-copy span {
+  color: var(--nb-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+.nb-setup .nb-instructions {
+  margin: 16px 0 20px;
+  padding-left: 18px;
+  gap: 8px;
+  color: var(--nb-text);
+  line-height: 18px;
+}
+.nb-setup .nb-instructions li {
+  padding-left: 8px;
+}
+.nb-setup .nb-instructions li::marker {
+  color: var(--nb-muted);
+}
+.nb-setup .nb-instructions a {
+  font-weight: 400;
+}
+.nb-setup .nb-instructions a:hover {
+  text-decoration: underline;
+}
+.nb-channel-form label {
+  color: var(--nb-muted);
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+}
+.nyxbot-onboarding.nb-setup .nb-token-field input {
+  border-radius: 6px;
+  box-shadow: none;
+}
+.nb-channel-token-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin: 20px 0 0;
+  color: var(--nb-muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+.nb-channel-token-note svg {
+  flex-shrink: 0;
 }
 .nb-notice {
   font-size: 12px;

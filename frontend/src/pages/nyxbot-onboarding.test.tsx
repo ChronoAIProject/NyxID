@@ -28,6 +28,7 @@ const { get, post, redirect, auth, telegram, authorizer } = vi.hoisted(() => ({
   auth: {
     user: { id: "owner", display_name: "Avery", email: "avery@example.com" },
     isAuthenticated: true,
+    isLoading: false,
   },
 }));
 vi.mock("@/lib/nyxbot-aevatar-auth", () => ({
@@ -117,6 +118,7 @@ beforeEach(async () => {
     "/onboarding?step=source&channel=telegram",
   );
   auth.isAuthenticated = true;
+  auth.isLoading = false;
   keys = [googleKey];
   catalogResponse = catalog;
   publicConfig = {
@@ -168,10 +170,78 @@ afterEach(() => {
 });
 
 async function toChannel() {
-  await screen.findByRole("heading", { name: "Set up channel" });
+  await screen.findByRole("heading", { name: "Connect a customer channel" });
 }
 
 describe("Nyxbot onboarding", () => {
+  it.each([true, false])(
+    "resolves a restored session before showing the account step (authenticated: %s)",
+    async (authenticated) => {
+      auth.isAuthenticated = false;
+      auth.isLoading = true;
+      const page = mount();
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Checking your account and connected services.",
+      );
+      expect(
+        screen.queryByRole("heading", { name: "Sign in to NyxID" }),
+      ).not.toBeInTheDocument();
+      expect(get).not.toHaveBeenCalledWith("/keys");
+      auth.isAuthenticated = authenticated;
+      auth.isLoading = false;
+      page.rerender(
+        <QueryClientProvider client={client}>
+          <NyxbotOnboardingPage />
+        </QueryClientProvider>,
+      );
+      await screen.findByRole("heading", {
+        name: authenticated ? "Connect a customer channel" : "Sign in to NyxID",
+      });
+    },
+  );
+  it.each(["/keys", "/catalog/api-google"])(
+    "does not render a provisional step while %s is loading",
+    async (path) => {
+      const previousGet = get.getMockImplementation()!;
+      let resolveRequest: (() => void) | undefined;
+      get.mockImplementation((requested: string) =>
+        requested === path
+          ? new Promise((resolve) => {
+              resolveRequest = () => resolve(previousGet(requested));
+            })
+          : previousGet(requested),
+      );
+      mount();
+      await waitFor(() => expect(resolveRequest).toBeTypeOf("function"));
+      expect(screen.getByRole("status")).toHaveTextContent(
+        "Checking your account and connected services.",
+      );
+      expect(
+        screen.queryByRole("heading", { name: "Connect a data source" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("heading", { name: "Connect a customer channel" }),
+      ).not.toBeInTheDocument();
+      expect(
+        screen.queryByRole("button", { name: "Connect Google" }),
+      ).not.toBeInTheDocument();
+      await act(async () => resolveRequest?.());
+      await toChannel();
+      expect(screen.getByText("Account").closest("li")).toHaveAttribute(
+        "data-state",
+        "complete",
+      );
+      expect(screen.getByText("Data source").closest("li")).toHaveAttribute(
+        "data-state",
+        "complete",
+      );
+      expect(screen.getByText("Channel").closest("li")).toHaveAttribute(
+        "aria-current",
+        "step",
+      );
+      expect(post).not.toHaveBeenCalled();
+    },
+  );
   it.each([
     "/onboarding?step=source",
     "/onboarding?step=source&provider_status=success",
@@ -206,13 +276,16 @@ describe("Nyxbot onboarding", () => {
     mount();
     await waitFor(() => expect(resolveAuthorization).toBeTypeOf("function"));
     expect(
-      screen.getByRole("heading", { name: "Connect a data source" }),
-    ).toBeVisible();
+      screen.queryByRole("heading", { name: "Connect a data source" }),
+    ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Connect Google" }),
-    ).toBeDisabled();
+      screen.queryByRole("button", { name: "Connect Google" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Checking your account and connected services.",
+    );
     expect(
-      screen.queryByRole("heading", { name: "Set up channel" }),
+      screen.queryByRole("heading", { name: "Connect a customer channel" }),
     ).not.toBeInTheDocument();
     await act(async () => resolveAuthorization?.(googleKey));
     await toChannel();
@@ -246,7 +319,7 @@ describe("Nyxbot onboarding", () => {
     );
     expect(screen.getByText("Signed in to NyxID")).toBeVisible();
     expect(
-      screen.queryByRole("heading", { name: "Set up channel" }),
+      screen.queryByRole("heading", { name: "Connect a customer channel" }),
     ).not.toBeInTheDocument();
     expect(post).not.toHaveBeenCalled();
   });
@@ -320,7 +393,7 @@ describe("Nyxbot onboarding", () => {
     });
     expect(screen.getByText("Google Workspace connected")).toBeVisible();
     expect(
-      screen.queryByRole("heading", { name: "Set up channel" }),
+      screen.queryByRole("heading", { name: "Connect a customer channel" }),
     ).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     await screen.findByRole("heading", { name: "Sign in to NyxID" });
@@ -427,7 +500,7 @@ describe("Nyxbot onboarding", () => {
     expect(screen.getByRole("radio", { name: /Telegram/ })).toBeChecked();
     const submit = screen.getByRole("button", { name: "Connect channel" });
     expect(submit).toBeDisabled();
-    const token = screen.getByLabelText("Bot token", { exact: true });
+    const token = screen.getByLabelText("Customer bot token", { exact: true });
     expect(token).toHaveAttribute("type", "password");
     await userEvent.type(token, `  ${telegramToken}  `);
     await userEvent.click(submit);
@@ -507,7 +580,7 @@ describe("Nyxbot onboarding", () => {
     );
     mount();
     await toChannel();
-    const token = screen.getByLabelText("Bot token", { exact: true });
+    const token = screen.getByLabelText("Customer bot token", { exact: true });
     const submit = screen.getByRole("button", { name: "Connect channel" });
     await userEvent.type(token, telegramToken);
     await userEvent.click(submit);
@@ -516,7 +589,7 @@ describe("Nyxbot onboarding", () => {
     expect(token).toBeDisabled();
     expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
     expect(
-      screen.getByRole("heading", { name: "Set up channel" }),
+      screen.getByRole("heading", { name: "Connect a customer channel" }),
     ).toBeVisible();
     await userEvent.click(submit);
     await act(async () => {
@@ -534,7 +607,7 @@ describe("Nyxbot onboarding", () => {
     mount();
     await toChannel();
     await userEvent.type(
-      screen.getByLabelText("Bot token", { exact: true }),
+      screen.getByLabelText("Customer bot token", { exact: true }),
       telegramToken,
     );
     const submit = screen.getByRole("button", { name: "Connect channel" });
@@ -563,22 +636,22 @@ describe("Nyxbot onboarding", () => {
     expect(screen.getByRole("radio", { name: /WhatsApp/ })).not.toBeChecked();
     await userEvent.click(screen.getByRole("radio", { name: /Telegram/ }));
     await userEvent.type(
-      screen.getByLabelText("Bot token", { exact: true }),
+      screen.getByLabelText("Customer bot token", { exact: true }),
       "unsent-token",
     );
     await userEvent.click(screen.getByRole("radio", { name: /WhatsApp/ }));
     expect(screen.getByRole("radio", { name: /Telegram/ })).toBeChecked();
     expect(screen.getByRole("radio", { name: /WhatsApp/ })).not.toBeChecked();
-    expect(screen.getByLabelText("Bot token", { exact: true })).toHaveValue(
-      "unsent-token",
-    );
+    expect(
+      screen.getByLabelText("Customer bot token", { exact: true }),
+    ).toHaveValue("unsent-token");
   });
   it("preserves Google authorization when token verification fails and redacts provider errors", async () => {
     post.mockRejectedValueOnce(new Error(`Bad token: ${telegramToken}`));
     mount();
     await toChannel();
     await userEvent.type(
-      screen.getByLabelText("Bot token", { exact: true }),
+      screen.getByLabelText("Customer bot token", { exact: true }),
       telegramToken,
     );
     await userEvent.click(
@@ -592,7 +665,7 @@ describe("Nyxbot onboarding", () => {
     ).not.toBeInTheDocument();
     expect(post).toHaveBeenCalledTimes(1);
     expect(
-      screen.getByRole("heading", { name: "Set up channel" }),
+      screen.getByRole("heading", { name: "Connect a customer channel" }),
     ).toBeVisible();
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     await screen.findByText("Google Workspace connected");
@@ -602,7 +675,7 @@ describe("Nyxbot onboarding", () => {
     mount();
     await toChannel();
     await userEvent.type(
-      screen.getByLabelText("Bot token", { exact: true }),
+      screen.getByLabelText("Customer bot token", { exact: true }),
       telegramToken,
     );
     await userEvent.click(
@@ -613,7 +686,7 @@ describe("Nyxbot onboarding", () => {
     );
     expect(post).not.toHaveBeenCalled();
     expect(
-      screen.getByRole("heading", { name: "Set up channel" }),
+      screen.getByRole("heading", { name: "Connect a customer channel" }),
     ).toBeVisible();
     expect(
       sessionStorage.getItem("nyxbot-onboarding:owner") ?? "",
@@ -633,7 +706,7 @@ describe("Nyxbot onboarding", () => {
     mount();
     await toChannel();
     await userEvent.type(
-      screen.getByLabelText("Bot token", { exact: true }),
+      screen.getByLabelText("Customer bot token", { exact: true }),
       telegramToken,
     );
     await userEvent.click(
@@ -686,7 +759,9 @@ describe("Nyxbot onboarding", () => {
         "/channel-bots/managed-onboarding/whatsapp",
       );
       await userEvent.click(screen.getByRole("radio", { name: /Telegram/ }));
-      expect(screen.getByLabelText("Bot token", { exact: true })).toBeVisible();
+      expect(
+        screen.getByLabelText("Customer bot token", { exact: true }),
+      ).toBeVisible();
       expect(post).not.toHaveBeenCalled();
     },
   );
@@ -704,7 +779,7 @@ describe("Nyxbot onboarding", () => {
         screen.queryByText("Google Workspace connected"),
       ).not.toBeInTheDocument();
       expect(
-        screen.queryByRole("heading", { name: "Set up channel" }),
+        screen.queryByRole("heading", { name: "Connect a customer channel" }),
       ).not.toBeInTheDocument();
       await userEvent.click(button);
       await waitFor(() => expect(redirect).toHaveBeenCalled());
@@ -738,7 +813,9 @@ describe("Nyxbot onboarding", () => {
       ] as unknown as typeof GOOGLE_WORKSPACE_SCOPES,
     };
     mount();
-    const button = screen.getByRole("button", { name: "Connect Google" });
+    const button = await screen.findByRole("button", {
+      name: "Connect Google",
+    });
     await waitFor(() => expect(button).toBeEnabled());
     expect(post).not.toHaveBeenCalled();
     await userEvent.click(button);
@@ -780,7 +857,9 @@ describe("Nyxbot onboarding", () => {
       return previousGet(path);
     });
     mount();
-    const button = screen.getByRole("button", { name: "Connect Google" });
+    const button = await screen.findByRole("button", {
+      name: "Connect Google",
+    });
     await waitFor(() => expect(button).toBeEnabled());
     await userEvent.click(button);
     await waitFor(() => expect(rejectInitiation).toBeTypeOf("function"));
@@ -833,17 +912,21 @@ describe("Nyxbot onboarding", () => {
     expect(get).toHaveBeenCalledWith("/channel-bots/business-bot");
     expect(post).not.toHaveBeenCalled();
   });
-  it("opens contextual help and switches the feature's language", async () => {
+  it("updates channel content and step navigation with the feature's language", async () => {
     mount();
     await toChannel();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Why this step?" }),
-    );
-    await screen.findByText(/Connect your business's customer-facing channel/);
-    fireEvent.change(screen.getByLabelText("Language"), {
-      target: { value: "zh-CN" },
+    await act(async () => {
+      await nyxbotI18n.changeLanguage("zh-CN");
     });
-    await screen.findByRole("heading", { name: "设置渠道" });
+    await screen.findByRole("heading", { name: "连接客户渠道" });
+    expect(screen.getByText("渠道").closest("li")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
+    expect(
+      screen.getByLabelText("客户机器人 token", { exact: true }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "连接渠道" })).toBeDisabled();
   });
 
   it("lets the owner recover when a previously registered bot was deleted", async () => {

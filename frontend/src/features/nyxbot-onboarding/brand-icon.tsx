@@ -65,7 +65,7 @@ export function BrandIcon({ brand }: { readonly brand: string }) {
   return (
     <ServiceIcon
       slug="api-facebook"
-      size="lg"
+      size="sm"
       className={`nb-brand-icon nb-${brand}`}
     />
   );

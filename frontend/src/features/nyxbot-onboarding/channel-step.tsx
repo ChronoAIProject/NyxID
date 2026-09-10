@@ -1,6 +1,12 @@
 import { useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Eye, EyeOff, ExternalLink } from "lucide-react";
+import {
+  ArrowLeft,
+  Eye,
+  EyeOff,
+  ExternalLink,
+  LockKeyhole,
+} from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -25,7 +31,6 @@ import {
   type NyxbotChannelRegistration,
 } from "@/lib/nyxbot-channels";
 import {
-  BackButton,
   OnboardingNotice,
   OnboardingShell,
   StepHelp,
@@ -99,9 +104,20 @@ export function ChannelStep({
   return (
     <OnboardingShell
       title={t("channelTitle")}
+      subtitle={t("channelIntro")}
       step={3}
+      variant="setup"
       actions={
         <>
+          <Button
+            type="button"
+            className="nb-secondary"
+            onClick={onBack}
+            disabled={createBot.isPending}
+          >
+            <ArrowLeft size={18} aria-hidden="true" />
+            {t("back")}
+          </Button>
           {channel === "whatsapp" ? (
             <Button
               type="button"
@@ -125,12 +141,12 @@ export function ChannelStep({
               {t("connectChannel")}
             </Button>
           )}
-          <BackButton onClick={onBack} disabled={createBot.isPending} />
         </>
       }
     >
-      <p className="nb-intro">
-        {t("channelIntro")} <StepHelp>{t("channelHelp")}</StepHelp>
+      <p className="nb-channel-conversation">
+        <BrandIcon brand="telegram" />
+        {t("channelConversation")}
       </p>
       <fieldset
         className="nb-tiles nb-channel-tiles"
@@ -185,8 +201,10 @@ export function ChannelStep({
             key={option.id}
           >
             <BrandIcon brand={option.id} />
-            <strong>{option.name}</strong>
-            <span>{t("comingSoon")}</span>
+            <div className="nb-channel-unavailable-copy">
+              <strong>{option.name}</strong>
+              <span>{t("comingSoon")}</span>
+            </div>
           </div>
         ))}
       </fieldset>
@@ -199,7 +217,7 @@ export function ChannelStep({
                 target="_blank"
                 rel="noopener noreferrer"
               >
-                {t("telegramOpen")} <ExternalLink size={12} />
+                {t("telegramOpen")}
               </a>{" "}
               {t("telegramCommand")}
             </li>
@@ -207,7 +225,11 @@ export function ChannelStep({
             <li>{t("telegramPaste")}</li>
           </ol>
           <Form {...form}>
-            <form id="nyxbot-telegram" onSubmit={form.handleSubmit(submit)}>
+            <form
+              id="nyxbot-telegram"
+              className="nb-channel-form"
+              onSubmit={form.handleSubmit(submit)}
+            >
               <FormField
                 control={form.control}
                 name="bot_token"
@@ -253,7 +275,10 @@ export function ChannelStep({
               </a>
             </p>
           )}
-          <p className="nb-small">{t("tokenNote")}</p>
+          <p className="nb-channel-token-note">
+            <LockKeyhole size={16} aria-hidden="true" />
+            {t("tokenNote")}
+          </p>
         </>
       )}
       {channel === "whatsapp" && (

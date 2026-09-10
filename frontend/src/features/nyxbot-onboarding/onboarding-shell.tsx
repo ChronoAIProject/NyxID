@@ -1,5 +1,5 @@
 import { useEffect, useRef, type ReactNode } from "react";
-import { Check, CircleHelp, Moon, Sun } from "lucide-react";
+import { Check, CircleHelp, LoaderCircle, Moon, Sun } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import {
@@ -63,7 +63,7 @@ export function OnboardingShell({
 }: {
   readonly title: string;
   readonly subtitle?: string;
-  readonly step: 1 | 2 | 3;
+  readonly step: 1 | 2 | 3 | null;
   readonly children: ReactNode;
   readonly actions: ReactNode;
   readonly variant?: "compact" | "setup";
@@ -104,36 +104,38 @@ export function OnboardingShell({
           </div>
         </header>
         <div className="nb-setup-shell">
-          <nav className="nb-setup-steps" aria-label={t("title")}>
-            <ol>
-              {steps.map((label, index) => (
-                <li
-                  key={label}
-                  data-state={
-                    index + 1 < step
-                      ? "complete"
-                      : index + 1 === step
-                        ? "current"
-                        : "pending"
-                  }
-                  aria-current={index + 1 === step ? "step" : undefined}
-                >
-                  <span className="nb-setup-step-number" aria-hidden="true">
-                    {index + 1 < step ? <Check size={12} /> : index + 1}
-                  </span>
-                  <span>{label}</span>
-                </li>
-              ))}
-            </ol>
-          </nav>
-          <main className="nb-setup-content">
+          {step !== null && (
+            <nav className="nb-setup-steps" aria-label={t("title")}>
+              <ol>
+                {steps.map((label, index) => (
+                  <li
+                    key={label}
+                    data-state={
+                      index + 1 < step
+                        ? "complete"
+                        : index + 1 === step
+                          ? "current"
+                          : "pending"
+                    }
+                    aria-current={index + 1 === step ? "step" : undefined}
+                  >
+                    <span className="nb-setup-step-number" aria-hidden="true">
+                      {index + 1 < step ? <Check size={12} /> : index + 1}
+                    </span>
+                    <span>{label}</span>
+                  </li>
+                ))}
+              </ol>
+            </nav>
+          )}
+          <main className="nb-setup-content" aria-busy={step === null}>
             <h1 ref={heading} tabIndex={-1}>
               {title}
             </h1>
             {subtitle && <p className="nb-setup-subtitle">{subtitle}</p>}
             {children}
           </main>
-          <footer className="nb-setup-footer">{actions}</footer>
+          {actions && <footer className="nb-setup-footer">{actions}</footer>}
         </div>
       </div>
     );
@@ -168,21 +170,44 @@ export function OnboardingShell({
             {title}
           </h1>
           <p>{subtitle ?? t("step", { step })}</p>
-          <div
-            className="nb-progress"
-            role="progressbar"
-            aria-label={t("title")}
-            aria-valuemin={0}
-            aria-valuemax={3}
-            aria-valuenow={step}
-          >
-            <span style={{ width: `${(step / 3) * 100}%` }} />
-          </div>
+          {step !== null && (
+            <div
+              className="nb-progress"
+              role="progressbar"
+              aria-label={t("title")}
+              aria-valuemin={0}
+              aria-valuemax={3}
+              aria-valuenow={step}
+            >
+              <span style={{ width: `${(step / 3) * 100}%` }} />
+            </div>
+          )}
         </header>
         <main className="nb-content">{children}</main>
         <footer className="nb-footer">{actions}</footer>
       </div>
     </div>
+  );
+}
+
+export function OnboardingLoading() {
+  const { t } = useTranslation();
+  return (
+    <OnboardingShell
+      title={t("loading")}
+      step={null}
+      variant="setup"
+      actions={null}
+    >
+      <div className="nb-setup-loading" role="status">
+        <LoaderCircle
+          className="animate-spin motion-reduce:animate-none"
+          size={20}
+          aria-hidden="true"
+        />
+        <p>{t("checkingSetup")}</p>
+      </div>
+    </OnboardingShell>
   );
 }
 
