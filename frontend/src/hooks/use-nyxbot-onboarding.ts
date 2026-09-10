@@ -62,7 +62,7 @@ export function useNyxbotOnboarding(
         }));
       updateProgress({ googleKeyId: key.id });
       const params = new URLSearchParams();
-      params.set("step", "source");
+      params.set("step", "channel");
       if (progress.channel) params.set("channel", progress.channel);
       const result = await initiateOAuth.mutateAsync({
         providerId: entry.provider_config_id,

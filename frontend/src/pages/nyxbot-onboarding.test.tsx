@@ -1,5 +1,12 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  createMemoryHistory,
+  createRootRoute,
+  createRoute,
+  createRouter,
+  RouterProvider,
+} from "@tanstack/react-router";
+import {
   act,
   fireEvent,
   render,
@@ -11,7 +18,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NyxbotOnboardingPage } from "./nyxbot-onboarding";
 import { nyxbotI18n } from "@/features/nyxbot-onboarding/i18n";
-import { GOOGLE_WORKSPACE_SCOPES } from "@/schemas/nyxbot-onboarding";
+import {
+  GOOGLE_WORKSPACE_SCOPES,
+  nyxbotSearchSchema,
+} from "@/schemas/nyxbot-onboarding";
 import { ApiError } from "@/lib/api-client";
 import { AevatarAuthError } from "@/lib/nyxbot-aevatar-auth";
 import {
@@ -88,15 +98,36 @@ let keys: object[];
 let catalogResponse: typeof catalog;
 let publicConfig: { social_providers: string[]; email_auth_enabled: boolean };
 let client: QueryClient;
-function mount() {
+function makeRouter() {
+  const root = createRootRoute();
+  const onboarding = createRoute({
+    getParentRoute: () => root,
+    path: "/onboarding",
+    validateSearch: (search) => nyxbotSearchSchema.parse(search),
+    component: NyxbotOnboardingPage,
+  });
+  return createRouter({
+    routeTree: root.addChildren([onboarding]),
+    history: createMemoryHistory({
+      initialEntries: [window.location.pathname + window.location.search],
+    }),
+    defaultPendingMinMs: 0,
+  });
+}
+let router: ReturnType<typeof makeRouter>;
+async function mount() {
   client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
-  return render(
+  router = makeRouter();
+  await router.load();
+  const page = render(
     <QueryClientProvider client={client}>
-      <NyxbotOnboardingPage />
+      <RouterProvider router={router} />
     </QueryClientProvider>,
   );
+  await waitFor(() => expect(router.state.status).toBe("idle"));
+  return page;
 }
 
 beforeEach(async () => {
@@ -115,7 +146,7 @@ beforeEach(async () => {
   window.history.replaceState(
     null,
     "",
-    "/onboarding?step=source&channel=telegram",
+    "/onboarding?step=channel&channel=telegram",
   );
   auth.isAuthenticated = true;
   auth.isLoading = false;
@@ -165,6 +196,7 @@ beforeEach(async () => {
 });
 afterEach(() => {
   cleanup();
+  router?.history.destroy();
   client?.clear();
   vi.unstubAllGlobals();
 });
@@ -174,12 +206,175 @@ async function toChannel() {
 }
 
 describe("Nyxbot onboarding", () => {
+  it.each([
+    "/onboarding?channel=telegram",
+    "/onboarding?step=unknown&channel=telegram",
+  ])(
+    "normalizes %s to the account URL without dropping the referral",
+    async (path) => {
+      window.history.replaceState(null, "", path);
+      await mount();
+      await screen.findByRole("heading", { name: "Sign in to NyxID" });
+      expect(router.state.location.search).toEqual({
+        step: "account",
+        channel: "telegram",
+      });
+      expect(router.history.length).toBe(1);
+      expect(get).not.toHaveBeenCalledWith("/keys");
+    },
+  );
+  it.each([
+    ["account", "Sign in to NyxID"],
+    ["source", "Connect a data source"],
+    ["channel", "Connect a customer channel"],
+    ["link", "Almost there"],
+  ] as const)(
+    "opens and reloads the distinct %s URL",
+    async (step, heading) => {
+      window.history.replaceState(
+        null,
+        "",
+        `/onboarding?step=${step}&channel=telegram`,
+      );
+      sessionStorage.setItem(
+        "nyxbot-onboarding:owner",
+        JSON.stringify({
+          botId: "business-bot",
+          registrationId: "aevatar-registration",
+          channel: "telegram",
+        }),
+      );
+      const first = await mount();
+      await screen.findByRole("heading", { name: heading });
+      expect(router.state.location.search.step).toBe(step);
+      first.unmount();
+      client.clear();
+      router.history.destroy();
+      await mount();
+      await screen.findByRole("heading", { name: heading });
+      expect(router.state.location.search.step).toBe(step);
+      expect(post).not.toHaveBeenCalled();
+    },
+  );
+  it("keeps browser Back/Forward in sync with the visible step and grants", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/onboarding?step=source&channel=telegram",
+    );
+    await mount();
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Continue", exact: true }),
+    );
+    await toChannel();
+    expect(router.state.location.search).toEqual({
+      step: "channel",
+      channel: "telegram",
+    });
+    await act(async () => router.history.back());
+    await screen.findByRole("heading", { name: "Connect a data source" });
+    expect(router.state.location.search.step).toBe("source");
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ["keys"] });
+    });
+    expect(
+      screen.getByRole("heading", { name: "Connect a data source" }),
+    ).toBeVisible();
+    await act(async () => router.history.forward());
+    await toChannel();
+    expect(router.state.location.search.step).toBe("channel");
+    await userEvent.click(screen.getByRole("button", { name: "Back" }));
+    await screen.findByRole("heading", { name: "Connect a data source" });
+    expect(router.state.location.search.step).toBe("source");
+    expect(post).not.toHaveBeenCalled();
+  });
+  it.each(["source", "channel", "link"])(
+    "guards an unauthenticated %s URL",
+    async (step) => {
+      auth.isAuthenticated = false;
+      window.history.replaceState(
+        null,
+        "",
+        `/onboarding?step=${step}&channel=telegram`,
+      );
+      await mount();
+      await screen.findByRole("heading", { name: "Sign in to NyxID" });
+      expect(router.state.location.search).toEqual({
+        step: "account",
+        channel: "telegram",
+      });
+      expect(router.history.length).toBe(1);
+      expect(get).not.toHaveBeenCalledWith("/keys");
+      expect(post).not.toHaveBeenCalled();
+    },
+  );
+  it.each(["channel", "link"])(
+    "replaces %s with source when Workspace grants are missing",
+    async (step) => {
+      keys = [];
+      window.history.replaceState(
+        null,
+        "",
+        `/onboarding?step=${step}&channel=telegram`,
+      );
+      sessionStorage.setItem(
+        "nyxbot-onboarding:owner",
+        JSON.stringify({ botId: "business-bot" }),
+      );
+      await mount();
+      await screen.findByRole("heading", { name: "Connect a data source" });
+      expect(router.state.location.search.step).toBe("source");
+      expect(router.history.length).toBe(1);
+      expect(get).not.toHaveBeenCalledWith("/channel-bots/business-bot");
+      expect(post).not.toHaveBeenCalled();
+    },
+  );
+  it("replaces a link URL with channel when no registered bot exists", async () => {
+    window.history.replaceState(
+      null,
+      "",
+      "/onboarding?step=link&botId=forged&completed=true",
+    );
+    await mount();
+    await toChannel();
+    expect(router.state.location.search).toEqual({ step: "channel" });
+    expect(router.history.length).toBe(1);
+    expect(get).not.toHaveBeenCalledWith("/channel-bots/forged");
+    expect(post).not.toHaveBeenCalled();
+  });
+  it("returns from link to channel and browser Back restores link without another registration", async () => {
+    window.history.replaceState(null, "", "/onboarding?step=link");
+    sessionStorage.setItem(
+      "nyxbot-onboarding:owner",
+      JSON.stringify({
+        botId: "business-bot",
+        registrationId: "aevatar-registration",
+      }),
+    );
+    await mount();
+    await screen.findByText(/Your channel is saved/);
+    expect(screen.getByRole("progressbar")).toHaveAttribute(
+      "aria-valuenow",
+      "4",
+    );
+    expect(screen.getByRole("progressbar")).toHaveAttribute(
+      "aria-valuemax",
+      "4",
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Back" }));
+    await toChannel();
+    expect(router.state.location.search.step).toBe("channel");
+    await act(async () => router.history.back());
+    await screen.findByRole("heading", { name: "Almost there" });
+    expect(router.state.location.search.step).toBe("link");
+    expect(post).not.toHaveBeenCalled();
+  });
   it.each([true, false])(
     "resolves a restored session before showing the account step (authenticated: %s)",
     async (authenticated) => {
       auth.isAuthenticated = false;
       auth.isLoading = true;
-      const page = mount();
+      const page = await mount();
       expect(screen.getByRole("status")).toHaveTextContent(
         "Checking your account and connected services.",
       );
@@ -191,7 +386,7 @@ describe("Nyxbot onboarding", () => {
       auth.isLoading = false;
       page.rerender(
         <QueryClientProvider client={client}>
-          <NyxbotOnboardingPage />
+          <RouterProvider key={String(authenticated)} router={router} />
         </QueryClientProvider>,
       );
       await screen.findByRole("heading", {
@@ -211,7 +406,7 @@ describe("Nyxbot onboarding", () => {
             })
           : previousGet(requested),
       );
-      mount();
+      await mount();
       await waitFor(() => expect(resolveRequest).toBeTypeOf("function"));
       expect(screen.getByRole("status")).toHaveTextContent(
         "Checking your account and connected services.",
@@ -243,15 +438,17 @@ describe("Nyxbot onboarding", () => {
     },
   );
   it.each([
-    "/onboarding?step=source",
+    "/onboarding?step=channel",
+    "/onboarding?step=channel&provider_status=success",
     "/onboarding?step=source&provider_status=success",
     "/onboarding?provider_status=success",
   ])(
     "automatically advances from %s when Drive and Calendar are already authorized",
     async (path) => {
       window.history.replaceState(null, "", path);
-      mount();
+      await mount();
       await toChannel();
+      expect(router.state.location.search).toEqual({ step: "channel" });
       expect(
         screen.queryByRole("heading", { name: "Connect a data source" }),
       ).not.toBeInTheDocument();
@@ -273,7 +470,7 @@ describe("Nyxbot onboarding", () => {
           })
         : previousGet(path),
     );
-    mount();
+    await mount();
     await waitFor(() => expect(resolveAuthorization).toBeTypeOf("function"));
     expect(
       screen.queryByRole("heading", { name: "Connect a data source" }),
@@ -291,13 +488,13 @@ describe("Nyxbot onboarding", () => {
     await toChannel();
     expect(post).not.toHaveBeenCalled();
   });
-  it("automatically advances when a pending connection gains both permissions", async () => {
+  it("keeps the explicit source URL after permissions become effective until Continue", async () => {
     keys = [{ ...googleKey, status: "pending_auth", granted_scopes: [] }];
     sessionStorage.setItem(
       "nyxbot-onboarding:owner",
       JSON.stringify({ googleKeyId: "google-1" }),
     );
-    mount();
+    await mount();
     await waitFor(() =>
       expect(
         screen.getByRole("button", { name: "Connect Google" }),
@@ -307,13 +504,18 @@ describe("Nyxbot onboarding", () => {
     await act(async () => {
       await client.invalidateQueries({ queryKey: ["keys"] });
     });
+    await screen.findByText("Google Workspace connected");
+    expect(router.state.location.search.step).toBe("source");
+    await userEvent.click(
+      screen.getByRole("button", { name: "Continue", exact: true }),
+    );
     await toChannel();
     expect(post).not.toHaveBeenCalled();
   });
   it("keeps a provider error on data source with sign-in preserved", async () => {
     keys = [];
     window.history.replaceState(null, "", "/onboarding?provider_status=error");
-    mount();
+    await mount();
     await screen.findByText(
       /Google authorization was cancelled or could not be completed/,
     );
@@ -334,7 +536,7 @@ describe("Nyxbot onboarding", () => {
         ? Promise.reject(new Error("Unavailable"))
         : previousGet(path),
     );
-    mount();
+    await mount();
     await screen.findByText("We couldn't load your connections. Please retry.");
     expect(get).not.toHaveBeenCalledWith("/channel-bots/business-bot");
     expect(
@@ -344,7 +546,7 @@ describe("Nyxbot onboarding", () => {
   it("starts with all account choices and enters data source only after explicit account continuation", async () => {
     window.history.replaceState(null, "", "/onboarding?channel=telegram");
     keys = [];
-    mount();
+    await mount();
     await screen.findByRole("heading", { name: "Sign in to NyxID" });
     for (const provider of ["Google", "GitHub", "Apple", "the NyxID app"]) {
       expect(
@@ -381,7 +583,7 @@ describe("Nyxbot onboarding", () => {
   });
   it("returns to account from data source and keeps the account-data-channel order", async () => {
     window.history.replaceState(null, "", "/onboarding");
-    mount();
+    await mount();
     await userEvent.click(
       screen.getByRole("button", { name: "Continue as Avery" }),
     );
@@ -407,9 +609,9 @@ describe("Nyxbot onboarding", () => {
   });
   it("keeps an unauthenticated return on account and points QR and registration back to data source", async () => {
     auth.isAuthenticated = false;
-    mount();
+    await mount();
     await screen.findByRole("heading", { name: "Sign in to NyxID" });
-    const returnTo = `${window.location.origin}/onboarding?step=source&channel=telegram`;
+    const returnTo = `${window.location.origin}/onboarding?step=channel&channel=telegram`;
     expect(
       screen.getByRole("button", { name: "Continue with the NyxID app" }),
     ).toHaveAttribute("data-return-to", returnTo);
@@ -431,7 +633,7 @@ describe("Nyxbot onboarding", () => {
     "hands off configured %s login with the onboarding return URL",
     async (id, name) => {
       auth.isAuthenticated = false;
-      mount();
+      await mount();
       const provider = await screen.findByRole("button", {
         name: `Continue with ${name}`,
       });
@@ -445,7 +647,7 @@ describe("Nyxbot onboarding", () => {
       );
       expect(target.pathname).toBe(`/api/v1/auth/social/${id}`);
       expect(target.searchParams.get("return_to")).toBe(
-        `${window.location.origin}/onboarding?step=source&channel=telegram`,
+        `${window.location.origin}/onboarding?step=channel&channel=telegram`,
       );
       expect(post).not.toHaveBeenCalled();
     },
@@ -453,7 +655,7 @@ describe("Nyxbot onboarding", () => {
   it("keeps all four design sign-in methods visible when social providers are unconfigured", async () => {
     auth.isAuthenticated = false;
     publicConfig = { social_providers: [], email_auth_enabled: true };
-    mount();
+    await mount();
     await screen.findByRole("link", { name: "Sign in with email" });
     expect(
       screen.getByRole("heading", { name: "Sign in to NyxID" }),
@@ -481,7 +683,7 @@ describe("Nyxbot onboarding", () => {
   it("only redirects enabled sign-in methods while retaining the other rows", async () => {
     auth.isAuthenticated = false;
     publicConfig.social_providers = ["github"];
-    mount();
+    await mount();
     const github = screen.getByRole("button", { name: "Continue with GitHub" });
     await waitFor(() =>
       expect(github).toHaveAttribute("aria-disabled", "false"),
@@ -495,7 +697,7 @@ describe("Nyxbot onboarding", () => {
     expect(redirect.mock.calls[0]![0]).toContain("/api/v1/auth/social/github?");
   });
   it("preselects a referral, registers Telegram once, and never fabricates a pairing code", async () => {
-    mount();
+    await mount();
     await toChannel();
     expect(screen.getByRole("radio", { name: /Telegram/ })).toBeChecked();
     const submit = screen.getByRole("button", { name: "Connect channel" });
@@ -505,6 +707,7 @@ describe("Nyxbot onboarding", () => {
     await userEvent.type(token, `  ${telegramToken}  `);
     await userEvent.click(submit);
     await screen.findByRole("heading", { name: "Almost there" });
+    expect(router.state.location.search.step).toBe("link");
     expect(post).toHaveBeenCalledWith(AEVATAR_CHANNELS_PATH, {
       platform: "telegram",
       label: "My_Shop_Bot_nyxid_bot",
@@ -541,7 +744,7 @@ describe("Nyxbot onboarding", () => {
     async (language) => {
       await nyxbotI18n.changeLanguage(language);
       const t = nyxbotI18n.t.bind(nyxbotI18n);
-      mount();
+      await mount();
       await screen.findByRole("heading", { name: t("channelTitle") });
       const token = screen.getByLabelText(t("token"), { exact: true });
       const submit = screen.getByRole("button", { name: t("connectChannel") });
@@ -578,7 +781,7 @@ describe("Nyxbot onboarding", () => {
           resolveRegistration = resolve;
         }),
     );
-    mount();
+    await mount();
     await toChannel();
     const token = screen.getByLabelText("Customer bot token", { exact: true });
     const submit = screen.getByRole("button", { name: "Connect channel" });
@@ -604,7 +807,7 @@ describe("Nyxbot onboarding", () => {
     authorizer.mockRejectedValueOnce(
       new AevatarAuthError("channelConsentRequired"),
     );
-    mount();
+    await mount();
     await toChannel();
     await userEvent.type(
       screen.getByLabelText("Customer bot token", { exact: true }),
@@ -627,7 +830,7 @@ describe("Nyxbot onboarding", () => {
   });
   it("leaves the channel unselected for a direct visitor and ignores the disabled WhatsApp option", async () => {
     window.history.replaceState(null, "", "/onboarding");
-    mount();
+    await mount();
     await userEvent.click(
       screen.getByRole("button", { name: "Continue as Avery" }),
     );
@@ -648,7 +851,7 @@ describe("Nyxbot onboarding", () => {
   });
   it("preserves Google authorization when token verification fails and redacts provider errors", async () => {
     post.mockRejectedValueOnce(new Error(`Bad token: ${telegramToken}`));
-    mount();
+    await mount();
     await toChannel();
     await userEvent.type(
       screen.getByLabelText("Customer bot token", { exact: true }),
@@ -672,7 +875,7 @@ describe("Nyxbot onboarding", () => {
   });
   it("stops at the token field when Telegram rejects the token, without calling Aevatar", async () => {
     telegram.mockResolvedValue({ ok: false, status: 401 });
-    mount();
+    await mount();
     await toChannel();
     await userEvent.type(
       screen.getByLabelText("Customer bot token", { exact: true }),
@@ -703,7 +906,7 @@ describe("Nyxbot onboarding", () => {
           })
         : previousGet(path),
     );
-    mount();
+    await mount();
     await toChannel();
     await userEvent.type(
       screen.getByLabelText("Customer bot token", { exact: true }),
@@ -731,7 +934,7 @@ describe("Nyxbot onboarding", () => {
         window.history.replaceState(
           null,
           "",
-          "/onboarding?step=source&channel=whatsapp",
+          "/onboarding?step=channel&channel=whatsapp",
         );
       } else {
         sessionStorage.setItem(
@@ -739,7 +942,7 @@ describe("Nyxbot onboarding", () => {
           JSON.stringify({ channel: "whatsapp" }),
         );
       }
-      mount();
+      await mount();
       await toChannel();
       const whatsapp = screen.getByRole("radio", { name: /WhatsApp/ });
       expect(whatsapp).toBeDisabled();
@@ -770,7 +973,7 @@ describe("Nyxbot onboarding", () => {
     async (parameter) => {
       keys = [{ ...googleKey, granted_scopes: ["openid", "email", "profile"] }];
       window.history.replaceState(null, "", `/onboarding?${parameter}=success`);
-      mount();
+      await mount();
       const button = await screen.findByRole("button", {
         name: "Connect Google",
       });
@@ -792,7 +995,7 @@ describe("Nyxbot onboarding", () => {
         ...GOOGLE_WORKSPACE_SCOPES,
       ]);
       expect(url.searchParams.get("redirect_path")).toBe(
-        "/onboarding?step=source",
+        "/onboarding?step=channel",
       );
       expect(
         JSON.parse(sessionStorage.getItem("nyxbot-onboarding:owner")!)
@@ -812,7 +1015,7 @@ describe("Nyxbot onboarding", () => {
         "profile",
       ] as unknown as typeof GOOGLE_WORKSPACE_SCOPES,
     };
-    mount();
+    await mount();
     const button = await screen.findByRole("button", {
       name: "Connect Google",
     });
@@ -856,7 +1059,7 @@ describe("Nyxbot onboarding", () => {
       }
       return previousGet(path);
     });
-    mount();
+    await mount();
     const button = await screen.findByRole("button", {
       name: "Connect Google",
     });
@@ -887,7 +1090,7 @@ describe("Nyxbot onboarding", () => {
   it("requires a Google OAuth provider route before starting consent", async () => {
     keys = [];
     catalogResponse = { ...catalog, provider_config_id: "" };
-    mount();
+    await mount();
     await screen.findByText(
       /Google Drive and Calendar authorization is not available/,
     );
@@ -902,7 +1105,7 @@ describe("Nyxbot onboarding", () => {
       "nyxbot-onboarding:owner",
       JSON.stringify({ botId: "business-bot", channel: "telegram" }),
     );
-    mount();
+    await mount();
     await screen.findByRole("heading", { name: "Sign in to NyxID" });
     expect(get).not.toHaveBeenCalledWith("/channel-bots/business-bot");
     await userEvent.click(
@@ -913,7 +1116,7 @@ describe("Nyxbot onboarding", () => {
     expect(post).not.toHaveBeenCalled();
   });
   it("updates channel content and step navigation with the feature's language", async () => {
-    mount();
+    await mount();
     await toChannel();
     await act(async () => {
       await nyxbotI18n.changeLanguage("zh-CN");
@@ -930,6 +1133,7 @@ describe("Nyxbot onboarding", () => {
   });
 
   it("lets the owner recover when a previously registered bot was deleted", async () => {
+    window.history.replaceState(null, "", "/onboarding?step=link");
     sessionStorage.setItem(
       "nyxbot-onboarding:owner",
       JSON.stringify({ botId: "deleted-bot", channel: "telegram" }),
@@ -940,12 +1144,9 @@ describe("Nyxbot onboarding", () => {
         ? Promise.reject(Object.assign(new Error("Not found"), { status: 404 }))
         : previousGet(path),
     );
-    mount();
+    await mount();
     await screen.findByText("We couldn't load your connections. Please retry.");
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
-    await userEvent.click(
-      screen.getByRole("button", { name: "Continue", exact: true }),
-    );
     await toChannel();
     expect(
       JSON.parse(sessionStorage.getItem("nyxbot-onboarding:owner")!).botId,
@@ -963,9 +1164,12 @@ describe("Nyxbot onboarding", () => {
         ? Promise.reject(Object.assign(new Error("Not found"), { status: 404 }))
         : previousGet(path),
     );
-    mount();
+    await mount();
     await screen.findByText("We couldn't load your connections. Please retry.");
     await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Continue", exact: true }),
+    );
     await toChannel();
     expect(
       JSON.parse(sessionStorage.getItem("nyxbot-onboarding:owner")!)

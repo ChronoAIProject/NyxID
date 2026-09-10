@@ -126,7 +126,7 @@
 }
 .nb-setup-steps ol {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
   list-style: none;
   margin: 0;
@@ -342,6 +342,14 @@
 .nb-setup-footer .nb-secondary svg {
   color: var(--nb-muted);
   flex-shrink: 0;
+}
+@media (max-width: 767px) {
+  .nb-setup-steps li {
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 6px;
+  }
 }
 @media (min-width: 768px) {
   .nb-setup-topbar-inner {

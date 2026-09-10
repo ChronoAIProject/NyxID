@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useNavigate, useSearch } from "@tanstack/react-router";
 import { I18nextProvider, useTranslation } from "react-i18next";
 import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -7,7 +8,9 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useNyxbotOnboarding } from "@/hooks/use-nyxbot-onboarding";
 import {
   nyxbotSearchSchema,
+  readNyxbotProgress,
   type NyxbotChannel,
+  type NyxbotStep,
 } from "@/schemas/nyxbot-onboarding";
 import { nyxbotI18n } from "@/features/nyxbot-onboarding/i18n";
 import {
@@ -21,24 +24,44 @@ import { SpendingCapStep } from "@/features/nyxbot-onboarding/spending-cap-step"
 import { LinkChannelStep } from "@/features/nyxbot-onboarding/link-channel-step";
 import "@/features/nyxbot-onboarding/onboarding.css";
 
+type StepNavigation = (
+  step: NyxbotStep,
+  options?: { replace?: boolean; callbackStatus?: "success" | "error" },
+) => void;
+
+function StepRedirect({
+  step,
+  onNavigate,
+  callbackStatus,
+}: {
+  readonly step: NyxbotStep;
+  readonly onNavigate: StepNavigation;
+  readonly callbackStatus?: "success" | "error";
+}) {
+  useEffect(() => {
+    onNavigate(step, { replace: true, callbackStatus });
+  }, [step, onNavigate, callbackStatus]);
+  return <OnboardingLoading />;
+}
+
 function ConnectedOnboarding({
   userId,
   accountName,
   referral,
-  callbackFailed,
-  onBackToAccount,
+  step,
+  callbackStatus,
+  onNavigate,
 }: {
   readonly userId: string;
   readonly accountName: string;
   readonly referral?: NyxbotChannel;
-  readonly callbackFailed: boolean;
-  readonly onBackToAccount: () => void;
+  readonly step: Exclude<NyxbotStep, "account">;
+  readonly callbackStatus?: "success" | "error";
+  readonly onNavigate: StepNavigation;
 }) {
   const { t } = useTranslation();
   const flow = useNyxbotOnboarding(userId, referral);
-  const [view, setView] = useState<"source" | "channel" | "cap" | "link">(() =>
-    flow.progress.botId ? "link" : "channel",
-  );
+  const [showSpendingCap, setShowSpendingCap] = useState(false);
   const loading =
     flow.keys.isPending ||
     flow.catalog.isPending ||
@@ -48,17 +71,32 @@ function ConnectedOnboarding({
   // A URL or locally remembered step never substitutes for a live authorization.
   const sourceReady = Boolean(flow.connectedKey) && !loading && !loadError;
 
-  // Resolve the destination before rendering a step. Explicit Back navigation
-  // and an in-progress Google connection keep their data-source view.
-  if (
-    loading &&
-    !loadError &&
-    view !== "source" &&
-    !flow.connectGoogle.isPending
-  )
+  if (loading && !loadError && !flow.connectGoogle.isPending)
     return <OnboardingLoading />;
 
-  if (view === "link" && flow.progress.botId && sourceReady)
+  if (step !== "source" && !sourceReady)
+    return (
+      <StepRedirect
+        step="source"
+        onNavigate={onNavigate}
+        callbackStatus={callbackStatus}
+      />
+    );
+  if (step === "link" && !flow.progress.botId)
+    return <StepRedirect step="channel" onNavigate={onNavigate} />;
+  // Legacy OAuth callbacks may still target source. An explicit source URL
+  // without a callback stays on that step, including after refresh or Back.
+  if (step === "source" && sourceReady && callbackStatus)
+    return (
+      <StepRedirect
+        step={flow.progress.botId ? "link" : "channel"}
+        onNavigate={onNavigate}
+      />
+    );
+  if (step !== "source" && callbackStatus)
+    return <StepRedirect step={step} onNavigate={onNavigate} />;
+
+  if (step === "link" && flow.progress.botId)
     return (
       <LinkChannelStep
         botId={flow.progress.botId}
@@ -66,26 +104,26 @@ function ConnectedOnboarding({
         onBack={(missing) => {
           if (missing)
             flow.updateProgress({ botId: null, registrationId: null });
-          setView("source");
+          onNavigate("channel");
         }}
       />
     );
-  if (view === "cap" && sourceReady)
-    return <SpendingCapStep onBack={() => setView("channel")} />;
-  if (view === "channel" && sourceReady)
+  if (step === "channel" && showSpendingCap)
+    return <SpendingCapStep onBack={() => setShowSpendingCap(false)} />;
+  if (step === "channel")
     return (
       <ChannelStep
         channel={flow.progress.channel}
         referral={referral}
         onSelect={(channel) => flow.updateProgress({ channel })}
-        onBack={() => setView("source")}
-        onSpendingCap={() => setView("cap")}
+        onBack={() => onNavigate("source")}
+        onSpendingCap={() => setShowSpendingCap(true)}
         onConnected={(registration) => {
           flow.updateProgress({
             botId: registration.nyx_channel_bot_id,
             registrationId: registration.registration_id,
           });
-          setView("link");
+          onNavigate("link");
         }}
       />
     );
@@ -101,10 +139,10 @@ function ConnectedOnboarding({
         (!sourceReady && !flow.googleAvailable)
       }
       onConnect={() => {
-        setView(flow.progress.botId ? "link" : "channel");
-        if (!sourceReady) flow.connectGoogle.mutate();
+        if (sourceReady) onNavigate(flow.progress.botId ? "link" : "channel");
+        else flow.connectGoogle.mutate();
       }}
-      onBack={onBackToAccount}
+      onBack={() => onNavigate("account")}
     >
       {loading && <OnboardingNotice>{t("loading")}</OnboardingNotice>}
       {loadError && (
@@ -135,7 +173,7 @@ function ConnectedOnboarding({
       {!loading && !loadError && !sourceReady && !flow.googleAvailable && (
         <OnboardingNotice>{t("googleUnavailable")}</OnboardingNotice>
       )}
-      {!sourceReady && callbackFailed && (
+      {!sourceReady && callbackStatus === "error" && (
         <OnboardingNotice error>{t("googleCancelled")}</OnboardingNotice>
       )}
       {!sourceReady && flow.authorization.data?.status === "active" && (
@@ -157,29 +195,54 @@ export function NyxbotOnboardingPage() {
   const user = useAuthStore((s) => s.user);
   const authenticated = useAuthStore((s) => s.isAuthenticated);
   const authLoading = useAuthStore((s) => s.isLoading);
-  const search = nyxbotSearchSchema.parse(
-    Object.fromEntries(new URLSearchParams(window.location.search)),
-  );
+  const search = nyxbotSearchSchema.parse(useSearch({ from: "/onboarding" }));
+  const navigate = useNavigate({ from: "/onboarding" });
   const callbackStatus = search.provider_status ?? search.status;
-  // Return hints select a view; authentication and data grants are still checked.
-  const [accountConfirmed, setAccountConfirmed] = useState(
-    () => search.step === "source" || Boolean(callbackStatus),
+  const step = search.step ?? (callbackStatus ? "source" : "account");
+  const onNavigate = useCallback<StepNavigation>(
+    (nextStep, options) => {
+      void navigate({
+        to: "/onboarding",
+        search: {
+          step: nextStep,
+          ...(search.channel ? { channel: search.channel } : {}),
+          ...(options?.callbackStatus
+            ? { provider_status: options.callbackStatus }
+            : {}),
+        },
+        replace: options?.replace ?? false,
+      });
+    },
+    [navigate, search.channel],
   );
+  const resumeStep =
+    authenticated && user && readNyxbotProgress(user.id).botId
+      ? "link"
+      : "channel";
   const returnUrl = new URL("/onboarding", window.location.origin);
-  returnUrl.searchParams.set("step", "source");
+  returnUrl.searchParams.set("step", resumeStep);
   if (search.channel) returnUrl.searchParams.set("channel", search.channel);
   return (
     <I18nextProvider i18n={nyxbotI18n}>
       {authLoading && !authenticated ? (
         <OnboardingLoading />
-      ) : authenticated && user && accountConfirmed ? (
+      ) : !search.step ? (
+        <StepRedirect
+          step={step}
+          onNavigate={onNavigate}
+          callbackStatus={callbackStatus}
+        />
+      ) : (!authenticated || !user) && step !== "account" ? (
+        <StepRedirect step="account" onNavigate={onNavigate} />
+      ) : authenticated && user && step !== "account" ? (
         <ConnectedOnboarding
           key={user.id}
           userId={user.id}
           accountName={user.display_name?.trim() || user.email}
           referral={search.channel}
-          callbackFailed={callbackStatus === "error"}
-          onBackToAccount={() => setAccountConfirmed(false)}
+          step={step}
+          callbackStatus={callbackStatus}
+          onNavigate={onNavigate}
         />
       ) : (
         <SignInStep
@@ -190,7 +253,7 @@ export function NyxbotOnboardingPage() {
               : undefined
           }
           onContinue={
-            authenticated && user ? () => setAccountConfirmed(true) : undefined
+            authenticated && user ? () => onNavigate(resumeStep) : undefined
           }
         />
       )}

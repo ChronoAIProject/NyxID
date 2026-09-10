@@ -40,7 +40,7 @@ export function LinkChannelStep({
     <OnboardingShell
       title={t("linkTitle")}
       subtitle={t("linkSubtitle")}
-      step={3}
+      step={4}
       actions={
         <>
           <Button className="nb-primary" disabled>

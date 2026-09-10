@@ -9,11 +9,17 @@ export const GOOGLE_WORKSPACE_SCOPES = [
 ] as const;
 
 export const nyxbotSearchSchema = z.object({
-  step: z.enum(["account", "source"]).optional().catch(undefined),
+  step: z
+    .enum(["account", "source", "channel", "link"])
+    .optional()
+    .catch(undefined),
   channel: z.enum(["telegram", "whatsapp"]).optional().catch(undefined),
   provider_status: z.enum(["success", "error"]).optional().catch(undefined),
   status: z.enum(["success", "error"]).optional().catch(undefined),
 });
+export type NyxbotStep = NonNullable<
+  z.infer<typeof nyxbotSearchSchema>["step"]
+>;
 export type NyxbotChannel = "telegram" | "whatsapp";
 
 export const nyxbotProgressSchema = z.object({

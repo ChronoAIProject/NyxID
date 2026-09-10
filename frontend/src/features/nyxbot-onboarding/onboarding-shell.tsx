@@ -63,7 +63,7 @@ export function OnboardingShell({
 }: {
   readonly title: string;
   readonly subtitle?: string;
-  readonly step: 1 | 2 | 3 | null;
+  readonly step: 1 | 2 | 3 | 4 | null;
   readonly children: ReactNode;
   readonly actions: ReactNode;
   readonly variant?: "compact" | "setup";
@@ -79,7 +79,12 @@ export function OnboardingShell({
   }, [title]);
 
   if (variant === "setup") {
-    const steps = [t("accountStep"), t("dataSourceStep"), t("channelStep")];
+    const steps = [
+      t("accountStep"),
+      t("dataSourceStep"),
+      t("channelStep"),
+      t("linkStep"),
+    ];
     return (
       <div className="nyxbot-onboarding nb-setup" lang={i18n.resolvedLanguage}>
         <header className="nb-setup-topbar">
@@ -176,10 +181,10 @@ export function OnboardingShell({
               role="progressbar"
               aria-label={t("title")}
               aria-valuemin={0}
-              aria-valuemax={3}
+              aria-valuemax={4}
               aria-valuenow={step}
             >
-              <span style={{ width: `${(step / 3) * 100}%` }} />
+              <span style={{ width: `${(step / 4) * 100}%` }} />
             </div>
           )}
         </header>
