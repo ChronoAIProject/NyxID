@@ -47,6 +47,8 @@ Android local debug (emulator/device, API URLs): see [docs/ANDROID_DEBUG.md](doc
 
 App Store review checklist: [docs/APP_STORE_REVIEW_CHECKLIST.md](docs/APP_STORE_REVIEW_CHECKLIST.md).
 
+Login compatibility release checks: [docs/LOGIN_RELEASE_VERIFICATION.md](docs/LOGIN_RELEASE_VERIFICATION.md).
+
 ## Environment
 
 `.env.example` is the source of truth for what config the build expects. Copy it to `.env.dev`, `.env.prod`, or both. Values in `.env.local` override either profile (for machine-specific tweaks).

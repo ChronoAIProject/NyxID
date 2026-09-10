@@ -30,6 +30,56 @@ test("v2 QR and manual codes preserve protocol and restricted grant eligibility"
   assert.equal(supportsRestrictedDeviceLogin("3-ABCD-EFGH"), false);
 });
 
+test("typing and pasting either login code format preserves the complete request", () => {
+  for (const [compact, formatted, restricted] of [
+    ["WJEGRKAM", "WJEG-RKAM", false],
+    ["2ABCDEFG", "2ABC-DEFG", false],
+    ["2WJEGRKAM", "2-WJEG-RKAM", true],
+    ["22ABCDEFG", "2-2ABC-DEFG", true],
+  ] as const) {
+    let typed = "";
+    for (const character of compact) {
+      typed = formatAuthDeviceUserCode(typed + character);
+    }
+    assert.equal(typed, formatted);
+    assert.equal(normalizeAuthDeviceUserCode(typed), compact);
+    assert.equal(supportsRestrictedDeviceLogin(typed), restricted);
+    assert.equal(formatAuthDeviceUserCode(formatted.toLowerCase()), formatted);
+
+    const deleted = formatAuthDeviceUserCode(typed.slice(0, -1));
+    assert.equal(formatAuthDeviceUserCode(deleted + compact.at(-1)), formatted);
+  }
+});
+
+test("formatting an invalid paste never truncates it into an accepted login code", () => {
+  for (const raw of [
+    "WJEG-RKAMZ",
+    "2-WJEG-RKAMZ",
+    "2-WJEG-RKAM!",
+    "3-WJEG-RKAM",
+    "WJEG-RKAM\n",
+  ]) {
+    assert.equal(normalizeAuthDeviceUserCode(raw), null);
+    assert.equal(normalizeAuthDeviceUserCode(formatAuthDeviceUserCode(raw)), null, raw);
+  }
+});
+
+test("QR and custom-scheme links preserve v2 codes and reject overlong codes", () => {
+  for (const prefix of [
+    "https://app.nyxid.test/login/device",
+    "nyxid://login/device",
+  ]) {
+    assert.equal(
+      extractAuthDeviceUserCodeFromQr(`${prefix}?user_code=2-WJEG-RKAM`, productionTrust),
+      "2WJEGRKAM",
+    );
+    assert.equal(
+      extractAuthDeviceUserCodeFromQr(`${prefix}?user_code=2-WJEG-RKAMZ`, productionTrust),
+      null,
+    );
+  }
+});
+
 test("extracts a code from the trusted HTTPS device-login URL", () => {
   assert.equal(
     extractAuthDeviceUserCodeFromQr(

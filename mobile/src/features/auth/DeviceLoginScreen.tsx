@@ -254,8 +254,8 @@ function ManualCodeModal({
             <View style={styles.modalHeaderCopy}>
               <Text style={styles.modalTitle}>Enter login code</Text>
               <Text style={styles.modalDescription}>
-                Enter the eight-character code shown on the device requesting
-                access.
+                Enter the full code shown on the device requesting access.
+                Include the leading 2 if shown.
               </Text>
             </View>
             <Pressable
@@ -278,7 +278,7 @@ function ManualCodeModal({
             <TextInput
               ref={inputRef}
               accessibilityLabel="Login code"
-              accessibilityHint="Eight-character code shown on the requesting device"
+              accessibilityHint="Full code shown on the requesting device, including the leading 2 if shown"
               value={value}
               onChangeText={onChange}
               onSubmitEditing={onSubmit}
@@ -286,7 +286,6 @@ function ManualCodeModal({
               autoCapitalize="characters"
               autoCorrect={false}
               textContentType="oneTimeCode"
-              maxLength={11}
               returnKeyType="done"
               selectionColor={colors.primary}
               placeholder="ABCD-EFGH"
@@ -388,7 +387,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
 
       const normalized = normalizeAuthDeviceUserCode(candidate);
       if (!normalized) {
-        setErrorMessage("Enter a valid eight-character login code.");
+        setErrorMessage("Enter the full login code, including the leading 2 if shown.");
         return false;
       }
 
@@ -612,6 +611,7 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
               <Text style={styles.inputLabel}>Login code</Text>
               <TextInput
                 accessibilityLabel="Login code"
+                accessibilityHint="Full code shown on the requesting device, including the leading 2 if shown"
                 value={userCode}
                 onChangeText={(value) => {
                   setUserCode(formatAuthDeviceUserCode(value));
@@ -621,7 +621,6 @@ export function DeviceLoginScreen({ navigation, route }: Props) {
                 autoCapitalize="characters"
                 autoCorrect={false}
                 textContentType="oneTimeCode"
-                maxLength={11}
                 returnKeyType="done"
                 onSubmitEditing={() => {
                   if (normalizeAuthDeviceUserCode(userCode))
