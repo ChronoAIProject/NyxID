@@ -232,7 +232,7 @@ mod tests {
             api_key_id: None,
             api_key_name: None,
             prompt: "What is the BEDC closure of item 8?".to_string(),
-            model_label: Some("chatgpt-5.5-pro".to_string()),
+            model_label: Some("chatgpt-6-pro".to_string()),
             project_url: None,
             tag: Some("bedc-deep".to_string()),
             pdf_base64: None,

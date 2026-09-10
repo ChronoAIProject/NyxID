@@ -2906,7 +2906,7 @@ mod tests {
             .and(path("/api/v1/oracle/pools/chatgpt-pro/tasks"))
             .and(body_json(serde_json::json!({
                 "prompt": "what is 2+2?",
-                "model": "chatgpt-5.5-pro",
+                "model": "chatgpt-6-pro",
                 "tag": "smoke",
             })))
             .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
@@ -2925,7 +2925,7 @@ mod tests {
             file: None,
             pdf: None,
             attach_file: None,
-            model: Some("chatgpt-5.5-pro".to_string()),
+            model: Some("chatgpt-6-pro".to_string()),
             project_url: None,
             tag: Some("smoke".to_string()),
             conversation: None,

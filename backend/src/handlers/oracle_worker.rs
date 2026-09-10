@@ -593,7 +593,7 @@ mod tests {
                 conversation_id: Some("conv_1".to_string()),
                 conversation_url: None,
                 is_followup: false,
-                model: Some("chatgpt-5.5-pro".to_string()),
+                model: Some("chatgpt-6-pro".to_string()),
                 tag: None,
                 pdf_base64: None,
                 pdf_name: None,
