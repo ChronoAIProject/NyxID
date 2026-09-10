@@ -7,7 +7,7 @@ import {
 } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LoginAgentKeyPage } from "./login-agent-key";
+import { LoginCodePage } from "./login-code";
 
 const mocks = vi.hoisted(() => ({
   post: vi.fn(),
@@ -108,7 +108,7 @@ afterEach(() => {
 function mount() {
   render(
     <QueryClientProvider client={client}>
-      <LoginAgentKeyPage mint />
+      <LoginCodePage />
     </QueryClientProvider>,
   );
 }
