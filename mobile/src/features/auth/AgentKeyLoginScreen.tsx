@@ -295,11 +295,11 @@ export function AgentKeyLoginScreen({ navigation, route }: Props) {
                   <Text style={styles.inputLabel}>User code</Text>
                   <TextInput
                     accessibilityLabel="User code"
+                    accessibilityHint="Full code shown on the requesting device, including the leading 2 if shown"
                     value={code}
                     editable={!pending}
                     autoCapitalize="characters"
                     autoCorrect={false}
-                    maxLength={11}
                     onChangeText={(value) =>
                       setCode(formatAuthDeviceUserCode(value))
                     }

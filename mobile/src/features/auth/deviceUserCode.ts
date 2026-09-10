@@ -6,7 +6,6 @@ import {
   NYXID_UNIVERSAL_LINK_HOST,
 } from "../../lib/env";
 
-const NORMALIZED_USER_CODE_LENGTH = 8;
 const NORMALIZED_USER_CODE_PATTERN = /^(?:2)?[0-9A-HJKMNP-TV-Z]{8}$/;
 const ABSOLUTE_URL_PATTERN =
   /^([a-z][a-z0-9+.-]*):\/\/([^/?#]*)(\/[^?#]*)?(?:\?([^#]*))?(?:#.*)?$/i;
@@ -103,9 +102,7 @@ export function normalizeAuthDeviceUserCode(raw: string): string | null {
     .replace(/O/g, "0")
     .replace(/U/g, "V");
 
-  if (
-    !NORMALIZED_USER_CODE_PATTERN.test(normalized)
-  ) {
+  if (!NORMALIZED_USER_CODE_PATTERN.test(normalized)) {
     return null;
   }
 
@@ -117,12 +114,9 @@ export function supportsRestrictedDeviceLogin(raw: string): boolean {
 }
 
 export function formatAuthDeviceUserCode(raw: string): string {
-  const compact = raw
-    .replace(/[- \t]/g, "")
-    .toUpperCase()
-    .slice(0, raw.replace(/[- \t]/g, "").startsWith("2") ? 9 : NORMALIZED_USER_CODE_LENGTH);
+  const compact = raw.replace(/[- \t]/g, "").toUpperCase();
 
-  if (compact.length === 9 && compact.startsWith("2")) {
+  if (compact.length >= 9 && compact.startsWith("2")) {
     return `2-${compact.slice(1, 5)}-${compact.slice(5)}`;
   }
 

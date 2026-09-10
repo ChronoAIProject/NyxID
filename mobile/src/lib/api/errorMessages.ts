@@ -42,7 +42,7 @@ const ERROR_MESSAGES: Record<number, string> = {
   11204: "This login request was denied.",
   11205: "This login request was already completed.",
   11206: "Too many attempts. Please wait and try again.",
-  11207: "Enter a valid eight-character login code.",
+  11207: "Enter the full login code, including the leading 2 if shown.",
 };
 
 const AUTH_DEVICE_CONNECTION_ERROR_MESSAGE =
