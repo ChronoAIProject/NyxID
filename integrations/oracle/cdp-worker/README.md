@@ -270,10 +270,22 @@ remain excluded from logs and audit, not from the worker protocol.
 Selection logs include `model_selection reason=<code>`, pill source
 (`structural`/`fallback`/`none`), detected level or `unrecognized`, pill text
 length, the last visible picker item count, and recognized canonical levels
-(e.g. `items=5 recognized=[Instant,Medium,High,Extra High,Pro]`). They never
-include raw pill/menu labels, prompts, answers, or conversation URLs. The
-durable `send_attempted` fence and the rule against resending an uncertain
-prompt remain in force.
+(e.g. `items=5 recognized=[Instant,Medium,High,Extra High,Pro]`). By default,
+raw pill/menu labels are omitted.
+
+For one-off diagnosis of unfamiliar localized labels, set
+`NYXID_ORACLE_LOG_PICKER_LABELS=1` so an operator can report the labels for new
+aliases. This stays off by default. Only `level_unavailable`, `unverified`,
+`menu_not_opened`, and `picker_unavailable` add a single
+`picker_labels pill=<text> items=[<text>,...]` log line from the composer
+picker's snapshot. Each label is truncated to 40 characters, at most 24 items
+are included, and JSON encoding escapes control characters to keep one line.
+These labels never enter `phase_detail` or acknowledgements. Turn the option
+off after collecting the diagnostic.
+
+Logs never include prompts, answers, or conversation URLs. The durable
+`send_attempted` fence and the rule against resending an uncertain prompt
+remain in force.
 
 ## Result artifacts
 
@@ -316,6 +328,7 @@ only. The deployed userscript is unchanged and simply omits generic files.
 | `NYXID_PRESENCE_MS` | `20000` | Presence heartbeat interval. |
 | `NYXID_HTTP_TIMEOUT_MS` | `30000` | Per-request timeout. |
 | `NYXID_MODEL_SELECT_TIMEOUT_MS` | `25000` | Reasoning selection deadline, clamped to 1–25000 ms; abort/drain and menu cleanup follow it. |
+| `NYXID_ORACLE_LOG_PICKER_LABELS` | off | Set exactly `1` for one-off localized picker diagnosis and reporting labels for new aliases. Logs bounded JSON-encoded pill/item labels only for unavailable or unverified selection outcomes; never sends them in acknowledgements. |
 | `NYXID_MAX_HTTP_BACKOFF_MS` | `60000` | Maximum network retry delay. |
 | `NYXID_MAX_CDP_FAILURES_BEFORE_RELAUNCH` | `3` | CDP failures before a full Chrome relaunch. |
 | `NYXID_MAX_TASK_RECOVERY_FAILURES` | `6` | Task-level browser failures before the worker reports a bounded failure. |

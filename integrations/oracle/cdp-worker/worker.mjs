@@ -1201,6 +1201,7 @@ export function modelItemMatches(itemText, targets, exact) {
 
 const MODEL_SELECT_TIMEOUT_MS = Math.max(1, Math.min(25000,
   Number(process.env.NYXID_MODEL_SELECT_TIMEOUT_MS) || 25000));
+const LOG_PICKER_LABELS = process.env.NYXID_ORACLE_LOG_PICKER_LABELS === "1";
 const PRE_SEND_ACTION_MS = 5000;
 const COMPOSER_SELECTOR = "#prompt-textarea, div[contenteditable='true'][role='textbox'], textarea[data-testid='prompt-textarea']";
 const SEND_SELECTOR = "button[data-testid='send-button'], button[aria-label='Send prompt'], button[aria-label='发送提示']";
@@ -1279,6 +1280,15 @@ export function modelSelectionDiagnostics(snapshot) {
     `pill_text_length=${observed.length} items=${items.length} recognized=[${recognized.join(",")}]`;
 }
 
+// Opt-in, local diagnostics only. Call with the composer picker's snapshot,
+// never page-wide text; JSON escaping keeps every label on one log line.
+export function formatPickerLabels(snapshot) {
+  const truncate = (label) => [...String(label ?? "")].slice(0, 40).join("");
+  const encode = (value) => JSON.stringify(value).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  const items = (snapshot?.items || []).slice(0, 24).map((item) => truncate(item.text));
+  return `picker_labels pill=${encode(truncate(snapshot?.observed))} items=${encode(items)}`;
+}
+
 function interactionDeadlineError() {
   return Object.assign(new Error("interaction_deadline"), { code: "interaction_deadline" });
 }
@@ -1335,7 +1345,8 @@ async function boundedRead(budget, read) {
 
 // Synchronous, read-only snapshots avoid N per-item auto-waits. Discovery is
 // restricted to the structural pill or the textarea's own composer region.
-// No arbitrary menu labels are written to logs or acknowledgement metadata.
+// Raw labels are logged only with the explicit picker-label diagnostic opt-in,
+// and are never written to acknowledgement metadata.
 async function pickerSnapshot(page, budget) {
   const snapshot = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, sendSelector, deadline, pickerId }) => {
     if (Date.now() >= deadline) return null;
@@ -1369,7 +1380,7 @@ async function pickerSnapshot(page, budget) {
   snapshot.observed = snapshot.candidates[index] || null;
   if (budget.picker) {
     // Preserve the last open picker's items after Escape for diagnostics.
-    // These texts stay in memory only; logging projects canonical metadata.
+    // Default logging projects canonical metadata; raw labels require opt-in.
     const lastItems = budget.picker.snapshot?.items || [];
     budget.picker.snapshot = { ...snapshot, items: snapshot.open ? snapshot.items : lastItems };
   }
@@ -1501,6 +1512,9 @@ async function selectModel(page, modelLabel) {
   result.verified = pillShowsLevel(result.observed, targets);
   if (result.verified && !["timeout", "already_selected"].includes(result.reason)) result.reason = "selected";
   log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)} ${modelSelectionDiagnostics(budget.picker.snapshot)}`);
+  if (LOG_PICKER_LABELS && ["level_unavailable", "unverified", "menu_not_opened", "picker_unavailable"].includes(result.reason)) {
+    log(formatPickerLabels(budget.picker.snapshot));
+  }
   return { ...result };
 }
 

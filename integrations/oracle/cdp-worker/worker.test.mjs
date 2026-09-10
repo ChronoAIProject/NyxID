@@ -28,6 +28,7 @@ import {
   modelSelectionDetail,
   preferredModelPillIndex,
   modelSelectionDiagnostics,
+  formatPickerLabels,
   requireInteractionRead,
   modelSelectionFailureReason,
   modelLevelTargets,
@@ -678,6 +679,29 @@ test("selection diagnostics contain structural metadata and canonical levels wit
     /pill_source=fallback pill_level=Pro pill_text_length=5 items=0 recognized=\[\]/);
   assert.equal(modelSelectionDiagnostics(null),
     "pill_source=none pill_level=unrecognized pill_text_length=0 items=0 recognized=[]");
+});
+
+test("picker label formatting bounds labels and items, JSON-escapes controls, and accepts an empty snapshot", () => {
+  for (const snapshot of [undefined, null, {}]) {
+    assert.equal(formatPickerLabels(snapshot), 'picker_labels pill="" items=[]');
+  }
+  const parse = (line) => {
+    const [, pill, items] = /^picker_labels pill=(.+) items=(.+)$/.exec(line);
+    return { pill: JSON.parse(pill), items: JSON.parse(items) };
+  };
+  const controls = '自动\n\r\t"\\\u0000\u001b\u2028\u2029';
+  const encoded = formatPickerLabels({ observed: controls, items: [{ text: controls }] });
+  assert.doesNotMatch(encoded, /[\n\r\t\u0000\u001b\u2028\u2029]/);
+  assert.deepEqual(parse(encoded), { pill: controls, items: [controls] });
+  const bounded = parse(formatPickerLabels({
+    observed: "x".repeat(39) + "🧭discard",
+    items: Array.from({ length: 30 }, (_, index) => ({ text: "item-" + index + ":" + "y".repeat(50) })),
+  }));
+  assert.equal(bounded.pill, "x".repeat(39) + "🧭");
+  assert.equal(bounded.items.length, 24);
+  assert.ok(bounded.items.every((label) => label.length === 40));
+  assert.equal(bounded.items[0], "item-0:" + "y".repeat(33));
+  assert.equal(bounded.items[23], "item-23:" + "y".repeat(32));
 });
 
 test("null browser reads carry the interaction deadline code instead of causing a TypeError", () => {

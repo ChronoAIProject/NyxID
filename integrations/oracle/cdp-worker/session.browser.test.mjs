@@ -785,6 +785,7 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
     // time for the real browser actions and intentional failure waits.
     NYXID_MAX_WAIT_MS: '1',
     NYXID_STABLE_INTERVAL_MS: '500',
+    ...(config.logPickerLabels ? { NYXID_ORACLE_LOG_PICKER_LABELS: '1' } : {}),
   });
   return { ...fixture, process, acknowledgements, results, task };
 }
@@ -943,6 +944,18 @@ test('reasoning: unavailable levels log counts and canonical levels without raw 
   await assertReasoningDelivered(fixture, { model: '自动', detail: 'level_unavailable' });
   assert.match(fixture.process.output(), /reason=level_unavailable .*pill_source=structural pill_level=unrecognized pill_text_length=2 items=4 recognized=\[Instant,Medium,High,Extra High\]/);
   assert.ok(!fixture.process.output().includes('自动'));
+  assert.ok(!fixture.process.output().includes('picker_labels'));
+});
+
+test('reasoning: unavailable picker labels are logged only locally with explicit opt-in', options, async (t) => {
+  const fixture = await reasoningFixture(t, { missingLevel: true, logPickerLabels: true });
+  await assertReasoningDelivered(fixture, { model: '自动', detail: 'level_unavailable' });
+  const lines = fixture.process.output().split('\n').filter(line => line.includes('picker_labels'));
+  assert.equal(lines.length, 1);
+  assert.ok(lines[0].endsWith('picker_labels pill="自动" items=["Instant","Medium","High","Extra High"]'));
+  assert.ok(!JSON.stringify(fixture.acknowledgements).includes('自动'));
+  assert.ok(!JSON.stringify(fixture.acknowledgements).includes('picker_labels'));
+  assert.ok(!JSON.stringify(fixture.acknowledgements).includes('Extra High'));
 });
 
 test('reasoning: expired page-side reads carry a deadline code instead of a TypeError', options, async (t) => {
