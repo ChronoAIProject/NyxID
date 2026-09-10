@@ -23,6 +23,9 @@ import {
   isTrustedArtifactUrl,
   markChatPageRecovered,
   modelItemMatches,
+  chooseNestedLevelEntry,
+  reportedPromptModel,
+  modelSelectionDetail,
   modelLevelTargets,
   pillShowsLevel,
   detectPillLevel,
@@ -541,7 +544,7 @@ test("level matching is exact before fuzzy so High never picks Extra High", () =
   const high = modelLevelTargets("high");
   assert.equal(modelItemMatches("High", high, true), true);
   assert.equal(modelItemMatches("Extra High", high, true), false);
-  assert.equal(modelItemMatches("Extra High", high, false), true);
+  assert.equal(modelItemMatches("Extra High", high, false), false);
   assert.equal(modelItemMatches("Pro", modelLevelTargets("chatgpt-5.5-pro"), true), true);
   assert.equal(modelItemMatches("Instant", modelLevelTargets("chatgpt-5.5-pro"), false), false);
 });
@@ -587,4 +590,66 @@ test("one ChatGPT tab is driven and duplicates are reported for closing", () => 
   assert.deepEqual(chooseChatPage([login, blank]), { chosen: login, duplicates: [], navigate: false });
   assert.deepEqual(chooseChatPage([blank]), { chosen: blank, duplicates: [], navigate: true });
   assert.deepEqual(chooseChatPage([]), { chosen: null, duplicates: [], navigate: true });
+});
+
+
+test("6-era pill labels detect the level without adding locale aliases", () => {
+  for (const label of ["GPT-6 Pro", "6 Pro", "Pro", "Pro 扩展", "扩展"]) {
+    assert.equal(detectPillLevel(label), "Pro", label);
+    assert.equal(modelLevelTargets(label)[0], "Pro", label);
+    assert.equal(pillShowsLevel(label, modelLevelTargets("chatgpt-6-pro")), true, label);
+  }
+  for (const label of ["Extra High", "GPT-6 Extra High", "6-extra-high", "超高"]) {
+    assert.equal(detectPillLevel(label), "Extra High", label);
+  }
+  for (const label of ["6", "GPT-6", "Auto", "自动", "Profile", "Products", "Highlight", "Improve"] ) {
+    assert.equal(detectPillLevel(label), null, label);
+  }
+});
+
+test("fuzzy level matching rejects partial labels and conflicting canonical levels", () => {
+  const high = modelLevelTargets("high");
+  assert.equal(modelItemMatches("GPT-6 High", high, false), true);
+  assert.equal(modelItemMatches("GPT-6 Extra High", high, false), false);
+  for (const label of ["P", "Profile", "Improve"]) {
+    assert.equal(modelItemMatches(label, modelLevelTargets("pro"), false), false, label);
+  }
+});
+
+test("nested entry choice prefers exact target, then fuzzy target, then a recognized checked level", () => {
+  const targets = modelLevelTargets("chatgpt-6-pro");
+  const items = [{ text: "Instant", checked: true }, { text: "GPT-6 Pro" }, { text: "Pro" }];
+  assert.equal(chooseNestedLevelEntry(items, targets), 2);
+  assert.equal(chooseNestedLevelEntry(items.slice(0, 2), targets), 1);
+  assert.equal(chooseNestedLevelEntry(items.slice(0, 1), targets), 0);
+  assert.equal(chooseNestedLevelEntry(items.slice(0, 1), targets, false), -1);
+});
+
+test("nested entry choice never picks an unchecked first item or a checked arbitrary action", () => {
+  const targets = modelLevelTargets("chatgpt-6-pro");
+  for (const items of [[], [{ text: "Instant" }], [{ text: "Delete conversation", checked: true }],
+    [{ text: "Profile", checked: true }], [{ text: "自动", checked: true }]]) {
+    assert.equal(chooseNestedLevelEntry(items, targets), -1);
+  }
+  assert.equal(chooseNestedLevelEntry([{ text: "Extra High" }], modelLevelTargets("high")), -1);
+});
+
+test("prompt result model reports only the observed pill, independently of verification", () => {
+  for (const verified of [true, false]) {
+    assert.equal(reportedPromptModel({ model: "chatgpt-6-pro", model_selected: "GPT-6 Pro", verified }), "GPT-6 Pro");
+    assert.equal(reportedPromptModel({ model: "chatgpt-6-pro", model_selected: "自动", verified }), "自动");
+  }
+  for (const model_selected of [undefined, null, ""]) {
+    assert.equal(reportedPromptModel({ model: "chatgpt-6-pro", model_selected, clicked: "Pro" }), "chatgpt-6-pro");
+  }
+});
+
+test("selection phase detail uses only canonical levels and stable outcome codes", () => {
+  assert.equal(modelSelectionDetail({ level: "Pro", verified: true, reason: "selected" }), "selected=Pro");
+  assert.equal(modelSelectionDetail({ level: "Extra High", verified: false, reason: "unverified" }), "unverified=Extra High");
+  assert.equal(modelSelectionDetail({ level: "private custom label", verified: false, reason: "unverified" }), "unverified=custom");
+  for (const reason of ["timeout", "picker_unavailable", "level_unavailable", "selection_failed"]) {
+    assert.equal(modelSelectionDetail({ level: "Pro", observed: "private page text", reason }), reason);
+  }
+  assert.equal(modelSelectionDetail({ level: "Pro", verified: true, reason: "timeout" }), "timeout");
 });

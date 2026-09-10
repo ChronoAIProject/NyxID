@@ -202,16 +202,46 @@ worker.
 
 ## Reasoning level
 
-The pool's `--model` (or a task's `model_label`) picks the ChatGPT reasoning
-level: `chatgpt-5.5-pro` selects **Pro**; `extra high`, `high`, `medium`, and
-`instant` select those levels. The worker opens the picker with real pointer
-clicks, verifies the picker closed and the composer pill shows the level, and
-reports the level it actually selected as the result's model, so a UI change
-that breaks selection is visible in `nyxid oracle result` instead of silently
-answering on Instant. Selection is best-effort and time-bounded: it never
-leaves a menu covering the composer and never consumes the task's retry
-budget; `worker logs` records the picker's visible labels when it cannot find
-the level.
+The pool's `--model` (or a task's `model_label`) requests a ChatGPT reasoning
+level: `chatgpt-6-pro` and `chatgpt-5.5-pro` request **Pro**; `extra high`,
+`high`, `medium`, and `instant` request those levels. Existing Chinese aliases
+remain supported. Picker discovery uses the structural composer pill, even
+when its label is unfamiliar (for example `自动`, `Auto`, or `6`). If that
+pill is absent, only menu buttons inside the textarea's nearest form, or its
+nearest ancestor containing Send, are considered. Header/account menus are
+never picker fallbacks. Text only breaks ties among composer candidates.
+
+Selection uses real pointer clicks and exact level matches before fuzzy
+matches. High cannot match Extra High. A sticky submenu can commit only a
+recognized target entry (exact, then fuzzy), or a recognized checked level;
+otherwise it is dismissed with Escape. There is no first-item fallback.
+
+Selection returns `{ level, verified, observed, reason }`. Verification means
+the observed composer pill shows the requested level. The result's `model`
+reports that observed pill text even when unverified; if no pill text could
+be read, it retains the requested model as a fallback, not as evidence of a
+successful selection. Clicked menu text is never reported as the model.
+
+Selection is best-effort, with a shared 25-second deadline (shortenable with
+`NYXID_MODEL_SELECT_TIMEOUT_MS`). Every step checks the remaining budget;
+Playwright actions carry timeouts and an abort signal. On timeout the worker
+aborts, allows up to three seconds to drain the inner operation, then spends
+at most two seconds closing menus. No background picker loop continues into
+prompt delivery, and selection errors do not consume browser recovery attempts.
+Before typing and before Send, a separate five-second guard dismisses menus
+and checks the composer hit target and body pointer events. A persistent
+obstruction fails safely before Send with `composer_unobstructed_failed`.
+
+Progress acknowledgements run `page_ready` → `selecting_model` →
+`ready_to_send` → `sent`. A second `selecting_model` acknowledgement records
+the finished selection's metadata-only `phase_detail`, such as `selected=Pro`,
+`unverified=Pro`, `picker_unavailable`, `level_unavailable`, `selection_failed`,
+or `timeout`. `ready_to_send` refreshes the lease after filling the prompt;
+first-turn uploads acknowledge it again before Send. Pre-send cancellation
+replies stop delivery. Logs use `model_selection reason=<code>` and canonical
+levels, never arbitrary menu text, prompts, answers, or conversation URLs;
+acknowledgements omit conversation URLs too. The durable `send_attempted`
+fence and the rule against resending an uncertain prompt remain in force.
 
 ## Result artifacts
 
@@ -253,6 +283,7 @@ only. The deployed userscript is unchanged and simply omits generic files.
 | `NYXID_POLL_MS` | `5000` | Idle task-poll interval. |
 | `NYXID_PRESENCE_MS` | `20000` | Presence heartbeat interval. |
 | `NYXID_HTTP_TIMEOUT_MS` | `30000` | Per-request timeout. |
+| `NYXID_MODEL_SELECT_TIMEOUT_MS` | `25000` | Reasoning selection deadline, clamped to 1–25000 ms; abort/drain and menu cleanup follow it. |
 | `NYXID_MAX_HTTP_BACKOFF_MS` | `60000` | Maximum network retry delay. |
 | `NYXID_MAX_CDP_FAILURES_BEFORE_RELAUNCH` | `3` | CDP failures before a full Chrome relaunch. |
 | `NYXID_MAX_TASK_RECOVERY_FAILURES` | `6` | Task-level browser failures before the worker reports a bounded failure. |
