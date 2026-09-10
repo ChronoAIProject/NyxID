@@ -77,6 +77,7 @@ import {
   CliPairPage,
   LoginDevicePage,
   LoginAgentKeyPage,
+  LoginCodePage,
   ConnectLinkPage,
   ConnectLinkReturnPage,
   OAuthLaunchingPage,
@@ -276,7 +277,7 @@ const loginCodeRoute = createRoute({
   path: "/login/code",
   getParentRoute: () => rootRoute,
   validateSearch: (): Record<string, never> => ({}),
-  component: () => <LoginAgentKeyPage mint />,
+  component: LoginCodePage,
 });
 
 const connectLinkRoute = createRoute({

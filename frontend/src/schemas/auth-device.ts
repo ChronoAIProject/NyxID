@@ -60,12 +60,10 @@ export const pollBodySchema = z.object({
   device_code: z.string().min(1),
 });
 
-export const pollWebResponseSchema = z.union([
-  z.object({ ok: z.literal(true), auth_kind: z.literal("account_session").optional() }),
-  z.object({ ok: z.literal(false), auth_kind: z.literal("agent_key"), login_code: z.object({
-    request_id: z.string(), code: z.string(), expires_at: z.string(),
-  }) }),
-]);
+export const pollWebResponseSchema = z.object({
+  ok: z.literal(true),
+  auth_kind: z.literal("account_session").optional(),
+});
 
 function boundedNullableString(maxLength: number) {
   return z
