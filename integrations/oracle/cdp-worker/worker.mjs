@@ -772,7 +772,45 @@ window.__nyx = (function () {
     return { rendered: nodes.length, turns };
   }
 
-  return { isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText };
+  // A picker interaction owns only menus newly visible after its trigger.
+  // Element identity matters: a sidebar listbox can outlive every task, and
+  // a picker can reuse a previously hidden menu node without changing counts.
+  let modelPickerId = null;
+  let preexistingModelMenus = new WeakSet();
+  function pickerElementVisible(el) {
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+  }
+  function visibleModelMenus() {
+    return [...document.querySelectorAll('[role="menu"], [role="listbox"]')].filter(pickerElementVisible);
+  }
+  function beginModelPicker(id) {
+    modelPickerId = id;
+    preexistingModelMenus = new WeakSet(visibleModelMenus());
+    return true;
+  }
+  function modelPickerMenus(id) {
+    if (!id || id !== modelPickerId) return [];
+    return visibleModelMenus().filter((menu) => !preexistingModelMenus.has(menu));
+  }
+  function modelPickerItems(id) {
+    const menus = modelPickerMenus(id);
+    return [...document.querySelectorAll('[role="menuitemradio"], [role="menuitem"], [role="option"]')]
+      .filter((el) => pickerElementVisible(el) && menus.includes(el.closest('[role="menu"], [role="listbox"]')))
+      .slice(0, 64);
+  }
+  function modelPickerTrigger(id) {
+    return modelPickerMenus(id).flatMap((menu) => [...menu.querySelectorAll('[data-testid="composer-intelligence-pro-thinking-effort-trigger"]')])
+      .find((el) => pickerElementVisible(el) && modelPickerMenus(id).includes(el.closest('[role="menu"], [role="listbox"]'))) || null;
+  }
+  function modelPickerItem(id, index, text) {
+    const item = modelPickerItems(id)[index];
+    return item && (item.innerText || item.textContent || "").trim() === text ? item : null;
+  }
+
+  return { isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
+    beginModelPicker, modelPickerMenus, modelPickerItems, modelPickerTrigger, modelPickerItem };
 })();
 `;
 
@@ -1165,8 +1203,6 @@ const MODEL_SELECT_TIMEOUT_MS = Math.max(1, Math.min(25000,
 const PRE_SEND_ACTION_MS = 5000;
 const COMPOSER_SELECTOR = "#prompt-textarea, div[contenteditable='true'][role='textbox'], textarea[data-testid='prompt-textarea']";
 const SEND_SELECTOR = "button[data-testid='send-button'], button[aria-label='Send prompt'], button[aria-label='发送提示']";
-const MENU_SELECTOR = '[role="menu"]:visible, [role="listbox"]:visible';
-const MENU_ITEM_SELECTOR = ':is([role="menu"], [role="listbox"]):visible :is([role="menuitemradio"], [role="menuitem"], [role="option"]):visible';
 const PILL_SELECTOR = 'button.__composer-pill[aria-haspopup="menu"]:visible';
 const COMPOSER_REGION_XPATH = "xpath=ancestor::*[.//button[@data-testid='send-button' or @aria-label='Send prompt' or @aria-label='发送提示']][1]";
 
@@ -1224,15 +1260,47 @@ export function modelSelectionDetail(result) {
   return result.reason;
 }
 
-function interactionBudget(duration) {
-  return { deadline: Date.now() + duration, controller: new AbortController() };
+// Use the same preference for structural pills and composer-local fallbacks.
+export function preferredModelPillIndex(labels) {
+  if (!labels.length) return -1;
+  const recognized = labels.findIndex((text) => detectPillLevel(text) !== null);
+  if (recognized >= 0) return recognized;
+  const legacy = labels.findIndex((text) => /instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text));
+  return legacy >= 0 ? legacy : 0;
 }
 
-function interactionOptions(budget, maximum = 1000) {
+export function modelSelectionDiagnostics(snapshot) {
+  const source = snapshot?.pill ? (snapshot.pill.structural ? "structural" : "fallback") : "none";
+  const observed = snapshot?.observed || "";
+  const items = snapshot?.items || [];
+  const recognized = [...new Set(items.map((item) => detectPillLevel(item.text)).filter(Boolean))];
+  return `pill_source=${source} pill_level=${detectPillLevel(observed) || "unrecognized"} ` +
+    `pill_text_length=${observed.length} items=${items.length} recognized=[${recognized.join(",")}]`;
+}
+
+function interactionDeadlineError() {
+  return Object.assign(new Error("interaction_deadline"), { code: "interaction_deadline" });
+}
+
+export function requireInteractionRead(value) {
+  if (value === null) throw interactionDeadlineError();
+  return value;
+}
+
+export function modelSelectionFailureReason(error, { deadline, aborted }, now) {
+  if (aborted || now >= deadline) return "timeout";
+  return error?.code === "interaction_deadline" ? "interaction_deadline" : "selection_failed";
+}
+
+function interactionBudget(duration, picker = null) {
+  return { deadline: Date.now() + duration, controller: new AbortController(), picker };
+}
+
+function interactionOptions(budget, maximum = 3000) {
   const remaining = budget.deadline - Date.now();
   if (remaining <= 0 || budget.controller.signal.aborted) {
     budget.controller.abort();
-    throw new Error("interaction_deadline");
+    throw interactionDeadlineError();
   }
   return { timeout: Math.max(1, Math.min(maximum, remaining)), signal: budget.controller.signal };
 }
@@ -1246,18 +1314,18 @@ async function budgetPause(budget, ms) {
 // Bound read-only evaluations too; their browser callback checks the same
 // deadline before reading DOM, and no continuation may act after abort.
 async function boundedRead(budget, read) {
-  const { timeout, signal } = interactionOptions(budget);
+  const { timeout, signal } = interactionOptions(budget, 1000);
   let timer;
   let abort;
   try {
-    return await Promise.race([
+    return requireInteractionRead(await Promise.race([
       read(timeout),
       new Promise((_, reject) => {
-        abort = () => reject(new Error("interaction_deadline"));
+        abort = () => reject(interactionDeadlineError());
         signal.addEventListener("abort", abort, { once: true });
         timer = setTimeout(abort, timeout);
       }),
-    ]);
+    ]));
   } finally {
     clearTimeout(timer);
     signal.removeEventListener("abort", abort);
@@ -1268,7 +1336,7 @@ async function boundedRead(budget, read) {
 // restricted to the structural pill or the textarea's own composer region.
 // No arbitrary menu labels are written to logs or acknowledgement metadata.
 async function pickerSnapshot(page, budget) {
-  return boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, sendSelector, deadline }) => {
+  const snapshot = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, sendSelector, deadline, pickerId }) => {
     if (Date.now() >= deadline) return null;
     const visible = (el) => {
       const rect = el.getBoundingClientRect();
@@ -1279,31 +1347,39 @@ async function pickerSnapshot(page, budget) {
     const form = input?.closest("form");
     let region = form || input?.parentElement;
     if (!form) while (region && !region.querySelector(sendSelector)) region = region.parentElement;
-    // body/html are not a composer region: a header Send button must not
-    // make a page-wide model/account menu eligible.
     if (region === body || region === document.documentElement) region = null;
     const pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]')].filter(visible);
     const candidates = pills.length ? pills : [...(region?.querySelectorAll('button[aria-haspopup="menu"]') || [])].filter(visible);
-    let index = 0;
-    if (!pills.length && candidates.length > 1) {
-      const preferred = candidates.findIndex((el) => /instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(el.innerText || ""));
-      if (preferred >= 0) index = preferred;
-    }
-    const pill = candidates[index];
-    const menus = [...body.querySelectorAll('[role="menu"], [role="listbox"]')].filter(visible);
-    const items = [...body.querySelectorAll('[role="menuitemradio"], [role="menuitem"], [role="option"]')]
-      .filter((el) => visible(el) && menus.some((menu) => menu.contains(el)))
-      .slice(0, 64)
-      .map((el) => ({ text: (el.innerText || el.textContent || "").trim(),
-        checked: el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true" }));
-    const trigger = body.querySelector('[data-testid="composer-intelligence-pro-thinking-effort-trigger"]');
+    const menus = window.__nyx.modelPickerMenus(pickerId);
+    const items = window.__nyx.modelPickerItems(pickerId).map((el) => ({
+      text: (el.innerText || el.textContent || "").trim(),
+      checked: el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true",
+    }));
     return {
-      pill: pill ? { index, structural: !!pills.length, form: !!form } : null,
-      observed: pill ? (pill.innerText || pill.textContent || "").trim() || null : null,
-      open: menus.length > 0, items,
-      submenu: !!trigger && visible(trigger) && menus.some((menu) => menu.contains(trigger)),
+      candidates: candidates.map((el) => (el.innerText || el.textContent || "").trim()),
+      structural: !!pills.length, form: !!form,
+      open: menus.length > 0, items, submenu: !!window.__nyx.modelPickerTrigger(pickerId),
     };
-  }, { composerSelector: COMPOSER_SELECTOR, sendSelector: SEND_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget)));
+  }, { composerSelector: COMPOSER_SELECTOR, sendSelector: SEND_SELECTOR, deadline: Date.now() + timeout,
+    pickerId: budget.picker?.id }, interactionOptions(budget, 1000)));
+  interactionOptions(budget);
+  const index = preferredModelPillIndex(snapshot.candidates);
+  snapshot.pill = index < 0 ? null : { index, structural: snapshot.structural, form: snapshot.form };
+  snapshot.observed = snapshot.candidates[index] || null;
+  if (budget.picker) {
+    // Preserve the last open picker's items after Escape for diagnostics.
+    // These texts stay in memory only; logging projects canonical metadata.
+    const lastItems = budget.picker.snapshot?.items || [];
+    budget.picker.snapshot = { ...snapshot, items: snapshot.open ? snapshot.items : lastItems };
+  }
+  return snapshot;
+}
+
+async function beginModelPicker(page, budget) {
+  await boundedRead(budget, (timeout) => page.locator("body").evaluate((_, { id, deadline }) => {
+    if (Date.now() >= deadline) return null;
+    return window.__nyx.beginModelPicker(id);
+  }, { id: budget.picker.id, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
 }
 
 function pickerLocator(page, pill) {
@@ -1312,22 +1388,46 @@ function pickerLocator(page, pill) {
   return region.locator('button[aria-haspopup="menu"]:visible').nth(pill.index);
 }
 
+async function clickPickerElement(page, budget, entry) {
+  let handle;
+  let acceptingHandle = true;
+  try {
+    handle = await boundedRead(budget, (timeout) => page.locator("body").evaluateHandle((_, { id, deadline, entry }) => {
+      if (Date.now() >= deadline) return null;
+      return entry.trigger ? window.__nyx.modelPickerTrigger(id)
+        : window.__nyx.modelPickerItem(id, entry.index, entry.text);
+    }, { id: budget.picker.id, deadline: Date.now() + timeout, entry }, interactionOptions(budget, 1000)).then((value) => {
+      // If evaluation completed after the read/selection deadline, release its
+      // handle without allowing a late click or leaking a remote reference.
+      if (!acceptingHandle || budget.controller.signal.aborted) {
+        void value.dispose().catch(() => {});
+        throw interactionDeadlineError();
+      }
+      return value;
+    }));
+    interactionOptions(budget);
+    const element = handle.asElement();
+    if (!element) throw Object.assign(new Error("picker_changed"), { code: "picker_changed" });
+    await element.click(interactionOptions(budget));
+  } finally {
+    acceptingHandle = false;
+    await handle?.dispose().catch(() => {});
+  }
+}
+
 async function clickMatchingLevel(page, targets, budget, allowChecked = false) {
   const snapshot = await pickerSnapshot(page, budget);
   const index = chooseNestedLevelEntry(snapshot.items, targets, allowChecked);
   if (index < 0) return false;
-  // Keep the text predicate on the live locator as well as the snapshot so a
-  // menu rerender cannot turn a saved index into a click on another action.
-  const item = snapshot.items[index];
-  const label = item.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
-  await page.locator(MENU_ITEM_SELECTOR).filter({ hasText: new RegExp(`^\\s*${label}\\s*$`) }).first()
-    .click(interactionOptions(budget));
+  // Revalidate innerText and membership page-side, then click that exact node.
+  // Hidden hints in textContent cannot invalidate a visible level match.
+  await clickPickerElement(page, budget, { index, text: snapshot.items[index].text });
   return true;
 }
 
 async function closeOpenMenus(page, budget) {
-  while ((await pickerSnapshot(page, budget)).open) {
-    await page.locator("body").press("Escape", interactionOptions(budget, 500));
+  for (let escapes = 0; escapes < 3 && (await pickerSnapshot(page, budget)).open; escapes += 1) {
+    await page.locator("body").press("Escape", interactionOptions(budget));
     await budgetPause(budget, 100);
   }
 }
@@ -1341,12 +1441,13 @@ async function closeOpenMenus(page, budget) {
 async function selectModel(page, modelLabel) {
   const targets = modelLevelTargets(modelLabel);
   const result = { level: targets[0] || null, verified: false, observed: null, reason: "picker_unavailable" };
-  const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS);
+  const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID(), snapshot: null });
   let timer;
   let drainTimer;
   const inner = selectModelInner(page, targets, budget, result).catch((error) => {
-    result.reason = budget.controller.signal.aborted || Date.now() >= budget.deadline ||
-      error?.name === "TimeoutError" || error?.message === "interaction_deadline" ? "timeout" : "selection_failed";
+    result.reason = modelSelectionFailureReason(error, {
+      deadline: budget.deadline, aborted: budget.controller.signal.aborted,
+    }, Date.now());
   });
   const timeout = new Promise((resolveTimeout) => {
     timer = setTimeout(() => {
@@ -1367,7 +1468,7 @@ async function selectModel(page, modelLabel) {
   // Cleanup gets its own small budget after the aborted selection is drained.
   // The pre-send guard below also handles non-menu overlays and stuck Radix
   // body pointer-events. Cleanup failure must not consume a recovery attempt.
-  const cleanup = interactionBudget(2000);
+  const cleanup = interactionBudget(2000, budget.picker);
   const cleanupTimer = setTimeout(() => cleanup.controller.abort(), 2000);
   try {
     await closeOpenMenus(page, cleanup);
@@ -1378,7 +1479,7 @@ async function selectModel(page, modelLabel) {
   }
   result.verified = pillShowsLevel(result.observed, targets);
   if (result.verified && !["timeout", "already_selected"].includes(result.reason)) result.reason = "selected";
-  log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)}`);
+  log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)} ${modelSelectionDiagnostics(budget.picker.snapshot)}`);
   return { ...result };
 }
 
@@ -1391,13 +1492,20 @@ async function selectModelInner(page, targets, budget, result) {
     return;
   }
   if (!before.pill || !targets.length) return;
-  await closeOpenMenus(page, budget);
+  await beginModelPicker(page, budget);
   await pickerLocator(page, before.pill).click(interactionOptions(budget));
-  await page.locator(MENU_SELECTOR).first().waitFor({ state: "visible", ...interactionOptions(budget, 5000) });
+  try {
+    await page.locator("body").waitForFunction((_, id) => window.__nyx.modelPickerMenus(id).length > 0,
+      budget.picker.id, interactionOptions(budget, 5000));
+  } catch (error) {
+    interactionOptions(budget);
+    if (error?.name !== "TimeoutError") throw error;
+    result.reason = "menu_not_opened";
+    return;
+  }
   let clicked = await clickMatchingLevel(page, targets, budget);
   if (!clicked && (await pickerSnapshot(page, budget)).submenu) {
-    await page.locator('[data-testid="composer-intelligence-pro-thinking-effort-trigger"]').first()
-      .click(interactionOptions(budget));
+    await clickPickerElement(page, budget, { trigger: true });
     await budgetPause(budget, 200);
     clicked = await clickMatchingLevel(page, targets, budget);
   }
@@ -1423,12 +1531,13 @@ async function selectModelInner(page, targets, budget, result) {
 }
 
 // Clear overlays before typing and again immediately before Send. Never force
-// a click through an obstruction: failure is terminal PRE-send, not a browser
-// recovery loop and never prompt_delivery_uncertain.
+// a click through an obstruction: failure stays pre-send and enters the
+// existing browser recovery / infrastructure retry path.
 async function ensureComposerUnobstructed(page) {
   const budget = interactionBudget(PRE_SEND_ACTION_MS);
   const timer = setTimeout(() => budget.controller.abort(), PRE_SEND_ACTION_MS);
   try {
+    await page.locator(COMPOSER_SELECTOR).first().scrollIntoViewIfNeeded(interactionOptions(budget)).catch(() => {});
     while (true) {
       const state = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
         if (Date.now() >= deadline) return null;
@@ -1443,19 +1552,19 @@ async function ensureComposerUnobstructed(page) {
         const main = body.querySelector("main");
         const mainRect = main?.getBoundingClientRect();
         const neutral = mainRect && document.elementFromPoint(mainRect.x + 4, mainRect.y + 4) === main;
-        return { clear: !open && !!hit && input.contains(hit) && getComputedStyle(body).pointerEvents !== "none", open, neutral };
-      }, { composerSelector: COMPOSER_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget)));
+        return { clear: !!hit && input.contains(hit) && getComputedStyle(body).pointerEvents !== "none", open, neutral };
+      }, { composerSelector: COMPOSER_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
       interactionOptions(budget);
       if (state.clear) return;
-      await page.locator("body").press("Escape", interactionOptions(budget, 500));
+      await page.locator("body").press("Escape", interactionOptions(budget));
       if (!state.open && state.neutral) {
-        await page.locator("main").first().click({ position: { x: 4, y: 4 }, ...interactionOptions(budget, 500) }).catch(() => {});
+        await page.locator("main").first().click({ position: { x: 4, y: 4 }, ...interactionOptions(budget) }).catch(() => {});
       }
       await budgetPause(budget, 100);
     }
   } catch {
     log("composer_unobstructed_failed");
-    throw new TaskFailure("composer_unobstructed_failed");
+    throw Object.assign(new Error("composer_unobstructed_failed"), { code: "composer_unobstructed_failed" });
   } finally {
     budget.controller.abort();
     clearTimeout(timer);
@@ -1755,7 +1864,7 @@ async function handlePrompt(runtime, page, task, recovering) {
   // Type the prompt into the composer (native — more robust than the
   // userscript's execCommand fallbacks) and send.
   const input = page.locator(COMPOSER_SELECTOR).first();
-  await input.waitFor({ state: "visible", timeout: PRE_SEND_ACTION_MS });
+  await input.waitFor({ state: "visible", timeout: 60000 });
   await ensureComposerUnobstructed(page);
   await input.click({ timeout: PRE_SEND_ACTION_MS });
   await input.fill(task.prompt, { timeout: PRE_SEND_ACTION_MS });
@@ -2304,6 +2413,7 @@ async function ack(runtime, task, phase, phaseDetail) {
   const response = await apiPost("/ack", taskIdentity(runtime, task, {
     phase,
     phase_detail: phaseDetail,
+    page_url: runtime.page?.url(),
   }));
   return response.status === "cancelled";
 }
@@ -2813,6 +2923,7 @@ async function executeTask(runtime, task, recovering) {
       });
       runtime.chromeAlive = false;
       runtime.lastError = stableErrorCode(error);
+      log(`task ${task.task_id} paused for browser recovery (${runtime.lastError})`);
       if (recovery.action === "fail") {
         runtime.lastError = recovery.code;
         await settleTaskFailure(runtime, task, recovery.code);
@@ -2820,7 +2931,6 @@ async function executeTask(runtime, task, recovering) {
         return;
       }
       runtime.health.cdp += 1;
-      log(`task ${task.task_id} paused for browser recovery (${runtime.lastError})`);
       await recoverChrome(runtime, recovery.forceRelaunch);
       recovering = true;
     }

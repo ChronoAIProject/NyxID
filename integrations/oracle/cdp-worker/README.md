@@ -209,12 +209,20 @@ remain supported. Picker discovery uses the structural composer pill, even
 when its label is unfamiliar (for example `自动`, `Auto`, or `6`). If that
 pill is absent, only menu buttons inside the textarea's nearest form, or its
 nearest ancestor containing Send, are considered. Header/account menus are
-never picker fallbacks. Text only breaks ties among composer candidates.
+never picker fallbacks. Among multiple structural pills or fallback buttons,
+a recognized reasoning level takes priority, then the existing label hints,
+then the first candidate. An unfamiliar single pill remains eligible.
 
 Selection uses real pointer clicks and exact level matches before fuzzy
 matches. High cannot match Extra High. A sticky submenu can commit only a
 recognized target entry (exact, then fuzzy), or a recognized checked level;
 otherwise it is dismissed with Escape. There is no first-item fallback.
+Before opening the pill, the worker records the identity of menus already
+visible. Picker waits, item/effort-trigger selection, and cleanup consider
+only newly visible menus, so a persistent sidebar listbox is ignored. Cleanup
+uses at most three Escape presses per call. Selected entries are revalidated
+by visible text and picker membership, then clicked through their exact
+element handle; hidden hints in an item's text content do not affect matching.
 
 Selection returns `{ level, verified, observed, reason }`. Verification means
 the observed composer pill shows the requested level. The result's `model`
@@ -223,25 +231,42 @@ be read, it retains the requested model as a fallback, not as evidence of a
 successful selection. Clicked menu text is never reported as the model.
 
 Selection is best-effort, with a shared 25-second deadline (shortenable with
-`NYXID_MODEL_SELECT_TIMEOUT_MS`). Every step checks the remaining budget;
-Playwright actions carry timeouts and an abort signal. On timeout the worker
-aborts, allows up to three seconds to drain the inner operation, then spends
+`NYXID_MODEL_SELECT_TIMEOUT_MS`). Every step checks the remaining budget.
+Picker clicks and key presses allow up to three seconds, reads one second,
+and menu opening five seconds, each capped by the remaining budget. Actions
+carry an abort signal. `timeout` means the shared deadline/abort was reached;
+a shorter menu wait reports `menu_not_opened`, other step failures report
+`selection_failed`, and an expired DOM read reports `interaction_deadline`.
+On deadline expiry the worker aborts, allows up to three seconds to drain
+the inner operation, then spends
 at most two seconds closing menus. No background picker loop continues into
 prompt delivery, and selection errors do not consume browser recovery attempts.
-Before typing and before Send, a separate five-second guard dismisses menus
-and checks the composer hit target and body pointer events. A persistent
-obstruction fails safely before Send with `composer_unobstructed_failed`.
+The initial composer visibility wait allows 60 seconds for slow page loads;
+click/fill/Send actions remain bounded to five seconds. Before typing and
+before Send, a separate five-second guard scrolls the composer into view,
+checks its hit target and body pointer events, and dismisses obstructions.
+An unrelated visible menu does not fail that check. A persistent obstruction
+raises `composer_unobstructed_failed` into existing pre-send browser recovery.
+After the local recovery budget is exhausted, `browser_recovery_exhausted`
+lets the server requeue the task while infrastructure retries remain.
 
 Progress acknowledgements run `page_ready` → `selecting_model` →
 `ready_to_send` → `sent`. A second `selecting_model` acknowledgement records
 the finished selection's metadata-only `phase_detail`, such as `selected=Pro`,
-`unverified=Pro`, `picker_unavailable`, `level_unavailable`, `selection_failed`,
-or `timeout`. `ready_to_send` refreshes the lease after filling the prompt;
-first-turn uploads acknowledge it again before Send. Pre-send cancellation
-replies stop delivery. Logs use `model_selection reason=<code>` and canonical
-levels, never arbitrary menu text, prompts, answers, or conversation URLs;
-acknowledgements omit conversation URLs too. The durable `send_attempted`
-fence and the rule against resending an uncertain prompt remain in force.
+`unverified=Pro`, `picker_unavailable`, `level_unavailable`, `menu_not_opened`,
+`selection_failed`, `interaction_deadline`, or `timeout`. `ready_to_send`
+refreshes the lease after filling the prompt; first-turn uploads acknowledge it again before Send. Pre-send cancellation
+replies stop delivery. Acknowledgements include `page_url` for task/worker
+protocol diagnostics; `phase_detail` stays metadata-only. Conversation URLs
+remain excluded from logs and audit, not from the worker protocol.
+
+Selection logs include `model_selection reason=<code>`, pill source
+(`structural`/`fallback`/`none`), detected level or `unrecognized`, pill text
+length, the last visible picker item count, and recognized canonical levels
+(e.g. `items=5 recognized=[Instant,Medium,High,Extra High,Pro]`). They never
+include raw pill/menu labels, prompts, answers, or conversation URLs. The
+durable `send_attempted` fence and the rule against resending an uncertain
+prompt remain in force.
 
 ## Result artifacts
 

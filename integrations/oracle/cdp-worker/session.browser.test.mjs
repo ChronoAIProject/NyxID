@@ -601,14 +601,17 @@ function reasoningPage(config) {
   const region = config.noForm ? "section" : "form";
   return `<!doctype html><meta charset="utf-8"><style>
     body { margin: 0; } main { padding: 40px; min-height: 500px; }
-    form, section { margin-top: 100px; width: 600px; }
+    form, section { margin-top: ${config.offscreen ? 1500 : 100}px; width: 600px; }
     #prompt-textarea { display: block; width: 500px; height: 100px; border: 1px solid; }
     [role=menu], [role=listbox] { position: fixed; top: 80px; left: 60px;
       background: white; border: 1px solid; padding: 10px; pointer-events: auto; z-index: 10; }
     [role=menuitemradio], [role=menuitem] { display: block; padding: 6px; }
+    #sidebar { position: fixed; top: 0; left: 680px; }
   </style><header><button id="header-model" aria-haspopup="menu">GPT-6</button></header>
+  ${config.sidebar ? '<nav id="sidebar" role="listbox"><button role="option" id="sidebar-pro">Pro</button></nav>' : ''}
   <main><div id="turns"></div><${region}>
   ${config.contenteditable ? '<div id="prompt-textarea" contenteditable="true"></div>' : '<textarea id="prompt-textarea"></textarea>'}
+  ${config.twoPills ? '<button type="button" id="tools-pill" class="__composer-pill" aria-haspopup="menu">GPT tools</button>' : ''}
   ${config.noPill ? "" : `<button type="button" id="pill" class="${config.fallback ? "" : "__composer-pill"}" aria-haspopup="menu">${config.initial || "自动"}</button>`}
   <button type="button" data-testid="send-button">Send</button>
   </${region}></main><script>
@@ -619,19 +622,26 @@ function reasoningPage(config) {
     const input = document.querySelector('#prompt-textarea');
     const pill = document.querySelector('#pill');
     const closeMenu = () => {
-      document.querySelectorAll('[role=menu], [role=listbox]').forEach(el => el.remove());
+      document.querySelectorAll('[data-picker-menu]').forEach(el => el.remove());
       document.body.style.pointerEvents = '';
     };
     const renderMenu = (nested = false) => {
       closeMenu();
       const menu = document.createElement('div');
+      menu.setAttribute('data-picker-menu', '');
       menu.setAttribute('role', config.listbox ? 'listbox' : 'menu');
       document.body.style.pointerEvents = 'none';
       const labels = nested && config.arbitraryNested
         ? ['Instant', 'Profile', 'Delete conversation'] : ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
-      for (const label of labels) {
+      for (const label of labels.filter(label => !config.missingLevel || label !== 'Pro')) {
         const item = document.createElement('button');
         item.textContent = label;
+        if (config.hiddenHints) {
+          const hint = document.createElement('span');
+          hint.style.display = 'none';
+          hint.textContent = 'private hidden hint for ' + label;
+          item.append(hint);
+        }
         item.setAttribute('role', 'menuitemradio');
         item.setAttribute('aria-checked', String(nested && (config.arbitraryNested ? label === 'Profile' : label === 'Instant')));
         item.onclick = () => {
@@ -645,7 +655,7 @@ function reasoningPage(config) {
       document.body.append(menu);
     };
     document.querySelector('#header-model').onclick = () => { record('header'); renderMenu(); };
-    if (config.blockPicker) {
+    if (config.blockPicker || config.slowPickerClick) {
       const rect = pill.getBoundingClientRect();
       const blocker = document.createElement('div');
       blocker.id = 'picker-blocker';
@@ -653,6 +663,8 @@ function reasoningPage(config) {
         'px;width:' + rect.width + 'px;height:' + rect.height + 'px';
       document.body.append(blocker);
     }
+    document.querySelector('#sidebar-pro')?.addEventListener('click', () => record('sidebar:Pro'));
+    document.querySelector('#tools-pill')?.addEventListener('click', () => record('tools-picker'));
     if (pill) pill.onclick = () => {
       record('picker');
       if (config.neverOpens) return;
@@ -666,6 +678,8 @@ function reasoningPage(config) {
     });
     input.addEventListener('input', () => {
       typed = true;
+      const rect = input.getBoundingClientRect();
+      window.composerVisibleAtFill = rect.top >= 0 && rect.bottom <= innerHeight;
       record('typed');
       if (config.blockPicker) setTimeout(() => document.querySelector('#picker-blocker').remove(), 600);
       if (config.obstructAfterFill) renderMenu();
@@ -694,7 +708,7 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
   let claimed = false;
   const task = { status: 'task', kind: 'prompt', task_id: 'reasoning-task', dispatch_attempt_id: 'reasoning-attempt',
     prompt: 'Synthetic private prompt marker', model: 'chatgpt-6-pro', is_followup: false };
-  const base = await apiFixture(t, (url, body) => {
+  const base = await apiFixture(t, async (url, body) => {
     if (url.pathname.endsWith('/heartbeat')) return { status: 'ok' };
     if (url.pathname.endsWith('/login-profile')) return [404, { error: 'legacy backend' }];
     if (url.pathname.endsWith('/task')) {
@@ -704,6 +718,21 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
     }
     if (url.pathname.endsWith('/ack')) {
       acknowledgements.push(body);
+      if (body.phase === 'selecting_model') {
+        if (!body.phase_detail && config.slowPickerClick) {
+          await fixture.page.evaluate(() => setTimeout(() => document.querySelector('#picker-blocker').remove(), 1400));
+        }
+        if (!body.phase_detail && config.expiredRead) {
+          await fixture.page.evaluate(() => { const now = Date.now; Date.now = () => now() + 60000; });
+        }
+        if (body.phase_detail && config.slowComposer) {
+          await fixture.page.evaluate(() => {
+            const input = document.querySelector('#prompt-textarea');
+            input.style.display = 'none';
+            setTimeout(() => { input.style.display = ''; }, 6000);
+          });
+        }
+      }
       const cancelled = cancelPhase === 'selection_finished'
         ? body.phase === 'selecting_model' && !!body.phase_detail : body.phase === cancelPhase;
       return { status: cancelled ? 'cancelled' : 'ok' };
@@ -714,7 +743,8 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
   });
   const process = workerProcess(fixture, [], {
     NYXID_BASE_URL: base, NYXID_WORKER_TOKEN: token,
-    NYXID_MODEL_SELECT_TIMEOUT_MS: config.blockPicker ? '350' : config.neverOpens ? '1500' : '5000',
+    NYXID_MODEL_SELECT_TIMEOUT_MS: config.selectionTimeout || (config.blockPicker ? '350' : config.neverOpens ? '1500' : '5000'),
+    NYXID_MAX_TASK_RECOVERY_FAILURES: '1',
     // Exercise the existing final extraction after one stability poll so a
     // whole worker/result cycle fits the per-test 30s CI limit.
     NYXID_MAX_WAIT_MS: '1',
@@ -736,13 +766,16 @@ async function assertReasoningDelivered(fixture, { model = 'GPT-6 Pro', detail =
   assert.equal(events.filter(item => item.event === 'send').length, 1);
   assert.equal(events.filter(item => item.event === 'header').length, 0);
   assert.deepEqual(await fixture.page.evaluate(() => ({
-    menus: document.querySelectorAll('[role=menu], [role=listbox]').length,
+    menus: document.querySelectorAll('[data-picker-menu]').length,
     blocked: getComputedStyle(document.body).pointerEvents === 'none',
   })), { menus: 0, blocked: false });
   for (const value of [fixture.task.prompt, 'Synthetic reasoning response', '/c/aaaaaa-bbbbbb']) {
     assert.ok(!fixture.process.output().includes(value), fixture.process.output());
-    assert.ok(!JSON.stringify(acks).includes(value));
+    if (!value.startsWith('/c/')) assert.ok(!JSON.stringify(acks).includes(value));
+    assert.ok(!JSON.stringify(acks.map(body => body.phase_detail)).includes(value));
   }
+  assert.ok(acks.every(body => body.page_url?.startsWith('https://chatgpt.com/')));
+  assert.equal(acks.at(-1).page_url, 'https://chatgpt.com/c/aaaaaa-bbbbbb');
   return events;
 }
 
@@ -764,7 +797,7 @@ test('reasoning: missing menu times out without a selection interaction after ty
   const fixture = await reasoningFixture(t, { neverOpens: true });
   const events = await assertReasoningDelivered(fixture, { model: '自动', detail: 'timeout' });
   assert.deepEqual(events.map(item => item.event), ['picker', 'typed', 'send']);
-  assert.match(fixture.process.output(), /model_selection reason=timeout/);
+  assert.match(fixture.process.output(), /model_selection reason=timeout .*pill_source=structural pill_level=unrecognized pill_text_length=2 items=0 recognized=\[\]/);
 });
 
 for (const phase of ['selecting_model', 'selection_finished', 'ready_to_send']) {
@@ -788,6 +821,7 @@ test('reasoning: a matching header picker outside the composer is never clicked'
   const fixture = await reasoningFixture(t, { noPill: true });
   const events = await assertReasoningDelivered(fixture, { model: 'chatgpt-6-pro', detail: 'picker_unavailable' });
   assert.deepEqual(events.map(item => item.event), ['typed', 'send']);
+  assert.match(fixture.process.output(), /reason=picker_unavailable .*pill_source=none pill_level=unrecognized pill_text_length=0 items=0 recognized=\[\]/);
 });
 
 for (const noForm of [false, true]) {
@@ -807,6 +841,7 @@ test('reasoning: arbitrary nested entries are dismissed without a blind first or
 test('reasoning: an unverified click reports the unchanged observed pill', options, async (t) => {
   const fixture = await reasoningFixture(t, { initial: 'Instant', unverified: true });
   await assertReasoningDelivered(fixture, { model: 'Instant', detail: 'unverified=Pro' });
+  assert.match(fixture.process.output(), /reason=unverified .*pill_source=structural pill_level=Instant pill_text_length=7 items=5 recognized=\[Instant,Medium,High,Extra High,Pro\]/);
 });
 
 test('reasoning: the second composer guard clears a menu opened during fill', options, async (t) => {
@@ -815,15 +850,15 @@ test('reasoning: the second composer guard clears a menu opened during fill', op
   assert.ok(events.some(item => item.event === 'escape' && item.typed));
 });
 
-test('reasoning: a permanent obstruction fails before send without burning recovery attempts', options, async (t) => {
+test('reasoning: a permanent obstruction enters pre-send recovery and exhausts safely', options, async (t) => {
   const fixture = await reasoningFixture(t, { permanentBlock: true });
   await waitUntil(() => fixture.results.length > 0, 15000);
-  assert.equal(fixture.results[0].response, 'ERROR: composer_unobstructed_failed', fixture.process.output());
+  assert.equal(fixture.results[0].response, 'ERROR: browser_recovery_exhausted', fixture.process.output());
   assert.equal(fixture.acknowledgements.some(body => body.phase === 'sent'), false);
   assert.equal(fixture.acknowledgements.filter(body => body.phase === 'page_ready').length, 1);
   assert.equal((await fixture.page.evaluate(() => window.clickLog)).some(item => item.event === 'send'), false);
   assert.match(fixture.process.output(), /composer_unobstructed_failed/);
-  assert.ok(!fixture.process.output().includes('paused for browser recovery'));
+  assert.ok(fixture.process.output().includes('paused for browser recovery (composer_unobstructed_failed)'));
 });
 
 
@@ -832,4 +867,70 @@ test('reasoning: a timed-out actionability wait is aborted before the covered pi
   const events = await assertReasoningDelivered(fixture, { model: '自动', detail: 'timeout' });
   assert.deepEqual(events.map(item => item.event), ['typed', 'send']);
   assert.equal(await fixture.page.locator('#picker-blocker').count(), 0);
+});
+
+
+test('reasoning: an always-visible sidebar listbox is not the picker or a composer obstruction', options, async (t) => {
+  const fixture = await reasoningFixture(t, { sidebar: true });
+  const events = await assertReasoningDelivered(fixture);
+  assert.equal(events.some(item => item.event === 'sidebar:Pro'), false);
+  assert.equal(events.filter(item => item.event === 'level:Pro').length, 1);
+  assert.ok(events.filter(item => item.event === 'escape' && !item.typed).length <= 3);
+  assert.equal(await fixture.page.locator('#sidebar').isVisible(), true);
+});
+
+test('reasoning: hidden item hints do not prevent exact visible-label selection', options, async (t) => {
+  const fixture = await reasoningFixture(t, { hiddenHints: true });
+  const events = await assertReasoningDelivered(fixture);
+  assert.deepEqual(events.filter(item => item.event.startsWith('level:')).map(item => item.event), ['level:Pro']);
+  assert.ok(!fixture.process.output().includes('private hidden hint'));
+});
+
+test('reasoning: a recognized model pill outranks an earlier structural tools pill', options, async (t) => {
+  const fixture = await reasoningFixture(t, { twoPills: true, initial: 'Instant' });
+  const events = await assertReasoningDelivered(fixture);
+  assert.equal(events.some(item => item.event === 'tools-picker'), false);
+  assert.equal(events.filter(item => item.event === 'picker').length, 1);
+});
+
+test('reasoning: a missing menu with budget remaining reports menu_not_opened', options, async (t) => {
+  const fixture = await reasoningFixture(t, { neverOpens: true, selectionTimeout: '15000' });
+  const events = await assertReasoningDelivered(fixture, { model: '自动', detail: 'menu_not_opened' });
+  assert.deepEqual(events.map(item => item.event), ['picker', 'typed', 'send']);
+  assert.match(fixture.process.output(), /reason=menu_not_opened .*pill_source=structural pill_level=unrecognized pill_text_length=2 items=0 recognized=\[\]/);
+});
+
+test('reasoning: unavailable levels log counts and canonical levels without raw labels', options, async (t) => {
+  const fixture = await reasoningFixture(t, { missingLevel: true });
+  await assertReasoningDelivered(fixture, { model: '自动', detail: 'level_unavailable' });
+  assert.match(fixture.process.output(), /reason=level_unavailable .*pill_source=structural pill_level=unrecognized pill_text_length=2 items=4 recognized=\[Instant,Medium,High,Extra High\]/);
+  assert.ok(!fixture.process.output().includes('自动'));
+});
+
+test('reasoning: expired page-side reads carry a deadline code instead of a TypeError', options, async (t) => {
+  const fixture = await reasoningFixture(t, { expiredRead: true });
+  await waitUntil(() => fixture.results.length > 0, 12000);
+  assert.equal(fixture.acknowledgements.find(body => body.phase_detail)?.phase_detail, 'interaction_deadline');
+  assert.match(fixture.process.output(), /model_selection reason=interaction_deadline/);
+  assert.ok(!fixture.process.output().includes('TypeError'));
+  assert.ok(!fixture.process.output().includes('reason=selection_failed'));
+  assert.equal(fixture.results[0].response, 'ERROR: browser_recovery_exhausted');
+});
+
+test('reasoning: initial composer visibility may take longer than an action timeout', options, async (t) => {
+  const fixture = await reasoningFixture(t, { slowComposer: true });
+  await assertReasoningDelivered(fixture);
+  assert.ok(!fixture.process.output().includes('paused for browser recovery'));
+});
+
+test('reasoning: picker actionability can take longer than one second', options, async (t) => {
+  const fixture = await reasoningFixture(t, { slowPickerClick: true });
+  await assertReasoningDelivered(fixture);
+  assert.equal(await fixture.page.locator('#picker-blocker').count(), 0);
+});
+
+test('reasoning: the guard scrolls an off-viewport composer into view', options, async (t) => {
+  const fixture = await reasoningFixture(t, { offscreen: true, initial: 'GPT-6 Pro' });
+  await assertReasoningDelivered(fixture);
+  assert.equal(await fixture.page.evaluate(() => window.composerVisibleAtFill), true);
 });

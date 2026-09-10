@@ -26,6 +26,10 @@ import {
   chooseNestedLevelEntry,
   reportedPromptModel,
   modelSelectionDetail,
+  preferredModelPillIndex,
+  modelSelectionDiagnostics,
+  requireInteractionRead,
+  modelSelectionFailureReason,
   modelLevelTargets,
   pillShowsLevel,
   detectPillLevel,
@@ -652,4 +656,41 @@ test("selection phase detail uses only canonical levels and stable outcome codes
     assert.equal(modelSelectionDetail({ level: "Pro", observed: "private page text", reason }), reason);
   }
   assert.equal(modelSelectionDetail({ level: "Pro", verified: true, reason: "timeout" }), "timeout");
+});
+
+
+test("pill preference uses canonical levels before legacy labels in either candidate source", () => {
+  assert.equal(preferredModelPillIndex(["GPT tools", "Instant"]), 1);
+  assert.equal(preferredModelPillIndex(["Search", "GPT-6"]), 1);
+  assert.equal(preferredModelPillIndex(["Tools", "自动"]), 0);
+  assert.equal(preferredModelPillIndex(["自动"]), 0);
+  assert.equal(preferredModelPillIndex(["Tools", "6 Pro", "High"]), 1);
+  assert.equal(preferredModelPillIndex([]), -1);
+});
+
+test("selection diagnostics contain structural metadata and canonical levels without raw labels", () => {
+  const observed = "private pill marker";
+  const output = modelSelectionDiagnostics({ pill: { structural: true }, observed,
+    items: [{ text: "Instant" }, { text: "Pro with private hint" }, { text: "Pro" }, { text: "private action" }] });
+  assert.equal(output, "pill_source=structural pill_level=unrecognized pill_text_length=19 items=4 recognized=[Instant,Pro]");
+  assert.ok(!output.includes("private"));
+  assert.match(modelSelectionDiagnostics({ pill: { structural: false }, observed: "6 Pro" }),
+    /pill_source=fallback pill_level=Pro pill_text_length=5 items=0 recognized=\[\]/);
+  assert.equal(modelSelectionDiagnostics(null),
+    "pill_source=none pill_level=unrecognized pill_text_length=0 items=0 recognized=[]");
+});
+
+test("null browser reads carry the interaction deadline code instead of causing a TypeError", () => {
+  assert.throws(() => requireInteractionRead(null), { message: "interaction_deadline", code: "interaction_deadline" });
+  for (const value of [false, 0, "", { open: false }, { clear: true }]) {
+    assert.equal(requireInteractionRead(value), value);
+  }
+});
+
+test("selection distinguishes the shared deadline from a shorter step timeout", () => {
+  const error = Object.assign(new Error("timed out"), { name: "TimeoutError" });
+  assert.equal(modelSelectionFailureReason(error, { deadline: 100, aborted: false }, 50), "selection_failed");
+  assert.equal(modelSelectionFailureReason(error, { deadline: 100, aborted: false }, 100), "timeout");
+  assert.equal(modelSelectionFailureReason(error, { deadline: 100, aborted: true }, 50), "timeout");
+  assert.equal(modelSelectionFailureReason({ code: "interaction_deadline" }, { deadline: 100, aborted: false }, 50), "interaction_deadline");
 });
