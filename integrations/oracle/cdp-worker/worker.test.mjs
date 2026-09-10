@@ -537,6 +537,9 @@ test("model labels map to ChatGPT reasoning levels with Pro first", () => {
   assert.equal(modelLevelTargets("chatgpt-5.5-pro")[0], "Pro");
   assert.equal(modelLevelTargets("gpt-5.5-extended")[0], "Pro");
   assert.equal(modelLevelTargets("Pro 扩展")[0], "Pro");
+  assert.deepEqual(modelLevelTargets("chatgpt-6-pro"), ["Pro", "Pro Standard", "Pro 扩展", "扩展"]);
+  assert.deepEqual(modelLevelTargets("chatgpt-6-pro-extended"), ["Pro", "Pro Extended", "Pro 扩展", "扩展"]);
+  assert.deepEqual(modelLevelTargets("Pro 扩展"), ["Pro", "Pro Extended", "Pro 扩展", "扩展"]);
   assert.equal(modelLevelTargets("extra high")[0], "Extra High");
   assert.equal(modelLevelTargets("high")[0], "High");
   assert.equal(modelLevelTargets("balanced")[0], "Medium");
@@ -628,6 +631,24 @@ test("nested entry choice prefers exact target, then fuzzy target, then a recogn
   assert.equal(chooseNestedLevelEntry(items.slice(0, 2), targets), 1);
   assert.equal(chooseNestedLevelEntry(items.slice(0, 1), targets), 0);
   assert.equal(chooseNestedLevelEntry(items.slice(0, 1), targets, false), -1);
+});
+
+test("split Pro tiers choose Standard for a plain Pro label and Extended for an extended label", () => {
+  const tiers = [{ text: "Instant" }, { text: "Extra High" }, { text: "Pro Extended" }, { text: "Pro Standard" }];
+  assert.equal(chooseNestedLevelEntry(tiers, modelLevelTargets("chatgpt-6-pro")), 3);
+  assert.equal(chooseNestedLevelEntry(tiers, modelLevelTargets("chatgpt-6-pro-extended")), 2);
+  assert.equal(chooseNestedLevelEntry(tiers, modelLevelTargets("Pro 扩展")), 2);
+  // A single "Pro" entry still wins exactly for both labels.
+  const single = [{ text: "Instant" }, { text: "Pro" }];
+  assert.equal(chooseNestedLevelEntry(single, modelLevelTargets("chatgpt-6-pro")), 1);
+  assert.equal(chooseNestedLevelEntry(single, modelLevelTargets("chatgpt-6-pro-extended")), 1);
+  // Only an Extended entry present: the plain label falls back to it fuzzily; never Instant.
+  assert.equal(chooseNestedLevelEntry([{ text: "Instant" }, { text: "Pro Extended" }], modelLevelTargets("chatgpt-6-pro")), 1);
+  for (const label of ["chatgpt-6-pro", "chatgpt-6-pro-extended"]) {
+    assert.equal(pillShowsLevel("GPT-6 Pro Standard", modelLevelTargets(label)), true, label);
+    assert.equal(pillShowsLevel("GPT-6 Pro Extended", modelLevelTargets(label)), true, label);
+    assert.equal(modelSelectionDetail({ level: modelLevelTargets(label)[0], verified: true, reason: "selected" }), "selected=Pro");
+  }
 });
 
 test("nested entry choice never picks an unchecked first item or a checked arbitrary action", () => {

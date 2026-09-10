@@ -1165,7 +1165,7 @@ async function ensureChatPage(runtime, targetUrl) {
 // ── Prompt flow ──────────────────────────────────────────────────────────
 // Map a requested model label to the ChatGPT picker's reasoning levels. The
 // current UI exposes Instant/Medium/High/Extra High/Pro as role="menuitemradio"
-// entries; "-pro" (the pool default `chatgpt-5.5-pro`) selects the Pro level.
+// entries; "-pro" (the pool default `chatgpt-6-pro`) selects the Pro level.
 // Chinese labels are kept so either localisation matches. The first entry is
 // the canonical display name.
 export function modelLevelTargets(label) {
@@ -1173,8 +1173,12 @@ export function modelLevelTargets(label) {
   if (!raw) return [];
   const lower = raw.toLowerCase();
   const compact = lower.replace(/^(chatgpt|openai)-/, "").replace(/[\s._-]+/g, "");
-  if (/\bpro\b|pro$|扩展|extended/.test(lower) || compact.endsWith("pro")) {
-    return ["Pro", "Pro 扩展", "扩展"];
+  // Pro plans may split Pro into "Pro Standard" and "Pro Extended" entries.
+  // The canonical level stays "Pro" (verification and phase_detail use it);
+  // the alias order decides which entry the exact pass prefers.
+  if (/扩展|extended/.test(lower)) return ["Pro", "Pro Extended", "Pro 扩展", "扩展"];
+  if (/\bpro\b|pro$/.test(lower) || compact.endsWith("pro")) {
+    return ["Pro", "Pro Standard", "Pro 扩展", "扩展"];
   }
   if (/extra\s*high|ultra|超高/.test(lower)) return ["Extra High", "超高"];
   if (/\bhigh\b|高级|advanced/.test(lower)) return ["High", "高级"];
@@ -1241,10 +1245,14 @@ export function pillShowsLevel(pillText, targets) {
 // item, even if checked. A submenu may contain account actions, not levels.
 export function chooseNestedLevelEntry(items, targets, allowChecked = true) {
   const recognized = (item) => detectPillLevel(item.text) !== null;
-  for (const exact of [true, false]) {
-    const index = items.findIndex((item) => recognized(item) && modelItemMatches(item.text, targets, exact));
+  // Exact pass walks aliases in priority order so "Pro Standard" beats
+  // "Pro Extended" for a plain Pro label regardless of menu order.
+  for (const target of targets || []) {
+    const index = items.findIndex((item) => recognized(item) && modelItemMatches(item.text, [target], true));
     if (index >= 0) return index;
   }
+  const fuzzy = items.findIndex((item) => recognized(item) && modelItemMatches(item.text, targets, false));
+  if (fuzzy >= 0) return fuzzy;
   return allowChecked ? items.findIndex((item) => recognized(item) && item.checked) : -1;
 }
 

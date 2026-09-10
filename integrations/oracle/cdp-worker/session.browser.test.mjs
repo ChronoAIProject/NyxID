@@ -632,7 +632,9 @@ function reasoningPage(config) {
       menu.setAttribute('role', config.listbox ? 'listbox' : 'menu');
       document.body.style.pointerEvents = 'none';
       const labels = nested && config.arbitraryNested
-        ? ['Instant', 'Profile', 'Delete conversation'] : ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
+        ? ['Instant', 'Profile', 'Delete conversation']
+        : config.proTiers ? ['Instant', 'Medium', 'High', 'Extra High', 'Pro Standard', 'Pro Extended']
+        : ['Instant', 'Medium', 'High', 'Extra High', 'Pro'];
       for (const label of labels.filter(label => !config.missingLevel || label !== 'Pro')) {
         const item = document.createElement('button');
         item.textContent = label;
@@ -722,7 +724,7 @@ async function reasoningFixture(t, config = {}, cancelPhase) {
   const results = [];
   let claimed = false;
   const task = { status: 'task', kind: 'prompt', task_id: 'reasoning-task', dispatch_attempt_id: 'reasoning-attempt',
-    prompt: 'Synthetic private prompt marker', model: 'chatgpt-6-pro', is_followup: false };
+    prompt: 'Synthetic private prompt marker', model: config.model || 'chatgpt-6-pro', is_followup: false };
   const base = await apiFixture(t, async (url, body) => {
     if (url.pathname.endsWith('/heartbeat')) return { status: 'ok' };
     if (url.pathname.endsWith('/login-profile')) return [404, { error: 'legacy backend' }];
@@ -823,6 +825,14 @@ test('reasoning: unrecognized structural pill selects Pro and reports the observ
   assert.equal(events.filter(item => item.event === 'picker').length, 1);
   assert.deepEqual(events.filter(item => item.event.startsWith('level:')).map(item => item.event), ['level:Pro']);
 });
+
+for (const [model, level] of [['chatgpt-6-pro', 'Pro Standard'], ['chatgpt-6-pro-extended', 'Pro Extended']]) {
+  test(`reasoning: split Pro tiers select ${level} for ${model}`, options, async (t) => {
+    const fixture = await reasoningFixture(t, { proTiers: true, model });
+    const events = await assertReasoningDelivered(fixture, { model: `GPT-6 ${level}` });
+    assert.deepEqual(events.filter(item => item.event.startsWith('level:')).map(item => item.event), [`level:${level}`]);
+  });
+}
 
 test('reasoning: sticky submenu commits the target over checked Instant and closes before typing', options, async (t) => {
   const fixture = await reasoningFixture(t, { sticky: true, listbox: true });

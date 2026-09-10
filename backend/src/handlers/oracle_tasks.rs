@@ -567,7 +567,7 @@ mod tests {
             api_key_id: None,
             api_key_name: None,
             prompt: "the prompt".to_string(),
-            model_label: Some("chatgpt-5.5-pro".to_string()),
+            model_label: Some("chatgpt-6-pro".to_string()),
             project_url: None,
             tag: None,
             pdf_base64: Some("cGRm".to_string()),

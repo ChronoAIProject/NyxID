@@ -203,9 +203,13 @@ worker.
 ## Reasoning level
 
 The pool's `--model` (or a task's `model_label`) requests a ChatGPT reasoning
-level: `chatgpt-6-pro` and `chatgpt-5.5-pro` request **Pro**; `extra high`,
-`high`, `medium`, and `instant` request those levels. Existing Chinese aliases
-remain supported. Picker discovery uses the structural composer pill, even
+level: `chatgpt-6-pro` (the pool default) and `chatgpt-5.5-pro` request
+**Pro**; `extra high`, `high`, `medium`, and `instant` request those levels.
+Where a Pro plan splits Pro into `Pro Standard` and `Pro Extended` entries, a
+plain Pro label prefers `Pro Standard` and a label containing `extended` or
+`扩展` (for example `chatgpt-6-pro-extended`) prefers `Pro Extended`; both
+verify and report the canonical `Pro` level. Existing Chinese aliases remain
+supported. Picker discovery uses the structural composer pill, even
 when its label is unfamiliar (for example `自动`, `Auto`, or `6`). If that
 pill is absent, only menu buttons inside the textarea's nearest form, or its
 nearest ancestor containing Send, are considered. Header/account menus are
