@@ -38,6 +38,9 @@ pub struct ScopeCatalogEntry {
     /// Write/admin/DM-grade scope — UI may emphasize it. No server effect.
     #[serde(default)]
     pub sensitive: bool,
+    /// Required by this catalog service when starting or completing OAuth.
+    #[serde(default)]
+    pub required: bool,
 }
 
 /// How safely a granted scope can be *removed* from an existing connection.
@@ -100,13 +103,11 @@ pub fn removal_capability(slug: &str) -> ScopeRemoval {
 ///
 /// Deliberately NOT derived from the display-oriented `sensitive` flags below:
 /// Google's verification classification is a separate, manually maintained
-/// decision. Google stays identity-only until the Phase 2 verification pass.
+/// decision. Operators must configure and verify the managed Google app for
+/// the Drive, Calendar, and Gmail read/send scopes before offering it in production.
 pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
     match slug {
-        // Identity only until aelf completes Google app verification; every
-        // useful Google API scope (Drive/Gmail/Sheets/Calendar) is sensitive
-        // or restricted and gated by Google review -> BYO for now.
-        "google" => Some(&["openid", "email", "profile"]),
+        "google" => Some(super::google_workspace::MANAGED_SCOPES),
         // Curated-broad: common recoverable read + authoring capabilities are
         // one-click. Excluded (-> BYO): `write:org` (alters org membership /
         // teams) and `delete_repo` (irreversible). Admin/hook/key/codespace/
@@ -161,6 +162,7 @@ pub fn for_provider(slug: &str) -> Option<Vec<ScopeCatalogEntry>> {
                 label: (*label).to_string(),
                 description: (*description).to_string(),
                 sensitive: *sensitive,
+                required: false,
             })
             .collect(),
     )
@@ -1111,14 +1113,22 @@ mod tests {
     }
 
     #[test]
-    fn platform_allowlist_excludes_google_sensitive_scopes() {
-        // Phase 1 launches unverified: no Drive/Gmail/Sheets-class scopes may
-        // ride the shared platform app until the Google verification pass.
+    fn platform_allowlist_google_supports_drive_calendar_and_gmail_read_send() {
         let google = platform_scope_allowlist("google").unwrap();
         for s in [
             "https://www.googleapis.com/auth/drive",
             "https://www.googleapis.com/auth/drive.readonly",
+            "https://www.googleapis.com/auth/calendar",
+            "https://www.googleapis.com/auth/calendar.readonly",
             "https://www.googleapis.com/auth/gmail.readonly",
+            "https://www.googleapis.com/auth/gmail.send",
+        ] {
+            assert!(google.contains(&s));
+        }
+        for s in [
+            "https://www.googleapis.com/auth/gmail.modify",
+            "https://www.googleapis.com/auth/gmail.compose",
+            "https://mail.google.com/",
             "https://www.googleapis.com/auth/spreadsheets",
         ] {
             assert!(

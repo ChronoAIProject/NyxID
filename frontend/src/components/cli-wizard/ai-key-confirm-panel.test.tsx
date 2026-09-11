@@ -781,6 +781,17 @@ describe("AiKeyConfirm — upstream scope picker (issue #917)", () => {
     );
   });
 
+  it("omits scope controls and overrides when onboarding a scopeless OAuth provider", async () => {
+    const user = userEvent.setup();
+    mockGet.mockResolvedValue({ ...oauthEntry, name: "Notion", supports_oauth_scopes: false });
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "social-twitter" }} />, { wrapper: createWrapper() });
+    const connect = await screen.findByRole("button", { name: /Continue with provider sign-in/i });
+    expect(screen.queryByRole("button", { name: /Read posts|Upload media/i })).not.toBeInTheDocument();
+    expect(screen.queryByPlaceholderText(/scope/i)).not.toBeInTheDocument();
+    await user.click(connect);
+    await waitFor(() => expect(mockOAuthFlow).toHaveBeenCalledWith(expect.objectContaining({ scopeOverride: undefined })));
+  });
+
   it("adds a custom scope via the Add field and forwards it to OAuth", async () => {
     const user = userEvent.setup();
     mockGet.mockResolvedValue(oauthEntry);
@@ -1036,6 +1047,47 @@ describe("AiKeyConfirm — manage-scopes mode (issue #917 CLI --set)", () => {
     baseProps.onSuccess = vi.fn();
   });
 
+  it("keeps required send permission when a CLI scope override omits it", async () => {
+    const user = userEvent.setup();
+    const read = "https://www.googleapis.com/auth/gmail.readonly";
+    const send = "https://www.googleapis.com/auth/gmail.send";
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === "/keys/svc-1")
+        return { ...existingKey, granted_scopes: [read] };
+      if (path === "/catalog/api-twitter")
+        return {
+          ...twitterEntry,
+          default_scopes: [read, send],
+          scope_catalog: [
+            {
+              scope: send,
+              label: "Gmail (send)",
+              description: "Send email.",
+              required: true,
+            },
+          ],
+        };
+      throw new Error(`unexpected GET ${path}`);
+    });
+    render(
+      <AiKeyConfirm
+        {...baseProps}
+        prefill={{ reconnect_key_id: "svc-1", scope_override: [read] }}
+      />,
+      { wrapper: createWrapper() },
+    );
+    const reauth = await screen.findByRole("button", {
+      name: /Re-authorize with these permissions/i,
+    });
+    expect(
+      screen.getByRole("button", { name: /Gmail \(send\)/ }),
+    ).toBeDisabled();
+    await user.click(reauth);
+    expect(mockOAuthFlow).toHaveBeenCalledWith(
+      expect.objectContaining({ scopeOverride: [read, send] }),
+    );
+  });
+
   it("seeds the picker from --set scope_override and hands it to OAuthFlow", async () => {
     const user = userEvent.setup();
     render(
@@ -1070,6 +1122,19 @@ describe("AiKeyConfirm — manage-scopes mode (issue #917 CLI --set)", () => {
         baselineAuthorizedAt: "2026-06-16T00:00:00Z",
       }),
     );
+  });
+
+  it("blocks scope management for scopeless providers even with a CLI scope override", async () => {
+    mockGet.mockImplementation(async (path: string) => {
+      if (path === "/keys/svc-1") return existingKey;
+      if (path === "/catalog/api-twitter") return { ...twitterEntry, name: "Notion", supports_oauth_scopes: false };
+      throw new Error(`unexpected GET ${path}`);
+    });
+    render(<AiKeyConfirm {...baseProps} prefill={{ reconnect_key_id: "svc-1", scope_override: ["media.write"] }} />, { wrapper: createWrapper() });
+    await screen.findByText(/doesn't support managing scopes here/i);
+    expect(screen.queryByRole("button", { name: /Re-authorize|Upload media|Read posts/i })).not.toBeInTheDocument();
+    expect(mockOAuthFlow).not.toHaveBeenCalled();
+    expect(mockPost).not.toHaveBeenCalled();
   });
 
   it("without --set, seeds from the connection's current grant", async () => {

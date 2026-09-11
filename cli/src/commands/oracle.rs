@@ -25,9 +25,14 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::api::ApiClient;
-use crate::cli::{OracleCommands, OraclePoolCommands, OracleWorkerCommands, OutputFormat};
+use crate::cli::{
+    OracleCommands, OracleLoginProfileCommands, OraclePoolCommands, OracleWorkerCommands,
+    OutputFormat,
+};
 use crate::commands::oracle_worker_daemon::{self, OracleWorkerConfig};
 use crate::org_resolver::resolve_org_id;
+
+mod enrollment;
 
 const POLL_INTERVAL_SECS: u64 = 3;
 const SESSION_FORMAT_VERSION: u32 = 1;
@@ -241,10 +246,12 @@ pub async fn run(command: OracleCommands) -> Result<()> {
         OracleCommands::Worker { command } => run_worker(command).await,
         OracleCommands::Login {
             pool,
+            save_as,
             worker_token_file,
             wait,
             auth,
-        } => run_login(pool, worker_token_file, wait, auth).await,
+        } => run_login(pool, save_as, worker_token_file, wait, auth).await,
+        OracleCommands::LoginProfile { command } => run_login_profile(command).await,
         OracleCommands::Sessions { pool, limit, auth } => {
             let output = auth.output;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
@@ -361,15 +368,28 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
                     }
                     let mut table = Table::new();
                     table.load_preset(UTF8_FULL_CONDENSED);
-                    table.set_header(["Slug", "Name", "Visibility", "Workers", "Active", "Manage"]);
+                    table.set_header([
+                        "Slug",
+                        "Name",
+                        "Visibility",
+                        "Online",
+                        "Max tasks",
+                        "Active",
+                        "Manage",
+                        "Join",
+                    ]);
                     for p in &pools {
                         table.add_row([
                             p["slug"].as_str().unwrap_or("-").to_string(),
                             p["name"].as_str().unwrap_or("-").to_string(),
                             p["visibility"].as_str().unwrap_or("-").to_string(),
+                            p["online_workers"]
+                                .as_u64()
+                                .map_or_else(|| "-".to_string(), |n| n.to_string()),
                             p["max_workers"].as_u64().unwrap_or(0).to_string(),
                             yes_no(p["is_active"].as_bool().unwrap_or(false)),
                             yes_no(p["can_manage"].as_bool().unwrap_or(false)),
+                            yes_no(p["can_enroll"].as_bool().unwrap_or(false)),
                         ]);
                     }
                     println!("{table}");
@@ -395,7 +415,17 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
                         "Allow extract: {}",
                         yes_no(p["allow_extract"].as_bool().unwrap_or(false))
                     );
-                    eprintln!("Max workers: {}", p["max_workers"].as_u64().unwrap_or(0));
+                    eprintln!(
+                        "Online:      {}",
+                        p["online_workers"]
+                            .as_u64()
+                            .map_or_else(|| "-".to_string(), |n| n.to_string())
+                    );
+                    eprintln!("Max tasks:   {}", p["max_workers"].as_u64().unwrap_or(0));
+                    eprintln!(
+                        "Can join:    {}",
+                        yes_no(p["can_enroll"].as_bool().unwrap_or(false))
+                    );
                     eprintln!(
                         "Max queue:   {}",
                         p["max_queue_length"].as_u64().unwrap_or(0)
@@ -488,9 +518,102 @@ async fn run_pool(command: OraclePoolCommands) -> Result<()> {
     }
 }
 
+fn validate_login_profile_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        bail!("Login profile name must be 1-64 letters, digits, '-' or '_'");
+    }
+    Ok(())
+}
+
+async fn run_login_profile(command: OracleLoginProfileCommands) -> Result<()> {
+    match command {
+        OracleLoginProfileCommands::List { pool, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let response: Value = api
+                .get(&format!(
+                    "/oracle/pools/{}/login-profiles",
+                    urlencoding::encode(&pool)
+                ))
+                .await?;
+            if matches!(auth.output, OutputFormat::Json) {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                let mut table = Table::new();
+                table.load_preset(UTF8_FULL_CONDENSED);
+                table.set_header(["Name", "Status", "Retained Until", "Workers"]);
+                for row in response["profiles"].as_array().into_iter().flatten() {
+                    let workers = row["workers"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Value::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    table.add_row([
+                        text_field(row, "name"),
+                        text_field(row, "status"),
+                        text_field(row, "expires_at"),
+                        workers,
+                    ]);
+                }
+                println!("{table}");
+            }
+            Ok(())
+        }
+        OracleLoginProfileCommands::Delete { pool, name, auth } => {
+            validate_login_profile_name(&name)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            api.delete_empty(&format!(
+                "/oracle/pools/{}/login-profiles/{}",
+                urlencoding::encode(&pool),
+                urlencoding::encode(&name)
+            ))
+            .await?;
+            eprintln!("Deleted saved login '{name}' and its bindings.");
+            Ok(())
+        }
+    }
+}
+
 async fn run_worker(command: OracleWorkerCommands) -> Result<()> {
     match command {
-        OracleWorkerCommands::List { pool, auth } => {
+        OracleWorkerCommands::BindLogin {
+            pool,
+            label,
+            login_profile,
+            replace_existing,
+            auth,
+        } => {
+            validate_login_profile_name(&login_profile)?;
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            let response: Value = api.put(&format!("{}/login-profile", worker_path(&pool, &label)),
+                &serde_json::json!({ "login_profile": login_profile, "replace_existing": replace_existing })).await?;
+            match auth.output {
+                OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+                OutputFormat::Table => {
+                    eprintln!("Worker '{label}' is bound to saved login '{login_profile}'.")
+                }
+            }
+            if response["requires_upgrade"].as_bool() == Some(true) {
+                eprintln!(
+                    "This worker needs an upgrade before it can use the saved login: nyxid oracle worker upgrade --pool {pool} --label {label}"
+                );
+            }
+            Ok(())
+        }
+        OracleWorkerCommands::UnbindLogin { pool, label, auth } => {
+            let mut api = ApiClient::from_auth_checked(&auth).await?;
+            api.delete_empty(&format!("{}/login-profile", worker_path(&pool, &label)))
+                .await?;
+            eprintln!("Saved login unbound from worker '{label}'.");
+            Ok(())
+        }
+        OracleWorkerCommands::List { pool, all, auth } => {
             let output = auth.output;
             let mut api = ApiClient::from_auth_checked(&auth).await?;
             let response: Value = api
@@ -499,7 +622,7 @@ async fn run_worker(command: OracleWorkerCommands) -> Result<()> {
                     urlencoding::encode(&pool)
                 ))
                 .await?;
-            print_workers(output, &response)
+            print_workers(output, &response, all)
         }
         OracleWorkerCommands::Show { pool, label, auth } => {
             let output = auth.output;
@@ -513,9 +636,10 @@ async fn run_worker(command: OracleWorkerCommands) -> Result<()> {
             pool,
             worker_token_file,
             label,
+            login_profile,
             force,
             auth,
-        } => install_worker(pool, worker_token_file, label, force, auth).await,
+        } => install_worker(pool, worker_token_file, label, login_profile, force, auth).await,
         OracleWorkerCommands::Start { pool, profile } => {
             oracle_worker_daemon::start(&pool, profile.as_deref())
         }
@@ -778,14 +902,39 @@ fn installed_bundle_matches(config: &OracleWorkerConfig, bundle: &WorkerBundle) 
         && playwright_version == bundle.playwright_core_version
 }
 
-fn print_workers(output: OutputFormat, response: &Value) -> Result<()> {
+/// Split the server's worker list into the rows to display and the number of
+/// offline rows hidden. With `include_offline` every row is shown.
+fn select_workers(response: &Value, include_offline: bool) -> (Vec<Value>, usize) {
+    let workers = response["workers"].as_array().cloned().unwrap_or_default();
+    if include_offline {
+        return (workers, 0);
+    }
+    let total = workers.len();
+    let online: Vec<Value> = workers
+        .into_iter()
+        .filter(|worker| worker["online"].as_bool().unwrap_or(false))
+        .collect();
+    let hidden = total - online.len();
+    (online, hidden)
+}
+
+fn print_workers(output: OutputFormat, response: &Value, include_offline: bool) -> Result<()> {
+    let (workers, hidden) = select_workers(response, include_offline);
     if matches!(output, OutputFormat::Json) {
-        println!("{}", serde_json::to_string_pretty(response)?);
+        let mut body = response.clone();
+        body["workers"] = Value::Array(workers);
+        body["hidden_offline"] = Value::from(hidden);
+        println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
     }
-    let workers = response["workers"].as_array().cloned().unwrap_or_default();
     if workers.is_empty() {
-        eprintln!("No workers have registered with this pool.");
+        if hidden > 0 {
+            eprintln!(
+                "No workers are online in this pool ({hidden} offline hidden; pass --all to show them)."
+            );
+        } else {
+            eprintln!("No workers have registered with this pool.");
+        }
         return Ok(());
     }
     let mut table = Table::new();
@@ -819,6 +968,9 @@ fn print_workers(output: OutputFormat, response: &Value) -> Result<()> {
         ]);
     }
     println!("{table}");
+    if hidden > 0 {
+        eprintln!("{hidden} offline worker(s) hidden; pass --all to show them.");
+    }
     Ok(())
 }
 
@@ -888,27 +1040,110 @@ async fn install_worker(
     pool: String,
     worker_token_file: Option<String>,
     requested_label: Option<String>,
+    login_profile: Option<String>,
     force: bool,
     auth: crate::cli::AuthArgs,
 ) -> Result<()> {
+    if let Some(name) = login_profile.as_deref() {
+        validate_login_profile_name(name)?;
+    }
     let profile = auth.profile.clone();
     let base_url = auth.resolved_base_url()?;
-    let mut api = ApiClient::from_auth_checked(&auth).await?;
+    let mut api = ApiClient::from_auth_checked(&auth)
+        .await?
+        .for_credential_transfer()?;
     let install_dir = oracle_worker_daemon::install_dir(&pool, profile.as_deref())?;
     fs::create_dir_all(&install_dir)?;
     set_private_dir(&install_dir)?;
+    let _install_lock = enrollment::lock_install(&install_dir)?;
 
-    let existing = oracle_worker_daemon::load_config(&pool, profile.as_deref()).ok();
+    let existing = if oracle_worker_daemon::config_path(&pool, profile.as_deref())?.exists() {
+        Some(oracle_worker_daemon::load_config(
+            &pool,
+            profile.as_deref(),
+        )?)
+    } else {
+        None
+    };
     if existing.is_some() && !force {
         bail!(
             "Worker is already installed at {}; use --force to refresh it",
             install_dir.display()
         )
     }
-    let label = match (&existing, requested_label.as_deref()) {
+    if existing.as_ref().is_some_and(|config| {
+        config.base_url.trim_end_matches('/') != base_url.trim_end_matches('/')
+    }) {
+        bail!("This worker belongs to a different NyxID server; use a separate --profile")
+    }
+    let pool_info: Value = api
+        .get(&format!("/oracle/pools/{}", urlencoding::encode(&pool)))
+        .await?;
+    let available_token = available_worker_token(
+        &pool,
+        profile.as_deref(),
+        worker_token_file.as_deref(),
+        existing.as_ref().map(|config| config.token_file.as_path()),
+    )?;
+    if available_token
+        .as_ref()
+        .is_some_and(|token| token.starts_with("nyx_owk_"))
+        && install_dir.join("enrollment.json").exists()
+    {
+        bail!(
+            "This installation uses its own browser account; use a separate --profile for a shared-login worker"
+        )
+    }
+    let enroll = use_automatic_enrollment(
+        &pool_info,
+        available_token.as_deref().map(String::as_str),
+        login_profile.as_deref(),
+    )?;
+    let bundle = fetch_manager_bundle(&mut api).await?;
+    let node = resolve_node()?;
+    let npm = resolve_program(&["npm"])?;
+    let chrome = resolve_chrome()?;
+    let installation_id_file = existing
+        .as_ref()
+        .map(|config| config.installation_id_file.clone())
+        .unwrap_or_else(|| install_dir.join("installation-id"));
+    let installation_id = match fs::read_to_string(&installation_id_file) {
+        Ok(value) => value.trim().to_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let value = uuid::Uuid::new_v4().to_string();
+            enrollment::write_secret(&installation_id_file, value.as_bytes())?;
+            value
+        }
+        Err(error) => return Err(error).context("Could not read worker installation identity"),
+    };
+    let enrolled = if enroll {
+        uuid::Uuid::parse_str(&installation_id)
+            .context("Worker installation identity is invalid")?;
+        let pool_id = pool_info["id"]
+            .as_str()
+            .context("Server omitted the pool identity")?;
+        Some(
+            enrollment::enroll(
+                &mut api,
+                &pool,
+                pool_id,
+                &install_dir,
+                &installation_id,
+                requested_label
+                    .as_deref()
+                    .or_else(|| existing.as_ref().map(|config| config.label.as_str())),
+                available_token.as_deref().map(String::as_str),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let label = match (&enrolled, &existing, requested_label.as_deref()) {
+        (Some(enrolled), _, _) => enrolled.label.clone(),
         // Keep the existing identity unless the operator explicitly renames.
-        (Some(config), None) => config.label.clone(),
-        (_, requested) => {
+        (_, Some(config), None) => config.label.clone(),
+        (_, _, requested) => {
             let body = match requested {
                 Some(label) => serde_json::json!({ "label": label }),
                 None => Value::Null,
@@ -935,17 +1170,24 @@ async fn install_worker(
             label
         }
     };
-    let token = read_worker_token(
-        &pool,
-        profile.as_deref(),
-        worker_token_file.as_deref(),
-        existing.as_ref().map(|config| config.token_file.as_path()),
-    )?;
-    let bundle = fetch_manager_bundle(&mut api).await?;
-    verify_worker_token(&base_url, token.as_str(), &bundle.sha256).await?;
-    let node = resolve_node()?;
-    let npm = resolve_program(&["npm"])?;
-    let chrome = resolve_chrome()?;
+    let token = match enrolled {
+        Some(enrolled) => enrolled.credential,
+        None => read_worker_token(
+            &pool,
+            profile.as_deref(),
+            worker_token_file.as_deref(),
+            existing.as_ref().map(|config| config.token_file.as_path()),
+        )?,
+    };
+    verify_worker_token(
+        &base_url,
+        token.as_str(),
+        &bundle.sha256,
+        pool_info["id"]
+            .as_str()
+            .context("Server omitted the pool identity")?,
+    )
+    .await?;
     let port = select_install_debug_port(
         existing.as_ref().map(|config| config.chrome_debug_port),
         force,
@@ -953,13 +1195,12 @@ async fn install_worker(
     let bundle_path = install_dir.join("worker.mjs");
     install_bundle_runtime(&install_dir, &bundle, &npm)?;
     let token_file = install_dir.join("worker-token");
-    write_private(&token_file, token.as_bytes())?;
-    let installation_id_file = install_dir.join("installation-id");
-    if !installation_id_file.exists() {
-        write_private(
-            &installation_id_file,
-            format!("{}\n", uuid::Uuid::new_v4()).as_bytes(),
-        )?;
+    enrollment::write_secret(&token_file, token.as_bytes())?;
+    if let Some(name) = login_profile.as_deref() {
+        let installation_id = fs::read_to_string(&installation_id_file)?;
+        let _: Value = api.put(&format!("{}/login-profile", worker_path(&pool, &label)),
+            &serde_json::json!({ "login_profile": name, "installation_id": installation_id.trim(),
+                "replace_existing": false })).await?;
     }
     let config = OracleWorkerConfig {
         pool: pool.clone(),
@@ -982,9 +1223,18 @@ async fn install_worker(
     oracle_worker_daemon::install_service(&config, profile.as_deref(), force)?;
     let _ = launch_chrome(&config.chrome_executable, &config.chrome_profile_dir, port)?;
     oracle_worker_daemon::start(&pool, profile.as_deref())?;
+    if enroll {
+        enrollment::complete(&install_dir)?;
+    }
 
     eprintln!("Installed oracle worker '{label}' for pool '{pool}'.");
-    eprintln!("Complete ChatGPT login in the dedicated Chrome window.");
+    if let Some(name) = login_profile {
+        eprintln!(
+            "Worker will claim saved login '{name}'; an existing logged-in account is preserved."
+        );
+    } else {
+        eprintln!("Complete ChatGPT login in the dedicated Chrome window.");
+    }
     eprintln!(
         "Check registration with: nyxid oracle worker list {pool}{}",
         profile
@@ -993,6 +1243,37 @@ async fn install_worker(
             .unwrap_or_default()
     );
     Ok(())
+}
+
+fn use_automatic_enrollment(
+    pool: &Value,
+    token: Option<&str>,
+    login_profile: Option<&str>,
+) -> Result<bool> {
+    if login_profile.is_some() && pool["can_manage"].as_bool() != Some(true) {
+        bail!("Only the pool owner or an org admin can assign saved shared logins")
+    }
+    if token.is_some_and(|value| value.starts_with("nyx_owk_")) {
+        return Ok(false);
+    }
+    if login_profile.is_some() {
+        if token.is_some_and(|value| value.starts_with(enrollment::CREDENTIAL_PREFIX)) {
+            bail!(
+                "This worker uses its own browser account; a saved shared login requires a pool-token installation"
+            )
+        }
+        return Ok(false);
+    }
+    match pool["can_enroll"].as_bool() {
+        Some(true) => Ok(true),
+        Some(false) => bail!(
+            "Joining requires an active pool and account, plus a member or admin role in its organization or pool ownership"
+        ),
+        None if token.is_none() && pool["can_manage"].as_bool() == Some(true) => Ok(false),
+        None => bail!(
+            "This NyxID server does not support automatic worker enrollment; upgrade the backend first"
+        ),
+    }
 }
 
 struct WorkerBundle {
@@ -1050,8 +1331,13 @@ fn verify_bundle(source: &str, expected: &str) -> Result<()> {
     Ok(())
 }
 
-async fn verify_worker_token(base_url: &str, token: &str, expected_sha: &str) -> Result<()> {
-    let response = reqwest::Client::new()
+async fn verify_worker_token(
+    base_url: &str,
+    token: &str,
+    expected_sha: &str,
+    expected_pool_id: &str,
+) -> Result<()> {
+    let response = crate::api::build_credential_http_client(None)?
         .get(format!(
             "{}/api/v1/oracle/worker/bundle",
             base_url.trim_end_matches('/')
@@ -1059,11 +1345,16 @@ async fn verify_worker_token(base_url: &str, token: &str, expected_sha: &str) ->
         .bearer_auth(token)
         .send()
         .await
-        .context("Could not validate the pool worker token")?;
+        .context("Could not validate the worker credential")?;
     if !response.status().is_success() {
-        bail!("Pool worker token was rejected by the server")
+        bail!("Worker credential was rejected by the server")
     }
     let body: Value = response.json().await?;
+    if (body.get("pool_id").is_some() || token.starts_with(enrollment::CREDENTIAL_PREFIX))
+        && body["pool_id"].as_str() != Some(expected_pool_id)
+    {
+        bail!("Worker credential belongs to a different pool")
+    }
     if body["sha256"].as_str() != Some(expected_sha) {
         bail!("Manager and worker bundle endpoints disagree on checksum")
     }
@@ -1100,12 +1391,12 @@ fn install_bundle_runtime(dir: &Path, bundle: &WorkerBundle, npm: &Path) -> Resu
     Ok(())
 }
 
-fn read_worker_token(
+fn available_worker_token(
     pool: &str,
     profile: Option<&str>,
     explicit_file: Option<&str>,
     installed_file: Option<&Path>,
-) -> Result<Zeroizing<String>> {
+) -> Result<Option<Zeroizing<String>>> {
     let env_file = std::env::var("NYXID_WORKER_TOKEN_FILE").ok();
     let path = explicit_file
         .map(PathBuf::from)
@@ -1127,14 +1418,39 @@ fn read_worker_token(
     } else if let Ok(value) = std::env::var("NYXID_WORKER_TOKEN") {
         value
     } else {
-        eprintln!("Enter the raw worker token for pool '{pool}'. Input is hidden.");
-        rpassword::prompt_password("Worker token: ")?
+        return Ok(None);
     });
     let token = raw.trim().to_string();
+    if !(token.starts_with("nyx_owk_") && token.len() >= 20 || enrollment::valid_credential(&token))
+    {
+        bail!("The worker credential file is invalid")
+    }
+    Ok(Some(Zeroizing::new(token)))
+}
+
+fn read_worker_token(
+    pool: &str,
+    profile: Option<&str>,
+    explicit_file: Option<&str>,
+    installed_file: Option<&Path>,
+) -> Result<Zeroizing<String>> {
+    let token = match available_worker_token(pool, profile, explicit_file, installed_file)? {
+        Some(token) => token,
+        None => {
+            eprintln!("Enter the raw worker token for pool '{pool}'. Input is hidden.");
+            let raw = Zeroizing::new(rpassword::prompt_password("Worker token: ")?);
+            Zeroizing::new(raw.trim().to_owned())
+        }
+    };
+    if token.starts_with(enrollment::CREDENTIAL_PREFIX) {
+        bail!(
+            "This worker uses its own browser account; open its dedicated Chrome window to log in"
+        )
+    }
     if !token.starts_with("nyx_owk_") || token.len() < 20 {
         bail!("Worker token must use the nyx_owk_ prefix")
     }
-    Ok(Zeroizing::new(token))
+    Ok(token)
 }
 
 fn resolve_node() -> Result<PathBuf> {
@@ -1303,24 +1619,6 @@ impl Drop for CaptureChrome {
     }
 }
 
-fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options.open(path)?;
-    file.write_all(bytes)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
-}
-
 fn atomic_write(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     let temp = path.with_extension(format!("tmp-{}", std::process::id()));
     fs::write(&temp, bytes)?;
@@ -1344,6 +1642,7 @@ fn set_private_dir(path: &Path) -> Result<()> {
 
 async fn run_login(
     pool: String,
+    save_as: Option<String>,
     worker_token_file: Option<String>,
     wait_secs: u64,
     auth: crate::cli::AuthArgs,
@@ -1351,6 +1650,22 @@ async fn run_login(
     let output = auth.output;
     let profile = auth.profile.clone();
     let mut api = ApiClient::from_auth_checked(&auth).await?;
+    let expected_generation = if let Some(name) = save_as.as_deref() {
+        validate_login_profile_name(name)?;
+        let profiles: Value = api
+            .get(&format!(
+                "/oracle/pools/{}/login-profiles",
+                urlencoding::encode(&pool)
+            ))
+            .await?;
+        profiles["profiles"]
+            .as_array()
+            .and_then(|rows| rows.iter().find(|row| row["name"].as_str() == Some(name)))
+            .and_then(|row| row["generation"].as_str())
+            .map(str::to_owned)
+    } else {
+        None
+    };
     let token = read_worker_token(
         &pool,
         profile.as_deref(),
@@ -1378,10 +1693,13 @@ async fn run_login(
     wait_for_cdp(port, Duration::from_secs(30))?;
 
     eprintln!("Complete the ChatGPT login in the Chrome window that just opened.");
-    eprintln!(
-        "The session is captured locally once ChatGPT shows as logged in, then pushed to the pool \
-         (up to {wait_secs}s)."
-    );
+    if let Some(name) = save_as.as_deref() {
+        eprintln!("The session will be captured and saved as '{name}' (up to {wait_secs}s).");
+    } else {
+        eprintln!(
+            "The session is captured locally once ChatGPT shows as logged in, then pushed to the pool (up to {wait_secs}s)."
+        );
+    }
     let capture_file = capture_dir.join("session.json");
     let status = Command::new(&node)
         .arg(capture_dir.join("worker.mjs"))
@@ -1413,24 +1731,46 @@ async fn run_login(
         encrypt_login_snapshot(plaintext.as_slice(), token.as_bytes())?
     });
     let verifier = hex::encode(Sha256::digest(token.as_bytes()));
-    let response: Value = api
-        .post(
+    let mut body = serde_json::json!({
+        "format_version": SESSION_FORMAT_VERSION, "worker_token_sha256": verifier,
+        "sealed_blob_base64": base64::engine::general_purpose::STANDARD.encode(sealed.as_slice()),
+    });
+    let response: Value = if let Some(name) = save_as.as_deref() {
+        body["expected_generation"] = serde_json::json!(expected_generation);
+        api.put(
+            &format!(
+                "/oracle/pools/{}/login-profiles/{}",
+                urlencoding::encode(&pool),
+                urlencoding::encode(name)
+            ),
+            &body,
+        )
+        .await?
+    } else {
+        api.post(
             &format!(
                 "/oracle/pools/{}/login-snapshots",
                 urlencoding::encode(&pool)
             ),
-            &serde_json::json!({
-                "format_version": SESSION_FORMAT_VERSION,
-                "worker_token_sha256": verifier,
-                "sealed_blob_base64": base64::engine::general_purpose::STANDARD.encode(sealed.as_slice()),
-            }),
+            &body,
         )
-        .await?;
+        .await?
+    };
     drop(sealed);
     capture_browser.stop()?;
     capture_workspace
         .close()
         .context("Could not remove the temporary login-capture profile")?;
+    if let Some(name) = save_as {
+        match output {
+            OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&response)?),
+            OutputFormat::Table => eprintln!(
+                "Saved login '{name}' until {}. Bound workers will claim it when idle.",
+                text_field(&response, "expires_at")
+            ),
+        }
+        return Ok(());
+    }
     let outcomes = wait_for_login_imports(&mut api, &pool, &response, wait_secs).await?;
     let all_verified = !outcomes.is_empty()
         && outcomes.iter().all(|result| {
@@ -2121,6 +2461,169 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
+    fn worker_list_hides_offline_rows_unless_all_is_requested() {
+        let response = serde_json::json!({ "workers": [
+            { "label": "tab_1", "online": true },
+            { "label": "tab_2", "online": false },
+            { "label": "legacy" },
+        ]});
+        let (shown, hidden) = select_workers(&response, false);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0]["label"], "tab_1");
+        assert_eq!(hidden, 2);
+        let (shown, hidden) = select_workers(&response, true);
+        assert_eq!(shown.len(), 3);
+        assert_eq!(hidden, 0);
+    }
+
+    #[test]
+    fn org_members_join_without_token_input_and_legacy_installs_keep_their_path() {
+        let member = serde_json::json!({ "can_enroll": true, "can_manage": false });
+        assert!(use_automatic_enrollment(&member, None, None).unwrap());
+        let enrolled = format!("nyx_owi_{}", "a".repeat(64));
+        assert!(use_automatic_enrollment(&member, Some(&enrolled), None).unwrap());
+        assert!(!use_automatic_enrollment(&member, Some("nyx_owk_existing_token"), None).unwrap());
+        assert!(
+            use_automatic_enrollment(&serde_json::json!({ "can_enroll": false }), None, None)
+                .is_err()
+        );
+        assert!(
+            use_automatic_enrollment(&serde_json::json!({ "can_manage": false }), None, None)
+                .is_err()
+        );
+        assert!(
+            !use_automatic_enrollment(&serde_json::json!({ "can_manage": true }), None, None)
+                .unwrap()
+        );
+        assert!(use_automatic_enrollment(&member, None, Some("shared-account")).is_err());
+    }
+
+    #[tokio::test]
+    async fn worker_credential_verification_checks_the_pool_not_only_the_bundle() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/oracle/worker/bundle"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sha256": "bundle-checksum", "pool_id": "other-pool",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = verify_worker_token(
+            &server.uri(),
+            "nyx_owk_existing_token",
+            "bundle-checksum",
+            "expected-pool",
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("different pool"));
+    }
+
+    #[tokio::test]
+    async fn old_backend_bundle_shape_stays_compatible_with_legacy_workers_only() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/oracle/worker/bundle"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sha256": "bundle-checksum",
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        verify_worker_token(
+            &server.uri(),
+            "nyx_owk_existing_token",
+            "bundle-checksum",
+            "expected-pool",
+        )
+        .await
+        .unwrap();
+        assert!(
+            verify_worker_token(
+                &server.uri(),
+                &format!("nyx_owi_{}", "a".repeat(64)),
+                "bundle-checksum",
+                "expected-pool"
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn saved_login_binding_and_lifecycle_use_manager_routes_without_fanout() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path(
+                "/api/v1/oracle/pools/pool/workers/remote/login-profile",
+            ))
+            .and(body_json(
+                serde_json::json!({ "login_profile": "account-b", "replace_existing": false }),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "binding_id": "binding" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        run_worker(OracleWorkerCommands::BindLogin {
+            pool: "pool".into(),
+            label: "remote".into(),
+            login_profile: "account-b".into(),
+            replace_existing: false,
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/oracle/pools/pool/login-profiles"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "profiles": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        run_login_profile(OracleLoginProfileCommands::List {
+            pool: "pool".into(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .unwrap();
+        Mock::given(method("DELETE"))
+            .and(path(
+                "/api/v1/oracle/pools/pool/workers/remote/login-profile",
+            ))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run_worker(OracleWorkerCommands::UnbindLogin {
+            pool: "pool".into(),
+            label: "remote".into(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .unwrap();
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/oracle/pools/pool/login-profiles/account-b"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        run_login_profile(OracleLoginProfileCommands::Delete {
+            pool: "pool".into(),
+            name: "account-b".into(),
+            auth: mock_auth_with_output(server.uri(), OutputFormat::Json),
+        })
+        .await
+        .unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 4);
+    }
+
+    #[test]
     fn resolve_prompt_prefers_argument() {
         assert_eq!(resolve_prompt(Some("hi"), None).unwrap(), "hi");
     }
@@ -2184,6 +2687,33 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn oracle_worker_refresh_envelope_decrypts_with_cli_wire_protocol() {
+        // Generated with worker.mjs encryptSessionEnvelope and the same synthetic
+        // token used by its Rust-to-JavaScript compatibility fixture.
+        let salt = base64::engine::general_purpose::STANDARD
+            .decode("8pNIaLZ7V9x8Oyqw7qxkeNKdkiYWgnHEKdaxmRsMLRM=")
+            .unwrap();
+        let nonce = base64::engine::general_purpose::STANDARD
+            .decode("lXR4kcu5lWEei4xA")
+            .unwrap();
+        let ciphertext = base64::engine::general_purpose::STANDARD
+            .decode("PMxiUrEsPgghSXT0gPCRMYrP/qqEN4iU6xdmmbavD8/lpvVypnwCPd5hna07M0+BTAJsBS4uEg==")
+            .unwrap();
+        let token = ["nyx_owk_", "test-token-material"].concat();
+        let cipher = snapshot_cipher(&salt, token.as_bytes()).unwrap();
+        let restored = cipher
+            .decrypt(
+                Nonce::from_slice(&nonce),
+                Payload {
+                    msg: &ciphertext,
+                    aad: SESSION_INFO,
+                },
+            )
+            .unwrap();
+        assert_eq!(restored, br#"{"version":1,"cookies":[],"origins":[]}"#);
     }
 
     #[test]
@@ -2376,7 +2906,7 @@ mod tests {
             .and(path("/api/v1/oracle/pools/chatgpt-pro/tasks"))
             .and(body_json(serde_json::json!({
                 "prompt": "what is 2+2?",
-                "model": "chatgpt-5.5-pro",
+                "model": "chatgpt-6-pro",
                 "tag": "smoke",
             })))
             .respond_with(ResponseTemplate::new(202).set_body_json(serde_json::json!({
@@ -2395,7 +2925,7 @@ mod tests {
             file: None,
             pdf: None,
             attach_file: None,
-            model: Some("chatgpt-5.5-pro".to_string()),
+            model: Some("chatgpt-6-pro".to_string()),
             project_url: None,
             tag: Some("smoke".to_string()),
             conversation: None,

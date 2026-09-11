@@ -30,6 +30,138 @@ use crate::services::{
 };
 
 const MAX_SERVICE_SLUG_LEN: usize = 80;
+
+/// Provision the personal API-key import's endpoint, key and service in its
+/// credential transaction. Retrying uses the reserved service ID; an existing
+/// disabled/deleted service is never silently re-enabled by verification.
+pub(crate) async fn provision_imported_api_key_in_transaction(
+    db: &mongodb::Database,
+    session: &mut mongodb::ClientSession,
+    token: &UserProviderToken,
+    catalog: &DownstreamService,
+    service_id: &str,
+) -> AppResult<()> {
+    use crate::models::service_provider_requirement::{
+        COLLECTION_NAME as REQUIREMENTS, ServiceProviderRequirement,
+    };
+    use crate::models::user_endpoint::COLLECTION_NAME as ENDPOINTS;
+    use crate::models::user_service::COLLECTION_NAME as SERVICES;
+
+    let services = db.collection::<UserService>(SERVICES);
+    if services
+        .find_one(doc! {"_id":service_id,"user_id":&token.user_id})
+        .session(&mut *session)
+        .await?
+        .is_some()
+    {
+        return Ok(());
+    }
+    if catalog.provider_config_id.as_deref() != Some(&token.provider_config_id)
+        || !catalog.is_active
+        || catalog.service_type != "http"
+        || catalog_spec_sync::is_platform_vendor_service(catalog)
+    {
+        return Err(AppError::BadRequest(
+            "A compatible personal API service is unavailable".into(),
+        ));
+    }
+    user_endpoint_service::validate_endpoint_url(&catalog.base_url)?;
+    if let Some(url) = &catalog.openapi_spec_url {
+        user_endpoint_service::validate_openapi_spec_url(url)?;
+    }
+    let requirement = db
+        .collection::<ServiceProviderRequirement>(REQUIREMENTS)
+        .find_one(doc! {"service_id":&catalog.id})
+        .session(&mut *session)
+        .await?;
+    let (auth_method, auth_key_name) = derive_effective_auth(catalog, requirement.as_ref());
+    if auth_method != "bearer" || !auth_key_name.eq_ignore_ascii_case("authorization") {
+        return Err(AppError::BadRequest(
+            "OpenAI connection requires bearer authentication".into(),
+        ));
+    }
+    let keys = db.collection::<UserApiKey>(USER_API_KEYS);
+    let key = match keys.find_one(doc! {"user_id":&token.user_id,"source":"user_created","source_id":&token.id,"status":"active"})
+        .session(&mut *session).await? {
+        Some(key) => key,
+        None => {
+            let mut key = user_api_key_service::api_key_from_provider_token(&token.user_id,
+                "Codex API key", &token.provider_config_id, token)?;
+            // A confirmed reconnect gets a fresh key when the prior one was
+            // deleted/revoked. Keep terminal keys and their audit identity.
+            if token.state_version > 1 {
+                key.source = Some("codex_import".into());
+                key.source_id = Some(format!("{}:{}",token.id,token.state_version));
+            }
+            keys.insert_one(&key).session(&mut *session).await?;
+            key
+        }
+    };
+    let now = Utc::now();
+    let endpoint = UserEndpoint {
+        id: Uuid::new_v4().to_string(),
+        user_id: token.user_id.clone(),
+        label: "Codex API key".into(),
+        url: catalog.base_url.clone(),
+        catalog_service_id: Some(catalog.id.clone()),
+        openapi_spec_url: catalog.openapi_spec_url.clone(),
+        recommended_skills: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let slug = format!("codex-openai-{}", service_id.replace('-', ""));
+    if db
+        .collection::<bson::Document>(crate::models::service_pool::COLLECTION_NAME)
+        .find_one(doc! {"user_id":&token.user_id,"slug":&slug})
+        .session(&mut *session)
+        .await?
+        .is_some()
+    {
+        return Err(AppError::ServicePoolSlugTaken(slug));
+    }
+    let identity = identity_config_from_downstream_service(catalog);
+    let service = UserService {
+        id: service_id.into(),
+        user_id: token.user_id.clone(),
+        slug,
+        endpoint_id: endpoint.id.clone(),
+        api_key_id: Some(key.id),
+        auth_method,
+        auth_key_name,
+        catalog_service_id: Some(catalog.id.clone()),
+        node_id: None,
+        node_priority: 0,
+        service_type: "http".into(),
+        ssh_auth_mode: SshAuthMode::ProxyOnly,
+        admin_only: false,
+        ssh_node_keys_stale: false,
+        identity_propagation_mode: identity.identity_propagation_mode,
+        identity_include_user_id: identity.identity_include_user_id,
+        identity_include_email: identity.identity_include_email,
+        identity_include_name: identity.identity_include_name,
+        identity_jwt_audience: identity.identity_jwt_audience,
+        forward_access_token: identity.forward_access_token,
+        inject_delegation_token: identity.inject_delegation_token,
+        delegation_token_scope: identity.delegation_token_scope,
+        custom_user_agent: None,
+        default_request_headers: None,
+        ws_frame_injections: Vec::new(),
+        is_active: true,
+        source: Some("codex_import".into()),
+        source_id: Some(service_id.into()),
+        source_app_id: None,
+        created_at: now,
+        updated_at: now,
+        state_version: 1,
+        rotation_predecessor_id: None,
+    };
+    db.collection::<UserEndpoint>(ENDPOINTS)
+        .insert_one(&endpoint)
+        .session(&mut *session)
+        .await?;
+    services.insert_one(&service).session(&mut *session).await?;
+    Ok(())
+}
 const HUMAN_SLUG_SUFFIX_MAX: u8 = 9;
 const RANDOM_SLUG_SUFFIX_ATTEMPTS: usize = 5;
 const RANDOM_SLUG_SUFFIX_LEN: usize = 4;
@@ -6286,6 +6418,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -6335,6 +6470,7 @@ mod tests {
         provider.slug = "github".to_string();
         provider.name = "GitHub".to_string();
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "github".to_string(),
             url: "https://api.github.com/applications".to_string(),
             auth: "basic".to_string(),
@@ -6548,6 +6684,7 @@ mod tests {
 
         let mut provider = multi_conn_provider("oauth2");
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "self_bearer".to_string(),
             url: format!("http://{address}/revoke"),
             auth: "none".to_string(),
@@ -6650,6 +6787,7 @@ mod tests {
         provider.slug = "facebook".to_string();
         provider.name = "Facebook".to_string();
         provider.revocation = Some(RevocationConfig {
+            request_encoding: "form".to_string(),
             style: "facebook_deauth".to_string(),
             url: "https://graph.facebook.com/me/permissions".to_string(),
             auth: "post".to_string(),
@@ -7620,6 +7758,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,

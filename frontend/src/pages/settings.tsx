@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate, useRouterState } from "@tanstack/react-router";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthStore } from "@/stores/auth-store";
 import { useConsentStore } from "@/stores/consent-store";
@@ -915,6 +915,7 @@ function SessionsTab() {
     <Card>
       <CardHeader>
         <CardTitle>Active Sessions</CardTitle>
+        <Button asChild variant="outline"><Link to="/login/code">Generate terminal login code</Link></Button>
         <CardDescription>
           Manage your active sessions across devices.
         </CardDescription>

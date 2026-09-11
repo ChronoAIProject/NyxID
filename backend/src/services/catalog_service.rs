@@ -50,6 +50,7 @@ pub struct CatalogEntry {
     pub device_verification_url: Option<String>,
     pub device_token_url: Option<String>,
     pub default_scopes: Option<Vec<String>>,
+    pub supports_oauth_scopes: bool,
     /// Curated menu of notable available scopes for this provider (NyxID#917),
     /// keyed off the provider slug via `scope_catalog::for_provider`. `None`
     /// for providers with no curated catalog. The connect UIs render these as
@@ -62,6 +63,8 @@ pub struct CatalogEntry {
     pub supports_pkce: bool,
     pub device_code_format: Option<String>,
     pub token_endpoint_auth_method: Option<String>,
+    pub token_request_encoding: Option<String>,
+    pub oauth_request_headers: HashMap<String, String>,
     pub extra_auth_params: Option<HashMap<String, String>>,
     pub oauth_client_id: Option<String>,
     pub client_id_param_name: Option<String>,
@@ -122,6 +125,20 @@ fn build_catalog_entry(
     let requires_credential =
         svc.requires_user_credential || svc.auth_method != "none" || spr.is_some();
     let platform_client_id_present = oauth_client_id.is_some();
+    let google_product = provider
+        .filter(|p| p.slug == "google")
+        .and_then(|_| super::google_workspace::GoogleProduct::from_slug(&svc.slug));
+    let default_scopes = google_product
+        .map(|p| p.default_scopes())
+        .or_else(|| provider.and_then(|p| p.default_scopes.clone()));
+    let mut scope_catalog = provider.and_then(|p| super::scope_catalog::for_provider(&p.slug));
+    if let (Some(product), Some(catalog)) = (google_product, scope_catalog.as_mut()) {
+        let allowed = product.allowed_scopes();
+        catalog.retain(|entry| allowed.contains(&entry.scope));
+        for entry in catalog {
+            entry.required = product.required_scopes().contains(&entry.scope.as_str());
+        }
+    }
     CatalogEntry {
         service_type: svc.service_type.clone(),
         ssh_host: svc.ssh_config.as_ref().map(|c| c.host.clone()),
@@ -170,13 +187,26 @@ fn build_catalog_entry(
         device_code_url: provider.and_then(|p| p.device_code_url.clone()),
         device_verification_url: provider.and_then(|p| p.device_verification_url.clone()),
         device_token_url: provider.and_then(|p| p.device_token_url.clone()),
-        default_scopes: provider.and_then(|p| p.default_scopes.clone()),
-        scope_catalog: provider.and_then(|p| crate::services::scope_catalog::for_provider(&p.slug)),
+        default_scopes,
+        supports_oauth_scopes: provider.is_none_or(|p| p.supports_oauth_scopes),
+        scope_catalog,
         scope_removal: provider
             .map(|p| crate::services::scope_catalog::removal_capability(&p.slug)),
         supports_pkce: provider.is_some_and(|p| p.supports_pkce),
         device_code_format: provider.map(|p| p.device_code_format.clone()),
         token_endpoint_auth_method: provider.map(|p| p.token_endpoint_auth_method.clone()),
+        token_request_encoding: provider.and_then(|p| p.token_request_encoding.clone()),
+        oauth_request_headers: provider
+            .map(|p| {
+                p.oauth_request_headers
+                    .iter()
+                    .filter(|(name, value)| {
+                        crate::models::provider_config::is_public_oauth_header(name, value)
+                    })
+                    .map(|(name, value)| (name.clone(), value.clone()))
+                    .collect()
+            })
+            .unwrap_or_default(),
         extra_auth_params: provider.and_then(|p| p.extra_auth_params.clone()),
         oauth_client_id,
         client_id_param_name: provider.and_then(|p| p.client_id_param_name.clone()),
@@ -195,9 +225,11 @@ fn build_catalog_entry(
                     || p.credential_mode == "user"
                     || (platform_client_id_present && platform_secret_present))
         }),
-        platform_scope_allowlist: provider.and_then(|p| {
-            crate::services::scope_catalog::platform_scope_allowlist(&p.slug)
-                .map(|scopes| scopes.iter().map(|s| (*s).to_string()).collect())
+        platform_scope_allowlist: google_product.map(|p| p.allowed_scopes()).or_else(|| {
+            provider.and_then(|p| {
+                crate::services::scope_catalog::platform_scope_allowlist(&p.slug)
+                    .map(|scopes| scopes.iter().map(|s| (*s).to_string()).collect())
+            })
         }),
         requires_credential,
         openapi_spec_url: svc.openapi_spec_url,

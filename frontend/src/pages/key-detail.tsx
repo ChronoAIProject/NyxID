@@ -2281,6 +2281,7 @@ export function KeyDetailPage() {
     !keyInfo.credential_missing &&
     keyInfo.status === "active" &&
     !isOpenAiDeviceCode &&
+    catalogEntry?.supports_oauth_scopes !== false &&
     (keyInfo.credential_type === "oauth2" ||
       catalogEntry?.provider_type === "oauth2" ||
       catalogEntry?.provider_type === "device_code");

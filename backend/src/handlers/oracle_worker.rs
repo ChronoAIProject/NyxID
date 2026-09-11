@@ -1,8 +1,8 @@
 //! Oracle worker endpoints (`/api/v1/oracle/worker/*`).
 //!
 //! Mounted OUTSIDE the JWT auth middleware (like `/api/v1/node-agent`):
-//! every request authenticates with the pool worker token in the
-//! `Authorization: Bearer nyx_owk_...` header. The wire format mirrors
+//! every request authenticates with a pool token or an enrolled installation
+//! credential in the `Authorization: Bearer` header. The wire format mirrors
 //! the local oracle servers (`/task`, `/ack`, `/result`, `/pin-conv-url`)
 //! so the userscript port is a thin diff: same field names, plus the
 //! auth header.
@@ -21,19 +21,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::errors::{AppError, AppResult};
-use crate::models::oracle_pool::OraclePool;
 use crate::models::oracle_worker_command::OracleWorkerCommand;
 use crate::services::{
-    oracle_login_snapshot_service, oracle_pool_service, oracle_task_service, oracle_worker_service,
+    oracle_login_snapshot_service, oracle_task_service,
+    oracle_worker_enrollment_service::{self, WorkerAuth},
+    oracle_worker_service,
 };
 
-async fn authenticate_worker(state: &AppState, headers: &HeaderMap) -> AppResult<OraclePool> {
+pub(super) async fn authenticate_worker(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> AppResult<WorkerAuth> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .ok_or(AppError::OracleWorkerTokenInvalid)?;
-    oracle_pool_service::validate_worker_token(&state.db, token).await
+    oracle_worker_enrollment_service::authenticate(&state.db, token).await
 }
 
 #[derive(Deserialize)]
@@ -71,14 +75,11 @@ pub async fn poll_task(
     headers: HeaderMap,
     Query(query): Query<PollTaskQuery>,
 ) -> AppResult<Json<PollTaskResponse>> {
-    let pool = authenticate_worker(&state, &headers).await?;
-    oracle_worker_service::ensure_instance_matches(
-        &state.db,
-        &pool,
-        &query.worker,
-        query.instance_id.as_deref(),
-    )
-    .await?;
+    let worker_auth = authenticate_worker(&state, &headers).await?;
+    worker_auth
+        .ensure_current_identity(&state.db, &query.worker, query.instance_id.as_deref())
+        .await?;
+    let pool = worker_auth.pool;
     let claimed = oracle_task_service::claim_task_with_retention(
         &state.db,
         &pool,
@@ -86,6 +87,7 @@ pub async fn poll_task(
         query.script_version.as_deref(),
         query.page_url.as_deref(),
         state.config.oracle_task_retention_days,
+        worker_auth.installation.as_ref(),
     )
     .await?;
     Ok(Json(match claimed {
@@ -125,20 +127,18 @@ pub async fn ack(
     headers: HeaderMap,
     Json(body): Json<WorkerAckRequest>,
 ) -> AppResult<Json<WorkerAckResponse>> {
-    let pool = authenticate_worker(&state, &headers).await?;
-    oracle_worker_service::ensure_instance_matches(
-        &state.db,
-        &pool,
-        &body.worker,
-        body.instance_id.as_deref(),
-    )
-    .await?;
+    let worker_auth = authenticate_worker(&state, &headers).await?;
+    worker_auth
+        .ensure_current_identity(&state.db, &body.worker, body.instance_id.as_deref())
+        .await?;
+    let pool = worker_auth.pool;
     let outcome = oracle_task_service::worker_ack_fenced(
         &state.db,
         &pool,
         &body.worker,
         &body.task_id,
         oracle_task_service::WorkerAckInput {
+            authorized_worker: worker_auth.installation.as_ref(),
             phase: body.phase.as_deref(),
             phase_detail: body.phase_detail.as_deref(),
             script_version: body.script_version.as_deref(),
@@ -207,14 +207,11 @@ pub async fn submit_result(
     headers: HeaderMap,
     Json(body): Json<WorkerResultRequest>,
 ) -> AppResult<Json<WorkerResultResponse>> {
-    let pool = authenticate_worker(&state, &headers).await?;
-    oracle_worker_service::ensure_instance_matches(
-        &state.db,
-        &pool,
-        &body.worker,
-        body.instance_id.as_deref(),
-    )
-    .await?;
+    let worker_auth = authenticate_worker(&state, &headers).await?;
+    worker_auth
+        .ensure_current_identity(&state.db, &body.worker, body.instance_id.as_deref())
+        .await?;
+    let pool = worker_auth.pool;
     let req_images = body.images.unwrap_or_default();
     let image_count = req_images.len();
     let image_base64_chars: usize = req_images.iter().map(|i| i.data_base64.len()).sum();
@@ -243,6 +240,7 @@ pub async fn submit_result(
         &body.worker,
         &body.task_id,
         oracle_task_service::WorkerResultInput {
+            authorized_worker: worker_auth.installation.as_ref(),
             response: &body.response,
             images,
             files,
@@ -309,14 +307,11 @@ pub async fn submit_transcript(
     headers: HeaderMap,
     Json(body): Json<WorkerTranscriptRequest>,
 ) -> AppResult<Json<WorkerTranscriptResponse>> {
-    let pool = authenticate_worker(&state, &headers).await?;
-    oracle_worker_service::ensure_instance_matches(
-        &state.db,
-        &pool,
-        &body.worker,
-        body.instance_id.as_deref(),
-    )
-    .await?;
+    let worker_auth = authenticate_worker(&state, &headers).await?;
+    worker_auth
+        .ensure_current_identity(&state.db, &body.worker, body.instance_id.as_deref())
+        .await?;
+    let pool = worker_auth.pool;
     let turns: Vec<oracle_task_service::TranscriptTurn> = body
         .turns
         .into_iter()
@@ -331,6 +326,7 @@ pub async fn submit_transcript(
         &body.worker,
         &body.task_id,
         oracle_task_service::WorkerTranscriptInput {
+            authorized_worker: worker_auth.installation.as_ref(),
             turns: &turns,
             chatgpt_url: body.chatgpt_url.as_deref(),
             retention_days: state.config.oracle_task_retention_days,
@@ -372,14 +368,11 @@ pub async fn pin_conv_url(
     headers: HeaderMap,
     Json(body): Json<PinConvUrlRequest>,
 ) -> AppResult<impl IntoResponse> {
-    let pool = authenticate_worker(&state, &headers).await?;
-    oracle_worker_service::ensure_instance_matches(
-        &state.db,
-        &pool,
-        &body.worker,
-        body.instance_id.as_deref(),
-    )
-    .await?;
+    let worker_auth = authenticate_worker(&state, &headers).await?;
+    worker_auth
+        .ensure_current_identity(&state.db, &body.worker, body.instance_id.as_deref())
+        .await?;
+    let pool = worker_auth.pool;
     oracle_task_service::pin_conversation_url_fenced(
         &state.db,
         &pool,
@@ -464,9 +457,10 @@ pub async fn heartbeat(
     headers: HeaderMap,
     Json(body): Json<WorkerHeartbeatRequest>,
 ) -> AppResult<Json<WorkerHeartbeatResponse>> {
-    let pool = authenticate_worker(&state, &headers).await?;
-    let capabilities = body.capabilities.clone();
-    oracle_worker_service::report_presence(
+    let worker_auth = authenticate_worker(&state, &headers).await?;
+    worker_auth.ensure_identity(&body.worker, Some(&body.instance_id))?;
+    let pool = worker_auth.pool;
+    let presence = oracle_worker_service::report_presence_for_worker(
         &state.db,
         &pool,
         oracle_worker_service::WorkerPresenceInput {
@@ -475,17 +469,18 @@ pub async fn heartbeat(
             script_version: body.script_version,
             instance_id: Some(body.instance_id),
             platform: body.platform,
-            capabilities: capabilities.clone(),
+            capabilities: body.capabilities,
             logged_in: body.logged_in,
             chrome_alive: body.chrome_alive,
             last_error: body.last_error,
         },
+        worker_auth.installation.as_ref(),
     )
     .await?;
-    oracle_worker_service::apply_command_reports(
+    let capabilities = &presence.capabilities;
+    oracle_worker_service::apply_command_reports_for_worker(
         &state.db,
-        &pool.id,
-        &body.worker,
+        &presence,
         body.command_reports
             .into_iter()
             .map(|report| oracle_worker_service::CommandReport {
@@ -496,17 +491,12 @@ pub async fn heartbeat(
             .collect(),
     )
     .await?;
-    let command = oracle_worker_service::deliver_next_command(
-        &state.db,
-        &pool.id,
-        &body.worker,
-        &capabilities,
-    )
-    .await?
-    .map(WorkerCommandDto::from);
-    let cancelled_command_ids = if capabilities.iter().any(|value| value == "commands_v1") {
-        oracle_worker_service::recently_cancelled_delivered(&state.db, &pool.id, &body.worker)
+    let command =
+        oracle_worker_service::deliver_next_command_for_worker(&state.db, &presence, capabilities)
             .await?
+            .map(WorkerCommandDto::from);
+    let cancelled_command_ids = if capabilities.iter().any(|value| value == "commands_v1") {
+        oracle_worker_service::recently_cancelled_delivered_for_worker(&state.db, &presence).await?
     } else {
         Vec::new()
     };
@@ -528,7 +518,9 @@ pub async fn fetch_login_snapshot(
     headers: HeaderMap,
     Path(snapshot_id): Path<String>,
 ) -> AppResult<Json<WorkerLoginSnapshotResponse>> {
-    let pool = authenticate_worker(&state, &headers).await?;
+    let worker_auth = authenticate_worker(&state, &headers).await?;
+    worker_auth.ensure_pool_credential()?;
+    let pool = worker_auth.pool;
     let payload = oracle_login_snapshot_service::fetch_for_worker(
         &state.db,
         &state.encryption_keys,
@@ -543,12 +535,31 @@ pub async fn fetch_login_snapshot(
     }))
 }
 
+#[derive(Serialize)]
+pub struct WorkerBundleResponse {
+    #[serde(flatten)]
+    pub bundle: super::oracle_worker_bundle::OracleWorkerBundleResponse,
+    pub pool_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installation_id: Option<String>,
+}
+
 pub async fn fetch_bundle(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> AppResult<Json<super::oracle_worker_bundle::OracleWorkerBundleResponse>> {
-    authenticate_worker(&state, &headers).await?;
-    Ok(Json(super::oracle_worker_bundle::bundle_response()))
+) -> AppResult<Json<WorkerBundleResponse>> {
+    let auth = authenticate_worker(&state, &headers).await?;
+    Ok(Json(WorkerBundleResponse {
+        bundle: super::oracle_worker_bundle::bundle_response(),
+        pool_id: auth.pool.id,
+        worker_label: auth
+            .installation
+            .as_ref()
+            .map(|worker| worker.worker_label.clone()),
+        installation_id: auth.installation.and_then(|worker| worker.instance_id),
+    }))
 }
 
 #[cfg(test)]
@@ -582,7 +593,7 @@ mod tests {
                 conversation_id: Some("conv_1".to_string()),
                 conversation_url: None,
                 is_followup: false,
-                model: Some("chatgpt-5.5-pro".to_string()),
+                model: Some("chatgpt-6-pro".to_string()),
                 tag: None,
                 pdf_base64: None,
                 pdf_name: None,

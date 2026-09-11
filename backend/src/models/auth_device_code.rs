@@ -6,6 +6,7 @@ use super::bson_datetime;
 use crate::redaction::RedactedLen;
 
 pub const COLLECTION_NAME: &str = "auth_device_codes";
+pub const V2_COLLECTION_NAME: &str = "auth_device_codes_v2";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,12 +64,18 @@ pub enum AuthDeviceCodeStatus {
 pub struct AuthDeviceCode {
     #[serde(rename = "_id")]
     pub id: String,
+    #[serde(default)]
+    pub supports_grant_choice: bool,
     pub device_code_hmac: String,
     pub user_code_hmac: String,
+    #[serde(default)]
+    pub user_code_reservation_hmac: Option<String>,
     pub status: AuthDeviceCodeStatus,
     pub poll_interval_secs: u32,
     pub slow_down_increments: u32,
     pub client_label: Option<String>,
+    #[serde(default)]
+    pub requested_profile: Option<String>,
     pub client_user_agent: Option<String>,
     #[serde(default)]
     pub client_ip: Option<String>,
@@ -115,6 +122,10 @@ pub struct AuthDeviceCode {
     pub last_polled_at: Option<DateTime<Utc>>,
     pub approved_user_id: Option<String>,
     pub approved_session_id: Option<String>,
+    #[serde(default)]
+    pub agent_key_grant: Option<AuthDeviceAgentKeyGrant>,
+    #[serde(default, with = "bson_datetime::optional")]
+    pub purge_at: Option<DateTime<Utc>>,
     pub approver_ip_hmac: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
     pub delivery_access_token_encrypted: Option<Vec<u8>>,
@@ -133,6 +144,15 @@ pub struct AuthDeviceCode {
     pub denied_by_user_id: Option<String>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AuthDeviceAgentKeyGrant {
+    pub api_key_id: String,
+    pub credential_id: String,
+    pub key_was_created: bool,
+    #[serde(default, with = "crate::models::bson_bytes::optional")]
+    pub delivery_credential_encrypted: Option<Vec<u8>>,
 }
 
 impl fmt::Debug for AuthDeviceCodeStatus {
@@ -230,9 +250,12 @@ mod tests {
     fn make_auth_device_code() -> AuthDeviceCode {
         let now = Utc::now();
         AuthDeviceCode {
+            supports_grant_choice: false,
             id: uuid::Uuid::new_v4().to_string(),
             device_code_hmac: "abc123ff".repeat(8),
             user_code_hmac: "def456aa".repeat(8),
+            requested_profile: None,
+            user_code_reservation_hmac: None,
             status: AuthDeviceCodeStatus::Pending,
             poll_interval_secs: 5,
             slow_down_increments: 0,
@@ -262,6 +285,8 @@ mod tests {
             last_polled_at: Some(now + chrono::Duration::seconds(5)),
             approved_user_id: Some(uuid::Uuid::new_v4().to_string()),
             approved_session_id: Some(uuid::Uuid::new_v4().to_string()),
+            agent_key_grant: None,
+            purge_at: None,
             approver_ip_hmac: Some("33334444".repeat(8)),
             delivery_access_token_encrypted: Some(vec![0xab, 0xcd, 0xef]),
             delivery_refresh_token_encrypted: Some(vec![0x12, 0x34, 0x56]),

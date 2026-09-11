@@ -381,6 +381,17 @@ pub enum AppError {
     #[error("Agent Key login credential not found")]
     AgentKeyCredentialNotFound,
 
+    #[error("Login code is invalid")]
+    LoginCodeInvalid,
+    #[error("Login code expired")]
+    LoginCodeExpired,
+    #[error("Login code was cancelled")]
+    LoginCodeCancelled,
+    #[error("Login code was already redeemed")]
+    LoginCodeRedeemed,
+    #[error("Too many login code attempts")]
+    LoginCodeRateLimited,
+
     #[error("Connect link not found")]
     ConnectLinkNotFound,
 
@@ -533,6 +544,9 @@ pub enum AppError {
     #[error("Oracle login snapshot not found: {0}")]
     OracleLoginSnapshotNotFound(String),
 
+    #[error("Installation credential expired; enroll with a fresh credential")]
+    OracleWorkerCredentialRenewalRequired,
+
     #[error("Service pool not found: {0}")]
     ServicePoolNotFound(String),
 
@@ -659,6 +673,10 @@ impl AppError {
             Self::AuthDeviceCodeRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::AuthDeviceUserCodeInvalid => StatusCode::BAD_REQUEST,
             Self::AgentKeyLoginNotFound => StatusCode::NOT_FOUND,
+            Self::LoginCodeInvalid => StatusCode::BAD_REQUEST,
+            Self::LoginCodeExpired | Self::LoginCodeRedeemed => StatusCode::GONE,
+            Self::LoginCodeCancelled => StatusCode::FORBIDDEN,
+            Self::LoginCodeRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::AgentKeyLoginExpired => StatusCode::GONE,
             Self::AgentKeyLoginPending => StatusCode::BAD_REQUEST,
             Self::AgentKeyLoginSlowDown => StatusCode::TOO_MANY_REQUESTS,
@@ -719,6 +737,7 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => StatusCode::NOT_FOUND,
             Self::OracleWorkerLabelUnavailable(_) => StatusCode::CONFLICT,
             Self::OracleLoginSnapshotNotFound(_) => StatusCode::NOT_FOUND,
+            Self::OracleWorkerCredentialRenewalRequired => StatusCode::CONFLICT,
             Self::ServicePoolNotFound(_) => StatusCode::NOT_FOUND,
             Self::ServicePoolSlugTaken(_) => StatusCode::CONFLICT,
             Self::ServicePoolMemberInvalid(_) => StatusCode::BAD_REQUEST,
@@ -834,6 +853,11 @@ impl AppError {
             Self::AuthDeviceCodeRateLimited => 11206,
             Self::AuthDeviceUserCodeInvalid => 11207,
             Self::AgentKeyLoginNotFound => 11900,
+            Self::LoginCodeInvalid => 12000,
+            Self::LoginCodeExpired => 12001,
+            Self::LoginCodeCancelled => 12002,
+            Self::LoginCodeRedeemed => 12003,
+            Self::LoginCodeRateLimited => 12004,
             Self::AgentKeyLoginExpired => 11901,
             Self::AgentKeyLoginPending => 11902,
             Self::AgentKeyLoginSlowDown => 11903,
@@ -894,6 +918,7 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => 11013,
             Self::OracleWorkerLabelUnavailable(_) => 11014,
             Self::OracleLoginSnapshotNotFound(_) => 11015,
+            Self::OracleWorkerCredentialRenewalRequired => 11016,
             Self::ServicePoolNotFound(_) => 11400,
             Self::ServicePoolSlugTaken(_) => 11401,
             Self::ServicePoolMemberInvalid(_) => 11402,
@@ -1045,6 +1070,11 @@ impl AppError {
             Self::AuthDeviceCodeRateLimited => "auth_device_rate_limited",
             Self::AuthDeviceUserCodeInvalid => "auth_device_user_code_invalid",
             Self::AgentKeyLoginNotFound => "agent_key_login_not_found",
+            Self::LoginCodeInvalid => "login_code_invalid",
+            Self::LoginCodeExpired => "login_code_expired",
+            Self::LoginCodeCancelled => "login_code_cancelled",
+            Self::LoginCodeRedeemed => "login_code_redeemed",
+            Self::LoginCodeRateLimited => "login_code_rate_limited",
             Self::AgentKeyLoginExpired => "agent_key_login_expired",
             Self::AgentKeyLoginPending => "agent_key_login_pending",
             Self::AgentKeyLoginSlowDown => "agent_key_login_slow_down",
@@ -1105,6 +1135,9 @@ impl AppError {
             Self::OracleWorkerCommandNotFound(_) => "oracle_worker_command_not_found",
             Self::OracleWorkerLabelUnavailable(_) => "oracle_worker_label_unavailable",
             Self::OracleLoginSnapshotNotFound(_) => "oracle_login_snapshot_not_found",
+            Self::OracleWorkerCredentialRenewalRequired => {
+                "oracle_worker_credential_renewal_required"
+            }
             Self::ServicePoolNotFound(_) => "service_pool_not_found",
             Self::ServicePoolSlugTaken(_) => "service_pool_slug_taken",
             Self::ServicePoolMemberInvalid(_) => "service_pool_member_invalid",
@@ -1626,6 +1659,7 @@ mod tests {
             AppError::OracleWorkerCommandNotFound("".into()).error_code(),
             AppError::OracleWorkerLabelUnavailable("".into()).error_code(),
             AppError::OracleLoginSnapshotNotFound("".into()).error_code(),
+            AppError::OracleWorkerCredentialRenewalRequired.error_code(),
             AppError::GrantCascadeConfirmationRequired(Box::new(GrantCascadePayload {
                 provider_slug: "github".into(),
                 provider_name: "GitHub".into(),

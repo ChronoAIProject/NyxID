@@ -35,35 +35,6 @@ mod device_login_user_agent_tests {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct AuthDeviceRequestBody {
-    pub client_label: Option<String>,
-    pub client_user_agent: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct AuthDeviceRequestResponse {
-    pub device_code: String,
-    pub user_code: String,
-    pub verification_uri: String,
-    pub verification_uri_complete: String,
-    pub expires_in: u64,
-    pub interval: u64,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct AuthDevicePollBody {
-    pub device_code: String,
-}
-
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-pub struct AuthDevicePollResponse {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub token_type: String,
-    pub expires_in: u64,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ErrorEnvelope {
     pub error: String,
@@ -115,19 +86,18 @@ impl ApiError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthDeviceRequestOutcome {
-    Created(AuthDeviceRequestResponse),
-    NotSupported,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AuthDevicePollOutcome {
-    Delivered(AuthDevicePollResponse),
-    Error(ErrorEnvelope),
-}
-
 pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {
+    build_cli_http_client_with_redirect(profile, reqwest::redirect::Policy::limited(10))
+}
+
+pub fn build_credential_http_client(profile: Option<&str>) -> Result<Client> {
+    build_cli_http_client_with_redirect(profile, reqwest::redirect::Policy::none())
+}
+
+fn build_cli_http_client_with_redirect(
+    profile: Option<&str>,
+    redirect: reqwest::redirect::Policy,
+) -> Result<Client> {
     // Attach `X-NyxID-Client: cli` + `X-NyxID-Client-Version` ONLY when
     // BOTH conditions are true:
     //   (a) the operator has configured a telemetry DSN (or opted into
@@ -173,6 +143,7 @@ pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {
         crate::telemetry::consent::resolve_consent_preferring_profile(profile).enabled;
 
     let mut builder = Client::builder()
+        .redirect(redirect)
         .user_agent(CLI_USER_AGENT)
         .connect_timeout(std::time::Duration::from_secs(10));
 
@@ -192,71 +163,6 @@ pub fn build_cli_http_client(profile: Option<&str>) -> Result<Client> {
     builder.build().context("Failed to build HTTP client")
 }
 
-pub async fn auth_device_request(
-    base_url: &str,
-    body: &AuthDeviceRequestBody,
-    profile: Option<&str>,
-) -> Result<AuthDeviceRequestOutcome> {
-    let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
-    let url = format!("{base}/auth/device/request");
-    let client = build_cli_http_client(profile)?;
-
-    let resp = client
-        .post(&url)
-        .json(body)
-        .send()
-        .await
-        .context("POST /auth/device/request failed")?;
-
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(AuthDeviceRequestOutcome::NotSupported);
-    }
-
-    if resp.status().is_success() {
-        let body = resp
-            .json::<AuthDeviceRequestResponse>()
-            .await
-            .context("Failed to parse response from /auth/device/request")?;
-        return Ok(AuthDeviceRequestOutcome::Created(body));
-    }
-
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    bail!("/auth/device/request failed (HTTP {status}): {body}");
-}
-
-pub async fn auth_device_poll(
-    base_url: &str,
-    body: &AuthDevicePollBody,
-    profile: Option<&str>,
-) -> Result<AuthDevicePollOutcome> {
-    let base = format!("{}/api/v1", base_url.trim_end_matches('/'));
-    let url = format!("{base}/auth/device/poll");
-    let client = build_cli_http_client(profile)?;
-
-    let resp = client
-        .post(&url)
-        .json(body)
-        .send()
-        .await
-        .context("POST /auth/device/poll failed")?;
-
-    if resp.status().is_success() {
-        let body = resp
-            .json::<AuthDevicePollResponse>()
-            .await
-            .context("Failed to parse response from /auth/device/poll")?;
-        return Ok(AuthDevicePollOutcome::Delivered(body));
-    }
-
-    let status = resp.status();
-    let body = resp.text().await.unwrap_or_default();
-    match serde_json::from_str::<ErrorEnvelope>(&body) {
-        Ok(error) => Ok(AuthDevicePollOutcome::Error(error)),
-        Err(_) => bail!("/auth/device/poll failed (HTTP {status}): {body}"),
-    }
-}
-
 pub struct ApiClient {
     client: Client,
     base_url: String,
@@ -268,6 +174,7 @@ pub struct ApiClient {
     /// saved session access token on the `profile`.
     refresh_disabled: bool,
     agent_key_auth: bool,
+    login_generation: Option<String>,
 }
 
 impl ApiClient {
@@ -284,6 +191,7 @@ impl ApiClient {
         let agent_key_auth = crate::auth::agent_key::is_agent_key_profile(profile.as_deref())
             && crate::auth::read_saved_token_for(profile.as_deref()).as_deref()
                 == Some(access_token.as_str());
+        let login_generation = crate::auth::login_generation(profile.as_deref());
 
         Ok(Self {
             client,
@@ -292,13 +200,29 @@ impl ApiClient {
             profile,
             refresh_disabled: agent_key_auth,
             agent_key_auth,
+            login_generation,
         })
     }
 
     pub fn from_auth(auth: &crate::cli::AuthArgs) -> Result<Self> {
+        if let Some(resolved) = crate::auth::resolve_access_token_override(auth) {
+            return Ok(Self {
+                client: build_cli_http_client(auth.profile.as_deref())?,
+                base_url: format!("{}/api/v1", auth.resolved_base_url()?.trim_end_matches('/')),
+                access_token: resolved.token,
+                profile: auth.profile.clone(),
+                refresh_disabled: true,
+                agent_key_auth: false,
+                login_generation: None,
+            });
+        }
+        let _lock = crate::auth::acquire_refresh_lock(auth.profile.as_deref())?;
         let base_url = auth.resolved_base_url()?;
         let resolved = crate::auth::resolve_access_token_with_source(auth)?;
         let allow_refresh = resolved.source.allows_session_refresh();
+        if allow_refresh || resolved.source == crate::auth::AccessTokenSource::SavedAgentKey {
+            crate::auth::validate_profile_destination(auth.profile.as_deref(), &base_url)?;
+        }
         let mut client = Self::new_with_profile(&base_url, resolved.token, auth.profile.clone())?;
         client.refresh_disabled = !allow_refresh;
         client.agent_key_auth = resolved.source == crate::auth::AccessTokenSource::SavedAgentKey;
@@ -333,6 +257,17 @@ impl ApiClient {
         self
     }
 
+    pub fn for_credential_transfer(mut self) -> Result<Self> {
+        self.client = Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent(CLI_USER_AGENT)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(75))
+            .build()?;
+        self.refresh_disabled = true;
+        Ok(self)
+    }
+
     pub fn base_url_root(&self) -> &str {
         self.base_url
             .strip_suffix("/api/v1")
@@ -362,7 +297,14 @@ impl ApiClient {
         let profile = self.profile.as_deref();
         // Same cross-process discipline as the preflight: lock, then prefer a
         // token another process already rotated over presenting a stale one.
-        let _lock = crate::auth::acquire_refresh_lock(profile).ok();
+        let Ok(_lock) = crate::auth::acquire_refresh_lock(profile) else {
+            return false;
+        };
+        if self.login_generation != crate::auth::login_generation(profile)
+            || crate::auth::validate_profile_destination(profile, self.base_url_root()).is_err()
+        {
+            return false;
+        }
         if crate::auth::agent_key::is_agent_key_profile(profile) {
             return false;
         }
@@ -987,7 +929,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // intentional: serialises HOME/env mutations across tests
     async fn caller_selected_credentials_never_refresh_or_switch_identity() {
-        let _env_guard = env_lock().lock().expect("env lock");
+        let _env_guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let temp = tempfile::tempdir().expect("temp dir");
         let _home = HomeGuard::set(temp.path());
         let _env = EnvGuard::set(&[
@@ -1021,7 +963,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // intentional: serialises HOME mutations across tests
     async fn proxy_request_refreshes_expired_token_and_retries() {
-        let _env_guard = env_lock().lock().expect("env lock");
+        let _env_guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let temp = tempfile::tempdir().expect("temp dir");
         let _home = HomeGuard::set(temp.path());
 
@@ -1078,7 +1020,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // intentional: serialises HOME mutations across tests
     async fn proxy_request_strips_client_authorization_header() {
-        let _env_guard = env_lock().lock().expect("env lock");
+        let _env_guard = env_lock().lock().unwrap_or_else(|err| err.into_inner());
         let temp = tempfile::tempdir().expect("temp dir");
         let _home = HomeGuard::set(temp.path());
 

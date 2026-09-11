@@ -249,6 +249,14 @@ impl LagoApi for FakeLago {
 
 #[tokio::test]
 async fn billing_route_coverage_smoke() {
+    // Poll the large route matrix as its own heap-allocated task, so mounted
+    // handler futures do not share a stack with the test wrapper's first poll.
+    tokio::spawn(Box::pin(run_billing_route_coverage_smoke()))
+        .await
+        .expect("billing route coverage task");
+}
+
+async fn run_billing_route_coverage_smoke() {
     assert_route_inventory_matches_router();
     assert_coverage_cases_are_exhaustive();
     assert_http_egress_classification_is_fail_closed();
@@ -453,6 +461,17 @@ async fn billing_route_coverage_smoke() {
         exercised_routes.insert(mounted_route);
     }
     assert_route_settled_count(&db, &llm_catalog.slug, BillingMetric::Tokens, 4).await;
+
+    Box::pin(exercise_codex_verification_route(
+        &db,
+        &app,
+        &owner_id,
+        &token,
+        &llm_catalog,
+        &downstream_url,
+    ))
+    .await;
+    exercised_routes.insert("/api/v1/providers/codex-connection/verify");
 
     let mcp = insert_route_service(
         &db,
@@ -1327,9 +1346,94 @@ async fn lago_webhook_signature_is_verified_at_the_mounted_route() {
     assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
 }
 
+async fn exercise_codex_verification_route(
+    db: &mongodb::Database,
+    app: &Router,
+    owner_id: &str,
+    token: &str,
+    llm_catalog: &DownstreamService,
+    downstream_url: &str,
+) {
+    // Keep this future boxed at the call site: the encompassing route smoke
+    // already exercises every ingress on the default test thread stack.
+    let mut codex_provider = db
+        .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+        .find_one(doc! {"slug":"deepseek"})
+        .await
+        .unwrap()
+        .unwrap();
+    codex_provider.id = Uuid::new_v4().to_string();
+    codex_provider.slug = "openai".into();
+    codex_provider.name = "Fixture OpenAI".into();
+    db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+        .insert_one(&codex_provider)
+        .await
+        .unwrap();
+    let mut codex_catalog = llm_catalog.clone();
+    codex_catalog.id = Uuid::new_v4().to_string();
+    codex_catalog.slug = "llm-openai".into();
+    codex_catalog.provider_config_id = Some(codex_provider.id);
+    codex_catalog.base_url = format!("{downstream_url}/codex-connection");
+    codex_catalog.auth_method = "bearer".into();
+    codex_catalog.auth_key_name = "Authorization".into();
+    codex_catalog.billing = Some(ServiceBilling {
+        platform_billable: true,
+        platform_metric: Some(BillingMetric::Requests),
+        ..Default::default()
+    });
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .insert_one(&codex_catalog)
+        .await
+        .unwrap();
+    let imported = call_mounted_route(app,route_request(Method::POST,
+        "/api/v1/providers/codex-connection",token,Body::from(serde_json::json!({
+            "account_id":owner_id,"api_key":"sk-billing-codex-fixture","expected_connection":null,
+        }).to_string()))).await;
+    let imported: serde_json::Value = serde_json::from_slice(&imported).unwrap();
+    assert_eq!(imported["status"], "saved");
+    let verified = call_mounted_route(
+        app,
+        route_request(
+            Method::POST,
+            "/api/v1/providers/codex-connection/verify",
+            token,
+            Body::from(
+                serde_json::json!({
+                    "connection":imported["connection"],"model":"gpt-4.1-mini",
+                })
+                .to_string(),
+            ),
+        ),
+    )
+    .await;
+    let verified: serde_json::Value = serde_json::from_slice(&verified).unwrap();
+    assert_eq!(verified["status"], "usable");
+    assert_eq!(verified["connection"], imported["connection"]);
+    let imported_service = db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc! {"_id":imported["service_id"].as_str().unwrap()})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_route_settled(db, &imported_service.slug, BillingMetric::Requests).await;
+}
+
 async fn start_billing_downstream() -> (String, tokio::task::JoinHandle<()>) {
     async fn respond(request: Request<Body>) -> axum::response::Response {
         let path = request.uri().path().to_string();
+        if path == "/codex-connection/responses" {
+            assert_eq!(
+                request.headers().get("authorization").unwrap(),
+                "Bearer sk-billing-codex-fixture"
+            );
+            let body = to_bytes(request.into_body(), 64 * 1024).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["model"], "gpt-4.1-mini");
+            assert_eq!(body["store"], false);
+            return Json(serde_json::json!({"object":"response","status":"completed",
+                "output":[{"type":"message","status":"completed","content":[{"type":"output_text","text":"OK\n"}]}],
+                "usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}})).into_response();
+        }
         if path == "/mcp-query" {
             assert_eq!(
                 request.uri().query(),
@@ -2055,6 +2159,9 @@ async fn insert_llm_route_service(
         is_active: true,
         credential_mode: "admin".to_string(),
         token_endpoint_auth_method: "client_secret_post".to_string(),
+        token_request_encoding: None,
+        oauth_request_headers: Default::default(),
+        supports_oauth_scopes: true,
         extra_auth_params: None,
         device_code_format: "rfc8628".to_string(),
         client_id_param_name: None,

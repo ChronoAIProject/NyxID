@@ -194,7 +194,8 @@ fn resolve_scope_param(
 /// Validate that a given provider supports user-supplied additional scopes.
 ///
 /// Only providers that need/accept scopes should receive them:
-/// - `oauth2` providers always accept scopes (RFC 6749 §3.3).
+/// - Providers with `supports_oauth_scopes: false` reject non-empty scopes.
+/// - Other `oauth2` providers accept scopes (RFC 6749 §3.3).
 /// - `device_code` providers using `rfc8628` format accept scopes.
 /// - `device_code` providers using `openai` format do **not** accept a `scope`
 ///   parameter — scopes are baked into the client registration (e.g., Codex).
@@ -209,6 +210,12 @@ fn ensure_additional_scopes_supported(
 ) -> AppResult<()> {
     if additional_scopes.is_empty() {
         return Ok(());
+    }
+
+    if !provider.supports_oauth_scopes {
+        return Err(AppError::ValidationError(
+            "This provider does not accept OAuth scopes".to_string(),
+        ));
     }
 
     match provider.provider_type.as_str() {
@@ -603,24 +610,52 @@ async fn store_telegram_identity(
     Ok(token)
 }
 
-/// Initiate an OAuth2 connection flow. Returns the authorization URL.
-///
-/// When `on_behalf_of` is `Some(sa_id)`, the flow stores tokens under the SA's
-/// ID instead of the initiating user. `redirect_path` overrides the default
-/// frontend callback path for the post-OAuth redirect.
-///
-/// `additional_scopes` are merged (deduped, order-preserving) on top of the
-/// provider's `default_scopes`. Pass an empty slice to preserve the original
-/// default-scopes-only behavior.
+/// Resolve product defaults from the owned connection, never a caller-supplied slug.
+async fn google_product_for_connection(
+    db: &mongodb::Database,
+    owner_id: &str,
+    provider: &ProviderConfig,
+    connection_id: Option<&str>,
+) -> AppResult<Option<super::google_workspace::GoogleProduct>> {
+    use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
+    use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+
+    if provider.slug != "google" {
+        return Ok(None);
+    }
+    let Some(connection_id) = connection_id else {
+        return Ok(None);
+    };
+    let key = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find_one(doc! {
+            "connection_id": connection_id,
+            "user_id": owner_id,
+            "provider_config_id": &provider.id,
+        })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Google connection not found".into()))?;
+    let service = db
+        .collection::<UserService>(USER_SERVICES)
+        .find_one(doc! { "api_key_id": &key.id, "user_id": owner_id })
+        .await?;
+    let Some(catalog_id) = service.and_then(|s| s.catalog_service_id) else {
+        return Ok(None);
+    };
+    let catalog = db
+        .collection::<DownstreamService>(SERVICES)
+        .find_one(doc! { "_id": catalog_id, "provider_config_id": &provider.id })
+        .await?;
+    Ok(catalog.and_then(|s| super::google_workspace::GoogleProduct::from_slug(&s.slug)))
+}
+
+/// Initiate an OAuth2 authorization-code flow. Additional scopes extend the
+/// product's defaults (or provider defaults for other services); an override
+/// replaces them. A connection ID pins the callback to its UserApiKey. Legacy
+/// flows without one write to UserProviderToken.
+/// `on_behalf_of` selects the token owner; `redirect_path` selects the frontend
+/// destination after the OAuth callback.
 #[allow(clippy::too_many_arguments)]
-/// Initiate an OAuth2 authorization-code flow.
-///
-/// `connection_id` (multi-connection rollout): when `Some`, the flow is
-/// part of a fresh multi-connection add — the callback will write the
-/// resulting token directly to the `UserApiKey` row carrying this
-/// `connection_id` (bypassing `user_provider_tokens`). When `None`, the
-/// callback takes the legacy single-tenant path (writing to
-/// `user_provider_tokens` keyed by `(user_id, provider_config_id)`).
 pub async fn initiate_oauth_connect(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
@@ -703,6 +738,24 @@ pub async fn initiate_oauth_connect(
             .await?
     };
 
+    let google_product = google_product_for_connection(
+        db,
+        on_behalf_of.unwrap_or(user_id),
+        &provider,
+        connection_id,
+    )
+    .await?;
+    let default_scopes = google_product
+        .map(|product| product.default_scopes())
+        .or_else(|| provider.default_scopes.clone());
+    let scope_param = provider
+        .supports_oauth_scopes
+        .then(|| resolve_scope_param(default_scopes.as_ref(), additional_scopes, scope_override))
+        .flatten();
+    if let Some(product) = google_product {
+        product.validate_scopes(scope_param.as_deref())?;
+    }
+
     // Platform-client scope allowlist (spec D5/B4): a request riding NyxID's
     // shared platform OAuth app may only ask for vetted scopes. BYO flows
     // stay free-form — connection-level Custom Apps set `used_connection_byo`,
@@ -713,11 +766,7 @@ pub async fn initiate_oauth_connect(
     if is_platform_flow
         && let Some(allowlist) =
             crate::services::scope_catalog::platform_scope_allowlist(&provider.slug)
-        && let Some(scope_str) = resolve_scope_param(
-            provider.default_scopes.as_ref(),
-            additional_scopes,
-            scope_override,
-        )
+        && let Some(scope_str) = scope_param.as_deref()
     {
         let disallowed: Vec<&str> = scope_str
             .split_whitespace()
@@ -851,12 +900,8 @@ pub async fn initiate_oauth_connect(
     // omit `scope` entirely; a `Some("")` is only produced for an admin-seeded
     // `default_scopes: Some(vec![])`, preserving the byte-identical
     // pre-feature URL.
-    if let Some(scope_str) = resolve_scope_param(
-        provider.default_scopes.as_ref(),
-        additional_scopes,
-        scope_override,
-    ) {
-        auth_url.push_str(&format!("&scope={}", urlencoding::encode(&scope_str)));
+    if let Some(scope_str) = scope_param.as_deref() {
+        auth_url.push_str(&format!("&scope={}", urlencoding::encode(scope_str)));
     }
 
     if let Some(ref verifier) = code_verifier {
@@ -1019,11 +1064,13 @@ pub async fn request_device_code(
         // still skips the `scope` form field, matching the old behavior).
         let mut params = vec![oauth_flow::client_id_form_field(&provider, &client_id)];
         // Scope resolution shared with `initiate_oauth_connect` (NyxID#917).
-        if let Some(scope_str) = resolve_scope_param(
-            provider.default_scopes.as_ref(),
-            additional_scopes,
-            scope_override,
-        ) {
+        if provider.supports_oauth_scopes
+            && let Some(scope_str) = resolve_scope_param(
+                provider.default_scopes.as_ref(),
+                additional_scopes,
+                scope_override,
+            )
+        {
             params.push(("scope".to_string(), scope_str));
         }
         oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(device_code_url))
@@ -1761,13 +1808,7 @@ pub async fn handle_oauth_callback(
     }
 
     // SEC-H2: Use no-redirect client for token exchange
-    let mut request =
-        oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(token_url));
-    request = if uses_json_oauth_token_exchange(&provider) {
-        request.json(&params_to_json_body(&params))
-    } else {
-        request.form(&params)
-    };
+    let mut request = oauth_flow::token_request(&provider, token_url, &params)?;
     if use_basic_auth {
         request = request.basic_auth(&resolved.client_id, resolved.client_secret.as_deref());
     }
@@ -1831,6 +1872,13 @@ pub async fn handle_oauth_callback(
     let refresh_token = token_payload["refresh_token"].as_str();
     let expires_in = token_payload["expires_in"].as_i64();
     let scope = token_payload["scope"].as_str();
+
+    if let Some(product) =
+        google_product_for_connection(db, user_id, &provider, oauth_state.connection_id.as_deref())
+            .await?
+    {
+        product.validate_required_scopes(scope)?;
+    }
 
     let access_enc = encryption_keys.encrypt(access_token.as_bytes()).await?;
     let refresh_enc = match refresh_token {
@@ -2009,22 +2057,6 @@ pub async fn handle_oauth_callback(
         provider_config_id: token.provider_config_id,
         connection_id: None,
     })
-}
-
-fn uses_json_oauth_token_exchange(provider: &ProviderConfig) -> bool {
-    matches!(provider.slug.as_str(), "lark" | "feishu")
-        || provider.token_url.as_deref().is_some_and(|url| {
-            url.contains("/open-apis/authen/v2/oauth/token")
-                && (url.contains("open.larksuite.com") || url.contains("open.feishu.cn"))
-        })
-}
-
-fn params_to_json_body(params: &[(String, String)]) -> serde_json::Value {
-    let mut body = serde_json::Map::new();
-    for (key, value) in params {
-        body.insert(key.clone(), serde_json::Value::String(value.clone()));
-    }
-    serde_json::Value::Object(body)
 }
 
 fn oauth_token_payload(token_data: &serde_json::Value) -> &serde_json::Value {
@@ -2436,13 +2468,7 @@ async fn refresh_user_api_key_under_lease(
         }
     }
 
-    let mut request =
-        oauth_flow::expect_json_response(oauth_flow::token_exchange_client().post(token_url));
-    request = if uses_json_oauth_token_exchange(&provider) {
-        request.json(&params_to_json_body(&params))
-    } else {
-        request.form(&params)
-    };
+    let mut request = oauth_flow::token_request(&provider, token_url, &params)?;
     if use_basic_auth {
         request = request.basic_auth(&client_id, client_secret.as_deref());
     }
@@ -2696,6 +2722,12 @@ pub async fn refresh_expiring_oauth_keys(
     window: Duration,
     notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<RefreshSweepReport> {
+    if super::user_api_key_service::expire_pending_channel_connections(db)
+        .await
+        .is_err()
+    {
+        tracing::warn!("Pending channel connection expiry failed; continuing OAuth refresh sweep");
+    }
     let deadline = Utc::now() + window;
     let candidates: Vec<UserApiKey> = db
         .collection::<UserApiKey>(USER_API_KEYS)
@@ -3137,14 +3169,14 @@ mod tests {
         DevicePollFlow, build_telegram_identity_metadata, build_telegram_identity_update_doc,
         build_user_token_summary, chat_attempt_nonce_from_state, classify_device_poll_failure,
         ensure_additional_scopes_supported, merge_scopes, normalize_telegram_bot_api_key,
-        oauth_token_payload, params_to_json_body, parse_additional_scopes,
-        parse_token_exchange_response, resolve_scope_param, token_exchange_provider_error,
-        uses_json_oauth_token_exchange,
+        oauth_token_payload, parse_additional_scopes, parse_token_exchange_response,
+        resolve_scope_param, token_exchange_provider_error,
     };
     use crate::crypto::telegram::TelegramLoginData;
     use crate::errors::AppError;
     use crate::models::provider_config::ProviderConfig;
     use crate::models::user_provider_token::UserProviderToken;
+    use crate::services::oauth_flow;
     use chrono::Utc;
     use mongodb::bson::{self, Bson};
     use std::collections::HashMap;
@@ -3193,6 +3225,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: Some("NyxIdBot".to_string()),
@@ -3237,10 +3272,10 @@ mod tests {
     fn lark_and_feishu_token_exchange_use_json_body() {
         let mut provider = make_provider("oauth2");
         provider.slug = "lark".to_string();
-        assert!(uses_json_oauth_token_exchange(&provider));
+        assert_eq!(oauth_flow::token_request_encoding(&provider), "json");
 
         provider.slug = "feishu".to_string();
-        assert!(uses_json_oauth_token_exchange(&provider));
+        assert_eq!(oauth_flow::token_request_encoding(&provider), "json");
     }
 
     #[test]
@@ -3249,17 +3284,17 @@ mod tests {
         provider.slug = "custom-lark".to_string();
         provider.token_url =
             Some("https://open.larksuite.com/open-apis/authen/v2/oauth/token".to_string());
-        assert!(uses_json_oauth_token_exchange(&provider));
+        assert_eq!(oauth_flow::token_request_encoding(&provider), "json");
 
         provider.token_url =
             Some("https://open.feishu.cn/open-apis/authen/v2/oauth/token".to_string());
-        assert!(uses_json_oauth_token_exchange(&provider));
+        assert_eq!(oauth_flow::token_request_encoding(&provider), "json");
     }
 
     #[test]
     fn standard_oauth_token_exchange_uses_form_body() {
         let provider = make_provider("oauth2");
-        assert!(!uses_json_oauth_token_exchange(&provider));
+        assert_eq!(oauth_flow::token_request_encoding(&provider), "form");
     }
 
     #[test]
@@ -3273,7 +3308,14 @@ mod tests {
             ),
         ];
 
-        let body = params_to_json_body(&params);
+        let mut provider = make_provider("oauth2");
+        provider.token_request_encoding = Some("json".to_string());
+        let request = oauth_flow::token_request(&provider, "https://example.com/token", &params)
+            .unwrap()
+            .build()
+            .unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(request.body().unwrap().as_bytes().unwrap()).unwrap();
 
         assert_eq!(body["grant_type"], "authorization_code");
         assert_eq!(body["code"], "abc123");
@@ -3747,6 +3789,592 @@ mod tests {
     use mongodb::bson::doc;
     use uuid::Uuid;
 
+    #[tokio::test]
+    async fn notion_oauth_callback_contract_and_optional_response_fields() {
+        use wiremock::matchers::{body_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let db = connect_test_database("notion_callback_contract")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        crate::services::provider_service::seed_default_providers(&db, &enc)
+            .await
+            .unwrap();
+        let mut provider = db
+            .collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .find_one(doc! { "slug": "notion" })
+            .await
+            .unwrap()
+            .unwrap();
+        let server = MockServer::start().await;
+        provider.token_url = Some(format!("{}/v1/oauth/token", server.uri()));
+        provider.client_id_encrypted = Some(enc.encrypt(b"client-id").await.unwrap());
+        provider.client_secret_encrypted = Some(enc.encrypt(b"client-secret").await.unwrap());
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .replace_one(doc! { "_id": &provider.id }, &provider)
+            .await
+            .unwrap();
+
+        let fixtures = [
+            include_str!("../../test-fixtures/oauth/notion-token-minimal.json"),
+            include_str!("../../test-fixtures/oauth/notion-token-refresh.json"),
+        ];
+        for (index, fixture) in fixtures.iter().enumerate() {
+            for multi_connection in [false, true] {
+                server.reset().await;
+                let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+                db.collection::<UserApiKey>(USER_API_KEYS).update_one(doc! { "_id": &key.id }, doc! {
+                    "$set": { "refresh_token_encrypted": bson::Bson::Null, "token_scopes": bson::Bson::Null, "expires_at": bson::Bson::Null }
+                }).await.unwrap();
+                let connection = if multi_connection {
+                    key.connection_id.as_deref()
+                } else {
+                    None
+                };
+                let result = super::initiate_oauth_connect(
+                    &db,
+                    &enc,
+                    "https://nyxid.example",
+                    &key.user_id,
+                    &provider.id,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    connection,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+                let url = reqwest::Url::parse(&result.authorization_url).unwrap();
+                let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                assert!(!query.contains_key("scope"));
+                assert!(!query.contains_key("code_challenge"));
+                assert_eq!(query["owner"], "user");
+                Mock::given(method("POST"))
+                    .and(path("/v1/oauth/token"))
+                    .and(header("content-type", "application/json"))
+                    .and(header("accept", "application/json"))
+                    .and(header("notion-version", "2022-06-28"))
+                    .and(header(
+                        "authorization",
+                        "Basic Y2xpZW50LWlkOmNsaWVudC1zZWNyZXQ=",
+                    ))
+                    .and(body_json(serde_json::json!({
+                        "grant_type": "authorization_code", "code": "notion-code",
+                        "redirect_uri": "https://nyxid.example/api/v1/providers/callback"
+                    })))
+                    .respond_with(
+                        ResponseTemplate::new(200).set_body_raw(*fixture, "application/json"),
+                    )
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let outcome = super::handle_oauth_callback(
+                    &db,
+                    &enc,
+                    "https://nyxid.example",
+                    &provider.id,
+                    "notion-code",
+                    &query["state"],
+                )
+                .await
+                .unwrap();
+                assert_eq!(outcome.connection_id.as_deref(), connection);
+                let (access, refresh, expires, scopes) = if multi_connection {
+                    let saved = db
+                        .collection::<UserApiKey>(USER_API_KEYS)
+                        .find_one(doc! { "_id": &key.id })
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(saved.status, "active");
+                    (
+                        saved.access_token_encrypted,
+                        saved.refresh_token_encrypted,
+                        saved.expires_at,
+                        saved.token_scopes,
+                    )
+                } else {
+                    let saved = db
+                        .collection::<UserProviderToken>(super::COLLECTION_NAME)
+                        .find_one(
+                            doc! { "user_id": &key.user_id, "provider_config_id": &provider.id },
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    (
+                        saved.access_token_encrypted,
+                        saved.refresh_token_encrypted,
+                        saved.expires_at,
+                        saved.token_scopes,
+                    )
+                };
+                assert_eq!(
+                    enc.decrypt(access.as_ref().unwrap()).await.unwrap(),
+                    b"notion-access"
+                );
+                assert!(expires.is_none(), "never invent a Notion token lifetime");
+                assert!(scopes.is_none());
+                if index == 0 {
+                    assert!(refresh.is_none());
+                } else {
+                    assert_eq!(
+                        enc.decrypt(refresh.as_ref().unwrap()).await.unwrap(),
+                        b"notion-refresh"
+                    );
+                }
+                server.verify().await;
+            }
+        }
+        for (additional, scope_override) in [
+            (vec!["unsupported".to_string()], None),
+            (vec![], Some(vec!["unsupported".to_string()])),
+        ] {
+            let err = super::initiate_oauth_connect(
+                &db,
+                &enc,
+                "https://nyxid.example",
+                "scope-test-user",
+                &provider.id,
+                None,
+                None,
+                &additional,
+                scope_override.as_deref(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, AppError::ValidationError(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_refresh_contracts_cover_both_stores_and_legacy_encodings() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let db = connect_test_database("oauth_refresh_contracts")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        let server = MockServer::start().await;
+        for (slug, encoding, basic) in [
+            ("notion", "json", true),
+            ("lark", "json", false),
+            ("feishu", "json", false),
+            ("ordinary", "form", false),
+            ("ordinary-basic", "form", true),
+        ] {
+            server.reset().await;
+            let mut provider = make_test_provider(
+                &Uuid::new_v4().to_string(),
+                &format!("{}/token", server.uri()),
+                Some(enc.encrypt(b"client-id").await.unwrap()),
+                Some(enc.encrypt(b"client-secret").await.unwrap()),
+            );
+            provider.slug = slug.into();
+            if basic {
+                provider.token_endpoint_auth_method = "client_secret_basic".into();
+            }
+            if slug == "notion" {
+                provider.token_request_encoding = Some("json".into());
+                provider
+                    .oauth_request_headers
+                    .insert("Notion-Version".into(), "2022-06-28".into());
+            }
+            // Round-trip a pre-field BSON document for the legacy providers.
+            let mut document = bson::to_document(&provider).unwrap();
+            if slug != "notion" {
+                document.remove("token_request_encoding");
+                document.remove("oauth_request_headers");
+                document.remove("supports_oauth_scopes");
+            }
+            db.collection::<bson::Document>(PROVIDER_CONFIGS)
+                .insert_one(document)
+                .await
+                .unwrap();
+            Mock::given(method("POST"))
+                .and(path("/token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": "rotated-access", "refresh_token": "rotated-refresh"
+                })))
+                .expect(2)
+                .mount(&server)
+                .await;
+            let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+            db.collection::<UserApiKey>(USER_API_KEYS)
+                .update_one(
+                    doc! { "_id": &key.id },
+                    doc! { "$set": { "expires_at": bson::Bson::Null } },
+                )
+                .await
+                .unwrap();
+            let key = db
+                .collection::<UserApiKey>(USER_API_KEYS)
+                .find_one(doc! { "_id": &key.id })
+                .await
+                .unwrap()
+                .unwrap();
+            let refreshed = super::refresh_user_api_key_in_place(&db, &enc, &key, None)
+                .await
+                .unwrap();
+            assert_eq!(
+                enc.decrypt(refreshed.access_token_encrypted.as_ref().unwrap())
+                    .await
+                    .unwrap(),
+                b"rotated-access"
+            );
+            assert_eq!(
+                enc.decrypt(refreshed.refresh_token_encrypted.as_ref().unwrap())
+                    .await
+                    .unwrap(),
+                b"rotated-refresh"
+            );
+            assert!(refreshed.expires_at.is_none());
+            assert_eq!(refreshed.credential_epoch, key.credential_epoch);
+
+            let mut legacy = make_oauth_token(
+                &enc,
+                &Uuid::new_v4().to_string(),
+                &provider.id,
+                "old-access",
+                "active",
+                None,
+            )
+            .await;
+            legacy.refresh_token_encrypted =
+                Some(enc.encrypt(b"stored-refresh-token").await.unwrap());
+            insert_test_token(&db, &legacy).await;
+            assert_eq!(
+                oauth_flow::refresh_oauth_token(&db, &enc, &legacy)
+                    .await
+                    .unwrap(),
+                "rotated-access"
+            );
+            let saved = db
+                .collection::<UserProviderToken>(super::COLLECTION_NAME)
+                .find_one(doc! { "_id": &legacy.id })
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                enc.decrypt(saved.refresh_token_encrypted.as_ref().unwrap())
+                    .await
+                    .unwrap(),
+                b"rotated-refresh"
+            );
+            assert!(saved.expires_at.is_none());
+
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 2);
+            for (index, request) in requests.into_iter().enumerate() {
+                assert_eq!(request.headers["accept"], "application/json");
+                if slug == "notion" {
+                    assert_eq!(request.headers["notion-version"], "2022-06-28");
+                } else {
+                    assert!(!request.headers.contains_key("notion-version"));
+                }
+                if basic {
+                    assert_eq!(
+                        request.headers["authorization"],
+                        "Basic Y2xpZW50LWlkOmNsaWVudC1zZWNyZXQ="
+                    );
+                } else {
+                    assert!(!request.headers.contains_key("authorization"));
+                }
+                let mut expected = serde_json::json!({ "grant_type": "refresh_token", "refresh_token": "stored-refresh-token" });
+                if !basic {
+                    expected["client_id"] = "client-id".into();
+                    expected["client_secret"] = "client-secret".into();
+                }
+                if encoding == "json" && (index == 0 || slug == "notion") {
+                    assert_eq!(request.headers["content-type"], "application/json");
+                    assert_eq!(request.body_json::<serde_json::Value>().unwrap(), expected);
+                } else {
+                    assert_eq!(
+                        request.headers["content-type"],
+                        "application/x-www-form-urlencoded"
+                    );
+                    let form: HashMap<String, String> = url::form_urlencoded::parse(&request.body)
+                        .into_owned()
+                        .collect();
+                    assert_eq!(serde_json::to_value(form).unwrap(), expected);
+                }
+            }
+            server.verify().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_legacy_refresh_requires_explicit_encoding_opt_in_for_lark_variants() {
+        use crate::services::provider_service::{self, ProviderUpdateInput};
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let db = connect_test_database("oauth_legacy_wire_format")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        provider_service::seed_default_providers(&db, &enc)
+            .await
+            .unwrap();
+        let server = MockServer::start().await;
+        for source in ["seed-lark", "seed-feishu", "custom-lark-url", "named-lark"] {
+            let mut provider = if source.starts_with("seed-") {
+                provider_service::get_provider_by_slug(&db, source.trim_start_matches("seed-"))
+                    .await
+                    .unwrap()
+            } else {
+                let mut provider = make_test_provider(
+                    &Uuid::new_v4().to_string(),
+                    "https://example.com/token",
+                    None,
+                    None,
+                );
+                provider.slug = if source == "named-lark" {
+                    "lark"
+                } else {
+                    "custom-lark-url"
+                }
+                .into();
+                provider
+            };
+            if source.starts_with("seed-") {
+                assert!(
+                    provider
+                        .token_url
+                        .as_ref()
+                        .unwrap()
+                        .contains("/open-apis/authen/v2/oauth/token")
+                );
+            }
+            provider.token_url = Some(if source == "custom-lark-url" {
+                format!(
+                    "{}/open-apis/authen/v2/oauth/token?upstream=open.larksuite.com",
+                    server.uri()
+                )
+            } else {
+                format!("{}/token", server.uri())
+            });
+            provider.credential_mode = "admin".into();
+            provider.client_id_encrypted = Some(enc.encrypt(b"client-id").await.unwrap());
+            provider.client_secret_encrypted = Some(enc.encrypt(b"client-secret").await.unwrap());
+            let mut document = bson::to_document(&provider).unwrap();
+            document.remove("token_request_encoding");
+            db.collection::<bson::Document>(PROVIDER_CONFIGS)
+                .replace_one(doc! { "_id": &provider.id }, document)
+                .upsert(true)
+                .await
+                .unwrap();
+            for explicit in [None, Some("json"), Some("form")] {
+                server.reset().await;
+                if let Some(encoding) = explicit {
+                    provider_service::update_provider(
+                        &db,
+                        &enc,
+                        &provider.id,
+                        ProviderUpdateInput {
+                            token_request_encoding: Some(encoding.into()),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                Mock::given(method("POST"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "access_token": "rotated-access", "refresh_token": "rotated-refresh"
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let mut token = make_oauth_token(
+                    &enc,
+                    &Uuid::new_v4().to_string(),
+                    &provider.id,
+                    "old-access",
+                    "active",
+                    None,
+                )
+                .await;
+                token.refresh_token_encrypted = Some(enc.encrypt(b"stored-refresh").await.unwrap());
+                insert_test_token(&db, &token).await;
+                assert_eq!(
+                    oauth_flow::refresh_oauth_token(&db, &enc, &token)
+                        .await
+                        .unwrap(),
+                    "rotated-access"
+                );
+                let requests = server.received_requests().await.unwrap();
+                assert_eq!(requests.len(), 1, "{source}: {explicit:?}");
+                let request = &requests[0];
+                let params = if explicit == Some("json") {
+                    assert_eq!(
+                        request.headers["content-type"], "application/json",
+                        "{source}"
+                    );
+                    request.body_json::<serde_json::Value>().unwrap()
+                } else {
+                    assert_eq!(
+                        request.headers["content-type"], "application/x-www-form-urlencoded",
+                        "{source}: {explicit:?}"
+                    );
+                    serde_json::to_value(
+                        url::form_urlencoded::parse(&request.body)
+                            .into_owned()
+                            .collect::<HashMap<_, _>>(),
+                    )
+                    .unwrap()
+                };
+                assert_eq!(
+                    params,
+                    serde_json::json!({
+                        "grant_type": "refresh_token", "refresh_token": "stored-refresh",
+                        "client_id": "client-id", "client_secret": "client-secret"
+                    })
+                );
+                server.verify().await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn notion_oauth_catalog_publishes_concrete_operations() {
+        use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
+        use crate::models::user_endpoint::{COLLECTION_NAME as ENDPOINTS, UserEndpoint};
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+        use crate::services::{catalog_spec_sync, mcp_service, provider_service};
+        let db = connect_test_database("notion_mcp_catalog")
+            .await
+            .expect("MongoDB required");
+        let enc = test_encryption_keys();
+        provider_service::seed_default_providers(&db, &enc)
+            .await
+            .unwrap();
+        provider_service::seed_default_services(&db, &enc)
+            .await
+            .unwrap();
+        let catalog = db
+            .collection::<DownstreamService>(SERVICES)
+            .find_one(doc! { "slug": "api-notion" })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            catalog
+                .openapi_spec_url
+                .as_deref()
+                .unwrap()
+                .ends_with("/api/v1/catalog-specs/notion/openapi.json")
+        );
+        let provider_id = catalog.provider_config_id.as_deref().unwrap();
+        let key = insert_pending_user_api_key(&db, &enc, provider_id, None, None).await;
+        let endpoint = crate::test_utils::test_user_endpoint(
+            &Uuid::new_v4().to_string(),
+            &key.user_id,
+            "Notion",
+            &catalog.base_url,
+            None,
+            Some(&catalog.id),
+        );
+        let mut service = crate::test_utils::test_user_service(
+            &Uuid::new_v4().to_string(),
+            &key.user_id,
+            "my-notion",
+            &endpoint.id,
+            Some(&catalog.id),
+            None,
+        );
+        service.api_key_id = Some(key.id.clone());
+        service.auth_method = "bearer".into();
+        service.auth_key_name = "Authorization".into();
+        db.collection::<UserEndpoint>(ENDPOINTS)
+            .insert_one(&endpoint)
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let manager = crate::services::node_ws_manager::NodeWsManager::new(30, 100);
+        let before = mcp_service::load_operation_catalog(
+            &db,
+            &manager,
+            &key.user_id,
+            mcp_service::NodeScope::Unrestricted,
+            mcp_service::ServiceScope::Unrestricted,
+        )
+        .await
+        .unwrap();
+        assert!(
+            !before
+                .services
+                .iter()
+                .any(|entry| entry.service_slug == "my-notion")
+        );
+        catalog_spec_sync::sync_seeded_service_endpoints(&db)
+            .await
+            .unwrap();
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            let operations = mcp_service::load_operation_catalog(
+                &db,
+                &manager,
+                &key.user_id,
+                mcp_service::NodeScope::Unrestricted,
+                mcp_service::ServiceScope::Unrestricted,
+            )
+            .await
+            .unwrap();
+            let notion = operations
+                .services
+                .iter()
+                .find(|entry| entry.service_slug == "my-notion")
+                .expect("Notion must be published in MCP");
+            assert!(!notion.is_generic_proxy);
+            assert_eq!(notion.endpoints.len(), 13);
+            let expected = [
+                "notion_search",
+                "notion_retrieve_page",
+                "notion_create_page",
+                "notion_update_page",
+                "notion_retrieve_database",
+                "notion_query_database",
+                "notion_list_block_children",
+                "notion_append_block_children",
+                "notion_retrieve_user",
+                "notion_list_users",
+                "notion_retrieve_bot_user",
+                "notion_list_comments",
+                "notion_create_comment",
+            ];
+            for name in expected {
+                assert!(
+                    notion
+                        .endpoints
+                        .iter()
+                        .any(|endpoint| endpoint.name == name),
+                    "missing {name}"
+                );
+            }
+            let current: Vec<_> = notion
+                .endpoints
+                .iter()
+                .map(|endpoint| endpoint.endpoint_id.clone())
+                .collect();
+            if !ids.is_empty() {
+                assert_eq!(ids, current);
+            }
+            ids = current;
+            catalog_spec_sync::sync_seeded_service_endpoints(&db)
+                .await
+                .unwrap();
+        }
+    }
+
     async fn spawn_token_server(
         response: serde_json::Value,
         status: axum::http::StatusCode,
@@ -3841,6 +4469,9 @@ mod tests {
             is_active: true,
             credential_mode: "admin".to_string(),
             token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
             extra_auth_params: None,
             device_code_format: "rfc8628".to_string(),
             client_id_param_name: None,
@@ -4414,6 +5045,384 @@ mod tests {
             !auth_url.authorization_url.contains("platform-client-id"),
             "BYO reconnect must NOT flip to the platform client"
         );
+    }
+
+    #[tokio::test]
+    async fn google_product_oauth_resolves_connection_scopes_and_owner() {
+        use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+        use crate::services::google_workspace::{
+            CALENDAR, DRIVE, GMAIL_READONLY, GMAIL_SEND, GoogleProduct,
+        };
+
+        let db = connect_test_database("google_product_oauth")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        let mut provider = make_test_provider(
+            &Uuid::new_v4().to_string(),
+            "https://oauth2.googleapis.com/token",
+            Some(enc.encrypt(b"shared-client").await.unwrap()),
+            Some(enc.encrypt(b"shared-secret").await.unwrap()),
+        );
+        provider.slug = "google".into();
+        provider.default_scopes = Some(vec!["openid".into(), "email".into(), "profile".into()]);
+        provider.extra_auth_params = Some(HashMap::from([
+            ("access_type".into(), "offline".into()),
+            ("prompt".into(), "consent".into()),
+        ]));
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        for slug in [
+            "api-google-workspace",
+            "api-google-calendar",
+            "api-google-drive",
+            "api-google-gmail",
+        ] {
+            let product = GoogleProduct::from_slug(slug).unwrap();
+            let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+            let conn = key.connection_id.as_deref();
+            let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+            catalog.id = Uuid::new_v4().to_string();
+            catalog.slug = slug.into();
+            catalog.provider_config_id = Some(provider.id.clone());
+            db.collection::<DownstreamService>(SERVICES)
+                .insert_one(&catalog)
+                .await
+                .unwrap();
+            // The user may rename their service; resolve the product from its catalog link.
+            let mut service = crate::test_utils::test_user_service(
+                &Uuid::new_v4().to_string(),
+                &key.user_id,
+                "renamed-google",
+                "endpoint",
+                Some(&catalog.id),
+                None,
+            );
+            service.api_key_id = Some(key.id.clone());
+            db.collection::<UserService>(USER_SERVICES)
+                .insert_one(&service)
+                .await
+                .unwrap();
+            for org_flow in [false, true] {
+                let (actor, owner) = if org_flow {
+                    ("org-admin", Some(key.user_id.as_str()))
+                } else {
+                    (key.user_id.as_str(), None)
+                };
+                let result = super::initiate_oauth_connect(
+                    &db,
+                    &enc,
+                    "http://localhost:3001",
+                    actor,
+                    &provider.id,
+                    owner,
+                    None,
+                    &[],
+                    None,
+                    conn,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+                let url = url::Url::parse(&result.authorization_url).unwrap();
+                let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                assert_eq!(query["scope"], product.default_scopes().join(" "));
+                assert_eq!(query["client_id"], "shared-client");
+                assert_eq!(
+                    query["redirect_uri"],
+                    "http://localhost:3001/api/v1/providers/callback"
+                );
+                assert_eq!(query["access_type"], "offline");
+                assert_eq!(query["code_challenge_method"], "S256");
+            }
+            if matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail) {
+                for use_override in [false, true] {
+                    let extra = vec![GMAIL_SEND.to_string()];
+                    let selected = vec![
+                        "openid".to_string(),
+                        GMAIL_READONLY.to_string(),
+                        GMAIL_SEND.to_string(),
+                    ];
+                    let (additional, scope_override) = if use_override {
+                        (&[][..], Some(selected.as_slice()))
+                    } else {
+                        (extra.as_slice(), None)
+                    };
+                    let result = super::initiate_oauth_connect(
+                        &db,
+                        &enc,
+                        "http://localhost:3001",
+                        &key.user_id,
+                        &provider.id,
+                        None,
+                        None,
+                        additional,
+                        scope_override,
+                        conn,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    let url = url::Url::parse(&result.authorization_url).unwrap();
+                    let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
+                    let scopes: Vec<_> = query["scope"].split_whitespace().collect();
+                    assert!(scopes.contains(&GMAIL_READONLY));
+                    assert!(scopes.contains(&GMAIL_SEND));
+                    if use_override {
+                        assert_eq!(scopes, vec!["openid", GMAIL_READONLY, GMAIL_SEND]);
+                    }
+                }
+            }
+            if matches!(product, GoogleProduct::Workspace | GoogleProduct::Gmail) {
+                for scopes in [vec![], vec![GMAIL_READONLY.to_string()]] {
+                    let error = super::initiate_oauth_connect(
+                        &db,
+                        &enc,
+                        "http://localhost:3001",
+                        &key.user_id,
+                        &provider.id,
+                        None,
+                        None,
+                        &[],
+                        Some(&scopes),
+                        conn,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap_err();
+                    assert!(matches!(error, AppError::ValidationError(_)));
+                    assert!(error.to_string().contains("Gmail send permission"));
+                }
+            }
+            let forbidden = match product {
+                GoogleProduct::Calendar => DRIVE,
+                GoogleProduct::Drive => CALENDAR,
+                GoogleProduct::Workspace | GoogleProduct::Gmail => {
+                    "https://www.googleapis.com/auth/gmail.modify"
+                }
+            };
+            for use_override in [false, true] {
+                let scopes = vec![forbidden.to_string()];
+                let (additional, scope_override) = if use_override {
+                    (&[][..], Some(scopes.as_slice()))
+                } else {
+                    (scopes.as_slice(), None)
+                };
+                let err = super::initiate_oauth_connect(
+                    &db,
+                    &enc,
+                    "http://localhost:3001",
+                    &key.user_id,
+                    &provider.id,
+                    None,
+                    None,
+                    additional,
+                    scope_override,
+                    conn,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap_err();
+                assert!(matches!(err, AppError::ValidationError(_)));
+            }
+            let err = super::google_product_for_connection(&db, "different-owner", &provider, conn)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, AppError::NotFound(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn google_mail_callback_requires_send_grant_before_storing_tokens() {
+        use crate::models::downstream_service::{COLLECTION_NAME as SERVICES, DownstreamService};
+        use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
+        use crate::services::google_workspace::{GMAIL_READONLY, GMAIL_SEND};
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let db = connect_test_database("google_mail_required_grant")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        let server = MockServer::start().await;
+        let mut provider = make_test_provider(
+            &Uuid::new_v4().to_string(),
+            &format!("{}/token", server.uri()),
+            Some(enc.encrypt(b"shared-client").await.unwrap()),
+            Some(enc.encrypt(b"shared-secret").await.unwrap()),
+        );
+        provider.slug = "google".into();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+
+        for slug in ["api-google-workspace", "api-google-gmail"] {
+            let key = insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await;
+            let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+            catalog.id = Uuid::new_v4().to_string();
+            catalog.slug = slug.into();
+            catalog.provider_config_id = Some(provider.id.clone());
+            db.collection::<DownstreamService>(SERVICES)
+                .insert_one(&catalog)
+                .await
+                .unwrap();
+            let mut service = crate::test_utils::test_user_service(
+                &Uuid::new_v4().to_string(),
+                &key.user_id,
+                "renamed-google",
+                "endpoint",
+                Some(&catalog.id),
+                None,
+            );
+            service.api_key_id = Some(key.id.clone());
+            db.collection::<UserService>(USER_SERVICES)
+                .insert_one(&service)
+                .await
+                .unwrap();
+            let granted = format!("openid {GMAIL_READONLY} {GMAIL_SEND}");
+            for scope in [None, Some(GMAIL_READONLY), Some(granted.as_str())] {
+                server.reset().await;
+                let mut response = serde_json::json!({"access_token": "google-access", "refresh_token": "google-refresh", "expires_in": 3600});
+                if let Some(scope) = scope {
+                    response["scope"] = scope.into();
+                }
+                Mock::given(method("POST"))
+                    .and(path("/token"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                    .mount(&server)
+                    .await;
+                let started = super::initiate_oauth_connect(
+                    &db,
+                    &enc,
+                    "http://localhost:3001",
+                    &key.user_id,
+                    &provider.id,
+                    None,
+                    None,
+                    &[],
+                    None,
+                    key.connection_id.as_deref(),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+                let url = url::Url::parse(&started.authorization_url).unwrap();
+                let state = url
+                    .query_pairs()
+                    .find(|(name, _)| name == "state")
+                    .unwrap()
+                    .1
+                    .into_owned();
+                let result = super::handle_oauth_callback(
+                    &db,
+                    &enc,
+                    "http://localhost:3001",
+                    &provider.id,
+                    "test-code",
+                    &state,
+                )
+                .await;
+                let saved = db
+                    .collection::<UserApiKey>(USER_API_KEYS)
+                    .find_one(doc! {"_id": &key.id})
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if scope == Some(granted.as_str()) {
+                    result.unwrap();
+                    assert_eq!(saved.status, "active");
+                    assert_eq!(saved.token_scopes.as_deref(), scope);
+                } else {
+                    assert!(matches!(result, Err(AppError::ValidationError(_))));
+                    assert_eq!(saved.status, key.status);
+                    assert_eq!(saved.access_token_encrypted, key.access_token_encrypted);
+                    assert_eq!(saved.token_scopes, key.token_scopes);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn google_managed_connections_refresh_with_rotated_shared_secret() {
+        let db = connect_test_database("google_shared_secret_rotation")
+            .await
+            .expect("local MongoDB");
+        let enc = test_encryption_keys();
+        let requests = Arc::new(std::sync::Mutex::new(Vec::<HashMap<String, String>>::new()));
+        let captured = requests.clone();
+        let app = axum::Router::new().route(
+            "/token",
+            axum::routing::post(
+                move |axum::Form(form): axum::Form<HashMap<String, String>>| {
+                    captured.lock().unwrap().push(form);
+                    async {
+                        axum::Json(serde_json::json!({
+                            "access_token": "refreshed-google-access", "expires_in": 3600,
+                        }))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let token_url = format!("http://{}/token", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let mut provider = make_test_provider(
+            &Uuid::new_v4().to_string(),
+            &token_url,
+            Some(enc.encrypt(b"shared-google-client").await.unwrap()),
+            Some(enc.encrypt(b"old-secret").await.unwrap()),
+        );
+        provider.slug = "google".into();
+        let providers = db.collection::<ProviderConfig>(PROVIDER_CONFIGS);
+        providers.insert_one(&provider).await.unwrap();
+        let mut keys = Vec::new();
+        for _ in 0..2 {
+            keys.push(insert_pending_user_api_key(&db, &enc, &provider.id, None, None).await);
+        }
+        providers
+            .update_one(
+                doc! { "_id": &provider.id },
+                doc! { "$set": {
+                    "client_secret_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic,
+                        bytes: enc.encrypt(b"rotated-secret").await.unwrap(),
+                    },
+                }},
+            )
+            .await
+            .unwrap();
+        for key in &keys {
+            let refreshed = super::refresh_user_api_key_in_place(&db, &enc, key, None)
+                .await
+                .unwrap();
+            assert_eq!(refreshed.status, "active");
+            assert_eq!(
+                enc.decrypt(refreshed.access_token_encrypted.as_ref().unwrap())
+                    .await
+                    .unwrap(),
+                b"refreshed-google-access"
+            );
+            assert_eq!(refreshed.credential_epoch, key.credential_epoch);
+        }
+        server.abort();
+        let captured = requests.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        for form in captured.iter() {
+            assert_eq!(form["client_id"], "shared-google-client");
+            assert_eq!(form["client_secret"], "rotated-secret");
+            assert_eq!(form["grant_type"], "refresh_token");
+        }
     }
 
     #[tokio::test]

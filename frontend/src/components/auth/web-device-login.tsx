@@ -276,6 +276,17 @@ export function WebDeviceLogin({
         </div>
       )}
 
+      {deviceLogin.phase === "restricted" && deviceLogin.loginCode && (
+        <section className="mt-6 space-y-3 text-center" aria-live="polite">
+          <CheckCircle2 className="mx-auto size-6 text-success" />
+          <h3 className="text-[15px] font-semibold">Restricted terminal login</h3>
+          <p className="text-[12px] text-muted-foreground">This browser remains signed out.</p>
+          <code data-sensitive className="block font-mono text-[24px]">{deviceLogin.loginCode.code}</code>
+          <p className="text-[12px]">Terminal command: <code>nyxid login --code</code></p>
+          <p className="text-[12px] text-muted-foreground">Expires {new Date(deviceLogin.loginCode.expires_at).toLocaleTimeString()}</p>
+        </section>
+      )}
+
       {deviceLogin.phase === "success" && (
         <div
           className="mt-8 flex items-center justify-center gap-2 text-[13px] text-success"

@@ -117,9 +117,8 @@ const TEST_DB_PROBE_NAME: &str = "nyxid_test_probe";
 /// dev docker-compose mongod on `127.0.0.1:27018` first, then the CI-style mongod
 /// on `127.0.0.1:27017`. Default candidates are gated by a fast TCP reachability
 /// check, so a port with no listener is skipped in milliseconds instead of
-/// stalling on the driver's server-selection timeout. Returns `None` when neither
-/// default candidate is reachable so non-transactional integration tests retain
-/// their existing optional-Mongo behavior. A configured override fails loudly
+/// stalling on the driver's server-selection timeout. Fails when neither
+/// default candidate is reachable. A configured override fails loudly
 /// when unusable instead of silently falling back to a different database.
 ///
 /// Deliberately NOT cached: a per-test client is required for correct llvm-cov
@@ -133,7 +132,9 @@ const TEST_DB_PROBE_NAME: &str = "nyxid_test_probe";
 /// and the cross-process stale sweep remain crash recovery.
 pub(crate) async fn connect_test_database(prefix: &str) -> Option<mongodb::Database> {
     let db_name = new_test_db_name(prefix);
-    let client = probe_test_mongo_client(&db_name, None).await?;
+    let client = probe_test_mongo_client(&db_name, None).await.expect(
+        "MongoDB is required for database tests; set NYXID_TEST_DATABASE_URL to a writable MongoDB URI",
+    );
 
     Some(client.database(&db_name))
 }
@@ -147,7 +148,9 @@ pub(crate) async fn connect_test_database_with_command_handler(
     handler: mongodb::event::EventHandler<mongodb::event::command::CommandEvent>,
 ) -> Option<mongodb::Database> {
     let db_name = new_test_db_name(prefix);
-    let client = probe_test_mongo_client(&db_name, Some(handler)).await?;
+    let client = probe_test_mongo_client(&db_name, Some(handler)).await.expect(
+        "MongoDB is required for database tests; set NYXID_TEST_DATABASE_URL to a writable MongoDB URI",
+    );
     Some(client.database(&db_name))
 }
 
@@ -1715,6 +1718,7 @@ pub(crate) fn test_app_config() -> AppConfig {
         public_mcp_rate_limit_per_minute:
             crate::services::anonymous_endpoint_service::DEFAULT_PUBLIC_MCP_RATE_LIMIT_PER_MINUTE,
         channel_relay_callback_timeout_secs: 30,
+        channel_poll_interval_secs: 30,
         channel_relay_max_bots_per_user: 5,
         channel_relay_message_ttl_days: 30,
         channel_relay_edit_rate_limit_per_second: 10,

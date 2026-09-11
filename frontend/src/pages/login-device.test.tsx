@@ -1,8 +1,10 @@
-import { act, render, screen } from "@testing-library/react";
+import { act, fireEvent, render as testingRender, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PreviewAuthDeviceResponse } from "@/schemas/auth-device";
 import { LoginDevicePage } from "./login-device";
+import { PreviewPanel, ApprovalCaution } from "@/components/auth/login-request-preview";
 
 const {
   approveMutate,
@@ -18,6 +20,7 @@ const {
   previewMutate: vi.fn(),
   previewReset: vi.fn(),
   previewState: {
+    search: {} as { user_code?: string },
     data: undefined as PreviewAuthDeviceResponse | undefined,
   },
 }));
@@ -27,6 +30,7 @@ vi.mock("@tanstack/react-router", () => ({
     <a href="/">{children}</a>
   ),
   useNavigate: () => navigate,
+  useSearch: () => previewState.search,
 }));
 
 vi.mock("@/stores/auth-store", () => ({
@@ -53,6 +57,25 @@ vi.mock("@/hooks/use-auth-device", () => ({
     reset: vi.fn(),
   }),
 }));
+
+vi.mock("@/hooks/use-agent-key-login", () => ({
+  usePreviewAgentKeyLogin: () => ({ isPending: false, mutateAsync: previewMutate, reset: previewReset }),
+  useAgentKeyLoginOptions: () => ({ isPending: false, reset: vi.fn() }),
+  useApproveAgentKeyLogin: () => ({ isPending: false, mutateAsync: vi.fn(), reset: vi.fn() }),
+  useDenyAgentKeyLogin: () => ({ isPending: false, mutateAsync: denyMutate, reset: vi.fn() }),
+}));
+
+function render(element: React.ReactNode) {
+  return testingRender(<QueryClientProvider client={new QueryClient({defaultOptions: {queries: {retry: false}}})}>{element}</QueryClientProvider>);
+}
+function renderRequester() {
+  render(<><PreviewPanel userCode="2ABCDEFGH" preview={previewState.data!} remainingSeconds={previewState.data!.seconds_remaining} /><ApprovalCaution /></>);
+}
+async function enterPreview(code = "ABCD-EFGH") {
+  render(<LoginDevicePage />);
+  fireEvent.change(screen.getByLabelText("User code"), {target: {value: code}});
+  await act(async () => { fireEvent.click(screen.getByRole("button", {name: "Continue"})); });
+}
 
 function makePreview(
   overrides: Partial<PreviewAuthDeviceResponse> = {},
@@ -95,7 +118,8 @@ function makePreview(
 beforeEach(() => {
   vi.clearAllMocks();
   previewState.data = undefined;
-  previewMutate.mockResolvedValue(makePreview());
+  previewState.search = {};
+  previewMutate.mockImplementation(async () => ({requested_profile: null, interval: 5, ...(previewState.data ?? makePreview())}));
 });
 
 afterEach(() => {
@@ -119,10 +143,45 @@ describe("LoginDevicePage", () => {
     expect(previewMutate).toHaveBeenCalledWith("ABCDEFGH");
   });
 
+  it("prefills v2 once, strips the URL, and echoes the code through account confirmation", async () => {
+    vi.useFakeTimers();
+    previewState.search = { user_code: "2-abcd efgh" };
+    render(<LoginDevicePage />);
+    const input = screen.getByLabelText("User code");
+    expect(input).toHaveValue("2-ABCD-EFGH");
+    expect(input).toHaveAttribute("placeholder", "2-XXXX-XXXX");
+    expect(navigate).toHaveBeenCalledWith({ to: "/login/device", search: {}, replace: true });
+    expect(previewMutate).not.toHaveBeenCalled();
+    expect(approveMutate).not.toHaveBeenCalled();
+    expect(denyMutate).not.toHaveBeenCalled();
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Continue" })); });
+    expect(previewMutate).toHaveBeenCalledWith("2ABCDEFGH");
+    expect(screen.getByText("2-ABCD-EFGH")).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+    fireEvent.click(screen.getByRole("button", { name: "Full account session" }));
+    expect(screen.getByText("Confirm full account access")).toBeInTheDocument();
+    expect(screen.getByText("2-ABCD-EFGH")).toBeInTheDocument();
+    expect(screen.getByText(/Reject if it does not match/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Approve full account session" }));
+    expect(approveMutate).not.toHaveBeenCalled();
+    await act(async () => { await vi.advanceTimersByTimeAsync(750); });
+    await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Approve full account session" })); });
+    expect(approveMutate).toHaveBeenCalledExactlyOnceWith("2ABCDEFGH");
+  });
+
+  it.each(["2-ABCD-EFGH!", "2-ABCD-EFGHX", "2-ABCD"])("rejects malformed device link %s before formatting", (user_code) => {
+    previewState.search = { user_code };
+    render(<LoginDevicePage />);
+    expect(screen.getByLabelText("User code")).toHaveValue("");
+    expect(screen.getByText(/Enter the code manually/)).toBeInTheDocument();
+    expect(navigate).toHaveBeenCalledWith({ to: "/login/device", search: {}, replace: true });
+    expect(previewMutate).not.toHaveBeenCalled();
+  });
+
   it("presents requester facts and device claims as neutral detail rows", async () => {
     const user = userEvent.setup();
     previewState.data = makePreview();
-    render(<LoginDevicePage />);
+    renderRequester();
 
     expect(screen.queryByText("Verified by NyxID")).not.toBeInTheDocument();
     expect(
@@ -156,7 +215,7 @@ describe("LoginDevicePage", () => {
       initiating_origin: "https://nyxid.dev",
       initiating_origin_status: "matched",
     });
-    render(<LoginDevicePage />);
+    renderRequester();
 
     expect(
       screen.queryByText(/Started from nyxid\.dev/i),
@@ -172,7 +231,7 @@ describe("LoginDevicePage", () => {
       same_ip_as_viewer: false,
       network_relation: "different_network",
     });
-    render(<LoginDevicePage />);
+    renderRequester();
 
     const signal = screen.getByText("Different network");
     expect(signal).not.toHaveClass("text-warning");
@@ -202,7 +261,7 @@ describe("LoginDevicePage", () => {
       network_relation: "same_network",
       same_ip_as_viewer: false,
     });
-    render(<LoginDevicePage />);
+    renderRequester();
 
     expect(screen.getByText("Same network as this device")).toBeInTheDocument();
     const timezone = screen.getByText(
@@ -221,7 +280,7 @@ describe("LoginDevicePage", () => {
       client_timezone: "Europe/Moscow",
       client_timezone_matches_ip: false,
     });
-    render(<LoginDevicePage />);
+    renderRequester();
 
     expect(screen.getByText("login-copy.example")).toHaveClass(
       "text-destructive",
@@ -238,7 +297,7 @@ describe("LoginDevicePage", () => {
       initiating_origin: "https://login-copy.example",
       initiating_origin_status: "mismatched",
     });
-    render(<LoginDevicePage />);
+    renderRequester();
 
     const origin = screen.getByText("login-copy.example");
     expect(origin).toHaveClass("text-destructive");
@@ -254,7 +313,7 @@ describe("LoginDevicePage", () => {
         status === "non_http" ? "file:///tmp/login.html" : "not a url",
       initiating_origin_status: status,
     });
-    render(<LoginDevicePage />);
+    renderRequester();
 
     expect(screen.getByText(message)).toHaveClass("text-destructive");
   });
@@ -277,7 +336,7 @@ describe("LoginDevicePage", () => {
       client_hardware_concurrency: null,
       client_device_memory: null,
     });
-    render(<LoginDevicePage />);
+    renderRequester();
 
     expect(
       screen.queryByText(/not the official NyxID site/i),
@@ -294,7 +353,7 @@ describe("LoginDevicePage", () => {
       same_ip_as_viewer: true,
       network_relation: null,
     });
-    render(<LoginDevicePage />);
+    renderRequester();
 
     expect(
       screen.getByText("IP unavailable on this deployment"),
@@ -313,7 +372,7 @@ describe("LoginDevicePage", () => {
       same_ip_as_viewer: null,
       network_relation: null,
     });
-    render(<LoginDevicePage />);
+    renderRequester();
 
     expect(screen.getByText("Not verified")).toBeInTheDocument();
     expect(screen.getByText("Reported IP")).toBeInTheDocument();
@@ -330,7 +389,7 @@ describe("LoginDevicePage", () => {
       expires_at: "2026-08-20T10:00:02Z",
       seconds_remaining: 2,
     });
-    render(<LoginDevicePage />);
+    await enterPreview();
 
     expect(screen.getByText(/^32 seconds ago · /)).toBeInTheDocument();
     const nearExpiry = screen.getByText("0:02");
@@ -340,7 +399,7 @@ describe("LoginDevicePage", () => {
       await vi.advanceTimersByTimeAsync(2_000);
     });
 
-    expect(screen.getByText("Expired")).toHaveClass("text-destructive");
+    expect(screen.getByText("Login request expired")).toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "Approve" }),
     ).not.toBeInTheDocument();
@@ -350,24 +409,36 @@ describe("LoginDevicePage", () => {
     expect(screen.queryByText(/Expires in -/)).not.toBeInTheDocument();
   });
 
-  it("offers decisions for a pending preview", () => {
+  it("offers both grant decisions for a pending preview", async () => {
     previewState.data = makePreview();
-    render(<LoginDevicePage />);
+    await enterPreview("2-ABCD-EFGH");
 
-    expect(screen.getByRole("button", { name: "Approve" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restricted Agent Key" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Full account session" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
+  });
+
+  it("keeps a legacy requester account-only", async () => {
+    previewState.data = makePreview();
+    await enterPreview();
+    expect(screen.queryByRole("button", { name: "Restricted Agent Key" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Full account session" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Reject" })).toBeInTheDocument();
   });
 
   it.each([
-    ["denied", "This login request was already denied."],
-    ["expired", "This code has expired."],
-    ["approved", "This code was already used."],
-    ["delivered", "This code was already used."],
+    ["denied", "Login rejected"],
+    ["expired", "Login request expired"],
+    ["approved", "Approved - return to the requesting device"],
+    ["delivered", "Approved - return to the requesting device"],
   ] as const)(
     "does not offer decisions for a %s preview",
-    (status, expectedMessage) => {
+    async (status, expectedMessage) => {
       previewState.data = makePreview({ status });
+      previewState.search = { user_code: "2-abcd-efgh" };
       render(<LoginDevicePage />);
+      expect(previewMutate).not.toHaveBeenCalled();
+      await act(async () => { fireEvent.click(screen.getByRole("button", { name: "Continue" })); });
 
       expect(screen.getByText(expectedMessage)).toBeInTheDocument();
       expect(
@@ -376,6 +447,11 @@ describe("LoginDevicePage", () => {
       expect(
         screen.queryByRole("button", { name: "Reject" }),
       ).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Enter another code" }));
+      expect(screen.getByLabelText("User code")).toHaveValue("");
+      expect(screen.queryByText(expectedMessage)).not.toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: "Enter another code" })).not.toBeInTheDocument();
+      expect(previewMutate).toHaveBeenCalledTimes(1);
     },
   );
 });

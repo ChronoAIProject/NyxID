@@ -19,14 +19,22 @@ use crate::models::oracle_worker_command::{
 use crate::mw::auth::AuthUser;
 use crate::services::{
     audit_service, oracle_login_snapshot_service, oracle_pool_service,
-    oracle_worker_bundle_service, oracle_worker_service,
+    oracle_worker_bundle_service, oracle_worker_enrollment_service as enrollment,
+    oracle_worker_service,
 };
+
+#[cfg(test)]
+mod enrollment_tests;
 
 const ONLINE_WINDOW_SECS: i64 = 90;
 
 #[derive(Serialize)]
 pub struct OracleWorkerInfo {
     pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<String>,
+    pub credential_type: &'static str,
+    pub can_manage: bool,
     pub online: bool,
     pub last_seen_at: String,
     pub last_seen_secs_ago: i64,
@@ -65,6 +73,62 @@ pub struct AllocateOracleWorkerResponse {
     pub label: String,
     /// True when an existing unbound (legacy) worker row was taken over.
     pub adopted: bool,
+}
+
+#[derive(Deserialize)]
+pub struct EnrollOracleWorkerRequest {
+    pub installation_id: String,
+    pub label: Option<String>,
+    pub credential: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for EnrollOracleWorkerRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnrollOracleWorkerRequest")
+            .field("credential", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
+pub struct EnrollOracleWorkerResponse {
+    pub pool_id: String,
+    pub pool_slug: String,
+    pub label: String,
+    pub installation_id: String,
+    pub credential_type: &'static str,
+}
+
+pub async fn enroll_worker(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(id_or_slug): Path<String>,
+    Json(body): Json<EnrollOracleWorkerRequest>,
+) -> AppResult<Json<EnrollOracleWorkerResponse>> {
+    let actor = auth_user.user_id.to_string();
+    let pool = oracle_pool_service::get_pool(&state.db, &id_or_slug).await?;
+    let worker = enrollment::enroll(
+        &state.db,
+        &actor,
+        &pool,
+        &body.installation_id,
+        body.label.as_deref(),
+        &body.credential,
+    )
+    .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth_user,
+        "oracle_worker_enrolled",
+        Some(serde_json::json!({ "pool_id": pool.id, "worker_label": worker.worker_label })),
+    );
+    Ok(Json(EnrollOracleWorkerResponse {
+        pool_id: pool.id,
+        pool_slug: pool.slug,
+        label: worker.worker_label,
+        installation_id: body.installation_id.clone(),
+        credential_type: "installation",
+    }))
 }
 
 #[derive(Deserialize, Default)]
@@ -131,7 +195,7 @@ pub struct UploadLoginSnapshotResponse {
     pub skipped_workers: Vec<String>,
 }
 
-fn decode_login_snapshot_envelope(encoded: &str) -> AppResult<Zeroizing<Vec<u8>>> {
+pub(super) fn decode_login_snapshot_envelope(encoded: &str) -> AppResult<Zeroizing<Vec<u8>>> {
     if encoded.len() > oracle_login_snapshot_service::MAX_LOGIN_SNAPSHOT_BASE64_CHARS {
         return Err(AppError::OraclePayloadTooLarge(format!(
             "login snapshot must be at most {} base64 characters",
@@ -149,6 +213,16 @@ fn decode_login_snapshot_envelope(encoded: &str) -> AppResult<Zeroizing<Vec<u8>>
 fn worker_info(worker: OracleWorker) -> OracleWorkerInfo {
     let last_seen_secs_ago = (Utc::now() - worker.last_seen_at).num_seconds().max(0);
     OracleWorkerInfo {
+        owner_user_id: worker
+            .enrollment
+            .as_ref()
+            .map(|enrollment| enrollment.owner_user_id.clone()),
+        credential_type: if worker.enrollment.is_some() {
+            "installation"
+        } else {
+            "pool"
+        },
+        can_manage: true,
         label: worker.worker_label,
         online: last_seen_secs_ago <= ONLINE_WINDOW_SECS,
         last_seen_at: worker.last_seen_at.to_rfc3339(),
@@ -216,6 +290,18 @@ async fn managed_pool(
     Ok(pool)
 }
 
+async fn contributed_worker_pool(
+    state: &AppState,
+    actor: &str,
+    id_or_slug: &str,
+    label: &str,
+) -> AppResult<(OraclePool, OracleWorker)> {
+    let pool = oracle_pool_service::get_pool(&state.db, id_or_slug).await?;
+    let worker = oracle_worker_service::get_worker(&state.db, &pool.id, label).await?;
+    enrollment::ensure_can_manage_worker(&state.db, actor, &pool, &worker).await?;
+    Ok((pool, worker))
+}
+
 pub async fn allocate_worker(
     State(state): State<AppState>,
     auth_user: AuthUser,
@@ -258,10 +344,23 @@ pub async fn list_workers(
     Path(id_or_slug): Path<String>,
 ) -> AppResult<Json<ListOracleWorkersResponse>> {
     let actor = auth_user.user_id.to_string();
-    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
+    let pool = oracle_pool_service::get_pool(&state.db, &id_or_slug).await?;
+    let manages_pool = oracle_pool_service::ensure_can_manage(&state.db, &actor, &pool)
+        .await
+        .is_ok();
+    if !manages_pool {
+        enrollment::enrollment_membership(&state.db, &actor, &pool).await?;
+    }
     let workers = oracle_worker_service::list_workers(&state.db, &pool.id)
         .await?
         .into_iter()
+        .filter(|worker| {
+            manages_pool
+                || worker
+                    .enrollment
+                    .as_ref()
+                    .is_some_and(|enrollment| enrollment.owner_user_id == actor)
+        })
         .map(worker_info)
         .collect();
     Ok(Json(ListOracleWorkersResponse { workers }))
@@ -273,8 +372,7 @@ pub async fn show_worker(
     Path((id_or_slug, label)): Path<(String, String)>,
 ) -> AppResult<Json<OracleWorkerInfo>> {
     let actor = auth_user.user_id.to_string();
-    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
-    let worker = oracle_worker_service::get_worker(&state.db, &pool.id, &label).await?;
+    let (_, worker) = contributed_worker_pool(&state, &actor, &id_or_slug, &label).await?;
     Ok(Json(worker_info(worker)))
 }
 
@@ -285,9 +383,9 @@ pub async fn forget_worker(
     Query(query): Query<ForgetWorkerQuery>,
 ) -> AppResult<Json<ForgetWorkerResponse>> {
     let actor = auth_user.user_id.to_string();
-    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
+    let (pool, worker) = contributed_worker_pool(&state, &actor, &id_or_slug, &label).await?;
     let outcome =
-        oracle_worker_service::forget_worker(&state.db, &pool, &label, query.force).await?;
+        oracle_worker_service::forget_authorized_worker(&state.db, &worker, query.force).await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -316,7 +414,7 @@ pub async fn enqueue_command(
     Json(body): Json<EnqueueWorkerCommandRequest>,
 ) -> AppResult<impl IntoResponse> {
     let actor = auth_user.user_id.to_string();
-    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
+    let (pool, worker) = contributed_worker_pool(&state, &actor, &id_or_slug, &label).await?;
     let kind = parse_command(&body.command)?;
     let bundle = if kind == OracleWorkerCommandKind::Upgrade {
         let current = oracle_worker_bundle_service::current_bundle();
@@ -324,8 +422,8 @@ pub async fn enqueue_command(
     } else {
         None
     };
-    let command = oracle_worker_service::enqueue_command(
-        &state.db, &pool.id, &actor, &label, kind, None, bundle,
+    let command = oracle_worker_service::enqueue_worker_command(
+        &state.db, &worker, &actor, kind, None, bundle,
     )
     .await?;
     audit_service::log_for_user(
@@ -348,9 +446,9 @@ pub async fn cancel_command(
     Path((id_or_slug, label, command_id)): Path<(String, String, String)>,
 ) -> AppResult<Json<OracleWorkerCommandInfo>> {
     let actor = auth_user.user_id.to_string();
-    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
+    let (pool, worker) = contributed_worker_pool(&state, &actor, &id_or_slug, &label).await?;
     let command =
-        oracle_worker_service::cancel_command(&state.db, &pool.id, &label, &command_id).await?;
+        oracle_worker_service::cancel_worker_command(&state.db, &worker, &command_id).await?;
     audit_service::log_for_user(
         state.db.clone(),
         &auth_user,
@@ -372,9 +470,8 @@ pub async fn list_commands(
     Path((id_or_slug, label)): Path<(String, String)>,
 ) -> AppResult<Json<ListOracleWorkerCommandsResponse>> {
     let actor = auth_user.user_id.to_string();
-    let pool = managed_pool(&state, &actor, &id_or_slug).await?;
-    oracle_worker_service::get_worker(&state.db, &pool.id, &label).await?;
-    let commands = oracle_worker_service::list_commands(&state.db, &pool.id, Some(&label))
+    let (_, worker) = contributed_worker_pool(&state, &actor, &id_or_slug, &label).await?;
+    let commands = oracle_worker_service::list_worker_commands(&state.db, &worker)
         .await?
         .into_iter()
         .map(command_info)

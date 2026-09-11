@@ -453,7 +453,9 @@ curl -X POST http://localhost:3001/api/v1/auth/refresh \
 
 #### POST /api/v1/auth/device/request
 
-Start a first-party device login for a CLI, desktop app, or other input-constrained client. This public contract is stable and versioned with `/api/v1`.
+Start a legacy account-only device login. New clients use the isolated
+[v2 exchange](#selectable-device-login-v2) below to let the human choose the
+grant. This route remains compatible with existing account-only clients.
 
 **Auth:** None
 
@@ -484,7 +486,7 @@ Start a first-party device login for a CLI, desktop app, or other input-constrai
 }
 ```
 
-The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance.
+The `device_code` is a secret and must not be logged or displayed. The `user_code` is for manual entry at `verification_uri`. Codes expire 10 minutes after issuance. QR/deep links using `verification_uri_complete` prefill the web approval page and mobile app; they never trigger preview or approval. The web page validates before formatting, seeds once, and removes `user_code` from the URL with replace navigation. Malformed codes leave an empty input with an explanation. After Continue, review echoes the code and asks the human to match it against the requesting device or terminal and reject a mismatch (RFC 8628 §§3.3.1, 5.4). Decisions remain explicit and throttled at >=750 ms. `/login/code` only mints codes and has no prefill input.
 
 #### POST /api/v1/auth/device/poll
 
@@ -598,6 +600,89 @@ Atomically reject a pending request. No tokens are minted, and the requester's n
 **Response (200):** `{ "ok": true }`
 
 Approve and deny use the same pending-status guard, so exactly one wins a concurrent decision. API-key, service-account, delegated, and relay credentials are rejected before either decision handler runs. Integrators should direct users to `verification_uri`; these are first-party review endpoints.
+
+#### Selectable Device Login V2
+
+Plain `nyxid login` deliberately defaults to this exchange: it provides requester attribution (IP, timezone, origin, screen) and human choice of account access or a restricted Agent Key. `nyxid login --callback` opts into the legacy local callback, which grants full account access without requester review. The CLI prints/opens only the bare verification URI for manual code entry; `--clipboard` copies the user code for pasting, except in JSON/no-wait modes, which do not copy or open a browser.
+
+New clients start with `POST /api/v1/auth/device/v2/request`, using the same
+client-context body as the legacy request, plus optional `requested_profile`.
+The response has the same fields, with a `nyx_adc2_` poll secret and a
+`2-XXXX-XXXX` human code. Use `/auth/device/v2/poll` or the browser-only
+`/auth/device/v2/poll-web` with `{"device_code":"nyx_adc2_<secret>"}`.
+
+V2 requests live in separate storage. Old replicas return an unsupported route
+without consuming new grants, and old TTL indexes cannot remove v2 cleanup
+work. Clients must not retry a v2 request through the legacy poll route.
+Legacy requests only offer account access.
+
+The shared public `/auth/device/preview` resolves the human-code version and
+includes the requested profile and sanitized requester context. Human decisions
+require a first-party personal session or an access JWT without an OAuth client
+ID. Third-party OAuth, delegated, relay, service-account and API-key credentials
+cannot approve or mint login grants.
+
+| Method and path | Body | Result |
+|---|---|---|
+| `POST /auth/device/options` | `{"user_code":"2-XXXX-XXXX"}` | Eligible personal/org keys and resource choices |
+| `POST /auth/device/approve` | `{"user_code":"2-XXXX-XXXX"}` | Full account approval |
+| `POST /auth/device/approve-agent-key` | Human code, `selection`, optional `credential_expires_at` | Restricted child credential approval |
+| `POST /auth/device/deny` | Human code | Denial without issuance |
+
+`selection` uses the Agent Key login contract: `{"kind":"existing","api_key_id":"<UUID>"}`
+or a `kind: "new"` selection containing the confirmed key permissions. Restricted
+decisions use a distinct fail-closed route so an old replica cannot silently
+interpret that choice as full account approval. Creation and delivery revalidate
+eligibility and effective authority.
+
+Successful CLI polling returns a tagged union. `auth_kind: "account_session"`
+includes `access_token`, `refresh_token`, `token_type` and `expires_in`.
+`auth_kind: "agent_key"` includes `credential`, `credential_id`,
+`credential_expires_at`, `label` and safe `api_key` metadata. Explicit Agent Key
+clients must reject an account grant. The existing device error contract applies;
+clients persist server backoff and stop on terminal outcomes.
+
+Browser account delivery returns `{"ok":true,"auth_kind":"account_session"}`
+and a cookie. Claim, bearer-session revocation and cookie-session insertion are
+one transaction. Browser restricted delivery returns
+`{"ok":false,"auth_kind":"agent_key","login_code":{"request_id":"<UUID>","code":"XXXX-XXXX","expires_at":"<RFC3339>"}}`.
+This code hands the credential to `nyxid login --code`; it never establishes an
+account cookie. Creating the handoff extends the initial 60-second delivery
+window to five minutes after approval; repeated handoff calls never extend that
+fixed deadline. Browser
+handoff and direct CLI delivery race atomically, with exactly one recipient.
+
+KMS failure before delivery preserves retryability. Abandoned approvals revoke
+their issued session or child; parent key configuration and other consumers
+remain intact. Cleanup completes before terminal TTL removal.
+
+#### One-Time Login Codes
+
+An authenticated human can create a five-minute code before opening a CLI. All
+paths below are under `/api/v1`; only redemption is public.
+
+| Method and path | Body or result |
+|---|---|
+| `POST /auth/login-code/options` | Eligible Agent Keys and resource choices |
+| `POST /auth/login-code` | `{"auth_kind":"account_session"}` or `{"auth_kind":"agent_key","selection":{...},"credential_expires_at":null}` |
+| `POST /auth/login-code/redeem` | `{"code":"XXXX-XXXX","requested_profile":"work","client_label":"Workstation"}` plus optional client context |
+| `GET /auth/login-code/{id}` | Issuer-only status and sanitized redemption context; no code or credential |
+| `DELETE /auth/login-code/{id}` | Cancel a pending code |
+| `POST /auth/login-code/{id}/revoke` | Revoke its delivered account session or child credential |
+
+Mint returns `request_id`, the secret `code` shown once, and `expires_at`.
+Redemption returns the same tagged delivery as v2 polling. Issuance and claim are
+one transaction; concurrent redemption has one winner and failures leave no
+orphan grant. Mint/redeem are limited by source and issuer, including invalid-code
+attempts. Terminal status is `redeemed`, `cancelled`, `expired` or `revoked`;
+`can_revoke` indicates delivered credentials. The numeric error definitions are
+authoritative in `backend/src/errors/mod.rs`. Codes belong in neither URLs, logs,
+telemetry nor persistent browser storage.
+
+First-party access JWTs carry `sid`. Protected requests and refresh validate the
+bound session's liveness, so issuer revocation invalidates both existing and
+refreshed access tokens and cascades to MCP sessions. Legacy first-party tokens
+without `sid` retain their existing compatibility behavior.
 
 ---
 
@@ -2781,6 +2866,36 @@ curl -X DELETE http://localhost:3001/api/v1/providers/p1a2b3c4-d5e6-7890-abcd-ef
 ---
 
 ### User Provider Tokens
+
+#### Codex API-Key Connection
+
+`GET /api/v1/providers/codex-connection` returns the authenticated account,
+`openai` provider, nullable connection `{id,state_version}`, nullable `service_id`,
+`feature: "openai_responses"` and status `not_connected`, `saved`, `usable` or
+`reconnect_required`. Only first-party human authentication is accepted.
+
+After explicit local destination/account consent, the dedicated CLI helper posts
+`{account_id,api_key,expected_connection}` to the same route. First import uses
+`expected_connection: null`; replacing a reviewed connection must send its exact
+ID and version. Stale consent returns409. The local helper supports only Codex
+API-key file storage, never ChatGPT OAuth subscription tokens. It preserves local
+files, disables redirects and exposes only redacted results.
+
+`POST /api/v1/providers/codex-connection/verify` accepts
+`{"connection":{"id":"<UUID>","state_version":1},"model":"gpt-4.1-mini"}`.
+It makes a small paid Responses request through the ordinary metered proxy with
+the exact saved service selector. `usable` requires a bounded, completed response
+using the current key epoch and service/endpoint binding; another personal or org
+credential cannot satisfy verification. Authentication rejection reports
+`reconnect_required`; network, body or completion failures do not report ready.
+
+Import, replacement and endpoint/key/service provisioning are transactional.
+Same-value user replacement advances credential epoch; verification and lazy
+refresh do not. Disable/Delete invalidate live usable status. Explicit reconnect
+creates a fresh service when the previous one is disabled or deleted, preserving
+its tombstone. NyxID deletion does not revoke an upstream API key or modify local
+Codex. See [the lifecycle and consent guide](CODEX_CONNECTION.md) for storage
+fallbacks, separate OAuth authorization and release capability checks.
 
 Users connect to providers by submitting API keys or completing OAuth flows. These endpoints manage the user's provider token lifecycle.
 

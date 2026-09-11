@@ -657,6 +657,8 @@ export function AccountSettingsScreen({ navigation }: Props) {
 
         {/* Actions */}
         <View style={styles.actionsWrap}>
+          <PrimaryButton label="Generate terminal login code" kind="ghost" disabled={isOffline}
+            onPress={() => navigation.navigate("AgentKeyLogin", { mint: true })} />
           <PrimaryButton
             label="Sign Out"
             kind="ghost"

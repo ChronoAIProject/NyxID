@@ -25,10 +25,13 @@
 
 import { chromium } from "playwright-core";
 import {
+  createCipheriv,
   createDecipheriv,
   createHash,
+  createHmac,
   hkdfSync,
   randomUUID,
+  randomBytes,
 } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import {
@@ -74,7 +77,8 @@ const SCRIPT_VERSION = (() => {
   return `cdp+${SOURCE_SHA256.slice(0, 12)}`;
 })();
 const POLL_MS = Number(process.env.NYXID_POLL_MS || 5000);
-const STABLE_INTERVAL_MS = 8000;
+const STABLE_INTERVAL_MS = Math.max(100, Math.min(60000,
+  Number(process.env.NYXID_STABLE_INTERVAL_MS) || 8000));
 const MAX_WAIT_MS = Number(process.env.NYXID_MAX_WAIT_MS || 2 * 60 * 60 * 1000); // 2h
 // Wedge guard: if ChatGPT has clearly stopped (not generating) yet produced
 // nothing extractable after this long, fail the task fast and free the slot
@@ -134,7 +138,14 @@ const NPM_EXECUTABLE = resolveNpmExecutable({ configured: process.env.NYXID_NPM_
 const NPM_INSTALL_TIMEOUT_MS = Number(
   process.env.NYXID_NPM_INSTALL_TIMEOUT_MS || 5 * 60 * 1000
 );
-const CAPABILITIES = ["commands_v1", "upgrade_v1", "session_import_v1", "attempt_fencing_v1"];
+export function workerCapabilities(token) {
+  const capabilities = ["commands_v1", "upgrade_v1", "attempt_fencing_v1"];
+  if (!String(token).startsWith("nyx_owi_")) capabilities.push("session_import_v1", "saved_login_v1");
+  return capabilities;
+}
+const CAPABILITIES = workerCapabilities(TOKEN);
+const SAVED_LOGIN_POLL_MS = Number(process.env.NYXID_SAVED_LOGIN_POLL_MS || 60000);
+const SAVED_LOGIN_REFRESH_MS = Number(process.env.NYXID_SAVED_LOGIN_REFRESH_MS || 300000);
 // Result-image caps (the server re-validates and caps lower-or-equal). Kept
 // below the 16 MiB worker body cap once base64-inflated (~33%).
 const MAX_IMAGES = Math.min(Number(process.env.NYXID_MAX_IMAGES || 4), 8);
@@ -443,7 +454,7 @@ function transientHttpStatus(status) {
   return status === 408 || status === 425 || status === 429 || status >= 500;
 }
 
-async function apiRequest(method, path, body) {
+async function apiRequest(method, path, body, retry = true) {
   let attempt = 0;
   for (;;) {
     const controller = new AbortController();
@@ -468,6 +479,7 @@ async function apiRequest(method, path, body) {
       }
       return await res.json();
     } catch (error) {
+      if (!retry) throw error;
       if (error?.status && !error.transient) throw error;
       const delay = backoffDelay(attempt++);
       if (attempt === 1 || attempt % 5 === 0) {
@@ -761,7 +773,45 @@ window.__nyx = (function () {
     return { rendered: nodes.length, turns };
   }
 
-  return { isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText };
+  // A picker interaction owns only menus newly visible after its trigger.
+  // Element identity matters: a sidebar listbox can outlive every task, and
+  // a picker can reuse a previously hidden menu node without changing counts.
+  let modelPickerId = null;
+  let preexistingModelMenus = new WeakSet();
+  function pickerElementVisible(el) {
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+  }
+  function visibleModelMenus() {
+    return [...document.querySelectorAll('[role="menu"], [role="listbox"]')].filter(pickerElementVisible);
+  }
+  function beginModelPicker(id) {
+    modelPickerId = id;
+    preexistingModelMenus = new WeakSet(visibleModelMenus());
+    return true;
+  }
+  function modelPickerMenus(id) {
+    if (!id || id !== modelPickerId) return [];
+    return visibleModelMenus().filter((menu) => !preexistingModelMenus.has(menu));
+  }
+  function modelPickerItems(id) {
+    const menus = modelPickerMenus(id);
+    return [...document.querySelectorAll('[role="menuitemradio"], [role="menuitem"], [role="option"]')]
+      .filter((el) => pickerElementVisible(el) && menus.includes(el.closest('[role="menu"], [role="listbox"]')))
+      .slice(0, 64);
+  }
+  function modelPickerTrigger(id) {
+    return modelPickerMenus(id).flatMap((menu) => [...menu.querySelectorAll('[data-testid="composer-intelligence-pro-thinking-effort-trigger"]')])
+      .find((el) => pickerElementVisible(el) && modelPickerMenus(id).includes(el.closest('[role="menu"], [role="listbox"]'))) || null;
+  }
+  function modelPickerItem(id, index, text) {
+    const item = modelPickerItems(id)[index];
+    return item && (item.innerText || item.textContent || "").trim() === text ? item : null;
+  }
+
+  return { isStillGenerating, assistantCount, extractResponse, extractImages, extractFiles, extractTranscript, extractTranscriptKeys, scrollContainer, extractTextWithMath, cleanText,
+    beginModelPicker, modelPickerMenus, modelPickerItems, modelPickerTrigger, modelPickerItem };
 })();
 `;
 
@@ -796,6 +846,50 @@ export function isAuthFlowUrl(u) {
   }
   if (AUTH_FLOW_HOSTS.test(url.hostname)) return true;
   return /^(chatgpt\.com|chat\.openai\.com)$/i.test(url.hostname) && /^\/auth(\/|$)/.test(url.pathname);
+}
+
+export function isAccountChangeUrl(value, navigation = false) {
+  let url;
+  try { url = new URL(value); } catch { return false; }
+  if (navigation && isAuthFlowUrl(value)) return true;
+  if (!/^(chatgpt\.com|chat\.openai\.com|auth\.openai\.com|auth0\.openai\.com)$/i.test(url.hostname)) return false;
+  return /(?:^|\/)(?:login|logout|signin|signout|switch-account|switch_account)(?:\/|$)/i.test(url.pathname);
+}
+
+export function invalidateSavedLogin(state, status) {
+  const local = state.saved_login;
+  if (!local || (local.status !== "verified" && !(local.status === "untrusted" && status === "external_login"))) return false;
+  local.status = status;
+  local.pending_publication_id = null;
+  return true;
+}
+
+async function observeSavedLoginTrust(runtime, loggedIn) {
+  if (runtime.applyingLogin || loggedIn !== false || !isChatGptUrl(runtime.page?.url())) return;
+  const loggedOut = await runtime.page.evaluate(() => Array.from(document.querySelectorAll("a,button"))
+    .some((element) => /^(log in|sign up|登录|注册)$/i.test((element.textContent || "").trim()))).catch(() => false);
+  if (loggedOut && invalidateSavedLogin(runtime.state, "untrusted")) saveState(runtime.state);
+}
+
+function watchLoginChanges(runtime) {
+  const context = runtime.context;
+  const watch = (page) => {
+    const changed = (url, navigation) => {
+      if (!runtime.applyingLogin && isAccountChangeUrl(url, navigation) &&
+          invalidateSavedLogin(runtime.state, "external_login")) saveState(runtime.state);
+    };
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) changed(frame.url(), true);
+    });
+    page.on("request", (request) => {
+      try {
+        if (request.frame() === page.mainFrame()) changed(request.url(), request.isNavigationRequest());
+      } catch {}
+    });
+    changed(page.url(), true);
+  };
+  context.pages().forEach(watch);
+  context.on("page", watch);
 }
 
 // Decide whether the worker keeps its hands off the tab: a live page that is
@@ -968,6 +1062,7 @@ async function connectChrome(runtime) {
   });
   runtime.browser = browser;
   runtime.context = browser.contexts()[0] || (await browser.newContext());
+  watchLoginChanges(runtime);
   runtime.page = await getChatPage(runtime.context);
   runtime.health.cdp = 0;
   markChatPageRecovered(runtime);
@@ -1070,7 +1165,7 @@ async function ensureChatPage(runtime, targetUrl) {
 // ── Prompt flow ──────────────────────────────────────────────────────────
 // Map a requested model label to the ChatGPT picker's reasoning levels. The
 // current UI exposes Instant/Medium/High/Extra High/Pro as role="menuitemradio"
-// entries; "-pro" (the pool default `chatgpt-5.5-pro`) selects the Pro level.
+// entries; "-pro" (the pool default `chatgpt-6-pro`) selects the Pro level.
 // Chinese labels are kept so either localisation matches. The first entry is
 // the canonical display name.
 export function modelLevelTargets(label) {
@@ -1078,8 +1173,12 @@ export function modelLevelTargets(label) {
   if (!raw) return [];
   const lower = raw.toLowerCase();
   const compact = lower.replace(/^(chatgpt|openai)-/, "").replace(/[\s._-]+/g, "");
-  if (/\bpro\b|pro$|扩展|extended/.test(lower) || compact.endsWith("pro")) {
-    return ["Pro", "Pro 扩展", "扩展"];
+  // Pro plans may split Pro into "Pro Standard" and "Pro Extended" entries.
+  // The canonical level stays "Pro" (verification and phase_detail use it);
+  // the alias order decides which entry the exact pass prefers.
+  if (/扩展|extended/.test(lower)) return ["Pro", "Pro Extended", "Pro 扩展", "扩展"];
+  if (/\bpro\b|pro$/.test(lower) || compact.endsWith("pro")) {
+    return ["Pro", "Pro Standard", "Pro 扩展", "扩展"];
   }
   if (/extra\s*high|ultra|超高/.test(lower)) return ["Extra High", "超高"];
   if (/\bhigh\b|高级|advanced/.test(lower)) return ["High", "高级"];
@@ -1097,98 +1196,22 @@ export function modelItemMatches(itemText, targets, exact) {
   const candidate = normalizeMenuText(itemText);
   if (!candidate) return false;
   const wanted = (targets || []).map(normalizeMenuText).filter(Boolean);
+  if (!exact && MODEL_LEVELS.some((aliases) => aliases[0] === targets?.[0]) &&
+      detectPillLevel(itemText) !== targets[0]) return false;
   return exact
     ? wanted.some((w) => candidate === w)
     : wanted.some((w) => candidate.includes(w) || w.includes(candidate));
 }
 
-async function waitForModelMenu(page, timeout = 5000) {
-  try {
-    await page.locator('[role="menu"], [role="listbox"]').first().waitFor({ state: "visible", timeout });
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
+const MODEL_SELECT_TIMEOUT_MS = Math.max(1, Math.min(25000,
+  Number(process.env.NYXID_MODEL_SELECT_TIMEOUT_MS) || 25000));
+const LOG_PICKER_LABELS = process.env.NYXID_ORACLE_LOG_PICKER_LABELS === "1";
+const PRE_SEND_ACTION_MS = 5000;
+const COMPOSER_SELECTOR = "#prompt-textarea, div[contenteditable='true'][role='textbox'], textarea[data-testid='prompt-textarea']";
+const SEND_SELECTOR = "button[data-testid='send-button'], button[aria-label='Send prompt'], button[aria-label='发送提示']";
+const PILL_SELECTOR = 'button.__composer-pill[aria-haspopup="menu"]:visible';
+const COMPOSER_REGION_XPATH = "xpath=ancestor::*[.//button[@data-testid='send-button' or @aria-label='Send prompt' or @aria-label='发送提示']][1]";
 
-async function clickMatchingLevel(page, targets) {
-  const items = page.locator('[role="menuitemradio"], [role="menuitem"], [role="option"]');
-  const count = await items.count();
-  for (const exact of [true, false]) {
-    for (let i = 0; i < count; i++) {
-      const item = items.nth(i);
-      let text = "";
-      try {
-        if (!(await item.isVisible())) continue;
-        text = ((await item.innerText({ timeout: 1000 })) || "").trim();
-      } catch (e) {
-        continue;
-      }
-      if (!modelItemMatches(text, targets, exact)) continue;
-      await item.click({ timeout: 5000 });
-      return text;
-    }
-  }
-  return null;
-}
-
-const MODEL_SELECT_TIMEOUT_MS = Number(process.env.NYXID_MODEL_SELECT_TIMEOUT_MS || 25000);
-
-async function visibleMenuTexts(page) {
-  try {
-    return await page.evaluate(() => {
-      const visible = (el) => {
-        const r = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-      };
-      return Array.from(
-        document.querySelectorAll('[role="menuitemradio"], [role="menuitem"], [role="option"]')
-      )
-        .filter(visible)
-        .map((el) => (el.innerText || el.textContent || "").trim().replace(/\s+/g, " "))
-        .filter(Boolean)
-        .slice(0, 24);
-    });
-  } catch {
-    return [];
-  }
-}
-
-async function menuIsOpen(page) {
-  try {
-    return await page.locator('[role="menu"], [role="listbox"]').first().isVisible();
-  } catch {
-    return false;
-  }
-}
-
-// Text of the composer's model pill (the picker trigger), used to skip the
-// menu when the level is already right and to verify a selection took.
-async function modelPillText(page) {
-  try {
-    return await page.evaluate(() => {
-      const visible = (el) => {
-        const r = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        return r.width > 0 && r.height > 0 && style.visibility !== "hidden" && style.display !== "none";
-      };
-      const pill =
-        document.querySelector('button.__composer-pill[aria-haspopup="menu"]') ||
-        Array.from(document.querySelectorAll('button[aria-haspopup="menu"]')).find((btn) => {
-          const text = (btn.innerText || btn.textContent || "").trim();
-          return visible(btn) && text.length > 0 && text.length < 40 &&
-            /instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text);
-        });
-      return pill && visible(pill) ? (pill.innerText || pill.textContent || "").trim() : "";
-    });
-  } catch {
-    return "";
-  }
-}
-
-// Canonical picker levels, longest aliases first so "Extra High" is detected
-// before "High" and "Pro 扩展" before "扩展".
 const MODEL_LEVELS = [
   ["Extra High", "超高"],
   ["Pro", "Pro 扩展", "扩展"],
@@ -1197,142 +1220,394 @@ const MODEL_LEVELS = [
   ["Instant", "极速"],
 ];
 
-// Which canonical level a pill/menu label shows, or null.
+// Canonical levels only, with word boundaries so e.g. "Profile" is not Pro.
+// Preserve the existing Chinese aliases; structural discovery handles locale.
 export function detectPillLevel(text) {
-  const hay = normalizeMenuText(text);
-  if (!hay) return null;
+  const label = String(text || "").toLowerCase().replace(/[._-]+/g, " ");
   for (const aliases of MODEL_LEVELS) {
-    if (aliases.some((alias) => hay.includes(normalizeMenuText(alias)))) return aliases[0];
+    const english = aliases[0].toLowerCase().replace(/ /g, "\\s*");
+    if (new RegExp(`(?:^|[^a-z])${english}(?:$|[^a-z])`).test(label) ||
+        aliases.slice(1).some((alias) => label.includes(alias.toLowerCase()))) return aliases[0];
   }
   return null;
 }
 
-// Whether a pill/menu label reflects the wanted level. Known levels compare
-// canonically ("Extra High" never satisfies "High"); custom labels fall back
-// to a containment check.
 export function pillShowsLevel(pillText, targets) {
   const canonical = (targets || [])[0];
   if (!canonical || !pillText) return false;
-  const known = MODEL_LEVELS.some((aliases) => aliases[0] === canonical);
-  if (known) return detectPillLevel(pillText) === canonical;
+  if (MODEL_LEVELS.some((aliases) => aliases[0] === canonical)) {
+    return detectPillLevel(pillText) === canonical;
+  }
   return normalizeMenuText(pillText).includes(normalizeMenuText(canonical));
 }
 
-async function closeOpenMenus(page) {
-  for (let i = 0; i < 3 && (await menuIsOpen(page)); i += 1) {
-    await page.keyboard.press("Escape").catch(() => {});
-    await sleep(250);
+// Index in a snapshot of visible entries. Never commit an arbitrary first
+// item, even if checked. A submenu may contain account actions, not levels.
+export function chooseNestedLevelEntry(items, targets, allowChecked = true) {
+  const recognized = (item) => detectPillLevel(item.text) !== null;
+  // Exact pass walks aliases in priority order so "Pro Standard" beats
+  // "Pro Extended" for a plain Pro label regardless of menu order.
+  for (const target of targets || []) {
+    const index = items.findIndex((item) => recognized(item) && modelItemMatches(item.text, [target], true));
+    if (index >= 0) return index;
   }
+  const fuzzy = items.findIndex((item) => recognized(item) && modelItemMatches(item.text, targets, false));
+  if (fuzzy >= 0) return fuzzy;
+  return allowChecked ? items.findIndex((item) => recognized(item) && item.checked) : -1;
 }
 
-// Select the reasoning level for a task. Returns the pill text after a
-// verified selection, or null when the picker was unavailable or the level
-// could not be verified, in which case the current level is used. Selection
-// is best-effort and time-bounded: it must never leave a menu covering the
-// composer (that blocked prompt delivery and burned the task's retry budget)
-// and never throws into the task flow. All clicks are REAL Playwright pointer
-// clicks; the picker is a Radix menu that ignores synthetic element.click().
-async function selectModel(page, modelLabel) {
-  const targets = modelLevelTargets(modelLabel);
-  if (!targets.length) return null;
+export function reportedPromptModel(task) {
+  // model_selected is exclusively an observed pill label, never a clicked
+  // item or a claim of verification. Retain the request when no pill is read.
+  return task.model_selected || task.model;
+}
+
+export function modelSelectionDetail(result) {
+  const level = MODEL_LEVELS.some((aliases) => aliases[0] === result.level) ? result.level : "custom";
+  if (result.reason === "timeout") return "timeout";
+  if (result.verified) return `selected=${level}`;
+  if (result.reason === "unverified") return `unverified=${level}`;
+  return result.reason;
+}
+
+// Use the same preference for structural pills and composer-local fallbacks.
+export function preferredModelPillIndex(labels) {
+  if (!labels.length) return -1;
+  const recognized = labels.findIndex((text) => detectPillLevel(text) !== null);
+  if (recognized >= 0) return recognized;
+  const legacy = labels.findIndex((text) => /instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text));
+  return legacy >= 0 ? legacy : 0;
+}
+
+export function modelSelectionDiagnostics(snapshot) {
+  const source = snapshot?.pill ? (snapshot.pill.structural ? "structural" : "fallback") : "none";
+  const observed = snapshot?.observed || "";
+  const items = snapshot?.items || [];
+  const recognized = [...new Set(items.map((item) => detectPillLevel(item.text)).filter(Boolean))];
+  return `pill_source=${source} pill_level=${detectPillLevel(observed) || "unrecognized"} ` +
+    `pill_text_length=${observed.length} items=${items.length} recognized=[${recognized.join(",")}]`;
+}
+
+// Opt-in, local diagnostics only. Call with the composer picker's snapshot,
+// never page-wide text; JSON escaping keeps every label on one log line.
+export function formatPickerLabels(snapshot) {
+  const truncate = (label) => [...String(label ?? "")].slice(0, 40).join("");
+  const encode = (value) => JSON.stringify(value).replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
+  const items = (snapshot?.items || []).slice(0, 24).map((item) => truncate(item.text));
+  return `picker_labels pill=${encode(truncate(snapshot?.observed))} items=${encode(items)}`;
+}
+
+function interactionDeadlineError() {
+  return Object.assign(new Error("interaction_deadline"), { code: "interaction_deadline" });
+}
+
+export function requireInteractionRead(value) {
+  if (value === null) throw interactionDeadlineError();
+  return value;
+}
+
+export function modelSelectionFailureReason(error, { deadline, aborted }, now) {
+  if (aborted || now >= deadline) return "timeout";
+  return error?.code === "interaction_deadline" ? "interaction_deadline" : "selection_failed";
+}
+
+function interactionBudget(duration, picker = null) {
+  return { deadline: Date.now() + duration, controller: new AbortController(), picker };
+}
+
+function interactionOptions(budget, maximum = 3000) {
+  const remaining = budget.deadline - Date.now();
+  if (remaining <= 0 || budget.controller.signal.aborted) {
+    budget.controller.abort();
+    throw interactionDeadlineError();
+  }
+  return { timeout: Math.max(1, Math.min(maximum, remaining)), signal: budget.controller.signal };
+}
+
+async function budgetPause(budget, ms) {
+  await sleep(interactionOptions(budget, ms).timeout);
+  interactionOptions(budget);
+}
+
+// Locator.evaluate's timeout covers resolution, not the evaluation itself.
+// Bound read-only evaluations too; their browser callback checks the same
+// deadline before reading DOM, and no continuation may act after abort.
+async function boundedRead(budget, read) {
+  const { timeout, signal } = interactionOptions(budget, 1000);
   let timer;
-  const timeout = new Promise((resolveTimeout) => {
-    timer = setTimeout(() => resolveTimeout("timeout"), MODEL_SELECT_TIMEOUT_MS);
-  });
+  let abort;
   try {
-    const outcome = await Promise.race([selectModelInner(page, modelLabel, targets), timeout]);
-    if (outcome === "timeout") {
-      log(`model selection for "${modelLabel}" timed out after ${MODEL_SELECT_TIMEOUT_MS}ms; using current`);
-      await closeOpenMenus(page);
-      return null;
-    }
-    return outcome;
-  } catch (err) {
-    log(`model "${modelLabel}" selection failed (${stableErrorCode(err)}); using current`);
-    await closeOpenMenus(page);
-    return null;
+    return requireInteractionRead(await Promise.race([
+      read(timeout),
+      new Promise((_, reject) => {
+        abort = () => reject(interactionDeadlineError());
+        signal.addEventListener("abort", abort, { once: true });
+        timer = setTimeout(abort, timeout);
+      }),
+    ]));
   } finally {
     clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
   }
 }
 
-async function selectModelInner(page, modelLabel, targets) {
-  await page.bringToFront().catch(() => {});
-  const before = await modelPillText(page);
-  if (pillShowsLevel(before, targets)) {
-    log(`model already "${before}" for "${modelLabel}"; no picker interaction`);
-    return before;
+// Synchronous, read-only snapshots avoid N per-item auto-waits. Discovery is
+// restricted to the structural pill or the textarea's own composer region.
+// Raw labels are logged only with the explicit picker-label diagnostic opt-in,
+// and are never written to acknowledgement metadata.
+async function pickerSnapshot(page, budget) {
+  const snapshot = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, sendSelector, deadline, pickerId }) => {
+    if (Date.now() >= deadline) return null;
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const input = body.querySelector(composerSelector);
+    const form = input?.closest("form");
+    let region = form || input?.parentElement;
+    if (!form) while (region && !region.querySelector(sendSelector)) region = region.parentElement;
+    if (region === body || region === document.documentElement) region = null;
+    const pills = [...body.querySelectorAll('button.__composer-pill[aria-haspopup="menu"]')].filter(visible);
+    const candidates = pills.length ? pills : [...(region?.querySelectorAll('button[aria-haspopup="menu"]') || [])].filter(visible);
+    const menus = window.__nyx.modelPickerMenus(pickerId);
+    const items = window.__nyx.modelPickerItems(pickerId).map((el) => ({
+      text: (el.innerText || el.textContent || "").trim(),
+      checked: el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-selected") === "true",
+    }));
+    return {
+      candidates: candidates.map((el) => (el.innerText || el.textContent || "").trim()),
+      structural: !!pills.length, form: !!form,
+      open: menus.length > 0, items, submenu: !!window.__nyx.modelPickerTrigger(pickerId),
+    };
+  }, { composerSelector: COMPOSER_SELECTOR, sendSelector: SEND_SELECTOR, deadline: Date.now() + timeout,
+    pickerId: budget.picker?.id }, interactionOptions(budget, 1000)));
+  interactionOptions(budget);
+  const index = preferredModelPillIndex(snapshot.candidates);
+  snapshot.pill = index < 0 ? null : { index, structural: snapshot.structural, form: snapshot.form };
+  snapshot.observed = snapshot.candidates[index] || null;
+  if (budget.picker) {
+    // Preserve the last open picker's items after Escape for diagnostics.
+    // Default logging projects canonical metadata; raw labels require opt-in.
+    const lastItems = budget.picker.snapshot?.items || [];
+    budget.picker.snapshot = { ...snapshot, items: snapshot.open ? snapshot.items : lastItems };
   }
-  log(`selecting model "${modelLabel}" -> level "${targets[0]}" (pill: "${before || "-"}")`);
+  return snapshot;
+}
 
-  let opened = false;
-  for (const selector of ['button.__composer-pill[aria-haspopup="menu"]', 'button[aria-haspopup="menu"]']) {
-    const buttons = page.locator(selector);
-    const count = await buttons.count();
-    for (let i = 0; i < count && !opened; i++) {
-      const button = buttons.nth(i);
-      try {
-        if (!(await button.isVisible())) continue;
-        const text = ((await button.innerText({ timeout: 1000 })) || "").trim();
-        if (!/instant|medium|high|extra|pro|gpt|思考|扩展|极速|均衡|高级|超高|\b5(\.|\b)/i.test(text)) continue;
-        await button.click({ timeout: 5000 });
-        if (await waitForModelMenu(page, 5000)) opened = true;
-      } catch (e) {}
+// Clear a leftover Radix modal lock before recording pre-existing menus.
+// Persistent sidebar menus alone never trigger Escape here.
+async function clearRadixLock(page, budget) {
+  for (let escapes = 0; escapes < 3; escapes += 1) {
+    const locked = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, deadline) => {
+      if (Date.now() >= deadline) return null;
+      return getComputedStyle(body).pointerEvents === "none";
+    }, Date.now() + timeout, interactionOptions(budget, 1000)));
+    if (!locked) return;
+    await page.locator("body").press("Escape", interactionOptions(budget));
+    await budgetPause(budget, 100);
+  }
+}
+
+async function beginModelPicker(page, budget) {
+  await boundedRead(budget, (timeout) => page.locator("body").evaluate((_, { id, deadline }) => {
+    if (Date.now() >= deadline) return null;
+    return window.__nyx.beginModelPicker(id);
+  }, { id: budget.picker.id, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
+}
+
+function pickerLocator(page, pill) {
+  if (pill.structural) return page.locator(PILL_SELECTOR).nth(pill.index);
+  const region = page.locator(COMPOSER_SELECTOR).first().locator(pill.form ? "xpath=ancestor::form[1]" : COMPOSER_REGION_XPATH);
+  return region.locator('button[aria-haspopup="menu"]:visible').nth(pill.index);
+}
+
+async function clickPickerElement(page, budget, entry) {
+  let handle;
+  let acceptingHandle = true;
+  try {
+    handle = await boundedRead(budget, (timeout) => page.locator("body").evaluateHandle((_, { id, deadline, entry }) => {
+      if (Date.now() >= deadline) return "deadline";
+      return entry.trigger ? window.__nyx.modelPickerTrigger(id)
+        : window.__nyx.modelPickerItem(id, entry.index, entry.text);
+    }, { id: budget.picker.id, deadline: Date.now() + timeout, entry }, interactionOptions(budget, 1000)).then((value) => {
+      // If evaluation completed after the read/selection deadline, release its
+      // handle without allowing a late click or leaking a remote reference.
+      if (!acceptingHandle || budget.controller.signal.aborted) {
+        void value.dispose().catch(() => {});
+        throw interactionDeadlineError();
+      }
+      return value;
+    }));
+    interactionOptions(budget);
+    const element = handle.asElement();
+    if (!element) {
+      // Wrap the value: a genuine missing item returns null, which is distinct
+      // from the page-side deadline marker and valid for this lookup.
+      const { value } = await boundedRead(budget, async () => ({ value: await handle.jsonValue() }));
+      if (value === "deadline") throw interactionDeadlineError();
+      throw Object.assign(new Error("picker_changed"), { code: "picker_changed" });
     }
-    if (opened) break;
+    await element.click(interactionOptions(budget));
+  } finally {
+    acceptingHandle = false;
+    await handle?.dispose().catch(() => {});
   }
-  if (!opened) {
-    log(`model picker unavailable for "${modelLabel}", using current`);
-    await closeOpenMenus(page);
-    return null;
-  }
-  log(`model picker items: ${JSON.stringify(await visibleMenuTexts(page))}`);
+}
 
-  let clicked = await clickMatchingLevel(page, targets);
+async function clickMatchingLevel(page, targets, budget, allowChecked = false) {
+  const snapshot = await pickerSnapshot(page, budget);
+  const index = chooseNestedLevelEntry(snapshot.items, targets, allowChecked);
+  if (index < 0) return false;
+  // Revalidate innerText and membership page-side, then click that exact node.
+  // Hidden hints in textContent cannot invalidate a visible level match.
+  await clickPickerElement(page, budget, { index, text: snapshot.items[index].text });
+  return true;
+}
+
+async function closeOpenMenus(page, budget) {
+  for (let escapes = 0; escapes < 3 && (await pickerSnapshot(page, budget)).open; escapes += 1) {
+    await page.locator("body").press("Escape", interactionOptions(budget));
+    await budgetPause(budget, 100);
+  }
+}
+
+// Returns { level, verified, observed, reason }. Only the actual pill can
+// verify a level or populate observed. Selection never throws into the task
+// flow. Abort cancels Playwright actions, and the deadline is checked before
+// EVERY interaction, including after reads that resolve late. The backstop
+// drains the inner promise before menu cleanup; no detached selection loop
+// can race prompt typing or Send.
+async function selectModel(page, modelLabel) {
+  const targets = modelLevelTargets(modelLabel);
+  const result = { level: targets[0] || null, verified: false, observed: null, reason: "picker_unavailable" };
+  const budget = interactionBudget(MODEL_SELECT_TIMEOUT_MS, { id: randomUUID(), snapshot: null });
+  let timer;
+  let drainTimer;
+  const inner = selectModelInner(page, targets, budget, result).catch((error) => {
+    result.reason = modelSelectionFailureReason(error, {
+      deadline: budget.deadline, aborted: budget.controller.signal.aborted,
+    }, Date.now());
+  });
+  const timeout = new Promise((resolveTimeout) => {
+    timer = setTimeout(() => {
+      budget.controller.abort(); // cancel even a click waiting for actionability
+      resolveTimeout("timeout");
+    }, MODEL_SELECT_TIMEOUT_MS);
+  });
+  try {
+    if (await Promise.race([inner, timeout]) === "timeout") {
+      await Promise.race([inner, new Promise((resolveDrain) => { drainTimer = setTimeout(resolveDrain, 3000); })]);
+      result.reason = "timeout";
+    }
+  } finally {
+    budget.controller.abort();
+    clearTimeout(timer);
+    clearTimeout(drainTimer);
+  }
+  // Cleanup gets its own small budget after the aborted selection is drained.
+  // The pre-send guard below also handles non-menu overlays and stuck Radix
+  // body pointer-events. Cleanup failure must not consume a recovery attempt.
+  const cleanup = interactionBudget(2000, budget.picker);
+  const cleanupTimer = setTimeout(() => cleanup.controller.abort(), 2000);
+  try {
+    await closeOpenMenus(page, cleanup);
+    result.observed = (await pickerSnapshot(page, cleanup)).observed;
+  } catch {} finally {
+    cleanup.controller.abort();
+    clearTimeout(cleanupTimer);
+  }
+  result.verified = pillShowsLevel(result.observed, targets);
+  if (result.verified && !["timeout", "already_selected"].includes(result.reason)) result.reason = "selected";
+  log(`model_selection reason=${result.reason} ${modelSelectionDetail(result)} ${modelSelectionDiagnostics(budget.picker.snapshot)}`);
+  if (LOG_PICKER_LABELS && ["level_unavailable", "unverified", "menu_not_opened", "picker_unavailable"].includes(result.reason)) {
+    log(formatPickerLabels(budget.picker.snapshot));
+  }
+  return { ...result };
+}
+
+async function selectModelInner(page, targets, budget, result) {
+  const before = await pickerSnapshot(page, budget);
+  interactionOptions(budget);
+  result.observed = before.observed;
+  if (pillShowsLevel(before.observed, targets)) {
+    result.reason = "already_selected";
+    return;
+  }
+  if (!before.pill || !targets.length) return;
+  await clearRadixLock(page, budget);
+  await beginModelPicker(page, budget);
+  await pickerLocator(page, before.pill).click(interactionOptions(budget));
+  try {
+    await page.locator("body").waitForFunction((_, id) => window.__nyx.modelPickerMenus(id).length > 0,
+      budget.picker.id, interactionOptions(budget, 5000));
+  } catch (error) {
+    interactionOptions(budget);
+    if (error?.name !== "TimeoutError") throw error;
+    result.reason = "menu_not_opened";
+    return;
+  }
+  let clicked = await clickMatchingLevel(page, targets, budget);
+  if (!clicked && (await pickerSnapshot(page, budget)).submenu) {
+    await clickPickerElement(page, budget, { trigger: true });
+    await budgetPause(budget, 200);
+    clicked = await clickMatchingLevel(page, targets, budget);
+  }
   if (!clicked) {
-    // Some layouts park Pro/effort levels behind a submenu trigger.
-    const trigger = page.locator('[data-testid="composer-intelligence-pro-thinking-effort-trigger"]').first();
-    if ((await trigger.count()) && (await trigger.isVisible().catch(() => false))) {
-      await trigger.click({ timeout: 5000 }).catch(() => {});
-      await sleep(600);
-      log(`model picker submenu items: ${JSON.stringify(await visibleMenuTexts(page))}`);
-      clicked = await clickMatchingLevel(page, targets);
-    }
+    interactionOptions(budget);
+    result.reason = "level_unavailable";
+    return;
   }
-  if (!clicked) {
-    await closeOpenMenus(page);
-    log(`model "${modelLabel}" not found in picker, using current`);
-    return null;
+  await budgetPause(budget, 200);
+  if ((await pickerSnapshot(page, budget)).open) await clickMatchingLevel(page, targets, budget, true);
+  await closeOpenMenus(page, budget);
+  // Allow up to one second for the pill to reflect the click, without
+  // repeatedly reopening the picker or treating clicked text as observation.
+  const verifyUntil = Math.min(budget.deadline, Date.now() + 1000);
+  while (true) {
+    const after = await pickerSnapshot(page, budget);
+    interactionOptions(budget);
+    result.observed = after.observed;
+    if (pillShowsLevel(result.observed, targets) || Date.now() >= verifyUntil) break;
+    await budgetPause(budget, 100);
   }
-  await sleep(500);
+  result.reason = "unverified";
+}
 
-  // Clicking a level may open a nested effort submenu that stays open over
-  // the composer. Prefer the already-checked entry, else the first entry, so
-  // the level commits; then make sure nothing is left covering the composer.
-  if (await menuIsOpen(page)) {
-    const nested = await visibleMenuTexts(page);
-    log(`model picker nested items: ${JSON.stringify(nested)}`);
-    const checked = page.locator('[role="menuitemradio"][aria-checked="true"], [role="option"][aria-selected="true"]').first();
-    const first = page.locator('[role="menuitemradio"], [role="option"], [role="menuitem"]').first();
-    for (const candidate of [checked, first]) {
-      try {
-        if ((await candidate.count()) && (await candidate.isVisible())) {
-          await candidate.click({ timeout: 3000 });
-          await sleep(400);
-          break;
-        }
-      } catch (e) {}
+// Clear overlays before typing and again immediately before Send. Never force
+// a click through an obstruction: failure stays pre-send and enters the
+// existing browser recovery / infrastructure retry path.
+async function ensureComposerUnobstructed(page) {
+  const budget = interactionBudget(PRE_SEND_ACTION_MS);
+  const timer = setTimeout(() => budget.controller.abort(), PRE_SEND_ACTION_MS);
+  try {
+    await page.locator(COMPOSER_SELECTOR).first().scrollIntoViewIfNeeded(interactionOptions(budget)).catch(() => {});
+    while (true) {
+      const state = await boundedRead(budget, (timeout) => page.locator("body").evaluate((body, { composerSelector, deadline }) => {
+        if (Date.now() >= deadline) return null;
+        const input = body.querySelector(composerSelector);
+        const rect = input?.getBoundingClientRect();
+        const hit = rect && document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2);
+        const main = body.querySelector("main");
+        const mainRect = main?.getBoundingClientRect();
+        const neutral = mainRect && document.elementFromPoint(mainRect.x + 4, mainRect.y + 4) === main;
+        return { clear: !!hit && input.contains(hit) && getComputedStyle(body).pointerEvents !== "none", neutral };
+      }, { composerSelector: COMPOSER_SELECTOR, deadline: Date.now() + timeout }, interactionOptions(budget, 1000)));
+      interactionOptions(budget);
+      if (state.clear) return;
+      await page.locator("body").press("Escape", interactionOptions(budget));
+      if (!state.clear && state.neutral) {
+        await page.locator("main").first().click({ position: { x: 4, y: 4 }, ...interactionOptions(budget) }).catch(() => {});
+      }
+      await budgetPause(budget, 100);
     }
-    await closeOpenMenus(page);
+  } catch {
+    log("composer_unobstructed_failed");
+    throw Object.assign(new Error("composer_unobstructed_failed"), { code: "composer_unobstructed_failed" });
+  } finally {
+    budget.controller.abort();
+    clearTimeout(timer);
   }
-
-  const after = await modelPillText(page);
-  if (pillShowsLevel(after, targets)) {
-    log(`model set to "${after}"`);
-    return after;
-  }
-  log(`model pill shows "${after || "-"}" after selecting "${clicked}"; using current`);
-  return after || clicked;
 }
 
 // NOTE: keep this table in sync with `fileMime` in
@@ -1370,8 +1645,8 @@ async function uploadAttachment(runtime, page, task) {
   log(`uploading attachment (${(buffer.length / 1024).toFixed(0)} KB, ${mime})`);
   let fileInput = page.locator("input[type='file']").first();
   if ((await fileInput.count()) === 0) {
-    const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button'], button[aria-haspopup='menu']").first();
-    if (await attach.count()) { await attach.click().catch(() => {}); await sleep(800); }
+    const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button']").first();
+    if (await attach.count()) { await attach.click({ timeout: PRE_SEND_ACTION_MS }).catch(() => {}); await sleep(800); }
     fileInput = page.locator("input[type='file']").first();
   }
   try {
@@ -1408,8 +1683,8 @@ async function uploadPdf(runtime, page, task) {
   log(`uploading PDF (${(buffer.length / 1024).toFixed(0)} KB)`);
   let fileInput = page.locator("input[type='file']").first();
   if ((await fileInput.count()) === 0) {
-    const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button'], button[aria-haspopup='menu']").first();
-    if (await attach.count()) { await attach.click().catch(() => {}); await sleep(800); }
+    const attach = page.locator("button[aria-label='Attach files'], button[aria-label='Upload file'], button[data-testid='composer-attach-button']").first();
+    if (await attach.count()) { await attach.click({ timeout: PRE_SEND_ACTION_MS }).catch(() => {}); await sleep(800); }
     fileInput = page.locator("input[type='file']").first();
   }
   try {
@@ -1526,9 +1801,8 @@ async function submitPromptResult(
       images: downloadedImages.items,
       files: downloadedFiles.items,
       chatgpt_url: page.url(),
-      // Report the level that was actually selected, so a picker regression
-      // shows up in task results instead of silently answering on Instant.
-      model: task.model_selected || task.model,
+      // The observed pill is useful even when selection was unverified.
+      model: reportedPromptModel(task),
     })
   );
   log(
@@ -1572,7 +1846,8 @@ async function handlePrompt(runtime, page, task, recovering) {
       : priorPhase,
     conversation_url: page.url(),
   });
-  await ack(runtime, task, "page_ready");
+  if (await ack(runtime, task, "page_ready")) throw new TaskFailure("cancelled");
+  if (await recoverPreSendLogin(runtime)) throw new TaskRestart();
 
   if (recovering && !["claimed", "page_ready", "ready_to_send"].includes(priorPhase)) {
     await sleep(1500);
@@ -1617,41 +1892,54 @@ async function handlePrompt(runtime, page, task, recovering) {
   }
 
   if (task.model && task.model !== "unknown") {
-    await ack(runtime, task, "selecting_model");
+    if (await ack(runtime, task, "selecting_model")) throw new TaskFailure("cancelled");
     const selected = await selectModel(page, task.model);
-    if (selected) task.model_selected = selected;
+    task.model_selected = selected.observed;
+    if (await ack(runtime, task, "selecting_model", modelSelectionDetail(selected))) {
+      throw new TaskFailure("cancelled");
+    }
   }
 
   // Type the prompt into the composer (native — more robust than the
   // userscript's execCommand fallbacks) and send.
-  const input = page
-    .locator("#prompt-textarea, div[contenteditable='true'][role='textbox'], textarea[data-testid='prompt-textarea']")
-    .first();
+  const input = page.locator(COMPOSER_SELECTOR).first();
   await input.waitFor({ state: "visible", timeout: 60000 });
-  await input.click();
-  await input.fill(task.prompt);
-  const baseline = await page.evaluate(() => window.__nyx?.extractTranscript()?.length || 0);
+  await ensureComposerUnobstructed(page);
+  await input.click({ timeout: PRE_SEND_ACTION_MS });
+  await input.fill(task.prompt, { timeout: PRE_SEND_ACTION_MS });
+  const before = await boundedRead(interactionBudget(PRE_SEND_ACTION_MS), (timeout) =>
+    page.locator("body").evaluate(() => ({
+      baseline: window.__nyx?.extractTranscript()?.length || 0,
+      assistantCount: window.__nyx.assistantCount(),
+    }), undefined, { timeout }));
+  const baseline = before.baseline;
   updateTaskState(runtime.state, { phase: "ready_to_send", baseline_turn_count: baseline });
+  if (await ack(runtime, task, "ready_to_send")) throw new TaskFailure("cancelled");
   await sleep(300);
   // Only attach a PDF on the FIRST turn of a conversation — never re-upload it
   // into an existing chat if the server ever resends pdf_base64 on a follow-up
   // (mirrors the userscript's `!is_followup && pdf_base64` guard).
   if (!task.is_followup && task.pdf_base64) {
-    await ack(runtime, task, "uploading_pdf");
+    if (await ack(runtime, task, "uploading_pdf")) throw new TaskFailure("cancelled");
     await uploadPdf(runtime, page, task);
   }
   // Same first-turn-only guard for a general attachment (image / pdf / ...).
   if (!task.is_followup && task.attachment_base64) {
-    await ack(runtime, task, "uploading_attachment");
+    if (await ack(runtime, task, "uploading_attachment")) throw new TaskFailure("cancelled");
     await uploadAttachment(runtime, page, task);
   }
 
-  const beforeCount = await page.evaluate(() => window.__nyx.assistantCount());
-  const sendBtn = page
-    .locator("button[data-testid='send-button'], button[aria-label='Send prompt'], button[aria-label='发送提示']")
-    .first();
+  const beforeCount = before.assistantCount;
+  const sendBtn = page.locator(SEND_SELECTOR).first();
+  await ensureComposerUnobstructed(page);
+  // Resolve actionability while still pre-send. The actual click is the
+  // only operation after the durable uncertainty fence.
+  await sendBtn.click({ trial: true, timeout: PRE_SEND_ACTION_MS });
+  if (!task.is_followup && (task.pdf_base64 || task.attachment_base64)) {
+    if (await ack(runtime, task, "ready_to_send")) throw new TaskFailure("cancelled");
+  }
   updateTaskState(runtime.state, { phase: "send_attempted", baseline_turn_count: baseline });
-  await sendBtn.click({ timeout: 30000 });
+  await sendBtn.click({ timeout: PRE_SEND_ACTION_MS });
   updateTaskState(runtime.state, { phase: "sent" });
   await ack(runtime, task, "sent");
   await pinCurrentConversation(runtime, page, task);
@@ -1682,7 +1970,7 @@ async function waitForResponse(runtime, page, task, beforeCount) {
       await heartbeat(runtime);
       if (
         runtime.state.pending_command?.command === "session_import" &&
-        runtime.loggedIn === false
+        runtime.loggedIn === false && canImportLogin(runtime.state, runtime.loggedIn)
       ) {
         await processPendingCommand(runtime, true);
         throw new TaskRestart();
@@ -2160,9 +2448,10 @@ async function handleExtract(runtime, page, task) {
   }
 }
 
-async function ack(runtime, task, phase) {
+async function ack(runtime, task, phase, phaseDetail) {
   const response = await apiPost("/ack", taskIdentity(runtime, task, {
     phase,
+    phase_detail: phaseDetail,
     page_url: runtime.page?.url(),
   }));
   return response.status === "cancelled";
@@ -2237,6 +2526,7 @@ async function heartbeat(runtime) {
     loggedIn = await detectLoggedIn(runtime.page);
   }
   runtime.loggedIn = loggedIn;
+  await observeSavedLoginTrust(runtime, loggedIn);
   const reports = [...(runtime.state.pending_reports || [])].slice(0, 16);
   const response = await apiPost("/heartbeat", {
     worker: LABEL,
@@ -2246,7 +2536,7 @@ async function heartbeat(runtime) {
     logged_in: loggedIn,
     current_task_id: runtime.state.current_task?.task_id || null,
     chrome_alive: runtime.chromeAlive,
-    last_error: runtime.lastError || null,
+    last_error: runtime.lastError || runtime.state.saved_login_error || null,
     command_reports: reports,
   });
   if (reports.length) {
@@ -2282,14 +2572,15 @@ export function decryptSessionEnvelope(sealedBytes, token) {
   if (salt.length !== 32 || nonce.length !== 12 || ciphertext.length < 16) {
     throw new TaskFailure("session_envelope_invalid");
   }
+  const key = Buffer.from(hkdfSync("sha256", Buffer.from(token), salt, SESSION_INFO, 32));
+  let plaintext;
   try {
-    const key = Buffer.from(hkdfSync("sha256", Buffer.from(token), salt, SESSION_INFO, 32));
     const body = ciphertext.subarray(0, ciphertext.length - 16);
     const tag = ciphertext.subarray(ciphertext.length - 16);
     const decipher = createDecipheriv("aes-256-gcm", key, nonce);
     decipher.setAAD(SESSION_AAD);
     decipher.setAuthTag(tag);
-    const plaintext = Buffer.concat([decipher.update(body), decipher.final()]);
+    plaintext = Buffer.concat([decipher.update(body), decipher.final()]);
     if (plaintext.length > MAX_SESSION_PLAINTEXT_BYTES) {
       throw new TaskFailure("session_plaintext_too_large");
     }
@@ -2297,6 +2588,33 @@ export function decryptSessionEnvelope(sealedBytes, token) {
   } catch (error) {
     if (error instanceof TaskFailure) throw error;
     throw new TaskFailure("session_decrypt_failed");
+  } finally {
+    key.fill(0);
+    plaintext?.fill(0);
+  }
+}
+
+export function encryptSessionEnvelope(snapshot, token) {
+  const plaintext = Buffer.from(JSON.stringify(snapshot));
+  if (!plaintext.length || plaintext.length > MAX_SESSION_PLAINTEXT_BYTES) {
+    plaintext.fill(0);
+    throw new TaskFailure("session_plaintext_too_large");
+  }
+  const salt = randomBytes(32);
+  const nonce = randomBytes(12);
+  const key = Buffer.from(hkdfSync("sha256", Buffer.from(token), salt, SESSION_INFO, 32));
+  try {
+    const cipher = createCipheriv("aes-256-gcm", key, nonce);
+    cipher.setAAD(SESSION_AAD);
+    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final(), cipher.getAuthTag()]);
+    const envelope = Buffer.from(JSON.stringify({ version: SESSION_FORMAT_VERSION,
+      salt_base64: salt.toString("base64"), nonce_base64: nonce.toString("base64"),
+      ciphertext_base64: ciphertext.toString("base64") }));
+    if (envelope.length > MAX_SESSION_SNAPSHOT_BYTES) throw new TaskFailure("session_envelope_size_invalid");
+    return envelope;
+  } finally {
+    key.fill(0);
+    plaintext.fill(0);
   }
 }
 
@@ -2318,22 +2636,91 @@ function allowedSessionOrigin(origin) {
 
 async function importLoginSnapshot(runtime, command) {
   const payload = await apiGet(`/login-snapshots/${encodeURIComponent(command.snapshot_id || "")}`);
+  if (runtime.state.saved_login) {
+    runtime.state.saved_login.status = "external_login";
+    saveState(runtime.state);
+  }
+  return importSessionPayload(runtime, payload);
+}
+
+export function validateSessionSnapshot(snapshot) {
+  if (snapshot?.version !== SESSION_FORMAT_VERSION || !Array.isArray(snapshot.cookies) ||
+      snapshot.cookies.length > 512 || Buffer.byteLength(JSON.stringify(snapshot)) > MAX_SESSION_PLAINTEXT_BYTES) {
+    throw new TaskFailure("session_snapshot_invalid");
+  }
+  const cookies = snapshot.cookies.filter(allowedSessionCookie).map((cookie) => {
+    if (typeof cookie.path !== "string" || !cookie.path.startsWith("/") || cookie.path.length > 2048 ||
+        typeof cookie.expires !== "number" || !Number.isFinite(cookie.expires) ||
+        typeof cookie.httpOnly !== "boolean" || typeof cookie.secure !== "boolean" ||
+        !["Strict", "Lax", "None"].includes(cookie.sameSite)) {
+      throw new TaskFailure("session_snapshot_invalid");
+    }
+    return { name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path,
+      expires: cookie.expires, httpOnly: cookie.httpOnly, secure: cookie.secure, sameSite: cookie.sameSite,
+      ...(typeof cookie.partitionKey === "string" ? { partitionKey: cookie.partitionKey } : {}) };
+  });
+  if (!cookies.length) throw new TaskFailure("session_snapshot_no_cookies");
+  if (snapshot.origins !== undefined && !Array.isArray(snapshot.origins)) throw new TaskFailure("session_snapshot_invalid");
+  const origins = (snapshot.origins || []).filter((entry) => allowedSessionOrigin(entry?.origin));
+  if (origins.length > 2 || new Set(origins.map((entry) => entry.origin)).size !== origins.length) {
+    throw new TaskFailure("session_snapshot_invalid");
+  }
+  for (const origin of origins) {
+    for (const kind of ["local_storage", "session_storage"]) {
+      if (origin[kind] !== undefined && (!Array.isArray(origin[kind]) || origin[kind].length > 1024 ||
+          origin[kind].some((item) => typeof item?.name !== "string" || typeof item?.value !== "string" ||
+            item.name.length > 1024 || item.value.length > MAX_SESSION_PLAINTEXT_BYTES))) {
+        throw new TaskFailure("session_snapshot_invalid");
+      }
+    }
+  }
+  return { version: SESSION_FORMAT_VERSION, cookies, origins };
+}
+
+export function canImportLogin(state, loggedIn) {
+  if (!state.current_task) return true;
+  return loggedIn === false && ["claimed", "page_ready", "ready_to_send"].includes(state.current_task.phase);
+}
+
+async function importSessionPayload(runtime, payload) {
   if (payload.format_version !== SESSION_FORMAT_VERSION) {
     throw new TaskFailure("session_snapshot_version_unsupported");
   }
-  const snapshot = decryptSessionEnvelope(
+  const snapshot = validateSessionSnapshot(decryptSessionEnvelope(
     Buffer.from(payload.sealed_blob_base64 || "", "base64"),
     TOKEN
-  );
-  if (snapshot?.version !== SESSION_FORMAT_VERSION || !Array.isArray(snapshot.cookies)) {
-    throw new TaskFailure("session_snapshot_invalid");
+  ));
+  return applySessionSnapshot(runtime, snapshot);
+}
+
+async function applySessionSnapshot(runtime, snapshot) {
+  runtime.applyingLogin = true;
+  try {
+    return await applySessionSnapshotInner(runtime, snapshot);
+  } finally {
+    runtime.applyingLogin = false;
   }
+}
+
+async function applySessionSnapshotInner(runtime, snapshot) {
   await ensureChatPage(runtime);
-  await runtime.context.clearCookies({ domain: /(^|\.)chatgpt\.com$/ }).catch(() => {});
-  await runtime.context.clearCookies({ domain: /(^|\.)openai\.com$/ }).catch(() => {});
-  const cookies = snapshot.cookies.filter(allowedSessionCookie).slice(0, 512);
-  if (!cookies.length) throw new TaskFailure("session_snapshot_no_cookies");
-  await runtime.context.addCookies(cookies);
+  // Stop old account pages before clearing their storage, so running scripts
+  // cannot restore the account we are explicitly replacing.
+  for (const page of runtime.context.pages()) {
+    if (allowedSessionOrigin(new URL(page.url()).origin)) {
+      await page.evaluate(() => sessionStorage.clear());
+      await page.goto("about:blank");
+    }
+  }
+  const cdp = await runtime.context.newCDPSession(runtime.page);
+  try {
+    for (const origin of ["https://chatgpt.com", "https://auth.openai.com"]) {
+      await cdp.send("Storage.clearDataForOrigin", { origin, storageTypes: "all" });
+    }
+  } finally { await cdp.detach(); }
+  await runtime.context.clearCookies({ domain: /(^|\.)chatgpt\.com$/ });
+  await runtime.context.clearCookies({ domain: /(^|\.)openai\.com$/ });
+  await runtime.context.addCookies(snapshot.cookies);
   for (const storage of (snapshot.origins || []).filter((entry) => allowedSessionOrigin(entry?.origin))) {
     await runtime.page.goto(storage.origin, { waitUntil: "domcontentloaded", timeout: 60000 });
     if (new URL(runtime.page.url()).origin !== storage.origin) continue;
@@ -2471,7 +2858,8 @@ async function processPendingCommand(runtime, allowSessionImportDuringLoggedOutT
   if (
     !command ||
     (runtime.state.current_task &&
-      !(allowSessionImportDuringLoggedOutTask && command.command === "session_import"))
+      !(allowSessionImportDuringLoggedOutTask && command.command === "session_import" &&
+        canImportLogin(runtime.state, runtime.loggedIn)))
   ) {
     return false;
   }
@@ -2488,10 +2876,15 @@ async function processPendingCommand(runtime, allowSessionImportDuringLoggedOutT
         resultCode = "browser_relaunched";
         break;
       case "relogin":
+        if (runtime.state.saved_login) {
+          runtime.state.saved_login.status = "external_login";
+          saveState(runtime.state);
+        }
         await ensureChatPage(runtime, "https://chatgpt.com/auth/login");
         resultCode = "login_page_opened";
         break;
       case "session_import":
+        if (!CAPABILITIES.includes("session_import_v1")) throw new TaskFailure("command_unsupported");
         resultCode = await importLoginSnapshot(runtime, command);
         break;
       case "upgrade":
@@ -2501,7 +2894,7 @@ async function processPendingCommand(runtime, allowSessionImportDuringLoggedOutT
       default:
         throw new TaskFailure("command_unsupported");
     }
-    runtime.state.draining = command.command === "restart" || command.command === "upgrade";
+    runtime.state.draining = Boolean(runtime.state.drain_requested) || command.command === "restart" || command.command === "upgrade";
     runtime.lastError = null;
     addCommandReport(runtime.state, command, true, resultCode);
     await heartbeat(runtime);
@@ -2513,7 +2906,7 @@ async function processPendingCommand(runtime, allowSessionImportDuringLoggedOutT
   } catch (error) {
     const code = stableErrorCode(error);
     runtime.lastError = code;
-    runtime.state.draining = false;
+    runtime.state.draining = Boolean(runtime.state.drain_requested);
     addCommandReport(runtime.state, command, false, code);
     await heartbeat(runtime);
     return false;
@@ -2556,15 +2949,20 @@ async function executeTask(runtime, task, recovering) {
         clearTaskState(runtime.state);
         return;
       }
+      if (await recoverPreSendLogin(runtime)) {
+        recovering = true;
+        continue;
+      }
       const failureCount = (runtime.state.current_task?.recovery_failures || 0) + 1;
       updateTaskState(runtime.state, { recovery_failures: failureCount });
+      runtime.lastError = stableErrorCode(error);
+      log(`task ${task.task_id} browser failure ${failureCount}/${MAX_TASK_RECOVERY_FAILURES} (${runtime.lastError})`);
       const recovery = taskRecoveryDecision({
         kind: task.kind,
         phase: runtime.state.current_task?.phase,
         failureCount,
       });
       runtime.chromeAlive = false;
-      runtime.lastError = stableErrorCode(error);
       if (recovery.action === "fail") {
         runtime.lastError = recovery.code;
         await settleTaskFailure(runtime, task, recovery.code);
@@ -2577,6 +2975,20 @@ async function executeTask(runtime, task, recovering) {
       recovering = true;
     }
   }
+}
+
+async function recoverPreSendLogin(runtime) {
+  if (!runtime.page || runtime.page.isClosed() || !canImportLogin(runtime.state, false)) return false;
+  runtime.loggedIn = await detectLoggedIn(runtime.page);
+  await observeSavedLoginTrust(runtime, runtime.loggedIn);
+  if (runtime.loggedIn !== false) return false;
+  await heartbeat(runtime);
+  if (runtime.state.pending_command?.command === "session_import") {
+    await processPendingCommand(runtime, true);
+    runtime.loggedIn = await detectLoggedIn(runtime.page);
+    if (runtime.loggedIn) return true;
+  }
+  return Boolean(await processSavedLogin(runtime, true));
 }
 
 async function captureStorage(page) {
@@ -2598,28 +3010,241 @@ async function captureSession(outputPath) {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline && !(await detectLoggedIn(page))) await sleep(1000);
     if (!(await detectLoggedIn(page))) throw new TaskFailure("login_capture_timeout");
-    const cookies = (await context.cookies([
-      "https://chatgpt.com/",
-      "https://auth.openai.com/",
-    ])).filter(allowedSessionCookie);
-    const origins = [];
-    for (const candidate of context.pages()) {
-      const storage = await captureStorage(candidate).catch(() => null);
-      if (storage && !origins.some((item) => item.origin === storage.origin)) origins.push(storage);
-    }
-    const snapshot = Buffer.from(
-      JSON.stringify({ version: SESSION_FORMAT_VERSION, captured_at: new Date().toISOString(), cookies, origins }),
-      "utf8"
-    );
-    if (!cookies.length || snapshot.length > MAX_SESSION_PLAINTEXT_BYTES) {
-      throw new TaskFailure(!cookies.length ? "login_capture_no_cookies" : "login_capture_too_large");
-    }
+    const snapshot = Buffer.from(JSON.stringify(await captureBrowserSession(context, page)));
     mkdirSync(dirname(outputPath), { recursive: true, mode: 0o700 });
     writeFileSync(outputPath, snapshot, { mode: 0o600 });
     chmodSync(outputPath, 0o600);
   } finally {
     await browser.close().catch(() => {});
   }
+}
+
+async function captureBrowserSession(context, page) {
+  if (!(await detectLoggedIn(page))) throw new TaskFailure("login_capture_logged_out");
+  const cookies = (await context.cookies()).filter(allowedSessionCookie);
+  const storageState = await context.storageState();
+  const origins = storageState.origins.filter((entry) => allowedSessionOrigin(entry.origin))
+    .map((entry) => ({ origin: entry.origin, local_storage: entry.localStorage, session_storage: [] }));
+  for (const candidate of context.pages()) {
+    const storage = await captureStorage(candidate);
+    if (!storage) continue;
+    const existing = origins.find((item) => item.origin === storage.origin);
+    if (existing) existing.session_storage = storage.session_storage;
+    else origins.push(storage);
+  }
+  if (!(await detectLoggedIn(page))) throw new TaskFailure("login_capture_logged_out");
+  return validateSessionSnapshot({ version: SESSION_FORMAT_VERSION, cookies, origins });
+}
+
+export function accountFingerprint(accountId, token) {
+  return createHmac("sha256", token).update("nyxid-oracle-account-v1\0").update(accountId).digest("hex");
+}
+
+async function browserAccountFingerprint(runtime) {
+  if (!runtime.page || new URL(runtime.page.url()).origin !== "https://chatgpt.com") return null;
+  const accountId = await runtime.page.evaluate(async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch("/api/auth/session", { credentials: "same-origin", cache: "no-store", redirect: "error", signal: controller.signal });
+      if (!response.ok || !response.body) return null;
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let size = 0;
+      let body = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        size += value.byteLength;
+        if (size > 64 * 1024) { await reader.cancel(); return null; }
+        body += decoder.decode(value, { stream: true });
+      }
+      body += decoder.decode();
+      const id = JSON.parse(body)?.user?.id;
+      return typeof id === "string" && id.length > 0 && id.length <= 256 ? id : null;
+    } catch { return null; }
+    finally { clearTimeout(timeout); }
+  }).catch(() => null);
+  return accountId ? accountFingerprint(accountId, TOKEN) : null;
+}
+
+export function savedLoginDecision(state, desired, loggedIn, now = Date.now()) {
+  if (desired.status !== "available") return "unavailable";
+  if (!canImportLogin(state, loggedIn)) return "defer";
+  const local = state.saved_login;
+  const sameBinding = local?.profile_id === desired.profile.id && local?.binding_id === desired.binding.binding_id;
+  const sameGeneration = sameBinding && local.generation === desired.profile.generation;
+  if (!sameBinding && loggedIn === true && !desired.binding.replace_existing) return "preserve_existing";
+  if (sameGeneration && local.status === "external_login") return "preserve_existing";
+  if (sameGeneration && local.status === "untrusted") return loggedIn === false ? "import" : "preserve_existing";
+  if (sameGeneration && local.attempted_revision === desired.profile.revision && local.status !== "verified") return "failed_revision";
+  if (sameGeneration && ["failed", "importing"].includes(local.status) && local.attempted_revision !== desired.profile.revision) return "import";
+  if (!sameGeneration || (loggedIn === false && local.attempted_revision !== desired.profile.revision)) return "import";
+  if (local.status !== "verified" || loggedIn !== true) return "defer";
+  if (local.source_revision !== desired.profile.revision) {
+    const updated = Date.parse(desired.profile.updated_at);
+    if (!state.current_task && Number.isFinite(updated) && now - updated >= 3 * SAVED_LOGIN_REFRESH_MS) return "import";
+    return "sibling_revision";
+  }
+  return state.current_task ? "defer" : "refresh";
+}
+
+async function processSavedLogin(runtime, force = false) {
+  if (!CAPABILITIES.includes("saved_login_v1")) return;
+  if (!force && Date.now() - (runtime.lastSavedLoginPollAt || 0) < SAVED_LOGIN_POLL_MS) return;
+  runtime.lastSavedLoginPollAt = Date.now();
+  const identity = { worker: LABEL, instance_id: runtime.state.instance_id };
+  const local = runtime.state.saved_login;
+  const query = new URLSearchParams(identity);
+  const observedRevision = runtime.savedLoginObservedRevision || local?.source_revision || local?.attempted_revision;
+  if (observedRevision) query.set("known_revision", observedRevision);
+  try {
+    // Saved-login maintenance uses one bounded HTTP attempt. A failed refresh
+    // must not prevent an otherwise healthy browser from serving tasks.
+    let desired = await apiRequest("GET", `/login-profile?${query}`, undefined, false);
+    if (desired.status === "unbound") {
+      if (local) { runtime.state.saved_login = null; saveState(runtime.state); }
+      setSavedLoginError(runtime, null);
+      return;
+    }
+    if (desired.status !== "available") {
+      setSavedLoginError(runtime, `saved_login_${desired.status === "expired" ? "expired" : "token_changed"}`);
+      return;
+    }
+    runtime.savedLoginObservedRevision = desired.profile.revision;
+    runtime.loggedIn = await detectLoggedIn(runtime.page);
+    await observeSavedLoginTrust(runtime, runtime.loggedIn);
+    if (local?.pending_publication_id && desired.profile.revision === local.pending_publication_id &&
+        local.generation === desired.profile.generation && local.binding_id === desired.binding.binding_id) {
+      local.source_revision = local.pending_publication_id;
+      local.pending_publication_id = null;
+      setSavedLoginError(runtime, null);
+      saveState(runtime.state);
+    }
+    const decision = savedLoginDecision(runtime.state, desired, runtime.loggedIn);
+    if (decision === "preserve_existing") {
+      if (runtime.state.saved_login_error !== "saved_login_account_changed") setSavedLoginError(runtime, "saved_login_existing_account_preserved");
+      return;
+    }
+    if (decision === "failed_revision") return;
+    if (decision === "import") {
+      setSavedLoginError(runtime, null);
+      if (!desired.sealed_blob_base64) desired = await apiRequest("GET", `/login-profile?${new URLSearchParams(identity)}`, undefined, false);
+      runtime.loggedIn = await detectLoggedIn(runtime.page);
+      if (savedLoginDecision(runtime.state, desired, runtime.loggedIn) !== "import") return;
+      // Validate before journaling or changing any live browser state.
+      try {
+        validateSessionSnapshot(decryptSessionEnvelope(Buffer.from(desired.sealed_blob_base64 || "", "base64"), TOKEN));
+      } catch (error) {
+        runtime.state.saved_login = { profile_id: desired.profile.id, binding_id: desired.binding.binding_id,
+          generation: desired.profile.generation, source_revision: null,
+          account_fingerprint: local?.generation === desired.profile.generation ? local?.account_fingerprint : null,
+          attempted_revision: desired.profile.revision, status: "failed" };
+        saveState(runtime.state);
+        throw error;
+      }
+      const confirmed = await apiRequest("GET", `/login-profile?${new URLSearchParams({ ...identity, known_revision: desired.profile.revision })}`, undefined, false);
+      if (confirmed.status !== "available" || confirmed.profile?.revision !== desired.profile.revision ||
+          confirmed.profile?.generation !== desired.profile.generation || confirmed.binding?.binding_id !== desired.binding.binding_id) return;
+      const handover = local?.profile_id === desired.profile.id && local?.binding_id === desired.binding.binding_id &&
+        local?.generation === desired.profile.generation && runtime.loggedIn === true;
+      if (handover) {
+        const currentIdentity = await browserAccountFingerprint(runtime);
+        if (!currentIdentity || !local.account_fingerprint) { setSavedLoginError(runtime, "saved_login_identity_unavailable"); return; }
+        if (currentIdentity !== local.account_fingerprint) {
+          local.status = "external_login";
+          setSavedLoginError(runtime, "saved_login_account_changed");
+          saveState(runtime.state);
+          return;
+        }
+      }
+      const backup = handover ? await captureBrowserSession(runtime.context, runtime.page) : null;
+      if (handover && await browserAccountFingerprint(runtime) !== local.account_fingerprint) {
+        setSavedLoginError(runtime, "saved_login_identity_unavailable");
+        return;
+      }
+      runtime.state.saved_login = { profile_id: desired.profile.id, binding_id: desired.binding.binding_id,
+        generation: desired.profile.generation, source_revision: null,
+        account_fingerprint: handover ? local.account_fingerprint : null,
+        attempted_revision: desired.profile.revision, status: "importing", last_export_at: Date.now() };
+      saveState(runtime.state);
+      try {
+        await importSessionPayload(runtime, desired);
+        const fingerprint = await browserAccountFingerprint(runtime);
+        if (handover && fingerprint !== local.account_fingerprint) {
+          throw new TaskFailure(fingerprint ? "saved_login_account_mismatch" : "saved_login_identity_unavailable");
+        }
+        runtime.state.saved_login.source_revision = desired.profile.revision;
+        runtime.state.saved_login.status = "verified";
+        runtime.state.saved_login.account_fingerprint = fingerprint;
+        runtime.loggedIn = true;
+        runtime.lastError = null;
+        setSavedLoginError(runtime, fingerprint ? null : "saved_login_identity_unavailable");
+      } catch (error) {
+        runtime.state.saved_login.status = "failed";
+        let importError = stableErrorCode(error);
+        if (backup) {
+          try {
+            await applySessionSnapshot(runtime, backup);
+            runtime.loggedIn = true;
+          } catch {
+            runtime.loggedIn = false;
+            importError = "saved_login_restore_failed";
+          }
+        }
+        setSavedLoginError(runtime, importError);
+      }
+      saveState(runtime.state);
+      return runtime.state.saved_login.status === "verified";
+    }
+    if (decision !== "refresh" || Date.now() - (local.last_export_at || 0) < SAVED_LOGIN_REFRESH_MS) return;
+    local.last_export_at = Date.now();
+    saveState(runtime.state);
+    const beforeIdentity = await browserAccountFingerprint(runtime);
+    if (!local.account_fingerprint || !beforeIdentity) {
+      setSavedLoginError(runtime, "saved_login_identity_unavailable");
+      return;
+    }
+    if (beforeIdentity !== local.account_fingerprint) {
+      local.status = "external_login";
+      setSavedLoginError(runtime, "saved_login_account_changed");
+      saveState(runtime.state);
+      return;
+    }
+    const snapshot = await captureBrowserSession(runtime.context, runtime.page);
+    if (local.status !== "verified") return;
+    const afterIdentity = await browserAccountFingerprint(runtime);
+    if (!afterIdentity) { setSavedLoginError(runtime, "saved_login_identity_unavailable"); return; }
+    if (afterIdentity !== local.account_fingerprint) {
+      local.status = "external_login";
+      setSavedLoginError(runtime, "saved_login_account_changed");
+      saveState(runtime.state);
+      return;
+    }
+    const envelope = encryptSessionEnvelope(snapshot, TOKEN);
+    const publicationId = randomUUID();
+    local.pending_publication_id = publicationId;
+    saveState(runtime.state);
+    const result = await apiRequest("POST", "/login-profile", { ...identity,
+      profile_id: local.profile_id, binding_id: local.binding_id, generation: local.generation,
+      expected_revision: local.source_revision, publication_id: publicationId,
+      format_version: SESSION_FORMAT_VERSION, sealed_blob_base64: envelope.toString("base64") }, false);
+    if (result.revision === publicationId && result.generation === local.generation) {
+      local.source_revision = publicationId;
+      local.pending_publication_id = null;
+      setSavedLoginError(runtime, null);
+      saveState(runtime.state);
+    }
+  } catch (error) {
+    if (error?.status === 404) { setSavedLoginError(runtime, null); return; }
+    setSavedLoginError(runtime, `saved_login_${stableErrorCode(error)}`);
+  }
+}
+
+function setSavedLoginError(runtime, code) {
+  if ((runtime.state.saved_login_error || null) === code) return;
+  runtime.state.saved_login_error = code;
+  saveState(runtime.state);
 }
 
 // ── Main loop ────────────────────────────────────────────────────────────
@@ -2658,6 +3283,7 @@ async function main() {
     try {
       if (Date.now() - runtime.lastPresenceAt >= PRESENCE_MS) await heartbeat(runtime);
       if (await processPendingCommand(runtime)) process.exit(75);
+      await processSavedLogin(runtime);
       if (runtime.state.draining && !runtime.state.current_task) {
         await sleep(POLL_MS);
         continue;

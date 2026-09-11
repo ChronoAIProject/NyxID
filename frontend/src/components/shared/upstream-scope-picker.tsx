@@ -17,7 +17,10 @@ import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Plus, X } from "lucide-react";
 import type { ScopeCatalogEntry } from "@/types/keys";
-import { parseAdditionalScopes } from "@/lib/parse-additional-scopes";
+import {
+  includeRequiredScopes,
+  parseAdditionalScopes,
+} from "@/lib/parse-additional-scopes";
 
 export interface UpstreamScopePickerProps {
   /** Curated menu of selectable scopes for this provider (may be empty). */
@@ -141,7 +144,11 @@ export function UpstreamScopePicker({
   platformAllowlist,
 }: UpstreamScopePickerProps) {
   const [customInput, setCustomInput] = useState("");
-  const selected = new Set(value);
+  const selection = includeRequiredScopes(value, catalog);
+  const required = new Set(
+    catalog.filter((entry) => entry.required).map((entry) => entry.scope),
+  );
+  const selected = new Set(selection);
   const locked = new Set(lockedScopes);
   const pills = buildPills(catalog, defaultScopes, value, lockedScopes);
   // Platform-path gating: a scope not on the shared app's allowlist cannot be
@@ -157,7 +164,7 @@ export function UpstreamScopePicker({
   const labelFor = (scope: string) =>
     pills.find((p) => p.scope === scope)?.label ?? scope;
   const grantedSet = grantedScopes ? new Set(grantedScopes) : null;
-  const added = grantedSet ? value.filter((s) => !grantedSet.has(s)) : [];
+  const added = grantedSet ? selection.filter((s) => !grantedSet.has(s)) : [];
   const removed = grantedScopes
     ? grantedScopes.filter((s) => !selected.has(s))
     : [];
@@ -165,7 +172,7 @@ export function UpstreamScopePicker({
 
   function toggle(scope: string) {
     // Locked (already-granted) scopes are append-only — can't be deselected.
-    if (locked.has(scope)) return;
+    if (locked.has(scope) || required.has(scope)) return;
     const next = new Set(selected);
     if (next.has(scope)) {
       next.delete(scope);
@@ -193,7 +200,7 @@ export function UpstreamScopePicker({
       }
     }
     setCustomError(null);
-    const next = [...value];
+    const next = [...selection];
     for (const s of parsed) {
       if (!next.includes(s)) next.push(s);
     }
@@ -207,6 +214,7 @@ export function UpstreamScopePicker({
       {pills.length > 0 ? (
         <div role="group" aria-label="Scopes" className="flex flex-wrap gap-1.5">
           {pills.map((p) => {
+            const isRequired = required.has(p.scope);
             const gated = isGated(p.scope, p.locked);
             const isOn = (selected.has(p.scope) || p.locked) && !gated;
             return (
@@ -214,13 +222,15 @@ export function UpstreamScopePicker({
                 key={p.scope}
                 type="button"
                 aria-pressed={isOn}
-                disabled={p.locked || gated}
+                disabled={p.locked || isRequired || gated}
                 title={
                   gated
                     ? `${p.description ?? p.scope} — available only with your own OAuth app`
-                    : p.locked
-                      ? `${p.description ?? p.scope} — already granted; can't be removed here`
-                      : (p.description ?? p.scope)
+                    : isRequired
+                      ? `${p.description ?? p.scope} — required for this service`
+                      : p.locked
+                        ? `${p.description ?? p.scope} — already granted; can't be removed here`
+                        : (p.description ?? p.scope)
                 }
                 onClick={() => {
                   toggle(p.scope);
@@ -229,7 +239,7 @@ export function UpstreamScopePicker({
                   "group inline-flex max-w-full items-center gap-1.5 rounded-full border px-3 py-1.5 text-left text-[12px] transition-colors " +
                   (gated
                     ? "cursor-not-allowed border-dashed border-border/60 bg-transparent text-muted-foreground/50"
-                    : p.locked
+                    : p.locked || isRequired
                       ? "cursor-default border-primary/60 bg-primary/10 text-foreground"
                       : isOn
                         ? "border-primary bg-primary/15 text-foreground"
@@ -254,6 +264,10 @@ export function UpstreamScopePicker({
                   <span className="shrink-0 text-[11px] italic text-muted-foreground/70">
                     own app
                   </span>
+                ) : isRequired ? (
+                  <span className="shrink-0 text-[11px] text-muted-foreground">
+                    required
+                  </span>
                 ) : p.locked ? (
                   <span className="shrink-0 text-[11px] text-muted-foreground">
                     granted
@@ -263,7 +277,7 @@ export function UpstreamScopePicker({
                     default
                   </span>
                 ) : null}
-                {isOn && !p.locked ? (
+                {isOn && !p.locked && !isRequired ? (
                   <X className="h-3 w-3 shrink-0 opacity-50 group-hover:opacity-100" />
                 ) : null}
               </button>

@@ -22,6 +22,7 @@ fn command(home: &Path) -> Command {
         .env_remove("NYXID_API_KEY")
         .env_remove("NYXID_ACCESS_TOKEN")
         .env_remove("NYXID_PROFILE")
+        .env_remove("NYXID_URL")
         .env_remove("NYXID_BASE_URL")
         .env_remove("NYXID_TELEMETRY_DSN")
         .env_remove("NYXID_SHARE_ANALYTICS")
@@ -214,7 +215,10 @@ async fn unsupported_backend_never_falls_back_to_an_account_session() {
     )
     .await;
     assert!(!output.status.success());
-    assert!(output_text(&output).contains("This NyxID backend doesn't support Agent Key login"));
+    assert_eq!(output.status.code(), Some(20));
+    assert!(
+        output_text(&output).contains("This backend does not support the requested login flow")
+    );
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
     assert!(!profile(home.path()).join("access_token").exists());
 }

@@ -37,4 +37,5 @@ jobs:
       - name: Check overlays against official specs
         run: |
           set -o pipefail
+          python3 -m unittest discover -s scripts -p 'test_catalog_spec_drift.py'
           python3 scripts/check-catalog-spec-drift.py | tee "$GITHUB_STEP_SUMMARY"

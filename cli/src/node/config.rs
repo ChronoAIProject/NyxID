@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -153,6 +153,51 @@ pub struct CredentialConfig {
     /// Alternate OAuth client ID parameter name (e.g. "client_key" for TikTok)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_client_id_param_name: Option<String>,
+    #[serde(default)]
+    pub oauth_request_options: OAuthRequestOptions,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthRequestEncoding {
+    #[default]
+    Form,
+    Json,
+}
+
+fn default_supports_oauth_scopes() -> bool {
+    true
+}
+
+/// Public protocol metadata retained with node credentials for later refreshes.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct OAuthRequestOptions {
+    #[serde(default)]
+    pub token_request_encoding: Option<OAuthRequestEncoding>,
+    #[serde(default)]
+    pub oauth_request_headers: HashMap<String, String>,
+    #[serde(default = "default_supports_oauth_scopes")]
+    pub supports_oauth_scopes: bool,
+}
+
+impl Default for OAuthRequestOptions {
+    fn default() -> Self {
+        Self {
+            token_request_encoding: None,
+            oauth_request_headers: HashMap::new(),
+            supports_oauth_scopes: true,
+        }
+    }
+}
+
+impl std::fmt::Debug for OAuthRequestOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthRequestOptions")
+            .field("token_request_encoding", &self.token_request_encoding)
+            .field("oauth_request_headers", &"[REDACTED]")
+            .field("supports_oauth_scopes", &self.supports_oauth_scopes)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,6 +295,7 @@ impl CredentialConfig {
             oauth_scopes: None,
             oauth_token_endpoint_auth_method: None,
             oauth_client_id_param_name: None,
+            oauth_request_options: Default::default(),
         }
     }
 
@@ -276,6 +322,7 @@ impl CredentialConfig {
             oauth_scopes: None,
             oauth_token_endpoint_auth_method: None,
             oauth_client_id_param_name: None,
+            oauth_request_options: Default::default(),
         }
     }
 
@@ -304,6 +351,7 @@ impl CredentialConfig {
             oauth_scopes: None,
             oauth_token_endpoint_auth_method: None,
             oauth_client_id_param_name: None,
+            oauth_request_options: Default::default(),
         }
     }
 
@@ -332,6 +380,7 @@ impl CredentialConfig {
             oauth_scopes: None,
             oauth_token_endpoint_auth_method: None,
             oauth_client_id_param_name: None,
+            oauth_request_options: Default::default(),
         }
     }
 
@@ -361,6 +410,7 @@ impl CredentialConfig {
             oauth_scopes: None,
             oauth_token_endpoint_auth_method: None,
             oauth_client_id_param_name: None,
+            oauth_request_options: Default::default(),
         }
     }
 }

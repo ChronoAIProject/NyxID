@@ -19,6 +19,7 @@ import { OrgScopeSelect } from "@/components/shared/org-scope-select";
 import { useOrgs } from "@/hooks/use-orgs";
 import { ApiError, api } from "@/lib/api-client";
 import { UpstreamScopePicker } from "@/components/shared/upstream-scope-picker";
+import { includeRequiredScopes } from "@/lib/parse-additional-scopes";
 import type { ScopeCatalogEntry } from "@/types/keys";
 import { Building2, ExternalLink } from "lucide-react";
 import type { AiKeyPrefill } from "@/pages/cli-pair/types";
@@ -86,6 +87,7 @@ interface CatalogEntryShape {
   readonly device_code_format?: string | null;
   /** Provider default scopes — pre-selected in the scope picker (NyxID#917). */
   readonly default_scopes?: readonly string[] | null;
+  readonly supports_oauth_scopes?: boolean;
   /** Curated selectable scope menu for this provider (NyxID#917). */
   readonly scope_catalog?: readonly ScopeCatalogEntry[] | null;
   /** Per-provider scope-removal capability (NyxID#917). `unsupported` →
@@ -400,11 +402,17 @@ function ManageScopesPanel({
       : null;
   const seedScopes = cliSet ?? (granted.length > 0 ? granted : defaultScopes);
   const [override, setOverride] = useState<readonly string[] | null>(null);
-  const selectedScopes = override ?? seedScopes;
+  const selectedScopes = includeRequiredScopes(
+    override ?? seedScopes,
+    entry?.scope_catalog ?? [],
+  );
   const scopeOverride =
-    override !== null
-      ? override
-      : (cliSet ?? (granted.length > 0 ? granted : undefined));
+    override !== null ||
+    cliSet !== null ||
+    granted.length > 0 ||
+    entry?.scope_catalog?.some((scope) => scope.required)
+      ? selectedScopes
+      : undefined;
   const setSelectedScopes = setOverride;
 
   const [authFlowActive, setAuthFlowActive] = useState(false);
@@ -429,7 +437,7 @@ function ManageScopesPanel({
   const isOAuth = (entry.provider_type ?? "").toLowerCase() === "oauth2";
   // Scoped management only applies to OAuth providers. (The only device-code
   // provider, openai-codex, has fixed scopes — nothing to manage.)
-  if (!isOAuth || !entry.provider_config_id) {
+  if (!isOAuth || !entry.provider_config_id || entry.supports_oauth_scopes === false) {
     return (
       <div className="flex flex-col gap-1">
         <h2 className="font-serif text-[28px] font-normal">Manage permissions</h2>
@@ -929,8 +937,12 @@ function CatalogConfirmForm({
   // Seeded with the provider's defaults (all pre-selected) so an unedited
   // submit requests exactly today's scopes; the picker lets the user drop a
   // default or add custom scopes. Passed to the sub-flow as `scopeOverride`.
-  const [selectedScopes, setSelectedScopes] = useState<readonly string[]>(
+  const [scopeSelection, setSelectedScopes] = useState<readonly string[]>(
     entry.default_scopes ?? [],
+  );
+  const selectedScopes = includeRequiredScopes(
+    scopeSelection,
+    entry.scope_catalog ?? [],
   );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1121,14 +1133,15 @@ function CatalogConfirmForm({
   const effectiveEndpointUrl = endpointUrl.trim() || prefill.endpoint_url;
 
   // Whether the upstream provider accepts additional scopes on the
-  // initiate request. OAuth always does; `openai`-format device-code
+  // initiate request. Scopeless OAuth and `openai`-format device-code
   // providers (Codex) reject a `scope` parameter, so hide the picker
   // for them — same gate as `add-key-dialog.tsx::DeviceCodeStep`
   // (NyxID#917). When supported, the sub-flow receives the picker's
   // complete selection as `scopeOverride`; when not, no override.
   const supportsAdditionalScopes =
-    shape === "oauth" ||
-    (shape === "device-code" && entry.device_code_format !== "openai");
+    entry.supports_oauth_scopes !== false &&
+    (shape === "oauth" ||
+      (shape === "device-code" && entry.device_code_format !== "openai"));
   const scopeOverride = supportsAdditionalScopes ? selectedScopes : undefined;
 
   if (authFlowActive && shape === "oauth" && entry.provider_config_id) {

@@ -1,4 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { DetailSection } from "@/components/shared/detail-section";
+import { DetailRow } from "@/components/shared/detail-row";
+import { ShieldCheck } from "lucide-react";
+import { toast } from "sonner";
+import { ApiError } from "@/lib/api-client";
+import { useReregisterChannelBot, useRepairChannelBot } from "@/hooks/use-channel-managed";
+import type { ChannelBotDetail } from "@/types/channels";
 import { useQueryClient } from "@tanstack/react-query";
 import { ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -18,6 +25,21 @@ const stageLabels: Record<string, string> = {
   subscribing: "Subscribing...",
   registering: "Registering...",
 };
+
+export function ManagedWhatsAppDetail({ bot }: { readonly bot: ChannelBotDetail }) {
+  const reregister = useReregisterChannelBot();
+  const repair = useRepairChannelBot();
+  return <DetailSection title="Managed setup">
+    <DetailRow label="Subscription" value={bot.managed_setup?.subscription ?? "pending"} />
+    <DetailRow label="Webhook override" value={bot.managed_setup?.webhook_override ?? "pending"} />
+    <DetailRow label="Number registration" value={bot.managed_setup?.registration ?? "pending"} />
+    {Object.entries(bot.managed_setup?.coexistence_sync ?? {}).map(([name, status]) => <DetailRow key={name} label={name === "history" ? "History sync" : "Contact sync"} value={status} />)}
+    <div className="flex flex-wrap gap-2 p-4">
+      <Button variant="outline" disabled={repair.isPending} isLoading={reregister.isPending} onClick={() => reregister.mutate(bot.id, { onSuccess: () => toast.success("Number registration checked"), onError: (error) => toast.error(error instanceof ApiError ? error.message : "Unable to re-register number") })}><ShieldCheck className="size-3" />Re-register number</Button>
+      <Button variant="outline" disabled={reregister.isPending} isLoading={repair.isPending} onClick={() => repair.mutate(bot.id, { onSuccess: () => toast.success("Setup checked"), onError: (error) => toast.error(error instanceof ApiError ? error.message : "Unable to repair setup") })}><ShieldCheck className="size-3" />Repair setup</Button>
+    </div>
+  </DetailSection>;
+}
 
 export function ManagedWhatsApp({
   bootstrap,
