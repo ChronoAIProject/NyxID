@@ -17,9 +17,12 @@ const tokenSchema = z.object({
 });
 
 export class AevatarAuthError extends Error {
-  constructor(readonly code: "channelAuthRequired" | "channelConsentRequired") {
+  readonly code: "channelAuthRequired" | "channelConsentRequired";
+
+  constructor(code: "channelAuthRequired" | "channelConsentRequired") {
     super(code);
     this.name = "AevatarAuthError";
+    this.code = code;
   }
 }
 

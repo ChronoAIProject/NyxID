@@ -47,8 +47,15 @@ const registrationStatusSchema = z.object({
 });
 
 export class NyxbotChannelError extends Error {
+  readonly code:
+    | "tokenRejected"
+    | "telegramUnavailable"
+    | "channelAuthRequired"
+    | "channelConsentRequired"
+    | "channelRegistrationFailed";
+
   constructor(
-    readonly code:
+    code:
       | "tokenRejected"
       | "telegramUnavailable"
       | "channelAuthRequired"
@@ -57,6 +64,7 @@ export class NyxbotChannelError extends Error {
   ) {
     super(code);
     this.name = "NyxbotChannelError";
+    this.code = code;
   }
 }
 
