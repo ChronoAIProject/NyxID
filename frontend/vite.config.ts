@@ -4,6 +4,7 @@ import react from "@vitejs/plugin-react"
 import tailwindcss from "@tailwindcss/vite"
 import path from "path"
 import fs from "node:fs"
+import https from "node:https"
 import { allDocPages } from "./src/features/docs/manifest"
 
 const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
@@ -15,12 +16,12 @@ const backendUrl = process.env.BACKEND_URL || "http://localhost:3001"
 // backend always sees the expected dev origin.
 const expectedOrigin = process.env.FRONTEND_URL || "http://localhost:3000"
 
-function originRewrite(proxyReq: import("http").ClientRequest) {
-  if (proxyReq.getHeader("origin")) {
-    proxyReq.setHeader("origin", expectedOrigin)
+function originRewrite(req: import("http").IncomingMessage) {
+  if (req.headers.origin) {
+    req.headers.origin = expectedOrigin
   }
-  if (proxyReq.getHeader("referer")) {
-    proxyReq.setHeader("referer", `${expectedOrigin}/`)
+  if (req.headers.referer) {
+    req.headers.referer = `${expectedOrigin}/`
   }
 }
 
@@ -39,9 +40,14 @@ function cookieRewrite(proxyRes: import("http").IncomingMessage) {
 const proxyTarget = {
   target: backendUrl,
   changeOrigin: true,
+  // Vite's proxy sets agent=false, so an environment proxy needs an explicit agent.
+  agent: process.env.NODE_USE_ENV_PROXY === "1" && backendUrl.startsWith("https:")
+    ? new https.Agent({ proxyEnv: process.env })
+    : undefined,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   configure: (proxy: any) => {
-    proxy.on("proxyReq", originRewrite)
+    // Proxy agents can send headers before proxyReq; rewrite before request creation.
+    proxy.on("start", originRewrite)
     proxy.on("proxyRes", cookieRewrite)
   },
 }
