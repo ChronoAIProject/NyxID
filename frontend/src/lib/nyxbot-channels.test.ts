@@ -138,6 +138,8 @@ describe("Nyxbot Telegram registration", () => {
   it.each([
     { ok: true, result: { ...identity.result, is_bot: false } },
     { ok: true, result: { ...identity.result, first_name: " " } },
+    { ok: true, result: { ...identity.result, username: undefined } },
+    { ok: true, result: { ...identity.result, username: "../another_bot" } },
     { ok: true },
   ])("requires an actual bot identity and name: %j", async (response) => {
     telegram.mockResolvedValue(json(response));

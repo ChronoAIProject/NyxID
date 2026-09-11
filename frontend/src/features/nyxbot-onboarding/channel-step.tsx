@@ -30,7 +30,7 @@ import {
 import {
   NYXBOT_CHANNEL_SERVICE_SLUGS,
   NyxbotChannelError,
-  type NyxbotChannelRegistration,
+  type NyxbotChannelRegistrationResult,
 } from "@/lib/nyxbot-channels";
 import {
   OnboardingNotice,
@@ -47,7 +47,6 @@ const CHANNEL_AVAILABILITY: Record<NyxbotChannel, boolean> = {
 
 export function ChannelStep({
   channel: preferredChannel,
-  connectedUrl,
   referral,
   onSelect,
   onBack,
@@ -55,11 +54,10 @@ export function ChannelStep({
   onSpendingCap,
 }: {
   readonly channel: NyxbotChannel | null;
-  readonly connectedUrl?: string | null;
   readonly referral?: NyxbotChannel;
   readonly onSelect: (channel: NyxbotChannel) => void;
   readonly onBack: () => void;
-  readonly onConnected: (registration: NyxbotChannelRegistration) => void;
+  readonly onConnected: (registration: NyxbotChannelRegistrationResult) => void;
   readonly onSpendingCap: () => void;
 }) {
   const { t } = useTranslation();
@@ -69,9 +67,6 @@ export function ChannelStep({
       : null;
   const [showToken, setShowToken] = useState(false);
   const [needsConsent, setNeedsConsent] = useState(false);
-  const [connectedUrlState, setConnectedUrl] = useState<string | null>(
-    connectedUrl ?? null,
-  );
   const submitting = useRef(false);
   const createBot = useRegisterNyxbotTelegram();
   const userServices = useUserServices();
@@ -107,7 +102,6 @@ export function ChannelStep({
       });
       form.reset();
       createBot.reset();
-      setConnectedUrl(result.telegram_url ?? null);
       onConnected(result);
     } catch (error) {
       setNeedsConsent(
@@ -168,14 +162,6 @@ export function ChannelStep({
         </>
       }
     >
-      {connectedUrlState && (
-        <OnboardingNotice>
-          {t("channelConnected")}{" "}
-          <a href={connectedUrlState} target="_blank" rel="noopener noreferrer">
-            {t("openTelegram")}
-          </a>
-        </OnboardingNotice>
-      )}
       <fieldset
         className="nb-tiles nb-channel-tiles"
         disabled={createBot.isPending}

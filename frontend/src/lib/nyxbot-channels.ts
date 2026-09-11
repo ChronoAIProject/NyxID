@@ -22,7 +22,10 @@ const telegramIdentitySchema = z.object({
     id: z.number().int().positive(),
     is_bot: z.literal(true),
     first_name: z.string().trim().min(1).max(128),
-    username: z.string().trim().min(1).max(64).optional(),
+    username: z
+      .string()
+      .trim()
+      .regex(/^[A-Za-z0-9_]{1,64}$/),
   }),
 });
 
@@ -34,7 +37,7 @@ const registrationSchema = z.object({
 });
 export type NyxbotChannelRegistration = z.infer<typeof registrationSchema>;
 export type NyxbotChannelRegistrationResult = NyxbotChannelRegistration & {
-  readonly telegram_url?: string;
+  readonly telegram_url: string;
 };
 
 const registrationStatusSchema = z.object({
@@ -140,9 +143,7 @@ export async function registerNyxbotTelegram(
     const registration = registrationSchema.parse(response);
     return {
       ...registration,
-      ...(identity.username
-        ? { telegram_url: `https://t.me/${identity.username}` }
-        : {}),
+      telegram_url: `https://t.me/${identity.username}`,
     };
   } catch (error) {
     if (error instanceof AevatarAuthError)

@@ -119,7 +119,7 @@ describe("Nyxbot authorization boundaries", () => {
       nyxbotSearchSchema.parse({ channel: "instagram" }).channel,
     ).toBeUndefined();
   });
-  it.each(["account", "source", "channel", "link"])(
+  it.each(["account", "source", "channel", "success", "link"])(
     "accepts %s as a view without accepting completion claims",
     (step) => {
       expect(

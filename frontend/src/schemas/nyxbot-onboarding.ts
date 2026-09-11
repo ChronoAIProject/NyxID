@@ -10,7 +10,7 @@ export const GOOGLE_WORKSPACE_SCOPES = [
 
 export const nyxbotSearchSchema = z.object({
   step: z
-    .enum(["account", "source", "channel", "link"])
+    .enum(["account", "source", "channel", "success", "link"])
     .optional()
     .catch(undefined),
   channel: z.enum(["telegram", "whatsapp"]).optional().catch(undefined),
@@ -24,7 +24,12 @@ export type NyxbotChannel = "telegram" | "whatsapp";
 
 export const nyxbotProgressSchema = z.object({
   channel: z.enum(["telegram", "whatsapp"]).nullable().default(null),
-  channelUrl: z.string().url().nullable().default(null),
+  channelUrl: z
+    .string()
+    .regex(/^https:\/\/t\.me\/[A-Za-z0-9_]{1,64}$/)
+    .nullable()
+    .catch(null)
+    .default(null),
   googleKeyId: z.string().max(128).nullable().default(null),
   botId: z.string().max(128).nullable().default(null),
   registrationId: z.string().max(128).nullable().default(null),

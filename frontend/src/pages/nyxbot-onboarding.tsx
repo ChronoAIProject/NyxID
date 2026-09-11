@@ -23,6 +23,7 @@ import {
 import { DataSourceStep } from "@/features/nyxbot-onboarding/data-source-step";
 import { SignInStep } from "@/features/nyxbot-onboarding/sign-in-step";
 import { ChannelStep } from "@/features/nyxbot-onboarding/channel-step";
+import { ChannelResult } from "@/features/nyxbot-onboarding/channel-result";
 import { SpendingCapStep } from "@/features/nyxbot-onboarding/spending-cap-step";
 import "@/features/nyxbot-onboarding/onboarding.css";
 
@@ -179,12 +180,20 @@ function ConnectedOnboarding({
     );
   if (step === "link")
     return <StepRedirect step="channel" onNavigate={onNavigate} />;
+  if (step === "success")
+    return progress.botId && progress.registrationId && progress.channelUrl ? (
+      <ChannelResult
+        telegramUrl={progress.channelUrl}
+        onAddAnother={() => onNavigate("channel")}
+      />
+    ) : (
+      <StepRedirect step="channel" onNavigate={onNavigate} />
+    );
   if (showSpendingCap)
     return <SpendingCapStep onBack={() => setShowSpendingCap(false)} />;
   return (
     <ChannelStep
       channel={progress.channel}
-      connectedUrl={progress.channelUrl}
       referral={referral}
       onSelect={(channel) => updateProgress({ channel })}
       onBack={() => onNavigate("source")}
@@ -195,6 +204,7 @@ function ConnectedOnboarding({
           registrationId: registration.registration_id,
           channelUrl: registration.telegram_url ?? null,
         });
+        onNavigate("success");
       }}
     />
   );

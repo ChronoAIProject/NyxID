@@ -60,6 +60,7 @@ export function OnboardingShell({
   children,
   actions,
   variant = "compact",
+  complete = false,
 }: {
   readonly title: string;
   readonly subtitle?: string;
@@ -67,6 +68,7 @@ export function OnboardingShell({
   readonly children: ReactNode;
   readonly actions: ReactNode;
   readonly variant?: "compact" | "setup";
+  readonly complete?: boolean;
 }) {
   const { t, i18n } = useTranslation();
   useApplyTheme();
@@ -111,16 +113,22 @@ export function OnboardingShell({
                   <li
                     key={label}
                     data-state={
-                      index + 1 < step
+                      complete || index + 1 < step
                         ? "complete"
                         : index + 1 === step
                           ? "current"
                           : "pending"
                     }
-                    aria-current={index + 1 === step ? "step" : undefined}
+                    aria-current={
+                      !complete && index + 1 === step ? "step" : undefined
+                    }
                   >
                     <span className="nb-setup-step-number" aria-hidden="true">
-                      {index + 1 < step ? <Check size={12} /> : index + 1}
+                      {complete || index + 1 < step ? (
+                        <Check size={12} />
+                      ) : (
+                        index + 1
+                      )}
                     </span>
                     <span>{label}</span>
                   </li>
