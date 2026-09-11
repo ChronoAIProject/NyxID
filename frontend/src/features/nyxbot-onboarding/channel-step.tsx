@@ -20,6 +20,7 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import { useRegisterNyxbotTelegram } from "@/hooks/use-nyxbot-channels";
+import { useUserServices } from "@/hooks/use-user-services";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
 import {
   createNyxbotTelegramSchema,
@@ -27,6 +28,7 @@ import {
   type NyxbotChannel,
 } from "@/schemas/nyxbot-onboarding";
 import {
+  NYXBOT_CHANNEL_SERVICE_SLUGS,
   NyxbotChannelError,
   type NyxbotChannelRegistration,
 } from "@/lib/nyxbot-channels";
@@ -67,6 +69,17 @@ export function ChannelStep({
   const [needsConsent, setNeedsConsent] = useState(false);
   const submitting = useRef(false);
   const createBot = useRegisterNyxbotTelegram();
+  const userServices = useUserServices();
+  const serviceIds = (userServices.data ?? [])
+    .filter(
+      (service) =>
+        NYXBOT_CHANNEL_SERVICE_SLUGS.some((slug) => slug === service.slug) &&
+        service.is_active &&
+        (service.credential_source.type === "personal" ||
+          service.credential_source.allowed),
+    )
+    .map((service) => service.id);
+  const serviceIdsReady = !userServices.isPending && !userServices.isError;
   const managed = useManagedOnboarding("whatsapp", channel === "whatsapp");
   const telegramSchema = createNyxbotTelegramSchema({
     required: t("tokenRequired"),
@@ -78,11 +91,15 @@ export function ChannelStep({
     mode: "onChange",
   });
   async function submit(values: NyxbotTelegramForm) {
-    if (submitting.current || channel !== "telegram") return;
+    if (submitting.current || channel !== "telegram" || !serviceIdsReady)
+      return;
     submitting.current = true;
     setNeedsConsent(false);
     try {
-      const result = await createBot.mutateAsync(values.bot_token);
+      const result = await createBot.mutateAsync({
+        botToken: values.bot_token,
+        serviceIds,
+      });
       form.reset();
       createBot.reset();
       onConnected(result);
@@ -134,6 +151,7 @@ export function ChannelStep({
               isLoading={createBot.isPending}
               disabled={
                 channel !== "telegram" ||
+                !serviceIdsReady ||
                 !telegramSchema.safeParse(form.watch()).success ||
                 createBot.isPending
               }
@@ -206,6 +224,19 @@ export function ChannelStep({
       </fieldset>
       {channel === "telegram" && (
         <>
+          {userServices.isPending && (
+            <p role="status" className="nb-small">
+              {t("loading")}
+            </p>
+          )}
+          {userServices.isError && (
+            <OnboardingNotice error>
+              {t("loadError")}{" "}
+              <Button onClick={() => void userServices.refetch()}>
+                {t("retry")}
+              </Button>
+            </OnboardingNotice>
+          )}
           <ol className="nb-instructions">
             <li>
               <a

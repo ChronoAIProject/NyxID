@@ -12,7 +12,13 @@ export function useRegisterNyxbotTelegram() {
   return useMutation({
     gcTime: 0,
     retry: false,
-    mutationFn: registerNyxbotTelegram,
+    mutationFn: ({
+      botToken,
+      serviceIds,
+    }: {
+      botToken: string;
+      serviceIds: readonly string[];
+    }) => registerNyxbotTelegram(botToken, serviceIds),
     onSuccess: () => {
       void queryClient.invalidateQueries({
         queryKey: channelBotsQueryKeys.all,

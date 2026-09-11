@@ -27,6 +27,7 @@ import {
   nyxbotSearchSchema,
 } from "@/schemas/nyxbot-onboarding";
 import { ApiError } from "@/lib/api-client";
+import type { UserServiceResponse } from "@/schemas/keys";
 import { AevatarAuthError } from "@/lib/nyxbot-aevatar-auth";
 import {
   AEVATAR_CHANNELS_PATH,
@@ -101,6 +102,10 @@ const registrationReceipt = {
 let keys: object[];
 let catalogResponse: typeof catalog;
 let publicConfig: { social_providers: string[]; email_auth_enabled: boolean };
+let userServices: Pick<
+  UserServiceResponse,
+  "id" | "slug" | "is_active" | "credential_source"
+>[];
 let client: QueryClient;
 function makeRouter() {
   const root = createRootRoute();
@@ -160,12 +165,39 @@ beforeEach(async () => {
     social_providers: ["google", "github", "apple"],
     email_auth_enabled: false,
   };
+  userServices = [
+    {
+      id: "workspace-service",
+      slug: "api-google-workspace",
+      is_active: true,
+      credential_source: { type: "personal" },
+    },
+    {
+      id: "ornn-service",
+      slug: "ornn-api",
+      is_active: true,
+      credential_source: {
+        type: "org",
+        allowed: true,
+        org_id: "org-1",
+        org_name: "Shared",
+        role: "member",
+      },
+    },
+    {
+      id: "llm-service",
+      slug: "chrono-llm-public",
+      is_active: true,
+      credential_source: { type: "personal" },
+    },
+  ];
   await nyxbotI18n.changeLanguage("en");
   get.mockImplementation(async (path: string) => {
     if (path === "/keys") return { keys };
     if (path === "/keys/google-1") return keys[0];
     if (path === "/catalog/api-google") return catalogResponse;
     if (path === "/public/config") return publicConfig;
+    if (path === "/user-services") return { services: userServices };
     if (path.startsWith("/providers/google-provider/connect/oauth"))
       return {
         authorization_url:
@@ -361,7 +393,9 @@ describe("Nyxbot onboarding", () => {
       expect(post).not.toHaveBeenCalled();
       expect(telegram).not.toHaveBeenCalled();
       if (step === "channel") {
-        expect(get).not.toHaveBeenCalled();
+        expect(
+          get.mock.calls.every(([path]) => path === "/user-services"),
+        ).toBe(true);
         expect(authorizer).not.toHaveBeenCalled();
       }
     },
@@ -387,7 +421,9 @@ describe("Nyxbot onboarding", () => {
       focusManager.setFocused(true);
       await client.invalidateQueries();
     });
-    expect(get).not.toHaveBeenCalled();
+    expect(get.mock.calls.every(([path]) => path === "/user-services")).toBe(
+      true,
+    );
     expect(post).not.toHaveBeenCalled();
     expect(telegram).not.toHaveBeenCalled();
     expect(authorizer).not.toHaveBeenCalled();
@@ -773,6 +809,9 @@ describe("Nyxbot onboarding", () => {
   it("preselects a referral, registers Telegram once, and never fabricates a pairing code", async () => {
     await mount();
     await toChannel();
+    expect(get).toHaveBeenCalledWith("/user-services");
+    expect(authorizer).not.toHaveBeenCalled();
+    expect(telegram).not.toHaveBeenCalled();
     expect(screen.getByRole("radio", { name: /Telegram/ })).toBeChecked();
     const submit = screen.getByRole("button", { name: "Connect channel" });
     expect(submit).toBeDisabled();
@@ -787,6 +826,7 @@ describe("Nyxbot onboarding", () => {
       label: "My_Shop_Bot_nyxid_bot",
       bot_token: telegramToken,
       webhook_base_url: AEVATAR_WEBHOOK_BASE_URL,
+      service_ids: ["workspace-service", "ornn-service", "llm-service"],
     });
     expect(post).toHaveBeenCalledTimes(1);
     expect(screen.getByRole("button", { name: "Copy code" })).toBeDisabled();
@@ -812,6 +852,108 @@ describe("Nyxbot onboarding", () => {
     expect(
       await screen.findByRole("link", { name: "Manage channel" }),
     ).toHaveAttribute("href", `${AEVATAR_WEBHOOK_BASE_URL}/channels`);
+  });
+  it("only includes active, permitted IDs for the three requested slugs", async () => {
+    userServices.push(
+      {
+        id: "unrelated-service",
+        slug: "api-google",
+        is_active: true,
+        credential_source: { type: "personal" },
+      },
+      {
+        id: "disabled-workspace",
+        slug: "api-google-workspace",
+        is_active: false,
+        credential_source: { type: "personal" },
+      },
+      {
+        id: "denied-ornn",
+        slug: "ornn-api",
+        is_active: true,
+        credential_source: {
+          type: "org",
+          allowed: false,
+          org_id: "org-2",
+          org_name: "Read only",
+          role: "viewer",
+        },
+      },
+    );
+    await mount();
+    await toChannel();
+    await userEvent.type(
+      screen.getByLabelText("Customer bot token", { exact: true }),
+      telegramToken,
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Connect channel" }),
+    );
+    await screen.findByRole("heading", { name: "Almost there" });
+    expect(post).toHaveBeenCalledWith(
+      AEVATAR_CHANNELS_PATH,
+      expect.objectContaining({
+        service_ids: ["workspace-service", "ornn-service", "llm-service"],
+      }),
+    );
+  });
+  it.each([{ availableIds: [] }, { availableIds: ["ornn-service"] }])(
+    "sends available service IDs explicitly when requested services are absent: $availableIds",
+    async ({ availableIds }) => {
+      userServices = userServices.filter((service) =>
+        availableIds.includes(service.id),
+      );
+      await mount();
+      await toChannel();
+      await userEvent.type(
+        screen.getByLabelText("Customer bot token", { exact: true }),
+        telegramToken,
+      );
+      await userEvent.click(
+        screen.getByRole("button", { name: "Connect channel" }),
+      );
+      await screen.findByRole("heading", { name: "Almost there" });
+      expect(post).toHaveBeenCalledWith(
+        AEVATAR_CHANNELS_PATH,
+        expect.objectContaining({ service_ids: availableIds }),
+      );
+    },
+  );
+  it("blocks submission until services load and retries a failed lookup without losing the token", async () => {
+    const previousGet = get.getMockImplementation()!;
+    let rejectServices: ((error: Error) => void) | undefined;
+    get.mockImplementation((path: string) =>
+      path === "/user-services"
+        ? new Promise((_, reject) => {
+            rejectServices = reject;
+          })
+        : previousGet(path),
+    );
+    await mount();
+    await toChannel();
+    const token = screen.getByLabelText("Customer bot token", { exact: true });
+    await userEvent.type(token, telegramToken);
+    const submit = screen.getByRole("button", { name: "Connect channel" });
+    expect(submit).toBeDisabled();
+    fireEvent.submit(token.closest("form")!);
+    await act(async () => rejectServices?.(new Error("Service lookup failed")));
+    await screen.findByText("We couldn't load your connections. Please retry.");
+    expect(submit).toBeDisabled();
+    expect(telegram).not.toHaveBeenCalled();
+    expect(authorizer).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalled();
+    get.mockImplementation(previousGet);
+    await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(submit).toBeEnabled());
+    expect(token).toHaveValue(telegramToken);
+    await userEvent.click(submit);
+    await screen.findByRole("heading", { name: "Almost there" });
+    expect(post).toHaveBeenCalledWith(
+      AEVATAR_CHANNELS_PATH,
+      expect.objectContaining({
+        service_ids: ["workspace-service", "ornn-service", "llm-service"],
+      }),
+    );
   });
   it.each(["en", "zh-CN"])(
     "blocks invalid tokens, shows localized feedback and accepts correction in %s",

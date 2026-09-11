@@ -10,6 +10,11 @@ import {
 export const AEVATAR_CHANNELS_PATH =
   "/proxy/s/aevatar/api/channels/registrations";
 export const AEVATAR_WEBHOOK_BASE_URL = AEVATAR_ORIGIN;
+export const NYXBOT_CHANNEL_SERVICE_SLUGS = [
+  "api-google-workspace",
+  "ornn-api",
+  "chrono-llm-public",
+] as const;
 
 const telegramIdentitySchema = z.object({
   ok: z.literal(true),
@@ -102,6 +107,7 @@ export async function getTelegramBotName(botToken: string): Promise<string> {
 
 export async function registerNyxbotTelegram(
   botToken: string,
+  serviceIds: readonly string[] = [],
 ): Promise<NyxbotChannelRegistration> {
   const token = botToken.trim();
   const botName = await getTelegramBotName(token);
@@ -116,6 +122,7 @@ export async function registerNyxbotTelegram(
         webhook_base_url: AEVATAR_WEBHOOK_BASE_URL,
         bot_token: token,
         label: botLabel(botName),
+        service_ids: [...new Set(serviceIds)],
       },
       preserveSessionOn401: true,
       signal: AbortSignal.timeout(60_000),

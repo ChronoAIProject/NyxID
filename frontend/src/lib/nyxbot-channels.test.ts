@@ -74,10 +74,26 @@ describe("Nyxbot Telegram registration", () => {
         bot_token: token,
         label: "My_Shop_Bot_nyxid_bot",
         webhook_base_url: AEVATAR_WEBHOOK_BASE_URL,
+        service_ids: [],
       },
       preserveSessionOn401: true,
       signal: expect.any(AbortSignal),
     });
+  });
+  it("passes the requested active service IDs and removes duplicates", async () => {
+    await registerNyxbotTelegram(token, [
+      "workspace-service",
+      "ornn-service",
+      "workspace-service",
+    ]);
+    expect(request).toHaveBeenCalledWith(
+      AEVATAR_CHANNELS_PATH,
+      expect.objectContaining({
+        body: expect.objectContaining({
+          service_ids: ["workspace-service", "ornn-service"],
+        }),
+      }),
+    );
   });
   it("does not register while Telegram verification is still pending", async () => {
     let resolveIdentity: ((response: Response) => void) | undefined;
