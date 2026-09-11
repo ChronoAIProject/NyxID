@@ -47,6 +47,8 @@ const CHANNEL_AVAILABILITY: Record<NyxbotChannel, boolean> = {
 
 export function ChannelStep({
   channel: preferredChannel,
+  connectedUrl,
+  isConnected = false,
   referral,
   onSelect,
   onBack,
@@ -54,6 +56,8 @@ export function ChannelStep({
   onSpendingCap,
 }: {
   readonly channel: NyxbotChannel | null;
+  readonly connectedUrl?: string | null;
+  readonly isConnected?: boolean;
   readonly referral?: NyxbotChannel;
   readonly onSelect: (channel: NyxbotChannel) => void;
   readonly onBack: () => void;
@@ -67,6 +71,12 @@ export function ChannelStep({
       : null;
   const [showToken, setShowToken] = useState(false);
   const [needsConsent, setNeedsConsent] = useState(false);
+  const [connectedUrlState, setConnectedUrl] = useState<string | null>(
+    connectedUrl ?? null,
+  );
+  const [connectedState, setConnectedState] = useState(
+    isConnected || Boolean(connectedUrl),
+  );
   const submitting = useRef(false);
   const createBot = useRegisterNyxbotTelegram();
   const userServices = useUserServices();
@@ -102,6 +112,8 @@ export function ChannelStep({
       });
       form.reset();
       createBot.reset();
+      setConnectedUrl(result.telegram_url ?? null);
+      setConnectedState(true);
       onConnected(result);
     } catch (error) {
       setNeedsConsent(
@@ -117,6 +129,40 @@ export function ChannelStep({
     } finally {
       submitting.current = false;
     }
+  }
+  if (connectedState) {
+    return (
+      <OnboardingShell
+        title={t("channelConnectedTitle")}
+        subtitle={t("channelConnectedSubtitle")}
+        step={3}
+        variant="setup"
+        actions={
+          <Button type="button" className="nb-secondary" onClick={onBack}>
+            <ArrowLeft size={18} aria-hidden="true" />
+            {t("back")}
+          </Button>
+        }
+      >
+        <OnboardingNotice>{t("channelConnected")}</OnboardingNotice>
+        {connectedUrlState ? (
+          <Button className="nb-primary nb-full" asChild>
+            <a
+              href={connectedUrlState}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <ExternalLink size={16} aria-hidden="true" />
+              {t("openTelegram")}
+            </a>
+          </Button>
+        ) : (
+          <OnboardingNotice error>
+            {t("telegramLinkUnavailable")}
+          </OnboardingNotice>
+        )}
+      </OnboardingShell>
+    );
   }
   return (
     <OnboardingShell

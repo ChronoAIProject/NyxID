@@ -140,6 +140,7 @@ describe("Nyxbot authorization boundaries", () => {
     } as never);
     expect(readNyxbotProgress("a")).toEqual({
       channel: "telegram",
+      channelUrl: null,
       googleKeyId: "g",
       botId: "b",
       registrationId: "aevatar-b",

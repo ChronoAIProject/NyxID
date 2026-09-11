@@ -24,7 +24,6 @@ import { DataSourceStep } from "@/features/nyxbot-onboarding/data-source-step";
 import { SignInStep } from "@/features/nyxbot-onboarding/sign-in-step";
 import { ChannelStep } from "@/features/nyxbot-onboarding/channel-step";
 import { SpendingCapStep } from "@/features/nyxbot-onboarding/spending-cap-step";
-import { LinkChannelStep } from "@/features/nyxbot-onboarding/link-channel-step";
 import "@/features/nyxbot-onboarding/onboarding.css";
 
 type StepNavigation = (
@@ -76,12 +75,7 @@ function ConnectedDataSource({
 
   // An explicit source URL stays on this step, including after refresh or Back.
   if (sourceReady && callbackStatus)
-    return (
-      <StepRedirect
-        step={progress.botId ? "link" : "channel"}
-        onNavigate={onNavigate}
-      />
-    );
+    return <StepRedirect step="channel" onNavigate={onNavigate} />;
   return (
     <DataSourceStep
       accountName={accountName}
@@ -94,7 +88,7 @@ function ConnectedDataSource({
         (!sourceReady && !flow.googleAvailable)
       }
       onConnect={() => {
-        if (sourceReady) onNavigate(progress.botId ? "link" : "channel");
+        if (sourceReady) onNavigate("channel");
         else flow.connectGoogle.mutate();
       }}
       onBack={() => onNavigate("account")}
@@ -184,23 +178,14 @@ function ConnectedOnboarding({
       />
     );
   if (step === "link")
-    return progress.botId ? (
-      <LinkChannelStep
-        botId={progress.botId}
-        registrationId={progress.registrationId}
-        onBack={(missing) => {
-          if (missing) updateProgress({ botId: null, registrationId: null });
-          onNavigate("channel");
-        }}
-      />
-    ) : (
-      <StepRedirect step="channel" onNavigate={onNavigate} />
-    );
+    return <StepRedirect step="channel" onNavigate={onNavigate} />;
   if (showSpendingCap)
     return <SpendingCapStep onBack={() => setShowSpendingCap(false)} />;
   return (
     <ChannelStep
       channel={progress.channel}
+      connectedUrl={progress.channelUrl}
+      isConnected={Boolean(progress.botId)}
       referral={referral}
       onSelect={(channel) => updateProgress({ channel })}
       onBack={() => onNavigate("source")}
@@ -209,8 +194,8 @@ function ConnectedOnboarding({
         updateProgress({
           botId: registration.nyx_channel_bot_id,
           registrationId: registration.registration_id,
+          channelUrl: registration.telegram_url ?? null,
         });
-        onNavigate("link");
       }}
     />
   );

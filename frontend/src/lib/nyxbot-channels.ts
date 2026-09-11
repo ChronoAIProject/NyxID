@@ -22,6 +22,7 @@ const telegramIdentitySchema = z.object({
     id: z.number().int().positive(),
     is_bot: z.literal(true),
     first_name: z.string().trim().min(1).max(128),
+    username: z.string().trim().min(1).max(64).optional(),
   }),
 });
 
@@ -32,6 +33,9 @@ const registrationSchema = z.object({
   nyx_channel_bot_id: z.string().min(1).max(128),
 });
 export type NyxbotChannelRegistration = z.infer<typeof registrationSchema>;
+export type NyxbotChannelRegistrationResult = NyxbotChannelRegistration & {
+  readonly telegram_url?: string;
+};
 
 const registrationStatusSchema = z.object({
   registration_id: z.string().min(1),
@@ -67,7 +71,7 @@ function botLabel(name: string): string {
   return `${prefix}${suffix}`;
 }
 
-export async function getTelegramBotName(botToken: string): Promise<string> {
+async function getTelegramBotIdentity(botToken: string) {
   if (!/^[0-9]+:[A-Za-z0-9_-]+$/.test(botToken))
     throw new NyxbotChannelError("tokenRejected");
   try {
@@ -96,7 +100,7 @@ export async function getTelegramBotName(botToken: string): Promise<string> {
       throw new NyxbotChannelError("tokenRejected");
     const result = telegramIdentitySchema.safeParse(payload);
     if (!result.success) throw new NyxbotChannelError("telegramUnavailable");
-    return result.data.result.first_name;
+    return result.data.result;
   } catch (error) {
     // Fetch failures may include the credential-bearing Telegram URL. Never retain them.
     throw error instanceof NyxbotChannelError
@@ -105,12 +109,18 @@ export async function getTelegramBotName(botToken: string): Promise<string> {
   }
 }
 
+export async function getTelegramBotName(botToken: string): Promise<string> {
+  const identity = await getTelegramBotIdentity(botToken);
+  return identity.first_name;
+}
+
 export async function registerNyxbotTelegram(
   botToken: string,
   serviceIds: readonly string[] = [],
-): Promise<NyxbotChannelRegistration> {
+): Promise<NyxbotChannelRegistrationResult> {
   const token = botToken.trim();
-  const botName = await getTelegramBotName(token);
+  const identity = await getTelegramBotIdentity(token);
+  const botName = identity.first_name;
   try {
     // Aevatar owns bot creation and relay provisioning; do not create a second NyxID bot.
     const authorization = await getAevatarAuthorization();
@@ -127,7 +137,13 @@ export async function registerNyxbotTelegram(
       preserveSessionOn401: true,
       signal: AbortSignal.timeout(60_000),
     });
-    return registrationSchema.parse(response);
+    const registration = registrationSchema.parse(response);
+    return {
+      ...registration,
+      ...(identity.username
+        ? { telegram_url: `https://t.me/${identity.username}` }
+        : {}),
+    };
   } catch (error) {
     if (error instanceof AevatarAuthError)
       throw new NyxbotChannelError(error.code);

@@ -27,7 +27,12 @@ vi.mock("@/lib/api-client", async (importOriginal) => ({
 const token = `123456:${"aB_9-".repeat(7)}`;
 const identity = {
   ok: true,
-  result: { id: 123456, is_bot: true, first_name: " My Shop Bot " },
+  result: {
+    id: 123456,
+    is_bot: true,
+    first_name: " My Shop Bot ",
+    username: "my_shop_bot",
+  },
 };
 const receipt = {
   status: "accepted",
@@ -49,9 +54,10 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe("Nyxbot Telegram registration", () => {
   it("gets the bot name before sending the exact registration fields to Aevatar", async () => {
-    await expect(registerNyxbotTelegram(`  ${token}  `)).resolves.toEqual(
-      receipt,
-    );
+    await expect(registerNyxbotTelegram(`  ${token}  `)).resolves.toEqual({
+      ...receipt,
+      telegram_url: "https://t.me/my_shop_bot",
+    });
     expect(telegram).toHaveBeenCalledWith(
       `https://api.telegram.org/bot${token}/getMe`,
       expect.objectContaining({

@@ -24,6 +24,7 @@ export type NyxbotChannel = "telegram" | "whatsapp";
 
 export const nyxbotProgressSchema = z.object({
   channel: z.enum(["telegram", "whatsapp"]).nullable().default(null),
+  channelUrl: z.string().url().nullable().default(null),
   googleKeyId: z.string().max(128).nullable().default(null),
   botId: z.string().max(128).nullable().default(null),
   registrationId: z.string().max(128).nullable().default(null),
