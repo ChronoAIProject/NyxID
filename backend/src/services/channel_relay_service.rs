@@ -1105,6 +1105,7 @@ mod tests {
             port: 0,
             base_url: "http://localhost".to_string(),
             frontend_url: "http://localhost".to_string(),
+            oauth_return_routes: None,
             cors_allowed_origins: vec![],
             csrf_trusted_origins: vec![],
             database_url: String::new(),

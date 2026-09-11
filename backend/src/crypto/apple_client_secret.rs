@@ -126,6 +126,7 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             port: 3001,
             base_url: "https://auth.example.com".to_string(),
             frontend_url: "https://app.example.com".to_string(),
+            oauth_return_routes: None,
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
             database_max_connections: 10,
             environment: "test".to_string(),

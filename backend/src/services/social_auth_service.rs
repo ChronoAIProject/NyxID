@@ -768,6 +768,7 @@ mod tests {
             port: 3001,
             base_url: "http://localhost:3001".to_string(),
             frontend_url: "http://localhost:3000".to_string(),
+            oauth_return_routes: None,
             database_url: "mongodb://localhost:27017/nyxid".to_string(),
             database_max_connections: 10,
             environment: "development".to_string(),

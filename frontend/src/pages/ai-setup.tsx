@@ -24,6 +24,8 @@ import { Copy, Plus, Shield } from "lucide-react";
 import { BrainIcon } from "@/components/icons/empty-state";
 import { useDeveloperApps } from "@/hooks/use-developer-apps";
 import { usePublicConfig } from "@/hooks/use-public-config";
+import { useAuthStore } from "@/stores/auth-store";
+import { ConfiguredOAuthConnect } from "@/components/shared/configured-oauth-connect";
 import {
   AI_TOOLS,
   AI_TOOL_SKILL_INFO,
@@ -214,6 +216,7 @@ function AiSkillSetupCard({
 
 
 export function AiSetupPage() {
+  const user = useAuthStore((state) => state.user);
   const { data: appsData, isLoading: appsLoading } = useDeveloperApps();
   const { data: config, isLoading: configLoading } = usePublicConfig();
 
@@ -240,7 +243,7 @@ export function AiSetupPage() {
     });
   }
 
-  const clients = appsData?.clients ?? [];
+  const clients = useMemo(() => appsData?.clients ?? [], [appsData]);
   const mcpUrl = config?.mcp_url ?? `${window.location.origin}/mcp`;
   const baseUrl = mcpUrl.replace(/\/mcp$/, "");
 
@@ -288,6 +291,15 @@ export function AiSetupPage() {
 
   return (
     <div className="space-y-8">
+      {user && (
+        <ConfiguredOAuthConnect
+          key={user.id}
+          userId={user.id}
+          serviceSlug="api-google"
+          serviceName="Google"
+          returnPage="onboarding"
+        />
+      )}
       <div>
         <h2 className="text-[28px] font-bold leading-none tracking-tight" style={{ letterSpacing: "-0.03em" }}>
           AI Setup Guide

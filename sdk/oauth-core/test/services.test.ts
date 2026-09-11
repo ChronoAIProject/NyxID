@@ -30,6 +30,31 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("NyxServicesClient connect links", () => {
+  it("sends a configured page name and exposes the resolved callback", async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      jsonResponse({
+        id: "link-1",
+        connect_url: "https://app.example/connect/secret",
+        expires_at: "2026-08-05T12:00:00Z",
+        callback_url: "https://app.example/onboarding",
+      }),
+    );
+    const client = new NyxServicesClient({
+      baseUrl: "https://api.example",
+      auth: { accessToken: "test" },
+      fetchFn,
+    });
+    const created = await client.connectLinks.create({
+      serviceSlug: "api-google",
+      returnPage: "onboarding",
+    });
+    expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body))).toEqual({
+      service_slug: "api-google",
+      return_page: "onboarding",
+    });
+    expect(created.callback_url).toBe("https://app.example/onboarding");
+  });
+
   it("creates a connect link with the backend wire field names", async () => {
     const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
       jsonResponse({

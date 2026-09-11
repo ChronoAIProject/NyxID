@@ -1,0 +1,13 @@
+{
+  "default_url": "https://nyx.chrono-ai.fun/dashboard",
+  "services": {
+    "api-google": {
+      "default_url": "https://nyx.chrono-ai.fun/keys",
+      "pages": {
+        "dashboard": "https://nyx.chrono-ai.fun/dashboard",
+        "onboarding": "https://nyx.chrono-ai.fun/ai-setup",
+        "local-poc": "http://127.0.0.1:3003/temp"
+      }
+    }
+  }
+}

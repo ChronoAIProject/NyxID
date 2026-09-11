@@ -1,5 +1,36 @@
 import { z } from "zod";
 
+export const createConnectLinkInputSchema = z.object({
+  service_slug: z.string().min(1),
+  return_page: z.string().regex(/^[a-z0-9_-]{1,64}$/),
+  expires_in: z.number().int().positive().optional(),
+});
+
+export const createConnectLinkResponseSchema = z.object({
+  id: z.string().uuid(),
+  connect_url: z.url({ protocol: /^https?$/ }),
+  expires_at: z.string().datetime({ offset: true }),
+  callback_url: z.url({ protocol: /^https?$/ }).optional(),
+});
+
+export type CreateConnectLinkInput = z.infer<
+  typeof createConnectLinkInputSchema
+>;
+export type CreateConnectLinkResponse = z.infer<
+  typeof createConnectLinkResponseSchema
+>;
+
+export const configuredConnectAttemptSchema =
+  createConnectLinkResponseSchema.extend({
+    service_slug: z.string().min(1),
+    context: z.string().min(1),
+    return_page: z.string().min(1),
+  });
+
+export type ConfiguredConnectAttempt = z.infer<
+  typeof configuredConnectAttemptSchema
+>;
+
 export const connectLinkStatusSchema = z.enum([
   "pending",
   "completed",
@@ -59,11 +90,7 @@ export const connectOAuthFormSchema = z.object({
 
 export const completeConnectLinkResponseSchema = z.object({
   id: z.string().uuid(),
-  status: z.enum([
-    "completed",
-    "oauth_required",
-    "device_code_required",
-  ]),
+  status: z.enum(["completed", "oauth_required", "device_code_required"]),
   service_slug: z.string().min(1),
   user_service_id: z.string().nullable().optional(),
   authorization_url: z.string().url().nullable().optional(),
@@ -135,7 +162,8 @@ export function validateConnectOAuthForm(
   }
   if (
     requiresClientCredentials &&
-    (values.oauth_client_id.length === 0 || values.oauth_client_secret.length === 0)
+    (values.oauth_client_id.length === 0 ||
+      values.oauth_client_secret.length === 0)
   ) {
     return "OAuth client ID and secret are required for this service";
   }

@@ -147,7 +147,12 @@ function Root() {
         router.getMatchedRoutes(path).foundRoute,
       );
       if (pathMatchesRoute && !isPublicPath(path)) {
-        router.navigate({ to: "/login" });
+        void router.navigate({
+          to: "/login",
+          search: {
+            return_to: `${window.location.origin}${path}${window.location.search}`,
+          },
+        });
       }
     }
   }, [ready, isAuthenticated]);

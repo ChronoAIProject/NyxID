@@ -73,7 +73,7 @@ export function ConnectLinkPage() {
 
   useEffect(() => {
     if (isLoading || isAuthenticated) return;
-    const returnTo = `${window.location.origin}/connect/${encodeURIComponent(token)}`;
+    const returnTo = `${window.location.origin}/connect/${encodeURIComponent(token)}${window.location.search}`;
     void navigate({ to: "/login", search: { return_to: returnTo } });
   }, [isAuthenticated, isLoading, navigate, token]);
 
@@ -320,7 +320,7 @@ export function ConnectLinkReturnPage() {
 
   useEffect(() => {
     if (isLoading || isAuthenticated) return;
-    const returnTo = `${window.location.origin}/connect/return/${linkId}`;
+    const returnTo = `${window.location.origin}/connect/return/${linkId}${window.location.search}`;
     void navigate({ to: "/login", search: { return_to: returnTo } });
   }, [isAuthenticated, isLoading, linkId, navigate]);
 

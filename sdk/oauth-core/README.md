@@ -52,6 +52,27 @@ const issues = await response.json();
 credential entry and provider consent remain browser-only; the SDK creates and
 polls the link but never handles the user's external credential.
 
+For a backend that configures named OAuth return pages, use `returnPage`:
+
+```ts
+const link = await nyx.connectLinks.create({
+  serviceSlug: "api-google",
+  returnPage: "onboarding",
+});
+if (!link.callback_url) {
+  await nyx.connectLinks.cancel(link.id);
+  throw new Error("The backend did not acknowledge the configured return page");
+}
+// Save link.id with this onboarding attempt before opening link.connect_url.
+```
+
+`returnPage` is mutually exclusive with `callbackUrl`. The backend resolves the
+page through `OAUTH_RETURN_ROUTES` and still validates the resulting URL against
+the authenticated app's redirect policy. `default` selects the service/global
+default. The create response's `callback_url` is the saved destination; terminal
+responses add `status` and `connect_link_id`. On return, match the expected link
+ID and read its authenticated status before advancing onboarding.
+
 ## Triggers and webhook verification
 
 ```ts

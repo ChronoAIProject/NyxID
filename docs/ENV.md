@@ -52,6 +52,21 @@ See [KMS_MIGRATION_GUIDE.md](KMS_MIGRATION_GUIDE.md) and [KMS_OPERATIONS_GUIDE.m
 | `BASE_URL` | `http://localhost:3001` | Backend base URL (used in JWT `aud`) |
 | `FRONTEND_URL` | `http://localhost:3000` | Frontend origin for CORS |
 | `ENVIRONMENT` | `development` | `development`, `staging`, `production` |
+| `OAUTH_RETURN_ROUTES` | Unset; named returns disabled | JSON mapping of catalog service slugs and page names to application return URLs for connect links. See below. |
+
+### Configured OAuth return pages
+
+Set `OAUTH_RETURN_ROUTES` on the **backend** to the JSON content illustrated in [oauth-return-routes.json](examples/oauth-return-routes.json). This setting selects the application page after connector setup; it does not change Google's registered provider callback, `BASE_URL`, CORS, or login cookies. The local Vite process cannot change production backend configuration.
+
+Call `POST /api/v1/connect-links` with `service_slug` and `return_page`. For example, `api-google` and `onboarding` select that service's configured onboarding destination. Resolution is exact page, service `default_url`, global `default_url`. The page name `default` requests the service/global default directly. An unknown syntactically valid page falls back; a nonexistent catalog service is still rejected. Service keys use catalog slugs, not provider names or user-instance slugs.
+
+Omitting `return_page` preserves the existing explicit `callback_url` behavior, including no callback when both are absent. Supplying both is invalid. Registered apps must still satisfy their existing redirect-URI matching policy for the resolved URL. A configured fallback is not an exemption from app registration.
+
+The JSON requires `default_url` and optionally `services`. Each service may define `default_url` and `pages`. URLs require HTTPS or explicitly configured HTTP loopback destinations (`localhost`, `127.0.0.1`, or `[::1]`). Userinfo, fragments, whitespace, controls, backslashes and unsupported schemes are rejected. Names are 1-64 lowercase ASCII letters, digits, hyphens or underscores. `default` is reserved and cannot appear in `pages`. Unknown fields, duplicate map keys, invalid URLs, and oversized configuration fail startup. Limits are 65,536 bytes of JSON, 128 services, 64 pages per service, and 2,048 bytes per URL.
+
+NyxID stores the resolved destination on the link. Configuration changes apply to newly created links; cancel an existing request if its stored destination should no longer be used. The create response acknowledges the saved destination as `callback_url`, without terminal query parameters. Callers selecting `return_page` must require this acknowledgement before opening setup, because an older replica can ignore an unknown request field. `/api/v1/public/config` advertises `oauth_return_routes_enabled: true` when configured. Release the backend and configure all replicas before enabling a caller that uses named returns.
+
+The existing hosted setup page can return to localhost after its hosted login. Skipping that intermediate hosted login requires a separate direct-return feature; `OAUTH_RETURN_ROUTES` does not transfer a session between origins. The full compatibility analysis is in [OAuth return configuration blast radius](OAUTH_RETURN_CONFIG_BLAST_RADIUS.md).
 
 ## Cluster coordination
 
