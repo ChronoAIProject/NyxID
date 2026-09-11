@@ -576,8 +576,9 @@ function DeleteBotDialog({
         <DialogHeader>
           <DialogTitle>Delete Channel Bot</DialogTitle>
           <DialogDescription>
-            This will permanently delete this bot and all its conversation
-            routes. This action cannot be undone.
+            This deletes the NyxID connection and its conversation routes.
+            The bot remains on the messaging platform. Reconnecting requires
+            assigning its agents again.
             {deletionNote && ` ${deletionNote}`}
           </DialogDescription>
         </DialogHeader>
@@ -659,6 +660,13 @@ function LarkPermissionSetupSection({
   );
 }
 
+function TelegramNewSetupSection({ bot }: { readonly bot: ChannelBotDetail }) {
+  return <DetailSection title="Telegram connection">
+    <DetailRow label="Webhook" value={bot.webhook_registered ? "Connected" : "Setup pending"} />
+    <p className="p-4 text-xs text-muted-foreground">{bot.status === "suspended" ? "Telegram reported a management change. Messages and replies are stopped. To keep this bot, delete this NyxID connection and reconnect using the regular Telegram option with its current token. Deleting the connection removes its NyxID routes; recreate the agent assignments afterward. You can also create a different bot with Telegram New." : "NyxID manages this bot's token and webhook. Assign an agent and send the bot a test message."}</p>
+    {bot.status === "pending" && <div className="p-4"><Button variant="outline" asChild><a href="/channel-bots?connect=telegram-new">Continue Telegram setup</a></Button></div>}
+  </DetailSection>;
+}
 
 function EditVerificationSection({
   bot,
@@ -1027,6 +1035,7 @@ export function ChannelBotDetailPage() {
         </DetailSection>
       )}
       {bot.permission_setup_url && <LarkPermissionSetupSection bot={bot} />}
+      {bot.platform === "telegram-new" && <TelegramNewSetupSection bot={bot} />}
       {(() => {
         const flow = CHANNEL_PLATFORMS[bot.platform].managedFlow;
         const ManagedDetail = flow ? MANAGED_FLOW_COMPONENTS[flow].Detail : undefined;

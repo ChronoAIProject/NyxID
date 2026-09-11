@@ -569,7 +569,7 @@ async fn oauth_start_uses_shared_client_pkce_popup_nonce_and_required_scopes() {
 }
 
 #[tokio::test]
-async fn admin_lists_both_providers_and_updates_only_the_shared_provider_config() {
+async fn admin_lists_all_providers_and_updates_only_the_shared_provider_config() {
     use crate::handlers::{admin_platform_credentials as admin, channel_managed};
     let (state, adapter, _, owner, _) = fixture().await;
     super::role_service::seed_system_roles(&state.db)
@@ -594,7 +594,7 @@ async fn admin_lists_both_providers_and_updates_only_the_shared_provider_config(
         .unwrap();
     assert_eq!(
         list.iter().map(|p| p.provider).collect::<Vec<_>>(),
-        ["meta", "x"]
+        ["meta", "telegram-new", "x"]
     );
     let (_, Json(updated)) = admin::update(
         State(state.clone()),
@@ -729,6 +729,7 @@ async fn reconnect_requires_same_identity_and_fences_stale_failure() {
     assert_eq!(current.poll_cursor.as_deref(), Some("100"));
     channel_bot_service::delete_bot(
         &state.db,
+        &state.config,
         &state.http_client,
         &state.encryption_keys,
         &adapter,

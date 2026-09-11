@@ -95,6 +95,7 @@ pub mod social_auth;
 pub mod ssh_exec;
 pub mod ssh_tunnel;
 pub mod ssh_web_terminal;
+pub mod telegram_new;
 pub mod trigger_webhooks;
 pub mod triggers;
 pub mod user_api_keys_external;

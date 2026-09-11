@@ -843,6 +843,7 @@ pub async fn delete_bot(
 
     let managed_webhook_cleanup = channel_bot_service::delete_bot(
         &state.db,
+        &state.config,
         &state.http_client,
         &state.encryption_keys,
         adapter.as_ref(),
@@ -884,6 +885,19 @@ pub async fn verify_bot(
 ) -> AppResult<Json<VerifyBotResponse>> {
     let actor = auth_user.user_id.to_string();
     let (_owner_id, bot) = resolve_bot_owner_for_write(&state, &actor, &bot_id).await?;
+    if bot.platform == "telegram-new" {
+        if !bot.is_active || bot.status == "suspended" {
+            return Err(AppError::Conflict(
+                "This Telegram bot requires fresh approval; verification cannot reactivate it."
+                    .into(),
+            ));
+        }
+        if bot.status != "active" {
+            return Err(AppError::Conflict(
+                "Continue the Telegram New creation request to finish setting up this bot.".into(),
+            ));
+        }
+    }
     let adapter = resolve_adapter(&bot.platform, &state.token_exchange_cache)?;
 
     // Decrypt the token and verify it is still valid with the platform
@@ -922,7 +936,7 @@ pub async fn verify_bot(
     ensure_verify_material_present(&bot, adapter.as_ref())?;
 
     // Some subscription protocols bind the dashboard to the original secret.
-    if adapter.registration().preserve_subscription_on_verify {
+    if adapter.registration().preserve_subscription_on_verify || bot.platform == "telegram-new" {
         return Ok(Json(VerifyBotResponse {
             id: bot.id,
             status: bot.status,

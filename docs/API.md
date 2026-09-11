@@ -50,6 +50,7 @@ This document describes every HTTP endpoint exposed by the NyxID backend. All en
   - [Notification Settings](#notification-settings)
   - [Device Token Management](#device-token-management)
   - [Approval Management](#approval-management)
+  - [Telegram New Channel Creation](#telegram-new-channel-creation)
   - [Webhooks](#webhooks)
 
 ---
@@ -7806,6 +7807,26 @@ Removes the per-service approval override, reverting to the global `approval_req
 curl -X DELETE -H "Authorization: Bearer $TOKEN" \
   http://localhost:3001/api/v1/approvals/service-configs/a1b2c3d4-e5f6-7890-abcd-ef1234567890
 ```
+
+---
+
+## Telegram New Channel Creation
+
+Telegram New is the separate `telegram-new` channel option. The existing `telegram` registration API and token-based setup remain available. See [Telegram New](TELEGRAM_NEW.md#api-and-storage) for request/response fields, status transitions, recovery rules, and administrator setup.
+
+Routes below are relative to `/api/v1`. Creation routes require an authenticated person; API keys, service accounts, relay tokens, and delegated access are rejected. Requests are bound to the initiating person and destination. Connecting requires current destination write access plus the exact bot ID and revision approved in Telegram.
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| GET | `/channel-bots/telegram-new` | Read availability and the current creation request |
+| POST | `/channel-bots/telegram-new` | Prepare a request with `{label, target_org_id?}` |
+| GET | `/channel-bots/telegram-new/requests/{id}` | Read the saved request |
+| POST | `/channel-bots/telegram-new/requests/{id}/launch` | Issue a fresh Telegram launch link |
+| DELETE | `/channel-bots/telegram-new/requests/{id}` | Cancel before provisioning begins |
+| POST | `/channel-bots/telegram-new/requests/{id}/connect` | Confirm `{telegram_bot_id, revision}` and connect or retry |
+| POST | `/webhooks/channel/telegram-new/manager` | Receive updates authenticated by the configured manager webhook secret |
+
+The connect body uses a decimal string for `telegram_bot_id` and an integer for `revision`, for example `{"telegram_bot_id":"900","revision":6}`. Manager credentials use the existing admin platform-credentials routes with provider `telegram-new`. Neither manager nor child bot tokens are returned to customers.
 
 ---
 
