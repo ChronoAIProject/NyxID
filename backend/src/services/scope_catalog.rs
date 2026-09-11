@@ -100,19 +100,13 @@ pub fn removal_capability(slug: &str) -> ScopeRemoval {
 ///
 /// Deliberately NOT derived from the display-oriented `sensitive` flags below:
 /// Google's verification classification is a separate, manually maintained
-/// decision. Google app configuration and verification must cover the scopes
-/// below before deploying shared-app data authorization.
+/// decision. Google stays identity-only until the Phase 2 verification pass.
 pub fn platform_scope_allowlist(slug: &str) -> Option<&'static [&'static str]> {
     match slug {
-        // Nyxbot asks for selected Drive files and Calendar access explicitly.
-        // Defaults stay identity-only; these scopes are requested at consent.
-        "google" => Some(&[
-            "openid",
-            "email",
-            "profile",
-            "https://www.googleapis.com/auth/drive.file",
-            "https://www.googleapis.com/auth/calendar",
-        ]),
+        // Identity only until aelf completes Google app verification; every
+        // useful Google API scope (Drive/Gmail/Sheets/Calendar) is sensitive
+        // or restricted and gated by Google review -> BYO for now.
+        "google" => Some(&["openid", "email", "profile"]),
         // Curated-broad: common recoverable read + authoring capabilities are
         // one-click. Excluded (-> BYO): `write:org` (alters org membership /
         // teams) and `delete_repo` (irreversible). Admin/hook/key/codespace/
@@ -1117,29 +1111,15 @@ mod tests {
     }
 
     #[test]
-    fn platform_allowlist_covers_nyxbot_google_consent() {
-        let google = platform_scope_allowlist("google").unwrap();
-        for scope in [
-            "https://www.googleapis.com/auth/drive.file",
-            "https://www.googleapis.com/auth/calendar",
-        ] {
-            assert!(
-                google.contains(&scope),
-                "missing Nyxbot consent scope {scope}"
-            );
-        }
-    }
-
-    #[test]
-    fn platform_allowlist_excludes_unrequested_google_scopes() {
-        // Adding Nyxbot consent must not open full Drive, Gmail or Sheets.
+    fn platform_allowlist_excludes_google_sensitive_scopes() {
+        // Phase 1 launches unverified: no Drive/Gmail/Sheets-class scopes may
+        // ride the shared platform app until the Google verification pass.
         let google = platform_scope_allowlist("google").unwrap();
         for s in [
             "https://www.googleapis.com/auth/drive",
             "https://www.googleapis.com/auth/drive.readonly",
             "https://www.googleapis.com/auth/gmail.readonly",
             "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/some.future.scope",
         ] {
             assert!(
                 !google.contains(&s),
