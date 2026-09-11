@@ -185,7 +185,6 @@ function ConnectedOnboarding({
     <ChannelStep
       channel={progress.channel}
       connectedUrl={progress.channelUrl}
-      isConnected={Boolean(progress.botId)}
       referral={referral}
       onSelect={(channel) => updateProgress({ channel })}
       onBack={() => onNavigate("source")}

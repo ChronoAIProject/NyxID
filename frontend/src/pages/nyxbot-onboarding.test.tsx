@@ -798,7 +798,7 @@ describe("Nyxbot onboarding", () => {
     expect(token).toHaveAttribute("type", "password");
     await userEvent.type(token, `  ${telegramToken}  `);
     await userEvent.click(submit);
-    await screen.findByRole("heading", { name: "Channel connected" });
+    await screen.findByRole("heading", { name: "Connect a customer channel" });
     expect(router.state.location.search.step).toBe("channel");
     expect(post).toHaveBeenCalledWith(AEVATAR_CHANNELS_PATH, {
       platform: "telegram",
@@ -861,7 +861,7 @@ describe("Nyxbot onboarding", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Connect channel" }),
     );
-    await screen.findByRole("heading", { name: "Channel connected" });
+    await screen.findByRole("heading", { name: "Connect a customer channel" });
     expect(post).toHaveBeenCalledWith(
       AEVATAR_CHANNELS_PATH,
       expect.objectContaining({
@@ -884,7 +884,9 @@ describe("Nyxbot onboarding", () => {
       await userEvent.click(
         screen.getByRole("button", { name: "Connect channel" }),
       );
-      await screen.findByRole("heading", { name: "Channel connected" });
+      await screen.findByRole("heading", {
+        name: "Connect a customer channel",
+      });
       expect(post).toHaveBeenCalledWith(
         AEVATAR_CHANNELS_PATH,
         expect.objectContaining({ service_ids: availableIds }),
@@ -919,7 +921,7 @@ describe("Nyxbot onboarding", () => {
     await waitFor(() => expect(submit).toBeEnabled());
     expect(token).toHaveValue(telegramToken);
     await userEvent.click(submit);
-    await screen.findByRole("heading", { name: "Channel connected" });
+    await screen.findByRole("heading", { name: "Connect a customer channel" });
     expect(post).toHaveBeenCalledWith(
       AEVATAR_CHANNELS_PATH,
       expect.objectContaining({
@@ -989,7 +991,7 @@ describe("Nyxbot onboarding", () => {
     });
     expect(post).toHaveBeenCalledTimes(1);
     await act(async () => resolveRegistration?.(registrationReceipt));
-    await screen.findByRole("heading", { name: "Channel connected" });
+    await screen.findByRole("heading", { name: "Connect a customer channel" });
   });
   it("offers first-time Aevatar consent and allows retry with the same bot token", async () => {
     authorizer.mockRejectedValueOnce(
@@ -1013,7 +1015,7 @@ describe("Nyxbot onboarding", () => {
     expect(submit).toBeEnabled();
     expect(auth.isAuthenticated).toBe(true);
     await userEvent.click(submit);
-    await screen.findByRole("heading", { name: "Channel connected" });
+    await screen.findByRole("heading", { name: "Connect a customer channel" });
     expect(post).toHaveBeenCalledTimes(1);
   });
   it("leaves the channel unselected for a direct visitor and ignores the disabled WhatsApp option", async () => {
@@ -1096,7 +1098,7 @@ describe("Nyxbot onboarding", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Connect channel" }),
     );
-    await screen.findByRole("heading", { name: "Channel connected" });
+    await screen.findByRole("heading", { name: "Connect a customer channel" });
     expect(post).toHaveBeenCalledTimes(1);
     expect(telegram).toHaveBeenCalledTimes(1);
   });
@@ -1295,7 +1297,7 @@ describe("Nyxbot onboarding", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Continue", exact: true }),
     );
-    await screen.findByRole("heading", { name: "Channel connected" });
+    await screen.findByRole("heading", { name: "Connect a customer channel" });
     expect(get).not.toHaveBeenCalledWith("/channel-bots/business-bot");
     expect(post).not.toHaveBeenCalled();
   });
