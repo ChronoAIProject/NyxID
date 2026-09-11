@@ -703,17 +703,6 @@
   height: 32px;
   margin: 3px;
 }
-.nb-apple {
-  background: #202124;
-  color: white;
-  border-radius: 7px;
-  padding: 5px;
-}
-.nb-github {
-  color: white;
-  background: #202124;
-  border-radius: 7px;
-}
 .nb-facebook {
   color: #0866ff !important;
 }

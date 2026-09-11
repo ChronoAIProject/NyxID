@@ -314,7 +314,7 @@ describe("Nyxbot onboarding", () => {
     );
     await mount();
     await userEvent.click(
-      await screen.findByRole("button", { name: "Continue" }),
+      await screen.findByRole("button", { name: /^Continue$/ }),
     );
     await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
     expect(router.state.location.search.step).toBe("source");
@@ -420,7 +420,7 @@ describe("Nyxbot onboarding", () => {
     await waitFor(() => expect(client.isFetching()).toBe(0));
     for (const path of ["/keys", "/catalog/api-google", "/keys/google-1"])
       expect(get).toHaveBeenCalledWith(path);
-    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Continue$/ }));
     await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
     expect(router.state.location.search.step).toBe("source");
     await router.navigate({
@@ -607,7 +607,7 @@ describe("Nyxbot onboarding", () => {
     });
     await screen.findByText("Google Workspace connected");
     expect(router.state.location.search.step).toBe("source");
-    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Continue$/ }));
     await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
     expect(router.state.location.search.step).toBe("source");
     expect(post).not.toHaveBeenCalled();
@@ -697,7 +697,7 @@ describe("Nyxbot onboarding", () => {
       screen.getByRole("button", { name: "Continue as Avery" }),
     );
     await userEvent.click(
-      await screen.findByRole("button", { name: "Continue" }),
+      await screen.findByRole("button", { name: /^Continue$/ }),
     );
     await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
     expect(router.state.location.search.step).toBe("source");
@@ -1198,7 +1198,7 @@ describe("Nyxbot onboarding", () => {
       screen.getByRole("button", { name: "Continue as Avery" }),
     );
     await userEvent.click(
-      await screen.findByRole("button", { name: "Continue" }),
+      await screen.findByRole("button", { name: /^Continue$/ }),
     );
     await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
     expect(router.state.location.search.step).toBe("source");
@@ -1473,7 +1473,7 @@ describe("Nyxbot onboarding", () => {
     await screen.findByText("Google Workspace connected");
     expect(router.state.location.search.step).toBe("source");
     expect(get).not.toHaveBeenCalledWith("/channel-bots/business-bot");
-    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+    await userEvent.click(screen.getByRole("button", { name: /^Continue$/ }));
     await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
     expect(router.state.location.search.step).toBe("source");
     expect(get).not.toHaveBeenCalledWith("/channel-bots/business-bot");
@@ -1529,7 +1529,7 @@ describe("Nyxbot onboarding", () => {
     await screen.findByText("We couldn't load your connections. Please retry.");
     await userEvent.click(screen.getByRole("button", { name: "Retry" }));
     await userEvent.click(
-      await screen.findByRole("button", { name: "Continue" }),
+      await screen.findByRole("button", { name: /^Continue$/ }),
     );
     await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
     expect(router.state.location.search.step).toBe("source");
