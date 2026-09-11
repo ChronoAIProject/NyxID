@@ -153,7 +153,7 @@ const loginRoute = createRoute({
 });
 
 const nyxbotOnboardingRoute = createRoute({
-  path: "/onboarding",
+  path: "/nyxbot/onboarding",
   getParentRoute: () => rootRoute,
   validateSearch: (search: Record<string, unknown>) =>
     nyxbotSearchSchema.parse(search),
@@ -728,7 +728,17 @@ const apiKeyDetailRoute = createRoute({
 
 const channelBotsRoute = createRoute({
   path: "/channel-bots",
-  validateSearch: (search: Record<string, unknown>): { connect?: "whatsapp"; label?: string; target_org_id?: string } => ({ connect: search.connect === "whatsapp" ? "whatsapp" : undefined, label: typeof search.label === "string" ? search.label.slice(0, 128) : undefined, target_org_id: typeof search.target_org_id === "string" ? search.target_org_id : undefined }),
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { connect?: "whatsapp"; label?: string; target_org_id?: string } => ({
+    connect: search.connect === "whatsapp" ? "whatsapp" : undefined,
+    label:
+      typeof search.label === "string" ? search.label.slice(0, 128) : undefined,
+    target_org_id:
+      typeof search.target_org_id === "string"
+        ? search.target_org_id
+        : undefined,
+  }),
   getParentRoute: () => dashboardLayout,
   component: ChannelBotsPage,
 });

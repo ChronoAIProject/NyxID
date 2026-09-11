@@ -81,7 +81,7 @@ export function useNyxbotDataSource(
             ...GOOGLE_WORKSPACE_SCOPES,
           ]),
         ],
-        redirectPath: `/onboarding${params.size ? `?${params}` : ""}`,
+        redirectPath: `/nyxbot/onboarding${params.size ? `?${params}` : ""}`,
       });
       const url = validateHttpAuthorizationUrl(result.authorization_url);
       if (!url) throw new Error("Invalid Google authorization URL.");

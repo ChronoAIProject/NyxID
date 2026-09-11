@@ -217,14 +217,16 @@ export function NyxbotOnboardingPage() {
   const user = useAuthStore((s) => s.user);
   const authenticated = useAuthStore((s) => s.isAuthenticated);
   const authLoading = useAuthStore((s) => s.isLoading);
-  const search = nyxbotSearchSchema.parse(useSearch({ from: "/onboarding" }));
-  const navigate = useNavigate({ from: "/onboarding" });
+  const search = nyxbotSearchSchema.parse(
+    useSearch({ from: "/nyxbot/onboarding" }),
+  );
+  const navigate = useNavigate({ from: "/nyxbot/onboarding" });
   const callbackStatus = search.provider_status ?? search.status;
   const step = search.step ?? (callbackStatus ? "source" : "account");
   const onNavigate = useCallback<StepNavigation>(
     (nextStep, options) => {
       void navigate({
-        to: "/onboarding",
+        to: "/nyxbot/onboarding",
         search: {
           step: nextStep,
           ...(search.channel ? { channel: search.channel } : {}),
@@ -237,7 +239,7 @@ export function NyxbotOnboardingPage() {
     },
     [navigate, search.channel],
   );
-  const returnUrl = new URL("/onboarding", window.location.origin);
+  const returnUrl = new URL("/nyxbot/onboarding", window.location.origin);
   returnUrl.searchParams.set("step", "source");
   if (search.channel) returnUrl.searchParams.set("channel", search.channel);
   return (

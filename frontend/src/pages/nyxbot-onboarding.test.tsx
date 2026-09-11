@@ -114,7 +114,7 @@ function makeRouter() {
   const root = createRootRoute();
   const onboarding = createRoute({
     getParentRoute: () => root,
-    path: "/onboarding",
+    path: "/nyxbot/onboarding",
     validateSearch: (search) => nyxbotSearchSchema.parse(search),
     component: NyxbotOnboardingPage,
   });
@@ -163,7 +163,7 @@ beforeEach(async () => {
   window.history.replaceState(
     null,
     "",
-    "/onboarding?step=channel&channel=telegram",
+    "/nyxbot/onboarding?step=channel&channel=telegram",
   );
   auth.isAuthenticated = true;
   auth.isLoading = false;
@@ -260,8 +260,8 @@ function expectNoGoogleRequests() {
 
 describe("Nyxbot onboarding", () => {
   it.each([
-    "/onboarding?channel=telegram",
-    "/onboarding?step=unknown&channel=telegram",
+    "/nyxbot/onboarding?channel=telegram",
+    "/nyxbot/onboarding?step=unknown&channel=telegram",
   ])(
     "normalizes %s to the account URL without dropping the referral",
     async (path) => {
@@ -286,7 +286,7 @@ describe("Nyxbot onboarding", () => {
       window.history.replaceState(
         null,
         "",
-        `/onboarding?step=${step}&channel=telegram`,
+        `/nyxbot/onboarding?step=${step}&channel=telegram`,
       );
       sessionStorage.setItem(
         "nyxbot-onboarding:owner",
@@ -310,7 +310,7 @@ describe("Nyxbot onboarding", () => {
     window.history.replaceState(
       null,
       "",
-      "/onboarding?step=source&channel=telegram",
+      "/nyxbot/onboarding?step=source&channel=telegram",
     );
     await mount();
     await userEvent.click(
@@ -319,7 +319,7 @@ describe("Nyxbot onboarding", () => {
     await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
     expect(router.state.location.search.step).toBe("source");
     await router.navigate({
-      to: "/onboarding",
+      to: "/nyxbot/onboarding",
       search: { step: "channel", channel: "telegram" },
     });
     await toChannel();
@@ -354,7 +354,7 @@ describe("Nyxbot onboarding", () => {
       window.history.replaceState(
         null,
         "",
-        `/onboarding?step=${step}&channel=telegram`,
+        `/nyxbot/onboarding?step=${step}&channel=telegram`,
       );
       await mount();
       await screen.findByRole("heading", { name: "Sign in to NyxID" });
@@ -374,7 +374,7 @@ describe("Nyxbot onboarding", () => {
       window.history.replaceState(
         null,
         "",
-        `/onboarding?step=${step}&channel=telegram`,
+        `/nyxbot/onboarding?step=${step}&channel=telegram`,
       );
       sessionStorage.setItem(
         "nyxbot-onboarding:owner",
@@ -410,7 +410,7 @@ describe("Nyxbot onboarding", () => {
     },
   );
   it("unmounts data-source queries when continuing to channel and remounts them only on Back", async () => {
-    window.history.replaceState(null, "", "/onboarding?step=source");
+    window.history.replaceState(null, "", "/nyxbot/onboarding?step=source");
     sessionStorage.setItem(
       "nyxbot-onboarding:owner",
       JSON.stringify({ googleKeyId: "google-1", channel: "telegram" }),
@@ -424,7 +424,7 @@ describe("Nyxbot onboarding", () => {
     await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
     expect(router.state.location.search.step).toBe("source");
     await router.navigate({
-      to: "/onboarding",
+      to: "/nyxbot/onboarding",
       search: { step: "channel", channel: "telegram" },
     });
     await toChannel();
@@ -450,7 +450,7 @@ describe("Nyxbot onboarding", () => {
     window.history.replaceState(
       null,
       "",
-      "/onboarding?step=link&botId=forged&completed=true",
+      "/nyxbot/onboarding?step=link&botId=forged&completed=true",
     );
     await mount();
     await toChannel();
@@ -460,7 +460,7 @@ describe("Nyxbot onboarding", () => {
     expect(post).not.toHaveBeenCalled();
   });
   it("returns from link to channel and browser Back restores link without another registration", async () => {
-    window.history.replaceState(null, "", "/onboarding?step=link");
+    window.history.replaceState(null, "", "/nyxbot/onboarding?step=link");
     sessionStorage.setItem("nyxbot-onboarding:owner", JSON.stringify({}));
     await mount();
     await screen.findByRole("heading", { name: "Connect a customer channel" });
@@ -496,7 +496,7 @@ describe("Nyxbot onboarding", () => {
   it.each(["/keys", "/catalog/api-google"])(
     "does not render a provisional step while %s is loading",
     async (path) => {
-      window.history.replaceState(null, "", "/onboarding?step=source");
+      window.history.replaceState(null, "", "/nyxbot/onboarding?step=source");
       const previousGet = get.getMockImplementation()!;
       let resolveRequest: (() => void) | undefined;
       get.mockImplementation((requested: string) =>
@@ -534,9 +534,9 @@ describe("Nyxbot onboarding", () => {
     },
   );
   it.each([
-    "/onboarding?step=channel&provider_status=success",
-    "/onboarding?step=source&provider_status=success",
-    "/onboarding?provider_status=success",
+    "/nyxbot/onboarding?step=channel&provider_status=success",
+    "/nyxbot/onboarding?step=source&provider_status=success",
+    "/nyxbot/onboarding?provider_status=success",
   ])(
     "automatically advances from %s when Drive and Calendar are already authorized",
     async (path) => {
@@ -555,7 +555,7 @@ describe("Nyxbot onboarding", () => {
     window.history.replaceState(
       null,
       "",
-      "/onboarding?step=source&provider_status=success",
+      "/nyxbot/onboarding?step=source&provider_status=success",
     );
     sessionStorage.setItem(
       "nyxbot-onboarding:owner",
@@ -589,7 +589,7 @@ describe("Nyxbot onboarding", () => {
     expect(post).not.toHaveBeenCalled();
   });
   it("keeps the explicit source URL after permissions become effective until Continue", async () => {
-    window.history.replaceState(null, "", "/onboarding?step=source");
+    window.history.replaceState(null, "", "/nyxbot/onboarding?step=source");
     keys = [{ ...googleKey, status: "pending_auth", granted_scopes: [] }];
     sessionStorage.setItem(
       "nyxbot-onboarding:owner",
@@ -614,7 +614,11 @@ describe("Nyxbot onboarding", () => {
   });
   it("keeps a provider error on data source with sign-in preserved", async () => {
     keys = [];
-    window.history.replaceState(null, "", "/onboarding?provider_status=error");
+    window.history.replaceState(
+      null,
+      "",
+      "/nyxbot/onboarding?provider_status=error",
+    );
     await mount();
     await screen.findByText(
       /Google authorization was cancelled or could not be completed/,
@@ -626,7 +630,7 @@ describe("Nyxbot onboarding", () => {
     expect(post).not.toHaveBeenCalled();
   });
   it("keeps data source retryable when its grant check fails, without loading a saved channel", async () => {
-    window.history.replaceState(null, "", "/onboarding?step=source");
+    window.history.replaceState(null, "", "/nyxbot/onboarding?step=source");
     sessionStorage.setItem(
       "nyxbot-onboarding:owner",
       JSON.stringify({ botId: "business-bot", channel: "telegram" }),
@@ -645,7 +649,11 @@ describe("Nyxbot onboarding", () => {
     ).not.toBeInTheDocument();
   });
   it("starts with all account choices and enters data source only after explicit account continuation", async () => {
-    window.history.replaceState(null, "", "/onboarding?channel=telegram");
+    window.history.replaceState(
+      null,
+      "",
+      "/nyxbot/onboarding?channel=telegram",
+    );
     keys = [];
     await mount();
     await screen.findByRole("heading", { name: "Sign in to NyxID" });
@@ -683,7 +691,7 @@ describe("Nyxbot onboarding", () => {
     expect(redirect).not.toHaveBeenCalled();
   });
   it("returns to account from data source and keeps the account-data-channel order", async () => {
-    window.history.replaceState(null, "", "/onboarding");
+    window.history.replaceState(null, "", "/nyxbot/onboarding");
     await mount();
     await userEvent.click(
       screen.getByRole("button", { name: "Continue as Avery" }),
@@ -694,7 +702,7 @@ describe("Nyxbot onboarding", () => {
     await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
     expect(router.state.location.search.step).toBe("source");
     await router.navigate({
-      to: "/onboarding",
+      to: "/nyxbot/onboarding",
       search: { step: "channel", channel: "telegram" },
     });
     await toChannel();
@@ -720,7 +728,7 @@ describe("Nyxbot onboarding", () => {
     auth.isAuthenticated = false;
     await mount();
     await screen.findByRole("heading", { name: "Sign in to NyxID" });
-    const returnTo = `${window.location.origin}/onboarding?step=source&channel=telegram`;
+    const returnTo = `${window.location.origin}/nyxbot/onboarding?step=source&channel=telegram`;
     expect(
       screen.getByRole("button", { name: "Continue with the NyxID app" }),
     ).toHaveAttribute("data-return-to", returnTo);
@@ -756,7 +764,7 @@ describe("Nyxbot onboarding", () => {
       );
       expect(target.pathname).toBe(`/api/v1/auth/social/${id}`);
       expect(target.searchParams.get("return_to")).toBe(
-        `${window.location.origin}/onboarding?step=source&channel=telegram`,
+        `${window.location.origin}/nyxbot/onboarding?step=source&channel=telegram`,
       );
       expect(post).not.toHaveBeenCalled();
     },
@@ -931,7 +939,7 @@ describe("Nyxbot onboarding", () => {
     async (language) => {
       await nyxbotI18n.changeLanguage(language);
       const t = nyxbotI18n.t.bind(nyxbotI18n);
-      window.history.replaceState(null, "", "/onboarding?step=success");
+      window.history.replaceState(null, "", "/nyxbot/onboarding?step=success");
       sessionStorage.setItem(
         "nyxbot-onboarding:owner",
         JSON.stringify({
@@ -978,7 +986,7 @@ describe("Nyxbot onboarding", () => {
     window.history.replaceState(
       null,
       "",
-      "/onboarding?step=success&botId=forged&completed=true",
+      "/nyxbot/onboarding?step=success&botId=forged&completed=true",
     );
     sessionStorage.setItem(
       "nyxbot-onboarding:owner",
@@ -1184,7 +1192,7 @@ describe("Nyxbot onboarding", () => {
     expect(post).toHaveBeenCalledTimes(1);
   });
   it("leaves the channel unselected for a direct visitor and ignores the disabled WhatsApp option", async () => {
-    window.history.replaceState(null, "", "/onboarding");
+    window.history.replaceState(null, "", "/nyxbot/onboarding");
     await mount();
     await userEvent.click(
       screen.getByRole("button", { name: "Continue as Avery" }),
@@ -1195,7 +1203,7 @@ describe("Nyxbot onboarding", () => {
     await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
     expect(router.state.location.search.step).toBe("source");
     await router.navigate({
-      to: "/onboarding",
+      to: "/nyxbot/onboarding",
       search: { step: "channel", channel: "telegram" },
     });
     await toChannel();
@@ -1280,7 +1288,7 @@ describe("Nyxbot onboarding", () => {
         window.history.replaceState(
           null,
           "",
-          "/onboarding?step=channel&channel=whatsapp",
+          "/nyxbot/onboarding?step=channel&channel=whatsapp",
         );
       } else {
         sessionStorage.setItem(
@@ -1315,10 +1323,10 @@ describe("Nyxbot onboarding", () => {
     },
   );
   it.each([
-    "/onboarding?status=success",
-    "/onboarding?provider_status=success",
-    "/onboarding?step=source&provider_status=success",
-    "/onboarding?step=channel&provider_status=success",
+    "/nyxbot/onboarding?status=success",
+    "/nyxbot/onboarding?provider_status=success",
+    "/nyxbot/onboarding?step=source&provider_status=success",
+    "/nyxbot/onboarding?step=channel&provider_status=success",
   ])("checks real scopes after OAuth instead of trusting %s", async (path) => {
     keys = [{ ...googleKey, granted_scopes: ["openid", "email", "profile"] }];
     window.history.replaceState(null, "", path);
@@ -1344,7 +1352,7 @@ describe("Nyxbot onboarding", () => {
       ...GOOGLE_WORKSPACE_SCOPES,
     ]);
     expect(url.searchParams.get("redirect_path")).toBe(
-      "/onboarding?step=source",
+      "/nyxbot/onboarding?step=source",
     );
     expect(
       JSON.parse(sessionStorage.getItem("nyxbot-onboarding:owner")!)
@@ -1352,7 +1360,7 @@ describe("Nyxbot onboarding", () => {
     ).toBe("google-1");
   });
   it("requests Drive and Calendar consent on click without using catalog configuration as a grant prerequisite", async () => {
-    window.history.replaceState(null, "", "/onboarding?step=source");
+    window.history.replaceState(null, "", "/nyxbot/onboarding?step=source");
     keys = [];
     catalogResponse = {
       ...catalog,
@@ -1384,7 +1392,7 @@ describe("Nyxbot onboarding", () => {
     );
   });
   it("shows an initiation rejection and retries the same connection without claiming user cancellation or consent", async () => {
-    window.history.replaceState(null, "", "/onboarding?step=source");
+    window.history.replaceState(null, "", "/nyxbot/onboarding?step=source");
     keys = [];
     const message =
       "Requested scopes are not enabled for the shared Google OAuth app.";
@@ -1438,7 +1446,7 @@ describe("Nyxbot onboarding", () => {
     expect(post).toHaveBeenCalledTimes(1);
   });
   it("requires a Google OAuth provider route before starting consent", async () => {
-    window.history.replaceState(null, "", "/onboarding?step=source");
+    window.history.replaceState(null, "", "/nyxbot/onboarding?step=source");
     keys = [];
     catalogResponse = { ...catalog, provider_config_id: "" };
     await mount();
@@ -1451,7 +1459,7 @@ describe("Nyxbot onboarding", () => {
     expect(post).not.toHaveBeenCalled();
   });
   it("continues from account to data source before resuming a saved channel", async () => {
-    window.history.replaceState(null, "", "/onboarding");
+    window.history.replaceState(null, "", "/nyxbot/onboarding");
     sessionStorage.setItem(
       "nyxbot-onboarding:owner",
       JSON.stringify({ botId: "business-bot", channel: "telegram" }),
@@ -1494,7 +1502,7 @@ describe("Nyxbot onboarding", () => {
   });
 
   it("redirects legacy link URLs to the channel step", async () => {
-    window.history.replaceState(null, "", "/onboarding?step=link");
+    window.history.replaceState(null, "", "/nyxbot/onboarding?step=link");
     sessionStorage.setItem(
       "nyxbot-onboarding:owner",
       JSON.stringify({ channel: "telegram" }),
@@ -1506,7 +1514,7 @@ describe("Nyxbot onboarding", () => {
   });
 
   it("drops a deleted OAuth placeholder on retry instead of trapping the user", async () => {
-    window.history.replaceState(null, "", "/onboarding?step=source");
+    window.history.replaceState(null, "", "/nyxbot/onboarding?step=source");
     sessionStorage.setItem(
       "nyxbot-onboarding:owner",
       JSON.stringify({ googleKeyId: "deleted-key" }),
