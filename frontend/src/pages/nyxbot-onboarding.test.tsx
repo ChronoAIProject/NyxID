@@ -313,6 +313,12 @@ describe("Nyxbot onboarding", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: "Continue", exact: true }),
     );
+    await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
+    expect(router.state.location.search.step).toBe("source");
+    await router.navigate({
+      to: "/onboarding",
+      search: { step: "channel", channel: "telegram" },
+    });
     await toChannel();
     expect(router.state.location.search).toEqual({
       step: "channel",
@@ -333,7 +339,10 @@ describe("Nyxbot onboarding", () => {
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     await screen.findByRole("heading", { name: "Connect a data source" });
     expect(router.state.location.search.step).toBe("source");
-    expect(post).not.toHaveBeenCalled();
+    expect(post).toHaveBeenCalledWith(
+      "/keys",
+      expect.objectContaining({ service_slug: "api-google" }),
+    );
   });
   it.each(["source", "channel", "success", "link"])(
     "guards an unauthenticated %s URL",
@@ -411,6 +420,12 @@ describe("Nyxbot onboarding", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Continue", exact: true }),
     );
+    await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
+    expect(router.state.location.search.step).toBe("source");
+    await router.navigate({
+      to: "/onboarding",
+      search: { step: "channel", channel: "telegram" },
+    });
     await toChannel();
     get.mockClear();
     await act(async () => {
@@ -594,7 +609,8 @@ describe("Nyxbot onboarding", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Continue", exact: true }),
     );
-    await toChannel();
+    await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
+    expect(router.state.location.search.step).toBe("source");
     expect(post).not.toHaveBeenCalled();
   });
   it("keeps a provider error on data source with sign-in preserved", async () => {
@@ -676,13 +692,15 @@ describe("Nyxbot onboarding", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: "Continue", exact: true }),
     );
+    await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
+    expect(router.state.location.search.step).toBe("source");
+    await router.navigate({
+      to: "/onboarding",
+      search: { step: "channel", channel: "telegram" },
+    });
     await toChannel();
     await userEvent.click(screen.getByRole("button", { name: "Back" }));
     await screen.findByRole("heading", { name: "Connect a data source" });
-    await act(async () => {
-      await client.invalidateQueries({ queryKey: ["keys"] });
-    });
-    expect(screen.getByText("Google Workspace connected")).toBeVisible();
     expect(
       screen.queryByRole("heading", { name: "Connect a customer channel" }),
     ).not.toBeInTheDocument();
@@ -694,7 +712,10 @@ describe("Nyxbot onboarding", () => {
     expect(
       screen.getByRole("button", { name: "Continue with Google" }),
     ).toBeVisible();
-    expect(post).not.toHaveBeenCalled();
+    expect(post).toHaveBeenCalledWith(
+      "/keys",
+      expect.objectContaining({ service_slug: "api-google" }),
+    );
   });
   it("keeps an unauthenticated return on account and points QR and registration back to data source", async () => {
     auth.isAuthenticated = false;
@@ -1172,6 +1193,12 @@ describe("Nyxbot onboarding", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: "Continue", exact: true }),
     );
+    await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
+    expect(router.state.location.search.step).toBe("source");
+    await router.navigate({
+      to: "/onboarding",
+      search: { step: "channel", channel: "telegram" },
+    });
     await toChannel();
     expect(screen.getByRole("radio", { name: /Telegram/ })).not.toBeChecked();
     expect(screen.getByRole("radio", { name: /WhatsApp/ })).not.toBeChecked();
@@ -1442,9 +1469,15 @@ describe("Nyxbot onboarding", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Continue", exact: true }),
     );
-    await screen.findByRole("heading", { name: "Connect a customer channel" });
+    await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
+    expect(router.state.location.search.step).toBe("source");
     expect(get).not.toHaveBeenCalledWith("/channel-bots/business-bot");
-    expect(post).not.toHaveBeenCalled();
+    expect(post).toHaveBeenCalledWith(
+      "/keys",
+      expect.objectContaining({
+        service_slug: "api-google",
+      }),
+    );
   });
   it("updates channel content and step navigation with the feature's language", async () => {
     await mount();
@@ -1493,10 +1526,11 @@ describe("Nyxbot onboarding", () => {
     await userEvent.click(
       await screen.findByRole("button", { name: "Continue", exact: true }),
     );
-    await toChannel();
+    await waitFor(() => expect(redirect).toHaveBeenCalledTimes(1));
+    expect(router.state.location.search.step).toBe("source");
     expect(
       JSON.parse(sessionStorage.getItem("nyxbot-onboarding:owner")!)
         .googleKeyId,
-    ).toBeNull();
+    ).toBe("google-1");
   });
 });

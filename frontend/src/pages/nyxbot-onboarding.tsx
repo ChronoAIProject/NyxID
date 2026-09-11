@@ -89,8 +89,11 @@ function ConnectedDataSource({
         (!sourceReady && !flow.googleAvailable)
       }
       onConnect={() => {
-        if (sourceReady) onNavigate("channel");
-        else flow.connectGoogle.mutate();
+        // Always start the Google consent flow from this action. The button is
+        // the explicit request to authorize Drive and Calendar; an existing
+        // grant is only used to render the current status and must not bypass
+        // the provider authorization step.
+        flow.connectGoogle.mutate();
       }}
       onBack={() => onNavigate("account")}
     >
