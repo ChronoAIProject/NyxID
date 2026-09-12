@@ -204,7 +204,7 @@ fn resolve_scope_param(
 ///
 /// An empty `additional_scopes` slice is always allowed, so existing default
 /// behavior is preserved on every code path.
-fn ensure_additional_scopes_supported(
+pub(crate) fn ensure_additional_scopes_supported(
     provider: &ProviderConfig,
     additional_scopes: &[String],
 ) -> AppResult<()> {
