@@ -1990,7 +1990,9 @@ pub fn generate_tool_definitions(
     tools.push(McpToolDefinition {
         name: "nyx__connect_service".to_string(),
         description: "Connect to an available service. If a credential is required and omitted, \
-            returns a hosted connection URL that the user can open."
+            returns a hosted connection URL that the user can open. Optional scopes request \
+            additional OAuth permissions on top of provider defaults through that hosted link; \
+            omit credential when requesting scopes."
             .to_string(),
         input_schema: serde_json::json!({
             "type": "object",
@@ -2006,6 +2008,11 @@ pub fn generate_tool_definitions(
                 "credential_label": {
                     "type": "string",
                     "description": "Optional label for this credential (e.g., 'Production Key')"
+                },
+                "scopes": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Additional OAuth scopes to request on top of the provider defaults, e.g. [\"public_repo\"]. Rejected for services whose provider does not accept scopes."
                 }
             },
             "required": ["service_id"]
@@ -4551,6 +4558,26 @@ pub async fn discover_services(
 // Meta-tool: nyx__connect_service
 // ---------------------------------------------------------------------------
 
+/// Accept the array contract and a comma/space-separated shorthand for MCP callers.
+/// Scope normalization and provider validation remain in connect_link_service::create.
+pub(crate) fn parse_connect_scopes(value: Option<&serde_json::Value>) -> AppResult<Vec<String>> {
+    match value {
+        None => Ok(Vec::new()),
+        Some(serde_json::Value::String(raw)) => Ok(vec![raw.clone()]),
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value.as_str().map(str::to_string).ok_or_else(|| {
+                    AppError::ValidationError("scopes must contain only strings".to_string())
+                })
+            })
+            .collect(),
+        _ => Err(AppError::ValidationError(
+            "scopes must be an array of strings or a comma/space-separated string".to_string(),
+        )),
+    }
+}
+
 /// Connect the user to a service from within the MCP client.
 #[allow(clippy::too_many_arguments)]
 pub async fn connect_service(
@@ -4563,6 +4590,7 @@ pub async fn connect_service(
     credential_label: Option<&str>,
     frontend_url: &str,
     requested_by: Option<&str>,
+    scopes: &[String],
 ) -> AppResult<serde_json::Value> {
     let service = db
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
@@ -4570,10 +4598,17 @@ pub async fn connect_service(
         .await?
         .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
 
-    if service.requires_user_credential && credential.is_none_or(|value| value.trim().is_empty()) {
+    let has_credential = credential.is_some_and(|value| !value.trim().is_empty());
+    if !scopes.is_empty() && has_credential {
+        return Err(AppError::ValidationError(
+            "Additional OAuth scopes require a hosted connection; omit credential".to_string(),
+        ));
+    }
+    if (service.requires_user_credential || !scopes.is_empty()) && !has_credential {
         let created = connect_link_service::create(
             db,
             connect_link_service::CreateInput {
+                scopes: scopes.to_vec(),
                 user_id: user_id.to_string(),
                 service_slug: service.slug,
                 label: credential_label.map(str::to_string),
@@ -4593,6 +4628,7 @@ pub async fn connect_service(
             "expires_at": created.link.expires_at.to_rfc3339(),
             "service_id": created.link.service_id,
             "service_slug": created.link.service_slug,
+            "scopes": created.link.scopes,
             "instructions": "Open this URL in a browser to connect the service, then call nyx__wait_for_connection with connect_link_id.",
         }));
     }
@@ -6068,6 +6104,102 @@ mod tests {
         assert!(connected_ids.is_disjoint(&discover_ids));
     }
 
+    #[test]
+    fn connect_scopes_accepts_arrays_and_string_shorthand_and_rejects_invalid_types() {
+        use serde_json::json;
+        assert!(parse_connect_scopes(None).unwrap().is_empty());
+        assert_eq!(
+            parse_connect_scopes(Some(&json!(["public_repo", "read:org"]))).unwrap(),
+            ["public_repo", "read:org"]
+        );
+        assert_eq!(
+            parse_connect_scopes(Some(&json!("public_repo, read:org"))).unwrap(),
+            ["public_repo, read:org"]
+        );
+        for value in [
+            json!(["public_repo", 1]),
+            json!(true),
+            json!({}),
+            json!(null),
+        ] {
+            assert!(matches!(
+                parse_connect_scopes(Some(&value)),
+                Err(AppError::ValidationError(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_service_scopes_are_persisted_and_echoed_in_pending_connection() {
+        use crate::models::provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig};
+        let db = connect_test_database("mcp_connect_scopes").await.unwrap();
+        let now = mongodb::bson::DateTime::now();
+        let provider: ProviderConfig = mongodb::bson::from_document(doc! {
+            "_id": uuid::Uuid::new_v4().to_string(), "slug": "scope-provider",
+            "name": "Scope Provider", "provider_type": "oauth2", "is_active": true,
+            "created_by": "test", "created_at": now, "updated_at": now,
+        })
+        .unwrap();
+        db.collection::<ProviderConfig>(PROVIDERS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        let mut service = dummy_service();
+        service.provider_config_id = Some(provider.id);
+        service.requires_user_credential = true;
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let actor = uuid::Uuid::new_v4().to_string();
+        let scopes = parse_connect_scopes(Some(&serde_json::json!(
+            "public_repo, read:org public_repo"
+        )))
+        .unwrap();
+        let result = connect_service(
+            &db,
+            &test_encryption_keys(),
+            &NodeWsManager::new(30, 100),
+            &actor,
+            &service.id,
+            None,
+            None,
+            "https://app.example.test",
+            None,
+            &scopes,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result["status"], "pending_connection");
+        assert_eq!(
+            result["scopes"],
+            serde_json::json!(["public_repo", "read:org"])
+        );
+        let view = connect_link_service::get_for_actor(
+            &db,
+            &actor,
+            result["connect_link_id"].as_str().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(view.link.scopes, ["public_repo", "read:org"]);
+        let error = connect_service(
+            &db,
+            &test_encryption_keys(),
+            &NodeWsManager::new(30, 100),
+            &actor,
+            &service.id,
+            Some("test-credential"),
+            None,
+            "https://app.example.test",
+            None,
+            &scopes,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, AppError::ValidationError(_)));
+    }
+
     #[tokio::test]
     async fn connect_service_without_credential_returns_hosted_pending_link() {
         let Some(db) = connect_test_database("mcp_connect_link_pending").await else {
@@ -6094,11 +6226,13 @@ mod tests {
             Some("Coding agent"),
             "https://app.example.test",
             Some("codex"),
+            &[],
         )
         .await
         .expect("create hosted connect link");
 
         assert_eq!(result["status"], "pending_connection");
+        assert_eq!(result["scopes"], serde_json::json!([]));
         assert_eq!(result["service_slug"], service.slug);
         assert!(
             result["connect_url"]

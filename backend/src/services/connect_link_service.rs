@@ -18,7 +18,9 @@ use crate::models::provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfi
 use crate::models::user_api_key::{COLLECTION_NAME as USER_API_KEYS, UserApiKey};
 use crate::models::user_service::{COLLECTION_NAME as USER_SERVICES, UserService};
 use crate::redaction::RedactedLen;
-use crate::services::{audit_service, oauth_service, org_service, unified_key_service};
+use crate::services::{
+    audit_service, oauth_service, org_service, unified_key_service, user_token_service,
+};
 
 pub const CONNECT_LINK_PREFIX: &str = "nyx_clk_";
 pub const DEFAULT_TTL_SECS: i64 = 15 * 60;
@@ -38,6 +40,7 @@ const MAX_LAST_ERROR_LEN: usize = 100;
 pub struct CreateInput {
     pub user_id: String,
     pub service_slug: String,
+    pub scopes: Vec<String>,
     pub label: Option<String>,
     pub requested_by: Option<String>,
     pub callback_url: Option<String>,
@@ -144,6 +147,8 @@ pub enum CompleteResult {
 
 pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<CreatedLink> {
     let service = load_catalog_info_by_slug(db, &input.service_slug).await?;
+    let scopes = normalize_scopes(&input.scopes)?;
+    validate_scopes(db, &service, &scopes).await?;
     if service.service_slug.trim().is_empty() {
         return Err(AppError::ValidationError(
             "service_slug must not be empty".to_string(),
@@ -174,6 +179,7 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         user_id: input.user_id,
         service_slug: service.service_slug.clone(),
         service_id: service.service_id.clone(),
+        scopes,
         label,
         requested_by,
         requesting_app_id: requesting_app.as_ref().map(|client| client.id.clone()),
@@ -203,6 +209,40 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         .await?;
 
     Ok(CreatedLink { link, raw_token })
+}
+
+fn normalize_scopes(scopes: &[String]) -> AppResult<Vec<String>> {
+    // Parse the whole request together so the shared count limit applies across entries.
+    let mut scopes = user_token_service::parse_additional_scopes(Some(&scopes.join(" ")))?;
+    let mut seen = std::collections::HashSet::new();
+    scopes.retain(|scope| seen.insert(scope.clone()));
+    Ok(scopes)
+}
+
+async fn validate_scopes(
+    db: &mongodb::Database,
+    service: &CatalogConnectInfo,
+    scopes: &[String],
+) -> AppResult<()> {
+    if scopes.is_empty() {
+        return Ok(());
+    }
+    if !matches!(service.connect_method(), "oauth" | "device_code") {
+        return Err(AppError::ValidationError(
+            "This service does not use OAuth; remove the additional scopes".to_string(),
+        ));
+    }
+    let provider_id = service.provider_id.as_deref().ok_or_else(|| {
+        AppError::ValidationError("This service has no active OAuth provider".to_string())
+    })?;
+    let provider = db
+        .collection::<ProviderConfig>(PROVIDERS)
+        .find_one(doc! { "_id": provider_id, "is_active": true })
+        .await?
+        .ok_or_else(|| {
+            AppError::ValidationError("This service has no active OAuth provider".to_string())
+        })?;
+    user_token_service::ensure_additional_scopes_supported(&provider, scopes)
 }
 
 pub fn build_connect_url(frontend_url: &str, raw_token: &str) -> AppResult<String> {
@@ -1445,6 +1485,7 @@ mod tests {
         let created = create(
             db,
             CreateInput {
+                scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
                 label: Some(format!("Connect {suffix}")),
@@ -1528,6 +1569,301 @@ mod tests {
         }
     }
 
+    fn scope_create_input(service: &DownstreamService, scopes: &[&str]) -> CreateInput {
+        CreateInput {
+            user_id: Uuid::new_v4().to_string(),
+            service_slug: service.slug.clone(),
+            scopes: scopes.iter().map(|scope| (*scope).to_string()).collect(),
+            label: None,
+            requested_by: None,
+            callback_url: None,
+            ttl_secs: None,
+            oauth_client_id: None,
+        }
+    }
+
+    async fn insert_scope_catalog(
+        db: &mongodb::Database,
+        provider: &ProviderConfig,
+    ) -> DownstreamService {
+        db.collection::<ProviderConfig>(PROVIDERS)
+            .insert_one(provider)
+            .await
+            .expect("insert scope provider");
+        let mut service = insert_catalog_service(db, "scopes").await;
+        service.provider_config_id = Some(provider.id.clone());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .replace_one(doc! { "_id": &service.id }, &service)
+            .await
+            .expect("attach scope provider");
+        service
+    }
+
+    #[test]
+    fn scopes_normalize_all_entries_and_dedupe_in_order() {
+        let raw = [
+            " public_repo,read:org ",
+            "read:org\tuser:email",
+            "",
+            "PUBLIC_REPO",
+        ]
+        .map(str::to_string);
+        assert_eq!(
+            normalize_scopes(&raw).unwrap(),
+            ["public_repo", "read:org", "user:email", "PUBLIC_REPO"]
+        );
+        assert!(normalize_scopes(&[" , ".to_string()]).unwrap().is_empty());
+    }
+
+    #[test]
+    fn scopes_reuse_shared_character_length_and_total_count_limits() {
+        for raw in [
+            vec!["bad<scope>".to_string()],
+            vec!["x".repeat(257)],
+            (0..101).map(|i| format!("scope{i}")).collect(),
+        ] {
+            assert!(matches!(
+                normalize_scopes(&raw),
+                Err(AppError::ValidationError(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn scopes_create_persists_oauth_scopes_and_legacy_rows_default_to_empty() {
+        let db = connect_test_database("connect_link_scopes_persist")
+            .await
+            .unwrap();
+        let service = insert_scope_catalog(&db, &test_oauth_provider()).await;
+        let created = create(
+            &db,
+            scope_create_input(
+                &service,
+                &[" public_repo,read:org ", "public_repo user:email"],
+            ),
+        )
+        .await
+        .unwrap();
+        let stored = db
+            .collection::<ConnectLink>(CONNECT_LINKS)
+            .find_one(doc! { "_id": &created.link.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.scopes, ["public_repo", "read:org", "user:email"]);
+        let mut legacy = bson::to_document(&stored).unwrap();
+        legacy.remove("scopes");
+        let restored: ConnectLink = bson::from_document(legacy).unwrap();
+        assert!(restored.scopes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scopes_create_rejects_api_key_and_none_services_before_insert() {
+        let db = connect_test_database("connect_link_scopes_no_oauth")
+            .await
+            .unwrap();
+        let mut service = insert_catalog_service(&db, "plain").await;
+        for auth_method in ["bearer", "none"] {
+            service.auth_method = auth_method.to_string();
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .replace_one(doc! { "_id": &service.id }, &service)
+                .await
+                .unwrap();
+            let error = create(&db, scope_create_input(&service, &["public_repo"]))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, AppError::ValidationError(_)));
+            assert_eq!(
+                db.collection::<ConnectLink>(CONNECT_LINKS)
+                    .count_documents(doc! {})
+                    .await
+                    .unwrap(),
+                0
+            );
+        }
+        create(&db, scope_create_input(&service, &[]))
+            .await
+            .expect("empty scopes allowed");
+    }
+
+    #[tokio::test]
+    async fn scopes_create_validates_provider_capabilities() {
+        let db = connect_test_database("connect_link_scopes_capabilities")
+            .await
+            .unwrap();
+        for (provider_type, format, supported, accepted) in [
+            ("oauth2", "rfc8628", true, true),
+            ("device_code", "rfc8628", true, true),
+            ("api_key", "rfc8628", true, false),
+            ("device_code", "openai", true, false),
+            ("oauth2", "rfc8628", false, false),
+        ] {
+            let mut provider = test_oauth_provider();
+            provider.provider_type = provider_type.to_string();
+            provider.device_code_format = format.to_string();
+            provider.supports_oauth_scopes = supported;
+            let service = insert_scope_catalog(&db, &provider).await;
+            let result = create(&db, scope_create_input(&service, &["public_repo"])).await;
+            if accepted {
+                assert_eq!(result.unwrap().link.scopes, ["public_repo"]);
+            } else {
+                assert!(matches!(result, Err(AppError::ValidationError(_))));
+                assert_eq!(
+                    db.collection::<ConnectLink>(CONNECT_LINKS)
+                        .count_documents(doc! { "service_id": &service.id })
+                        .await
+                        .unwrap(),
+                    0
+                );
+            }
+            create(&db, scope_create_input(&service, &[]))
+                .await
+                .expect("empty scopes allowed");
+        }
+    }
+
+    // Exercise the public create/preview/poll and human completion handlers, including
+    // a real provider-decline callback and retry of the same pinned connection.
+    #[tokio::test]
+    async fn scopes_completion_merges_defaults_for_oauth_retry_and_device_code() {
+        use crate::handlers::{connect_links as handlers, user_tokens};
+        use crate::test_utils::{test_app_state, test_auth_user};
+        use axum::{
+            Json,
+            extract::{ConnectInfo, Path, Query, State},
+            http::HeaderMap,
+        };
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{body_string_contains, method, path},
+        };
+
+        let db = connect_test_database("connect_link_scopes_completion")
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        for device in [false, true] {
+            let server = MockServer::start().await;
+            let mut provider = test_oauth_provider();
+            provider.default_scopes = Some(vec!["read:user".to_string(), "read:org".to_string()]);
+            provider.client_id_encrypted =
+                Some(state.encryption_keys.encrypt(b"test-client").await.unwrap());
+            provider.client_secret_encrypted =
+                Some(state.encryption_keys.encrypt(b"test-secret").await.unwrap());
+            if device {
+                provider.provider_type = "device_code".to_string();
+                provider.device_code_url = Some(format!("{}/device", server.uri()));
+                Mock::given(method("POST"))
+                    .and(path("/device"))
+                    .and(body_string_contains(
+                        "scope=read%3Auser+read%3Aorg+public_repo",
+                    ))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "device_code": "test-device-code", "user_code": "TEST-CODE",
+                        "verification_uri": "https://auth.example.test/device", "expires_in": 900,
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+            }
+            let service = insert_scope_catalog(&db, &provider).await;
+            let actor = Uuid::new_v4().to_string();
+            let Json(created) = handlers::create_connect_link(
+                State(state.clone()),
+                test_auth_user(&actor),
+                Json(handlers::CreateConnectLinkRequest {
+                    service_slug: service.slug.clone(),
+                    scopes: vec!["read:org, public_repo".to_string()],
+                    label: None,
+                    requested_by: None,
+                    callback_url: None,
+                    expires_in: None,
+                }),
+            )
+            .await
+            .unwrap();
+            let raw_token = created.connect_url.rsplit('/').next().unwrap().to_string();
+            let Json(preview) = handlers::preview_connect_link(
+                State(state.clone()),
+                ConnectInfo("127.0.0.1:43210".parse().unwrap()),
+                HeaderMap::new(),
+                Json(handlers::PreviewConnectLinkRequest {
+                    token: raw_token.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(preview.scopes, ["read:org", "public_repo"]);
+            let Json(status) = handlers::get_connect_link(
+                State(state.clone()),
+                test_auth_user(&actor),
+                Path(created.id.clone()),
+            )
+            .await
+            .unwrap();
+            assert_eq!(status.scopes, preview.scopes);
+            for attempt in 0..if device { 1 } else { 2 } {
+                let Json(completed) = handlers::complete_connect_link(
+                    State(state.clone()),
+                    test_auth_user(&actor),
+                    ConnectInfo("127.0.0.1:43210".parse().unwrap()),
+                    HeaderMap::new(),
+                    Json(handlers::CompleteConnectLinkRequest {
+                        token: raw_token.clone(),
+                        credential: None,
+                        endpoint_url: None,
+                        oauth_client_id: None,
+                        oauth_client_secret: None,
+                        device_state: None,
+                    }),
+                )
+                .await
+                .unwrap();
+                if device {
+                    assert_eq!(completed.status, "device_code_required");
+                    assert_eq!(completed.device_user_code.as_deref(), Some("TEST-CODE"));
+                } else {
+                    assert_eq!(completed.status, "oauth_required");
+                    let url =
+                        url::Url::parse(completed.authorization_url.as_deref().unwrap()).unwrap();
+                    let params: std::collections::HashMap<_, _> =
+                        url.query_pairs().into_owned().collect();
+                    assert_eq!(params["scope"], "read:user read:org public_repo");
+                    if attempt == 0 {
+                        let redirect = user_tokens::generic_oauth_callback(
+                            State(state.clone()),
+                            crate::mw::auth::OptionalAuthUser(None),
+                            Query(user_tokens::GenericOAuthCallbackQuery {
+                                code: None,
+                                state: Some(params["state"].clone()),
+                                error: Some("access_denied".to_string()),
+                                error_description: None,
+                            }),
+                        )
+                        .await;
+                        use axum::response::IntoResponse;
+                        let redirect = redirect.into_response();
+                        assert!(
+                            redirect.headers()["location"]
+                                .to_str()
+                                .unwrap()
+                                .contains("provider_status=error")
+                        );
+                        let Json(status) = handlers::get_connect_link(
+                            State(state.clone()),
+                            test_auth_user(&actor),
+                            Path(created.id.clone()),
+                        )
+                        .await
+                        .unwrap();
+                        assert_eq!(status.last_error.as_deref(), Some("provider_access_denied"));
+                        assert_eq!(status.scopes, preview.scopes);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn callback_url_accepts_absolute_http_and_https() {
         assert!(validate_callback_url(Some("https://agent.example/callback?run=1")).is_ok());
@@ -1560,6 +1896,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
                 label: None,
@@ -1595,6 +1932,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
                 label: None,
@@ -1624,6 +1962,7 @@ mod tests {
         let result = create(
             &db,
             CreateInput {
+                scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
                 label: None,
@@ -2288,6 +2627,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                scopes: Vec::new(),
                 user_id: owner,
                 service_slug: service.slug.clone(),
                 label: Some("Production".to_string()),
@@ -2328,6 +2668,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
                 label: None,
@@ -2370,6 +2711,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
                 label: None,
@@ -2409,6 +2751,7 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
+                scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
                 label: None,

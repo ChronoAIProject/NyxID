@@ -32,6 +32,8 @@ pub struct ConnectLink {
     pub user_id: String,
     pub service_slug: String,
     pub service_id: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
     pub label: Option<String>,
     pub requested_by: Option<String>,
     #[serde(default)]
@@ -143,6 +145,7 @@ mod tests {
     fn fixture() -> ConnectLink {
         let now = Utc::now();
         ConnectLink {
+            scopes: Vec::new(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             service_slug: "api-github-pat".to_string(),

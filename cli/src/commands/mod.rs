@@ -44,6 +44,18 @@ pub mod update;
 pub(crate) mod update_attestation;
 pub mod whoami;
 
+/// Normalize repeatable --scope values without changing their case or order.
+pub(crate) fn normalize_oauth_scopes(scopes: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    scopes
+        .iter()
+        .flat_map(|raw| raw.split(|c: char| c == ',' || c.is_whitespace()))
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty() && seen.insert((*scope).to_string()))
+        .map(str::to_string)
+        .collect()
+}
+
 /// Truncate an id to its first 8 characters for compact table display,
 /// UTF-8 safe.
 ///

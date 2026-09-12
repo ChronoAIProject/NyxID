@@ -3430,6 +3430,7 @@ Content-Type: application/json
 {
   "service_slug": "github",
   "label": "Work account",
+  "scopes": ["public_repo"],
   "callback_url": "desktop-app://connect/return",
   "expires_in": 900
 }
@@ -3447,6 +3448,12 @@ Content-Type: application/json
 
 Treat `connect_url` as a single-use secret and hand it only to the browser. The authenticated app ID and display name are recorded on the link; a request-body `requested_by` value cannot override that identity.
 
+`scopes` is an optional array of additional OAuth scopes (default `[]`). Each entry may contain comma- or whitespace-separated scopes; NyxID trims and deduplicates them in order, preserving case. The shared OAuth scope limits apply across the entire request: at most 32 scopes before deduplication, at most 256 characters per scope, and only `[A-Za-z0-9._:/~+*=-]` characters. Scopes supplement the provider defaults for OAuth and RFC 8628 device-code flows; they do not replace defaults, and the provider decides which permissions to grant. Stored scopes survive provider denial and retry.
+
+Creation returns HTTP 400 (`AppError::ValidationError`) for malformed/oversized scopes or non-empty scopes on API-key/no-auth services, providers with `supports_oauth_scopes = false`, and OpenAI-format device-code providers. An empty list preserves the existing behavior for every connection method.
+
+**Public preview:** `POST /api/v1/connect-links/preview` with `{ "token": "nyx_clk_<opaque-secret>" }` returns service and request details, including `connect_method` (`oauth`, `device_code`, `api_key`, or `none`) and `scopes: ["public_repo"]`. The `scopes` array is always present, possibly empty, including for legacy stored links. The hosted page displays these creator-selected permissions for human review; completion cannot edit them.
+
 **Polling response:**
 
 ```json
@@ -3456,6 +3463,7 @@ Treat `connect_url` as a single-use secret and hand it only to the browser. The 
   "service_name": "GitHub",
   "service_slug": "github",
   "expires_at": "2026-08-05T10:15:00.000Z",
+  "scopes": ["public_repo"],
   "requesting_app_id": "desktop-client-id",
   "requesting_app_name": "Desktop App",
   "last_error": "provider_access_denied",
@@ -3464,6 +3472,8 @@ Treat `connect_url` as a single-use secret and hand it only to the browser. The 
 ```
 
 `status` is one of `pending`, `completed`, `expired`, or `cancelled`. A completed response includes `connected_service: { "id", "slug" }`. Terminal responses with a callback include the fully merged `callback_url`.
+
+Polling always includes `scopes` (possibly `[]`) in every state. MCP `nyx__connect_service` accepts the same optional `scopes` array, or a comma/space-separated string, and echoes normalized scopes in its `pending_connection` response. Omit `credential` to use the hosted OAuth flow when requesting scopes.
 
 `last_error` is an optional short, stable, metadata-only code. `provider_access_denied` means the provider consent screen was declined, but the link remains `pending` and may be retried within its TTL and finalization grace. The field is cleared when a later attempt succeeds. Its absence means no provider decline has been recorded; it does not prove that the browser is still open.
 

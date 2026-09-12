@@ -215,6 +215,11 @@ pub struct ConnectArgs {
     /// Human-readable label shown on the hosted connection page
     #[arg(long)]
     pub label: Option<String>,
+    /// Additional OAuth scopes to request on top of the provider's defaults
+    /// (repeatable, comma- or space-separated). The upstream provider decides
+    /// whether to grant them. Example: --scope "public_repo,read:org"
+    #[arg(long = "scope", value_name = "SCOPES")]
+    pub scopes: Vec<String>,
     /// Return immediately after creating the link
     #[arg(long)]
     pub no_wait: bool,

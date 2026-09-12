@@ -414,15 +414,7 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             };
             // Normalize --scope inputs: split each entry on comma/whitespace so
             // users can write `--scope a,b --scope "c d"` or `--scope a --scope b`.
-            let additional_scopes: Vec<String> = scopes
-                .iter()
-                .flat_map(|raw| {
-                    raw.split(|c: char| c == ',' || c.is_whitespace())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                })
-                .collect();
+            let additional_scopes = super::normalize_oauth_scopes(&scopes);
 
             // `--scope` is forwarded only on the OAuth and device-code flows.
             // Other paths accept the flag for symmetry (e.g. a user adding a

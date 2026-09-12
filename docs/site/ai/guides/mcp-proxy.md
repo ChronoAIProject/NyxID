@@ -23,7 +23,7 @@ In addition to per-service tools, NyxID always surfaces five core meta-tools:
 |---|---|
 | `nyx__discover_services` | Browse catalog services that are not connected |
 | `nyx__list_connected_services` | Enumerate connected services and their current availability |
-| `nyx__connect_service` | Add a service from within the agent |
+| `nyx__connect_service` | Add a service from within the agent; accepts optional `scopes` for extra OAuth permissions |
 | `nyx__search_tools` | Search across all available tools |
 | `nyx__call_tool` | Invoke any tool by name with arbitrary arguments |
 

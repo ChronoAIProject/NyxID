@@ -2330,6 +2330,10 @@ async fn handle_meta_connect(
 
     let credential = arguments.get("credential").and_then(|c| c.as_str());
     let credential_label = arguments.get("credential_label").and_then(|l| l.as_str());
+    let scopes = match mcp_service::parse_connect_scopes(arguments.get("scopes")) {
+        Ok(scopes) => scopes,
+        Err(error) => return tool_result(request_id, &error.to_string(), true),
+    };
 
     if credential.is_none_or(|value| value.trim().is_empty()) {
         let rate_key = auth.api_key_id.as_deref().map_or_else(
@@ -2363,6 +2367,7 @@ async fn handle_meta_connect(
         credential_label,
         &state.config.frontend_url,
         auth.api_key_name.as_deref(),
+        &scopes,
     )
     .await
     {
@@ -2376,6 +2381,7 @@ async fn handle_meta_connect(
                         "connect_link_id": result.get("connect_link_id"),
                         "service_id": service_id,
                         "service_slug": result.get("service_slug"),
+                        "scopes": result.get("scopes"),
                     })),
                     auth.ip_address.clone(),
                     auth.user_agent.clone(),
@@ -2523,6 +2529,7 @@ async fn handle_wait_for_connection(
                 "connect_link_id": view.link.id,
                 "service_slug": view.completed_service_slug,
                 "service_id": view.link.service_id,
+                "scopes": view.link.scopes,
                 "expires_at": view.link.expires_at.to_rfc3339(),
                 "last_error": (status == "pending")
                     .then(|| view.link.last_error.clone())
