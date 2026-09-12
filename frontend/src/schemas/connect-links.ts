@@ -15,6 +15,7 @@ export const connectMethodSchema = z.enum([
 ]);
 
 export const connectLinkPreviewSchema = z.object({
+  scopes: z.array(z.string()).default([]),
   service_name: z.string().min(1),
   service_slug: z.string().min(1),
   label: z.string().nullable(),
@@ -76,6 +77,7 @@ export const completeConnectLinkResponseSchema = z.object({
 });
 
 export const connectLinkStatusResponseSchema = z.object({
+  scopes: z.array(z.string()).default([]),
   id: z.string().uuid(),
   status: connectLinkStatusSchema,
   service_name: z.string(),

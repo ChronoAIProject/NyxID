@@ -43,7 +43,8 @@ nyxid catalog list --all --output json                    # include system servi
 nyxid catalog show <slug> --output json                   # full metadata: links, capabilities, auth notes
 nyxid catalog endpoints <slug>                            # list API endpoints from OpenAPI spec
 nyxid connect <slug>                                      # hosted link; browser handles OAuth or API key entry
-nyxid connect <slug> --no-wait --output json              # return the link immediately for an agent to relay
+nyxid connect github --scope public_repo                  # hosted OAuth with additional permissions
+nyxid connect github --scope public_repo --no-wait --output json  # link for an agent to relay
 nyxid service add <slug> --oauth                          # OAuth flow (opens browser -- easiest)
 nyxid service add <slug> --device-code                    # device code flow (enter code on website)
 nyxid service add <slug>                                  # API key (CLI prompts securely)
@@ -111,6 +112,10 @@ For full consent behavior, app-declared default services (`default_service_catal
 
 ## Requesting additional OAuth scopes
 
+Hosted connect links now carry additional scopes: use `nyxid connect github --scope public_repo` or MCP `nyx__connect_service` with `scopes: ["public_repo"]` (omit `credential`). The flag is repeatable and accepts comma- or space-separated values. The hosted page displays the creator's requested permissions for human consent; preview, polling, and MCP pending responses echo the normalized scopes. CLI versions older than **0.18.1** have no `connect --scope`; update first. Non-empty scopes fail at link creation for API-key/no-auth services, providers with OAuth scopes disabled, and OpenAI-format device-code providers.
+
+For an **existing connection**, add scopes in the console: **External Services → connection → Manage permissions**. Creating a new hosted link starts a new connection.
+
 Some OAuth providers (Lark, Google, GitHub, Atlassian, ...) expose many scopes but NyxID's catalog only configures a sensible default set. When a user needs a capability that isn't covered -- for example Lark's contact/attendance APIs -- add extra scopes on top of the defaults with `--scope`:
 
 ```bash
@@ -126,7 +131,7 @@ nyxid service add api-lark --oauth \
   --scope "contact:user.base:readonly,contact:user.department:readonly"
 
 # Works the same way for device-code services
-nyxid service add llm-openai --device-code --scope "custom-scope-1,custom-scope-2"
+nyxid service add <rfc8628-service-slug> --device-code --scope "custom-scope-1,custom-scope-2"
 ```
 
 Lark note: bot (tenant) scope names differ from user OAuth scope names. For example, `contact:contact.base:readonly` is a bot/tenant scope; the user OAuth variant is `contact:user.base:readonly`. Requesting a bot-only scope in a user OAuth flow fails at the provider.

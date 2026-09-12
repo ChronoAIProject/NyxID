@@ -32,7 +32,7 @@ NyxID also exposes a small number of built-in tools for navigation:
 | `nyx__discover_services` | Browse services that are not connected |
 | `nyx__list_connected_services` | List connected services, including currently unavailable ones |
 | `nyx__search_tools` | Search connected tools by keyword |
-| `nyx__connect_service` | Connect to a specific service and activate its tools |
+| `nyx__connect_service` | Connect to a specific service and activate its tools; accepts optional `scopes` for extra OAuth permissions |
 | `nyx__call_tool` | Invoke a connected tool by name and activate its service |
 
 ## How a tool call flows

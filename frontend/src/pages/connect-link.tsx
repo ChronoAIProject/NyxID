@@ -609,39 +609,53 @@ function OAuthSetupForm({
   );
 }
 
-function RequestDetails({ preview }: { readonly preview: ConnectLinkPreview }) {
+export function RequestDetails({ preview }: { readonly preview: ConnectLinkPreview }) {
   return (
-    <div className="divide-y divide-border/30 rounded-lg border border-border/50 bg-white/[0.02]">
-      <ConnectLinkDetailRow label="Service" value={preview.service_name} />
-      <ConnectLinkDetailRow
-        label="Requested by"
-        value={preview.requested_by ?? "Your NyxID account"}
-      />
-      <ConnectLinkDetailRow
-        label="Label"
-        value={preview.label ?? "Not provided"}
-      />
-      <ConnectLinkDetailRow
-        label="Created"
-        value={new Date(preview.created_at).toLocaleString()}
-      />
-      <ConnectLinkDetailRow
-        label="Status"
-        value={preview.status}
-        capitalizeValue
-      />
-      {preview.api_key_url ? (
-        <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
-          <span className="text-muted-foreground">Credential source</span>
-          <a
-            className="inline-flex items-center gap-1 text-nyx-secondary-400 hover:underline"
-            href={preview.api_key_url}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Open provider <ExternalLink className="h-3 w-3" />
-          </a>
-        </div>
+    <div className="space-y-4">
+      <div className="divide-y divide-border/30 rounded-lg border border-border/50 bg-white/[0.02]">
+        <ConnectLinkDetailRow label="Service" value={preview.service_name} />
+        {preview.scopes.length > 0 ? (
+          <ConnectLinkDetailRow
+            label="Requested permissions"
+            value={preview.scopes.join(", ")}
+          />
+        ) : null}
+        <ConnectLinkDetailRow
+          label="Requested by"
+          value={preview.requested_by ?? "Your NyxID account"}
+        />
+        <ConnectLinkDetailRow
+          label="Label"
+          value={preview.label ?? "Not provided"}
+        />
+        <ConnectLinkDetailRow
+          label="Created"
+          value={new Date(preview.created_at).toLocaleString()}
+        />
+        <ConnectLinkDetailRow
+          label="Status"
+          value={preview.status}
+          capitalizeValue
+        />
+        {preview.api_key_url ? (
+          <div className="flex items-center justify-between gap-4 px-4 py-2.5 text-[12px]">
+            <span className="text-muted-foreground">Credential source</span>
+            <a
+              className="inline-flex items-center gap-1 text-nyx-secondary-400 hover:underline"
+              href={preview.api_key_url}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Open provider <ExternalLink className="h-3 w-3" />
+            </a>
+          </div>
+        ) : null}
+      </div>
+      {preview.scopes.length > 0 &&
+      (preview.connect_method === "oauth" || preview.connect_method === "device_code") ? (
+        <p className="text-[12px] text-muted-foreground">
+          These additional permissions will be requested on top of the provider defaults.
+        </p>
       ) : null}
     </div>
   );

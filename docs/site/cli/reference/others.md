@@ -1,9 +1,9 @@
 ---
 title: Other commands
-description: Reference for the remaining nyxid commands — updating the CLI, account & MFA, sessions, approvals, notifications, endpoints, credentials, service accounts, developer apps, channel relay, admin, and telemetry.
+description: Reference for the remaining nyxid commands — updating the CLI, hosted connect links, account & MFA, sessions, approvals, notifications, endpoints, credentials, service accounts, developer apps, channel relay, admin, and telemetry.
 ---
 
-The pages above cover the headline command groups. This is the catch-all reference for everything else `nyxid` exposes: keeping the CLI itself current, account and session management, approvals and notifications, endpoints and credentials, service accounts and developer apps, channel relay, admin, and telemetry. Run `nyxid --help` or `nyxid <command> --help` for the authoritative flag list.
+The pages above cover the headline command groups. This is the catch-all reference for everything else `nyxid` exposes: keeping the CLI itself current, hosted connect links, account and session management, approvals and notifications, endpoints and credentials, service accounts and developer apps, channel relay, admin, and telemetry. Run `nyxid --help` or `nyxid <command> --help` for the authoritative flag list.
 
 :::note
 Commands that call the NyxID API accept the common flags `--base-url`, `--access-token` / `--access-token-env`, `--profile`, and `--output table|json`. Account-bootstrap commands (`login`, `register`, password reset) take `--base-url` explicitly. See [Authenticate](/docs/cli/getting-started/authenticate).
@@ -12,6 +12,22 @@ Commands that call the NyxID API accept the common flags `--base-url`, `--access
 :::tip
 Secret-issuing commands (`api-key create`, `service-account create`, `node register-token`, `*-rotate`, …) open a browser wizard so the new secret is shown in a page you control. Add `--terminal` to print it to the terminal instead, or `--no-wait` to create a remote pairing and pick the result up later with [`nyxid pairing resume`](#pairing).
 :::
+
+## connect
+
+Create a single-use hosted link for a catalog service. The human reviews the request and completes OAuth, device-code authorization, or API-key entry in the browser.
+
+```bash
+nyxid connect github --scope public_repo
+nyxid connect github --scope "public_repo,read:org" --scope user:email
+nyxid connect github --scope public_repo --no-wait --output json
+```
+
+`--scope SCOPES` is repeatable and accepts comma- or space-separated values. Hosted connect links carry these scopes on top of provider defaults and display them for consent. Non-empty scopes are rejected for API-key/no-auth services, providers that disable OAuth scopes, and OpenAI-format device-code providers. Omit the flag for default permissions. CLI versions older than **0.18.1** have no `connect --scope`; update the CLI first.
+
+`--label` names the request, `--no-wait` returns the link immediately, and `--timeout` sets the wait limit (default 900 seconds). JSON output includes non-empty `scopes`. Agents can also use MCP `nyx__connect_service` with `scopes: ["public_repo"]`, then `nyx__wait_for_connection`.
+
+To add scopes to an **existing connection**, use the console: **External Services → connection → Manage permissions**.
 
 ## update
 
