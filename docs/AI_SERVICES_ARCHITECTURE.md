@@ -497,14 +497,26 @@ their effective service union, including explicit selections. Grants do not over
 normal org membership, operation policy or delegated execution checks. See
 [the design](PLATFORM_KEYS_AND_INFERENCE.md) for complete pricing and upgrade rules.
 
-### Review-round compatibility and management rules
+### Credential replacement and admin catalog editing
+
+Admin catalog `PUT /services/{catalog-id}` accepts a write-only master `credential`
+through envelope encryption and metadata-only auditing; it never returns credential
+bytes or lengths. Absent legacy public master configurations display as “enabled,
+public (implicit)”. See [credential replacement and audit](PLATFORM_KEYS_AND_INFERENCE.md#credential-replacement-and-audit).
+
+### Editing platform connections
 
 Explicit platform connections allow label, admin-only visibility, recommended skills,
 User-Agent and default-header edits, plus Disable/Enable. Endpoint/auth/node/identity/
 delegation settings require switching to a user key; automatic rows stay managed.
+
+### Node transport hardening
+
 Platform master credentials, including legacy internal master rows, always use server
 transport. Existing owner-node bindings for those rows are ignored as intentional
 hardening; nodes inject their own credentials only.
+
+### Org provisioning and reconciliation
 
 A Member/Admin listing keys may trigger idempotent provisioning of org-owned rows for
 explicit platform-key grants when their role permits proxying. Org views identify
@@ -512,3 +524,10 @@ them as auto-connected. Removing the org grant immediately blocks execution and 
 next owner reconciliation removes automatic rows and orphan endpoints. This side
 effect is limited to explicit platform configurations; inherited legacy no-auth
 provisioning remains personal-only. Authentication does not provision rows.
+
+Key listing shares one membership and active-owner grant snapshot across personal/org
+provisioning, stale-row reconciliation, org row loading, and availability rendering.
+Provider eligibility is batch-loaded once for the request. Catalog, MCP and LLM
+listings likewise reuse grants and provider rows rather than issuing ACL queries per
+service. These snapshots last for one request only; the next request rechecks live
+membership, owner activity, provider eligibility and catalog configuration.

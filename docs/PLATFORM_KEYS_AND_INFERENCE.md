@@ -27,7 +27,8 @@ the credential used for execution.
   `platform_key: { available, pricing }`, and `byok_pricing`. Price views expose the
   metric, exact decimal credits per unit, and synchronization status, without Lago
   identifiers or diagnostic details. Keys expose the binding, availability, and the
-  same price views.
+  same price views, including immediate BYOK creation responses and assistant-reserved
+  connection IDs.
 - Inference `binding` and `status_slug` are computed, never stored. A caller who can
   use an authorized platform key receives `binding=platform`, without `status_slug`.
   Otherwise the binding is `user`; provider-linked rows use `ProviderConfig.slug`
@@ -47,9 +48,14 @@ whose role permits proxying. Org-owned connections retain the existing owner acc
 member scope, and `admin_only` gates. A personal grant never grants another owner's
 connection. Admin role alone does not bypass the platform-key execution ACL. Restricted checks
 fetch active memberships once and batch-check person/org activity, then intersect
-owner IDs in memory; query count is independent of allowlist size. LLM status passes
-one request membership snapshot through every provider/owner check. Owner validation
-uses a single `$in` query. No membership data is cached across requests.
+owner IDs in memory; query count is independent of allowlist size. Catalog and key
+listings, auto-provisioning and reconciliation, MCP discovery and callable-service
+loading, and LLM status/gateway checks share request-scoped `OwnerGrants` across all
+service/owner checks. Key listing shares that snapshot with its provisioning and org
+row traversal. Provider eligibility uses the already-loaded catalog/status provider
+batch or one provider batch shared across the other listing/provisioning paths.
+`available_with_grants` performs no database calls. Owner validation uses a single
+`$in` query. No membership or provider eligibility data is cached across requests.
 
 An absent platform configuration preserves the legacy public/internal/master-key
 predicate, including its provider exclusion. Explicit disabled or restricted config
@@ -71,13 +77,18 @@ for previously provisioned connections. Platform usage retains the per-user
 Personal connections keep precedence over legacy personal connections and org
 fallback. A platform binding uses the live catalog destination and effective catalog
 auth injection (including `ServiceProviderRequirement` for provider-linked seeds).
-It cannot accept a user destination, auth override, or node route that would send
+
+### Node transport hardening
+
+A platform binding cannot accept a user destination, auth override, or node route that would send
 the platform credential elsewhere. Node selection with a platform binding is a
 validation error. Legacy internal master credentials also always use server transport;
 existing owner-node bindings are ignored for those credentials. Owner nodes inject
 only their own credentials. This is intentional hardening at both HTTP/WS and MCP
 routing boundaries, including legacy rows without platform configuration. Agent credential overrides retain their existing behavior and
 final credential classification; they do not bypass a revoked connection grant.
+
+### Personal and org provisioning
 
 Public platform services auto-provision through the existing idempotent lifecycle.
 Restricted services provision only eligible personal owners and granted org owners.
@@ -96,6 +107,28 @@ Authentication's `allow_auto_connected_services` union includes active same-owne
 platform-bound rows as well as historical automatic rows.
 
 ## Connection and administration surfaces
+
+### Credential replacement and audit
+
+`PUT /services/{catalog-id}` accepts a write-only master `credential` through the same
+envelope encryption used at catalog creation; the user `/connections/{id}/credential`
+route remains a distinct connection operation. Credential and inference edits, and
+platform configuration creation/update, emit metadata-only audit-chain events.
+No secret value, ciphertext, length, or owner allowlist appears in those events.
+
+### Admin catalog editing
+
+Catalog responses expose `legacy_public_master` so admin editors and
+`nyxid service show <catalog-id-or-slug> --catalog-admin` display
+“enabled, public (implicit)” for eligible absent configurations. Explicit enable on
+such a row defaults to public. Catalog CLI prices use the shared free/unit/pending
+wording; missing discovery fields display “not configured”. Catalog update 404s
+explain that a connection ID cannot identify the catalog row. CLI slug lookup uses
+the admin service listing, whose responses carry catalog IDs; discovery entries do
+not carry IDs. Use a catalog ID for rows absent from that listing, such as disabled
+services.
+
+### User platform connection editing
 
 `POST /keys` accepts `use_platform_key` (default false for existing callers). It is
 exclusive with credential/OAuth inputs, custom destination/auth, and node routing.
@@ -261,24 +294,3 @@ Admin inference flags are `--inference-protocol`, `--inference-model-list`, and
 - xAI [Models REST API](https://docs.x.ai/developers/rest-api-reference/inference/models.md): `GET /v1/models`, OpenAI-style `data`/model objects.
 - xAI [Voice agent guide](https://docs.x.ai/docs/guides/voice/agent): bearer-authenticated `wss://api.x.ai/v1/realtime`.
 - OpenAI [Models](https://developers.openai.com/api/reference/resources/models/methods/list), [DeepSeek models](https://api-docs.deepseek.com/api/list-models), [Mistral models](https://docs.mistral.ai/api/endpoint/models), [Anthropic models](https://docs.anthropic.com/en/api/models-list), and [OpenRouter models](https://openrouter.ai/api/v1/models) establish model-list capability. Transport construction tests cover OpenAI and xAI realtime; no paid upstream session is required for the local test suite.
-
-### Review round 1 compatibility details
-
-`PUT /services/{catalog-id}` accepts a write-only master `credential` through the same
-envelope encryption used at catalog creation; the user `/connections/{id}/credential`
-route remains a distinct connection operation. Credential and inference edits, and
-platform configuration creation/update, emit metadata-only audit-chain events.
-No secret value, ciphertext, length, or owner allowlist appears in those events.
-Catalog responses expose `legacy_public_master` so admin editors and
-`nyxid service show <catalog-id-or-slug> --catalog-admin` display
-“enabled, public (implicit)” for eligible absent configurations. Explicit enable on
-such a row defaults to public. Catalog CLI prices use the shared free/unit/pending
-wording; missing discovery fields display “not configured”. Catalog update 404s
-explain that a connection ID cannot identify the catalog row. CLI slug lookup uses
-the admin service listing, whose responses carry catalog IDs; discovery entries do
-not carry IDs. Use a catalog ID for rows absent from that listing, such as disabled
-services.
-
-BYOK creation responses now resolve platform availability and both lane prices just
-like subsequent key reads, including assistant-reserved connection IDs. The version
-remains 0.20.0 for these pre-release review fixes.

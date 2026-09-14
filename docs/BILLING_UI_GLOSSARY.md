@@ -87,17 +87,7 @@ this banner is mostly a defense against stale capability state rather than the n
 Backed by `GET /api/v1/billing/wallet` → `BillingWalletResponse` (`handlers/billing.rs:94-114`;
 model at `models/billing_wallet.rs`).
 
-Token capture checks both configured lanes, regardless of catalog slug or price sync
-state. JSON/SSE provider usage is authoritative. MCP keeps zero tokens for non-token
-services unless a response actually reports usage; token-metered responses without
-reported usage retain the existing estimate.
-
-Mixed billing lanes may use different units. Allowances match the actual request's
-selected platform metric at reservation and settlement. Admin allowance create/update
-accepts optional `metric`, validated against configured lane units (plus a legacy
-fallback unit while sync is pending/failed). Omitted `metric` defaults to BYOK's unit,
-otherwise platform key's unit, otherwise the legacy service default. Existing allowance
-rows retain their original unit; the UI offers a unit selector for mixed lanes.
+For mixed billing lanes, the allowance unit selector follows [the metering and allowance rules](USAGE_BILLING_LAGO_SPEC.md#40-metadata-only-route-context-r1).
 
 ### Header
 
