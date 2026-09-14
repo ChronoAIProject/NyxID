@@ -269,6 +269,81 @@ mod tests {
         assert!(is_platform_vendor_service(&service));
     }
 
+    /// The `google` overlay gained Drive authoring by addition only. These
+    /// operations existed before and are what deployed callers, stored
+    /// bindings, and durable approvals are bound to: a changed method or path
+    /// breaks them, and any contract edit bumps `operation_generation`, which
+    /// invalidates durable exact-service approvals. Adding operations does
+    /// neither.
+    #[test]
+    fn google_overlay_keeps_its_preexisting_operations_unchanged() {
+        const PREEXISTING: &[(&str, &str, &str)] = &[
+            ("get_userinfo", "GET", "/oauth2/v2/userinfo"),
+            ("gmail_list_messages", "GET", "/gmail/v1/users/me/messages"),
+            (
+                "gmail_get_message",
+                "GET",
+                "/gmail/v1/users/me/messages/{id}",
+            ),
+            (
+                "gmail_send_message",
+                "POST",
+                "/gmail/v1/users/me/messages/send",
+            ),
+            ("drive_list_files", "GET", "/drive/v3/files"),
+            ("drive_get_file", "GET", "/drive/v3/files/{fileId}"),
+            // Deliberately calendar-`primary`, not `{calendarId}`: switching to
+            // the templated form would add a required path parameter.
+            (
+                "calendar_list_events",
+                "GET",
+                "/calendar/v3/calendars/primary/events",
+            ),
+            (
+                "calendar_create_event",
+                "POST",
+                "/calendar/v3/calendars/primary/events",
+            ),
+        ];
+
+        let inputs = seeded_endpoint_inputs("api-google").expect("google overlay parses");
+        for (name, method, path) in PREEXISTING {
+            let endpoint = inputs
+                .iter()
+                .find(|input| input.name == *name)
+                .unwrap_or_else(|| panic!("api-google no longer publishes '{name}'"));
+            assert_eq!(&endpoint.method, method, "'{name}' changed method");
+            assert_eq!(&endpoint.path, path, "'{name}' changed path");
+        }
+    }
+
+    /// Google Docs/Sheets/Slides bodies are written by uploading Markdown and
+    /// letting Drive convert. That only works if the published operation asks
+    /// for a text body: an `application/octet-stream` contract makes the MCP
+    /// tool demand base64 bytes and send a binary Content-Type, which Drive
+    /// will not convert into a native document.
+    #[test]
+    fn google_overlay_publishes_a_markdown_drive_content_write() {
+        let inputs = seeded_endpoint_inputs("api-google").expect("google overlay parses");
+        let write = inputs
+            .iter()
+            .find(|input| input.name == "drive_upload_file_content")
+            .expect("api-google publishes drive_upload_file_content");
+        assert_eq!(write.method, "PATCH");
+        assert_eq!(write.path, "/upload/drive/v3/files/{fileId}");
+        assert_eq!(
+            write.request_content_type.as_deref(),
+            Some("text/markdown"),
+            "must request a Markdown body so Drive converts it"
+        );
+        for required in ["drive_create_file", "drive_export_file"] {
+            assert!(
+                inputs.iter().any(|input| input.name == required),
+                "api-google must publish '{required}' to complete the authoring round trip"
+            );
+        }
+    }
+
     #[test]
     fn every_hydrated_slug_produces_valid_endpoint_inputs() {
         for slug in catalog_spec_registry::hydrated_slugs() {
