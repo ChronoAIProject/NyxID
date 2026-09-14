@@ -121,6 +121,18 @@ and exact decimal `credits_per_unit`; null selects Free.
   `resale_billable` on the service, and a final credential class of
   `nyxid_managed_master`. See the spec for details.
 
+Token capture checks both configured lanes, regardless of catalog slug or price sync
+state. JSON/SSE provider usage is authoritative. MCP keeps zero tokens for non-token
+services unless a response actually reports usage; token-metered responses without
+reported usage retain the existing estimate.
+
+Mixed billing lanes may use different units. Allowances match the actual request's
+selected platform metric at reservation and settlement. Admin allowance create/update
+accepts optional `metric`, validated against configured lane units (plus a legacy
+fallback unit while sync is pending/failed). Omitted `metric` defaults to BYOK's unit,
+otherwise platform key's unit, otherwise the legacy service default. Existing allowance
+rows retain their original unit; the UI offers a unit selector for mixed lanes.
+
 ## 5. OSS Lago limitations
 
 - **Wallet ongoing balance never updates.** Lago's

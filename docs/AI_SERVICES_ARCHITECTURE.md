@@ -496,3 +496,19 @@ routing edits require switching back to BYOK.
 their effective service union, including explicit selections. Grants do not override
 normal org membership, operation policy or delegated execution checks. See
 [the design](PLATFORM_KEYS_AND_INFERENCE.md) for complete pricing and upgrade rules.
+
+### Review-round compatibility and management rules
+
+Explicit platform connections allow label, admin-only visibility, recommended skills,
+User-Agent and default-header edits, plus Disable/Enable. Endpoint/auth/node/identity/
+delegation settings require switching to a user key; automatic rows stay managed.
+Platform master credentials, including legacy internal master rows, always use server
+transport. Existing owner-node bindings for those rows are ignored as intentional
+hardening; nodes inject their own credentials only.
+
+A Member/Admin listing keys may trigger idempotent provisioning of org-owned rows for
+explicit platform-key grants when their role permits proxying. Org views identify
+them as auto-connected. Removing the org grant immediately blocks execution and the
+next owner reconciliation removes automatic rows and orphan endpoints. This side
+effect is limited to explicit platform configurations; inherited legacy no-auth
+provisioning remains personal-only. Authentication does not provision rows.

@@ -307,6 +307,18 @@ metadata pass out of it (or compute the context from the already-resolved `pre`/
 **after** the agent-credential override at `proxy.rs:1289-1300`, where the final credential is known —
 do **not** read the pre-override `has_server_credential`).
 
+Token capture checks both configured lanes, regardless of catalog slug or price sync
+state. JSON/SSE provider usage is authoritative. MCP keeps zero tokens for non-token
+services unless a response actually reports usage; token-metered responses without
+reported usage retain the existing estimate.
+
+Mixed billing lanes may use different units. Allowances match the actual request's
+selected platform metric at reservation and settlement. Admin allowance create/update
+accepts optional `metric`, validated against configured lane units (plus a legacy
+fallback unit while sync is pending/failed). Omitted `metric` defaults to BYOK's unit,
+otherwise platform key's unit, otherwise the legacy service default. Existing allowance
+rows retain their original unit; the UI offers a unit selector for mixed lanes.
+
 ### 4.1 `MeteredProxyContext`
 
 The emit-side handle, derived from `BillingRouteContext` + measured usage. `billing_request_id` is

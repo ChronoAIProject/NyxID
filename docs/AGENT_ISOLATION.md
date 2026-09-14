@@ -100,10 +100,14 @@ and device approval resolve/provision before listing or selecting services.
 The indexed expansion query only runs for restricted, opted-in keys.
 
 Ownership remains authoritative: a personal platform row cannot be selected for
-an org key, and expansion never includes a different owner's rows. Provisioning
-runs only for the acting person. Org device approval and onboarding skip
-platform provisioning. Org keys have no auto-connected platform rows; the picker explains
-why the personal platform group is unavailable.
+an org key, and expansion never includes a different owner's rows. Version 0.20
+includes explicit platform bindings in the auto-connected grant. Management key
+listing may idempotently provision org-owned rows for explicit platform-key grants
+when an active Member/Admin with `can_proxy()` visits. These rows appear as
+auto-connected in org views. Removing an org grant immediately blocks execution
+and the next per-owner reconciliation removes automatic rows and orphan endpoints.
+Legacy no-auth/public-master provisioning remains personal-only during inherited
+membership traversal; authentication itself never provisions.
 
 ```bash
 nyxid api-key create --name research --scopes proxy --allowed-services github,autoplatform --terminal

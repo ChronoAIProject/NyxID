@@ -11,12 +11,14 @@ the credential used for execution.
 - `DownstreamService.inference` is optional. Its `wire_protocol` enum is
   `anthropic_messages`, `openai_responses`, or `openai_completions`; `model_list` and
   `realtime` are defaulted booleans. Unknown protocol values fail validation.
+  The defaulted `inference_admin_modified` marker records explicit edits, including
+  null clears, so startup never restores an admin-cleared block.
 - `DownstreamService.platform_key` is optional, with defaulted `enabled`, an
   `audience` enum (`public` or `restricted`), and `allowed_owner_ids`. Owners are UUID
   strings identifying people or org users. The existing encrypted master credential
-  and existing rotation API hold the secret. Admin responses contain configuration,
-  never secret bytes or lengths. Audit records contain identifiers and changed field
-  names only.
+  holds the secret. Admin catalog PUT accepts write-only `credential` for replacement. Admin responses contain configuration,
+  never secret bytes or lengths. Audit records contain metadata only: identifiers,
+  changed field names and configuration state, without credentials or owner lists.
 - `UserService.credential_binding` is an optional string: `platform` or `user`.
   Absent means the historical interpretation: no API key plus `auto_provision`
   source uses the platform path; other rows use their own credential. Truly no-auth
@@ -37,11 +39,17 @@ the credential used for execution.
 ## Authorization, routing, and precedence
 
 Platform availability requires an active HTTP service, enabled configuration, and
-nonempty encrypted master credential. Public audience allows authenticated owners;
+nonempty encrypted master credential. Providers requiring a user gateway URL cannot
+use platform keys: enabling is rejected and runtime availability is false, preventing
+placeholder catalog destinations from receiving the platform credential. Public audience allows authenticated owners;
 restricted audience requires an explicit owner grant or an active org membership
 whose role permits proxying. Org-owned connections retain the existing owner access,
 member scope, and `admin_only` gates. A personal grant never grants another owner's
-connection. Admin role alone does not bypass the platform-key execution ACL.
+connection. Admin role alone does not bypass the platform-key execution ACL. Restricted checks
+fetch active memberships once and batch-check person/org activity, then intersect
+owner IDs in memory; query count is independent of allowlist size. LLM status passes
+one request membership snapshot through every provider/owner check. Owner validation
+uses a single `$in` query. No membership data is cached across requests.
 
 An absent platform configuration preserves the legacy public/internal/master-key
 predicate, including its provider exclusion. Explicit disabled or restricted config
@@ -51,8 +59,11 @@ master credentials and no-auth auto-connections retain their existing behavior.
 All credential resolvers authorize against the live catalog and owner before
 decryption: streamlined and legacy proxy, HTTP and WebSocket, LLM gateway, MCP,
 and delegated execution. Existing actor-addressed operation policies and exact
-execution-authority approval checks remain in force. Anonymous/public execution and
-server-selected unauthenticated surfaces do not acquire the new platform-key grant.
+execution-authority approval checks remain in force. Server-selected surfaces retain
+the legacy public/internal master predicate and also
+accept explicit enabled/public configuration on that same shape. Explicit restricted
+or disabled configs are denied without an actor. Anonymous/public execution retains
+its existing authorization rules and gains no platform-key access.
 Revocation yields the existing not-found-shaped unavailable-service error, including
 for previously provisioned connections. Platform usage retains the per-user
 `PLATFORM_SERVICE_RATE_LIMIT_*` gate and `NyxidManagedMaster` classification.
@@ -62,12 +73,20 @@ fallback. A platform binding uses the live catalog destination and effective cat
 auth injection (including `ServiceProviderRequirement` for provider-linked seeds).
 It cannot accept a user destination, auth override, or node route that would send
 the platform credential elsewhere. Node selection with a platform binding is a
-validation error. Agent credential overrides retain their existing behavior and
+validation error. Legacy internal master credentials also always use server transport;
+existing owner-node bindings are ignored for those credentials. Owner nodes inject
+only their own credentials. This is intentional hardening at both HTTP/WS and MCP
+routing boundaries, including legacy rows without platform configuration. Agent credential overrides retain their existing behavior and
 final credential classification; they do not bypass a revoked connection grant.
 
 Public platform services auto-provision through the existing idempotent lifecycle.
 Restricted services provision only eligible personal owners and granted org owners.
-Org access is inherited through the existing membership traversal. This new org
+Org access is inherited through the existing membership traversal. A Member with
+`can_proxy()` may trigger idempotent creation of the org-owned platform rows when
+listing keys; this limited reconciliation side effect requires no org-admin action.
+Org views badge these rows `auto_connected=true`. Removing the org grant removes
+the automatic org rows and orphan endpoints on the next owner reconciliation; live
+execution is refused immediately, before that cleanup. This new org
 walk provisions explicit platform configurations only; legacy no-auth provisioning
 remains personal unless an existing caller explicitly provisions an org owner. Stale automatic
 rows are removed with orphan endpoint cleanup, allowing re-provisioning after a
@@ -86,7 +105,11 @@ and revisions v4-v8 remain byte-compatible with deployed Aevatar pins.
 
 Key updates accept `use_platform_key`: true selects an available platform key; false
 requires a fresh credential or the existing OAuth setup path, including the existing
-raw/copy custom-app credential inputs. Switching to platform
+raw/copy custom-app credential inputs. Explicit platform-bound rows may update
+`label`, `admin_only`, `recommended_skills`, `custom_user_agent`, and
+`default_request_headers`, plus Disable/Enable. Endpoint, auth, node, OpenAPI, identity,
+forward-token and delegation fields stay locked with a field-naming “Switch to your
+own key to change …” error. Automatic rows remain managed by reconciliation. Switching to platform
 retains the personal `UserApiKey`; it does not silently delete credentials or their
 other consumers. Actual user credential replacement retains the pipeline-based
 credential-epoch bump. Automatic rows may be adopted into a user-managed connection
@@ -142,7 +165,21 @@ Lane selection happens in the shared billing route context after final credentia
 classification and before wallet gating/reservation. Existing metering, actual-unit
 allowances, expiring grants, wallet funding, settlement, Lago outbox, and dashboard
 queries consume the selected metric. Provider-reported token usage remains the
-authoritative token input. Ledger canonical fields, order, hash derivation, dedupe
+authoritative token input. Capture recognizes token pricing on either configured lane,
+including pending lanes and non-`llm-` slugs, for JSON and SSE. MCP estimates tokens
+only for token-metered services; other services report zero tokens unless the body
+actually carries provider usage.
+
+When lanes use different units, each request's final `ctx.platform_metric` controls
+reservation and settlement allowance matching. Admin allowance create/update accepts
+optional `metric`: it must match a configured lane (or a legacy metric still used
+while a lane is pending/failed). Omitting it chooses BYOK's metric first, otherwise
+the platform-key metric, otherwise the legacy service default. The existing
+`effective_platform_metric` display field uses that same deterministic default;
+it is not a claim that every credential lane has that unit. The allowance UI offers
+a unit selector for mixed lanes. Existing allowances keep their stored unit on
+unrelated updates, including older clients repeating the same service reference, and only
+fund requests with that matching unit. Ledger canonical fields, order, hash derivation, dedupe
 keys, and verification are unchanged; lane charges use the existing platform layer
 and reference usage rows that distinguish lanes by metric code and credential class.
 
@@ -153,8 +190,9 @@ semantics; omitted new lanes are always preserved, and explicit null clears a la
 
 ## Inference defaults and transports
 
-Startup fills only absent/null inference blocks, including admin-created Chrono
-rows; it never replaces an admin-authored block.
+Startup fills only absent/null inference blocks whose `inference_admin_modified`
+marker is absent/false, including admin-created Chrono rows. It never replaces an
+admin-authored block or an explicit null clear.
 
 | Catalog slug | Protocol | Model list | Realtime |
 | --- | --- | --- | --- |
@@ -223,3 +261,24 @@ Admin inference flags are `--inference-protocol`, `--inference-model-list`, and
 - xAI [Models REST API](https://docs.x.ai/developers/rest-api-reference/inference/models.md): `GET /v1/models`, OpenAI-style `data`/model objects.
 - xAI [Voice agent guide](https://docs.x.ai/docs/guides/voice/agent): bearer-authenticated `wss://api.x.ai/v1/realtime`.
 - OpenAI [Models](https://developers.openai.com/api/reference/resources/models/methods/list), [DeepSeek models](https://api-docs.deepseek.com/api/list-models), [Mistral models](https://docs.mistral.ai/api/endpoint/models), [Anthropic models](https://docs.anthropic.com/en/api/models-list), and [OpenRouter models](https://openrouter.ai/api/v1/models) establish model-list capability. Transport construction tests cover OpenAI and xAI realtime; no paid upstream session is required for the local test suite.
+
+### Review round 1 compatibility details
+
+`PUT /services/{catalog-id}` accepts a write-only master `credential` through the same
+envelope encryption used at catalog creation; the user `/connections/{id}/credential`
+route remains a distinct connection operation. Credential and inference edits, and
+platform configuration creation/update, emit metadata-only audit-chain events.
+No secret value, ciphertext, length, or owner allowlist appears in those events.
+Catalog responses expose `legacy_public_master` so admin editors and
+`nyxid service show <catalog-id-or-slug> --catalog-admin` display
+“enabled, public (implicit)” for eligible absent configurations. Explicit enable on
+such a row defaults to public. Catalog CLI prices use the shared free/unit/pending
+wording; missing discovery fields display “not configured”. Catalog update 404s
+explain that a connection ID cannot identify the catalog row. CLI slug lookup uses
+the admin service listing, whose responses carry catalog IDs; discovery entries do
+not carry IDs. Use a catalog ID for rows absent from that listing, such as disabled
+services.
+
+BYOK creation responses now resolve platform availability and both lane prices just
+like subsequent key reads, including assistant-reserved connection IDs. The version
+remains 0.20.0 for these pre-release review fixes.

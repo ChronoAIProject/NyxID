@@ -253,3 +253,9 @@ additive boolean schema with `GET /api/v1/assistant/actions?revision=nyxid-assis
 the default and revisions v4-v8 keep their deployed pinned schemas. The v9
 `catalogService.use_platform_key` field is optional and the human can review the
 choice in the connection dialog.
+
+Admin-cleared inference stays absent after restart: `inference_admin_modified` is a
+stored, defaulted tombstone and is not a client inference capability. Admin catalog
+responses additionally expose `legacy_public_master`; editors render such absent
+platform configurations as enabled/public (implicit). Gateway-URL providers never
+advertise an available platform key.
