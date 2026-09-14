@@ -179,7 +179,7 @@ async fn snapshot(
     })
 }
 
-fn credential_revision(key: &UserApiKey) -> String {
+pub(crate) fn credential_revision(key: &UserApiKey) -> String {
     // Refresh intentionally preserves credential_epoch. Bind refreshed material
     // and scopes separately, so a late rejection cannot outlive a newer token.
     let mut hash = Sha256::new();
@@ -198,11 +198,27 @@ fn credential_revision(key: &UserApiKey) -> String {
 }
 
 fn fresh(record: &ServiceValidationRecord, live: &Snapshot, version: u32) -> bool {
+    evidence_is_fresh(
+        record,
+        &live.digest,
+        live.revision.as_deref(),
+        version,
+        Utc::now(),
+    )
+}
+
+pub(crate) fn evidence_is_fresh(
+    record: &ServiceValidationRecord,
+    digest: &str,
+    revision: Option<&str>,
+    version: u32,
+    now: chrono::DateTime<Utc>,
+) -> bool {
     record.completed
         && record.validator_version == version
-        && record.execution_authority_digest == live.digest
-        && record.credential_revision == live.revision
-        && record.valid_until > Utc::now()
+        && record.execution_authority_digest == digest
+        && record.credential_revision.as_deref() == revision
+        && record.valid_until > now
 }
 
 pub async fn validate(

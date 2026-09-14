@@ -1574,6 +1574,8 @@ pub struct OAuthClientResponse {
     /// Raw client secret -- only returned at creation time.
     pub client_secret: Option<String>,
     pub created_at: String,
+    pub app_connect_capability_enabled: bool,
+    pub current_manifest_version: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1709,6 +1711,8 @@ fn oauth_client_response(
         !matches!(broker_capability_source, BrokerCapabilitySource::None);
 
     OAuthClientResponse {
+        app_connect_capability_enabled: client.app_connect_capability_enabled,
+        current_manifest_version: client.current_manifest_version,
         id: client.id,
         client_name: client.client_name,
         client_type: client.client_type,
@@ -3059,6 +3063,8 @@ mod operator_route_tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
+            app_connect_capability_enabled: false,
+            current_manifest_version: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,

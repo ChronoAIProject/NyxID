@@ -52,6 +52,11 @@ pub struct OauthClient {
     pub default_service_catalog_slugs: Vec<String>,
     #[serde(default)]
     pub broker_capability_enabled: bool,
+    /// Platform-admin grant; never inferred from requested OAuth scopes.
+    #[serde(default)]
+    pub app_connect_capability_enabled: bool,
+    #[serde(default)]
+    pub current_manifest_version: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation_webhook_url: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
@@ -93,6 +98,11 @@ impl std::fmt::Debug for OauthClient {
                 &self.default_service_catalog_slugs,
             )
             .field("broker_capability_enabled", &self.broker_capability_enabled)
+            .field(
+                "app_connect_capability_enabled",
+                &self.app_connect_capability_enabled,
+            )
+            .field("current_manifest_version", &self.current_manifest_version)
             .field(
                 "revocation_webhook_url",
                 &self
@@ -157,6 +167,8 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: true,
+            app_connect_capability_enabled: false,
+            current_manifest_version: None,
             revocation_webhook_url: Some("https://client.example.com/cae".to_string()),
             revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
             connection_webhook_url: Some("https://client.example.com/connections".to_string()),
@@ -235,6 +247,8 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: vec!["openai".to_string(), "lark".to_string()],
             broker_capability_enabled: false,
+            app_connect_capability_enabled: false,
+            current_manifest_version: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -272,6 +286,8 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: true,
+            app_connect_capability_enabled: false,
+            current_manifest_version: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -303,6 +319,8 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: vec![],
             broker_capability_enabled: false,
+            app_connect_capability_enabled: false,
+            current_manifest_version: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
             connection_webhook_url: None,

@@ -308,6 +308,8 @@ pub struct AppConfig {
     /// Require the admin-managed OAuth client broker-capability flag, ignoring
     /// the legacy DCR scope trigger. Default false preserves current behavior.
     pub broker_require_admin_capability: bool,
+    pub app_connect_rollout: crate::models::platform_settings::AppConnectRollout,
+    pub app_connect_allowed_org_ids: Vec<String>,
 
     /// Explicit HMAC key (64 hex chars = 32 bytes) used to derive
     /// `CliPairing.code_hash`. When unset, the backend derives the
@@ -994,6 +996,31 @@ fn parse_invite_code_required(raw: Option<String>) -> bool {
     }
 }
 
+fn parse_app_connect_rollout(
+    value: Option<&str>,
+) -> crate::models::platform_settings::AppConnectRollout {
+    use crate::models::platform_settings::AppConnectRollout;
+    match value.unwrap_or("disabled").trim() {
+        "disabled" => AppConnectRollout::Disabled,
+        "allowlist" => AppConnectRollout::Allowlist,
+        "public" => AppConnectRollout::Public,
+        _ => panic!("APP_CONNECT_ROLLOUT must be disabled, allowlist, or public"),
+    }
+}
+
+fn parse_app_connect_allowed_org_ids(value: Option<&str>) -> Vec<String> {
+    let mut ids = value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
 impl AppConfig {
     /// Load configuration from environment variables.
     /// Panics on missing required variables to fail fast at startup.
@@ -1139,6 +1166,12 @@ impl AppConfig {
             broker_require_admin_capability: parse_bool_env(
                 "BROKER_REQUIRE_ADMIN_CAPABILITY",
                 false,
+            ),
+            app_connect_rollout: parse_app_connect_rollout(
+                env::var("APP_CONNECT_ROLLOUT").ok().as_deref(),
+            ),
+            app_connect_allowed_org_ids: parse_app_connect_allowed_org_ids(
+                env::var("APP_CONNECT_ALLOWED_ORG_IDS").ok().as_deref(),
             ),
             cli_pairing_hmac_key: env::var("CLI_PAIRING_HMAC_KEY")
                 .ok()
@@ -1782,6 +1815,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn app_connect_rollout_defaults_disabled_and_parses_reserved_public_mode() {
+        use crate::models::platform_settings::AppConnectRollout;
+        assert_eq!(parse_app_connect_rollout(None), AppConnectRollout::Disabled);
+        assert_eq!(
+            parse_app_connect_rollout(Some("allowlist")),
+            AppConnectRollout::Allowlist
+        );
+        assert_eq!(
+            parse_app_connect_rollout(Some("public")),
+            AppConnectRollout::Public
+        );
+        assert!(parse_app_connect_allowed_org_ids(None).is_empty());
+        assert_eq!(
+            parse_app_connect_allowed_org_ids(Some(" b, a,,b ")),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
     fn internal_advertise_url_prefers_explicit_url() {
         let resolved = resolve_internal_advertise_url(
             Some("https://backend-1.internal:9443"),
@@ -1898,6 +1950,8 @@ mod tests {
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
             broker_require_admin_capability: false,
+            app_connect_rollout: Default::default(),
+            app_connect_allowed_org_ids: Vec::new(),
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,
             billing_ledger_hmac_key: None,

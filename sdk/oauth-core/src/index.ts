@@ -1,3 +1,6 @@
+import { NyxAppConnectError, NyxRequirementsClient } from "./requirements.js";
+export * from "./requirements.js";
+
 export interface NyxIDClientConfig {
   readonly baseUrl: string;
   readonly clientId: string;
@@ -11,6 +14,7 @@ export * from "./services.js";
 export * from "./webhooks.js";
 
 export interface LoginRedirectOptions {
+  readonly resource?: string | readonly string[];
   readonly scope?: string;
   readonly redirectUri?: string;
   readonly state?: string;
@@ -18,6 +22,7 @@ export interface LoginRedirectOptions {
 }
 
 export interface NyxIDTokenSet {
+  readonly resource?: readonly string[];
   readonly accessToken: string;
   readonly tokenType: string;
   readonly expiresIn: number;
@@ -45,6 +50,7 @@ interface PendingAuthState {
 }
 
 interface TokenResponse {
+  readonly resource?: string[];
   readonly access_token: string;
   readonly token_type: string;
   readonly expires_in: number;
@@ -111,6 +117,7 @@ function normalizeBaseUrl(baseUrl: string): string {
 }
 
 export class NyxIDClient {
+  readonly requirements: NyxRequirementsClient;
   private readonly baseUrl: string;
   private readonly clientId: string;
   private readonly defaultRedirectUri: string;
@@ -129,6 +136,11 @@ export class NyxIDClient {
     this.fetchFn = config.fetchFn ?? globalThis.fetch.bind(globalThis);
     this.pendingKey = `nyxid:pending:${this.clientId}`;
     this.tokensKey = `nyxid:tokens:${this.clientId}`;
+    this.requirements = new NyxRequirementsClient(
+      this.baseUrl,
+      () => this.getStoredTokens()?.accessToken,
+      this.fetchFn,
+    );
   }
 
   async buildAuthorizeUrl(options: LoginRedirectOptions = {}): Promise<string> {
@@ -157,6 +169,11 @@ export class NyxIDClient {
     if (options.prompt) {
       url.searchParams.set("prompt", options.prompt);
     }
+    for (const resource of typeof options.resource === "string"
+      ? [options.resource]
+      : (options.resource ?? [])) {
+      url.searchParams.append("resource", resource);
+    }
     return url.toString();
   }
 
@@ -172,18 +189,9 @@ export class NyxIDClient {
     currentUrl = window.location.href,
   ): Promise<NyxIDTokenSet> {
     const callback = new URL(currentUrl);
-    const oauthError = callback.searchParams.get("error");
-    if (oauthError) {
-      throw new Error(
-        callback.searchParams.get("error_description") ??
-          `OAuth error: ${oauthError}`,
-      );
-    }
-
-    const code = callback.searchParams.get("code");
     const state = callback.searchParams.get("state");
-    if (!code || !state) {
-      throw new Error("Missing authorization code or state");
+    if (!state || callback.searchParams.getAll("state").length !== 1) {
+      throw new Error("Missing or ambiguous authorization state");
     }
 
     const rawPending = this.storage.getItem(this.pendingKey);
@@ -201,6 +209,14 @@ export class NyxIDClient {
     if (pending.state !== state) {
       throw new Error("State mismatch");
     }
+
+    // An uncorrelated callback must never surface a provider or app error.
+    if (callback.searchParams.has("error")) {
+      this.storage.removeItem(this.pendingKey);
+      throw new NyxAppConnectError(callback.searchParams);
+    }
+    const code = callback.searchParams.get("code");
+    if (!code) throw new Error("Missing authorization code");
 
     const form = new URLSearchParams();
     form.set("grant_type", "authorization_code");
@@ -234,6 +250,7 @@ export class NyxIDClient {
       refreshToken: body.refresh_token,
       idToken: body.id_token,
       scope: body.scope,
+      resource: body.resource,
     };
     this.storage.setItem(this.tokensKey, JSON.stringify(tokens));
     this.storage.removeItem(this.pendingKey);

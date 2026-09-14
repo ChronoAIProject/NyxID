@@ -3,6 +3,15 @@ use serde::{Deserialize, Serialize};
 pub const COLLECTION_NAME: &str = "platform_settings";
 pub const PLATFORM_SETTINGS_ID: &str = "platform";
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppConnectRollout {
+    #[default]
+    Disabled,
+    Allowlist,
+    Public,
+}
+
 fn default_platform_settings_id() -> String {
     PLATFORM_SETTINGS_ID.to_string()
 }
@@ -21,6 +30,10 @@ pub struct PlatformSettings {
     pub broker_require_admin_capability: Option<bool>,
     #[serde(default)]
     pub broker_policy_revision: i64,
+    #[serde(default)]
+    pub app_connect_rollout: Option<AppConnectRollout>,
+    #[serde(default)]
+    pub app_connect_policy_revision: i64,
 }
 
 impl PlatformSettings {
@@ -30,6 +43,8 @@ impl PlatformSettings {
             broker_require_sender_constraint: None,
             broker_require_admin_capability: None,
             broker_policy_revision: 0,
+            app_connect_rollout: None,
+            app_connect_policy_revision: 0,
         }
     }
 }
@@ -57,6 +72,7 @@ mod tests {
             broker_require_sender_constraint: Some(true),
             broker_require_admin_capability: Some(false),
             broker_policy_revision: 7,
+            ..PlatformSettings::empty()
         };
 
         let doc = bson::to_document(&settings).expect("serialize platform settings");

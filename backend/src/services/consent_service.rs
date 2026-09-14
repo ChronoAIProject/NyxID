@@ -400,6 +400,8 @@ mod tests {
                 is_active: true,
                 delegation_scopes: String::new(),
                 broker_capability_enabled: false,
+                app_connect_capability_enabled: false,
+                current_manifest_version: None,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,

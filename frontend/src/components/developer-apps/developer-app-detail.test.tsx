@@ -44,12 +44,16 @@ vi.mock("@/components/shared/client-secret-dialog", () => ({
     open ? <div data-testid="client-secret-dialog" /> : null,
 }));
 
+vi.mock("./requirements-card", () => ({
+  RequirementsCard: ({ clientId }: { readonly clientId: string }) => (
+    <div data-testid="requirements-card">{clientId}</div>
+  ),
+}));
+
 vi.mock("./connection-webhook-section", () => ({
-  ConnectionWebhookSection: ({
-    clientId,
-  }: {
-    readonly clientId: string;
-  }) => <div data-testid="connection-webhook-section">{clientId}</div>,
+  ConnectionWebhookSection: ({ clientId }: { readonly clientId: string }) => (
+    <div data-testid="connection-webhook-section">{clientId}</div>
+  ),
 }));
 
 vi.mock("sonner", () => ({
@@ -101,6 +105,44 @@ describe("DeveloperAppDetail", () => {
       isLoading: false,
     });
     mocks.updateMutateAsync.mockResolvedValue(oauthClient);
+  });
+
+  it("hides requirements when rollout is disabled even if capability is granted", () => {
+    mocks.useDeveloperApp.mockReturnValue({
+      data: {
+        ...oauthClient,
+        app_connect_capability_enabled: true,
+        app_connect_enabled: false,
+      },
+      isLoading: false,
+    });
+    render(
+      <DeveloperAppDetail
+        clientId="client-1"
+        backTo={{ to: "/developer-apps", label: "Developer Apps" }}
+      />,
+    );
+    expect(screen.queryByTestId("requirements-card")).not.toBeInTheDocument();
+  });
+
+  it("shows requirements for enabled apps in the shared personal and org detail", () => {
+    mocks.useDeveloperApp.mockReturnValue({
+      data: {
+        ...oauthClient,
+        app_connect_capability_enabled: true,
+        app_connect_enabled: true,
+      },
+      isLoading: false,
+    });
+    render(
+      <DeveloperAppDetail
+        clientId="client-1"
+        backTo={{ to: "/orgs/test/developer-apps", label: "Organization apps" }}
+      />,
+    );
+    expect(screen.getByTestId("requirements-card")).toHaveTextContent(
+      "client-1",
+    );
   });
 
   it("uses the include-all catalog for default service declarations", async () => {

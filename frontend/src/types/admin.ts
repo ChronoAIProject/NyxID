@@ -245,6 +245,8 @@ export interface AdminAuditLogSearchState {
 // ── Admin OAuth clients / broker rollout settings ──
 
 export interface AdminOAuthClient {
+  readonly app_connect_capability_enabled?: boolean;
+  readonly current_manifest_version?: number | null;
   readonly id: string;
   readonly client_name: string;
   readonly client_type: "public" | "confidential" | string;

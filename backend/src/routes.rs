@@ -970,6 +970,15 @@ fn build_router_internal(
             post(handlers::admin::run_chain_verification),
         )
         .route(
+            "/settings/app-connect",
+            get(handlers::app_requirements::get_rollout)
+                .patch(handlers::app_requirements::update_rollout),
+        )
+        .route(
+            "/oauth-clients/{client_id}/app-connect-capability",
+            patch(handlers::app_requirements::update_capability),
+        )
+        .route(
             "/settings/broker",
             get(handlers::admin::get_broker_settings)
                 .patch(handlers::admin::update_broker_settings),
@@ -1510,6 +1519,11 @@ fn build_router_internal(
                 .delete(handlers::developer_apps::delete_my_oauth_client),
         )
         .route(
+            "/oauth-clients/{client_id}/requirements",
+            get(handlers::app_requirements::list_manifests)
+                .post(handlers::app_requirements::publish_manifest),
+        )
+        .route(
             "/oauth-clients/{client_id}/authorization",
             get(handlers::developer_apps::get_my_oauth_client_authorization),
         )
@@ -1700,6 +1714,10 @@ fn build_router_internal(
         .nest("/providers", provider_routes)
         .nest("/nodes", node_registration_routes)
         .nest("/oracle", oracle_consumer_routes)
+        .route(
+            "/app-requirements/status",
+            get(handlers::app_requirements::status),
+        )
         .nest("/connect-links", connect_link_routes)
         .nest("/triggers", trigger_routes)
         .layer(middleware::from_fn(reject_delegated_tokens))

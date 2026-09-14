@@ -7902,3 +7902,73 @@ the same server-enforced deadline and body cap. DNS pinning does not apply to
 node egress: the node executes inside its owner's network, whose SSRF boundary
 belongs to that owner. Checks run only on an explicit click; the existing Agent
 Key verification UI continues to test allowed/denied scope separately.
+
+
+## App requirements
+
+App requirements are advisory, immutable versions describing which catalog services a developer app needs. This feature ships disabled. In allowlist mode it requires an active app owned by an allowed organization and a capability granted by a platform admin. Manifest and status routes return HTTP 404 when the effective rollout check fails. Publishing requirements does not change authorize, consent, issued tokens, or execution permissions.
+
+`GET /api/v1/developer/oauth-clients/{client_id}/requirements` lists `{ versions, validator_profiles }`. Versions include `id`, `oauth_client_id`, `version`, `enforcement`, `requirements`, `compiled`, `published_by`, and `published_at`. Profile metadata includes the code-owned `id`, `version`, `claim`, and applicable `catalog_slugs`. Existing app read ownership rules apply; publishing requires app write ownership (the personal owner or an owning-org admin).
+
+`POST /api/v1/developer/oauth-clients/{client_id}/requirements` publishes the next version:
+
+```json
+{
+  "enforcement": "advise",
+  "requirements": [{
+    "id": "source_code",
+    "label": "Source code",
+    "any_of_catalog_slugs": ["api-github"],
+    "any_of_catalog_prefix": null,
+    "owner_policy": "personal_only",
+    "accepted_credential_types": ["oauth2"],
+    "allow_master_credential": false,
+    "allow_no_credential": false,
+    "required_downstream_scopes": ["repo"],
+    "validator": { "kind": "profile", "id": "github_user_v1" },
+    "optional": false
+  }]
+}
+```
+
+A manifest has at most 25 requirements with unique stable IDs matching `[a-z0-9_-]{1,32}`. Each resolves to 1–25 active, user-connectable catalog slugs. `any_of_catalog_prefix` expands active seeded slugs at publication and freezes that membership; later seeds enter only on republish. Unknown slugs, catalog tags, provider-category rows, inactive rows, unknown profiles, and profiles applying to none of a requirement's slugs are rejected with `12000 AppRequirementsInvalid` (400). `gate` is rejected until phase 2; the error explains that only `advise` is available. An empty manifest clears the current requirements by publishing a new version.
+
+`owner_policy` is `personal_only` or `personal_or_org_allowed`; org candidates require the person's live proxy permission. Empty `accepted_credential_types` accepts any user credential, while the master/no-credential flags independently allow platform credentials or credential-free services. OAuth scope checks use the stored `token_scopes`. `{"kind":"stored_only"}` uses local credential readiness; a profile uses the connection-validation evidence and proves only that profile's documented claim.
+
+`GET /api/v1/app-requirements/status` accepts an ordinary developer-app user access token. Its verified client ID selects the manifest; there is no client selector in the request. Session-only, API-key, delegated, relay, service-account, and non-person callers are rejected. The response is:
+
+```json
+{
+  "requirements_version": 1,
+  "result_id": "a-uuid",
+  "requirements": [{
+    "requirement_id": "source_code",
+    "state": "met",
+    "user_service_id": "selected-service-uuid",
+    "slug": "api-github",
+    "resource_uri": "https://id.example/api/v1/proxy/s/api-github",
+    "owner_id": "owner-uuid",
+    "validated_at": "2026-09-15T00:00:00Z",
+    "valid_until": "2026-09-15T00:05:00Z",
+    "credential_health": "active",
+    "granted_to_caller": false
+  }]
+}
+```
+
+Only manifest services may be disclosed. Optional selection/evidence fields are `null` when absent. `granted_to_caller` uses the token's own service allowlist: a requirement may be `met` while this token cannot use its selected service. Evaluation persists a result bound to the person, app, and manifest version, expiring after one hour; the result grants no access.
+
+| State | Meaning |
+|-------|---------|
+| `met` | Fresh authenticated profile evidence, or Connected local readiness for StoredOnly. |
+| `included` | An eligible credential-free or platform-credentialed service is provisioned and ready. |
+| `unmet` | No eligible connection is available. |
+| `unknown` | Evidence is absent, expired, changed, or inconclusive. |
+| `broken` | The selected credential is expired, revoked, or freshly rejected, with no ready alternative. |
+| `needs_reauth` | A candidate lacks required downstream OAuth scopes. |
+| `unsatisfiable` | No active catalog alternative remains. |
+| `disabled` | Disabled, enable to use. Evaluation never enables the service. |
+
+The evaluator performs no provider I/O, decryption, or token refresh. It reuses phase-0 freshness checks, including the profile version, credential revision, and execution-authority digest. Transport failures and other zero-window observations are not reusable evidence. No check runs merely because an app reads status. Credential-free services use the existing local auto-provision path. Prior explicit eligible selections win, followed by freshest authenticated evidence and most recent use; a rejected selection falls back to a ready eligible alternative.
+
+Platform admins use `PATCH /api/v1/admin/oauth-clients/{client_id}/app-connect-capability` with `{"enabled":true|false}`. `GET/PATCH /api/v1/admin/settings/app-connect` reads/updates rollout with `{"rollout":"disabled"|"allowlist"|null}`; `null` restores the deployment default. The response reports `effective`, `env_default`, `override_value`, and `allowed_org_ids`. Public mode is a reserved configuration value requiring a separate rollout review and is not offered in the UI. Capability changes emit `app_connect_capability_granted`/`app_connect_capability_revoked`; mode changes emit `app_connect_rollout_changed`.

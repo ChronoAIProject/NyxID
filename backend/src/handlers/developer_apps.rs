@@ -59,7 +59,7 @@ pub(crate) async fn resolve_developer_app_write_owner(
 /// Read variant: any active member of the owning org (or the direct
 /// creator) may view the client. See `resolve_developer_app_write_owner`
 /// for why the membership scope is not applied at the resource level.
-async fn resolve_developer_app_read_owner(
+pub(crate) async fn resolve_developer_app_read_owner(
     state: &AppState,
     actor: &str,
     client_id: &str,
@@ -126,6 +126,9 @@ pub struct UpdateDeveloperOAuthClientRequest {
 
 #[derive(Debug, Serialize)]
 pub struct DeveloperOAuthClientResponse {
+    pub app_connect_capability_enabled: bool,
+    pub app_connect_enabled: bool,
+    pub current_manifest_version: Option<u32>,
     pub id: String,
     pub client_name: String,
     pub client_type: String,
@@ -198,8 +201,17 @@ pub struct RotateDeveloperClientSecretResponse {
 
 // ── Shared helpers ──
 
-fn to_response(c: OauthClient, secret: Option<String>) -> DeveloperOAuthClientResponse {
-    DeveloperOAuthClientResponse {
+async fn to_response(
+    state: &AppState,
+    c: OauthClient,
+    secret: Option<String>,
+) -> AppResult<DeveloperOAuthClientResponse> {
+    let app_connect_enabled =
+        crate::services::app_connect_rollout::is_enabled_for(state, &c).await?;
+    Ok(DeveloperOAuthClientResponse {
+        app_connect_enabled,
+        app_connect_capability_enabled: c.app_connect_capability_enabled,
+        current_manifest_version: c.current_manifest_version,
         id: c.id,
         client_name: c.client_name,
         client_type: c.client_type,
@@ -215,7 +227,7 @@ fn to_response(c: OauthClient, secret: Option<String>) -> DeveloperOAuthClientRe
         client_secret: secret,
         created_at: c.created_at.to_rfc3339(),
         updated_at: c.updated_at.to_rfc3339(),
-    }
+    })
 }
 
 /// Maximum catalog slugs an app may declare as consent defaults.
@@ -418,7 +430,7 @@ pub(crate) async fn create_my_oauth_client_with_id(
         TelemetryEvent::OauthClientRegistered,
     );
 
-    Ok(Json(to_response(client, raw_secret)))
+    Ok(Json(to_response(&state, client, raw_secret).await?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -448,7 +460,10 @@ pub async fn list_my_oauth_clients(
     };
     let clients = oauth_client_service::list_clients_by_creator(&state.db, &user_id).await?;
 
-    let items = clients.into_iter().map(|c| to_response(c, None)).collect();
+    let mut items = Vec::with_capacity(clients.len());
+    for client in clients {
+        items.push(to_response(&state, client, None).await?);
+    }
 
     Ok(Json(DeveloperOAuthClientListResponse { clients: items }))
 }
@@ -462,7 +477,7 @@ pub async fn get_my_oauth_client(
     let actor = auth_user.user_id.to_string();
     let user_id = resolve_developer_app_read_owner(&state, &actor, &client_id).await?;
     let c = oauth_client_service::get_client_for_creator(&state.db, &client_id, &user_id).await?;
-    Ok(Json(to_response(c, None)))
+    Ok(Json(to_response(&state, c, None).await?))
 }
 
 /// GET /api/v1/developer/oauth-clients/{client_id}/authorization
@@ -475,7 +490,7 @@ pub async fn get_my_oauth_client_authorization(
     let owner = resolve_developer_app_read_owner(&state, &actor, &client_id).await?;
     let client =
         oauth_client_service::get_client_for_creator(&state.db, &client_id, &owner).await?;
-    let detail = to_response(client, None);
+    let detail = to_response(&state, client, None).await?;
     Ok(Json(
         DeveloperOAuthClientAuthorizationEvidenceResponse::from_client_response(&detail),
     ))
@@ -550,7 +565,7 @@ pub async fn update_my_oauth_client(
     )
     .await?;
 
-    Ok(Json(to_response(updated, None)))
+    Ok(Json(to_response(&state, updated, None).await?))
 }
 
 /// POST /api/v1/developer/oauth-clients/:client_id/rotate-secret
@@ -660,7 +675,7 @@ pub async fn disable_connection_webhook(
         "connection_webhook_disabled",
         Some(serde_json::json!({ "app_id": &client.id })),
     );
-    Ok(Json(to_response(client, None)))
+    Ok(Json(to_response(&state, client, None).await?))
 }
 
 /// DELETE /api/v1/developer/oauth-clients/:client_id
@@ -1615,8 +1630,8 @@ mod tests {
         assert_eq!(normalize_optional_nonempty(Some("value")), Some("value"));
     }
 
-    #[test]
-    fn to_response_maps_oauth_client_fields() {
+    #[tokio::test]
+    async fn to_response_maps_oauth_client_fields() {
         use chrono::Utc;
         let client = OauthClient {
             id: "client_1".to_string(),
@@ -1630,6 +1645,8 @@ mod tests {
             delegation_scopes: "proxy:*".to_string(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: true,
+            app_connect_capability_enabled: false,
+            current_manifest_version: None,
             revocation_webhook_url: Some("https://ex.com/revoke".to_string()),
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -1641,7 +1658,10 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        let resp = to_response(client, Some("secret_value".to_string()));
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let resp = to_response(&state, client, Some("secret_value".to_string()))
+            .await
+            .unwrap();
         assert_eq!(resp.id, "client_1");
         assert_eq!(resp.client_name, "My App");
         assert_eq!(resp.client_type, "confidential");
@@ -1650,8 +1670,8 @@ mod tests {
         assert!(resp.created_at.contains('T'));
     }
 
-    #[test]
-    fn to_response_omits_secret_when_none() {
+    #[tokio::test]
+    async fn to_response_omits_secret_when_none() {
         use chrono::Utc;
         let client = OauthClient {
             id: "client_2".to_string(),
@@ -1665,6 +1685,8 @@ mod tests {
             delegation_scopes: String::new(),
             default_service_catalog_slugs: Vec::new(),
             broker_capability_enabled: false,
+            app_connect_capability_enabled: false,
+            current_manifest_version: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -1676,7 +1698,8 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
-        let resp = to_response(client, None);
+        let state = crate::test_utils::test_app_state_no_db().await;
+        let resp = to_response(&state, client, None).await.unwrap();
         assert!(resp.client_secret.is_none());
         assert!(!resp.is_active);
     }
@@ -1684,6 +1707,9 @@ mod tests {
     #[test]
     fn developer_oauth_client_response_serialization() {
         let resp = DeveloperOAuthClientResponse {
+            app_connect_capability_enabled: false,
+            app_connect_enabled: false,
+            current_manifest_version: None,
             id: "c1".to_string(),
             client_name: "App".to_string(),
             client_type: "public".to_string(),
@@ -1708,6 +1734,9 @@ mod tests {
     #[test]
     fn developer_oauth_client_response_includes_secret_when_present() {
         let resp = DeveloperOAuthClientResponse {
+            app_connect_capability_enabled: false,
+            app_connect_enabled: false,
+            current_manifest_version: None,
             id: "c2".to_string(),
             client_name: "App".to_string(),
             client_type: "confidential".to_string(),
@@ -1731,6 +1760,9 @@ mod tests {
     #[test]
     fn developer_app_authorization_projection_excludes_names_urls_and_secret() {
         let detail = DeveloperOAuthClientResponse {
+            app_connect_capability_enabled: false,
+            app_connect_enabled: false,
+            current_manifest_version: None,
             id: "client-1".to_string(),
             client_name: "Bearer nyxid_ag_abcdefghijklmnop".to_string(),
             client_type: "confidential".to_string(),

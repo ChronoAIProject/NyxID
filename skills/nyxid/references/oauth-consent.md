@@ -143,3 +143,8 @@ Already-issued access tokens can keep working until they expire. The UI warns us
 - "How does an app pre-request OpenAI?" -> The developer app declares the catalog slug in `default_service_catalog_slugs`; the user's matching service is preselected, but the user may remove it.
 - "How does a client request one service programmatically?" -> Send the service's `resource_uri` as a repeatable RFC 8707 `resource` parameter.
 - "Can refresh expand from OpenAI to GitHub?" -> No. Refresh/exchange can narrow only; widening requires a new interactive consent.
+
+
+### Advisory app requirements
+
+An enabled developer app can publish immutable Advise manifests at `/api/v1/developer/oauth-clients/{client_id}/requirements` and read `/api/v1/app-requirements/status` with its ordinary user access token. The rollout is disabled by default and needs both a platform-admin capability and an allowed org owner. Status is local-only, discloses only manifest services, and never probes or changes consent. Treat `state` and `granted_to_caller` separately: ready services outside the token's grant still need interactive consent using RFC 8707 `resource`. Disabled services are never auto-enabled. SDK `client.requirements.status()` exposes this result; OAuth callback error handling must verify the pending `state` before interpreting `error` or app-connect parameters. Gate enforcement and consent-result binding are phase 2.

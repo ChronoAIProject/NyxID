@@ -421,6 +421,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "channel-bots"
                 | "channel-conversations"
                 | "connect-links"
+                | "app-requirements"
                 | "platform-ops"
         )
     ) {
@@ -1547,6 +1548,7 @@ mod tests {
             "/api/v1/webhooks/telegram",
             "/api/v1/integrations/openclaw/mappings",
             "/api/v1/billing/wallet",
+            "/api/v1/app-requirements/status",
             "/api/v1/oracle/pools",
             "/api/v1/channel-bots",
             "/api/v1/channel-conversations/conversation-id",
@@ -2453,6 +2455,8 @@ mod tests {
                 delegation_scopes: "proxy:*".to_string(),
                 default_service_catalog_slugs: Vec::new(),
                 broker_capability_enabled: false,
+                app_connect_capability_enabled: false,
+                current_manifest_version: None,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: Some(vec![19, 20, 21]),
                 connection_webhook_url: None,

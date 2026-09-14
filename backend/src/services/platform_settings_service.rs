@@ -164,6 +164,7 @@ mod tests {
             broker_require_sender_constraint: Some(false),
             broker_require_admin_capability: Some(true),
             broker_policy_revision: 3,
+            ..PlatformSettings::empty()
         };
         let policy = BrokerPolicy::resolve(true, false, &settings);
 

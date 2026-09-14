@@ -381,6 +381,23 @@ pub enum AppError {
     #[error("Agent Key login credential not found")]
     AgentKeyCredentialNotFound,
 
+    #[error("Invalid app requirements: {0}")]
+    AppRequirementsInvalid(String),
+    #[error("App connect link not found")]
+    AppConnectLinkNotFound,
+    #[error("App connect link expired")]
+    AppConnectLinkExpired,
+    #[error("App connect link already completed")]
+    AppConnectLinkCompleted,
+    #[error("App connect link cancelled")]
+    AppConnectLinkCancelled,
+    #[error("App requirement cannot be satisfied")]
+    RequirementNotSatisfiable,
+    #[error("App requirement is not met")]
+    RequirementNotMet,
+    #[error("App requirement result does not match")]
+    AppConnectResultMismatch,
+
     #[error("Connection validation rejected")]
     ServiceValidationRejected,
     #[error("Connection validation is temporarily unavailable")]
@@ -675,6 +692,14 @@ impl AppError {
             Self::AgentKeyLoginUserCodeInvalid => StatusCode::BAD_REQUEST,
             Self::AgentKeyLoginKeyIneligible => StatusCode::BAD_REQUEST,
             Self::AgentKeyCredentialNotFound => StatusCode::NOT_FOUND,
+            Self::AppRequirementsInvalid(_) => StatusCode::BAD_REQUEST,
+            Self::AppConnectLinkNotFound => StatusCode::NOT_FOUND,
+            Self::AppConnectLinkExpired => StatusCode::GONE,
+            Self::AppConnectLinkCompleted => StatusCode::CONFLICT,
+            Self::AppConnectLinkCancelled => StatusCode::CONFLICT,
+            Self::RequirementNotSatisfiable => StatusCode::CONFLICT,
+            Self::RequirementNotMet => StatusCode::CONFLICT,
+            Self::AppConnectResultMismatch => StatusCode::BAD_REQUEST,
             Self::ServiceValidationRejected => StatusCode::UNPROCESSABLE_ENTITY,
             Self::ServiceValidationUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             Self::ServiceValidationRateLimited => StatusCode::TOO_MANY_REQUESTS,
@@ -853,6 +878,14 @@ impl AppError {
             Self::AgentKeyLoginUserCodeInvalid => 11907,
             Self::AgentKeyLoginKeyIneligible => 11908,
             Self::AgentKeyCredentialNotFound => 11909,
+            Self::AppRequirementsInvalid(_) => 12000,
+            Self::AppConnectLinkNotFound => 12001,
+            Self::AppConnectLinkExpired => 12002,
+            Self::AppConnectLinkCompleted => 12003,
+            Self::AppConnectLinkCancelled => 12004,
+            Self::RequirementNotSatisfiable => 12005,
+            Self::RequirementNotMet => 12006,
+            Self::AppConnectResultMismatch => 12010,
             Self::ServiceValidationRejected => 12007,
             Self::ServiceValidationUnavailable => 12008,
             Self::ServiceValidationRateLimited => 12009,
@@ -1067,6 +1100,14 @@ impl AppError {
             Self::AgentKeyLoginUserCodeInvalid => "agent_key_login_user_code_invalid",
             Self::AgentKeyLoginKeyIneligible => "agent_key_login_key_ineligible",
             Self::AgentKeyCredentialNotFound => "agent_key_credential_not_found",
+            Self::AppRequirementsInvalid(_) => "app_requirements_invalid",
+            Self::AppConnectLinkNotFound => "app_connect_link_not_found",
+            Self::AppConnectLinkExpired => "app_connect_link_expired",
+            Self::AppConnectLinkCompleted => "app_connect_link_completed",
+            Self::AppConnectLinkCancelled => "app_connect_link_cancelled",
+            Self::RequirementNotSatisfiable => "requirement_not_satisfiable",
+            Self::RequirementNotMet => "requirement_not_met",
+            Self::AppConnectResultMismatch => "app_connect_result_mismatch",
             Self::ServiceValidationRejected => "service_validation_rejected",
             Self::ServiceValidationUnavailable => "service_validation_unavailable",
             Self::ServiceValidationRateLimited => "service_validation_rate_limited",

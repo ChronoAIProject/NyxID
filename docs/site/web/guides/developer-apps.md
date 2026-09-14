@@ -168,3 +168,28 @@ From **Developer**, click an app to open its detail page. You can:
 ## Org-owned apps
 
 A developer app can be owned by an org so all org admins can manage it. When creating the app, select the org in the **Owner** field. See [Organizations](/docs/web/guides/organizations) for the org model.
+
+
+## Advisory app requirements
+
+For apps enabled by your platform administrator, the developer app detail page includes a **Requirements** card. Publish an immutable version selecting catalog services (or a seeded catalog prefix), ownership policy, credential types, required OAuth scopes, and a validator. Prefix membership is frozen when published. This initial release supports **Advise** only, so sign-in and consent continue normally even when requirements are unmet. The card is hidden when the app is outside the deployment rollout or lacks its admin-granted capability.
+
+Use the OAuth SDK's local status API after sign-in:
+
+```ts
+const status = await client.requirements.status();
+for (const requirement of status.requirements) {
+  // Readiness and this token's execution grant are separate facts.
+  if (requirement.state === "met" && !requirement.granted_to_caller) {
+    // Request interactive consent for the chosen resource using the existing flow.
+    await client.loginWithRedirect({
+      prompt: "consent",
+      resource: requirement.resource_uri ? [requirement.resource_uri] : [],
+    });
+  }
+}
+```
+
+Status uses the ordinary user access token bound to this app, discloses only its manifest services, and performs no provider calls. Credential-free services appear as Included; disabled services stay disabled. Provider-backed evidence expires and proves only the selected validator's claim. A status result expires after one hour and is not an access grant. `resource` accepts a URI or an array on `buildAuthorizeUrl` and `loginWithRedirect`; the token set reports the resources actually granted by the server.
+
+The SDK verifies the pending OAuth `state` before inspecting callback errors. Correlated errors are `NyxAppConnectError` instances with `error`, `status`, `reason`, and `appConnectLinkId`; never interpret callback parameters before correlation. Repair links and their hosted checklist arrive in the next sub-phase.

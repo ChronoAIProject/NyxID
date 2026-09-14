@@ -211,6 +211,17 @@ Header-forwarded mTLS for certificate-bound broker access tokens (RFC 8705 §3).
 | `BROKER_REQUIRE_SENDER_CONSTRAINT` | `false` | Startup default for sender-constraint enforcement. When the effective value is `false`, legacy unpinned broker bindings continue to exchange as bearer-compatible credentials, while new bindings are pinned if the client presents DPoP or trusted mTLS during authorization-code exchange. When the effective value is `true`, NyxID refuses to mint an unpinned broker binding and refuses to exchange any existing unpinned binding. Flip only after broker clients (for example aevatar) send DPoP or trusted mTLS on both authorization-code and broker token-exchange calls. Runtime DB override wins over this env value. |
 | `BROKER_REQUIRE_ADMIN_CAPABILITY` | `false` | Startup default for admin-provisioned broker capability. When the effective value is `false`, the legacy `urn:nyxid:scope:broker_binding` scope trigger and authenticated developer-app self-service `broker_capability_enabled=true` remain accepted for compatibility. When the effective value is `true`, broker capability requires the admin-managed `OAuthClient.broker_capability_enabled` flag: anonymous DCR broker scope requests are rejected, developer-app create/update can set the flag only for platform admins, and broker detection ignores the scope trigger. Ops migration: have a platform admin set `broker_capability_enabled=true` for the broker client through Admin → OAuth Clients (or `PATCH /api/v1/admin/oauth-clients/{client_id}`), verify it no longer depends on the scope trigger, then flip the runtime broker setting. Runtime DB override wins over this env value. |
 
+## App Connect rollout
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `APP_CONNECT_ROLLOUT` | `disabled` | Startup mode: `disabled`, `allowlist`, or reserved `public`. A platform-admin MongoDB override takes precedence and refreshes on every replica using the existing five-second broker-policy refresh loop. The admin UI offers Disabled and Allowlist only. Public rollout requires separate review. |
+| `APP_CONNECT_ALLOWED_ORG_IDS` | *(empty)* | Comma-separated org user IDs. In allowlist mode the active client's owner must resolve to an active org in this deployment-supplied list. Personal owners never qualify, even if their ID is present. |
+
+Every enabled app also needs the platform-admin-controlled `app_connect_capability_enabled` flag. Developer owners and dynamic client registration cannot grant it. Admin → OAuth Clients has a per-client switch and an App Connect Rollout Policy card. `GET/PATCH /api/v1/admin/settings/app-connect` reads or overrides the mode; `{"rollout":null}` restores the environment default. The org list remains deployment configuration. Capability and rollout changes emit metadata-only audit events.
+
+Disabled rollout makes manifest and app-status routes not-found-shaped and hides the Requirements card. Authorize and consent retain their existing behavior in this advisory phase. As with broker policy, manually resetting the stored revision below a process's cached revision requires restarting that process to adopt the reset.
+
 ## Rate Limiting
 
 | Variable | Default | Description |

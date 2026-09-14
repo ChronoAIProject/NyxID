@@ -33,6 +33,7 @@ import { ApiError } from "@/lib/api-client";
 import { toast } from "sonner";
 import { useCatalog } from "@/hooks/use-keys";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
+import { RequirementsCard } from "./requirements-card";
 import { ConnectionWebhookSection } from "./connection-webhook-section";
 
 const OIDC_SCOPES = [
@@ -324,6 +325,8 @@ export function DeveloperAppDetail({
           )}
         </CardContent>
       </Card>
+
+      {app.app_connect_enabled && <RequirementsCard clientId={app.id} />}
 
       <ConnectionWebhookSection
         clientId={app.id}

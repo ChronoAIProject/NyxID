@@ -199,6 +199,26 @@ vi.mock("@/hooks/use-admin-oauth-clients", () => ({
   }),
 }));
 
+vi.mock("@/hooks/use-app-requirements", () => ({
+  useAppConnectRollout: () => ({
+    data: {
+      effective: "disabled",
+      env_default: "disabled",
+      override_value: null,
+      allowed_org_ids: [],
+    },
+    isPending: false,
+  }),
+  useUpdateAppConnectRollout: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  }),
+  useUpdateAppConnectCapability: () => ({
+    mutateAsync: vi.fn(),
+    isPending: false,
+  }),
+}));
+
 vi.mock("sonner", () => ({
   toast: {
     success: vi.fn(),

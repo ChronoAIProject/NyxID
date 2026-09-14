@@ -56,6 +56,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AppConnectRolloutPolicy,
+  AppConnectCapabilitySwitch,
+} from "@/components/admin/app-connect-rollout";
 import { Switch } from "@/components/ui/switch";
 import {
   Table,
@@ -651,6 +655,13 @@ export function AdminOAuthClientsPage() {
             >
               {client.id}
             </p>
+            {canWrite && (
+              <AppConnectCapabilitySwitch
+                clientId={client.id}
+                clientName={client.client_name}
+                enabled={client.app_connect_capability_enabled ?? false}
+              />
+            )}
           </div>
         );
       case "client_type":
@@ -747,6 +758,8 @@ export function AdminOAuthClientsPage() {
           disabled={updateSettings.isPending}
         />
       )}
+
+      {canWrite && <AppConnectRolloutPolicy />}
 
       <section
         className="m-0 overflow-hidden rounded-lg border border-border/60 bg-card"

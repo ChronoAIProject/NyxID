@@ -162,6 +162,8 @@ ci0O2dgc19c2/sLtanU7P2KAzhEo8O0tIc0Dwe/nMqKfue82eGVL3DqM\n\
             trusted_proxy_ips: vec![],
             mtls_client_cert_header: None,
             broker_require_sender_constraint: false,
+            app_connect_rollout: Default::default(),
+            app_connect_allowed_org_ids: Vec::new(),
             broker_require_admin_capability: false,
             cli_pairing_hmac_key: None,
             audit_chain_hmac_key: None,

@@ -192,6 +192,13 @@ Single-use hosted credential setup for agents and CLI callers. An authenticated 
 - API-key and OAuth provisioning must reuse `unified_key_service`; completion is atomically serialized and single-use. OAuth state carries only `connect_link_id`, while the browser keeps the raw token in session storage across the redirect.
 - MCP callers use `nyx__connect_service` followed by `nyx__wait_for_connection`. A pending link must not activate service tools or emit `tools/list_changed`; activation happens only after completed status is observed.
 
+### 13a. App requirements (advisory rollout)
+
+- `app_requirement_manifests` contains immutable UUID-string rows with per-client monotonic versions. Publication freezes catalog slug IDs, seeded-prefix membership, and validator versions, and advances `OauthClient.current_manifest_version` in the same MongoDB transaction. Only `Advise` can be published until the authorize/consent gate ships.
+- `app_requirement_results` stores each local evaluation's client, person, manifest version and per-requirement selection; BSON `expires_at` has a one-hour TTL. Automatic selections are not explicit user preferences. Results confer no execution grant.
+- `APP_CONNECT_ROLLOUT` defaults to `disabled`; `allowlist` requires an active app, platform-admin-granted `app_connect_capability_enabled`, and an active org owner in `APP_CONNECT_ALLOWED_ORG_IDS`. The MongoDB mode override refreshes on the broker policy interval; stale policy revisions never replace newer snapshots. `public` is reserved for a separately reviewed rollout and is not an admin UI action. Capability is never self-grantable or inferred from DCR scopes.
+- `/app-requirements/status` requires an ordinary developer-app user access token and discloses only manifest services. It evaluates local authority and phase-0 evidence without credential materialization or provider I/O; `granted_to_caller` comes from the token's own service allowlist. Org candidates require `CredentialSource::Org { allowed: true }`. Disabled rows are disclosure-only and never auto-enabled; eligible no-credential services use the existing auto-provision path and appear as Included. This phase does not alter authorize or consent.
+
 ### 14. Connection Webhooks and Triggers
 
 - Developer-app connection webhooks use a server-generated secret encrypted with `EncryptionKeys`. Secrets are returned only by configure/rotate responses, alongside a non-secret key ID. Delivery signs `X-NyxID-Timestamp + "." + raw_body` with HMAC-SHA256 and sends the signature, timestamp, event type, delivery ID, and key ID headers. Connect-link terminal events use the link as a durable bounded outbox; connection-expiry events remain best effort. Transition paths never depend on delivery success.
@@ -380,6 +387,9 @@ BROKER_REQUIRE_ADMIN_CAPABILITY=false   # Default-off broker hardening: require 
                                         # broker_capability_enabled provisioning; DCR scope and
                                         # non-admin developer-app self-grant no longer confer broker mode.
                                         # Runtime-overridable by platform admins; DB override wins over env.
+APP_CONNECT_ROLLOUT=disabled        # disabled | allowlist | public; ships dark. Platform-admin DB
+                                    # mode override refreshes with broker policy; public UI withheld.
+APP_CONNECT_ALLOWED_ORG_IDS=        # Comma-separated org user IDs; deployment-owned allowlist.
 CLI_PAIRING_HMAC_KEY=               # Optional 64 hex; keys CliPairing.code_hash against DB-snapshot
                                     # brute force. Unset = derived from ENCRYPTION_KEY or the JWT key
                                     # (stable per-worker, multi-instance safe).

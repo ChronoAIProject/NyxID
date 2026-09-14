@@ -103,6 +103,7 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     crate::services::coordination_service::ensure_indexes(db).await?;
     ensure_service_validation_indexes(db).await?;
+    ensure_app_requirement_indexes(db).await?;
 
     // ── assistant_wire_logs ──
     db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)
@@ -4498,6 +4499,38 @@ pub(crate) async fn ensure_service_validation_indexes(
                         .expire_after(Duration::from_secs(86_400))
                         .build(),
                 )
+                .build(),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Immutable manifest versions and short-lived, user/client-bound evaluation results.
+pub(crate) async fn ensure_app_requirement_indexes(
+    db: &Database,
+) -> Result<(), mongodb::error::Error> {
+    use crate::models::{app_requirement_manifest as manifests, app_requirement_result as results};
+    db.collection::<Document>(manifests::COLLECTION_NAME)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "oauth_client_id": 1, "version": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    let results = db.collection::<Document>(results::COLLECTION_NAME);
+    results
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(IndexOptions::builder().expire_after(Duration::ZERO).build())
+                .build(),
+        )
+        .await?;
+    results
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "oauth_client_id": 1, "created_at": -1 })
                 .build(),
         )
         .await?;

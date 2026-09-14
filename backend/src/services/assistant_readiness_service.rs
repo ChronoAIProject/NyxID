@@ -553,7 +553,7 @@ async fn legacy_personal_evidence(
     }))
 }
 
-fn connection_state_for_key(
+pub(crate) fn connection_state_for_key(
     key: &UserApiKey,
     service: &UserService,
     executable: Option<bool>,

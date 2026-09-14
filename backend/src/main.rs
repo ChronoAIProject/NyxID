@@ -75,6 +75,7 @@ use crypto::key_provider::KeyProvider;
 use crypto::local_key_provider::LocalKeyProvider;
 use models::mcp_session::McpSessionStore;
 
+use services::app_connect_rollout::AppConnectPolicy;
 use services::node_ws_manager::NodeWsManager;
 use services::platform_settings_service::BrokerPolicy;
 use services::provider_token_exchange_service::TokenExchangeCache;
@@ -170,6 +171,7 @@ pub struct AppState {
     /// settings writes. Enforcement reads this in-memory snapshot, never
     /// MongoDB, so broker checks do not add per-request database work.
     pub broker_policy: Arc<std::sync::RwLock<BrokerPolicy>>,
+    pub app_connect_policy: Arc<std::sync::RwLock<AppConnectPolicy>>,
     /// Server-side HMAC key used to derive `CliPairing.code_hash`.
     /// Lives in process memory only (never persisted), so a MongoDB
     /// snapshot alone doesn't let an attacker brute-force the 32^8
@@ -211,6 +213,25 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn app_connect_policy(&self) -> AppConnectPolicy {
+        *self
+            .app_connect_policy
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub fn set_app_connect_policy_if_fresh(&self, policy: AppConnectPolicy) -> bool {
+        let mut current = self
+            .app_connect_policy
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if policy.revision < current.revision || *current == policy {
+            return false;
+        }
+        *current = policy;
+        true
+    }
+
     pub fn broker_policy(&self) -> BrokerPolicy {
         match self.broker_policy.read() {
             Ok(policy) => *policy,
@@ -266,6 +287,15 @@ fn spawn_broker_policy_refresh_task(state: AppState) {
                 BROKER_POLICY_REFRESH_INTERVAL_SECS,
             ))
             .await;
+
+            match services::app_connect_rollout::load_policy(&state.db, &state.config).await {
+                Ok(policy) => {
+                    state.set_app_connect_policy_if_fresh(policy);
+                }
+                Err(error) => {
+                    tracing::warn!(error = %error, "Failed to refresh app connect rollout policy")
+                }
+            }
 
             match services::platform_settings_service::load_broker_policy(&state.db, &state.config)
                 .await
@@ -760,6 +790,9 @@ async fn main() {
     let broker_policy = services::platform_settings_service::load_broker_policy(&db, &config)
         .await
         .expect("Failed to load platform broker policy");
+    let app_connect_policy = services::app_connect_rollout::load_policy(&db, &config)
+        .await
+        .expect("Failed to load app connect rollout policy");
     let developer_webhook_dispatcher = Arc::new(
         services::developer_webhook_service::DeveloperWebhookDispatcher::new(
             http_client.clone(),
@@ -920,6 +953,7 @@ async fn main() {
             60,
         ),
         broker_policy: Arc::new(std::sync::RwLock::new(broker_policy)),
+        app_connect_policy: Arc::new(std::sync::RwLock::new(app_connect_policy)),
         cli_pairing_hmac_key,
         auth_device_hmac_key,
         audit_chain_hmac_key,

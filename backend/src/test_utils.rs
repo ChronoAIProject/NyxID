@@ -1649,6 +1649,8 @@ pub(crate) fn test_app_config() -> AppConfig {
         mtls_client_cert_header: None,
         broker_require_sender_constraint: false,
         broker_require_admin_capability: false,
+        app_connect_rollout: Default::default(),
+        app_connect_allowed_org_ids: Vec::new(),
         cli_pairing_hmac_key: None,
         audit_chain_hmac_key: None,
         billing_ledger_hmac_key: None,
@@ -2045,6 +2047,9 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             60,
         ),
         broker_policy: Arc::new(std::sync::RwLock::new(BrokerPolicy::from_config(&config))),
+        app_connect_policy: Arc::new(std::sync::RwLock::new(
+            crate::services::app_connect_rollout::AppConnectPolicy::from_config(&config),
+        )),
         // Production default from backend/src/main.rs — 5 claims per
         // 60s per IP; mirror here so claim-rate-limit tests see the
         // same shape.
