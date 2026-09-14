@@ -345,7 +345,7 @@ async fn refresh_refuses_expired_deleted_or_revoked_bound_session_before_rotatio
 #[tokio::test]
 async fn restricted_browser_handoff_and_direct_delivery_cannot_both_win() {
     let (state, actor) = fixture("login_code_browser_race").await;
-    let request = device::initiate_v2(&state.db, KEY, context("192.0.2.1"))
+    let request = device::initiate_v2(&state.db, KEY, context("192.0.2.1"), true)
         .await
         .unwrap();
     device::approve_with_agent_key(

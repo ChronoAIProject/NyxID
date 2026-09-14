@@ -630,6 +630,7 @@ mod tests {
     ) -> crate::config::AppConfig {
         crate::config::AppConfig {
             port: 3001,
+            auth_device_eight_char_codes: false,
             base_url: "http://localhost:3001".to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],

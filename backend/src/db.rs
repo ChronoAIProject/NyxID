@@ -10,7 +10,10 @@ use mongodb::{Client, Database, IndexModel};
 use crate::config::AppConfig;
 use crate::models::anonymous_endpoint_usage::COLLECTION_NAME as ANONYMOUS_ENDPOINT_USAGE;
 use crate::models::assistant_wire_log::AssistantWireLog;
-use crate::models::auth_device_code::{AuthDeviceCode, COLLECTION_NAME as AUTH_DEVICE_CODES};
+use crate::models::auth_device_code::{
+    AuthDeviceCode, COLLECTION_NAME as AUTH_DEVICE_CODES,
+    RESERVATION_COLLECTION_NAME as AUTH_DEVICE_CODE_RESERVATIONS,
+};
 use crate::models::billing_topup_session::COLLECTION_NAME as BILLING_TOPUP_SESSIONS;
 use crate::models::catalog_delegation_grant::COLLECTION_NAME as CATALOG_DELEGATION_GRANTS;
 use crate::models::connect_link::{COLLECTION_NAME as CONNECT_LINKS, ConnectLink};
@@ -1427,6 +1430,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         auth_device_codes
             .create_index(
                 IndexModel::builder()
+                    .keys(doc! {"user_code_hmac": 1, "_id": 1})
+                    .build(),
+            )
+            .await?;
+        auth_device_codes
+            .create_index(
+                IndexModel::builder()
                     .keys(doc! {"user_code_reservation_hmac": 1})
                     .options(
                         IndexOptions::builder()
@@ -1498,6 +1508,31 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         auth_device_codes.update_many(doc! {"status": {"$in": ["denied", "delivered"]}, "purge_at": bson::Bson::Null},
         doc! {"$set": {"purge_at": bson::DateTime::from_chrono(chrono::Utc::now() + chrono::Duration::days(1))}}).await?;
     }
+
+    // Public user codes are accepted by both legacy and grant-capable clients.
+    // A single reservation collection makes uniqueness global across the two
+    // request collections, including when different protocol writers race.
+    let reservations = db.collection::<Document>(AUTH_DEVICE_CODE_RESERVATIONS);
+    reservations
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_code_hmac": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    reservations
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(0))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
 
     // ── connect_links ──
     let connect_links = db.collection::<ConnectLink>(CONNECT_LINKS);

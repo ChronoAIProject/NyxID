@@ -37,6 +37,8 @@ Credential nodes can be personal or org-owned. Org admins manage org-owned nodes
 
 For the full API reference, error codes, and advanced topics (SSH, MCP, OAuth client integration, service accounts), load `references/playbook.md` (populated at install time from the NyxID server's `/llms.txt` endpoint), or fetch the latest directly from `<NYXID_BASE_URL>/llms.txt`.
 
+For device login, approval-time Agent Key choice and safe URL hints, read `references/device-login.md`.
+
 ## CLI setup (optional)
 
 Install the NyxID CLI when a shell is available. This is the default "install NyxID" path; do not run the Docker backend setup unless the user explicitly asks to self-host. HTTP-only clients can instead call the authenticated Web API described in the reference pages.

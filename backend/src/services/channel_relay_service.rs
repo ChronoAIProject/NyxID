@@ -1102,6 +1102,7 @@ mod tests {
         // Only fields touched by forward_to_agent matter. The rest are
         // padded with safe defaults to construct a complete AppConfig.
         crate::config::AppConfig {
+            auth_device_eight_char_codes: false,
             port: 0,
             base_url: "http://localhost".to_string(),
             frontend_url: "http://localhost".to_string(),

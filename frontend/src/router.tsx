@@ -20,6 +20,7 @@ import { shouldRedirectFromBilling } from "@/lib/billing-availability";
 import { normalizeAdminAuditLogSearch } from "@/lib/admin-audit-log";
 import { normalizeAdminOAuthClientSearch } from "@/lib/admin-oauth-clients";
 import { parseAssistantSearch } from "@/lib/assistant/search";
+import { resolveTrustedAuthReturnTo } from "@/lib/return-url";
 import { parseAuthDeviceSearch } from "@/schemas/auth-device";
 import { nyxbotSearchSchema } from "@/schemas/nyxbot-onboarding";
 
@@ -126,8 +127,9 @@ const authLayout = createRoute({
       const returnTo = new URLSearchParams(window.location.search).get(
         "return_to",
       );
-      if (returnTo && returnTo.startsWith(window.location.origin + "/")) {
-        window.location.assign(returnTo);
+      const trusted = resolveTrustedAuthReturnTo(returnTo ?? undefined);
+      if (trusted) {
+        window.location.assign(trusted);
         return;
       }
       throw redirect({ to: "/dashboard" });

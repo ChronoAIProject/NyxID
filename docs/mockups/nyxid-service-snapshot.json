@@ -1,0 +1,2338 @@
+{
+  "capturedAt": "2026-09-14",
+  "catalog": [
+    {
+      "slug": "aws-cost-explorer",
+      "name": "AWS Cost Explorer",
+      "provider_type": "api_key",
+      "service_type": "http"
+    },
+    {
+      "slug": "aevatar",
+      "name": "Aevatar",
+      "service_type": "http",
+      "capabilities": {
+        "supports_proxy_read": false,
+        "supports_proxy_write": false,
+        "supports_proxy_binary_upload": false,
+        "supports_direct_downstream_auth": false,
+        "supports_authoring_via_nyx": false,
+        "supports_websocket": false,
+        "supports_streaming": false
+      },
+      "required_permissions": ["proxy", "proxy:*"]
+    },
+    {
+      "slug": "llm-anthropic",
+      "name": "Anthropic API",
+      "provider_type": "api_key",
+      "service_type": "http"
+    },
+    {
+      "slug": "cma-trigger-github-observer-staging",
+      "name": "CMA Trigger staging public GitHub observer",
+      "service_type": "http"
+    },
+    {
+      "slug": "chrono-llm",
+      "name": "Chrono LLM",
+      "service_type": "http"
+    },
+    {
+      "slug": "chrono-llm-public",
+      "name": "Chrono LLM (public)",
+      "service_type": "http",
+      "capabilities": {
+        "supports_proxy_read": false,
+        "supports_proxy_write": false,
+        "supports_proxy_binary_upload": false,
+        "supports_direct_downstream_auth": false,
+        "supports_authoring_via_nyx": false,
+        "supports_websocket": false,
+        "supports_streaming": false
+      },
+      "required_permissions": []
+    },
+    {
+      "slug": "chrono-sandbox",
+      "name": "Chrono Sandbox",
+      "service_type": "http",
+      "capabilities": {
+        "supports_proxy_read": false,
+        "supports_proxy_write": false,
+        "supports_proxy_binary_upload": false,
+        "supports_direct_downstream_auth": false,
+        "supports_authoring_via_nyx": false,
+        "supports_websocket": false,
+        "supports_streaming": false
+      },
+      "required_permissions": []
+    },
+    {
+      "slug": "chrono-storage-service",
+      "name": "Chrono Storage Service",
+      "service_type": "http",
+      "capabilities": {
+        "supports_proxy_read": false,
+        "supports_proxy_write": false,
+        "supports_proxy_binary_upload": false,
+        "supports_direct_downstream_auth": false,
+        "supports_authoring_via_nyx": false,
+        "supports_websocket": false,
+        "supports_streaming": false
+      },
+      "required_permissions": []
+    },
+    {
+      "slug": "llm-cohere",
+      "name": "Cohere API",
+      "provider_type": "api_key",
+      "service_type": "http"
+    },
+    {
+      "slug": "llm-deepseek",
+      "name": "DeepSeek API",
+      "provider_type": "api_key",
+      "service_type": "http"
+    },
+    {
+      "slug": "api-discord",
+      "name": "Discord API",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "identify",
+          "label": "Identity",
+          "description": "See your username, avatar, and ID.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "email",
+          "label": "Email address",
+          "description": "See your email address.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "guilds",
+          "label": "Servers list",
+          "description": "See the servers you're in.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "guilds.members.read",
+          "label": "Server membership",
+          "description": "Read your member info in servers.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "guilds.join",
+          "label": "Join servers",
+          "description": "Add you to a server on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "connections",
+          "label": "Linked accounts",
+          "description": "See your linked third-party accounts.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "applications.commands",
+          "label": "Slash commands",
+          "description": "Use application commands in servers.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "bot",
+          "label": "Bot",
+          "description": "Add a bot to a server (with the bot permissions you grant).",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "messages.read",
+          "label": "Read messages",
+          "description": "Read messages in channels you can access.",
+          "sensitive": true,
+          "required": false
+        }
+      ]
+    },
+    {
+      "slug": "api-discord-bot",
+      "name": "Discord Bot API",
+      "provider_type": "api_key",
+      "service_type": "http"
+    },
+    {
+      "slug": "api-elevenlabs",
+      "name": "ElevenLabs",
+      "provider_type": "api_key",
+      "service_type": "http",
+      "capabilities": {
+        "supports_proxy_read": true,
+        "supports_proxy_write": true,
+        "supports_proxy_binary_upload": true,
+        "supports_direct_downstream_auth": true,
+        "supports_authoring_via_nyx": false,
+        "supports_websocket": true,
+        "supports_streaming": true
+      }
+    },
+    {
+      "slug": "api-facebook",
+      "name": "Facebook Graph API",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "public_profile",
+          "label": "Basic profile",
+          "description": "See your public profile.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "email",
+          "label": "Email address",
+          "description": "See your email address.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "pages_show_list",
+          "label": "List Pages",
+          "description": "See the list of Pages you manage.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "pages_read_engagement",
+          "label": "Page engagement",
+          "description": "Read content and engagement on your Pages.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "pages_manage_posts",
+          "label": "Manage Page posts",
+          "description": "Create, edit, and delete posts on your Pages.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "pages_messaging",
+          "label": "Page messaging",
+          "description": "Send and receive messages on your Pages.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "business_management",
+          "label": "Business assets",
+          "description": "Manage Business Manager assets.",
+          "sensitive": true,
+          "required": false
+        }
+      ]
+    },
+    {
+      "slug": "api-feishu",
+      "name": "Feishu API (User OAuth)",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "contact:user.base:readonly",
+          "label": "Basic profile",
+          "description": "Read basic user profile (name, avatar).",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "contact:user.email:readonly",
+          "label": "Email address",
+          "description": "Read the user's email address.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "contact:user.employee_id:readonly",
+          "label": "Employee ID",
+          "description": "Read the user's employee ID.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "offline_access",
+          "label": "Stay connected",
+          "description": "Refresh access without re-authorizing.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "im:message",
+          "label": "Messages",
+          "description": "Read and send messages.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "im:message:send_as_bot",
+          "label": "Send as bot",
+          "description": "Send messages as the bot.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "docs:doc:readonly",
+          "label": "Docs (read)",
+          "description": "Read documents.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "docx:document",
+          "label": "Docs (read/write)",
+          "description": "Read and edit documents.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "drive:drive:readonly",
+          "label": "Drive (read)",
+          "description": "Read files in Drive.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "drive:drive",
+          "label": "Drive (read/write)",
+          "description": "Read and write files in Drive.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "sheets:spreadsheet:readonly",
+          "label": "Sheets (read)",
+          "description": "Read spreadsheets.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "sheets:spreadsheet",
+          "label": "Sheets (read/write)",
+          "description": "Read and edit spreadsheets.",
+          "sensitive": true,
+          "required": false
+        }
+      ]
+    },
+    {
+      "slug": "api-feishu-bot",
+      "name": "Feishu Bot API (Transparent Tenant Token)",
+      "provider_type": "api_key",
+      "service_type": "http",
+      "required_permissions": ["bitable:app:readonly"]
+    },
+    {
+      "slug": "api-firecrawl",
+      "name": "Firecrawl",
+      "provider_type": "api_key",
+      "service_type": "http",
+      "capabilities": {
+        "supports_proxy_read": true,
+        "supports_proxy_write": true,
+        "supports_proxy_binary_upload": false,
+        "supports_direct_downstream_auth": true,
+        "supports_authoring_via_nyx": false,
+        "supports_websocket": false,
+        "supports_streaming": true
+      }
+    },
+    {
+      "slug": "api-github-pat",
+      "name": "GitHub API (Personal Access Token)",
+      "provider_type": "api_key",
+      "service_type": "http"
+    },
+    {
+      "slug": "api-github",
+      "name": "GitHub OAuth",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "read:user",
+          "label": "Read profile",
+          "description": "Read your profile data.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "user:email",
+          "label": "Email addresses",
+          "description": "Read your email addresses.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "repo",
+          "label": "Repositories (full)",
+          "description": "Full control of private and public repositories.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "public_repo",
+          "label": "Public repos",
+          "description": "Access public repositories only.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "repo:status",
+          "label": "Commit statuses",
+          "description": "Read and write commit statuses.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "read:org",
+          "label": "Read org",
+          "description": "Read org membership and teams.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "write:org",
+          "label": "Manage org",
+          "description": "Manage org membership and teams.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "gist",
+          "label": "Gists",
+          "description": "Create and edit gists.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "workflow",
+          "label": "Actions workflows",
+          "description": "Update GitHub Actions workflow files.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "notifications",
+          "label": "Notifications",
+          "description": "Read and manage your notifications.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "read:packages",
+          "label": "Packages (read)",
+          "description": "Download packages from GitHub Packages.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "write:packages",
+          "label": "Packages (write)",
+          "description": "Upload packages to GitHub Packages.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "delete_repo",
+          "label": "Delete repos",
+          "description": "Delete repositories you administer.",
+          "sensitive": true,
+          "required": false
+        }
+      ],
+      "platform_scope_allowlist": [
+        "read:user",
+        "user:email",
+        "read:org",
+        "repo",
+        "public_repo",
+        "repo:status",
+        "gist",
+        "workflow",
+        "notifications",
+        "read:packages",
+        "write:packages"
+      ]
+    },
+    {
+      "slug": "api-google-gmail",
+      "name": "Gmail",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "openid",
+          "label": "Sign-in (OpenID)",
+          "description": "Authenticate your Google identity.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "email",
+          "label": "Email address",
+          "description": "See your primary Google email address.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "profile",
+          "label": "Basic profile",
+          "description": "See your name and profile picture.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/gmail.readonly",
+          "label": "Gmail (read)",
+          "description": "Read your email messages and settings.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/gmail.send",
+          "label": "Gmail (send)",
+          "description": "Send email on your behalf.",
+          "sensitive": true,
+          "required": true
+        }
+      ],
+      "capabilities": {
+        "supports_proxy_read": true,
+        "supports_proxy_write": true,
+        "supports_proxy_binary_upload": false,
+        "supports_direct_downstream_auth": true,
+        "supports_authoring_via_nyx": true,
+        "supports_websocket": false,
+        "supports_streaming": false
+      },
+      "required_permissions": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send"
+      ],
+      "platform_scope_allowlist": [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send"
+      ]
+    },
+    {
+      "slug": "llm-google-ai",
+      "name": "Google AI API",
+      "provider_type": "api_key",
+      "service_type": "http"
+    },
+    {
+      "slug": "api-google",
+      "name": "Google API",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "openid",
+          "label": "Sign-in (OpenID)",
+          "description": "Authenticate your Google identity.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "email",
+          "label": "Email address",
+          "description": "See your primary Google email address.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "profile",
+          "label": "Basic profile",
+          "description": "See your name and profile picture.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/drive.readonly",
+          "label": "Drive (read)",
+          "description": "Read files in your Google Drive.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/drive.file",
+          "label": "Drive (app files)",
+          "description": "Manage only files this app creates in Drive.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/drive",
+          "label": "Drive (full)",
+          "description": "Full read/write access to all Drive files.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/spreadsheets.readonly",
+          "label": "Sheets (read)",
+          "description": "Read your Google Sheets.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/spreadsheets",
+          "label": "Sheets (read/write)",
+          "description": "Read and edit your Google Sheets.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/documents.readonly",
+          "label": "Docs (read)",
+          "description": "Read your Google Docs.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/documents",
+          "label": "Docs (read/write)",
+          "description": "Read and edit your Google Docs.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/gmail.readonly",
+          "label": "Gmail (read)",
+          "description": "Read your email messages and settings.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/gmail.send",
+          "label": "Gmail (send)",
+          "description": "Send email on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/gmail.modify",
+          "label": "Gmail (modify)",
+          "description": "Read, compose, and modify email (no permanent delete).",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/calendar.readonly",
+          "label": "Calendar (read)",
+          "description": "Read your calendars and events.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/calendar",
+          "label": "Calendar (read/write)",
+          "description": "Manage your calendars and events.",
+          "sensitive": true,
+          "required": false
+        }
+      ],
+      "platform_scope_allowlist": [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ]
+    },
+    {
+      "slug": "api-google-calendar",
+      "name": "Google Calendar",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "openid",
+          "label": "Sign-in (OpenID)",
+          "description": "Authenticate your Google identity.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "email",
+          "label": "Email address",
+          "description": "See your primary Google email address.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "profile",
+          "label": "Basic profile",
+          "description": "See your name and profile picture.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/calendar.readonly",
+          "label": "Calendar (read)",
+          "description": "Read your calendars and events.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/calendar",
+          "label": "Calendar (read/write)",
+          "description": "Manage your calendars and events.",
+          "sensitive": true,
+          "required": false
+        }
+      ],
+      "capabilities": {
+        "supports_proxy_read": true,
+        "supports_proxy_write": true,
+        "supports_proxy_binary_upload": false,
+        "supports_direct_downstream_auth": true,
+        "supports_authoring_via_nyx": true,
+        "supports_websocket": false,
+        "supports_streaming": false
+      },
+      "required_permissions": ["https://www.googleapis.com/auth/calendar"],
+      "platform_scope_allowlist": [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ]
+    },
+    {
+      "slug": "api-google-cloud",
+      "name": "Google Cloud API",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "https://www.googleapis.com/auth/cloud-platform.read-only",
+          "label": "Cloud (read)",
+          "description": "Read-only access to Google Cloud resources.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/cloud-platform",
+          "label": "Cloud (full)",
+          "description": "Full management of Google Cloud resources.",
+          "sensitive": true,
+          "required": false
+        }
+      ]
+    },
+    {
+      "slug": "api-google-drive",
+      "name": "Google Drive",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "openid",
+          "label": "Sign-in (OpenID)",
+          "description": "Authenticate your Google identity.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "email",
+          "label": "Email address",
+          "description": "See your primary Google email address.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "profile",
+          "label": "Basic profile",
+          "description": "See your name and profile picture.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/drive.readonly",
+          "label": "Drive (read)",
+          "description": "Read files in your Google Drive.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/drive.file",
+          "label": "Drive (app files)",
+          "description": "Manage only files this app creates in Drive.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/drive",
+          "label": "Drive (full)",
+          "description": "Full read/write access to all Drive files.",
+          "sensitive": true,
+          "required": false
+        }
+      ],
+      "capabilities": {
+        "supports_proxy_read": true,
+        "supports_proxy_write": true,
+        "supports_proxy_binary_upload": true,
+        "supports_direct_downstream_auth": true,
+        "supports_authoring_via_nyx": true,
+        "supports_websocket": false,
+        "supports_streaming": false
+      },
+      "required_permissions": ["https://www.googleapis.com/auth/drive"],
+      "platform_scope_allowlist": [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive.file"
+      ]
+    },
+    {
+      "slug": "api-google-workspace",
+      "name": "Google Workspace",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "openid",
+          "label": "Sign-in (OpenID)",
+          "description": "Authenticate your Google identity.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "email",
+          "label": "Email address",
+          "description": "See your primary Google email address.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "profile",
+          "label": "Basic profile",
+          "description": "See your name and profile picture.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/drive.readonly",
+          "label": "Drive (read)",
+          "description": "Read files in your Google Drive.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/drive.file",
+          "label": "Drive (app files)",
+          "description": "Manage only files this app creates in Drive.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/drive",
+          "label": "Drive (full)",
+          "description": "Full read/write access to all Drive files.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/gmail.readonly",
+          "label": "Gmail (read)",
+          "description": "Read your email messages and settings.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/gmail.send",
+          "label": "Gmail (send)",
+          "description": "Send email on your behalf.",
+          "sensitive": true,
+          "required": true
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/calendar.readonly",
+          "label": "Calendar (read)",
+          "description": "Read your calendars and events.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "https://www.googleapis.com/auth/calendar",
+          "label": "Calendar (read/write)",
+          "description": "Manage your calendars and events.",
+          "sensitive": true,
+          "required": false
+        }
+      ],
+      "capabilities": {
+        "supports_proxy_read": true,
+        "supports_proxy_write": true,
+        "supports_proxy_binary_upload": true,
+        "supports_direct_downstream_auth": true,
+        "supports_authoring_via_nyx": true,
+        "supports_websocket": false,
+        "supports_streaming": false
+      },
+      "required_permissions": [
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send"
+      ],
+      "platform_scope_allowlist": [
+        "openid",
+        "email",
+        "profile",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive.file",
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/calendar.readonly"
+      ]
+    },
+    {
+      "slug": "api-lark",
+      "name": "Lark API (User OAuth)",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "contact:user.base:readonly",
+          "label": "Basic profile",
+          "description": "Read basic user profile (name, avatar).",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "contact:user.email:readonly",
+          "label": "Email address",
+          "description": "Read the user's email address.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "contact:user.employee_id:readonly",
+          "label": "Employee ID",
+          "description": "Read the user's employee ID.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "offline_access",
+          "label": "Stay connected",
+          "description": "Refresh access without re-authorizing.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "im:message",
+          "label": "Messages",
+          "description": "Read and send messages.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "im:message:send_as_bot",
+          "label": "Send as bot",
+          "description": "Send messages as the bot.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "docs:doc:readonly",
+          "label": "Docs (read)",
+          "description": "Read documents.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "docx:document",
+          "label": "Docs (read/write)",
+          "description": "Read and edit documents.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "drive:drive:readonly",
+          "label": "Drive (read)",
+          "description": "Read files in Drive.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "drive:drive",
+          "label": "Drive (read/write)",
+          "description": "Read and write files in Drive.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "sheets:spreadsheet:readonly",
+          "label": "Sheets (read)",
+          "description": "Read spreadsheets.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "sheets:spreadsheet",
+          "label": "Sheets (read/write)",
+          "description": "Read and edit spreadsheets.",
+          "sensitive": true,
+          "required": false
+        }
+      ]
+    },
+    {
+      "slug": "api-lark-bot",
+      "name": "Lark Bot API (Transparent Tenant Token)",
+      "provider_type": "api_key",
+      "service_type": "http",
+      "required_permissions": ["bitable:app:readonly"]
+    },
+    {
+      "slug": "api-microsoft",
+      "name": "Microsoft Graph API",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "openid",
+          "label": "Sign-in (OpenID)",
+          "description": "Authenticate your Microsoft identity.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "email",
+          "label": "Email address",
+          "description": "See your email address.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "profile",
+          "label": "Basic profile",
+          "description": "See your name and profile.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "offline_access",
+          "label": "Stay connected",
+          "description": "Refresh access without re-authorizing.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "User.Read",
+          "label": "Read your profile",
+          "description": "Read your Microsoft profile.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "Mail.Read",
+          "label": "Mail (read)",
+          "description": "Read your mail.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "Mail.Send",
+          "label": "Mail (send)",
+          "description": "Send mail on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "Files.Read",
+          "label": "Files (read)",
+          "description": "Read your OneDrive files.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "Files.ReadWrite",
+          "label": "Files (read/write)",
+          "description": "Read and write your OneDrive files.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "Calendars.Read",
+          "label": "Calendar (read)",
+          "description": "Read your calendars.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "Calendars.ReadWrite",
+          "label": "Calendar (read/write)",
+          "description": "Manage your calendars.",
+          "sensitive": true,
+          "required": false
+        }
+      ]
+    },
+    {
+      "slug": "llm-mistral",
+      "name": "Mistral AI API",
+      "provider_type": "api_key",
+      "service_type": "http"
+    },
+    {
+      "slug": "api-notion",
+      "name": "Notion",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "capabilities": {
+        "supports_proxy_read": true,
+        "supports_proxy_write": true,
+        "supports_proxy_binary_upload": true,
+        "supports_direct_downstream_auth": true,
+        "supports_authoring_via_nyx": true,
+        "supports_websocket": false,
+        "supports_streaming": false
+      }
+    },
+    {
+      "slug": "llm-openai",
+      "name": "OpenAI API",
+      "provider_type": "api_key",
+      "service_type": "http"
+    },
+    {
+      "slug": "llm-openai-codex",
+      "name": "OpenAI Codex API",
+      "provider_type": "device_code",
+      "service_type": "http"
+    },
+    {
+      "slug": "llm-openrouter",
+      "name": "OpenRouter API",
+      "provider_type": "api_key",
+      "service_type": "http"
+    },
+    {
+      "slug": "api-reddit",
+      "name": "Reddit API",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "identity",
+          "label": "Identity",
+          "description": "Read your account info.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "read",
+          "label": "Read content",
+          "description": "Read posts and comments.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "mysubreddits",
+          "label": "Your subreddits",
+          "description": "Read the subreddits you're subscribed to.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "submit",
+          "label": "Submit posts",
+          "description": "Submit posts and comments on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "edit",
+          "label": "Edit content",
+          "description": "Edit your posts and comments.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "vote",
+          "label": "Vote",
+          "description": "Cast votes on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "save",
+          "label": "Save content",
+          "description": "Save and unsave posts and comments.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "history",
+          "label": "Read history",
+          "description": "Read your voting and posting history.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "subscribe",
+          "label": "Manage subscriptions",
+          "description": "Subscribe to and unsubscribe from subreddits.",
+          "sensitive": true,
+          "required": false
+        }
+      ]
+    },
+    {
+      "slug": "api-slack",
+      "name": "Slack API (User OAuth)",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "users:read",
+          "label": "Read users",
+          "description": "View people in the workspace.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "users:read.email",
+          "label": "User emails",
+          "description": "View email addresses of workspace members.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "channels:read",
+          "label": "Read channels",
+          "description": "View basic info about public channels.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "channels:history",
+          "label": "Channel history",
+          "description": "View messages in public channels.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "chat:write",
+          "label": "Send messages",
+          "description": "Send messages on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "files:read",
+          "label": "Read files",
+          "description": "View files shared in the workspace.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "files:write",
+          "label": "Upload files",
+          "description": "Upload and edit files on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "groups:read",
+          "label": "Read private channels",
+          "description": "View basic info about private channels.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "im:history",
+          "label": "DM history",
+          "description": "View your direct message history.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "reactions:write",
+          "label": "Add reactions",
+          "description": "Add and remove emoji reactions.",
+          "sensitive": false,
+          "required": false
+        }
+      ]
+    },
+    {
+      "slug": "api-slack-bot",
+      "name": "Slack Bot API",
+      "provider_type": "api_key",
+      "service_type": "http"
+    },
+    {
+      "slug": "api-spotify",
+      "name": "Spotify API",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "user-read-email",
+          "label": "Email address",
+          "description": "Read your email address.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "user-read-private",
+          "label": "Account details",
+          "description": "Read your subscription and country.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "playlist-read-private",
+          "label": "Private playlists",
+          "description": "Read your private playlists.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "playlist-modify-public",
+          "label": "Edit public playlists",
+          "description": "Create and edit your public playlists.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "playlist-modify-private",
+          "label": "Edit private playlists",
+          "description": "Create and edit your private playlists.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "user-library-read",
+          "label": "Library (read)",
+          "description": "Read your saved tracks and albums.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "user-library-modify",
+          "label": "Library (modify)",
+          "description": "Save and remove tracks and albums.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "user-top-read",
+          "label": "Top artists/tracks",
+          "description": "Read your top artists and tracks.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "user-read-playback-state",
+          "label": "Playback state",
+          "description": "Read your current playback state.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "user-modify-playback-state",
+          "label": "Control playback",
+          "description": "Control playback on your devices.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "streaming",
+          "label": "Stream audio",
+          "description": "Play content via the Web Playback SDK.",
+          "sensitive": true,
+          "required": false
+        }
+      ]
+    },
+    {
+      "slug": "talos",
+      "name": "Talos",
+      "service_type": "http",
+      "capabilities": {
+        "supports_proxy_read": false,
+        "supports_proxy_write": false,
+        "supports_proxy_binary_upload": false,
+        "supports_direct_downstream_auth": false,
+        "supports_authoring_via_nyx": false,
+        "supports_websocket": false,
+        "supports_streaming": false
+      }
+    },
+    {
+      "slug": "api-telegram-bot",
+      "name": "Telegram Bot API",
+      "provider_type": "api_key",
+      "service_type": "http"
+    },
+    {
+      "slug": "api-tiktok",
+      "name": "TikTok API",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "user.info.basic",
+          "label": "Basic profile",
+          "description": "Read your display name and avatar.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "user.info.profile",
+          "label": "Profile details",
+          "description": "Read your profile bio and link.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "user.info.stats",
+          "label": "Profile stats",
+          "description": "Read your follower and like counts.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "video.list",
+          "label": "List videos",
+          "description": "Read your public videos.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "video.upload",
+          "label": "Upload videos",
+          "description": "Upload videos to your account (draft).",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "video.publish",
+          "label": "Publish videos",
+          "description": "Publish videos directly to your account.",
+          "sensitive": true,
+          "required": false
+        }
+      ]
+    },
+    {
+      "slug": "api-twilio",
+      "name": "Twilio",
+      "provider_type": "api_key",
+      "service_type": "http",
+      "capabilities": {
+        "supports_proxy_read": true,
+        "supports_proxy_write": true,
+        "supports_proxy_binary_upload": false,
+        "supports_direct_downstream_auth": true,
+        "supports_authoring_via_nyx": false,
+        "supports_websocket": false,
+        "supports_streaming": false
+      }
+    },
+    {
+      "slug": "api-twitch",
+      "name": "Twitch API",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "user:read:email",
+          "label": "Email address",
+          "description": "Read your email address.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "user:read:follows",
+          "label": "Read follows",
+          "description": "Read the channels you follow.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "channel:read:subscriptions",
+          "label": "Read subscriptions",
+          "description": "Read your channel's subscribers.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "chat:read",
+          "label": "Read chat",
+          "description": "Read chat messages.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "chat:edit",
+          "label": "Send chat",
+          "description": "Send chat messages on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "clips:edit",
+          "label": "Manage clips",
+          "description": "Create clips on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "channel:manage:broadcast",
+          "label": "Manage broadcast",
+          "description": "Update your channel's title and category.",
+          "sensitive": true,
+          "required": false
+        }
+      ]
+    },
+    {
+      "slug": "api-twitter",
+      "name": "Twitter / X API",
+      "provider_type": "oauth2",
+      "service_type": "http",
+      "scope_catalog": [
+        {
+          "scope": "tweet.read",
+          "label": "Read posts",
+          "description": "Read posts and timelines.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "tweet.write",
+          "label": "Write posts",
+          "description": "Create and delete posts on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "tweet.moderate.write",
+          "label": "Moderate replies",
+          "description": "Hide and unhide replies to your posts.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "users.read",
+          "label": "Read profile",
+          "description": "Read profile info for you and other accounts.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "follows.read",
+          "label": "Read follows",
+          "description": "See who you follow and who follows you.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "follows.write",
+          "label": "Manage follows",
+          "description": "Follow and unfollow accounts on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "offline.access",
+          "label": "Stay connected",
+          "description": "Refresh access without re-authorizing (long-lived token).",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "like.read",
+          "label": "Read likes",
+          "description": "See posts you've liked.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "like.write",
+          "label": "Manage likes",
+          "description": "Like and unlike posts on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "list.read",
+          "label": "Read lists",
+          "description": "Read your lists and their members.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "list.write",
+          "label": "Manage lists",
+          "description": "Create and edit lists on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "bookmark.read",
+          "label": "Read bookmarks",
+          "description": "See your bookmarked posts.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "bookmark.write",
+          "label": "Manage bookmarks",
+          "description": "Add and remove bookmarks on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "block.read",
+          "label": "Read blocks",
+          "description": "See accounts you've blocked.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "block.write",
+          "label": "Manage blocks",
+          "description": "Block and unblock accounts on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "mute.read",
+          "label": "Read mutes",
+          "description": "See accounts you've muted.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "mute.write",
+          "label": "Manage mutes",
+          "description": "Mute and unmute accounts on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "space.read",
+          "label": "Read Spaces",
+          "description": "Read details about Spaces.",
+          "sensitive": false,
+          "required": false
+        },
+        {
+          "scope": "dm.read",
+          "label": "Read DMs",
+          "description": "Read your direct messages.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "dm.write",
+          "label": "Send DMs",
+          "description": "Send direct messages on your behalf.",
+          "sensitive": true,
+          "required": false
+        },
+        {
+          "scope": "media.write",
+          "label": "Upload media",
+          "description": "Upload images and video (required for POST /2/media/upload).",
+          "sensitive": true,
+          "required": false
+        }
+      ]
+    },
+    {
+      "slug": "api-whatsapp-business",
+      "name": "WhatsApp Business Platform (Meta Cloud API)",
+      "provider_type": "api_key",
+      "service_type": "http"
+    },
+    {
+      "slug": "ornn-api",
+      "name": "ornn-api",
+      "service_type": "http",
+      "capabilities": {
+        "supports_proxy_read": false,
+        "supports_proxy_write": false,
+        "supports_proxy_binary_upload": false,
+        "supports_direct_downstream_auth": false,
+        "supports_authoring_via_nyx": false,
+        "supports_websocket": false,
+        "supports_streaming": false
+      },
+      "required_permissions": []
+    }
+  ],
+  "connections": [
+    {
+      "id": "b60a49f4-c890-4f35-a260-688886192783",
+      "slug": "api-google-3",
+      "name": "Google API",
+      "catalogSlug": "api-google",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "oauth2",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": "active",
+      "credentialMissing": false,
+      "grantedScopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/drive.file"
+      ]
+    },
+    {
+      "id": "ee23efed-7f14-4a7c-b32d-a313bd4db95c",
+      "slug": "api-google-2",
+      "name": "Google API",
+      "catalogSlug": "api-google",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "oauth2",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "pending_auth",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "e9d9e14c-9dce-46c7-9c45-fa05bb49005c",
+      "slug": "api-google",
+      "name": "Google API",
+      "catalogSlug": "api-google",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "oauth2",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "failed",
+      "connectionStatus": "expired",
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "af7ddddd-8c57-476c-8216-5bb7c9d7c96e",
+      "slug": "api-google-gmail-3",
+      "name": "Gmail",
+      "catalogSlug": "api-google-gmail",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "oauth2",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": "active",
+      "credentialMissing": false,
+      "grantedScopes": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/gmail.send",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "openid"
+      ]
+    },
+    {
+      "id": "23500892-07fa-4732-9dd8-84d9b51ee3e1",
+      "slug": "api-google-gmail-2",
+      "name": "Gmail",
+      "catalogSlug": "api-google-gmail",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "oauth2",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": "active",
+      "credentialMissing": false,
+      "grantedScopes": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "openid"
+      ]
+    },
+    {
+      "id": "364f6ca3-23ee-4f21-8d55-5f4f4dc72ffa",
+      "slug": "api-google-gmail",
+      "name": "Gmail",
+      "catalogSlug": "api-google-gmail",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "oauth2",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": "active",
+      "credentialMissing": false,
+      "grantedScopes": [
+        "https://www.googleapis.com/auth/gmail.readonly",
+        "openid",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile"
+      ]
+    },
+    {
+      "id": "22fec12f-c374-46c9-b75a-f5d44a238290",
+      "slug": "api-google-workspace-2",
+      "name": "Google Workspace",
+      "catalogSlug": "api-google-workspace",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "oauth2",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": "active",
+      "credentialMissing": false,
+      "grantedScopes": [
+        "https://www.googleapis.com/auth/calendar",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "openid"
+      ]
+    },
+    {
+      "id": "ecc8e1f8-fdd4-472a-81c8-499b1160dd0c",
+      "slug": "api-google-workspace",
+      "name": "Google Workspace",
+      "catalogSlug": "api-google-workspace",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "oauth2",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "failed",
+      "connectionStatus": "expired",
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "e8f88bf6-5edb-415b-b566-ec2949da8037",
+      "slug": "cma-trigger-github-observer-staging",
+      "name": "CMA Trigger staging public GitHub observer",
+      "catalogSlug": "cma-trigger-github-observer-staging",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "226a19c4-c806-45f0-825a-1f51100db133",
+      "slug": "talos",
+      "name": "Talos",
+      "catalogSlug": "talos",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "e868e122-f8cd-4fc1-8d9b-c8fb74a67747",
+      "slug": "api-github",
+      "name": "GitHub OAuth",
+      "catalogSlug": "api-github",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "oauth2",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": "active",
+      "credentialMissing": false,
+      "grantedScopes": ["read:user", "repo", "user:email"]
+    },
+    {
+      "id": "a3a9d2b6-5f20-4413-be00-a7957887fc5a",
+      "slug": "api-github",
+      "name": "GitHub OAuth",
+      "catalogSlug": "api-github",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "oauth2",
+      "serviceType": "http",
+      "isActive": false,
+      "credentialStatus": "failed",
+      "connectionStatus": "expired",
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "2fbd5f13-400d-4aff-ae37-691224afbeb7",
+      "slug": "api-github",
+      "name": "GitHub OAuth",
+      "catalogSlug": "api-github",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": false,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": true,
+      "grantedScopes": null
+    },
+    {
+      "id": "ac363dd9-0e1c-423e-88da-264005ac82f5",
+      "slug": "api-github",
+      "name": "GitHub OAuth",
+      "catalogSlug": "api-github",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "oauth2",
+      "serviceType": "http",
+      "isActive": false,
+      "credentialStatus": "failed",
+      "connectionStatus": "expired",
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "0861d14b-c78b-421d-8144-04ff316df071",
+      "slug": "chrono-sandbox",
+      "name": "Chrono Sandbox",
+      "catalogSlug": "chrono-sandbox",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "67cbc76f-218a-4079-a71b-9f4be0993936",
+      "slug": "llm-openai",
+      "name": "OpenAI API",
+      "catalogSlug": "llm-openai",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "api_key",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "91b4bd09-692a-49b1-bebe-4f1c72165cb8",
+      "slug": "llm-openai-codex",
+      "name": "OpenAI Codex API",
+      "catalogSlug": "llm-openai-codex",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "oauth2",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "revoked",
+      "connectionStatus": "expired",
+      "credentialMissing": false,
+      "grantedScopes": ["openid", "profile", "email", "offline_access"]
+    },
+    {
+      "id": "87a9daf1-7e17-4433-8681-3e84d5cfd54f",
+      "slug": "chrono-llm-public",
+      "name": "Chrono LLM (public)",
+      "catalogSlug": "chrono-llm-public",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "a4b0a100-302c-489f-8f55-0853b7e559c1",
+      "slug": "aevatar",
+      "name": "Aevatar",
+      "catalogSlug": "aevatar",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "0b033428-38e0-4c72-998c-bb156bbce6ab",
+      "slug": "ornn-api",
+      "name": "ornn-api",
+      "catalogSlug": "ornn-api",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "e6f073cb-5f36-4406-9b5c-30dced12e6ac",
+      "slug": "sisyphus-admin",
+      "name": "Sisyphus Admin",
+      "catalogSlug": "sisyphus-admin",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "d3c7de7e-b07c-4eee-a558-d576c6e6ceb5",
+      "slug": "sisyphus-paper-compiler",
+      "name": "Sisyphus Paper Compiler",
+      "catalogSlug": "sisyphus-paper-compiler",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "7b886fd2-be73-4083-8739-524a1e7418e8",
+      "slug": "sisyphus-schema",
+      "name": "Sisyphus Schema",
+      "catalogSlug": "sisyphus-schema",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "6a458611-d958-43fe-a114-0c4e5ac58dd3",
+      "slug": "sisyphus-ingestor",
+      "name": "Sisyphus Ingestor",
+      "catalogSlug": "sisyphus-ingestor",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "c7879b27-b27e-4043-a538-95bc8dbb417f",
+      "slug": "sisyphus-workflow",
+      "name": "Sisyphus Workflow",
+      "catalogSlug": "sisyphus-workflow",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "2a5669dd-50ca-4735-8089-802730ee1112",
+      "slug": "sisyphus-research-runner",
+      "name": "Sisyphus Research Runner",
+      "catalogSlug": "sisyphus-research-runner",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "2223ee22-685b-41a0-8620-6b133e4c67bb",
+      "slug": "chrono-storage-service",
+      "name": "Chrono Storage Service",
+      "catalogSlug": "chrono-storage-service",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "8b13f5ed-7898-45f4-be9e-0a9425e71a69",
+      "slug": "llm-openai",
+      "name": "OpenAI API",
+      "catalogSlug": "llm-openai",
+      "owner": "personal",
+      "ownerName": "Personal",
+      "kind": "api_key",
+      "serviceType": "http",
+      "isActive": false,
+      "credentialStatus": "revoked",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "d328001c-188f-4090-a833-0f11a33d050b",
+      "slug": "api-twitter-loning",
+      "name": "Twitter / X API",
+      "catalogSlug": "api-twitter",
+      "owner": "org",
+      "ownerName": "ChronoAI",
+      "kind": "oauth2",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": "active",
+      "credentialMissing": false,
+      "grantedScopes": [
+        "offline.access",
+        "tweet.write",
+        "media.write",
+        "users.read",
+        "tweet.read"
+      ]
+    },
+    {
+      "id": "de3c8cfb-30d6-4e6c-8dc3-e9701bedebfa",
+      "slug": "api-elevenlabs",
+      "name": "ElevenLabs",
+      "catalogSlug": "api-elevenlabs",
+      "owner": "org",
+      "ownerName": "ChronoAI",
+      "kind": "api_key",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "42fe812d-9ed1-4318-8805-5351b2bd1784",
+      "slug": "api-twilio",
+      "name": "Twilio",
+      "catalogSlug": "api-twilio",
+      "owner": "org",
+      "ownerName": "ChronoAI",
+      "kind": "api_key",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "33dc1c9b-e1f3-4be8-a35e-fef09b999021",
+      "slug": "api-firecrawl",
+      "name": "Firecrawl",
+      "catalogSlug": "api-firecrawl",
+      "owner": "org",
+      "ownerName": "ChronoAI",
+      "kind": "api_key",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "f681818b-f625-4aef-82f7-8bfd92e426b8",
+      "slug": "api-lark-bot",
+      "name": "Lark Bot API (Transparent Tenant Token)",
+      "catalogSlug": "api-lark-bot",
+      "owner": "org",
+      "ownerName": "ChronoAI",
+      "kind": "api_key",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "e30eebeb-278f-4d94-9fad-10d0856831fc",
+      "slug": "tavily-search-chrono-ai",
+      "name": "tavily-search-chrono-ai",
+      "catalogSlug": "tavily-search-chrono-ai",
+      "owner": "org",
+      "ownerName": "ChronoAI",
+      "kind": "api_key",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "3ce0fb17-435c-4a04-8d4d-9f882c9042a5",
+      "slug": "frigate",
+      "name": "Frigate at office",
+      "catalogSlug": "frigate",
+      "owner": "org",
+      "ownerName": "ChronoAI",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "4437e193-6ea5-4ec9-bc6a-c0612536f673",
+      "slug": "esp32-cam-office-1",
+      "name": "esp32-cam-office-1",
+      "catalogSlug": "esp32-cam-office-1",
+      "owner": "org",
+      "ownerName": "ChronoAI",
+      "kind": "none",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "70f053b1-9185-4794-a135-5536c7608c19",
+      "slug": "sg-office-network",
+      "name": "SG Office Network",
+      "catalogSlug": "_ssh_69b3fbd6-bb62-40ec-9b42-88457a9c75d0",
+      "owner": "org",
+      "ownerName": "ChronoAI",
+      "kind": "ssh_certificate",
+      "serviceType": "ssh",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "bb01b065-563f-4b4f-8a5e-3a81f799da7d",
+      "slug": "godgpt-posthog",
+      "name": "godgpt posthog",
+      "catalogSlug": "godgpt-posthog",
+      "owner": "org",
+      "ownerName": "ChronoAI",
+      "kind": "api_key",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    },
+    {
+      "id": "9da679e5-088f-4cdf-a700-b632bb0cc973",
+      "slug": "nyxid-posthog",
+      "name": "nyxid posthog",
+      "catalogSlug": "nyxid-posthog",
+      "owner": "org",
+      "ownerName": "ChronoAI",
+      "kind": "api_key",
+      "serviceType": "http",
+      "isActive": true,
+      "credentialStatus": "active",
+      "connectionStatus": null,
+      "credentialMissing": false,
+      "grantedScopes": null
+    }
+  ]
+}

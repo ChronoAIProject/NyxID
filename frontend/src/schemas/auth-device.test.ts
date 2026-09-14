@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "@/lib/api-client";
 import {
   approveBodySchema,
-  authDeviceUserCodePlaceholder,
   denyBodySchema,
   errorEnvelopeSchema,
   formatAuthDeviceUserCodeInput,
@@ -28,9 +27,16 @@ describe("userCodeSchema", () => {
     expect(userCodeSchema.safeParse("ABCDEFGHI").success).toBe(false);
   });
 
-  it("rejects ambiguous I, L, O, and U inputs", () => {
-    for (const char of ["I", "L", "O", "U"]) {
-      expect(userCodeSchema.safeParse(`ABCD-EFG${char}`).success).toBe(false);
+  it("normalizes ambiguous input consistently with backend and installed scanner", () => {
+    for (const [char, normalized] of [
+      ["I", "1"],
+      ["L", "1"],
+      ["O", "0"],
+      ["U", "V"],
+    ]) {
+      expect(userCodeSchema.parse(`ABCD-EFG${char}`)).toBe(
+        `ABCDEFG${normalized}`,
+      );
     }
   });
 });
@@ -193,7 +199,9 @@ describe("browser device-code schemas", () => {
       device_code: "nyx_adc_test",
     });
     expect(pollWebResponseSchema.parse({ ok: true })).toEqual({ ok: true });
-    expect(pollWebResponseSchema.safeParse({ access_token: "secret" }).success).toBe(false);
+    expect(
+      pollWebResponseSchema.safeParse({ access_token: "secret" }).success,
+    ).toBe(false);
   });
 });
 
@@ -302,16 +310,5 @@ describe("friendlyAuthDeviceStatusMessage", () => {
 
   it("returns no message for a pending preview", () => {
     expect(friendlyAuthDeviceStatusMessage("pending")).toBeNull();
-  });
-});
-
-
-describe("authDeviceUserCodePlaceholder", () => {
-  it.each([
-    ["device", "2-XXXX-XXXX"],
-    ["agent-key", "XXXX-XXXX"],
-  ] as const)("matches the issued %s code format", (flow, placeholder) => {
-    expect(authDeviceUserCodePlaceholder(flow)).toBe(placeholder);
-    expect(userCodeSchema.safeParse(placeholder).success).toBe(true);
   });
 });

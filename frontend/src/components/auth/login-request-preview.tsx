@@ -167,6 +167,8 @@ export function PreviewPanel({
           label="Platform"
           value={preview.client_platform ?? "Not identified"}
         />
+        <details className="group">
+          <summary className="cursor-pointer px-4 py-2.5 text-[12px] text-muted-foreground">Additional reported device details</summary>
         <ApprovalDetailRow
           label="Form factor"
           value={
@@ -204,6 +206,7 @@ export function PreviewPanel({
               : `${preview.client_device_memory} GB`
           }
         />
+        </details>
         <details className="group px-4 py-2.5">
           <summary className="flex cursor-pointer list-none items-center justify-between gap-3 text-[12px] text-muted-foreground">
             Raw user agent

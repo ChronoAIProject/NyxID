@@ -469,6 +469,7 @@ grant. This route remains compatible with existing account-only clients.
 
 ```json
 {
+  "supports_grant_choice": false,
   "client_label": "Desktop workstation",
   "client_user_agent": "desktop-app/1.4"
 }
@@ -572,6 +573,11 @@ Fetch the non-mutating anti-phishing context shown by first-party review surface
 
 `client_label` and `client_user_agent` are requester-supplied free text. `client_ip` is the server-resolved request address observed at `/request`; legacy rows return `null`. All auth-device rows expire after 10 minutes.
 
+`supports_grant_choice` is an explicit capability advertisement. It is `true`
+only for grant-capable `/auth/device/v2/request` rows and is `false` for
+legacy rows. Clients must use this field instead of inspecting the public code
+format. Legacy requests use eight normalized characters. V2 keeps the old nine-character marker by default; `AUTH_DEVICE_EIGHT_CHAR_CODES=true` enables eight-character issuance only after old readers and non-reserving writers have drained (see ADR-015).
+
 #### POST /api/v1/auth/device/approve
 
 Atomically approve a pending request and prepare a first-party token pair for one poller.
@@ -604,12 +610,22 @@ Approve and deny use the same pending-status guard, so exactly one wins a concur
 
 #### Selectable Device Login V2
 
+Options expose per-key effective bindings and platform availability metadata.
+`allow_auto_connected_services` covers active same-owner rows with either
+`source=auto_provision` or `credential_binding=platform`, including future rows.
+This durable grant is disclosed as extra access; unreported provider scopes are
+never exact. New-client approval submits snapshots for explicit and current
+implied connections. See [DEVICE_LOGIN_PROTOCOL.md](DEVICE_LOGIN_PROTOCOL.md).
+
+The browser hint allowlist, three-step approval and additive consent snapshots are documented in [DEVICE_LOGIN_PROTOCOL.md](DEVICE_LOGIN_PROTOCOL.md).
+
 Plain `nyxid login` deliberately defaults to this exchange: it provides requester attribution (IP, timezone, origin, screen) and human choice of account access or a restricted Agent Key. `nyxid login --callback` opts into the legacy local callback, which grants full account access without requester review. The CLI prints/opens only the bare verification URI for manual code entry; `--clipboard` copies the user code for pasting, except in JSON/no-wait modes, which do not copy or open a browser.
 
 New clients start with `POST /api/v1/auth/device/v2/request`, using the same
 client-context body as the legacy request, plus optional `requested_profile`.
 The response has the same fields, with a `nyx_adc2_` poll secret and a
-`2-XXXX-XXXX` human code. Use `/auth/device/v2/poll` or the browser-only
+human code: `2-XXXX-XXXX` in compatibility mode, or `XXXX-XXXX` after the
+staged issuance gate is enabled. Use `/auth/device/v2/poll` or the browser-only
 `/auth/device/v2/poll-web` with `{"device_code":"nyx_adc2_<secret>"}`.
 
 V2 requests live in separate storage. Old replicas return an unsupported route
@@ -617,7 +633,7 @@ without consuming new grants, and old TTL indexes cannot remove v2 cleanup
 work. Clients must not retry a v2 request through the legacy poll route.
 Legacy requests only offer account access.
 
-The shared public `/auth/device/preview` resolves the human-code version and
+The shared public `/auth/device/preview` checks both protocol collections, rejects ambiguous codes, and
 includes the requested profile and sanitized requester context. Human decisions
 require a first-party personal session or an access JWT without an OAuth client
 ID. Third-party OAuth, delegated, relay, service-account and API-key credentials
@@ -625,8 +641,8 @@ cannot approve or mint login grants.
 
 | Method and path | Body | Result |
 |---|---|---|
-| `POST /auth/device/options` | `{"user_code":"2-XXXX-XXXX"}` | Eligible personal/org keys and resource choices |
-| `POST /auth/device/approve` | `{"user_code":"2-XXXX-XXXX"}` | Full account approval |
+| `POST /auth/device/options` | `{"user_code":"XXXX-XXXX"}` | Eligible personal/org keys and resource choices |
+| `POST /auth/device/approve` | `{"user_code":"XXXX-XXXX"}` | Full account approval |
 | `POST /auth/device/approve-agent-key` | Human code, `selection`, optional `credential_expires_at` | Restricted child credential approval |
 | `POST /auth/device/deny` | Human code | Denial without issuance |
 

@@ -1,4 +1,6 @@
+mod consent;
 use chrono::{DateTime, Duration, Utc};
+pub use consent::EffectiveService;
 use futures::TryStreamExt;
 use mongodb::{
     Database,
@@ -92,6 +94,8 @@ pub struct ResourceSummary {
 #[derive(Clone, Debug, Serialize, ToSchema)]
 #[schema(as = AgentKeyLoginKeySummary)]
 pub struct KeySummary {
+    pub effective_services: Vec<EffectiveService>,
+    pub permission_snapshot: String,
     pub id: String,
     pub name: String,
     pub key_prefix: String,
@@ -116,6 +120,7 @@ pub struct KeySummary {
 #[derive(Debug, Serialize, ToSchema)]
 #[schema(as = AgentKeyLoginLoginOptions)]
 pub struct LoginOptions {
+    pub connections: Vec<EffectiveService>,
     pub keys: Vec<KeySummary>,
     pub services: Vec<ResourceSummary>,
     pub nodes: Vec<ResourceSummary>,
@@ -325,7 +330,10 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
         .await?
         .try_collect()
         .await?;
+    let (effective_services, permission_snapshot) = consent::key_access(db, key, None).await?;
     Ok(KeySummary {
+        effective_services,
+        permission_snapshot,
         id: key.id.clone(),
         name: key.name.clone(),
         key_prefix: key.key_prefix.clone(),
@@ -351,10 +359,7 @@ pub async fn key_summary(db: &Database, key: &ApiKey, created_now: bool) -> AppR
                     id: id.clone(),
                     name: row.map_or_else(|| "Unavailable service".into(), |r| r.slug.clone()),
                     owner_id: row.map_or_else(|| key.user_id.clone(), |r| r.user_id.clone()),
-                    auto_connected: row.is_some_and(|r| {
-                        r.source.as_deref()
-                            == Some(crate::models::user_service::AUTO_PROVISION_SOURCE)
-                    }),
+                    auto_connected: row.is_some_and(consent::auto_connected),
                 }
             })
             .collect(),
@@ -425,21 +430,22 @@ pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOpt
             }
         }
     }
-    let services = user_service_service::list_user_services_with_sources(db, actor)
-        .await?
-        .into_iter()
-        .filter(|entry| match &entry.source {
-            user_service_service::CredentialSource::Personal => true,
-            user_service_service::CredentialSource::Org { allowed, .. } => *allowed,
-        })
-        .map(|entry| ResourceSummary {
+    let entries = user_service_service::list_user_services_with_sources(db, actor).await?;
+    let mut services = Vec::new();
+    let mut connections = Vec::new();
+    for entry in entries.into_iter().filter(|entry| match &entry.source {
+        user_service_service::CredentialSource::Personal => true,
+        user_service_service::CredentialSource::Org { allowed, .. } => *allowed,
+    }) {
+        connections.push(consent::connection(db, &entry.service, None, None).await?);
+        let auto_connected = consent::auto_connected(&entry.service);
+        services.push(ResourceSummary {
             id: entry.service.id,
             name: entry.service.slug,
             owner_id: entry.service.user_id,
-            auto_connected: entry.service.source.as_deref()
-                == Some(crate::models::user_service::AUTO_PROVISION_SOURCE),
-        })
-        .collect();
+            auto_connected,
+        });
+    }
     let nodes = node_service::list_user_nodes(db, actor)
         .await?
         .into_iter()
@@ -451,6 +457,7 @@ pub async fn options_for_actor(db: &Database, actor: &str) -> AppResult<LoginOpt
         })
         .collect();
     Ok(LoginOptions {
+        connections,
         keys,
         services,
         nodes,
@@ -529,6 +536,7 @@ pub async fn issue_selected(
     {
         return Err(AppError::AgentKeyLoginKeyIneligible);
     }
+    consent::validate(db, &parent, selection, &mut *session).await?;
     credentials::issue(
         db,
         &parent,
@@ -577,6 +585,7 @@ pub async fn preview(
             row.created_at,
             row.expires_at,
             status,
+            false,
             viewer_ip,
             attribution,
         ),
@@ -601,7 +610,7 @@ pub async fn approve(
         return Err(decision_error(&row));
     }
     let (key_id, created_now) = match &selection {
-        Selection::Existing { api_key_id } => {
+        Selection::Existing { api_key_id, .. } => {
             (eligible_key(db, actor, api_key_id).await?.id, false)
         }
         Selection::New(_) => (Uuid::new_v4().to_string(), true),

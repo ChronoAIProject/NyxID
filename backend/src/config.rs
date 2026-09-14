@@ -195,6 +195,8 @@ pub struct AppConfig {
     pub base_url: String,
     /// Frontend URL for CORS and redirects (e.g. https://nyxid.dev)
     pub frontend_url: String,
+    /// Enable only after pre-reservation writers and legacy-only readers are drained.
+    pub auth_device_eight_char_codes: bool,
     /// Additional CORS allowed origins (comma-separated, e.g. "http://localhost:5847,http://localhost:3000")
     pub cors_allowed_origins: Vec<String>,
     /// Additional origins trusted for browser CSRF (comma-separated).
@@ -1017,6 +1019,9 @@ impl AppConfig {
         );
 
         Self {
+            auth_device_eight_char_codes: env::var("AUTH_DEVICE_EIGHT_CHAR_CODES")
+                .map(|v| v.parse::<bool>().expect("AUTH_DEVICE_EIGHT_CHAR_CODES must be true or false"))
+                .unwrap_or(false),
             port: env::var("PORT")
                 .ok()
                 .and_then(|v| v.parse().ok())
@@ -1859,6 +1864,7 @@ mod tests {
     fn make_config(base_url: &str, environment: &str, encryption_key: &str) -> AppConfig {
         AppConfig {
             port: 3001,
+            auth_device_eight_char_codes: false,
             base_url: base_url.to_string(),
             frontend_url: "http://localhost:3000".to_string(),
             cors_allowed_origins: vec![],
