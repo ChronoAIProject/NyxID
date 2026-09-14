@@ -1,4 +1,7 @@
 //! Fenced, expiring observations; probe outcomes never mutate credential health.
+//! Only classified provider answers have a five-minute reuse window. Unsupported,
+//! transport, and local configuration observations are non-reusable, so the next
+//! explicit check re-evaluates node routing and capabilities.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -222,95 +225,129 @@ async fn validate_round(
     service_id: &str,
     force: bool,
 ) -> AppResult<ServiceValidationRecord> {
-    let live = snapshot(state, &caller, service_id).await?;
-    let profile = live
-        .resolution
-        .catalog_service_slug
-        .as_deref()
-        .and_then(validator_profiles::for_slug);
-    let (profile_id, version) =
-        profile.map_or(("unsupported", 0), |profile| (profile.id, profile.version));
-    let records = state
-        .db
-        .collection::<ServiceValidationRecord>(COLLECTION_NAME);
-    let previous = records
-        .find_one(doc! { "user_service_id": service_id, "validator_id": profile_id })
-        .await?;
-    if !force
-        && let Some(record) = previous
-            .as_ref()
-            .filter(|record| fresh(record, &live, version))
-    {
-        return Ok(record.clone());
-    }
-    let lease_name = format!("service-validation:{service_id}:{profile_id}");
-    let holder = &coordination_service::cluster_lease_runtime().holder;
-    let lease = LeaseStore::acquire(&state.db, &lease_name, holder, LEASE_TTL).await?;
-    let attempt_id = if let Some(lease) = lease {
-        let attempt_id = lease.lease_id.clone();
-        // Re-read under the lease in case the previous worker just completed.
-        let latest = match records
+    loop {
+        let live = snapshot(state, &caller, service_id).await?;
+        let profile = live
+            .resolution
+            .catalog_service_slug
+            .as_deref()
+            .and_then(validator_profiles::for_slug);
+        let (profile_id, version) =
+            profile.map_or(("unsupported", 0), |profile| (profile.id, profile.version));
+        let records = state
+            .db
+            .collection::<ServiceValidationRecord>(COLLECTION_NAME);
+        let previous = records
             .find_one(doc! { "user_service_id": service_id, "validator_id": profile_id })
-            .await
+            .await?;
+        if !force
+            && let Some(record) = previous
+                .as_ref()
+                .filter(|record| fresh(record, &live, version))
         {
-            Ok(latest) => latest,
-            Err(error) => {
+            return Ok(record.clone());
+        }
+        let lease_name = format!("service-validation:{service_id}:{profile_id}");
+        let holder = &coordination_service::cluster_lease_runtime().holder;
+        let lease = LeaseStore::acquire(&state.db, &lease_name, holder, LEASE_TTL).await?;
+        let attempt_id = if let Some(lease) = lease {
+            let attempt_id = lease.lease_id.clone();
+            // Re-read under the lease in case the previous worker just completed.
+            let latest = match records
+                .find_one(doc! { "user_service_id": service_id, "validator_id": profile_id })
+                .await
+            {
+                Ok(latest) => latest,
+                Err(error) => {
+                    let _ = LeaseStore::release(&state.db, &lease).await;
+                    return Err(error.into());
+                }
+            };
+            let joining = previous.as_ref().is_none_or(|record| !record.completed);
+            if let Some(record) = latest
+                .as_ref()
+                .filter(|record| (!force || joining) && fresh(record, &live, version))
+            {
                 let _ = LeaseStore::release(&state.db, &lease).await;
-                return Err(error.into());
+                let current = snapshot(state, &caller, service_id).await?;
+                return if fresh(record, &current, version) {
+                    Ok(record.clone())
+                } else {
+                    Err(AppError::ServiceValidationUnavailable)
+                };
+            }
+            let started = start_attempt(state, &caller, live, profile, latest, &lease).await;
+            match started {
+                Ok((record, admission)) => {
+                    let state = state.clone();
+                    let caller = caller.clone();
+                    tokio::spawn(async move {
+                        run_attempt(state, caller, profile, record, lease, admission).await;
+                    });
+                }
+                Err(error) => {
+                    let _ = LeaseStore::release(&state.db, &lease).await;
+                    return Err(error);
+                }
+            }
+            attempt_id
+        } else {
+            match join_attempt(state, &lease_name).await? {
+                Some(attempt_id) => {
+                    if previous
+                        .as_ref()
+                        .is_some_and(|record| record.completed && record.attempt_id == attempt_id)
+                    {
+                        // A published result can outlive its worker's admission/audit
+                        // cleanup. This new request must not join that settled check.
+                        wait_for_attempt_release(state, &lease_name, &attempt_id).await?;
+                        continue;
+                    }
+                    attempt_id
+                }
+                None => {
+                    if let Some(record) = previous.as_ref().filter(|record| !record.completed) {
+                        return completed_observation(
+                            state,
+                            &caller,
+                            service_id,
+                            profile_id,
+                            version,
+                            Some(&record.attempt_id),
+                        )
+                        .await?
+                        .ok_or(AppError::ServiceValidationUnavailable);
+                    }
+                    // Cleanup raced the lease read. Re-enter normal admission
+                    // rather than reusing a completed record for a new check.
+                    continue;
+                }
             }
         };
-        let joining = previous.as_ref().is_none_or(|record| !record.completed);
-        if let Some(record) = latest
-            .as_ref()
-            .filter(|record| (!force || joining) && fresh(record, &live, version))
-        {
-            let _ = LeaseStore::release(&state.db, &lease).await;
-            let current = snapshot(state, &caller, service_id).await?;
-            return if fresh(record, &current, version) {
-                Ok(record.clone())
-            } else {
-                Err(AppError::ServiceValidationUnavailable)
-            };
-        }
-        let started = start_attempt(state, &caller, live, profile, latest, &lease).await;
-        match started {
-            Ok((record, admission)) => {
-                let state = state.clone();
-                let caller = caller.clone();
-                tokio::spawn(async move {
-                    run_attempt(state, caller, profile, record, lease, admission).await;
-                });
-            }
-            Err(error) => {
-                let _ = LeaseStore::release(&state.db, &lease).await;
-                return Err(error);
-            }
-        }
-        attempt_id
-    } else {
-        match join_attempt(state, &lease_name).await? {
-            Some(attempt_id) => attempt_id,
-            None => {
-                return completed_observation(
-                    state, &caller, service_id, profile_id, version, None,
-                )
-                .await?
-                .ok_or(AppError::ServiceValidationUnavailable);
-            }
-        }
-    };
-    // Disconnecting does not cancel a rotating OAuth refresh. The detached
-    // worker retains its Mongo leases until it settles or loses authority.
-    poll_attempt(
-        state,
-        &caller,
-        service_id,
-        profile_id,
-        version,
-        &lease_name,
-        &attempt_id,
-    )
-    .await
+        // Disconnecting does not cancel a rotating OAuth refresh. The detached
+        // worker retains its Mongo leases until it settles or loses authority.
+        return poll_attempt(
+            state,
+            &caller,
+            service_id,
+            profile_id,
+            version,
+            &lease_name,
+            &attempt_id,
+        )
+        .await;
+    }
+}
+
+async fn wait_for_attempt_release(
+    state: &AppState,
+    lease_name: &str,
+    attempt_id: &str,
+) -> AppResult<()> {
+    while join_attempt(state, lease_name).await?.as_deref() == Some(attempt_id) {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    Ok(())
 }
 
 async fn join_attempt(state: &AppState, lease_name: &str) -> AppResult<Option<String>> {
@@ -782,7 +819,15 @@ async fn observe(
         }
     }
     record.checked_at = Utc::now();
-    record.valid_until = record.checked_at + chrono::Duration::seconds(DISPLAY_WINDOW_SECS);
+    record.valid_until = if status_class.is_some()
+        && !matches!(
+            outcome,
+            ValidationOutcome::TransportUnknown | ValidationOutcome::Unsupported
+        ) {
+        record.checked_at + chrono::Duration::seconds(DISPLAY_WINDOW_SECS)
+    } else {
+        record.checked_at
+    };
     record.outcome = outcome;
     record.reason_code = reason;
     record.completed = true;

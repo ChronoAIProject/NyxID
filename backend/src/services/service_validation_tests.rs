@@ -179,6 +179,26 @@ async fn validation_db_joins_attempt_reuses_freshness_and_never_changes_status()
     let Some(mut f) = fixture("validation_join", true).await else {
         return;
     };
+    let (checking, lease, admission) = pending_attempt(&f).await;
+    let state = f.state.clone();
+    let caller = f.caller.clone();
+    // Settle while retaining the attempt lease to expose the cleanup window
+    // deterministically. A new force request must wait, then apply cooldown.
+    let worker = tokio::spawn(async move {
+        let dispatched = AtomicBool::new(false);
+        observe(
+            &state,
+            &caller,
+            validator_profiles::for_slug("api-github"),
+            checking,
+            &admission,
+            &dispatched,
+        )
+        .await
+        .unwrap_or_else(|failure| panic!("observation failed: {}", failure.reason_code()));
+        assert!(dispatched.load(Ordering::Relaxed));
+        admission
+    });
     let first = begin(&f, false);
     let frame = request(&mut f).await;
     let second = begin(&f, true);
@@ -201,8 +221,17 @@ async fn validation_db_joins_attempt_reuses_freshness_and_never_changes_status()
             .attempt_id,
         a.attempt_id
     );
+    let admission = worker.await.unwrap();
+    let forced = begin(&f, true);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !forced.is_finished(),
+        "a new check must not join a settled attempt"
+    );
+    release_admission(&f.state.db, &admission).await;
+    LeaseStore::release(&f.state.db, &lease).await.unwrap();
     assert!(matches!(
-        validate(&f.state, f.caller.clone(), &f.service.id, true).await,
+        forced.await.unwrap(),
         Err(AppError::ServiceValidationRateLimited)
     ));
     assert!(f.outbound.try_recv().is_err());
@@ -234,6 +263,23 @@ async fn validation_db_node_upgrade_required_and_offline_do_not_probe() {
     assert_eq!(record.outcome, ValidationOutcome::Unsupported);
     assert_eq!(record.reason_code, "node_agent_upgrade_required");
     assert!(f.outbound.try_recv().is_err());
+    assert_eq!(record.valid_until, record.checked_at);
+    // Capability changes do not affect the execution digest. The next explicit
+    // check must still see the upgrade and send a probe without force.
+    f.state.node_ws_manager.record_capabilities(
+        &f.node_id,
+        &NodeCapabilitiesMsg {
+            no_redirect_proxy: true,
+            ..Default::default()
+        },
+    );
+    let upgraded = begin(&f, false);
+    let frame = request(&mut f).await;
+    respond(&f, &frame, 200, br#"{"id":123,"login":"fixture"}"#, vec![]);
+    let upgraded = upgraded.await.unwrap().unwrap();
+    assert_ne!(upgraded.attempt_id, record.attempt_id);
+    assert_eq!(upgraded.outcome, ValidationOutcome::Authenticated);
+    assert!(upgraded.valid_until > upgraded.checked_at);
     // A routing change invalidates evidence and receives its own digest cooldown.
     let offline = uuid::Uuid::new_v4().to_string();
     f.state
@@ -249,6 +295,12 @@ async fn validation_db_node_upgrade_required_and_offline_do_not_probe() {
         .await
         .unwrap();
     assert_eq!(record.outcome, ValidationOutcome::TransportUnknown);
+    assert_eq!(record.valid_until, record.checked_at);
+    let retried = validate(&f.state, f.caller.clone(), &f.service.id, false)
+        .await
+        .unwrap();
+    assert_eq!(retried.outcome, ValidationOutcome::TransportUnknown);
+    assert_ne!(retried.attempt_id, record.attempt_id);
     assert!(f.outbound.try_recv().is_err());
 }
 

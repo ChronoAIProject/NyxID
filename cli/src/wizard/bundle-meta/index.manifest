@@ -84,6 +84,7 @@ frontend/src/schemas/assistant-wire-log.ts
 frontend/src/schemas/cli-wizard.ts
 frontend/src/schemas/http-url.ts
 frontend/src/schemas/runtime-config.ts
+frontend/src/schemas/service-validation.ts
 frontend/src/stores/assistant-context-store.ts
 frontend/src/stores/assistant-draft-store.ts
 frontend/src/stores/assistant-wire-log-store.ts

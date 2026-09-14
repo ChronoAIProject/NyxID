@@ -7869,8 +7869,14 @@ A node agent without the advertised `no_redirect_proxy` capability receives no
 probe and reports `unsupported` with `reason_code: node_agent_upgrade_required`.
 An offline configured node reports `transport_unknown`.
 
-Fresh evidence is reusable for five minutes for display, bound to the profile
-version, execution authority, and credential revision. Future authorization gates
+Classified provider answers (`authenticated`, `permission_denied`,
+`credential_rejected`, provider-returned `configuration_error`, `billing_blocked`,
+and `rate_limited`) are reusable for five minutes for display, bound to the profile
+version, execution authority, and credential revision. Every `transport_unknown`
+or `unsupported` result and local configuration failure has `valid_until` equal to
+`checked_at`; it is a non-reusable observation, displayed with its outcome rather
+than an expired badge. The next explicit click re-evaluates routing and node
+capabilities. Future authorization gates
 must use a maximum age of 60 seconds; this observation never replaces execution
 checks or changes global credential health. The shared OAuth refresh path retains
 its existing credential lifecycle behavior. `force: true` bypasses freshness reuse
