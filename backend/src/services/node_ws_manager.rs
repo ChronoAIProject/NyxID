@@ -1108,6 +1108,7 @@ fn append_lossy_capped(target: &mut String, chunk: &str) {
 }
 
 /// Compute HMAC-SHA256 signature for a proxy request.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_hmac_signature(
     secret: &[u8],
     timestamp: &str,
@@ -1116,6 +1117,7 @@ pub fn compute_hmac_signature(
     path: &str,
     query: Option<&str>,
     body: Option<&[u8]>,
+    follow_redirects: bool,
 ) -> String {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
@@ -1127,7 +1129,7 @@ pub fn compute_hmac_signature(
         })
         .unwrap_or_default();
 
-    let message = format!(
+    let mut message = format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
         timestamp,
         nonce,
@@ -1137,6 +1139,10 @@ pub fn compute_hmac_signature(
         body_b64,
     );
 
+    if !follow_redirects {
+        message.push_str("\nfollow_redirects=false");
+    }
+
     let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
     mac.update(message.as_bytes());
     hex::encode(mac.finalize().into_bytes())
@@ -1145,7 +1151,7 @@ pub fn compute_hmac_signature(
 pub fn sign_proxy_request(secret: &[u8], request: &NodeProxyRequest) -> NodeRequestSignature {
     let timestamp = chrono::Utc::now().to_rfc3339();
     let nonce = uuid::Uuid::new_v4().to_string();
-    let mut signature = compute_hmac_signature(
+    let signature = compute_hmac_signature(
         secret,
         &timestamp,
         &nonce,
@@ -1153,29 +1159,8 @@ pub fn sign_proxy_request(secret: &[u8], request: &NodeProxyRequest) -> NodeRequ
         &request.path,
         request.query.as_deref(),
         request.body.as_deref(),
+        request.follow_redirects,
     );
-    if !request.follow_redirects {
-        use base64::Engine;
-        use hmac::{Hmac, Mac};
-        use sha2::Sha256;
-        let body = request
-            .body
-            .as_deref()
-            .map(|body| base64::engine::general_purpose::STANDARD.encode(body))
-            .unwrap_or_default();
-        let message = format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\nfollow_redirects=false",
-            timestamp,
-            nonce,
-            request.method,
-            request.path,
-            request.query.as_deref().unwrap_or(""),
-            body
-        );
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
-        mac.update(message.as_bytes());
-        signature = hex::encode(mac.finalize().into_bytes());
-    }
     NodeRequestSignature {
         timestamp,
         nonce,
@@ -4308,6 +4293,7 @@ mod tests {
             "/v1/chat/completions",
             Some("stream=true"),
             Some(b"hello"),
+            true,
         );
         let sig2 = compute_hmac_signature(
             secret,
@@ -4317,6 +4303,7 @@ mod tests {
             "/v1/chat/completions",
             Some("stream=true"),
             Some(b"hello"),
+            true,
         );
         assert_eq!(sig1, sig2);
         assert!(!sig1.is_empty());
@@ -4333,6 +4320,7 @@ mod tests {
             "/v1/chat/completions",
             None,
             None,
+            true,
         );
         let sig2 = compute_hmac_signature(
             secret,
@@ -4342,6 +4330,7 @@ mod tests {
             "/v1/chat/completions",
             None,
             None,
+            true,
         );
         assert_ne!(sig1, sig2);
     }

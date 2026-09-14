@@ -22,6 +22,15 @@ const outcomeLabels: Record<ServiceValidationResponse["outcome"], string> = {
   unsupported: "Check unavailable",
 };
 
+const reasonMessages: Readonly<Record<string, string>> = {
+  node_agent_upgrade_required:
+    "Upgrade the connected node agent to check this connection.",
+  credential_unavailable:
+    "The stored credential could not be used. Reconnect this service.",
+  attempt_superseded:
+    "The connection changed while it was being checked. Check again.",
+};
+
 export function ConnectionValidationCard({
   serviceId,
   active,
@@ -52,7 +61,7 @@ export function ConnectionValidationCard({
           permission.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-3">
+      <CardContent className="space-y-3 text-[12px]">
         <Button
           onClick={() => validation.mutate({ force: Boolean(result) })}
           disabled={!active}
@@ -61,7 +70,7 @@ export function ConnectionValidationCard({
           Check connection
         </Button>
         {!active && (
-          <p className="text-[12px] text-muted-foreground">
+          <p className="text-muted-foreground">
             Enable this service before checking its connection.
           </p>
         )}
@@ -79,10 +88,10 @@ export function ConnectionValidationCard({
               >
                 {expired ? "Check expired" : outcomeLabels[result.outcome]}
               </Badge>
-              <p className="text-[12px] text-muted-foreground">{result.claim}</p>
-              {result.reason_code === "node_agent_upgrade_required" && (
-                <p className="text-[12px] text-muted-foreground">
-                  Upgrade the connected node agent to check this connection.
+              <p className="text-muted-foreground">{result.claim}</p>
+              {reasonMessages[result.reason_code] && (
+                <p className="text-muted-foreground">
+                  {reasonMessages[result.reason_code]}
                 </p>
               )}
               <p className="text-[11px] text-muted-foreground">
@@ -92,7 +101,7 @@ export function ConnectionValidationCard({
             </>
           )}
           {validation.error && (
-            <p role="alert" className="text-[12px] text-destructive">
+            <p role="alert" className="text-destructive">
               {validation.error.message}
             </p>
           )}

@@ -1,4 +1,3 @@
-import { ConnectionValidationCard } from "@/components/dashboard/connection-validation-card";
 import { useEffect, useMemo, useState } from "react";
 import {
   Link,
@@ -38,6 +37,7 @@ import { ErrorBanner } from "@/components/shared/error-banner";
 import { PageHeader } from "@/components/shared/page-header";
 import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
 import { SshServiceInstructions } from "@/components/dashboard/ssh-service-instructions";
+import { ConnectionValidationCard } from "@/components/dashboard/connection-validation-card";
 import { RoutingSection } from "@/components/dashboard/routing-section";
 import { AddKeyDialog } from "@/components/dashboard/add-key-dialog";
 import {
@@ -2519,7 +2519,6 @@ export function KeyDetailPage() {
           </TabsList>
 
           <TabsContent value="overview" className="space-y-4">
-            <ConnectionValidationCard key={keyInfo.id} serviceId={keyInfo.id} active={keyInfo.is_active} />
             <div className="grid gap-4 lg:grid-cols-2">
               <EndpointSection
                 endpointUrl={keyInfo.endpoint_url ?? ""}
@@ -2556,6 +2555,12 @@ export function KeyDetailPage() {
                 readOnly={readOnly}
               />
             </div>
+
+            <ConnectionValidationCard
+              key={keyInfo.id}
+              serviceId={keyInfo.id}
+              active={keyInfo.is_active}
+            />
 
             {!isSsh && (
               <ApiUsageSection

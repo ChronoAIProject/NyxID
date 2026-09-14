@@ -2203,7 +2203,8 @@ fn classify_device_poll_failure(
 ///
 /// - **Token storage**: success writes new `access_token_encrypted`,
 ///   `refresh_token_encrypted` (if returned), `expires_at`,
-///   `last_used_at`, `status: "active"`, and clears `error_message`
+///   `last_used_at` (when usage attribution is enabled), `status: "active"`,
+///   and clears `error_message`
 ///   directly on the `UserApiKey` row by `_id`. No write to
 ///   `user_provider_tokens`.
 ///
@@ -2224,12 +2225,25 @@ pub async fn refresh_user_api_key_in_place(
     api_key: &UserApiKey,
     notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<UserApiKey> {
+    refresh_user_api_key_in_place_with_usage_touch(db, encryption_keys, api_key, notifier, true)
+        .await
+}
+
+/// Uses the same coordinated refresh lease, with optional usage attribution.
+pub async fn refresh_user_api_key_in_place_with_usage_touch(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    api_key: &UserApiKey,
+    notifier: Option<&ConnectionExpiryNotifier>,
+    touch_usage: bool,
+) -> AppResult<UserApiKey> {
     refresh_user_api_key_with_runtime(
         db,
         encryption_keys,
         api_key,
         notifier,
         coordination_service::cluster_lease_runtime(),
+        touch_usage,
     )
     .await
 }
@@ -2308,6 +2322,7 @@ async fn refresh_user_api_key_with_runtime(
     api_key: &UserApiKey,
     notifier: Option<&ConnectionExpiryNotifier>,
     runtime: &ClusterLeaseRuntime,
+    touch_usage: bool,
 ) -> AppResult<UserApiKey> {
     let lease_name = user_api_key_refresh_lease_name(&api_key.id);
     let Some(lease) = runtime.acquire(db, &lease_name).await? else {
@@ -2345,7 +2360,7 @@ async fn refresh_user_api_key_with_runtime(
         .run_while_renewed(
             db,
             &lease,
-            refresh_user_api_key_under_lease(db, encryption_keys, &current, notifier),
+            refresh_user_api_key_under_lease(db, encryption_keys, &current, notifier, touch_usage),
         )
         .await;
     if let Err(error) = LeaseStore::release(db, &lease).await {
@@ -2363,6 +2378,7 @@ async fn refresh_user_api_key_under_lease(
     encryption_keys: &EncryptionKeys,
     api_key: &UserApiKey,
     notifier: Option<&ConnectionExpiryNotifier>,
+    touch_usage: bool,
 ) -> AppResult<UserApiKey> {
     let provider_id = api_key.provider_config_id.as_deref().ok_or_else(|| {
         AppError::Internal(
@@ -2589,9 +2605,11 @@ async fn refresh_user_api_key_under_lease(
         },
         "status": "active",
         "error_message": bson::Bson::Null,
-        "last_used_at": bson::DateTime::from_chrono(now),
         "updated_at": bson::DateTime::from_chrono(now),
     };
+    if touch_usage {
+        set_doc.insert("last_used_at", bson::DateTime::from_chrono(now));
+    }
     if let Some(exp) = expires_in {
         let new_expires = now + Duration::seconds(exp);
         set_doc.insert("expires_at", bson::DateTime::from_chrono(new_expires));
@@ -2852,6 +2870,19 @@ pub async fn get_active_token(
     provider_id: &str,
     notifier: Option<&ConnectionExpiryNotifier>,
 ) -> AppResult<DecryptedProviderToken> {
+    get_active_token_with_usage_touch(db, encryption_keys, user_id, provider_id, notifier, true)
+        .await
+}
+
+/// Validation shares refresh coordination without recording a credential use.
+pub async fn get_active_token_with_usage_touch(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    provider_id: &str,
+    notifier: Option<&ConnectionExpiryNotifier>,
+    touch_usage: bool,
+) -> AppResult<DecryptedProviderToken> {
     let token = db
         .collection::<UserProviderToken>(COLLECTION_NAME)
         .find_one(doc! {
@@ -2862,14 +2893,15 @@ pub async fn get_active_token(
         .await?
         .ok_or_else(|| AppError::NotFound("No active token found for this provider".to_string()))?;
 
-    // Update last_used_at
     let now = Utc::now();
-    db.collection::<UserProviderToken>(COLLECTION_NAME)
-        .update_one(
-            doc! { "_id": &token.id },
-            doc! { "$set": { "last_used_at": bson::DateTime::from_chrono(now) } },
-        )
-        .await?;
+    if touch_usage {
+        db.collection::<UserProviderToken>(COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &token.id },
+                doc! { "$set": { "last_used_at": bson::DateTime::from_chrono(now) } },
+            )
+            .await?;
+    }
 
     match token.token_type.as_str() {
         "api_key" => {
@@ -3963,6 +3995,7 @@ mod tests {
                 &first_key,
                 None,
                 &first_runtime,
+                true,
             )
             .await
         });
@@ -3978,6 +4011,7 @@ mod tests {
                 &second_key,
                 None,
                 &second_runtime,
+                true,
             )
             .await
         });
@@ -4054,9 +4088,10 @@ mod tests {
             .await
             .unwrap();
 
-        let returned = super::refresh_user_api_key_under_lease(&db, &encryption_keys, &stale, None)
-            .await
-            .expect("stale provider result should be discarded");
+        let returned =
+            super::refresh_user_api_key_under_lease(&db, &encryption_keys, &stale, None, true)
+                .await
+                .expect("stale provider result should be discarded");
         assert_eq!(returned.credential_epoch, 2);
         let stored_access = encryption_keys
             .decrypt(returned.access_token_encrypted.as_ref().unwrap())
@@ -4103,7 +4138,7 @@ mod tests {
             .await
             .unwrap();
 
-        super::refresh_user_api_key_under_lease(&db, &encryption_keys, &stale, None)
+        super::refresh_user_api_key_under_lease(&db, &encryption_keys, &stale, None, true)
             .await
             .expect_err("provider rejection remains an error");
         let stored = db
@@ -4530,6 +4565,63 @@ mod tests {
         assert_eq!(refreshed.token_scopes.as_deref(), Some("openid profile"));
         // expires_at advanced past now.
         assert!(refreshed.expires_at.unwrap() > Utc::now());
+    }
+
+    #[tokio::test]
+    async fn validation_db_oauth_refresh_preserves_last_used_at() {
+        let Some(db) = connect_test_database("validation_refresh_usage").await else {
+            return;
+        };
+        let encryption_keys = test_encryption_keys();
+        let (token_url, _server) = spawn_token_server(
+            serde_json::json!({
+                "access_token": "refreshed-access", "refresh_token": "refreshed-refresh",
+                "expires_in": 3600,
+            }),
+            axum::http::StatusCode::OK,
+        )
+        .await;
+        let provider_id = Uuid::new_v4().to_string();
+        let client_id = encryption_keys.encrypt(b"fixture-client").await.unwrap();
+        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
+            .insert_one(make_test_provider(
+                &provider_id,
+                &token_url,
+                Some(client_id),
+                None,
+            ))
+            .await
+            .unwrap();
+        let key =
+            insert_pending_user_api_key(&db, &encryption_keys, &provider_id, None, None).await;
+        let last_used = bson::DateTime::from_chrono(Utc::now() - Duration::days(1));
+        db.collection::<UserApiKey>(USER_API_KEYS)
+            .update_one(
+                doc! { "_id": &key.id },
+                doc! { "$set": { "last_used_at": last_used } },
+            )
+            .await
+            .unwrap();
+        let refreshed = super::refresh_user_api_key_in_place_with_usage_touch(
+            &db,
+            &encryption_keys,
+            &key,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            refreshed.last_used_at.unwrap().timestamp_millis(),
+            last_used.timestamp_millis()
+        );
+        assert_eq!(
+            encryption_keys
+                .decrypt(refreshed.access_token_encrypted.as_ref().unwrap())
+                .await
+                .unwrap(),
+            b"refreshed-access"
+        );
     }
 
     #[tokio::test]

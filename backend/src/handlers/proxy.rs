@@ -8636,7 +8636,7 @@ mod proxy_resolution_integration_tests {
             let (mut ws_sink, mut ws_stream) = socket.split();
             let replay_guard = tokio::sync::Mutex::new(ReplayGuard::new());
             let metrics = AgentNodeMetrics::new();
-            let http_client = nyxid_node_proxy_test::proxy_executor::build_http_client()
+            let http_client = nyxid_node_proxy_test::proxy_executor::build_http_clients()
                 .expect("build node executor HTTP client");
 
             while let Some(message) = ws_stream.next().await {

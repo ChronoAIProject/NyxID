@@ -71,3 +71,19 @@ it("expires display evidence without sending another probe", async () => {
   expect(screen.getByText("Check expired")).toBeInTheDocument();
   expect(post).toHaveBeenCalledTimes(1);
 });
+
+
+it.each([
+  ["credential_unavailable", "The stored credential could not be used. Reconnect this service."],
+  ["attempt_superseded", "The connection changed while it was being checked. Check again."],
+])("shows actionable guidance for %s without retrying automatically", async (reason, message) => {
+  const checked = new Date().toISOString();
+  post.mockResolvedValue({
+    ...response(), outcome: "transport_unknown", reason_code: reason,
+    checked_at: checked, valid_until: checked,
+  });
+  mount();
+  fireEvent.click(screen.getByRole("button", { name: "Check connection" }));
+  expect(await screen.findByText(message)).toBeInTheDocument();
+  expect(post).toHaveBeenCalledTimes(1);
+});

@@ -1,4 +1,3 @@
-import { serviceValidationResponseSchema } from "@/schemas/service-validation";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
@@ -12,6 +11,7 @@ import type {
   ExternalApiKeyListResponse,
 } from "@/types/keys";
 import type { DefaultRequestHeader } from "@/schemas/default-request-headers";
+import { serviceValidationResponseSchema } from "@/schemas/service-validation";
 import type { WsFrameInjection } from "@/schemas/services";
 
 // -- Queries --

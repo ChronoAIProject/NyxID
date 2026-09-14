@@ -156,6 +156,24 @@ fn respond(
     );
 }
 
+async fn validation_audit(db: &mongodb::Database) -> Document {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(audit) = db
+                .collection::<Document>("audit_log")
+                .find_one(doc! { "event_type": "service_validation_checked" })
+                .await
+                .unwrap()
+            {
+                return audit;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the settled observation must be audited")
+}
+
 #[tokio::test]
 async fn validation_db_joins_attempt_reuses_freshness_and_never_changes_status() {
     let Some(mut f) = fixture("validation_join", true).await else {
@@ -198,14 +216,7 @@ async fn validation_db_joins_attempt_reuses_freshness_and_never_changes_status()
         .unwrap();
     assert_eq!(key.status, "active");
     assert_eq!(key.credential_epoch, 1);
-    let audit = f
-        .state
-        .db
-        .collection::<Document>("audit_log")
-        .find_one(doc! { "event_type": "service_validation_checked" })
-        .await
-        .unwrap()
-        .unwrap();
+    let audit = validation_audit(&f.state.db).await;
     let encoded = serde_json::to_string(&audit).unwrap();
     assert!(!encoded.contains("fixture-token"));
     assert!(!encoded.contains("Bad credentials"));
@@ -258,10 +269,9 @@ async fn validation_db_stale_rejection_after_refresh_is_discarded() {
         .unwrap();
     f.state.db.collection::<UserApiKey>(USER_API_KEYS).update_one(doc! { "_id": &f.key.id }, doc! { "$set": { "credential_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: refreshed } } }).await.unwrap();
     respond(&f, &frame, 401, br#"{"message":"Bad credentials"}"#, vec![]);
-    assert!(matches!(
-        first.await.unwrap(),
-        Err(AppError::ServiceValidationUnavailable)
-    ));
+    let observation = first.await.unwrap().unwrap();
+    assert_eq!(observation.outcome, ValidationOutcome::TransportUnknown);
+    assert_eq!(observation.reason_code, "attempt_superseded");
     let record = f
         .state
         .db
@@ -270,15 +280,14 @@ async fn validation_db_stale_rejection_after_refresh_is_discarded() {
         .await
         .unwrap()
         .unwrap();
-    assert!(!record.completed);
-    assert_eq!(
-        f.state
-            .db
-            .collection::<Document>("audit_log")
-            .count_documents(doc! { "event_type": "service_validation_checked" })
-            .await
-            .unwrap(),
-        0
+    assert!(record.completed);
+    assert_eq!(record.reason_code, "attempt_superseded");
+    assert_eq!(record.outcome, ValidationOutcome::TransportUnknown);
+    let audit = validation_audit(&f.state.db).await;
+    assert!(
+        serde_json::to_string(&audit)
+            .unwrap()
+            .contains("attempt_superseded")
     );
 }
 
@@ -666,4 +675,401 @@ async fn validation_db_nonhuman_callers_are_rejected_before_resource_lookup() {
             .unwrap(),
         0
     );
+}
+
+async fn pending_attempt(f: &Fixture) -> (ServiceValidationRecord, LeaseToken, Admission) {
+    let profile = validator_profiles::for_slug("api-github").unwrap();
+    let live = snapshot(&f.state, &f.caller, &f.service.id).await.unwrap();
+    let name = format!("service-validation:{}:{}", f.service.id, profile.id);
+    let lease = LeaseStore::acquire(
+        &f.state.db,
+        &name,
+        &coordination_service::cluster_lease_runtime().holder,
+        LEASE_TTL,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let (record, admission) = start_attempt(&f.state, &f.caller, live, Some(profile), None, &lease)
+        .await
+        .unwrap();
+    (record, lease, admission)
+}
+
+#[tokio::test]
+async fn validation_db_aborted_attempts_settle_and_release_unsent_cooldown() {
+    for reason in [
+        "attempt_superseded",
+        "credential_unavailable",
+        "lease_lost",
+        "internal_error",
+    ] {
+        let Some(mut f) = fixture("validation_abort", true).await else {
+            return;
+        };
+        if reason == "credential_unavailable" {
+            let encrypted = f.state.encryption_keys.encrypt(b"").await.unwrap();
+            f.state
+                .db
+                .collection::<Document>(USER_API_KEYS)
+                .update_one(
+                    doc! { "_id": &f.key.id },
+                    doc! { "$set": { "credential_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted,
+                    } } },
+                )
+                .await
+                .unwrap();
+            f.state
+                .db
+                .collection::<Document>(USER_SERVICES)
+                .update_one(
+                    doc! { "_id": &f.service.id },
+                    doc! { "$set": { "node_id": null } },
+                )
+                .await
+                .unwrap();
+        } else if reason == "internal_error" {
+            // Corrupt ciphertext is an internal fault, not provider rejection.
+            f.state
+                .db
+                .collection::<Document>(USER_API_KEYS)
+                .update_one(
+                    doc! { "_id": &f.key.id },
+                    doc! { "$set": { "credential_encrypted": bson::Binary {
+                        subtype: bson::spec::BinarySubtype::Generic, bytes: vec![42; 64],
+                    } } },
+                )
+                .await
+                .unwrap();
+        }
+        let (record, lease, admission) = pending_attempt(&f).await;
+        let cooldown = admission.cooldown.as_ref().unwrap().name.clone();
+        if reason == "attempt_superseded" {
+            f.state
+                .db
+                .collection::<Document>(USER_API_KEYS)
+                .update_one(
+                    doc! { "_id": &f.key.id },
+                    doc! { "$set": { "token_scopes": "changed" } },
+                )
+                .await
+                .unwrap();
+        } else if reason == "lease_lost" {
+            LeaseStore::release(&f.state.db, &lease).await.unwrap();
+        }
+        let started = tokio::time::Instant::now();
+        run_attempt(
+            f.state.clone(),
+            f.caller.clone(),
+            validator_profiles::for_slug("api-github"),
+            record.clone(),
+            lease,
+            admission,
+        )
+        .await;
+        let settled = completed_observation(
+            &f.state,
+            &f.caller,
+            &f.service.id,
+            "github_user_v1",
+            1,
+            Some(&record.attempt_id),
+        )
+        .await
+        .unwrap()
+        .expect("the settled observation must reach the handler");
+        assert!(settled.completed);
+        assert_eq!(settled.reason_code, reason);
+        assert_eq!(settled.outcome, ValidationOutcome::TransportUnknown);
+        assert!(settled.valid_until <= settled.checked_at);
+        assert!(started.elapsed() < Duration::from_secs(3));
+        assert!(f.outbound.try_recv().is_err());
+        let audit = f
+            .state
+            .db
+            .collection::<Document>("audit_log")
+            .find_one(doc! { "event_type": "service_validation_checked" })
+            .await
+            .unwrap()
+            .unwrap();
+        let serialized = serde_json::to_string(&audit).unwrap();
+        assert!(serialized.contains(reason));
+        assert!(!serialized.contains("fixture-token"));
+        // Immediate reacquisition proves internal aborts consume no provider budget.
+        assert!(
+            LeaseStore::acquire(
+                &f.state.db,
+                &cooldown,
+                &coordination_service::cluster_lease_runtime().holder,
+                MIN_PROBE_INTERVAL
+            )
+            .await
+            .unwrap()
+            .is_some()
+        );
+    }
+}
+
+#[tokio::test]
+async fn validation_db_poll_exits_when_attempt_lease_disappears() {
+    let Some(f) = fixture("validation_poll_lost", true).await else {
+        return;
+    };
+    let (record, lease, admission) = pending_attempt(&f).await;
+    let state = f.state.clone();
+    let caller = f.caller.clone();
+    let service_id = f.service.id.clone();
+    let lease_name = lease.name.clone();
+    let attempt = record.attempt_id.clone();
+    let waiter = tokio::spawn(async move {
+        poll_attempt(
+            &state,
+            &caller,
+            &service_id,
+            "github_user_v1",
+            1,
+            &lease_name,
+            &attempt,
+        )
+        .await
+    });
+    tokio::task::yield_now().await;
+    LeaseStore::release(&f.state.db, &lease).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), waiter)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(AppError::ServiceValidationUnavailable)
+    ));
+    release_cooldown(&f.state.db, &admission).await;
+    release_admission(&f.state.db, &admission).await;
+}
+
+#[tokio::test]
+async fn validation_db_abort_cannot_overwrite_replacement_attempt() {
+    let Some(f) = fixture("validation_abort_fence", true).await else {
+        return;
+    };
+    let (record, lease, admission) = pending_attempt(&f).await;
+    let replacement = uuid::Uuid::new_v4().to_string();
+    f.state
+        .db
+        .collection::<Document>(COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": &record.id },
+            doc! { "$set": { "attempt_id": &replacement } },
+        )
+        .await
+        .unwrap();
+    LeaseStore::release(&f.state.db, &lease).await.unwrap();
+    run_attempt(
+        f.state.clone(),
+        f.caller.clone(),
+        validator_profiles::for_slug("api-github"),
+        record.clone(),
+        lease,
+        admission,
+    )
+    .await;
+    let current = f
+        .state
+        .db
+        .collection::<ServiceValidationRecord>(COLLECTION_NAME)
+        .find_one(doc! { "_id": &record.id })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.attempt_id, replacement);
+    assert!(!current.completed);
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>("audit_log")
+            .count_documents(doc! { "event_type": "service_validation_checked" })
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn validation_db_probe_preserves_last_used_at() {
+    let Some(mut f) = fixture("validation_usage", true).await else {
+        return;
+    };
+    // Binding routing exercises the shared materializer's normal credential
+    // branch, where proxy use schedules touch_last_used (explicit nodes return early).
+    f.state
+        .db
+        .collection::<Document>(USER_SERVICES)
+        .update_one(
+            doc! { "_id": &f.service.id },
+            doc! { "$set": { "node_id": null } },
+        )
+        .await
+        .unwrap();
+    let live = snapshot(&f.state, &f.caller, &f.service.id).await.unwrap();
+    let now = bson::DateTime::now();
+    f.state
+        .db
+        .collection::<Document>("node_service_bindings")
+        .insert_one(doc! {
+            "_id": uuid::Uuid::new_v4().to_string(), "node_id": &f.node_id,
+            "user_id": &f.service.user_id, "service_id": &live.resolution.target.service.id,
+            "is_active": true, "created_at": now, "updated_at": now,
+        })
+        .await
+        .unwrap();
+    let last_used = bson::DateTime::from_chrono(Utc::now() - chrono::Duration::days(1));
+    f.state
+        .db
+        .collection::<Document>(USER_API_KEYS)
+        .update_one(
+            doc! { "_id": &f.key.id },
+            doc! { "$set": { "last_used_at": last_used } },
+        )
+        .await
+        .unwrap();
+    let run = begin(&f, false);
+    let frame = request(&mut f).await;
+    respond(&f, &frame, 200, br#"{"login":"octocat"}"#, vec![]);
+    assert_eq!(
+        run.await.unwrap().unwrap().outcome,
+        ValidationOutcome::Authenticated
+    );
+    // Allow any wrongly spawned usage-touch task to complete before reading.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let key = f
+        .state
+        .db
+        .collection::<Document>(USER_API_KEYS)
+        .find_one(doc! { "_id": &f.key.id })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(key.get_datetime("last_used_at").unwrap(), &last_used);
+}
+
+#[tokio::test]
+async fn validation_db_org_member_probes_org_node_without_node_management_acl() {
+    use crate::models::org_membership::{COLLECTION_NAME as MEMBERSHIPS, OrgRole};
+    for shared_node_owner in [true, false] {
+        let Some(mut f) = fixture("validation_org_node", true).await else {
+            return;
+        };
+        let org = uuid::Uuid::new_v4().to_string();
+        f.state
+            .db
+            .collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&org, UserType::Org))
+            .await
+            .unwrap();
+        f.state
+            .db
+            .collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
+            .insert_one(test_membership(
+                &org,
+                &f.caller.user_id,
+                OrgRole::Member,
+                None,
+            ))
+            .await
+            .unwrap();
+        for (collection, id) in [
+            (USER_SERVICES, &f.service.id),
+            (USER_API_KEYS, &f.key.id),
+            ("user_endpoints", &f.service.endpoint_id),
+        ] {
+            f.state
+                .db
+                .collection::<Document>(collection)
+                .update_one(doc! { "_id": id }, doc! { "$set": { "user_id": &org } })
+                .await
+                .unwrap();
+        }
+        let node_owner = if shared_node_owner {
+            org
+        } else {
+            let id = uuid::Uuid::new_v4().to_string();
+            f.state
+                .db
+                .collection::<crate::models::user::User>(USERS)
+                .insert_one(test_user(&id, UserType::Org))
+                .await
+                .unwrap();
+            id
+        };
+        f.state
+            .db
+            .collection::<Document>(NODES)
+            .update_one(
+                doc! { "_id": &f.node_id },
+                doc! { "$set": { "user_id": node_owner } },
+            )
+            .await
+            .unwrap();
+        if !shared_node_owner {
+            assert!(crate::services::node_service::get_node(
+                &f.state.db, &f.caller.user_id, &f.node_id,
+            ).await.is_err());
+        }
+        let run = begin(&f, false);
+        let frame = request(&mut f).await;
+        respond(&f, &frame, 200, br#"{"login":"octocat"}"#, vec![]);
+        assert_eq!(
+            run.await.unwrap().unwrap().outcome,
+            ValidationOutcome::Authenticated
+        );
+    }
+}
+
+#[tokio::test]
+async fn validation_db_handler_returns_settled_credential_abort() {
+    use crate::handlers::keys::{ValidateKeyRequest, validate_key};
+    use crate::services::billing::route_inventory::BillingRoutePolicy;
+    use axum::{
+        Extension, Json,
+        extract::{Path, State},
+    };
+    let Some(mut f) = fixture("validation_handler_abort", true).await else {
+        return;
+    };
+    let encrypted = f.state.encryption_keys.encrypt(b"").await.unwrap();
+    f.state
+        .db
+        .collection::<Document>(USER_API_KEYS)
+        .update_one(
+            doc! { "_id": &f.key.id },
+            doc! { "$set": { "credential_encrypted": bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic, bytes: encrypted,
+            } } },
+        )
+        .await
+        .unwrap();
+    f.state
+        .db
+        .collection::<Document>(USER_SERVICES)
+        .update_one(
+            doc! { "_id": &f.service.id },
+            doc! { "$set": { "node_id": null } },
+        )
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let Json(response) = validate_key(
+            State(f.state.clone()),
+            test_auth_user(&f.caller.user_id),
+            Path(f.service.id.clone()),
+            Extension(BillingRoutePolicy::Exempt("service_validation")),
+            Json(ValidateKeyRequest::default()),
+        )
+        .await
+        .expect("internal abort is a 200 observation and remains immediately retryable");
+        assert_eq!(response.outcome, "transport_unknown");
+        assert_eq!(response.reason_code, "credential_unavailable");
+    }
+    assert!(f.outbound.try_recv().is_err());
 }

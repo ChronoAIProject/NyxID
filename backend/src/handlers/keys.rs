@@ -2815,7 +2815,6 @@ pub async fn validate_key(
     >,
     Json(body): Json<ValidateKeyRequest>,
 ) -> AppResult<Json<ServiceValidationResponse>> {
-    use crate::models::service_validation_record::CallerContext;
     use crate::mw::auth::AuthMethod;
     use crate::services::{service_validation_service, validator_profiles};
     if !matches!(
@@ -2840,13 +2839,7 @@ pub async fn validate_key(
     }
     let caller = service_validation_service::ValidationCaller {
         user_id: actor.clone(),
-        context: CallerContext::Human {
-            session: auth_user
-                .session_id
-                .map(|id| id.to_string())
-                .or(auth_user.token_jti)
-                .unwrap_or(actor),
-        },
+        context: validation_caller_context(&auth_user),
         allow_all_services: auth_user.allow_all_services,
         allowed_service_ids: auth_user.allowed_service_ids,
         allow_all_nodes: auth_user.allow_all_nodes,
@@ -2874,8 +2867,36 @@ pub async fn validate_key(
     }))
 }
 
+fn validation_caller_context(
+    auth: &AuthUser,
+) -> crate::models::service_validation_record::CallerContext {
+    // Access tokens without a session id or jti fall back to the actual user:
+    // the two concurrent session slots then become two slots per user.
+    crate::models::service_validation_record::CallerContext::Human {
+        session: auth
+            .session_id
+            .map(|id| id.to_string())
+            .or_else(|| auth.token_jti.clone())
+            .unwrap_or_else(|| auth.user_id.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn validation_session_admission_falls_back_to_user_id() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut auth = crate::test_utils::test_auth_user(&id);
+        auth.session_id = None;
+        auth.token_jti = None;
+        let crate::models::service_validation_record::CallerContext::Human { session } =
+            super::validation_caller_context(&auth)
+        else {
+            panic!("human context expected");
+        };
+        assert_eq!(session, id);
+    }
+
     use std::sync::Arc;
 
     use super::{

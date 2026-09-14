@@ -41,7 +41,7 @@ pub async fn execute_proxy_request(
     metrics: &NodeMetrics,
     tx: &mpsc::Sender<NodeWsMessage>,
     use_binary_proxy_chunks: bool,
-    http_client: &Client,
+    http_clients: &NodeHttpClients,
 ) {
     let request_id = request["request_id"].as_str().unwrap_or("");
     let service_slug = request["service_slug"].as_str().unwrap_or("");
@@ -178,27 +178,10 @@ pub async fn execute_proxy_request(
     }
 
     let method = reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
-    let no_redirect_client;
     let client = if follows_redirects(request) {
-        http_client
+        &http_clients.default
     } else {
-        no_redirect_client = match build_no_redirect_client() {
-            Ok(client) => client,
-            Err(_) => {
-                let _ = send_ws_message(
-                    tx,
-                    proxy_error_response(
-                        request_id,
-                        "Validation transport unavailable",
-                        502,
-                        false,
-                    ),
-                )
-                .await;
-                return;
-            }
-        };
-        &no_redirect_client
+        &http_clients.no_redirect
     };
     let mut req_builder = client.request(method.clone(), &url);
 
@@ -375,18 +358,27 @@ fn follows_redirects(request: &serde_json::Value) -> bool {
     request["follow_redirects"].as_bool().unwrap_or(true)
 }
 
-fn build_no_redirect_client() -> Result<Client> {
-    Ok(Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(std::time::Duration::from_secs(4))
-        .build()?)
-}
-
-pub fn build_http_client() -> Result<Client> {
-    Ok(Client::builder()
+fn base_client_builder() -> reqwest::ClientBuilder {
+    Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .pool_idle_timeout(std::time::Duration::from_secs(90))
-        .build()?)
+}
+
+#[derive(Clone)]
+pub struct NodeHttpClients {
+    pub default: Client,
+    pub no_redirect: Client,
+}
+
+pub fn build_http_clients() -> Result<NodeHttpClients> {
+    Ok(NodeHttpClients {
+        default: base_client_builder().build()?,
+        no_redirect: base_client_builder()
+            .connect_timeout(std::time::Duration::from_secs(4))
+            .timeout(std::time::Duration::from_secs(4))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?,
+    })
 }
 
 /// Stream a proxy response back through the WebSocket channel.
@@ -690,7 +682,7 @@ mod validation_tests {
                 &NodeMetrics::new(),
                 &tx,
                 false,
-                &build_http_client().unwrap(),
+                &build_http_clients().unwrap(),
             )
             .await;
             let NodeWsMessage::Text(frame) = rx.recv().await.unwrap() else {

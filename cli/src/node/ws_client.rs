@@ -912,7 +912,7 @@ async fn connect_and_serve(
     let ws_read_idle_timeout_secs =
         compute_ws_read_idle_timeout_secs(server_heartbeat_interval_secs);
 
-    let proxy_http_client = proxy_executor::build_http_client()?;
+    let proxy_http_client = proxy_executor::build_http_clients()?;
 
     // 4. Set up writer channel
     let (tx, mut rx) = mpsc::channel::<NodeWsMessage>(WS_WRITE_CHANNEL_SIZE);
@@ -4668,7 +4668,7 @@ mod tests {
             &metrics,
             &tx,
             true,
-            &reqwest::Client::new(),
+            &proxy_executor::build_http_clients().unwrap(),
         )
         .await;
 
@@ -4754,7 +4754,7 @@ mod tests {
             &metrics,
             &tx,
             true,
-            &reqwest::Client::new(),
+            &proxy_executor::build_http_clients().unwrap(),
         )
         .await;
 

@@ -20,6 +20,7 @@ pub struct ValidatorProfile {
     pub catalog_slugs: &'static [&'static str],
     pub method: Method,
     pub target: ProbeTarget,
+    pub target_overrides: &'static [(&'static str, ProbeTarget)],
     pub body: Option<&'static str>,
     pub max_body_bytes: usize,
     pub classify: fn(&ProbeResponse) -> ValidationOutcome,
@@ -49,6 +50,7 @@ pub static PROFILES: &[ValidatorProfile] = &[
         catalog_slugs: &["api-github", "api-github-pat"],
         method: Method::GET,
         target: ProbeTarget::Relative("user"),
+        target_overrides: &[],
         body: None,
         max_body_bytes: 32 * 1024,
         classify: github,
@@ -68,6 +70,10 @@ pub static PROFILES: &[ValidatorProfile] = &[
         ],
         method: Method::GET,
         target: ProbeTarget::Relative("models"),
+        target_overrides: &[(
+            "llm-cohere",
+            ProbeTarget::AbsoluteAllowlisted("https://api.cohere.com/v1/models"),
+        )],
         body: None,
         max_body_bytes: 512 * 1024,
         classify: models,
@@ -80,6 +86,7 @@ pub static PROFILES: &[ValidatorProfile] = &[
         catalog_slugs: &["llm-openrouter"],
         method: Method::GET,
         target: ProbeTarget::Relative("key"),
+        target_overrides: &[],
         body: None,
         max_body_bytes: 32 * 1024,
         classify: openrouter,
@@ -92,6 +99,7 @@ pub static PROFILES: &[ValidatorProfile] = &[
         catalog_slugs: &["api-slack", "api-slack-bot"],
         method: Method::POST,
         target: ProbeTarget::Relative("auth.test"),
+        target_overrides: &[],
         body: None,
         max_body_bytes: 32 * 1024,
         classify: slack,
@@ -104,6 +112,7 @@ pub static PROFILES: &[ValidatorProfile] = &[
         catalog_slugs: &["api-lark", "api-feishu"],
         method: Method::GET,
         target: ProbeTarget::Relative("authen/v1/user_info"),
+        target_overrides: &[],
         body: None,
         max_body_bytes: 32 * 1024,
         classify: lark,
@@ -116,6 +125,7 @@ pub static PROFILES: &[ValidatorProfile] = &[
         catalog_slugs: &["api-telegram-bot"],
         method: Method::GET,
         target: ProbeTarget::Relative("getMe"),
+        target_overrides: &[],
         body: None,
         max_body_bytes: 32 * 1024,
         classify: telegram,
@@ -128,6 +138,7 @@ pub static PROFILES: &[ValidatorProfile] = &[
         catalog_slugs: &["api-twitch"],
         method: Method::GET,
         target: ProbeTarget::Relative("users"),
+        target_overrides: &[],
         body: None,
         max_body_bytes: 32 * 1024,
         classify: twitch,
@@ -144,11 +155,10 @@ pub fn for_slug(slug: &str) -> Option<&'static ValidatorProfile> {
 
 impl ValidatorProfile {
     pub fn target_for(&self, slug: &str) -> ProbeTarget {
-        if self.id == "llm_models_v1" && slug == "llm-cohere" {
-            ProbeTarget::AbsoluteAllowlisted("https://api.cohere.com/v1/models")
-        } else {
-            self.target
-        }
+        self.target_overrides
+            .iter()
+            .find_map(|(candidate, target)| (*candidate == slug).then_some(*target))
+            .unwrap_or(self.target)
     }
 
     pub fn classify_response(&self, response: &ProbeResponse) -> ValidationOutcome {

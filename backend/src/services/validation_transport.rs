@@ -5,7 +5,11 @@
 //! the entire exchange and the received body, including streaming responses.
 
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
+
+use futures::TryStreamExt;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use reqwest::{Client, Url};
 
@@ -94,7 +98,7 @@ fn pinned_client(host: &str, addresses: &[SocketAddr]) -> Result<Client, Transpo
         .redirect(reqwest::redirect::Policy::none())
         .timeout(PROBE_DEADLINE)
         .resolve_to_addrs(host, addresses)
-        .gzip(true)
+        .no_gzip()
         .build()
         .map_err(|_| TransportError::Unavailable)
 }
@@ -103,6 +107,7 @@ pub async fn send(
     profile: &ValidatorProfile,
     slug: &str,
     target: &ProxyTarget,
+    dispatched: &AtomicBool,
 ) -> Result<ProbeResponse, TransportError> {
     tokio::time::timeout(PROBE_DEADLINE, async {
         let url = profile_url(profile, slug, &target.base_url)?;
@@ -120,6 +125,7 @@ pub async fn send(
         validate_addresses(&addresses)?;
         let client = pinned_client(&host, &addresses)?;
         let request = prepare_request(&client, profile, slug, target, url)?;
+        dispatched.store(true, Ordering::Relaxed);
         let response = request
             .send()
             .await
@@ -171,25 +177,22 @@ fn prepare_request(
     if let Some(body) = profile.body {
         request = request.body(body);
     }
-    Ok(request)
+    Ok(request.header("accept-encoding", "gzip, identity"))
 }
 
 async fn read_response(
-    mut response: reqwest::Response,
+    response: reqwest::Response,
     limit: usize,
 ) -> Result<ProbeResponse, TransportError> {
-    // gzip is decoded by reqwest before chunks reach this boundary. Other
-    // encodings are not requested and cannot be treated as parsed evidence.
-    if response
-        .headers()
-        .get("content-encoding")
-        .is_some_and(|v| v != "identity")
-    {
+    let encoding = response.headers().get("content-encoding");
+    let gzip = encoding.is_some_and(|value| value.as_bytes().eq_ignore_ascii_case(b"gzip"));
+    if encoding.is_some_and(|value| value != "identity") && !gzip {
         return Err(TransportError::Unavailable);
     }
-    if response
-        .content_length()
-        .is_some_and(|size| size > limit as u64)
+    if !gzip
+        && response
+            .content_length()
+            .is_some_and(|size| size > limit as u64)
     {
         return Err(TransportError::BodyTooLarge);
     }
@@ -198,31 +201,49 @@ async fn read_response(
         headers: response.headers().clone(),
         body: Vec::new(),
     };
-    while let Some(chunk) = response
-        .chunk()
+    // Decode only here: enabling reqwest's gzip feature would alter every shared
+    // proxy client's content negotiation and encoded-body pass-through.
+    let wire =
+        tokio_util::io::StreamReader::new(response.bytes_stream().map_err(std::io::Error::other));
+    let reader: std::pin::Pin<Box<dyn AsyncRead + Send>> = if gzip {
+        let mut decoder = async_compression::tokio::bufread::GzipDecoder::new(wire);
+        decoder.multiple_members(true);
+        Box::pin(decoder)
+    } else {
+        Box::pin(wire)
+    };
+    // Read at most one decoded byte beyond the cap, including gzip bombs. The
+    // caller's total deadline and the client's body timeout both remain active.
+    reader
+        .take(limit.saturating_add(1) as u64)
+        .read_to_end(&mut result.body)
         .await
-        .map_err(|_| TransportError::Unavailable)?
-    {
-        if chunk.len() > limit.saturating_sub(result.body.len()) {
-            return Err(TransportError::BodyTooLarge);
-        }
-        result.body.extend_from_slice(&chunk);
+        .map_err(|_| TransportError::Unavailable)?;
+    if result.body.len() > limit {
+        return Err(TransportError::BodyTooLarge);
     }
     Ok(result)
 }
 
 pub async fn send_via_node(
     state: &crate::AppState,
-    actor_id: &str,
     node_id: &str,
     profile: &ValidatorProfile,
     slug: &str,
     target: &ProxyTarget,
+    dispatched: &AtomicBool,
 ) -> Result<ProbeResponse, TransportError> {
     use super::node_ws_manager::{NodeProxyRequest, ProxyResponseType, StreamChunk};
-    let node = super::node_service::get_node(&state.db, actor_id, node_id)
+    // The service owner's routing authority selects this node. Caller node
+    // grants were checked by the execution snapshot; node-management ACLs do
+    // not apply to an authorized service execution.
+    let node = state
+        .db
+        .collection::<crate::models::node::Node>(crate::models::node::COLLECTION_NAME)
+        .find_one(mongodb::bson::doc! { "_id": node_id })
         .await
-        .map_err(|_| TransportError::Unavailable)?;
+        .map_err(|_| TransportError::Unavailable)?
+        .ok_or(TransportError::Unavailable)?;
     if !super::node_routing_service::is_node_id_dispatchable(
         &state.db,
         node_id,
@@ -298,6 +319,7 @@ pub async fn send_via_node(
         ))
         .map_err(|_| TransportError::Configuration)?;
     let result = tokio::time::timeout(PROBE_DEADLINE, async {
+        dispatched.store(true, Ordering::Relaxed);
         let response = state
             .node_ws_manager
             .send_proxy_request_classified(
@@ -307,7 +329,10 @@ pub async fn send_via_node(
                 permit,
             )
             .await
-            .map_err(|_| TransportError::Unavailable)?;
+            .map_err(|error| {
+                dispatched.store(error.dispatched, Ordering::Relaxed);
+                TransportError::Unavailable
+            })?;
         match response {
             ProxyResponseType::Complete(response) => node_response(
                 response.status,
@@ -422,7 +447,7 @@ mod node_signature_tests {
         frame["timestamp"] = signature.timestamp.into();
         frame["nonce"] = signature.nonce.into();
         frame["signature"] = signature.signature.into();
-        let client = nyxid_node_proxy_test::proxy_executor::build_http_client().unwrap();
+        let client = nyxid_node_proxy_test::proxy_executor::build_http_clients().unwrap();
         for tamper in [false, true] {
             if tamper {
                 frame["follow_redirects"] = true.into();
@@ -595,6 +620,7 @@ mod tests {
                 .unwrap()
                 .build()
                 .unwrap();
+            assert_eq!(probe.headers()["accept-encoding"], "gzip, identity");
             assert_eq!(probe.headers()[name], expected);
             assert_eq!(probe.headers()[name], proxy.headers()[name]);
         }
@@ -658,6 +684,68 @@ mod tests {
             TransportError::Unavailable
         );
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn validation_gzip_bomb_is_capped_during_decoding() {
+        use axum::{body::Body, http::Response};
+        let compressed = hex::decode(
+            "1f8b08000000000002ffedc1010d000000c2a0da8f6f0f0714000000f06ec177103e00100000",
+        )
+        .unwrap();
+        assert!(compressed.len() < 64);
+        let (url, task) = server(Router::new().route(
+            "/",
+            get(move || {
+                let compressed = compressed.clone();
+                async move {
+                    Response::builder()
+                        .header("content-encoding", "gzip")
+                        .body(Body::from(compressed))
+                        .unwrap()
+                }
+            }),
+        ))
+        .await;
+        let parsed = Url::parse(&url).unwrap();
+        let client =
+            pinned_client("validation.invalid", &parsed.socket_addrs(|| None).unwrap()).unwrap();
+        let response = client
+            .get(&url)
+            .header("accept-encoding", "gzip, identity")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            read_response(response, 1024).await.unwrap_err(),
+            TransportError::BodyTooLarge
+        );
+        // A sufficient decoded cap parses the same compressed stream successfully.
+        let response = client.get(&url).send().await.unwrap();
+        assert_eq!(
+            read_response(response, 4096).await.unwrap().body,
+            vec![b'x'; 4096]
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn validation_does_not_enable_compression_on_shared_proxy_clients() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+        let server = MockServer::start().await;
+        Mock::given(path("/"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let clients = nyxid_node_proxy_test::proxy_executor::build_http_clients().unwrap();
+        for client in [Client::new(), clients.default, clients.no_redirect] {
+            client.get(server.uri()).send().await.unwrap();
+        }
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 3);
+        for request in requests {
+            assert!(!request.headers.contains_key("accept-encoding"));
+        }
     }
 
     #[tokio::test]

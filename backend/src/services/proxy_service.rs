@@ -1332,6 +1332,7 @@ async fn lookup_service_pool_member(
 
 #[derive(Clone, Copy)]
 pub struct ProxyExecutionContext<'a> {
+    touch_usage: bool,
     pub connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
     pub platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
 }
@@ -1344,7 +1345,14 @@ impl<'a> ProxyExecutionContext<'a> {
         Self {
             connection_expiry_notifier,
             platform_user_rate_limit,
+            touch_usage: true,
         }
+    }
+
+    /// Observation may refresh credentials but must not count as service use.
+    pub const fn without_usage_touch(mut self) -> Self {
+        self.touch_usage = false;
+        self
     }
 }
 
@@ -1353,6 +1361,7 @@ struct ProxyCredentialResolution<'a> {
     connection_expiry_notifier: Option<&'a ConnectionExpiryNotifier>,
     platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy,
     materialize_credentials: bool,
+    touch_usage: bool,
 }
 
 impl<'a> ProxyCredentialResolution<'a> {
@@ -1361,6 +1370,7 @@ impl<'a> ProxyCredentialResolution<'a> {
             connection_expiry_notifier: context.connection_expiry_notifier,
             platform_user_rate_limit: context.platform_user_rate_limit,
             materialize_credentials: true,
+            touch_usage: context.touch_usage,
         }
     }
 
@@ -1370,6 +1380,7 @@ impl<'a> ProxyCredentialResolution<'a> {
             platform_user_rate_limit: crate::mw::rate_limit::PlatformUserRateLimitPolicy::disabled(
             ),
             materialize_credentials: false,
+            touch_usage: false,
         }
     }
 }
@@ -2582,6 +2593,7 @@ async fn finish_resolution(
             effective_owner_id,
             api_key,
             connection_expiry_notifier,
+            credential_resolution.touch_usage,
         )
         .await?
     } else {
@@ -2659,12 +2671,13 @@ async fn finish_resolution(
         let credential =
             credential.ok_or_else(|| missing_user_api_key_credential_error(&api_key))?;
 
-        // Fire-and-forget: update last_used_at only for execution materialization.
-        let db_clone = db.clone();
-        let key_id = api_key.id.clone();
-        tokio::spawn(async move {
-            user_api_key_service::touch_last_used(&db_clone, &key_id).await;
-        });
+        if credential_resolution.touch_usage {
+            let db_clone = db.clone();
+            let key_id = api_key.id.clone();
+            tokio::spawn(async move {
+                user_api_key_service::touch_last_used(&db_clone, &key_id).await;
+            });
+        }
         credential
     } else if credential_is_materializable(db, &api_key).await? {
         String::new()
@@ -2977,6 +2990,7 @@ pub async fn resolve_agent_credential_override_identity(
         user_id,
         api_key,
         connection_expiry_notifier,
+        true,
     )
     .await?;
 
@@ -3011,6 +3025,7 @@ async fn maybe_refresh_provider_backed_api_key(
     user_id: &str,
     api_key: UserApiKey,
     connection_expiry_notifier: Option<&ConnectionExpiryNotifier>,
+    touch_usage: bool,
 ) -> AppResult<UserApiKey> {
     // GCP service account: mint a fresh Google access token from the
     // stored SA key when the cached token is missing or within the
@@ -3068,11 +3083,12 @@ async fn maybe_refresh_provider_backed_api_key(
     // winner's row. If the wait bound expires while the lease remains held,
     // the conflict propagates instead of falling back to this stale row.
     if api_key.connection_id.is_some() {
-        return match user_token_service::refresh_user_api_key_in_place(
+        return match user_token_service::refresh_user_api_key_in_place_with_usage_touch(
             db,
             encryption_keys,
             &api_key,
             connection_expiry_notifier,
+            touch_usage,
         )
         .await
         {
@@ -3098,18 +3114,24 @@ async fn maybe_refresh_provider_backed_api_key(
     // Legacy single-tenant path: refresh runs against
     // `user_provider_tokens`, then `sync_provider_token_to_api_keys`
     // fans the new token out to all legacy keys for `(user, provider)`.
-    match user_token_service::get_active_token(
+    match user_token_service::get_active_token_with_usage_touch(
         db,
         encryption_keys,
         user_id,
         provider_config_id,
         connection_expiry_notifier,
+        touch_usage,
     )
     .await
     {
         Ok(_) => {
-            user_api_key_service::sync_provider_token_to_api_keys(db, user_id, provider_config_id)
-                .await?;
+            user_api_key_service::sync_provider_token_to_api_keys_with_usage_touch(
+                db,
+                user_id,
+                provider_config_id,
+                touch_usage,
+            )
+            .await?;
 
             db.collection::<UserApiKey>(USER_API_KEYS)
                 .find_one(doc! { "_id": &api_key.id })

@@ -1,5 +1,6 @@
 //! Fenced, expiring observations; probe outcomes never mutate credential health.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
@@ -69,7 +70,10 @@ async fn materialized_matches(
     if Some(credential_revision(&key).as_str()) != revision {
         return Ok(false);
     }
-    let encrypted = if key.credential_type == "oauth2" {
+    let encrypted = if matches!(
+        key.credential_type.as_str(),
+        "oauth2" | "gcp_service_account"
+    ) {
         key.access_token_encrypted
     } else {
         key.credential_encrypted
@@ -284,22 +288,113 @@ async fn validate_round(
         }
         attempt_id
     } else {
-        if let Some(lease) = state.db.collection::<CoordinationLease>(LEASE_COLLECTION_NAME).find_one(doc! { "_id": lease_name }).await? {
-            lease.lease_id
-        } else if let Some(record) = records.find_one(doc! { "user_service_id": service_id, "validator_id": profile_id, "completed": true }).await? {
-            let current = snapshot(state, &caller, service_id).await?;
-            return if fresh(&record, &current, version) { Ok(record) } else { Err(AppError::ServiceValidationUnavailable) };
-        } else {
-            return Err(AppError::ServiceValidationUnavailable);
+        match join_attempt(state, &lease_name).await? {
+            Some(attempt_id) => attempt_id,
+            None => {
+                return completed_observation(
+                    state, &caller, service_id, profile_id, version, None,
+                )
+                .await?
+                .ok_or(AppError::ServiceValidationUnavailable);
+            }
         }
     };
-    // A caller leaving the page does not cancel an in-progress rotating OAuth
-    // refresh. The detached worker retains/renews its Mongo leases to settlement.
+    // Disconnecting does not cancel a rotating OAuth refresh. The detached
+    // worker retains its Mongo leases until it settles or loses authority.
+    poll_attempt(
+        state,
+        &caller,
+        service_id,
+        profile_id,
+        version,
+        &lease_name,
+        &attempt_id,
+    )
+    .await
+}
+
+async fn join_attempt(state: &AppState, lease_name: &str) -> AppResult<Option<String>> {
+    Ok(state
+        .db
+        .collection::<CoordinationLease>(LEASE_COLLECTION_NAME)
+        .find_one(doc! { "_id": lease_name, "$expr": { "$gt": ["$expires_at", "$$NOW"] } })
+        .await?
+        .map(|lease| lease.lease_id))
+}
+
+async fn completed_observation(
+    state: &AppState,
+    caller: &ValidationCaller,
+    service_id: &str,
+    profile_id: &str,
+    version: u32,
+    attempt_id: Option<&str>,
+) -> AppResult<Option<ServiceValidationRecord>> {
+    let mut filter = doc! {
+        "user_service_id": service_id, "validator_id": profile_id, "completed": true,
+    };
+    if let Some(attempt_id) = attempt_id {
+        filter.insert("attempt_id", attempt_id);
+    }
+    let Some(record) = state
+        .db
+        .collection::<ServiceValidationRecord>(COLLECTION_NAME)
+        .find_one(filter)
+        .await?
+    else {
+        return Ok(None);
+    };
+    // The caller waiting for this exact attempt receives its settled outcome,
+    // including an expired abort. Freshness gates only reuse of prior evidence.
+    if attempt_id.is_some() {
+        return Ok(Some(record));
+    }
+    if record.valid_until <= Utc::now() {
+        return Err(AppError::ServiceValidationUnavailable);
+    }
+    let current = snapshot(state, caller, service_id).await?;
+    if fresh(&record, &current, version) {
+        Ok(Some(record))
+    } else {
+        Err(AppError::ServiceValidationUnavailable)
+    }
+}
+
+async fn poll_attempt(
+    state: &AppState,
+    caller: &ValidationCaller,
+    service_id: &str,
+    profile_id: &str,
+    version: u32,
+    lease_name: &str,
+    attempt_id: &str,
+) -> AppResult<ServiceValidationRecord> {
     loop {
-        if let Some(record) = records.find_one(doc! { "user_service_id": service_id, "validator_id": profile_id, "attempt_id": &attempt_id, "completed": true }).await? {
-            let current = snapshot(state, &caller, service_id).await?;
-            if fresh(&record, &current, version) { return Ok(record); }
-            return Err(AppError::ServiceValidationUnavailable);
+        if let Some(record) = completed_observation(
+            state,
+            caller,
+            service_id,
+            profile_id,
+            version,
+            Some(attempt_id),
+        )
+        .await?
+        {
+            return Ok(record);
+        }
+        if join_attempt(state, lease_name).await?.as_deref() != Some(attempt_id) {
+            // Settlement may have raced the first read and released the lease.
+            // Re-read once so a completed observation is not mistaken for loss.
+            return completed_observation(
+                state,
+                caller,
+                service_id,
+                profile_id,
+                version,
+                Some(attempt_id),
+            )
+            .await?
+            .ok_or(AppError::ServiceValidationUnavailable);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -396,6 +491,7 @@ async fn start_attempt(
     match result {
         Ok(record) => Ok((record, admission)),
         Err(error) => {
+            release_cooldown(&state.db, &admission).await;
             release_admission(&state.db, &admission).await;
             Err(error)
         }
@@ -405,18 +501,66 @@ async fn start_attempt(
 async fn release_admission(db: &mongodb::Database, admission: &Admission) {
     let _ = SlotStore::release(db, &admission.session).await;
     let _ = SlotStore::release(db, &admission.deployment).await;
-    // The cooldown survives completion, failures, disconnects, and replica loss.
+    // A dispatched attempt keeps its provider cooldown after releasing active slots.
+}
+
+async fn release_cooldown(db: &mongodb::Database, admission: &Admission) {
+    if let Some(cooldown) = &admission.cooldown {
+        let _ = LeaseStore::release(db, cooldown).await;
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AttemptFailure {
+    Superseded,
+    CredentialUnavailable,
+    LeaseLost,
+    Internal,
+}
+
+impl AttemptFailure {
+    fn materialization(error: AppError) -> Self {
+        match error {
+            AppError::BadRequest(_)
+            | AppError::NotFound(_)
+            | AppError::ServiceValidationRejected => Self::CredentialUnavailable,
+            _ => Self::Internal,
+        }
+    }
+
+    fn reason_code(self) -> &'static str {
+        match self {
+            Self::Superseded => "attempt_superseded",
+            Self::CredentialUnavailable => "credential_unavailable",
+            Self::LeaseLost => "lease_lost",
+            Self::Internal => "internal_error",
+        }
+    }
+}
+
+impl From<AppError> for AttemptFailure {
+    fn from(_: AppError) -> Self {
+        Self::Internal
+    }
 }
 
 async fn run_attempt(
     state: AppState,
     caller: ValidationCaller,
     profile: Option<&'static ValidatorProfile>,
-    record: ServiceValidationRecord,
+    mut record: ServiceValidationRecord,
     lease: LeaseToken,
     admission: Admission,
 ) {
-    let work = observe(&state, &caller, profile, record, &admission);
+    let dispatched = AtomicBool::new(false);
+    let work = observe(
+        &state,
+        &caller,
+        profile,
+        record.clone(),
+        &admission,
+        &dispatched,
+    );
     tokio::pin!(work);
     let mut renewal = tokio::time::interval(Duration::from_secs(10));
     let result = loop {
@@ -432,12 +576,34 @@ async fn run_attempt(
                             None => true,
                         })
                 }.await;
-                if !matches!(renewed, Ok(true)) { break Err(AppError::ServiceValidationUnavailable); }
+                if !matches!(renewed, Ok(true)) { break Err(AttemptFailure::LeaseLost); }
             }
         }
     };
-    if result.is_err() {
-        tracing::warn!(attempt_id = %lease.lease_id, "Service validation attempt did not settle");
+    if !dispatched.load(Ordering::Relaxed) {
+        release_cooldown(&state.db, &admission).await;
+    }
+    if let Err(failure) = result {
+        record.completed = true;
+        record.outcome = ValidationOutcome::TransportUnknown;
+        record.reason_code = failure.reason_code().into();
+        record.checked_at = Utc::now();
+        // Internal aborts must not become reusable provider evidence.
+        record.valid_until = record.checked_at;
+        match finish_observation(&state.db, &record).await {
+            Ok(true) => {
+                if audit_observation(&state, &caller, &record, None)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(attempt_id = %lease.lease_id, "Could not audit validation abort");
+                }
+            }
+            Ok(false) => {}
+            Err(_) => {
+                tracing::warn!(attempt_id = %lease.lease_id, "Could not settle validation abort");
+            }
+        }
     }
     release_admission(&state.db, &admission).await;
     let _ = LeaseStore::release(&state.db, &lease).await;
@@ -449,12 +615,13 @@ async fn observe(
     profile: Option<&ValidatorProfile>,
     mut record: ServiceValidationRecord,
     admission: &Admission,
-) -> AppResult<()> {
+    dispatched: &AtomicBool,
+) -> Result<(), AttemptFailure> {
     let before = snapshot(state, caller, &record.user_service_id).await?;
     if before.digest != record.execution_authority_digest
         || before.revision != record.credential_revision
     {
-        return Err(AppError::ServiceValidationUnavailable);
+        return Err(AttemptFailure::Superseded);
     }
     let unsupported_type = matches!(
         before.credential_type.as_deref(),
@@ -494,10 +661,12 @@ async fn observe(
                     proxy_service::ProxyExecutionContext::new(
                         Some(&state.connection_expiry_notifier),
                         state.platform_user_rate_limit,
-                    ),
+                    )
+                    .without_usage_touch(),
                 )
-                .await?
-                .ok_or(AppError::ServiceValidationRejected)?,
+                .await
+                .map_err(AttemptFailure::materialization)?
+                .ok_or(AttemptFailure::CredentialUnavailable)?,
             );
             let materialized_digest =
                 execution_authority::digest(&execution_authority::build_projection(
@@ -510,13 +679,14 @@ async fn observe(
                 || current.digest != before.digest
                 || !materialized_matches(state, &materialized, current.revision.as_deref()).await?
             {
-                return Err(AppError::ServiceValidationUnavailable);
+                return Err(AttemptFailure::Superseded);
             }
             record.credential_revision = current.revision;
-            if let Some(cooldown) = admission.cooldown.as_ref()
-                && !extend_cooldown(&state.db, cooldown, MIN_PROBE_INTERVAL).await?
-            {
-                return Err(AppError::ServiceValidationUnavailable);
+            if let Some(cooldown) = admission.cooldown.as_ref() {
+                let renewed = extend_cooldown(&state.db, cooldown, MIN_PROBE_INTERVAL).await;
+                if !matches!(renewed, Ok(true)) {
+                    return Err(AttemptFailure::LeaseLost);
+                }
             }
             // Prefer the selected service's explicit node; a binding may route a
             // service without node_id. Never fall through to direct egress when
@@ -548,17 +718,17 @@ async fn observe(
             let response = if let Some(node) = selected {
                 validation_transport::send_via_node(
                     state,
-                    &caller.user_id,
                     &node,
                     profile,
                     slug,
                     &materialized.target,
+                    dispatched,
                 )
                 .await
             } else if configured_node {
                 Err(validation_transport::TransportError::Unavailable)
             } else {
-                validation_transport::send(profile, slug, &materialized.target).await
+                validation_transport::send(profile, slug, &materialized.target, dispatched).await
             };
             match response {
                 Ok(response) => {
@@ -592,7 +762,7 @@ async fn observe(
     if current.digest != record.execution_authority_digest
         || current.revision != record.credential_revision
     {
-        return Err(AppError::ServiceValidationUnavailable);
+        return Err(AttemptFailure::Superseded);
     }
     if let ValidationOutcome::RateLimited {
         retry_after: Some(retry_after),
@@ -604,7 +774,12 @@ async fn observe(
         let duration = (*retry_after)
             .max(MIN_PROBE_INTERVAL)
             .min(Duration::from_secs(i32::MAX as u64));
-        let _ = extend_cooldown(&state.db, cooldown, duration).await?;
+        if !matches!(
+            extend_cooldown(&state.db, cooldown, duration).await,
+            Ok(true)
+        ) {
+            return Err(AttemptFailure::LeaseLost);
+        }
     }
     record.checked_at = Utc::now();
     record.valid_until = record.checked_at + chrono::Duration::seconds(DISPLAY_WINDOW_SECS);
@@ -614,6 +789,16 @@ async fn observe(
     if !finish_observation(&state.db, &record).await? {
         return Ok(());
     }
+    audit_observation(state, caller, &record, status_class).await?;
+    Ok(())
+}
+
+async fn audit_observation(
+    state: &AppState,
+    caller: &ValidationCaller,
+    record: &ServiceValidationRecord,
+    status_class: Option<u16>,
+) -> AppResult<()> {
     let actor = super::audit_service::AuditActor {
         user_id: caller.user_id.clone(),
         ip_address: None,
@@ -625,6 +810,7 @@ async fn observe(
         "user_service_id": record.user_service_id, "owner_id": record.owner_id, "api_key_id": record.api_key_id,
         "attempt_id": record.attempt_id, "validator_id": record.validator_id, "validator_version": record.validator_version,
         "outcome": validator_profiles::outcome_code(&record.outcome), "http_status_class": status_class,
+        "reason_code": record.reason_code,
     }))).await?;
     Ok(())
 }

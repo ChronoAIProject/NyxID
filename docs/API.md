@@ -7878,9 +7878,15 @@ but cannot bypass admission limits. Concurrent requests join the current attempt
 The limits are one probe per credential/profile/execution digest per 60 seconds,
 two active checks per session, and 32 per deployment, coordinated in MongoDB.
 Provider `Retry-After` delays are honored. Admission failures use error 12009
-(429), unavailable or superseded attempts use 12008 (503), and locally rejected
-validation uses 12007 (422). A foreground request waits at most ten seconds for
-an observation; an already-started coordinated refresh can settle in the background.
+(429), missing attempts or an unavailable wait use 12008 (503), and locally rejected
+validation uses 12007 (422), including a disabled service. The Check connection
+button is disabled client-side while the service is disabled. A check never
+updates the credential's last-used timestamp, including during OAuth refresh.
+A settled internal abort is returned as a 200 observation with `transport_unknown`
+and a stable `reason_code` (`attempt_superseded`, `credential_unavailable`,
+`lease_lost`, or `internal_error`). It expires immediately and cannot be reused;
+an abort before dispatch releases the provider cooldown so a check can be retried.
+A foreground request waits at most ten seconds for an observation; an already-started coordinated refresh can settle in the background.
 
 All v1 profiles are non-billable in NyxID. **Provider rate limits still apply.**
 Direct probes allow only seeded public provider targets, resolve and pin public

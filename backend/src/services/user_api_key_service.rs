@@ -369,7 +369,17 @@ pub async fn sync_provider_token_to_api_keys(
     user_id: &str,
     provider_config_id: &str,
 ) -> AppResult<()> {
-    sync_provider_token_to_api_keys_impl(db, user_id, provider_config_id, None).await
+    sync_provider_token_to_api_keys_with_usage_touch(db, user_id, provider_config_id, true).await
+}
+
+/// Refresh fan-out may preserve each key's usage metadata for observation.
+pub async fn sync_provider_token_to_api_keys_with_usage_touch(
+    db: &mongodb::Database,
+    user_id: &str,
+    provider_config_id: &str,
+    touch_usage: bool,
+) -> AppResult<()> {
+    sync_provider_token_to_api_keys_impl(db, user_id, provider_config_id, None, touch_usage).await
 }
 
 /// Fresh-authorization variant: identical to
@@ -389,7 +399,8 @@ pub async fn sync_provider_token_to_api_keys_after_authorization(
     provider_config_id: &str,
 ) -> AppResult<()> {
     let authorized_at = bson::DateTime::from_chrono(Utc::now());
-    sync_provider_token_to_api_keys_impl(db, user_id, provider_config_id, Some(authorized_at)).await
+    sync_provider_token_to_api_keys_impl(db, user_id, provider_config_id, Some(authorized_at), true)
+        .await
 }
 
 async fn sync_provider_token_to_api_keys_impl(
@@ -397,6 +408,7 @@ async fn sync_provider_token_to_api_keys_impl(
     user_id: &str,
     provider_config_id: &str,
     last_authorized_at: Option<bson::DateTime>,
+    touch_usage: bool,
 ) -> AppResult<()> {
     // Exclude terminal failure keys from provider-token sync. Without
     // this filter, a placeholder that was revoked via the
@@ -468,6 +480,10 @@ async fn sync_provider_token_to_api_keys_impl(
                 "updated_at": &now,
             }
         };
+
+        if !touch_usage {
+            set_doc.remove("last_used_at");
+        }
 
         // Stamp only on the fresh-auth path (NyxID#917) — refresh-only syncs
         // pass `None` and must not advance the manage-scopes completion
