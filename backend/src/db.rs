@@ -2047,6 +2047,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     // ── channel_bots ──
+    crate::services::telegram_new_service::ensure_indexes(db).await?;
     let channel_bots = db.collection::<mongodb::bson::Document>("channel_bots");
     channel_bots
         .create_index(

@@ -4714,7 +4714,7 @@ pub enum AiSetupCommands {
 pub enum ChannelBotCommands {
     /// Register a new messaging platform bot
     Register {
-        /// Platform: telegram, discord, lark, feishu, slack, whatsapp (Meta Cloud API)
+        /// Platform: telegram, telegram-new (use --managed), discord, lark, feishu, slack, whatsapp
         #[arg(long)]
         platform: String,
         /// Complete managed onboarding in your browser

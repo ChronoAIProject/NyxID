@@ -10,6 +10,8 @@ Combined with [Agent Isolation](./AGENT_ISOLATION.md), the same NyxID user can w
 
 ---
 
+For Telegram's optional native bot creation, see [Telegram bot creation](TELEGRAM_NEW.md). The **Telegram** option uses the separate `telegram-new` adapter; **Telegram bot token** uses the existing `telegram` adapter and token setup. These are display labels; platform identifiers and existing connections remain unchanged.
+
 ## X DM Accounts
 
 X is managed-only: users connect their own X account with OAuth and provide no developer credentials. NyxID uses the account's user-context token to poll incoming one-to-one and group DMs and deliver the routed agent's asynchronous reply. App-only bearer tokens cannot access private DMs. Although X also supports legacy OAuth 1.0a user-context credentials, a BYO path would require users to supply and maintain developer credentials, so this channel deliberately does not expose one.
