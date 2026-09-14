@@ -217,7 +217,34 @@ async fn provider_connection(server: &MockServer, request_id: &str, webhook_stat
 #[tokio::test]
 async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
     let (state, actor, server) = fixture().await;
+    state
+        .db
+        .collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+        .update_one(
+            doc! {"_id": &actor},
+            doc! {"$set": {"email": "calvin&team@example.test"}},
+        )
+        .await
+        .unwrap();
     let pending = waiting_consent(&state, &actor, &server).await;
+    let sent = server.received_requests().await.unwrap();
+    let consent = sent
+        .iter()
+        .filter_map(|request| request.body_json::<Value>().ok())
+        .find(|body| body["reply_markup"]["inline_keyboard"][0][1]["text"] == "Approve this bot")
+        .unwrap();
+    assert_eq!(consent["parse_mode"], "HTML");
+    assert_eq!(consent["link_preview_options"]["is_disabled"], true);
+    let text = consent["text"].as_str().unwrap();
+    let (visible, references) = text.split_once("<blockquote expandable>").unwrap();
+    assert!(visible.contains("@CustomerBot"));
+    assert!(visible.contains("Personal account: calvin&amp;team@example.test"));
+    assert!(visible.contains("https://app.nyxid.test"));
+    assert!(visible.contains("receive messages sent to this bot and send replies"));
+    assert!(visible.contains("<b>Connect bot</b>"));
+    assert!(!visible.contains(&actor));
+    assert!(references.contains(&actor));
+    assert!(references.contains("Telegram bot ID: 900"));
     let creation = server
         .received_requests()
         .await
@@ -243,6 +270,22 @@ async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
     assert_eq!(wrong.status, Status::WaitingConsent);
     let ready = approve(&state, &actor, &server, &pending.id, 700).await;
     assert_eq!(ready.status, Status::Ready);
+    let sent = server.received_requests().await.unwrap();
+    let return_message = sent
+        .iter()
+        .filter_map(|request| request.body_json::<Value>().ok())
+        .find(|body| body["reply_markup"]["inline_keyboard"][0][0]["text"] == "Return to NyxID")
+        .unwrap();
+    assert_eq!(
+        return_message["reply_markup"]["inline_keyboard"][0][0]["url"],
+        "https://app.nyxid.test/channel-bots?connect=telegram-new"
+    );
+    assert!(
+        return_message["text"]
+            .as_str()
+            .unwrap()
+            .contains("<b>Connect bot</b>")
+    );
     provider_connection(&server, &ready.id, 200).await;
     let base = server.uri();
     let service = service(&state, &base);
@@ -666,6 +709,166 @@ async fn telegram_new_manual_identity_and_quota_writers_are_serialized() {
 }
 
 #[tokio::test]
+async fn telegram_new_clear_manager_survives_webhook_failures() {
+    for endpoint in ["getWebhookInfo", "deleteWebhook"] {
+        for status in [401, 404, 503] {
+            let (state, _, server) = fixture().await;
+            let base = server.uri();
+            let service = service(&state, &base);
+            Mock::given(method("POST"))
+                .and(path(format!("/bot{MANAGER}/{endpoint}")))
+                .respond_with(ResponseTemplate::new(status))
+                .with_priority(1)
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            service.clear_manager().await.unwrap();
+
+            assert!(
+                credentials::load(
+                    &state.db,
+                    &super::channel_adapters::telegram_new::credential_descriptor(),
+                )
+                .await
+                .unwrap()
+                .is_none(),
+                "saved credentials must be deleted when {endpoint} returns {status}"
+            );
+            assert!(service.manager().await.is_err());
+        }
+    }
+}
+
+#[tokio::test]
+async fn telegram_new_clear_manager_removes_only_its_own_webhook() {
+    for owned in [true, false] {
+        let (state, _, server) = fixture().await;
+        let base = server.uri();
+        let service = service(&state, &base);
+        let callback = if owned {
+            service.manager_callback()
+        } else {
+            "https://another.example/webhook".into()
+        };
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{MANAGER}/getWebhookInfo")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"ok": true, "result": {"url": callback}})),
+            )
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/bot{MANAGER}/deleteWebhook")))
+            .and(wiremock::matchers::body_json(
+                json!({"drop_pending_updates": false}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": true})),
+            )
+            .with_priority(1)
+            .expect(u64::from(owned))
+            .mount(&server)
+            .await;
+
+        service.clear_manager().await.unwrap();
+        service.clear_manager().await.unwrap();
+        assert!(service.manager().await.is_err());
+    }
+}
+
+#[tokio::test]
+async fn telegram_new_clear_deleted_manager_allows_recreated_username() {
+    let (state, actor, server) = fixture().await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    let old_headers = headers(&state).await;
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{MANAGER}/getWebhookInfo")))
+        .respond_with(ResponseTemplate::new(401))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    service.clear_manager().await.unwrap();
+
+    let replacement = "200:replacement-manager-test-secret";
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{replacement}/getMe")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": {"id": 200, "username": "NyxSetupBot", "is_bot": true, "can_manage_bots": true}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{replacement}/getWebhookInfo")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": {"url": service.manager_callback(), "allowed_updates": ["message", "callback_query", "managed_bot"]}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(format!("/bot{replacement}/setWebhook")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "result": true})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    service
+        .configure_manager(
+            &actor,
+            &[(
+                "manager_bot_token".into(),
+                Some(Zeroizing::new(replacement.into())),
+            )]
+            .into(),
+            false,
+        )
+        .await
+        .unwrap();
+
+    let (request, launch_url) = service.begin(&actor, &actor, "Replacement").await.unwrap();
+    assert_eq!(request.manager_bot_id, 200);
+    assert_ne!(request.observation_id, "test-observation");
+    assert!(launch_url.starts_with("https://t.me/NyxSetupBot?start="));
+    assert_ne!(old_headers, headers(&state).await);
+    assert!(service.webhook(&old_headers, br#"{}"#).await.is_err());
+}
+
+#[tokio::test]
+async fn telegram_new_clear_manager_rejects_saved_managed_bots() {
+    let (state, actor, server) = fixture().await;
+    let pending = waiting_consent(&state, &actor, &server).await;
+    let ready = approve(&state, &actor, &server, &pending.id, 700).await;
+    provider_connection(&server, &ready.id, 200).await;
+    let base = server.uri();
+    let service = service(&state, &base);
+    service
+        .connect(&actor, &ready.id, 900, ready.revision)
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .db
+            .collection::<TelegramBotRequest>(REQUESTS)
+            .count_documents(doc! {"active": true})
+            .await
+            .unwrap(),
+        0
+    );
+    server.reset().await;
+
+    assert!(matches!(
+        service.clear_manager().await,
+        Err(crate::errors::AppError::Conflict(_))
+    ));
+    assert!(service.manager().await.is_ok());
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn telegram_new_manager_configuration_preserves_secret_and_validates_webhook() {
     let (state, actor, server) = fixture().await;
     let base = server.uri();
@@ -702,7 +905,10 @@ async fn telegram_new_manager_configuration_preserves_secret_and_validates_webho
         .begin(&actor, &actor, "Active request")
         .await
         .unwrap();
+    server.reset().await;
     assert!(service.clear_manager().await.is_err());
+    assert!(service.manager().await.is_ok());
+    assert!(server.received_requests().await.unwrap().is_empty());
     assert!(
         service
             .configure_manager(&actor, &Default::default(), true)

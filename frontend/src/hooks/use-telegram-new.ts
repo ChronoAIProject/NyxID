@@ -11,19 +11,25 @@ import {
 
 const ROOT = "/channel-bots/telegram-new";
 
+export function useTelegramNewConfiguration() {
+  const actor = useAuthStore((state) => state.user?.id);
+  return useQuery({
+    queryKey: ["telegram-new", actor],
+    enabled: Boolean(actor),
+    retry: false,
+    staleTime: 0,
+    refetchInterval: (query) => (query.state.data?.request ? 3000 : false),
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    queryFn: async () => telegramNewConfigSchema.parse(await api.get(ROOT)),
+  });
+}
+
 export function useTelegramNew() {
   const actor = useAuthStore((state) => state.user?.id);
   const client = useQueryClient();
   const key = ["telegram-new", actor] as const;
-  const configuration = useQuery({
-    queryKey: key,
-    enabled: Boolean(actor),
-    retry: false,
-    staleTime: 0,
-    refetchInterval: 3000,
-    refetchIntervalInBackground: false,
-    queryFn: async () => telegramNewConfigSchema.parse(await api.get(ROOT)),
-  });
+  const configuration = useTelegramNewConfiguration();
   const refresh = () => client.invalidateQueries({ queryKey: key });
   const begin = useMutation({
     gcTime: 0,

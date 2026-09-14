@@ -34,6 +34,89 @@ pub fn hash(value: &str) -> String {
 }
 const CREATION_RECOVERY_MINUTES: i64 = 60;
 
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn account_line(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(256)
+        .collect()
+}
+
+fn setup_destination(owner: &User, initiator: &User, website: &str) -> String {
+    let account = if owner.user_type.is_org() {
+        let name = account_line(
+            owner
+                .display_name
+                .as_deref()
+                .or(owner.slug.as_deref())
+                .unwrap_or("Organization"),
+        );
+        let handle = owner
+            .slug
+            .as_deref()
+            .map(|slug| format!(" (@{})", account_line(slug)))
+            .unwrap_or_default();
+        format!(
+            "Organization: {name}{handle}\nSetup started by: {}",
+            account_line(&initiator.email)
+        )
+    } else {
+        format!("Personal account: {}", account_line(&owner.email))
+    };
+    format!("{account}\nWebsite: {website}")
+}
+
+fn destination_html(request: &TelegramBotRequest) -> String {
+    let old_owner_line = format!("Destination ID: {}", request.owner_user_id);
+    let old_actor_line = format!("Initiating account ID: {}", request.actor_user_id);
+    html_escape(
+        &request
+            .destination
+            .lines()
+            .filter(|line| *line != old_owner_line && *line != old_actor_line)
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+}
+
+fn account_details_html(request: &TelegramBotRequest) -> String {
+    let bot = request
+        .telegram_bot_id
+        .map(|id| format!("\nTelegram bot ID: {id}"))
+        .unwrap_or_default();
+    format!(
+        "<blockquote expandable>Account references\nNyxID account ID: {}\nSetup started by account ID: {}{bot}</blockquote>",
+        html_escape(&request.owner_user_id),
+        html_escape(&request.actor_user_id)
+    )
+}
+
+fn creation_message(request: &TelegramBotRequest) -> String {
+    format!(
+        "<b>Let's create your Telegram bot.</b>\n\nThis chat helps you create a new bot for the NyxID account below.\n\n{}\n\n1. Tap <b>Create bot</b> below.\n2. Choose a name and a username ending in <b>bot</b>.\n3. Finish the form, then return to this chat to approve the connection.\n\nYou will finish setup on the NyxID page after approving here. Only continue if you started this setup in NyxID and recognize the account and website above.\n\n{}",
+        destination_html(request),
+        account_details_html(request)
+    )
+}
+
+fn consent_message(request: &TelegramBotRequest) -> String {
+    format!(
+        "Bot: <b>@{}</b>\n{}\n\nApproving lets NyxID receive messages sent to this bot and send replies through it.\n\nOnly approve if you started this setup in NyxID and recognize the bot, account, and website above. Tap <b>Approve this bot</b> to continue, or <b>Decline</b> to stop.\n\nNext, return to NyxID and tap <b>Connect bot</b> to finish.\n\n{}",
+        html_escape(request.bot_username.as_deref().unwrap_or("")),
+        destination_html(request),
+        account_details_html(request)
+    )
+}
+
 fn suggested_bot_username(label: &str) -> String {
     let mut stem = label
         .split(|ch: char| !ch.is_ascii_alphanumeric())
@@ -291,6 +374,17 @@ impl TelegramNewService<'_> {
             .find_one(doc! {"_id": owner})
             .await?
             .ok_or_else(|| AppError::NotFound("Destination account not found".into()))?;
+        let initiator = if owner == actor {
+            None
+        } else {
+            Some(
+                self.db
+                    .collection::<User>(USERS)
+                    .find_one(doc! {"_id": actor})
+                    .await?
+                    .ok_or_else(|| AppError::NotFound("Account not found".into()))?,
+            )
+        };
         let challenge = nonce();
         let request = TelegramBotRequest {
             id: uuid::Uuid::new_v4().to_string(),
@@ -299,12 +393,10 @@ impl TelegramNewService<'_> {
             manager_bot_id: manager_id,
             observation_id: observation_id.into(),
             label: label.into(),
-            destination: format!(
-                "{}\nDestination ID: {}\nInitiating account ID: {}\nWebsite: {}",
-                destination.slug.as_deref().unwrap_or("Personal account"),
-                owner,
-                actor,
-                self.config.frontend_url
+            destination: setup_destination(
+                &destination,
+                initiator.as_ref().unwrap_or(&destination),
+                &self.config.frontend_url,
             ),
             status: Status::WaitingTelegram,
             active: true,
@@ -388,7 +480,7 @@ impl TelegramNewService<'_> {
             && let Ok((_, _, values)) = self.manager().await
             && let Some(token) = values.get(MANAGER_TOKEN)
         {
-            let _ = self.api.call(token, "sendMessage", json!({"chat_id": user, "text": "Creation request cancelled. A bot already created in Telegram still belongs to you.", "reply_markup": {"remove_keyboard": true}})).await;
+            let _ = self.api.call(token, "sendMessage", json!({"chat_id": user, "text": "Setup cancelled. Any bot you already created still exists in Telegram. You can start setup again from Channel Bots in NyxID.", "reply_markup": {"remove_keyboard": true}})).await;
         }
         Ok(())
     }
@@ -487,7 +579,7 @@ impl TelegramNewService<'_> {
                             doc! {"$set": {"status": "waiting_bot"}},
                         )
                         .await?;
-                    self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": format!("Create a Telegram bot to connect to:\n{}\n\nOnly continue if you started this setup and recognize these identifiers. You own the bot; NyxID will manage its connection. You will approve the exact bot after creation.\n\nTo recover a bot created in an earlier attempt, send /recover @YourBotUsername here.", request.destination), "reply_markup": {"keyboard": [[{"text": "Create bot", "request_managed_bot": {"request_id": 1, "suggested_name": request.label.chars().take(64).collect::<String>(), "suggested_username": suggested_bot_username(&request.label)}}]], "resize_keyboard": true, "one_time_keyboard": true}})).await?;
+                    self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": creation_message(&request), "parse_mode": "HTML", "link_preview_options": {"is_disabled": true}, "reply_markup": {"keyboard": [[{"text": "Create bot", "request_managed_bot": {"request_id": 1, "suggested_name": request.label.chars().take(64).collect::<String>(), "suggested_username": suggested_bot_username(&request.label)}}]], "resize_keyboard": true, "one_time_keyboard": true}})).await?;
                 }
             }
             return Ok(());
@@ -560,8 +652,8 @@ impl TelegramNewService<'_> {
         if result.modified_count != 1 {
             return Ok(());
         }
-        self.api.call(token, "sendMessage", json!({"chat_id": request.telegram_user_id, "text": "Review the exact bot and destination below before approving.", "reply_markup": {"remove_keyboard": true}})).await?;
-        self.api.call(token, "sendMessage", json!({"chat_id": request.telegram_user_id, "text": format!("Connect @{} (bot ID {}) to:\n{}\n\nNyxID has not verified a prior relationship between this Telegram account and the destination. Only approve if you started this setup and recognize these identifiers. NyxID will obtain this bot's token to receive messages and send replies.", request.bot_username.as_deref().unwrap_or(""), request.telegram_bot_id.unwrap_or_default(), request.destination), "reply_markup": {"inline_keyboard": [[{"text": "Decline", "callback_data": format!("no:{}", consent.as_str())}, {"text": "Approve this bot", "callback_data": format!("ok:{}", consent.as_str())}]]}})).await?;
+        self.api.call(token, "sendMessage", json!({"chat_id": request.telegram_user_id, "text": "Your bot is ready for the next step. Check the connection details below.", "reply_markup": {"remove_keyboard": true}})).await?;
+        self.api.call(token, "sendMessage", json!({"chat_id": request.telegram_user_id, "text": consent_message(request), "parse_mode": "HTML", "link_preview_options": {"is_disabled": true}, "reply_markup": {"inline_keyboard": [[{"text": "Decline", "callback_data": format!("no:{}", consent.as_str())}, {"text": "Approve this bot", "callback_data": format!("ok:{}", consent.as_str())}]]}})).await?;
         Ok(())
     }
 
@@ -636,7 +728,7 @@ impl TelegramNewService<'_> {
             } else {
                 json!({"remove_keyboard": true})
             };
-            self.api.call(token, "sendMessage", json!({"chat_id": user, "text": if approve {"Approved. Return to NyxID and confirm Connect bot to finish."} else {"Connection declined. Your Telegram bot has not been connected."}, "reply_markup": markup})).await?;
+            self.api.call(token, "sendMessage", json!({"chat_id": user, "text": if approve {"<b>Approved. There is one more step.</b>\n\nTap <b>Return to NyxID</b> below, then tap <b>Connect bot</b> on the setup page.\n\nAfter it connects, choose an AI agent to handle replies. Then open your new bot's chat and send a test message."} else {"You declined the connection. Your bot still exists in Telegram, but it is not connected to NyxID. You can start again from Channel Bots."}, "parse_mode": "HTML", "link_preview_options": {"is_disabled": true}, "reply_markup": markup})).await?;
             let _ = self.api.call(token, "answerCallbackQuery", json!({"callback_query_id": callback["id"], "text": if request.status == Status::Ready {"Approved"} else {"Declined"}})).await;
         }
         Ok(())
@@ -757,7 +849,21 @@ pub fn bot_identity(value: &Value) -> Option<(i64, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::suggested_bot_username;
+    use super::{html_escape, setup_destination, suggested_bot_username};
+
+    #[test]
+    fn telegram_new_org_summary_identifies_the_initiator_and_escapes_display_names() {
+        use crate::models::user::UserType;
+        let actor = crate::test_utils::test_user("actor", UserType::Person);
+        let mut org = crate::test_utils::test_user("org", UserType::Org);
+        org.display_name = Some("Support <Team> & Partners\n".into());
+        org.slug = Some("support-team".into());
+        let summary = setup_destination(&org, &actor, "https://app.nyxid.test");
+        assert!(summary.contains("Organization: Support <Team> & Partners (@support-team)"));
+        assert!(summary.contains(&format!("Setup started by: {}", actor.email)));
+        assert!(!summary.contains(&org.email));
+        assert!(html_escape(&summary).contains("Support &lt;Team&gt; &amp; Partners"));
+    }
 
     #[test]
     fn telegram_new_username_suggestions_follow_telegram_constraints() {
