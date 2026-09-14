@@ -781,7 +781,7 @@ mod tests {
             "9".repeat(128),
         ] {
             let username = suggested_bot_username(&label);
-            assert!((5..=32).contains(&username.len()), "{username}");
+            assert!((5..=32).contains(&username.len()));
             assert!(username.starts_with(|ch: char| ch.is_ascii_alphabetic()));
             assert!(username.ends_with("bot"));
             assert!(
