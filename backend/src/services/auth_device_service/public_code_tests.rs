@@ -205,7 +205,7 @@ async fn compatibility_gate_separates_old_writer_namespace_and_keeps_old_rows_re
     old_row.id = Uuid::new_v4().to_string();
     old_row.supports_grant_choice = false;
     old_row.device_code_hmac = "old-writer-private".into();
-    old_row.user_code_hmac = hmac_hex(KEY, code[1..].as_bytes());
+    old_row.user_code_hmac = hmac_hex(KEY, &code.as_bytes()[1..]);
     old_row.user_code_reservation_hmac = None;
     collection(&db).insert_one(&old_row).await.unwrap();
     let (old_reader, actual) = find_by_user_code(&db, &old_row.user_code_hmac)

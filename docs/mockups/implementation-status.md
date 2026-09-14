@@ -21,8 +21,10 @@ TypeScript and native dependency sync. The frontend production build passes
 with the corrected fixture type. Two additional mockup browser regressions
 verify icon rendering and prevent icon text from becoming active HTML.
 
-Rust formatting, AWS/GCP feature builds and CLI wizard freshness passed in CI.
-Backend tests, coverage, Clippy and CodeQL are being rerun after the test helper
-and mockup renderer corrections. The installed-scanner fixture matches the
+The 28 targeted CLI exchange, Agent Key, resumption and wizard tests pass.
+Rust formatting and all AWS/GCP feature builds passed in CI.
+Backend tests, coverage, Clippy and CodeQL are required merge gates. Their
+current results are recorded in [draft PR #1569](https://github.com/ChronoAIProject/NyxID/pull/1569).
+The installed-scanner fixture matches the
 pre-#1544 parser byte for byte. Physical iPhone acceptance remains a rollout
 check; the HTML preview and parser fixture do not establish it.
