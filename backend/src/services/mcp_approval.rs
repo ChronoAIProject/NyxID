@@ -77,6 +77,7 @@ mod tests {
 
     fn loaded_user_service(id: &str, owner_id: &str, slug: &str) -> mcp_service::McpToolService {
         mcp_service::McpToolService {
+            workspace_destinations_pending: false,
             service_id: id.to_string(),
             service_name: "Approval target".to_string(),
             service_slug: slug.to_string(),

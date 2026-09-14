@@ -128,7 +128,7 @@ fn hash_canonical(value: &Value) -> String {
 
 pub fn endpoint_contract_digest(endpoint: &ServiceEndpoint) -> AppResult<String> {
     let normalized_path = normalize_path(&endpoint.path)?;
-    Ok(hash_canonical(&serde_json::json!({
+    let mut contract = serde_json::json!({
         "authority": "nyxid",
         "contract_version": DURABLE_GRANT_CONTRACT_VERSION,
         "endpoint_id": endpoint.id,
@@ -141,7 +141,11 @@ pub fn endpoint_contract_digest(endpoint: &ServiceEndpoint) -> AppResult<String>
         "request_body_required": endpoint.effective_request_body_required(),
         "risk": endpoint.risk,
         "supports_idempotency_key": endpoint.supports_idempotency_key,
-    })))
+    });
+    if let Some(target_id) = &endpoint.target_id {
+        contract["target_id"] = target_id.clone().into();
+    }
+    Ok(hash_canonical(&contract))
 }
 
 /// The Discord annotation narrows a formerly unrestricted parameter. An
@@ -225,6 +229,7 @@ async fn load_active_published_endpoint(
     };
     let now = Utc::now();
     Ok(Some(ServiceEndpoint {
+        target_id: endpoint.target_id,
         id: endpoint.endpoint_id,
         service_id: user_service_id.to_string(),
         name: endpoint.name,
@@ -1629,6 +1634,7 @@ mod tests {
     fn endpoint() -> ServiceEndpoint {
         let now = Utc::now();
         ServiceEndpoint {
+            target_id: None,
             id: Uuid::new_v4().to_string(),
             service_id: Uuid::new_v4().to_string(),
             name: "create_item".to_string(),
@@ -1977,6 +1983,7 @@ mod tests {
         let user_endpoint_id = Uuid::new_v4().to_string();
         let ordinary = endpoint();
         let custom = ServiceEndpoint {
+            target_id: None,
             id: Uuid::new_v4().to_string(),
             name: "publish_item".to_string(),
             path: "/items/{item_id}:publish".to_string(),
@@ -2108,6 +2115,7 @@ mod tests {
             .find(|endpoint| endpoint.source_operation_id.as_deref() == Some("add_reaction"))
             .unwrap();
         ServiceEndpoint {
+            target_id: None,
             name: parsed.name,
             description: parsed.description,
             method: parsed.method,

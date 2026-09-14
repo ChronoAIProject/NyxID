@@ -496,6 +496,7 @@ mod tests {
 
     fn compatible_service() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
             id: "svc-1".to_string(),
             name: "Service".to_string(),
             slug: "svc".to_string(),

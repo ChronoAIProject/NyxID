@@ -16,6 +16,7 @@ pub struct EndpointInput {
     pub description: Option<String>,
     pub method: String,
     pub path: String,
+    pub target_id: Option<String>,
     pub parameters: Option<serde_json::Value>,
     pub request_body_schema: Option<serde_json::Value>,
     pub request_content_type: Option<String>,
@@ -32,6 +33,7 @@ pub struct EndpointUpdate {
     pub description: Option<Option<String>>,
     pub method: Option<String>,
     pub path: Option<String>,
+    pub target_id: Option<Option<String>>,
     pub parameters: Option<Option<serde_json::Value>>,
     pub request_body_schema: Option<Option<serde_json::Value>>,
     pub request_content_type: Option<Option<String>>,
@@ -149,10 +151,12 @@ pub async fn create_endpoint(
     service_id: &str,
     input: EndpointInput,
 ) -> AppResult<ServiceEndpoint> {
+    validate_parent_target(db, service_id, input.target_id.as_deref()).await?;
     let coll = db.collection::<ServiceEndpoint>(COLLECTION_NAME);
     let now = Utc::now();
 
     let endpoint = ServiceEndpoint {
+        target_id: input.target_id.clone(),
         id: Uuid::new_v4().to_string(),
         service_id: service_id.to_string(),
         name: input.name,
@@ -191,6 +195,9 @@ pub async fn update_endpoint(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("Endpoint not found: {endpoint_id}")))?;
     ensure_writable_operation_generation(&existing)?;
+    if let Some(target_id) = &updates.target_id {
+        validate_parent_target(db, service_id, target_id.as_deref()).await?;
+    }
     let mut set_doc = bson::Document::new();
 
     if let Some(name) = updates.name
@@ -216,6 +223,11 @@ pub async fn update_endpoint(
         && existing.path != path
     {
         set_doc.insert("path", path);
+    }
+    if let Some(target_id) = updates.target_id
+        && existing.target_id != target_id
+    {
+        set_doc.insert("target_id", target_id);
     }
     if let Some(parameters) = updates.parameters
         && existing.parameters != parameters
@@ -362,6 +374,7 @@ pub async fn bulk_upsert_endpoints(
     let mut upserted_names: Vec<String> = Vec::with_capacity(inputs.len());
 
     for input in inputs {
+        validate_parent_target(db, service_id, input.target_id.as_deref()).await?;
         upserted_names.push(input.name.clone());
         result_endpoints.push(
             upsert_one_endpoint(
@@ -431,6 +444,7 @@ pub async fn upsert_endpoints_additive(
 
     let mut result_endpoints: Vec<ServiceEndpoint> = Vec::with_capacity(inputs.len());
     for input in inputs {
+        validate_parent_target(db, service_id, input.target_id.as_deref()).await?;
         result_endpoints.push(
             upsert_one_endpoint(
                 &coll,
@@ -443,6 +457,31 @@ pub async fn upsert_endpoints_additive(
         );
     }
     Ok(result_endpoints)
+}
+
+async fn validate_parent_target(
+    db: &mongodb::Database,
+    service_id: &str,
+    target_id: Option<&str>,
+) -> AppResult<()> {
+    if let Some(id) = target_id {
+        super::destination_routing::validate_target_id(id)?;
+        let service = db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .find_one(doc! {"_id": service_id})
+            .await?
+            .ok_or_else(|| {
+                AppError::ValidationError("Endpoint destination parent is missing".into())
+            })?;
+        if !service.destination_targets.contains_key(id) {
+            return Err(AppError::ValidationError(
+                "Endpoint target is absent from the parent destination map".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Create or update a single endpoint matched by (service_id, name).
@@ -467,6 +506,7 @@ async fn upsert_one_endpoint(
         let unchanged = existing.description == input.description
             && existing.method == input.method.to_uppercase()
             && existing.path == input.path
+            && existing.target_id == input.target_id
             && existing.parameters == input.parameters
             && existing.request_body_schema == input.request_body_schema
             && existing.request_content_type == input.request_content_type
@@ -484,6 +524,7 @@ async fn upsert_one_endpoint(
             "description": input.description.as_deref(),
             "method": input.method.to_uppercase(),
             "path": &input.path,
+            "target_id": input.target_id.as_deref(),
             "updated_at": bson::DateTime::from_chrono(now),
         };
         if activation == EndpointSyncActivation::ForceActive {
@@ -550,6 +591,7 @@ async fn upsert_one_endpoint(
     } else {
         // Create new endpoint
         let endpoint = ServiceEndpoint {
+            target_id: input.target_id.clone(),
             id: Uuid::new_v4().to_string(),
             service_id: service_id.to_string(),
             name: input.name,
@@ -581,6 +623,7 @@ mod tests {
 
     fn make_input(name: &str, method: &str, path: &str) -> EndpointInput {
         EndpointInput {
+            target_id: None,
             name: name.to_string(),
             description: Some(format!("{name} endpoint")),
             method: method.to_string(),
@@ -598,6 +641,7 @@ mod tests {
 
     fn empty_update() -> EndpointUpdate {
         EndpointUpdate {
+            target_id: None,
             name: None,
             description: None,
             method: None,
@@ -899,6 +943,7 @@ mod tests {
             &service_id,
             &ep.id,
             EndpointUpdate {
+                target_id: None,
                 name: Some("ep1_renamed".to_string()),
                 description: None,
                 method: Some("post".to_string()),
@@ -940,6 +985,7 @@ mod tests {
             "service-alpha",
             "nonexistent-id",
             EndpointUpdate {
+                target_id: None,
                 name: Some("x".to_string()),
                 description: None,
                 method: None,
@@ -980,6 +1026,7 @@ mod tests {
             &owner_service_id,
             &endpoint.id,
             EndpointUpdate {
+                target_id: None,
                 name: None,
                 description: None,
                 method: None,

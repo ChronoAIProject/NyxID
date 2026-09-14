@@ -456,6 +456,7 @@ fn node_session_info(
             is_connected: true,
             capabilities_resolved: owner.capabilities_resolved,
             capabilities: crate::services::node_ws_manager::NodeCapabilitiesFlags {
+                http_signature_v2: owner.http_signature_v2,
                 credential_ack_correlation: owner.credential_ack_correlation,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
                 proxy_max_body_size: owner.proxy_max_body_size,
@@ -3140,6 +3141,7 @@ mod tests {
         state.node_ws_manager.record_capabilities(
             &first.id,
             &NodeCapabilitiesMsg {
+                http_signature_v2: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             },
@@ -3544,6 +3546,7 @@ mod tests {
         state.node_ws_manager.record_capabilities(
             &node.id,
             &NodeCapabilitiesMsg {
+                http_signature_v2: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             },
@@ -3824,6 +3827,7 @@ mod tests {
                     state.node_ws_manager.record_capabilities(
                         &node.id,
                         &NodeCapabilitiesMsg {
+                            http_signature_v2: false,
                             remote_credential_crypto_v1: true,
                             ..NodeCapabilitiesMsg::default()
                         },
@@ -5776,6 +5780,7 @@ mod tests {
                 last_success_at: None,
             }),
             capabilities: NodeCapabilitiesFlags {
+                http_signature_v2: false,
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: true,
                 proxy_max_body_size: Some(100 * 1024 * 1024),

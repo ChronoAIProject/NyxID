@@ -1408,6 +1408,7 @@ mod tests {
 
     fn ssh_service_row(id: &str, created_by: &str, visibility: &str) -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
             id: id.to_string(),
             name: "Bastion".to_string(),
             slug: format!("ssh-{id}"),

@@ -4758,6 +4758,7 @@ mod tests {
 
     fn sample_downstream_service() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
             id: "svc-1".to_string(),
             name: "Test".to_string(),
             slug: "test".to_string(),

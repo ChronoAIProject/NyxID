@@ -95,6 +95,9 @@ tempfile = "3.27.0"
 axum-extra = { version = "0.12.6", features = ["form", "query"] }
 
 [dev-dependencies]
+# TLS echo proxy for multi-origin routing and redirect acceptance tests.
+rcgen = "0.14"
+tokio-rustls = "0.26"
 wiremock = "0.6"
 # Used only by `test_utils` (compiled under `#[cfg(test)]`) to register an
 # `atexit` hook that drops the per-test databases at process exit. Already in

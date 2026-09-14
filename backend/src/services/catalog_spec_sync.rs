@@ -32,7 +32,15 @@ use crate::services::{catalog_spec_registry, openapi_parser};
 /// Materialize `ServiceEndpoint` rows for every seeded catalog service
 /// that has a hosted overlay spec. Idempotent; called at startup after
 /// `seed_default_services`.
+#[cfg(test)]
 pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<()> {
+    sync_seeded_service_endpoints_with_destinations(db, true).await
+}
+
+pub async fn sync_seeded_service_endpoints_with_destinations(
+    db: &mongodb::Database,
+    enable_workspace_destinations: bool,
+) -> AppResult<()> {
     let service_col = db.collection::<DownstreamService>(DOWNSTREAM_SERVICES);
 
     for slug in catalog_spec_registry::hydrated_slugs() {
@@ -46,7 +54,7 @@ pub async fn sync_seeded_service_endpoints(db: &mongodb::Database) -> AppResult<
             continue;
         }
 
-        let inputs = match seeded_endpoint_inputs(slug) {
+        let inputs = match hosted_endpoint_inputs(&service, enable_workspace_destinations) {
             Ok(inputs) => inputs,
             Err(error) => {
                 // Embedded specs are validated by unit tests; reaching this
@@ -218,11 +226,112 @@ pub fn is_platform_vendor_service(service: &DownstreamService) -> bool {
 }
 
 /// Parse and validate the hosted overlay for a slug into endpoint inputs.
+#[cfg(test)]
 fn seeded_endpoint_inputs(slug: &str) -> AppResult<Vec<EndpointInput>> {
     let spec = catalog_spec_registry::spec_for_slug(slug).ok_or_else(|| {
         crate::errors::AppError::Internal(format!("no hosted catalog spec registered for '{slug}'"))
     })?;
-    endpoint_inputs_from_spec(&spec)
+    let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+    service.slug = slug.into();
+    service.base_url = spec["servers"][0]["url"]
+        .as_str()
+        .unwrap_or("https://example.com")
+        .into();
+    if slug == "api-google-workspace" {
+        service.destination_targets = super::destination_routing::workspace_targets();
+    }
+    hosted_endpoint_inputs(&service, true)
+}
+
+fn hosted_endpoint_inputs(
+    service: &DownstreamService,
+    enable_workspace_destinations: bool,
+) -> AppResult<Vec<EndpointInput>> {
+    let spec = catalog_spec_registry::spec_for_slug(&service.slug)
+        .ok_or_else(|| crate::errors::AppError::Internal("Missing hosted catalog spec".into()))?;
+    let mut spec = (*spec).clone();
+    if !enable_workspace_destinations && service.slug == "api-google-workspace" {
+        for key in ["google-docs", "google-sheets", "google-slides"] {
+            for path in catalog_spec_registry::spec_for_key(key).expect("editor spec")["paths"]
+                .as_object()
+                .expect("editor paths")
+                .keys()
+            {
+                spec["paths"]
+                    .as_object_mut()
+                    .expect("Workspace paths")
+                    .remove(path);
+            }
+        }
+    }
+    destination_endpoint_inputs(service, &spec)
+}
+
+fn destination_endpoint_inputs(
+    service: &DownstreamService,
+    spec: &serde_json::Value,
+) -> AppResult<Vec<EndpointInput>> {
+    // Embedded nested servers select an exact origin. Reject invalid selectors
+    // before parsing can discard a path, credentials, or an alternative host.
+    if let Some(paths) = spec["paths"].as_object() {
+        for item in paths.values() {
+            for scope in std::iter::once(item).chain(
+                [
+                    "get", "post", "put", "patch", "delete", "head", "options", "trace",
+                ]
+                .iter()
+                .filter_map(|method| item.get(*method)),
+            ) {
+                if let Some(servers) = scope.get("servers") {
+                    let servers = servers
+                        .as_array()
+                        .filter(|values| values.len() == 1)
+                        .ok_or_else(|| {
+                            crate::errors::AppError::ValidationError(
+                                "Hosted nested servers must select one exact origin".into(),
+                            )
+                        })?;
+                    let value = servers[0]["url"].as_str().ok_or_else(|| {
+                        crate::errors::AppError::ValidationError(
+                            "Hosted server URL is required".into(),
+                        )
+                    })?;
+                    super::destination_routing::normalize_origin(value)?;
+                }
+            }
+        }
+    }
+    let mut inputs = endpoint_inputs_from_spec(spec)?;
+    // Routing metadata is honored exclusively for embedded, server-owned overlays.
+    // Even when the map is missing, non-root origins must fail closed.
+    let root_origin = spec["servers"][0]["url"]
+        .as_str()
+        .and_then(|url| url::Url::parse(url).ok())
+        .map(|url| url.origin().ascii_serialization());
+    for (input, parsed) in inputs
+        .iter_mut()
+        .zip(openapi_parser::parse_openapi_spec_value(spec)?)
+    {
+        if parsed.origin == root_origin {
+            continue;
+        }
+        let origin = parsed.origin.ok_or_else(|| {
+            crate::errors::AppError::ValidationError("Hosted operation has no exact origin".into())
+        })?;
+        input.target_id = Some(
+            service
+                .destination_targets
+                .iter()
+                .find(|(_, allowed)| **allowed == origin)
+                .map(|(id, _)| id.clone())
+                .ok_or_else(|| {
+                    crate::errors::AppError::ValidationError(
+                        "Hosted operation origin is outside the service destination map".into(),
+                    )
+                })?,
+        );
+    }
+    Ok(inputs)
 }
 
 /// Parse and validate an OpenAPI document into endpoint inputs, applying
@@ -237,6 +346,7 @@ fn endpoint_inputs_from_spec(spec: &serde_json::Value) -> AppResult<Vec<Endpoint
         validate_response_contract(&endpoint.response)?;
 
         inputs.push(EndpointInput {
+            target_id: None,
             name: endpoint.name,
             description: endpoint.description,
             method: endpoint.method,
@@ -366,6 +476,31 @@ mod tests {
                     input.method
                 );
             }
+        }
+    }
+
+    #[test]
+    fn workspace_overlay_cannot_expand_destination_map() {
+        let mut service = crate::models::downstream_service::test_helpers::dummy_service();
+        service.slug = "api-google-workspace".into();
+        service.destination_targets = super::super::destination_routing::workspace_targets();
+        let mut spec = (*catalog_spec_registry::spec_for_slug(&service.slug).unwrap()).clone();
+        assert_eq!(
+            destination_endpoint_inputs(&service, &spec).unwrap().len(),
+            38
+        );
+        for origin in [
+            "https://outside.test",
+            "https://docs.googleapis.com/path",
+            "https://user:secret@docs.googleapis.com",
+            "http://docs.googleapis.com",
+        ] {
+            spec["paths"]["/v1/documents/{documentId}:batchUpdate"]["servers"] =
+                serde_json::json!([{"url":origin}]);
+            assert!(
+                destination_endpoint_inputs(&service, &spec).is_err(),
+                "{origin}"
+            );
         }
     }
 

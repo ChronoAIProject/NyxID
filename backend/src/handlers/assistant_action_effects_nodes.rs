@@ -1906,6 +1906,7 @@ mod tests {
         state.node_ws_manager.record_capabilities(
             &node_id,
             &crate::services::node_ws_manager::NodeCapabilitiesMsg {
+                http_signature_v2: false,
                 remote_credential_crypto_v1: true,
                 ..Default::default()
             },

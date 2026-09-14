@@ -189,8 +189,8 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("llm-openrouter", "openrouter"),
 ];
 
-static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> =
-    LazyLock::new(|| {
+static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> = LazyLock::new(
+    || {
         let mut specs: HashMap<_, _> = HOSTED_SPEC_SOURCES
             .iter()
             .map(|(key, source)| {
@@ -205,7 +205,7 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> =
         let mut workspace = (*specs["google-drive"]).clone();
         workspace["info"]["title"] = "Google Workspace".into();
         workspace["info"]["description"] =
-            "Google Drive, Calendar, and Gmail read/send operations using one Google OAuth client."
+            "Google Workspace uses one Google OAuth connection for Drive, Calendar, Gmail, Docs, Sheets, and Slides. The root server https://www.googleapis.com serves Drive, Calendar, and Gmail; Docs, Sheets, and Slides paths declare their respective https://docs.googleapis.com, https://sheets.googleapis.com, and https://slides.googleapis.com servers. Standard OpenAPI server precedence applies: operation servers override path servers, which override the root server. During the operator-controlled upgrade window, editor requests return workspace_destinations_not_activated (12100) until the operator enables GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED after upgrading readers and node agents."
                 .into();
         for key in ["google-calendar", "google-gmail"] {
             workspace["paths"]
@@ -218,9 +218,25 @@ static PARSED_SPECS: LazyLock<HashMap<&'static str, Arc<serde_json::Value>>> =
                         .clone(),
                 );
         }
+        for key in ["google-docs", "google-sheets", "google-slides"] {
+            let servers = specs[key]["servers"].clone();
+            for (path, item) in specs[key]["paths"].as_object().expect("Product paths") {
+                let mut item = item.clone();
+                item["servers"] = servers.clone();
+                assert!(
+                    workspace["paths"]
+                        .as_object_mut()
+                        .expect("Workspace paths")
+                        .insert(path.clone(), item)
+                        .is_none(),
+                    "Duplicate Workspace path"
+                );
+            }
+        }
         specs.insert("google-workspace", Arc::new(workspace));
         specs
-    });
+    },
+);
 
 /// Parsed overlay document for a spec key (the `{spec_key}` URL segment).
 pub fn spec_for_key(spec_key: &str) -> Option<Arc<serde_json::Value>> {
@@ -376,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn google_workspace_is_the_union_of_drive_calendar_and_gmail() {
+    fn google_workspace_is_the_union_of_all_six_products() {
         let workspace = spec_for_slug("api-google-workspace").unwrap();
         let drive = spec_for_slug("api-google-drive").unwrap();
         let calendar = spec_for_slug("api-google-calendar").unwrap();
@@ -387,7 +403,29 @@ mod tests {
             drive["paths"].as_object().unwrap().len()
                 + calendar["paths"].as_object().unwrap().len()
                 + gmail["paths"].as_object().unwrap().len()
+                + ["google-docs", "google-sheets", "google-slides"]
+                    .iter()
+                    .map(|key| spec_for_key(key).unwrap()["paths"]
+                        .as_object()
+                        .unwrap()
+                        .len())
+                    .sum::<usize>()
         );
+        assert_eq!(workspace["servers"][0]["url"], "https://www.googleapis.com");
+        assert_eq!(
+            crate::services::openapi_parser::parse_openapi_spec_value(&workspace)
+                .unwrap()
+                .len(),
+            38
+        );
+        for key in ["google-docs", "google-sheets", "google-slides"] {
+            let product = spec_for_key(key).unwrap();
+            for (path, item) in product["paths"].as_object().unwrap() {
+                let mut expected = item.clone();
+                expected["servers"] = product["servers"].clone();
+                assert_eq!(paths[path], expected);
+            }
+        }
         for spec in [drive, calendar, gmail] {
             for (path, item) in spec["paths"].as_object().unwrap() {
                 assert_eq!(&paths[path], item);

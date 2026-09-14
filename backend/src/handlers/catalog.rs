@@ -1123,6 +1123,7 @@ mod tests {
         use crate::services::openapi_parser::ParsedEndpoint;
 
         let parsed = ParsedEndpoint {
+            origin: None,
             source_operation_id: Some("listWidgets".to_string()),
             name: "listWidgets".to_string(),
             description: Some("List all widgets".to_string()),
@@ -1152,6 +1153,7 @@ mod tests {
         use crate::services::openapi_parser::ParsedEndpoint;
 
         let parsed = ParsedEndpoint {
+            origin: None,
             source_operation_id: Some("createWidget".to_string()),
             name: "createWidget".to_string(),
             description: None,

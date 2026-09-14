@@ -9,6 +9,7 @@ use crate::services::content_type::{
 
 /// A single endpoint parsed from an OpenAPI/Swagger specification.
 pub struct ParsedEndpoint {
+    pub origin: Option<String>,
     pub source_operation_id: Option<String>,
     pub name: String,
     pub description: Option<String>,
@@ -168,7 +169,18 @@ fn parse_endpoints_from_spec(
                     })
                 });
 
+            let origin = operation
+                .get("servers")
+                .or_else(|| path_item.get("servers"))
+                .or_else(|| spec.get("servers"))
+                .and_then(|servers| servers.as_array())
+                .and_then(|servers| servers.first())
+                .and_then(|server| server["url"].as_str())
+                .and_then(|server| url::Url::parse(server).ok())
+                .filter(|server| matches!(server.scheme(), "http" | "https"))
+                .map(|server| server.origin().ascii_serialization());
             endpoints.push(ParsedEndpoint {
+                origin,
                 source_operation_id,
                 name,
                 description,

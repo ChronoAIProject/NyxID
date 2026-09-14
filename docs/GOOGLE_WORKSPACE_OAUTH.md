@@ -18,12 +18,13 @@ Drive, Gmail, Docs, Sheets, or Slides connections.
 | Google Slides | `api-google-slides` | `drive` |
 
 The full API scope prefix is `https://www.googleapis.com/auth/`. All seven also
-request `openid email profile`. Workspace bundles Drive, Calendar,
-and Gmail; Google does not have a single Workspace OAuth scope. Workspace and
+request `openid email profile`. Workspace bundles Drive, Calendar, Gmail,
+and, after multi-origin activation, Docs, Sheets, and Slides; Google does not have a single Workspace OAuth scope. Workspace and
 Gmail require `gmail.send` for sending and replying. It is selected and locked in
 the permission picker. Both custom and managed OAuth requests must include it,
 and Google must return it in the granted scopes before authorization completes.
-Native Docs/Sheets/Slides editing uses the three separate services below.
+Native Docs/Sheets/Slides editing is available through the three separate services
+and through Workspace after the multi-origin activation described below.
 Workspace administration remains outside this bundle.
 
 Gmail access is limited to `gmail.readonly` and `gmail.send`. NyxID does not
@@ -96,7 +97,8 @@ provider; creating a sign-in client alone does not provision managed services.
 ## NyxID Setup
 
 1. Startup seeds the seven service rows and their operation catalogs. This
-   addition creates Docs, Sheets, and Slides catalog entries only. Existing
+   product addition creates Docs, Sheets, and Slides catalog entries. Workspace
+   receives the same editor operations when its temporary activation gate is enabled. Existing
    Google service IDs, slugs, endpoints, credentials, agent bindings, node
    configuration, resource URIs, grants, and audit/billing identities stay in
    place. Repeated startup does not duplicate entries. Legacy Google token
@@ -144,9 +146,11 @@ upgrade an existing token.
 
 ## Docs, Sheets, and Slides operations
 
-Each service has one origin. Existing `api-google`, Drive, Calendar, Gmail, and
-Workspace operations retain their original paths and request contracts; none
-are retargeted to these hosts. Connect each desired editor product explicitly.
+Each separate editor service has one origin. Workspace also exposes these
+operations after multi-origin activation. Existing `api-google`, Drive, Calendar,
+Gmail, and Workspace operations retain their original paths and request contracts;
+none are retargeted to these hosts. Connect Workspace or each desired editor
+product according to the required scope.
 Native `documents`, `spreadsheets`, and `presentations` OAuth scopes are not added:
 full `drive` already authorizes every published operation, subject to the user's
 file permissions. The permission picker also allows `drive.file` (app-authorized
@@ -283,8 +287,9 @@ rewritten to complete the rollout.
   `POST /gmail/v1/users/me/messages/send`. To reply, also set `threadId` in the
   JSON body and include matching `Subject`, `In-Reply-To`, and `References`
   MIME headers. Sending creates the outgoing message in Gmail's Sent folder.
-- Workspace: the same Drive, Calendar, and Gmail operations work through the
-  Workspace service. Its hosted OpenAPI document combines their definitions.
+- Workspace: the same Drive, Calendar, Gmail, and activated Docs/Sheets/Slides
+  operations work through the Workspace service. Its hosted OpenAPI document
+  combines their definitions and publishes the editor origins at path level.
 - Verify token refresh after access-token expiry. Live Google consent and
   refresh require a configured client and test account; local tests use
   synthetic credentials and do not establish Google production readiness.
@@ -309,3 +314,96 @@ References: [Google web-server OAuth](https://developers.google.com/identity/pro
 [Calendar scopes](https://developers.google.com/workspace/calendar/api/auth),
 [Gmail scopes](https://developers.google.com/workspace/gmail/api/auth/scopes),
 [Gmail threads and replies](https://developers.google.com/workspace/gmail/api/guides/threads).
+
+## Workspace multi-origin routing
+
+`api-google-workspace` adds the same 13 editor operations as the separate Docs, Sheets, and Slides services. Those three services remain available. The public spec at `/api/v1/catalog-specs/google-workspace/openapi.json` contains 38 operations. Its root server remains `https://www.googleapis.com`; editor path items copy the product overlays' root servers. OpenAPI operation > path > root precedence identifies each destination without a vendor extension. Composition leaves the source overlays unchanged.
+
+### Multi-origin design and decisions
+
+The catalog owns `destination_targets`, mapping stable IDs (`docs`, `sheets`, `slides`) to exact
+normalized HTTPS origins. Google recipients are explicitly limited to `docs.googleapis.com`,
+`sheets.googleapis.com`, and `slides.googleapis.com`, on port 443. Endpoint and policy `target_id`
+fields select only entries in the parent's map. Only in-tree overlays can supply routing origins;
+remote and instance specs cannot expand or select destinations. HTTPS is required for all new
+destination maps, including custom admin maps. Services without a map retain their existing behavior.
+
+The endpoint selector is a top-level field because older endpoint writers replace `parameters`
+wholesale. Those writers leave the independent target field intact. Absent selectors and empty maps
+are omitted from serialization; endpoint contract and catalog digests include a target only when
+present. Existing operation contracts, positive generations, identifiers, grants, resource URIs,
+connections, keys, agent bindings, node configuration, billing attribution, and audit identities are
+preserved.
+
+REST, generic MCP, typed MCP, and every exact-approval resolution mode select the operation's origin
+before dispatch or execution-authority hashing. The existing destination URL field binds the origin;
+execution consumes and revalidates that resolved target without retargeting it. The real v1 and v2
+policy projections retain their original shapes. The whole-catalog and exact-view fences have no
+special compatibility variant for the added operations: adding operations changes the catalog view
+that a human approved. Durable grants bind the endpoint contract, so existing operation grants remain
+valid. The narrow Discord metadata projection is unchanged. Nested execution futures are boxed to
+bound the size of enclosing async state machines without changing execution order or stack settings.
+
+Selected operations require effective bearer injection. Google keeps its stored service
+`auth_method: none` and provider requirement `injection_method: bearer`; changing those stored values
+would change existing connection contracts. Agent credential overrides are checked against the same
+provider and map recipients at binding creation and before selected execution. Token-exchange
+services cannot have destination maps because their exchange configuration can use the destination
+URL when minting a credential.
+
+Selected HTTP requests use dedicated backend and node clients that do not follow redirects. This
+prevents an injected custom header, query credential, or body from reaching a redirect recipient
+without authorization for that hop. Existing services keep their redirect behavior. Selected routes
+reject WebSocket upgrades on direct and node paths; Docs, Sheets, and Slides targets are HTTP-only.
+Specialized transports, including the ChatGPT transport, cannot replace a selected destination.
+
+Nodes must advertise `http_signature_v2`. The versioned HTTP signature binds service ID/slug, target
+ID, normalized origin, timestamp, nonce, method, path, query, and body. Capability checks run before
+dispatch markers and again against the owning live socket. Cross-replica checks use capability
+metadata in the existing ephemeral connection-owner record, without migrating node configuration or
+credential identity. An incompatible node fails closed with code 8013,
+`node_http_signature_unsupported`. The node executor rejects a missing or empty selected origin with
+HTTP 502 and reason `target_base_url_missing`, before any fallback to a locally configured URL; the
+v2 verifier independently requires a normalized HTTPS origin. Non-target calls retain the legacy
+wire format and signature behavior.
+
+Served instance specs rewrite the proxy root and remove nested server overrides. A cycle-safe queue
+follows local Path Item, Callback, Response, and Link references without expansion or external
+fetches. External references to those routing objects are omitted in place with
+`x-nyxid-omitted-external-ref` and a reason; the rest of the document keeps serving. Links with an
+external `operationRef` are also omitted. Local and `operationId` links keep their other metadata
+with the `server` override stripped. Omitted inline Responses retain a fixed description, as required
+by OpenAPI. Ordinary schema references, including external schemas, remain untouched.
+
+Omission closes routing pointers that could direct a rich client past the proxy. Rejecting the whole
+spec would instead change instance/template fallback behavior. These external routing references
+never produced NyxID endpoint rows or tools. An operation whose response is omitted remains in the
+served spec, and its template tools remain available. Serving the rewritten document changes neither
+the cached parser input nor instance/template catalog precedence.
+
+Cache inputs receive the resolved origin so different targets cannot collide. Billing remains
+service-keyed. Target dispatch, completion, and denial events use the existing chained audit append
+path and record the stable target ID and sanitized origin as metadata.
+
+The hosted spec always publishes 38 operations. A temporary, off-by-default writer gate orders
+readers before activation writes while keeping spec composition independent of database access.
+Before activation, editor calls return actionable HTTP 503/code 12100,
+`workspace_destinations_not_activated`; this rollout state is excluded from proxy-fault telemetry.
+Activation uses a known-default compare-and-set so administrator changes are preserved. A skipped
+activation with an empty map logs the first failed precondition at warning level; skipped metadata
+updates log at debug level. The activation order and gate removal condition are below.
+
+This design retains the separate product services and source overlays, and requires no credential or
+identity migration or billing redesign. Token-exchange targets, selected WebSocket support, and
+redirect-hop reauthorization are outside its scope.
+
+### Activation order and approval window
+
+1. Deploy the new backend readers everywhere with `GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED=false` (the default). No editor endpoints activate just by deploying. The hosted spec is already 38 operations; editor calls return actionable HTTP 503/code 12100, `workspace_destinations_not_activated`, during this short operator-controlled window.
+2. Upgrade every node used by Workspace, including failover candidates, and verify it advertises HTTP signature v2. Old nodes continue handling non-target operations.
+3. Set `GOOGLE_WORKSPACE_MULTI_ORIGIN_ENABLED=true` and restart a backend writer. Startup compare-and-sets only the known default Workspace policy plus absent/empty map, then additively inserts the 13 endpoint rows. Check the materialized catalog has 38 endpoints and the three targets. An admin-edited policy/map requires an explicit administrator decision; startup never overwrites it. When activation is skipped with an empty map, startup warns with the first failed precondition name; skipped description/limitation updates are logged at debug level.
+4. Leave the gate enabled. It is idempotent and safe on subsequent restarts; disabling it does not reverse persisted activation. Remove this temporary gate once all environments have activated.
+
+Approvals pending at activation may require one re-approval. The exact-approval lifetime defaults to 30 seconds and API settings allow at most 300 seconds, so this affects at most five minutes of outstanding API-configured approvals. The whole-catalog fence remains unchanged: if a caller's visible catalog includes Workspace, its new operations can cause `catalog_drift` on a pending exact approval for any service in that catalog. Workspace policy changes also cause `execution_authority_drift` for pending approvals carrying an execution digest; catalog drift is checked first and takes precedence when both changed. Rows predating the execution digest still enforce the catalog fence. Observation reports live drift only after human approval; a request still awaiting the human decision remains pending. Redemption enforces the same fences before provider effects. Durable operation grants bind the endpoint contract, not the catalog or union policy, and existing endpoint grants remain valid. Ordinary connection-level approvals do not gain an exact-catalog fence. Direct database edits to approval timeouts outside the supported API limits can extend the window.
+
+An old backend replica ignores top-level `target_id` and the policy's new target field. It matches a Docs path by method/template and sends it to the legacy `www.googleapis.com` base, where Google returns 404. This degraded request remains within the same Google provider; no credential crosses providers. That same-provider fact is the only reason this is tolerable as a rollback/mixed-version failure mode. A non-Google multi-target rollout requires a gate that excludes old readers before any target metadata is published. The supported order above upgrades readers first. Old startup endpoint writers do not remove the independent top-level target field when replacing `parameters`.

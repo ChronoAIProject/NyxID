@@ -173,6 +173,12 @@ async fn create_binding_with_scope_authorization_inner(
                     .ok_or_else(|| {
                         AppError::NotFound("External credential not found".to_string())
                     })?;
+                super::destination_routing::validate_override_recipient(
+                    &db,
+                    &user_service_id,
+                    &credential,
+                )
+                .await?;
                 if credential.status != "active" {
                     return Err(AppError::ValidationError(format!(
                         "credential is not active (status: {})",

@@ -187,14 +187,162 @@ pub async fn fetch_downstream_openapi_spec(
     let mut spec = Arc::unwrap_or_clone(cached);
     let base = proxy_base_url.trim_end_matches('/');
     let proxy_url = format!("{base}/api/v1/proxy/{}/", service.id);
-    spec["servers"] = serde_json::json!([{
-        "url": proxy_url,
-        "description": "NyxID authenticated proxy"
-    }]);
+    rewrite_openapi_servers(&mut spec, &proxy_url);
     spec["x-nyxid-service-id"] = serde_json::Value::String(service.id.clone());
     spec["x-nyxid-service-slug"] = serde_json::Value::String(service.slug.clone());
 
     Ok(spec)
+}
+
+/// Rewrite routing objects, including local references, without dereferencing schemas.
+/// External routing references never produced NyxID tools; serve an annotated
+/// omission instead of exposing a reference that could bypass the proxy.
+pub(crate) fn rewrite_openapi_servers(spec: &mut serde_json::Value, proxy_url: &str) {
+    use std::collections::{HashSet, VecDeque};
+    #[derive(Clone, Copy, Hash, PartialEq, Eq)]
+    enum Kind {
+        PathItem,
+        Callback,
+        Response,
+        Link,
+    }
+    fn child_pointer(parent: &str, key: &str) -> String {
+        format!("{parent}/{}", key.replace('~', "~0").replace('/', "~1"))
+    }
+    fn enqueue_entries(
+        spec: &serde_json::Value,
+        pointer: &str,
+        kind: Kind,
+        pending: &mut VecDeque<(String, Kind)>,
+    ) {
+        if let Some(entries) = spec.pointer(pointer).and_then(serde_json::Value::as_object) {
+            pending.extend(
+                entries
+                    .keys()
+                    .filter(|key| pointer != "/paths" || !key.starts_with("x-"))
+                    .map(|key| (child_pointer(pointer, key), kind)),
+            );
+        }
+    }
+    let mut pending = VecDeque::new();
+    for pointer in ["/paths", "/webhooks", "/components/pathItems"] {
+        enqueue_entries(spec, pointer, Kind::PathItem, &mut pending);
+    }
+    enqueue_entries(spec, "/components/callbacks", Kind::Callback, &mut pending);
+    enqueue_entries(spec, "/components/responses", Kind::Response, &mut pending);
+    enqueue_entries(spec, "/components/links", Kind::Link, &mut pending);
+    // References stay local pointers, so shared/cyclic definitions do not
+    // expand the document or recurse on the thread stack.
+    let mut visited = HashSet::new();
+    while let Some((pointer, kind)) = pending.pop_front() {
+        if !visited.insert((pointer.clone(), kind)) {
+            continue;
+        }
+        let Some(value) = spec.pointer_mut(&pointer) else {
+            continue;
+        };
+        if let Some(reference) = value.get("$ref") {
+            if let Some(local) = reference
+                .as_str()
+                .and_then(|reference| reference.strip_prefix("#/"))
+            {
+                if let Ok(decoded) = urlencoding::decode(local) {
+                    pending.push_back((format!("/{decoded}"), kind));
+                }
+            } else {
+                let reason = match kind {
+                    Kind::Link => "external link reference is not served through the proxy",
+                    Kind::Response => "external response reference is not served through the proxy",
+                    _ => "external routing reference is not served through the proxy",
+                };
+                *value = serde_json::json!({"x-nyxid-omitted-external-ref": {
+                    "reason": reason
+                }});
+                if kind == Kind::Response {
+                    // A served inline Response Object requires a description.
+                    value["description"] =
+                        "External response documentation omitted by NyxID".into();
+                }
+                tracing::info!("Omitted external OpenAPI routing reference from proxied spec");
+                continue;
+            }
+        }
+        let Some(object) = value.as_object_mut() else {
+            continue;
+        };
+        match kind {
+            Kind::PathItem => {
+                object.remove("servers");
+                for method in [
+                    "get", "put", "post", "delete", "patch", "head", "options", "trace",
+                ] {
+                    if let Some(operation) = object
+                        .get_mut(method)
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        operation.remove("servers");
+                        if let Some(responses) = operation
+                            .get("responses")
+                            .and_then(serde_json::Value::as_object)
+                        {
+                            let parent = format!("{pointer}/{method}/responses");
+                            pending.extend(
+                                responses
+                                    .keys()
+                                    .filter(|key| !key.starts_with("x-"))
+                                    .map(|key| (child_pointer(&parent, key), Kind::Response)),
+                            );
+                        }
+                        if let Some(callbacks) = operation
+                            .get("callbacks")
+                            .and_then(serde_json::Value::as_object)
+                        {
+                            let parent = format!("{pointer}/{method}/callbacks");
+                            pending.extend(
+                                callbacks
+                                    .keys()
+                                    .map(|key| (child_pointer(&parent, key), Kind::Callback)),
+                            );
+                        }
+                    }
+                }
+            }
+            Kind::Callback => {
+                pending.extend(
+                    object
+                        .keys()
+                        .filter(|key| key.as_str() != "$ref" && !key.starts_with("x-"))
+                        .map(|key| (child_pointer(&pointer, key), Kind::PathItem)),
+                );
+            }
+            Kind::Response => {
+                if let Some(links) = object.get("links").and_then(serde_json::Value::as_object) {
+                    let parent = format!("{pointer}/links");
+                    pending.extend(
+                        links
+                            .keys()
+                            .map(|key| (child_pointer(&parent, key), Kind::Link)),
+                    );
+                }
+            }
+            Kind::Link => {
+                if object.get("operationRef").is_some_and(|reference| {
+                    reference
+                        .as_str()
+                        .is_none_or(|reference| !reference.starts_with("#/"))
+                }) {
+                    *value = serde_json::json!({"x-nyxid-omitted-external-ref": {
+                        "reason":"external link reference is not served through the proxy"
+                    }});
+                    tracing::info!("Omitted external OpenAPI link reference from proxied spec");
+                } else {
+                    object.remove("server");
+                }
+            }
+        }
+    }
+    spec["servers"] =
+        serde_json::json!([{ "url": proxy_url, "description": "NyxID authenticated proxy" }]);
 }
 
 pub async fn fetch_downstream_asyncapi_spec(

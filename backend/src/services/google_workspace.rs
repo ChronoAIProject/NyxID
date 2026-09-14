@@ -148,11 +148,30 @@ impl GoogleProduct {
                     .into_iter()
                     .filter(move |method| item.get(*method).is_some())
                     .map(move |method| {
-                        super::proxy_authorization::rule_from_endpoint(
+                        let mut rule = super::proxy_authorization::rule_from_endpoint(
                             method,
                             path,
                             item[method].get("parameters"),
-                        )
+                        )?;
+                        if self == Self::Workspace
+                            && let Some(origin) = item
+                                .get("servers")
+                                .and_then(|servers| servers[0]["url"].as_str())
+                        {
+                            rule.target_id = Some(
+                                super::destination_routing::workspace_targets()
+                                    .into_iter()
+                                    .find(|(_, allowed)| allowed == origin)
+                                    .map(|(id, _)| id)
+                                    .ok_or_else(|| {
+                                        AppError::Internal(
+                                            "Workspace overlay origin is not an allowed recipient"
+                                                .into(),
+                                        )
+                                    })?,
+                            );
+                        }
+                        Ok(rule)
                     })
             })
             .collect::<AppResult<Vec<_>>>()?;

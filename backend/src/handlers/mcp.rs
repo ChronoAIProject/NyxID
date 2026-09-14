@@ -285,6 +285,7 @@ mod tests {
     #[test]
     fn rest_and_mcp_tool_generation_share_the_same_operation_set() {
         let services = vec![McpToolService {
+            workspace_destinations_pending: false,
             service_id: "user-service-1".to_string(),
             service_name: "Example".to_string(),
             service_slug: "example".to_string(),
@@ -292,6 +293,7 @@ mod tests {
             service_category: "user_service".to_string(),
             recommended_skills: Vec::new(),
             endpoints: vec![McpToolEndpoint {
+                target_id: None,
                 endpoint_id: "endpoint-1".to_string(),
                 name: "get_item".to_string(),
                 description: None,

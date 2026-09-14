@@ -129,8 +129,21 @@ pub fn normalize_policy(policy: ProxyOperationPolicy) -> AppResult<ProxyOperatio
             )));
         }
         validate_rule(&rule)?;
+        if let Some(id) = &rule.target_id {
+            super::destination_routing::validate_target_id(id)?;
+        }
+        if rules.iter().any(|existing: &ProxyOperationRule| {
+            existing.method == method
+                && existing.path_template == rule.path_template
+                && existing.target_id != rule.target_id
+        }) {
+            return Err(AppError::ValidationError(
+                "Identical operations may not select different targets".into(),
+            ));
+        }
         rules.push(ProxyOperationRule {
             method,
+            target_id: rule.target_id,
             path_template: rule.path_template,
             path_parameter_constraints: rule.path_parameter_constraints,
         });

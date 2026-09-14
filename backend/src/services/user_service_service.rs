@@ -2200,6 +2200,7 @@ mod tests {
     ) -> DownstreamService {
         let now = Utc::now();
         DownstreamService {
+            destination_targets: Default::default(),
             id: service_id.to_string(),
             name: slug.to_string(),
             slug: slug.to_string(),

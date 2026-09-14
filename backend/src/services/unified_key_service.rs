@@ -1385,6 +1385,7 @@ async fn create_key_inner(
         let empty_credential = encryption_keys.encrypt(b"").await?;
         let internal_ds_slug = format!("_ssh_{ds_id}");
         let ds = DownstreamService {
+            destination_targets: Default::default(),
             id: ds_id.clone(),
             name: label.to_string(),
             // New SSH rows keep an internal UUID-derived backing slug so the
@@ -4546,6 +4547,7 @@ mod tests {
 
     fn sample_catalog_service() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
             id: "cat-1".to_string(),
             name: "Catalog".to_string(),
             slug: "catalog".to_string(),

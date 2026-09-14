@@ -867,6 +867,8 @@ pub async fn gateway_request(
         // M-5: Google AI uses OpenAI-compatible format but at a different base URL.
         // No body translation needed, but the base URL must be overridden.
         Some(base) => proxy_service::ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base.to_string(),
             auth_method: target.auth_method,
             auth_key_name: target.auth_key_name,

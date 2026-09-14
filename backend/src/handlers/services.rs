@@ -37,6 +37,8 @@ use super::services_helpers::{
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateServiceRequest {
+    #[serde(default)]
+    pub destination_targets: std::collections::BTreeMap<String, String>,
     pub name: String,
     pub slug: Option<String>,
     pub description: Option<String>,
@@ -138,6 +140,8 @@ pub struct SshServiceConfigResponse {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct ServiceResponse {
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub destination_targets: std::collections::BTreeMap<String, String>,
     pub id: String,
     pub name: String,
     pub slug: String,
@@ -249,6 +253,7 @@ pub struct ResyncIdentityResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateServiceRequest {
+    pub destination_targets: Option<std::collections::BTreeMap<String, String>>,
     pub name: Option<String>,
     pub description: Option<String>,
     pub base_url: Option<String>,
@@ -1110,7 +1115,15 @@ pub async fn create_service(
     }
     validate_service_billing(body.billing.as_ref())?;
 
+    let destination_targets = crate::services::destination_routing::normalize_targets(
+        &slug,
+        &auth_method,
+        &service_type,
+        body.destination_targets.clone(),
+        proxy_operation_policy.as_ref(),
+    )?;
     let new_service = DownstreamService {
+        destination_targets,
         id: id.clone(),
         name: body.name.clone(),
         slug: slug.clone(),
@@ -1384,6 +1397,9 @@ pub async fn update_service(
 ) -> AppResult<Json<ServiceResponse>> {
     let service = fetch_service(&state, &service_id).await?;
     require_admin_or_creator(&state, &auth_user, &service.created_by).await?;
+    if body.destination_targets.is_some() {
+        require_admin(&state, &auth_user).await?;
+    }
     let is_platform_vendor = catalog_spec_sync::is_platform_vendor_service(&service);
     if is_platform_vendor && (body.openapi_spec_url.is_some() || body.asyncapi_spec_url.is_some()) {
         return Err(AppError::BadRequest(
@@ -1926,6 +1942,33 @@ pub async fn update_service(
         );
     }
 
+    let destination_auth = if body
+        .destination_targets
+        .as_ref()
+        .is_some_and(|targets| !targets.is_empty())
+        || !service.destination_targets.is_empty()
+    {
+        crate::services::destination_routing::effective_catalog_auth(&state.db, &service).await?
+    } else {
+        service.auth_method.clone()
+    };
+    let next_targets = crate::services::destination_routing::normalize_targets(
+        &service.slug,
+        &destination_auth,
+        &service.service_type,
+        body.destination_targets
+            .clone()
+            .unwrap_or_else(|| service.destination_targets.clone()),
+        body.proxy_operation_policy
+            .as_ref()
+            .or(service.proxy_operation_policy.as_ref()),
+    )?;
+    if body.destination_targets.is_some() {
+        set_doc.insert(
+            "destination_targets",
+            bson::to_bson(&next_targets).map_err(|error| AppError::Internal(error.to_string()))?,
+        );
+    }
     if let Some(policy) = body.proxy_operation_policy.clone() {
         let normalized = crate::services::proxy_authorization::normalize_policy(policy)?;
         set_doc.insert(
@@ -2515,6 +2558,50 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use uuid::Uuid;
 
+    #[tokio::test]
+    async fn workspace_admin_writes_reject_unsafe_destination_recipients() {
+        let db = connect_test_database("workspace_admin_targets")
+            .await
+            .unwrap();
+        crate::services::destination_routing::tests::seed(&db, false).await;
+        let owner = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let service = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! {"slug":"api-google-workspace"})
+            .await
+            .unwrap()
+            .unwrap();
+        for origin in [
+            "http://docs.googleapis.com",
+            "https://outside.test",
+            "https://evil.googleapis.com",
+        ] {
+            let body: super::UpdateServiceRequest =
+                serde_json::from_value(serde_json::json!({"destination_targets":{"docs":origin}}))
+                    .unwrap();
+            let error = super::update_service(
+                State(state.clone()),
+                test_auth_user(&owner),
+                Default::default(),
+                Path(service.id.clone()),
+                Json(body),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(error, AppError::ValidationError(_)), "{error:?}");
+        }
+        assert!(
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .find_one(doc! {"_id":service.id})
+                .await
+                .unwrap()
+                .unwrap()
+                .destination_targets
+                .is_empty()
+        );
+    }
+
     #[derive(Default)]
     struct PriceRemovalLago {
         removals: AtomicUsize,
@@ -2625,6 +2712,7 @@ mod tests {
         base_url: String,
     ) -> CreateServiceRequest {
         CreateServiceRequest {
+            destination_targets: Default::default(),
             name: name.to_string(),
             slug: Some(slug.to_string()),
             description: None,

@@ -205,6 +205,7 @@ mod tests {
 
     fn safe_anonymous_service() -> DownstreamService {
         DownstreamService {
+            destination_targets: Default::default(),
             id: Uuid::new_v4().to_string(),
             name: "Public Catalog".to_string(),
             slug: "public-catalog".to_string(),

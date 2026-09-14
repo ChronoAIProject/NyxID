@@ -750,6 +750,7 @@ mod tests {
     #[test]
     fn parsed_endpoint_to_response_maps_all_fields() {
         let parsed = openapi_parser::ParsedEndpoint {
+            origin: None,
             source_operation_id: Some("list_users".into()),
             name: "list_users".into(),
             description: Some("List all users".into()),
@@ -775,6 +776,7 @@ mod tests {
     #[test]
     fn parsed_endpoint_to_response_with_body() {
         let parsed = openapi_parser::ParsedEndpoint {
+            origin: None,
             source_operation_id: Some("create_user".into()),
             name: "create_user".into(),
             description: None,

@@ -66,8 +66,10 @@ fn proxy_error_telemetry_fields(err: &AppError) -> (u16, u32) {
         AppError::DurableOperationConflict => (409, 9015),
         AppError::DurableOperationOutcomeUncertain => (409, 9016),
         AppError::NodeCredentialMissing(_) => (502, 8004),
+        AppError::NodeHttpSignatureUnsupported => (502, 8013),
         AppError::WsProxyDownstream(_) => (502, 8005),
         AppError::ClientDisconnected => (499, 8012),
+        AppError::WorkspaceDestinationsNotActivated => (503, 12100),
         AppError::ApiKeyScopeForbidden(_) => (403, 9000),
         AppError::ApiKeyScopeInactive => (403, 9001),
         AppError::ApiKeyScopeNotFound(_) => (404, 9002),
@@ -91,6 +93,10 @@ fn emit_proxy_error_telemetry(
     resolved_slug: &str,
     err: &AppError,
 ) {
+    // Expected, operator-controlled rollout state is not a proxy server fault.
+    if matches!(err, AppError::WorkspaceDestinationsNotActivated) {
+        return;
+    }
     let (status, error_code) = proxy_error_telemetry_fields(err);
     emit_event(
         state.telemetry.as_deref(),
@@ -1010,7 +1016,7 @@ async fn proxy_request_inner(
                     resolved.pool_selection.as_ref(),
                 );
             }
-            return execute_proxy_inner(
+            return Box::pin(execute_proxy_inner(
                 state,
                 auth_user,
                 &effective_service_id,
@@ -1033,7 +1039,7 @@ async fn proxy_request_inner(
                 TargetMode::CallerAddressed,
                 Vec::new(),
                 resolved_slug,
-            )
+            ))
             .await;
         }
         return Err(AppError::NotFound(format!(
@@ -1075,7 +1081,7 @@ async fn proxy_request_inner(
                 resolved.pool_selection.as_ref(),
             );
         }
-        return execute_proxy_inner(
+        return Box::pin(execute_proxy_inner(
             state,
             auth_user,
             &effective_service_id,
@@ -1098,7 +1104,7 @@ async fn proxy_request_inner(
             TargetMode::CallerAddressed,
             Vec::new(),
             resolved_slug,
-        )
+        ))
         .await;
     }
 
@@ -1186,6 +1192,8 @@ pub async fn proxy_request_by_slug(
     result
 }
 
+// Box the shared execution future at each dispatch arm, as the UUID path does,
+// to bound stack growth when the router constructs nested handler futures.
 async fn proxy_request_by_slug_inner(
     state: &AppState,
     auth_user: &AuthUser,
@@ -1247,7 +1255,7 @@ async fn proxy_request_by_slug_inner(
                     resolved.pool_selection.as_ref(),
                 );
             }
-            return execute_proxy_inner(
+            return Box::pin(execute_proxy_inner(
                 state,
                 auth_user,
                 &effective_service_id,
@@ -1270,7 +1278,7 @@ async fn proxy_request_by_slug_inner(
                 TargetMode::CallerAddressed,
                 Vec::new(),
                 resolved_slug,
-            )
+            ))
             .await;
         }
         return Err(AppError::NotFound(format!(
@@ -1312,7 +1320,7 @@ async fn proxy_request_by_slug_inner(
                 resolved.pool_selection.as_ref(),
             );
         }
-        return execute_proxy_inner(
+        return Box::pin(execute_proxy_inner(
             state,
             auth_user,
             &effective_service_id,
@@ -1335,7 +1343,7 @@ async fn proxy_request_by_slug_inner(
             TargetMode::CallerAddressed,
             Vec::new(),
             resolved_slug,
-        )
+        ))
         .await;
     }
 
@@ -1960,6 +1968,33 @@ async fn execute_proxy_inner(
             return Err(err);
         }
 
+        if !pre.target.service.destination_targets.is_empty() {
+            let canonical =
+                crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
+            crate::services::destination_routing::resolve_target(
+                &mut pre.target,
+                request.method().as_str(),
+                &canonical,
+                None,
+            )?;
+        }
+        let mut override_audit = crate::services::destination_routing::DestinationAudit::new(
+            &state.db,
+            audit_service::AuditActor::from_auth_user(auth_user),
+            &pre.target,
+        );
+        if let (Some(api_key_id), Some(user_service_id)) =
+            (&auth_user.api_key_id, &pre.user_service_id)
+        {
+            crate::services::destination_routing::validate_selected_override(
+                &state.db,
+                &user_id_str,
+                api_key_id,
+                user_service_id,
+                &pre.target,
+            )
+            .await?;
+        }
         // Per-agent credential override: if this request is via an API key and
         // the user has bound a different credential for this service, swap it in.
         if let (Some(ak_id), Some(us_id)) = (&auth_user.api_key_id, &pre.user_service_id)
@@ -1977,6 +2012,7 @@ async fn execute_proxy_inner(
             agent_override_applied = true;
         }
 
+        override_audit.dismiss();
         let required = pre.node_id.is_some();
         let catalog_service_slug = pre.catalog_service_slug;
         (
@@ -2069,20 +2105,29 @@ async fn execute_proxy_inner(
     // REST method/path before approval, billing, credential injection, node
     // transport, or forwarding. Rows without a policy retain the legacy path
     // bytes and behavior unchanged.
-    let canonical_forward_path = if target.service.proxy_operation_policy.is_some() {
+    let canonical_forward_path = if target.service.proxy_operation_policy.is_some()
+        || !target.service.destination_targets.is_empty()
+    {
         let canonical_path =
             crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
-        Some(
-            crate::services::proxy_authorization::authorize_proxy_operation(
-                &target.service,
-                request.method().as_str(),
-                &canonical_path,
-            )?,
-        )
+        Some(crate::services::destination_routing::resolve_target(
+            &mut target,
+            request.method().as_str(),
+            &canonical_path,
+            None,
+        )?)
     } else {
         None
     };
     let path = canonical_forward_path.as_deref().unwrap_or(path);
+    let mut destination_audit = crate::services::destination_routing::DestinationAudit::new(
+        &state.db,
+        audit_service::AuditActor::from_auth_user(auth_user),
+        &target,
+    );
+    if is_ws_upgrade_request(&request) {
+        crate::services::destination_routing::reject_websocket(&target)?;
+    }
 
     // Billing is metadata-only and must never change proxy resolution
     // behavior. Resolve the billing owner using the SAME identity the proxy
@@ -2727,6 +2772,12 @@ async fn execute_proxy_inner(
     // node_route was resolved earlier (before credential check) to allow node-backed
     // users to bypass credential requirements.
     if let Some(node_route) = node_route {
+        crate::services::destination_routing::validate_node_outbound_destination(
+            &target,
+            method.as_str(),
+            path,
+            &delegated,
+        )?;
         let mut node_delegated = delegated.clone();
         proxy_service::extend_with_path_credential(&mut node_delegated, &target);
         let prepared =
@@ -2760,6 +2811,7 @@ async fn execute_proxy_inner(
 
         // Build base node request (will be cloned for failover retries)
         let node_request = NodeProxyRequest {
+            target_id: target.target_id.clone(),
             request_id: uuid::Uuid::new_v4().to_string(),
             service_id: service_id.to_string(),
             service_slug: target.service.slug.clone(),
@@ -2824,7 +2876,24 @@ async fn execute_proxy_inner(
                 None
             };
 
+            if target.target_id.is_some()
+                && let Err(error) = state
+                    .node_ws_manager
+                    .require_http_signature_v2(node_id, signing_secret.is_some())
+                    .await
+            {
+                if let Some(reservation) = durable_reservation.as_ref() {
+                    durable_operation_grant_service::mark_pre_dispatch_rejected(
+                        &state.db,
+                        reservation,
+                        "node lacks HTTP destination signature v2",
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
             let start = std::time::Instant::now();
+            destination_audit.dispatch();
             if let Err(error) = state.billing.mark_forwarded(&metered).await {
                 if let Some(reservation) = durable_reservation.as_ref() {
                     durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -3121,12 +3190,16 @@ async fn execute_proxy_inner(
                         .await;
                     }
 
+                    destination_audit.complete(response.status().as_u16());
                     return Ok(response);
                 }
                 Err(NodeProxyFailure {
                     error: err @ AppError::NodeCredentialMissing(_),
                     dispatched,
                 }) => {
+                    if !dispatched {
+                        destination_audit.denied();
+                    }
                     had_dispatched_failure |= dispatched;
                     // A different fallback node may have the credential
                     // configured locally, so we still try the rest of
@@ -3177,6 +3250,9 @@ async fn execute_proxy_inner(
                     error: err @ (AppError::NodeOffline(_) | AppError::NodeProxyTimeout),
                     dispatched,
                 }) => {
+                    if !dispatched {
+                        destination_audit.denied();
+                    }
                     had_dispatched_failure |= dispatched;
                     // Record error metrics (fire-and-forget)
                     let db_clone = state.db.clone();
@@ -3223,6 +3299,22 @@ async fn execute_proxy_inner(
                         error: e,
                         dispatched,
                     } = failure;
+                    if !dispatched {
+                        destination_audit.denied();
+                        if target.target_id.is_some()
+                            && matches!(e, AppError::NodeHttpSignatureUnsupported)
+                        {
+                            if let Some(reservation) = durable_reservation.as_ref() {
+                                durable_operation_grant_service::mark_pre_dispatch_rejected(
+                                    &state.db,
+                                    reservation,
+                                    "node lost HTTP destination signature v2 before dispatch",
+                                )
+                                .await;
+                            }
+                            return Err(e);
+                        }
+                    }
                     if let Some(reservation) = durable_reservation.as_ref() {
                         finish_durable_operation(
                             state,
@@ -3343,6 +3435,7 @@ async fn execute_proxy_inner(
     let is_codex = target.service.slug == "llm-openai-codex";
 
     if is_codex
+        && target.target_id.is_none()
         && is_codex_transport_path(path)
         && let Some(body_ref) = body.as_ref()
     {
@@ -3388,6 +3481,7 @@ async fn execute_proxy_inner(
             model.clone(),
         );
 
+        destination_audit.dispatch();
         if let Err(error) = state.billing.mark_forwarded(&metered).await {
             if let Some(reservation) = durable_reservation.as_ref() {
                 durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -3501,10 +3595,12 @@ async fn execute_proxy_inner(
             .await;
         }
 
+        destination_audit.complete(response.status().as_u16());
         return Ok(response);
     }
 
     // Reuse the shared reqwest::Client from AppState for connection pooling.
+    destination_audit.dispatch();
     if let Err(error) = state.billing.mark_forwarded(&metered).await {
         if let Some(reservation) = durable_reservation.as_ref() {
             durable_operation_grant_service::mark_pre_dispatch_rejected(
@@ -4073,6 +4169,7 @@ async fn execute_proxy_inner(
         target.connection_id.as_deref(),
     );
 
+    destination_audit.complete(response.status().as_u16());
     Ok(response)
 }
 
@@ -5159,6 +5256,7 @@ async fn handle_ws_passthrough(
     metered: crate::services::billing::MeteredProxyContext,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<Response> {
+    crate::services::destination_routing::reject_websocket(target)?;
     let downstream_url = build_downstream_ws_url(target, path, query, delegated)?;
 
     let guard = state
@@ -5294,6 +5392,7 @@ async fn handle_ws_passthrough_via_node(
     metered: crate::services::billing::MeteredProxyContext,
     billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
 ) -> AppResult<Response> {
+    crate::services::destination_routing::reject_websocket(target)?;
     use crate::services::node_ws_manager::NodeWsProxyRequest;
 
     // Prepare headers for the node request (same as HTTP node proxy).
@@ -6845,8 +6944,10 @@ mod tests {
 
     use super::build_downstream_ws_url;
 
-    fn make_target(base_url: &str) -> proxy_service::ProxyTarget {
+    pub(super) fn make_target(base_url: &str) -> proxy_service::ProxyTarget {
         proxy_service::ProxyTarget {
+            workspace_destinations_pending: false,
+            target_id: None,
             base_url: base_url.to_string(),
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
@@ -8955,6 +9056,108 @@ mod proxy_resolution_integration_tests {
             .await
             .expect("insert org GCP SA key");
         api_key_id
+    }
+
+    #[tokio::test]
+    async fn workspace_proxy_future_size_budget() {
+        let db = connect_test_database("workspace_future_size")
+            .await
+            .unwrap();
+        let state = test_app_state(db);
+        let auth = crate::test_utils::test_auth_user(&Uuid::new_v4().to_string());
+        let mut slug = String::new();
+        let future = super::execute_proxy_inner(
+            &state,
+            &auth,
+            "service",
+            "/",
+            Request::new(Body::empty()),
+            None,
+            super::TargetMode::CallerAddressed,
+            Vec::new(),
+            &mut slug,
+        );
+        let size = std::mem::size_of_val(&future);
+        eprintln!("workspace execute_proxy_inner future bytes: {size}");
+        drop(future);
+        let future = super::proxy_request_by_slug_inner(
+            &state,
+            &auth,
+            "workspace",
+            "/",
+            Request::new(Body::empty()),
+            &mut slug,
+        );
+        let route_size = std::mem::size_of_val(&future);
+        eprintln!("workspace proxy_request_by_slug_inner future bytes: {route_size}");
+        // B originally grew this future to 35,560 bytes and overflowed the
+        // default test stack in the mounted billing route smoke test.
+        assert!(
+            route_size < 32 * 1024,
+            "proxy route future grew to {route_size} bytes"
+        );
+        drop(future);
+        let target = super::tests::make_target("https://example.com");
+        let future = crate::services::destination_routing::validate_selected_override(
+            &state.db, "user", "key", "service", &target,
+        );
+        eprintln!(
+            "workspace validate_selected_override future bytes: {}",
+            std::mem::size_of_val(&future)
+        );
+        let future = state
+            .node_ws_manager
+            .require_http_signature_v2("node", true);
+        eprintln!(
+            "workspace require_http_signature_v2 future bytes: {}",
+            std::mem::size_of_val(&future)
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_node_websocket_is_denied_without_dispatch_and_audits_target() {
+        use crate::services::destination_routing::tests::{connect, rest_call, seed};
+        let db = connect_test_database("workspace_node_ws").await.unwrap();
+        crate::services::audit_service::init_audit_chain_hmac_key(zeroize::Zeroizing::new(
+            [2u8; 32],
+        ));
+        seed(&db, true).await;
+        let owner = Uuid::new_v4().to_string();
+        let service = connect(&db, &owner, "api-google-workspace").await;
+        let state = test_app_state(db.clone());
+        let node = insert_online_node(&state, &owner, "Workspace node").await;
+        let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+        crate::test_utils::register_test_node_connection(&state, &node.id, tx).await;
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(doc! {"_id":&service.id}, doc! {"$set":{"node_id":&node.id}})
+            .await
+            .unwrap();
+        let error = rest_call(&state, &owner, &service.slug, "/v1/documents/doc", true)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error,AppError::BadRequest(ref message) if message == "Target-selected operations support HTTP only"),
+            "{error:?}"
+        );
+        assert!(rx.try_recv().is_err());
+        let mut audit = None;
+        for _ in 0..100 {
+            audit = db
+                .collection::<AuditLog>(crate::models::audit_log::COLLECTION_NAME)
+                .find_one(doc! {"user_id":&owner,"event_type":"proxy_target_denied"})
+                .await
+                .unwrap();
+            if audit.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let audit = audit.expect("chained target denial audit");
+        assert!(audit.seq.is_some());
+        let data = audit.event_data.unwrap();
+        assert_eq!(data["target_id"], "docs");
+        assert_eq!(data["destination_origin"], "https://docs.googleapis.com");
+        assert!(!data.to_string().contains("test-google-token"));
     }
 
     async fn insert_online_node(state: &AppState, owner_user_id: &str, name: &str) -> Node {
