@@ -1132,9 +1132,12 @@ async fn app_requirements_db_status_without_manifest_is_not_found_with_relevant_
     let error = status(State(f.state.clone()), f.auth.clone())
         .await
         .unwrap_err();
-    assert_eq!(error.status_code(), axum::http::StatusCode::NOT_FOUND);
     assert!(
-        matches!(error, AppError::NotFound(message) if message == "No published requirements for this app")
+        matches!(&error, AppError::NotFound(message) if message == "No published requirements for this app")
+    );
+    assert_eq!(
+        axum::response::IntoResponse::into_response(error).status(),
+        axum::http::StatusCode::NOT_FOUND,
     );
 }
 
