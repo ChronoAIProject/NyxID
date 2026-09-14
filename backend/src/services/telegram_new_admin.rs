@@ -184,18 +184,25 @@ impl TelegramNewService<'_> {
             &super::channel_adapters::telegram_new::credential_descriptor(),
         )
         .await?;
-        if let Some(token) = values.get(MANAGER_TOKEN) {
-            let webhook = self.api.call(token, "getWebhookInfo", json!({})).await?;
-            if webhook["url"] == self.manager_callback() {
-                self.api
-                    .call(
-                        token,
-                        "deleteWebhook",
-                        json!({"drop_pending_updates": false}),
-                    )
-                    .await?;
-            }
+        if let Some(token) = values.get(MANAGER_TOKEN)
+            && let Err(error) = self.remove_manager_webhook(token).await
+        {
+            tracing::warn!(%error, "Telegram manager webhook cleanup failed; clearing saved configuration");
         }
         credentials::delete(self.db, &credential_descriptor()).await
+    }
+
+    async fn remove_manager_webhook(&self, token: &str) -> AppResult<()> {
+        let webhook = self.api.call(token, "getWebhookInfo", json!({})).await?;
+        if webhook["url"] == self.manager_callback() {
+            self.api
+                .call(
+                    token,
+                    "deleteWebhook",
+                    json!({"drop_pending_updates": false}),
+                )
+                .await?;
+        }
+        Ok(())
     }
 }

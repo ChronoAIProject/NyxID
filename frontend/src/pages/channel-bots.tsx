@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
 import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
-import { TelegramNew } from "@/components/channels/telegram-new";
+import { TelegramSetupPage } from "@/pages/telegram-setup";
+import { useTelegramNewConfiguration } from "@/hooks/use-telegram-new";
 import { useWatch } from "react-hook-form";
 import { useAppForm } from "@/components/ui/form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -412,9 +413,17 @@ function CreateBotDialog({
             <Label htmlFor="platform">Platform</Label>
             <Select
               value={platform}
-              onValueChange={(value) =>
-                setValue("platform", value as ChannelPlatform)
-              }
+              onValueChange={(value) => {
+                if (value === "telegram-new") {
+                  onOpenChange(false);
+                  void navigate({
+                    to: "/channel-bots",
+                    search: { connect: "telegram-new", label, target_org_id: targetOrgId ?? undefined },
+                  });
+                } else {
+                  setValue("platform", value as ChannelPlatform);
+                }
+              }}
             >
               <SelectTrigger>
                 <SelectValue placeholder="Select platform" />
@@ -444,10 +453,6 @@ function CreateBotDialog({
             )}
           </div>
 
-          {platform === "telegram-new" && <TelegramNew label={label} orgId={targetOrgId} onConnected={(id) => {
-            onOpenChange(false);
-            void navigate({ to: "/channel-bots/$botId", params: { botId: id } });
-          }} />}
           {CHANNEL_PLATFORMS[platform].managedOnly && !managedAvailable && (
             <p role="status" className="text-xs text-muted-foreground">{managed.isLoading ? "Loading account connection..." : managed.isError ? "Unable to load account connection settings. Retry shortly." : `Not available until an admin configures ${platformLabel(platform)}.`}</p>
           )}
@@ -1004,7 +1009,9 @@ function DeviceChannelsSection({
   );
 }
 
-export function ChannelBotsPage() {
+function ChannelBotsList() {
+  const navigate = useNavigate();
+  const telegram = useTelegramNewConfiguration();
   const search = useSearch({ strict: false }) as { connect?: ChannelPlatform; label?: string; target_org_id?: string };
   const [scopeOrgId, setScopeOrgId] = useState<string | null>(search.target_org_id ?? null);
   const { data: bots, isLoading, error, refetch } = useChannelBots({ orgId: scopeOrgId });
@@ -1029,6 +1036,20 @@ export function ChannelBotsPage() {
           </div>
         }
       />
+
+      {telegram.data?.request && (
+        <div className="flex flex-col gap-3 rounded-xl border border-primary/30 bg-primary/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="min-w-0 space-y-1">
+            <p className="text-sm font-medium">Telegram setup in progress</p>
+            <p className="break-words text-xs text-muted-foreground">
+              Continue setting up {telegram.data.request.label} from your saved step.
+            </p>
+          </div>
+          <Button variant="outline" onClick={() => void navigate({ to: "/channel-bots", search: { connect: "telegram-new" } })}>
+            Resume Telegram setup
+          </Button>
+        </div>
+      )}
 
       {isLoading ? (
         <LoadingSkeleton />
@@ -1061,4 +1082,9 @@ export function ChannelBotsPage() {
       <DeleteBotDialog botId={deleteTarget} deletionNote={(() => { const bot = bots?.find((bot) => bot.id === deleteTarget); return bot && bot.credential_source !== "user" ? CHANNEL_PLATFORMS[bot.platform].deletionNote : undefined; })()} onClose={() => setDeleteTarget(null)} />
     </div>
   );
+}
+
+export function ChannelBotsPage() {
+  const search = useSearch({ strict: false }) as { connect?: ChannelPlatform };
+  return search.connect === "telegram-new" ? <TelegramSetupPage /> : <ChannelBotsList />;
 }
