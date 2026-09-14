@@ -84,7 +84,7 @@ pub(crate) async fn with_operation<T>(
     let _ = LeaseStore::release(db, &lease).await;
     result.unwrap_or_else(|| {
         Err(conflict(
-            "Telegram operation interrupted. Reopen Add Channel Bot → Telegram New to continue the saved request; for manager configuration, save it again.",
+            "Telegram operation interrupted. Reopen Add Channel Bot → Telegram to continue the saved request; for manager configuration, save it again.",
         ))
     })
 }
@@ -183,7 +183,7 @@ impl TelegramNewService<'_> {
             .and_then(|v| v.parse::<i64>().ok());
         match (id, values.get("manager_username"), values.get(MANAGER_TOKEN), values.get("webhook_ready")) {
             (Some(id), Some(name), Some(_), Some("true")) => Ok((id, name.to_owned(), values)),
-            _ => Err(AppError::ValidationError("Telegram New is not configured. Ask an administrator to save a manager bot in Platform Credentials.".into())),
+            _ => Err(AppError::ValidationError("Telegram bot creation is not configured. Ask an administrator to save a manager bot in Platform Credentials.".into())),
         }
     }
 
@@ -511,7 +511,7 @@ impl TelegramNewService<'_> {
                     && *date >= Utc::now() - Duration::minutes(CREATION_RECOVERY_MINUTES)
                     && *date <= Utc::now() + Duration::seconds(30)
             }) else {
-                self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": "This creation is too old or has no verifiable creation time. Create a new bot from the current setup request, or use regular Telegram with its current token."})).await?;
+                self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": "This creation is too old or has no verifiable creation time. Create a new bot from the current setup request, or use the Telegram bot token option with its current token."})).await?;
                 return Ok(());
             };
             let events = self.db.collection::<ManagedBotEvents>(MANAGED_BOTS);
@@ -525,7 +525,7 @@ impl TelegramNewService<'_> {
             .map(|name| name.trim().trim_start_matches('@'))
         {
             let Some(candidate) = self.db.collection::<ManagedBotEvents>(MANAGED_BOTS).find_one(doc! {"manager_bot_id": manager_id, "created_by": user_id, "bot_username": name, "observation_id": observation_id, "retired": {"$ne": true}, "created_at": {"$gt": bson::DateTime::from_chrono(Utc::now() - Duration::minutes(CREATION_RECOVERY_MINUTES))}}).await? else {
-                self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": "No recent, unconnected bot creation was recorded for your Telegram account. Recovery is available for 60 minutes after creation. Create a new bot or use regular Telegram with its current token."})).await?;
+                self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": "No recent, unconnected bot creation was recorded for your Telegram account. Recovery is available for 60 minutes after creation. Create a new bot or use the Telegram bot token option with its current token."})).await?;
                 return Ok(());
             };
             (
@@ -543,7 +543,7 @@ impl TelegramNewService<'_> {
         else if let Some(request) = self.db.collection::<TelegramBotRequest>(REQUESTS).find_one(doc! {"manager_bot_id": manager_id, "telegram_user_id": user_id, "telegram_bot_id": bot_id, "active": true, "status": "waiting_consent"}).await? {
             self.send_consent(token, &request).await?;
         } else {
-            self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": format!("@{username} exists in Telegram but this event has no waiting creation request. Return to NyxID → Add Channel Bot → Telegram New, start a request, then send /recover @{username} here. No bot was connected by this message."), "reply_markup": {"remove_keyboard": true}})).await?;
+            self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": format!("@{username} exists in Telegram but this event has no waiting creation request. Return to NyxID → Add Channel Bot → Telegram, start a request, then send /recover @{username} here. No bot was connected by this message."), "reply_markup": {"remove_keyboard": true}})).await?;
         }
         Ok(())
     }
@@ -615,7 +615,7 @@ impl TelegramNewService<'_> {
             })
         {
             self.cancel_unstarted(&pending).await?;
-            self.api.call(token, "sendMessage", json!({"chat_id": user, "text": "This bot's management changed after creation. This request has been cancelled. Create a new bot, or use the regular Telegram option with the current bot token after deleting any saved connection.", "reply_markup": {"remove_keyboard": true}})).await?;
+            self.api.call(token, "sendMessage", json!({"chat_id": user, "text": "This bot's management changed after creation. This request has been cancelled. Create a new bot, or use the Telegram bot token option with the current bot token after deleting any saved connection.", "reply_markup": {"remove_keyboard": true}})).await?;
             return Ok(());
         }
         if approve && event.as_ref().is_none_or(|event| event.revision == 0) {
@@ -647,8 +647,8 @@ impl TelegramNewService<'_> {
         request: &TelegramBotRequest,
         token: &str,
     ) -> AppResult<()> {
-        let event = self.db.collection::<ManagedBotEvents>(MANAGED_BOTS).find_one(doc! {"manager_bot_id": request.manager_bot_id, "telegram_bot_id": request.telegram_bot_id, "revision": 1_i64, "created_by": request.telegram_user_id, "observation_id": &request.observation_id, "retired": {"$ne": true}}).await?.ok_or_else(|| conflict("Bot management changed. Create a new bot or use its current token with regular Telegram."))?;
-        let created_at = event.created_at.filter(|date| *date >= Utc::now() - Duration::minutes(CREATION_RECOVERY_MINUTES)).ok_or_else(|| conflict("This creation is too old to connect automatically. Use regular Telegram with its current token."))?;
+        let event = self.db.collection::<ManagedBotEvents>(MANAGED_BOTS).find_one(doc! {"manager_bot_id": request.manager_bot_id, "telegram_bot_id": request.telegram_bot_id, "revision": 1_i64, "created_by": request.telegram_user_id, "observation_id": &request.observation_id, "retired": {"$ne": true}}).await?.ok_or_else(|| conflict("Bot management changed. Create a new bot or use its current token with the Telegram bot token option."))?;
+        let created_at = event.created_at.filter(|date| *date >= Utc::now() - Duration::minutes(CREATION_RECOVERY_MINUTES)).ok_or_else(|| conflict("This creation is too old to connect automatically. Use the Telegram bot token option with its current token."))?;
         let webhook = self.api.call(token, "getWebhookInfo", json!({})).await?;
         if webhook["url"] != self.manager_callback()
             || webhook["pending_update_count"].as_i64() != Some(0)
@@ -657,7 +657,7 @@ impl TelegramNewService<'_> {
                 .is_some_and(|date| date >= created_at.timestamp())
         {
             return Err(conflict(
-                "Telegram management updates are pending or delivery was interrupted. Retry after delivery recovers; a recorded delivery error requires a new bot or the regular Telegram option.",
+                "Telegram management updates are pending or delivery was interrupted. Retry after delivery recovers; a recorded delivery error requires a new bot or the Telegram bot token option.",
             ));
         }
         let unchanged = self
@@ -667,7 +667,7 @@ impl TelegramNewService<'_> {
             .await?;
         if unchanged.is_none() {
             return Err(conflict(
-                "Telegram management changed while checking delivery. Start a new bot or use its current token with regular Telegram.",
+                "Telegram management changed while checking delivery. Start a new bot or use its current token with the Telegram bot token option.",
             ));
         }
         Ok(())

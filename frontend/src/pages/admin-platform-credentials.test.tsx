@@ -78,11 +78,11 @@ it("renders an unknown provider entirely from its descriptor with masked configu
   ).toBeDisabled();
 });
 
-it("saves a Telegram New manager token after a single paste", async () => {
+it("saves a Telegram manager token after a single paste", async () => {
   mocks.providers = [
     {
       provider: "telegram-new",
-      label: "Telegram New — bot creation",
+      label: "Telegram — bot creation",
       platform: "telegram-new",
       available: false,
       fields: [

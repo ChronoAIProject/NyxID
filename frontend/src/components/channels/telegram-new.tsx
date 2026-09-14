@@ -81,8 +81,8 @@ export function TelegramNew({
         {error && <ErrorBanner message={error.message} />}
         <p className="text-sm text-muted-foreground">
           An administrator needs to configure a manager bot in Admin → Platform
-          Credentials → Telegram New. You can use the regular Telegram option to
-          connect an existing bot token.
+          Credentials → Telegram — bot creation. You can use Telegram bot token
+          to connect an existing bot.
         </p>
         <Button
           type="button"
@@ -174,7 +174,7 @@ export function TelegramNew({
             </Button>
           )}
           <p className="text-xs text-muted-foreground">
-            You can reopen Add Channel Bot → Telegram New to continue this
+            You can reopen Add Channel Bot → Telegram to continue this
             request for 15 minutes. If it expires, a bot you created may still
             exist in Telegram without being connected. For 60 minutes after
             creation, you can start another request and send /recover

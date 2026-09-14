@@ -2,12 +2,12 @@ import { describe, expect, it } from "vitest";
 import { CHANNEL_PLATFORMS, channelBotRegistrationPayload, editableChannelFields, managedConnectPlatform } from "./channel-platforms";
 
 describe("channel platform fields", () => {
-  it("keeps existing Telegram token setup separate from Telegram New creation", () => {
-    expect(CHANNEL_PLATFORMS.telegram.label).toBe("Telegram");
+  it("keeps existing Telegram token setup separate from managed Telegram creation", () => {
+    expect(CHANNEL_PLATFORMS.telegram.label).toBe("Telegram bot token");
     expect(CHANNEL_PLATFORMS.telegram.fields.map((field) => field.name)).toEqual(["bot_token"]);
     expect(channelBotRegistrationPayload({ platform: "telegram", label: "Support", bot_token: "existing-token" }))
       .toEqual({ platform: "telegram", label: "Support", bot_token: "existing-token", target_org_id: undefined });
-    expect(CHANNEL_PLATFORMS["telegram-new"].label).toBe("Telegram New");
+    expect(CHANNEL_PLATFORMS["telegram-new"].label).toBe("Telegram");
     expect(CHANNEL_PLATFORMS["telegram-new"].fields).toEqual([]);
     expect(managedConnectPlatform("telegram-new")).toBe("telegram-new");
     expect(managedConnectPlatform("telegram")).toBeUndefined();

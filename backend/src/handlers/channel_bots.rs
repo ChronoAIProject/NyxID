@@ -894,7 +894,7 @@ pub async fn verify_bot(
         }
         if bot.status != "active" {
             return Err(AppError::Conflict(
-                "Continue the Telegram New creation request to finish setting up this bot.".into(),
+                "Continue the Telegram bot creation request to finish setting up this bot.".into(),
             ));
         }
     }

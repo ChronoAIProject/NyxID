@@ -33,8 +33,8 @@ const larkSetupNote = {
 // and payload selection use the same fields so hidden credentials never cross platforms.
 export type ManagedFlow = "meta_embedded_signup" | "oauth_connection";
 export const CHANNEL_PLATFORMS: Record<ChannelPlatform, { readonly label: string; readonly fields: readonly ChannelFieldDescriptor[]; readonly webhookDocs: string; readonly identityLabel?: string; readonly detailFields?: readonly { readonly name: keyof ChannelBotDetail; readonly label: string }[]; readonly managedFlow?: ManagedFlow; readonly managedOnly?: boolean; readonly webhookIngestion?: boolean; readonly connectLabel?: string; readonly connectedLabel?: string; readonly deletionNote?: string; readonly advancedLabel?: string; readonly setupNote?: { readonly title: string; readonly text: string } }> = {
-  telegram: { label: "Telegram", fields: [tokenField], webhookDocs: "https://core.telegram.org/bots/api#setwebhook" },
-  "telegram-new": { label: "Telegram New", fields: [], webhookDocs: "https://core.telegram.org/api/bots/managed-bots" },
+  telegram: { label: "Telegram bot token", fields: [{ ...tokenField, hint: "Connect an existing Telegram bot using its BotFather token." }], webhookDocs: "https://core.telegram.org/bots/api#setwebhook" },
+  "telegram-new": { label: "Telegram", fields: [], webhookDocs: "https://core.telegram.org/api/bots/managed-bots" },
   discord: { label: "Discord", fields: [tokenField, { name: "public_key", label: "Public Key", required: true }], webhookDocs: "https://discord.com/developers/docs/interactions/receiving-and-responding" },
   lark: { label: "Lark", fields: larkFields, setupNote: larkSetupNote, webhookDocs: "https://open.larksuite.com/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case" },
   feishu: { label: "Feishu", fields: larkFields, setupNote: larkSetupNote, webhookDocs: "https://open.feishu.cn/document/server-docs/event-subscription-guide/event-subscription-configure-/request-url-configuration-case" },

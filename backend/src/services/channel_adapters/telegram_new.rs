@@ -16,7 +16,7 @@ pub fn credential_descriptor() -> PlatformCredentialDescriptor {
     PlatformCredentialDescriptor {
         provider: PLATFORM,
         backing: crate::services::channel_managed::PlatformCredentialBacking::Stored,
-        label: "Telegram New — bot creation",
+        label: "Telegram — bot creation",
         fields: &[PlatformCredentialField {
             name: MANAGER_TOKEN,
             label: "Manager bot token",
@@ -28,7 +28,7 @@ pub fn credential_descriptor() -> PlatformCredentialDescriptor {
         setup_checklist: &[
             "Create a dedicated manager bot in BotFather and enable management of other bots.",
             "Use separate manager bots for staging and production, and keep them separate from the approval bot.",
-            "Save the manager token here, then choose Telegram New in Add Channel Bot.",
+            "Save the manager token here, then choose Telegram in Add Channel Bot.",
         ],
         webhook_secret_field: Some(MANAGER_TOKEN),
     }
@@ -62,7 +62,7 @@ impl PlatformAdapter for TelegramNewAdapter {
         _fields: &RegistrationValues<'_>,
     ) -> AppResult<zeroize::Zeroizing<String>> {
         Err(AppError::ValidationError(
-            "Use Telegram New's creation flow to connect this bot".into(),
+            "Use Telegram's creation flow to connect this bot".into(),
         ))
     }
 

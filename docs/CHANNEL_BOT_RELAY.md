@@ -10,7 +10,7 @@ Combined with [Agent Isolation](./AGENT_ISOLATION.md), the same NyxID user can w
 
 ---
 
-For Telegram's optional native bot creation, see [Telegram New](TELEGRAM_NEW.md). It is a separate `telegram-new` adapter; the existing `telegram` option and its token setup remain available.
+For Telegram's optional native bot creation, see [Telegram bot creation](TELEGRAM_NEW.md). The **Telegram** option uses the separate `telegram-new` adapter; **Telegram bot token** uses the existing `telegram` adapter and token setup. These are display labels; platform identifiers and existing connections remain unchanged.
 
 ## X DM Accounts
 

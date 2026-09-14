@@ -663,7 +663,7 @@ function LarkPermissionSetupSection({
 function TelegramNewSetupSection({ bot }: { readonly bot: ChannelBotDetail }) {
   return <DetailSection title="Telegram connection">
     <DetailRow label="Webhook" value={bot.webhook_registered ? "Connected" : "Setup pending"} />
-    <p className="p-4 text-xs text-muted-foreground">{bot.status === "suspended" ? "Telegram reported a management change. Messages and replies are stopped. To keep this bot, delete this NyxID connection and reconnect using the regular Telegram option with its current token. Deleting the connection removes its NyxID routes; recreate the agent assignments afterward. You can also create a different bot with Telegram New." : "NyxID manages this bot's token and webhook. Assign an agent and send the bot a test message."}</p>
+    <p className="p-4 text-xs text-muted-foreground">{bot.status === "suspended" ? "Telegram reported a management change. Messages and replies are stopped. To keep this bot, delete this NyxID connection and reconnect using the Telegram bot token option with its current token. Deleting the connection removes its NyxID routes; recreate the agent assignments afterward. You can also create a different bot with the Telegram option." : "NyxID manages this bot's token and webhook. Assign an agent and send the bot a test message."}</p>
     {bot.status === "pending" && <div className="p-4"><Button variant="outline" asChild><a href="/channel-bots?connect=telegram-new">Continue Telegram setup</a></Button></div>}
   </DetailSection>;
 }

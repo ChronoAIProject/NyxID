@@ -31,7 +31,7 @@ impl TelegramNewService<'_> {
         regenerate: bool,
     ) -> AppResult<()> {
         if regenerate {
-            return Err(AppError::ValidationError("Telegram New keeps a stable webhook secret. Use manager-token rotation without regenerating the webhook secret.".into()));
+            return Err(AppError::ValidationError("Telegram bot creation keeps a stable webhook secret. Use manager-token rotation without regenerating the webhook secret.".into()));
         }
         if fields.keys().any(|key| key != MANAGER_TOKEN)
             || fields.get(MANAGER_TOKEN).is_some_and(Option::is_none)
@@ -84,7 +84,7 @@ impl TelegramNewService<'_> {
             == Some(id)
         {
             return Err(AppError::Conflict(
-                "The notification bot cannot also be the Telegram New manager.".into(),
+                "The notification bot cannot also be the Telegram bot creation manager.".into(),
             ));
         }
         if self.db.collection::<ChannelBot>(BOTS).find_one(doc! {"platform": {"$in": ["telegram", PLATFORM]}, "platform_bot_id": id.to_string(), "is_active": true}).await?.is_some() {
@@ -95,7 +95,7 @@ impl TelegramNewService<'_> {
             .map_err(|_| AppError::ValidationError("Invalid public callback URL".into()))?;
         if url.scheme() != "https" {
             return Err(AppError::ValidationError(
-                "Telegram New requires an HTTPS public backend URL.".into(),
+                "Telegram bot creation requires an HTTPS public backend URL.".into(),
             ));
         }
         let webhook = self.api.call(token, "getWebhookInfo", json!({})).await?;

@@ -85,7 +85,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
                         println!("{url}");
                         if platform == "telegram-new" {
                             eprintln!(
-                                "Open this URL, sign in to NyxID, and choose Telegram New. Create and approve your bot in Telegram, then return to connect it."
+                                "Open this URL, sign in to NyxID, and choose Telegram. Create and approve your bot in Telegram, then return to connect it."
                             );
                         } else {
                             eprintln!(
@@ -98,7 +98,7 @@ pub async fn run(command: ChannelBotCommands) -> Result<()> {
             }
             if platform == "telegram-new" {
                 bail!(
-                    "Telegram New requires browser approval. Use --managed to get its creation link."
+                    "Telegram requires browser approval for new bot creation. Use --managed to get its creation link."
                 );
             }
             let label = label.ok_or_else(|| anyhow::anyhow!("--label is required"))?;
