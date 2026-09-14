@@ -175,6 +175,30 @@ impl std::io::Write for TraceCapture {
     }
 }
 
+#[test]
+fn trace_capture_rebuilds_interest_after_registration_without_subscriber() {
+    fn event() {
+        tracing::info!("capture_after_no_subscriber");
+    }
+
+    let capture = TraceCapture(Default::default());
+    let writer = capture.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dispatch = tracing::Dispatch::new(subscriber);
+    tracing::dispatcher::with_default(&tracing::Dispatch::none(), event);
+    assert!(capture.0.lock().unwrap().is_empty());
+
+    tracing::dispatcher::with_default(&dispatch, || {
+        tracing::callsite::rebuild_interest_cache();
+        event();
+    });
+    let logs = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+    assert!(logs.contains("capture_after_no_subscriber"));
+}
+
 #[tokio::test]
 async fn traces_record_hashed_ip_identifiers_and_outcomes_without_secrets() {
     use tracing::instrument::WithSubscriber;
@@ -188,6 +212,9 @@ async fn traces_record_hashed_ip_identifiers_and_outcomes_without_secrets() {
         .with_writer(move || writer.clone())
         .finish();
     let (user_code, device_code, delivery) = async {
+        // Parallel tests may register shared callsites without a subscriber.
+        // Refresh their interest after WithSubscriber installs this capture.
+        tracing::callsite::rebuild_interest_cache();
         let addr = "203.0.113.9:1234".parse().unwrap();
         let (_, Json(created)) = request(
             State(state.clone()),
