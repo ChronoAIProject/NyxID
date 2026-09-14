@@ -24,6 +24,13 @@ async fn fixture(prefix: &str, capable: bool) -> Option<Fixture> {
         .await
         .unwrap();
     let mut state = test_app_state(db.clone());
+    // Mirror startup so chained-audit assertions also hold in focused test runs.
+    static AUDIT_INIT: std::sync::Once = std::sync::Once::new();
+    AUDIT_INIT.call_once(|| {
+        crate::services::audit_service::init_audit_chain_hmac_key(
+            state.audit_chain_hmac_key.as_ref().clone(),
+        );
+    });
     state.config.node_hmac_signing_enabled = false;
     let owner = uuid::Uuid::new_v4().to_string();
     db.collection::<crate::models::user::User>(USERS)
