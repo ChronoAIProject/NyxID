@@ -205,6 +205,8 @@ mod tests {
 
     fn safe_anonymous_service() -> DownstreamService {
         DownstreamService {
+            inference: None,
+            platform_key: None,
             id: Uuid::new_v4().to_string(),
             name: "Public Catalog".to_string(),
             slug: "public-catalog".to_string(),
@@ -346,6 +348,10 @@ mod tests {
         billable_svc.id = Uuid::new_v4().to_string();
         billable_svc.slug = "billable-service".to_string();
         billable_svc.billing = Some(ServiceBilling {
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             platform_billable: false,
             platform_metric: None,
             platform_pricing: None,

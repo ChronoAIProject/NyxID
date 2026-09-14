@@ -644,6 +644,10 @@ mod tests {
             .expect("create transaction id index");
 
         let billing = ServiceBilling {
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             platform_billable: true,
             platform_metric: None,
             platform_pricing: None,
@@ -915,6 +919,10 @@ mod tests {
         };
         create_usage_transaction_index(&db).await;
         let billing = ServiceBilling {
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             platform_billable: true,
             platform_metric: None,
             platform_pricing: None,

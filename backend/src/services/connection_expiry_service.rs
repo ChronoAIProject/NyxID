@@ -381,6 +381,7 @@ mod tests {
     fn user_service(user_id: &str, api_key_id: &str) -> UserService {
         let now = Utc::now();
         UserService {
+            credential_binding: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             slug: "github-work".to_string(),

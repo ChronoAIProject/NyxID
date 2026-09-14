@@ -796,6 +796,7 @@ mod tests {
     async fn insert_user_service(db: &Database, user_id: &str, slug: &str) -> UserService {
         let now = Utc::now();
         let service = UserService {
+            credential_binding: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             slug: slug.to_string(),

@@ -155,3 +155,6 @@ pub mod user_service_service;
 pub mod user_token_service;
 pub mod webhook_delivery_service;
 pub mod ws_frame_injector;
+
+pub mod inference_service;
+pub mod platform_key_service;

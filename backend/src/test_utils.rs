@@ -2386,6 +2386,7 @@ pub(crate) fn test_user_service(
     node_id: Option<&str>,
 ) -> UserService {
     UserService {
+        credential_binding: None,
         id: service_id.to_string(),
         user_id: user_id.to_string(),
         slug: slug.to_string(),
@@ -2490,6 +2491,8 @@ pub(crate) fn test_auto_connected_catalog_service()
 -> crate::models::downstream_service::DownstreamService {
     use crate::models::downstream_service::DownstreamService;
     DownstreamService {
+        inference: None,
+        platform_key: None,
         id: uuid::Uuid::new_v4().to_string(),
         name: "Catalog".to_string(),
         slug: "autoplatform".to_string(),

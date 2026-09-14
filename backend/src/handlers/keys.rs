@@ -290,6 +290,8 @@ async fn resolve_key_read_owner(
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateKeyRequest {
+    #[serde(default)]
+    pub use_platform_key: bool,
     /// Catalog service slug (e.g., "llm-openai").
     pub service_slug: Option<String>,
     /// The credential value (API key, bearer token, etc.)
@@ -430,6 +432,10 @@ pub struct KeyResponse {
     /// True when the service's stored `api_key_id` no longer resolves to a
     /// credential row. The service remains manageable for recovery.
     pub credential_missing: bool,
+    pub credential_binding: String,
+    pub platform_key_available: bool,
+    pub platform_key_pricing: Option<crate::services::inference_service::LanePricingView>,
+    pub byok_pricing: Option<crate::services::inference_service::LanePricingView>,
     pub credential_type: String,
     pub auth_method: String,
     pub auth_key_name: String,
@@ -663,8 +669,9 @@ pub struct KeyListResponse {
     pub keys: Vec<KeyResponse>,
 }
 
-#[derive(Deserialize, ToSchema)]
+#[derive(Deserialize, Serialize, ToSchema)]
 pub struct UpdateKeyRequest {
+    pub use_platform_key: Option<bool>,
     /// New display label
     pub label: Option<String>,
     /// New endpoint URL
@@ -1014,55 +1021,84 @@ pub(crate) async fn create_key_with_service_id(
         unified_key_service::OauthClientCredentialsInput::None
     };
 
-    let result = match reserved_service_id {
-        Some(service_id) => {
-            unified_key_service::create_key_with_service_id(
-                &state.db,
-                &state.encryption_keys,
-                &user_id_str,
-                &actor,
-                body.service_slug.as_deref(),
-                body.endpoint_url.as_deref(),
-                credential,
-                &body.label,
-                body.slug.as_deref(),
-                body.auth_method.as_deref(),
-                body.auth_key_name.as_deref(),
-                body.node_id.as_deref(),
-                ssh_params,
-                identity,
-                openapi_input,
-                body.ws_frame_injections.as_deref(),
-                body.admin_only.unwrap_or(false),
-                oauth_client_credentials,
-                state.config.is_production(),
-                service_id,
-            )
-            .await?
+    let result = if body.use_platform_key {
+        if body.credential.is_some()
+            || raw_present
+            || copy_present
+            || body.node_id.is_some()
+            || body.endpoint_url.is_some()
+            || body.auth_method.is_some()
+            || body.auth_key_name.is_some()
+            || body.ssh_host.is_some()
+            || body.ws_frame_injections.is_some()
+        {
+            return Err(AppError::ValidationError("use_platform_key cannot be combined with credential, OAuth, custom routing, or node inputs".to_string()));
         }
-        None => {
-            unified_key_service::create_key(
-                &state.db,
-                &state.encryption_keys,
-                &user_id_str,
-                &actor,
-                body.service_slug.as_deref(),
-                body.endpoint_url.as_deref(),
-                credential,
-                &body.label,
-                body.slug.as_deref(),
-                body.auth_method.as_deref(),
-                body.auth_key_name.as_deref(),
-                body.node_id.as_deref(),
-                ssh_params,
-                identity,
-                openapi_input,
-                body.ws_frame_injections.as_deref(),
-                body.admin_only.unwrap_or(false),
-                oauth_client_credentials,
-                state.config.is_production(),
-            )
-            .await?
+        let slug = body.service_slug.as_deref().ok_or_else(|| {
+            AppError::ValidationError("use_platform_key requires service_slug".to_string())
+        })?;
+        unified_key_service::create_platform_key(
+            &state.db,
+            &user_id_str,
+            &actor,
+            slug,
+            &body.label,
+            body.slug.as_deref(),
+            body.admin_only.unwrap_or(false),
+            reserved_service_id,
+        )
+        .await?
+    } else {
+        match reserved_service_id {
+            Some(service_id) => {
+                unified_key_service::create_key_with_service_id(
+                    &state.db,
+                    &state.encryption_keys,
+                    &user_id_str,
+                    &actor,
+                    body.service_slug.as_deref(),
+                    body.endpoint_url.as_deref(),
+                    credential,
+                    &body.label,
+                    body.slug.as_deref(),
+                    body.auth_method.as_deref(),
+                    body.auth_key_name.as_deref(),
+                    body.node_id.as_deref(),
+                    ssh_params,
+                    identity,
+                    openapi_input,
+                    body.ws_frame_injections.as_deref(),
+                    body.admin_only.unwrap_or(false),
+                    oauth_client_credentials,
+                    state.config.is_production(),
+                    service_id,
+                )
+                .await?
+            }
+            None => {
+                unified_key_service::create_key(
+                    &state.db,
+                    &state.encryption_keys,
+                    &user_id_str,
+                    &actor,
+                    body.service_slug.as_deref(),
+                    body.endpoint_url.as_deref(),
+                    credential,
+                    &body.label,
+                    body.slug.as_deref(),
+                    body.auth_method.as_deref(),
+                    body.auth_key_name.as_deref(),
+                    body.node_id.as_deref(),
+                    ssh_params,
+                    identity,
+                    openapi_input,
+                    body.ws_frame_injections.as_deref(),
+                    body.admin_only.unwrap_or(false),
+                    oauth_client_credentials,
+                    state.config.is_production(),
+                )
+                .await?
+            }
         }
     };
 
@@ -1093,7 +1129,19 @@ pub(crate) async fn create_key_with_service_id(
     // created under the actor's personal scope or under an org. This is
     // cosmetic for the immediate response; subsequent `GET /keys/{id}`
     // calls compute the source server-side from `resolve_owner_access`.
-    let mut response = key_response_from_result(&result);
+    let mut response = if body.use_platform_key {
+        key_response_from_view(
+            unified_key_service::get_key(
+                &state.db,
+                &state.encryption_keys,
+                &user_id_str,
+                &result.service.id,
+            )
+            .await?,
+        )
+    } else {
+        key_response_from_result(&result)
+    };
     if let Some(target_org_id) = body.target_org_id.as_deref() {
         use crate::handlers::user_services_handler::{CredentialSourceResponse, OrgRoleResponse};
         let org = state
@@ -1363,6 +1411,119 @@ pub async fn update_key(
     let view =
         unified_key_service::get_key(&state.db, &state.encryption_keys, &user_id_str, &key_id)
             .await?;
+
+    if let Some(use_platform_key) = body.use_platform_key {
+        if body.label.is_some()
+            || body.is_active.is_some()
+            || body.admin_only.is_some()
+            || body.identity_propagation_mode.is_some()
+            || body.identity_include_user_id.is_some()
+            || body.identity_include_email.is_some()
+            || body.identity_include_name.is_some()
+            || body.identity_jwt_audience.is_some()
+            || body.forward_access_token.is_some()
+            || body.inject_delegation_token.is_some()
+            || body.delegation_token_scope.is_some()
+            || body.custom_user_agent.is_some()
+            || body.default_request_headers.is_some()
+            || body.openapi_spec_url.is_some()
+            || body.recommended_skills.is_some()
+            || body.node_id.is_some()
+            || body.endpoint_url.is_some()
+            || body.auth_method.is_some()
+            || body.auth_key_name.is_some()
+        {
+            return Err(AppError::ValidationError(
+                "Change the credential binding separately from routing settings".to_string(),
+            ));
+        }
+        let raw_id = body.oauth_client_id.as_deref().map(str::trim);
+        let raw_secret = body.oauth_client_secret.as_deref().map(str::trim);
+        let copy_from = body.copy_oauth_client_from.as_deref().map(str::trim);
+        let raw_present =
+            raw_id.is_some_and(|s| !s.is_empty()) || raw_secret.is_some_and(|s| !s.is_empty());
+        let copy_present = copy_from.is_some_and(|s| !s.is_empty());
+        if raw_present && copy_present {
+            return Err(AppError::BadRequest(
+                "oauth_client_id/oauth_client_secret and copy_oauth_client_from are mutually exclusive"
+                    .to_string(),
+            ));
+        }
+        let oauth_client_credentials = if copy_present {
+            unified_key_service::OauthClientCredentialsInput::CopyFrom {
+                source_key_id: copy_from.expect("copy_present"),
+            }
+        } else if raw_present {
+            let (Some(id), Some(secret)) = (raw_id, raw_secret) else {
+                return Err(AppError::BadRequest(
+                    "oauth_client_id and oauth_client_secret must be supplied together".to_string(),
+                ));
+            };
+            if id.is_empty() || secret.is_empty() {
+                return Err(AppError::BadRequest(
+                    "oauth_client_id and oauth_client_secret must be supplied together".to_string(),
+                ));
+            }
+            unified_key_service::OauthClientCredentialsInput::Raw {
+                client_id: id,
+                client_secret: secret,
+            }
+        } else {
+            unified_key_service::OauthClientCredentialsInput::None
+        };
+
+        unified_key_service::switch_credential_binding(
+            &state.db,
+            &state.encryption_keys,
+            &user_id_str,
+            &key_id,
+            use_platform_key,
+            body.credential.as_deref(),
+            oauth_client_credentials,
+        )
+        .await?;
+        crate::services::audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "service_credential_binding_changed",
+            Some(
+                serde_json::json!({ "service_id": &key_id, "credential_binding": if use_platform_key { "platform" } else { "user" } }),
+            ),
+        );
+        return Ok(Json(resolve_key_response(&state, &actor, &key_id).await?));
+    }
+    if view.credential_binding == "platform" && !view.auto_connected {
+        let fields = serde_json::to_value(&body).map_err(|e| AppError::Internal(e.to_string()))?;
+        if fields.as_object().is_some_and(|fields| {
+            fields
+                .iter()
+                .all(|(key, value)| key == "is_active" || value.is_null())
+        }) {
+            if let Some(active) = body.is_active {
+                unified_key_service::set_platform_connection_active(
+                    &state.db,
+                    &user_id_str,
+                    &key_id,
+                    active,
+                )
+                .await?;
+                crate::services::audit_service::log_for_user(
+                    state.db.clone(),
+                    &auth_user,
+                    if active {
+                        "service_enabled"
+                    } else {
+                        "service_disabled"
+                    },
+                    Some(serde_json::json!({ "service_id": &key_id })),
+                );
+            }
+            return Ok(Json(resolve_key_response(&state, &actor, &key_id).await?));
+        }
+        return Err(AppError::ValidationError(
+            "Switch to your own key before changing platform-managed routing".to_string(),
+        ));
+    }
 
     if view.auto_connected {
         return Err(crate::errors::AppError::Forbidden(
@@ -2350,6 +2511,12 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
         endpoint_id: result.endpoint.id.clone(),
         api_key_id: result.api_key.as_ref().map(|api_key| api_key.id.clone()),
         credential_missing: false,
+        credential_binding: crate::services::platform_key_service::binding(&result.service)
+            .to_string(),
+        platform_key_available: crate::services::platform_key_service::binding(&result.service)
+            == "platform",
+        platform_key_pricing: None,
+        byok_pricing: None,
         credential_type: result
             .api_key
             .as_ref()
@@ -2482,6 +2649,10 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
         api_key_id: view.api_key_id,
         credential_missing: view.credential_missing,
         credential_type: view.credential_type,
+        credential_binding: view.credential_binding,
+        platform_key_available: view.platform_key_available,
+        platform_key_pricing: view.platform_key_pricing,
+        byok_pricing: view.byok_pricing,
         auth_method: view.auth_method,
         auth_key_name: view.auth_key_name,
         status: view.status,
@@ -3137,6 +3308,7 @@ mod tests {
 
     fn empty_update_request() -> super::UpdateKeyRequest {
         super::UpdateKeyRequest {
+            use_platform_key: None,
             label: None,
             endpoint_url: None,
             auth_method: None,
@@ -3676,6 +3848,7 @@ mod tests {
         let user_id = uuid::Uuid::new_v4().to_string();
 
         let body = super::CreateKeyRequest {
+            use_platform_key: false,
             service_slug: None,
             credential: Some("secret-token".to_string()),
             label: "Header Service".to_string(),
@@ -3990,6 +4163,7 @@ mod tests {
         auth_method: Option<&str>,
     ) -> super::CreateKeyRequest {
         super::CreateKeyRequest {
+            use_platform_key: false,
             service_slug: None,
             credential: credential.map(str::to_string),
             label: label.to_string(),

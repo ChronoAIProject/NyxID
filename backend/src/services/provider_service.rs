@@ -212,6 +212,51 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
+    // 3. xAI (API Key)
+    if !slug_exists!("xai") {
+        let provider = ProviderConfig {
+            id: Uuid::new_v4().to_string(),
+            slug: "xai".to_string(),
+            name: "xAI".to_string(),
+            description: Some("xAI Grok API access".to_string()),
+            provider_type: "api_key".to_string(),
+            authorization_url: None,
+            token_url: None,
+            revocation_url: None,
+            revocation: None,
+            default_scopes: None,
+            client_id_encrypted: None,
+            client_secret_encrypted: None,
+            supports_pkce: false,
+            device_code_url: None,
+            device_token_url: None,
+            device_verification_url: None,
+            hosted_callback_url: None,
+            api_key_instructions: Some("Get your API key from https://console.x.ai".to_string()),
+            api_key_url: Some("https://console.x.ai".to_string()),
+            icon_url: None,
+            documentation_url: Some("https://docs.x.ai".to_string()),
+            is_active: true,
+            credential_mode: "admin".to_string(),
+            token_endpoint_auth_method: "client_secret_post".to_string(),
+            token_request_encoding: None,
+            oauth_request_headers: Default::default(),
+            supports_oauth_scopes: true,
+            extra_auth_params: None,
+            device_code_format: "rfc8628".to_string(),
+            client_id_param_name: None,
+            requires_gateway_url: false,
+            created_by: "system".to_string(),
+            revocation_seed_version: 0,
+            created_at: now,
+            updated_at: now,
+        };
+        validate_seeded_provider_options(&provider)?;
+        collection.insert_one(&provider).await?;
+        tracing::info!(slug = "xai", "Seeded default provider: xAI");
+        seeded_count += 1;
+    }
+
     // 3. Anthropic (API Key)
     if !slug_exists!("anthropic") {
         let provider = ProviderConfig {
@@ -2867,6 +2912,23 @@ const OPENROUTER_DEFAULT_HEADERS: &[SeededHeader] = &[
 
 const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
     DefaultServiceSeed {
+        provider_slug: "xai",
+        service_slug: "llm-xai",
+        service_name: "xAI API",
+        base_url: "https://api.x.ai/v1",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: None,
+        default_request_headers: None,
+        service_category: "internal",
+        requires_user_credential: false,
+        homepage_url: None,
+        auth_notes: None,
+        known_limitations: None,
+    },
+    DefaultServiceSeed {
         provider_slug: "openai",
         service_slug: "llm-openai",
         service_name: "OpenAI API",
@@ -4498,6 +4560,8 @@ pub async fn seed_default_services(
             .map(|entries| entries.iter().map(seeded_header_to_model).collect());
 
         let service = DownstreamService {
+            inference: None,
+            platform_key: None,
             id: service_id.clone(),
             name: seed.service_name.to_string(),
             slug: seed.service_slug.to_string(),

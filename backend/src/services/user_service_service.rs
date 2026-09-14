@@ -72,7 +72,9 @@ pub struct IdentityConfig {
 }
 
 fn ensure_user_managed_service(service: &UserService) -> AppResult<()> {
-    if service.source.as_deref() == Some(AUTO_PROVISION_SOURCE) {
+    if service.source.as_deref() == Some(AUTO_PROVISION_SOURCE)
+        || service.credential_binding.as_deref() == Some("platform")
+    {
         return Err(AppError::Forbidden(
             "Auto-connected services are platform managed and cannot be modified".to_string(),
         ));
@@ -123,7 +125,7 @@ pub async fn auto_connected_endpoint_ids(
         .collection::<bson::Document>(COLLECTION_NAME)
         .find(doc! {
             "user_id": user_id,
-            "source": AUTO_PROVISION_SOURCE,
+            "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }],
         })
         .with_options(
             FindOptions::builder()
@@ -160,7 +162,7 @@ pub async fn ensure_user_managed_endpoint(
         .count_documents(doc! {
             "user_id": user_id,
             "endpoint_id": endpoint_id,
-            "source": AUTO_PROVISION_SOURCE,
+            "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }],
         })
         .await?;
     if count > 0 {
@@ -843,7 +845,7 @@ pub async fn create_user_service_with_id(
     let platform_managed_catalog_service = api_key_id.is_none()
         && auth_method != "none"
         && catalog_service_id.is_some()
-        && source == Some(AUTO_PROVISION_SOURCE);
+        && matches!(source, Some(AUTO_PROVISION_SOURCE | "platform_key"));
     if api_key_id.is_none() && auth_method != "none" && !platform_managed_catalog_service {
         return Err(AppError::ValidationError(
             "Services without an API key must use auth_method 'none'".to_string(),
@@ -900,6 +902,7 @@ pub async fn create_user_service_with_id(
 
     let now = Utc::now();
     let service = UserService {
+        credential_binding: (source == Some("platform_key")).then(|| "platform".to_string()),
         id: reserved_id
             .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -2200,6 +2203,8 @@ mod tests {
     ) -> DownstreamService {
         let now = Utc::now();
         DownstreamService {
+            inference: None,
+            platform_key: None,
             id: service_id.to_string(),
             name: slug.to_string(),
             slug: slug.to_string(),

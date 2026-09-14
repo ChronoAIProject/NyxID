@@ -30,6 +30,42 @@ pub struct ServiceCapabilities {
     pub supports_streaming: bool,
 }
 
+/// Admin-authored model-call protocol; availability is resolved per caller.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InferenceWireProtocol {
+    AnthropicMessages,
+    OpenaiResponses,
+    OpenaiCompletions,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct ServiceInference {
+    pub wire_protocol: InferenceWireProtocol,
+    #[serde(default)]
+    pub model_list: bool,
+    #[serde(default)]
+    pub realtime: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformKeyAudience {
+    #[default]
+    Restricted,
+    Public,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+pub struct PlatformKeyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub audience: PlatformKeyAudience,
+    #[serde(default)]
+    pub allowed_owner_ids: Vec<String>,
+}
+
 /// Declarative configuration for a server-side token exchange flow.
 ///
 /// When a service has `auth_method == "token_exchange"`, the proxy uses this
@@ -286,6 +322,10 @@ pub struct DownstreamService {
     /// and is not configured on catalog services.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub billing: Option<ServiceBilling>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference: Option<ServiceInference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_key: Option<PlatformKeyConfig>,
     /// Freeform notes on downstream auth expectations
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
@@ -418,6 +458,8 @@ pub mod test_helpers {
     /// valid struct but don't care about specific field values.
     pub fn dummy_service() -> DownstreamService {
         DownstreamService {
+            inference: None,
+            platform_key: None,
             id: "test-id".to_string(),
             name: "Test".to_string(),
             slug: "test".to_string(),
@@ -516,6 +558,8 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let svc = DownstreamService {
+            inference: None,
+            platform_key: None,
             id: uuid::Uuid::new_v4().to_string(),
             name: "Test Service".to_string(),
             slug: "test-service".to_string(),
@@ -597,6 +641,8 @@ mod tests {
         // Serialize a full struct, then remove default fields from the doc,
         // and verify they get their defaults on deserialization.
         let svc = DownstreamService {
+            inference: None,
+            platform_key: None,
             id: "test-id".to_string(),
             name: "Svc".to_string(),
             slug: "svc".to_string(),

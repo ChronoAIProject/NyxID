@@ -194,6 +194,10 @@ pub async fn get_llm_status(
             }
         }
 
+        if crate::services::platform_key_service::available(db, service, user_id).await? {
+            best = LlmStatusRank::Ready;
+        }
+
         statuses.push(LlmProviderStatus {
             provider_slug: provider.slug.clone(),
             provider_name: provider.name.clone(),
@@ -226,6 +230,7 @@ pub async fn get_llm_status(
             "embed-*".to_string(),
             "rerank-*".to_string(),
             "deepseek-*".to_string(),
+            "grok-*".to_string(),
         ],
     })
 }
@@ -306,6 +311,23 @@ async fn lookup_user_service_status(
     if !owner.allows(&us) {
         return Ok(LlmStatusRank::NotConnected);
     }
+    if crate::services::platform_key_service::binding(&us) == "platform"
+        && let Some(catalog) = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": catalog_service_id })
+            .await?
+        && (catalog.platform_key.is_some() || us.auth_method != "none")
+    {
+        return Ok(
+            if crate::services::platform_key_service::available(db, &catalog, owner.user_id())
+                .await?
+            {
+                LlmStatusRank::Ready
+            } else {
+                LlmStatusRank::NotConnected
+            },
+        );
+    }
     let Some(api_key_id) = us.api_key_id.as_deref() else {
         // No-auth services have no api_key but are always reachable.
         return Ok(LlmStatusRank::Ready);
@@ -379,6 +401,8 @@ pub fn resolve_provider_for_model(model: &str) -> Option<&'static str> {
         || model_lower.starts_with("rerank-")
     {
         Some("cohere")
+    } else if model_lower.starts_with("grok-") {
+        Some("xai")
     } else if model_lower.starts_with("deepseek-") {
         Some("deepseek")
     } else {

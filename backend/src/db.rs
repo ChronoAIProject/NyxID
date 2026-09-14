@@ -4020,6 +4020,7 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             .and_then(|svc| svc.ssh_config.as_ref().map(|ssh| ssh.ssh_auth_mode))
             .unwrap_or(SshAuthMode::ProxyOnly);
         let user_service = UserService {
+            credential_binding: None,
             id: service_id,
             user_id: token.user_id.clone(),
             slug,
@@ -4255,6 +4256,7 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
         // Create UserService -- clean up endpoint + api_key on failure
         let inherited_identity = inherited_identity_fields(Some(&service));
         let user_service = UserService {
+            credential_binding: None,
             id: service_id,
             user_id: conn.user_id.clone(),
             slug,
@@ -4516,6 +4518,7 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
         // Create UserService with node routing
         let inherited_identity = inherited_identity_fields(Some(&service));
         let user_service = UserService {
+            credential_binding: None,
             id: service_id,
             user_id: binding.user_id.clone(),
             slug,
@@ -4643,6 +4646,8 @@ mod tests {
 
     fn sample_downstream_service() -> DownstreamService {
         DownstreamService {
+            inference: None,
+            platform_key: None,
             id: "svc-1".to_string(),
             name: "Test".to_string(),
             slug: "test".to_string(),

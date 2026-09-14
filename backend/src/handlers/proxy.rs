@@ -1597,6 +1597,10 @@ async fn resolve_via_downstream_service(
         }
     };
 
+    // Server-held master credentials never travel through owner-managed nodes.
+    if !t.service.requires_user_credential && t.auth_method != "none" {
+        return Ok((None, t, has_cred, None, false));
+    }
     Ok((nr, t, has_cred, None, node_routing_required))
 }
 
@@ -4290,7 +4294,10 @@ fn websocket_resale_usage(
 }
 
 fn service_supports_stream_options_include_usage(service_slug: &str) -> bool {
-    matches!(service_slug, "llm-openai" | "llm-deepseek")
+    matches!(
+        service_slug,
+        "llm-openai" | "llm-deepseek" | "llm-xai" | "chrono-llm" | "chrono-llm-public"
+    )
 }
 
 fn force_stream_usage_for_service(
@@ -4512,7 +4519,7 @@ fn is_ws_upgrade_request(request: &Request<Body>) -> bool {
 
 /// Build a downstream WebSocket URL from the proxy target, applying
 /// credential injection (path, query) via `prepare_delegated_request`.
-fn build_downstream_ws_url(
+pub(crate) fn build_downstream_ws_url(
     target: &proxy_service::ProxyTarget,
     path: &str,
     query: Option<&str>,
@@ -4556,17 +4563,14 @@ fn build_downstream_ws_url(
     Ok(url)
 }
 
-/// Connect to a downstream WebSocket, injecting credentials and identity
-/// headers into the upgrade request.
-async fn connect_downstream_ws(
+pub(crate) fn build_downstream_ws_request(
     url: &str,
     target: &proxy_service::ProxyTarget,
     delegated: &[delegation_service::DelegatedCredential],
     identity_headers: &[(String, String)],
     forward_headers: &[(String, String)],
     caller_token: Option<&str>,
-    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
-) -> AppResult<DownstreamWsConnection> {
+) -> AppResult<axum::http::Request<()>> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     let mut request = url
@@ -4729,6 +4733,29 @@ async fn connect_downstream_ws(
             )));
         }
     }
+
+    Ok(request)
+}
+
+/// Connect to a downstream WebSocket, injecting credentials and identity
+/// headers into the upgrade request.
+async fn connect_downstream_ws(
+    url: &str,
+    target: &proxy_service::ProxyTarget,
+    delegated: &[delegation_service::DelegatedCredential],
+    identity_headers: &[(String, String)],
+    forward_headers: &[(String, String)],
+    caller_token: Option<&str>,
+    _billing_egress_permit: crate::services::billing::route_inventory::BillingEgressPermit,
+) -> AppResult<DownstreamWsConnection> {
+    let request = build_downstream_ws_request(
+        url,
+        target,
+        delegated,
+        identity_headers,
+        forward_headers,
+        caller_token,
+    )?;
 
     let mut ws_config = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default();
     ws_config.max_message_size = Some(WS_PASSTHROUGH_MAX_MESSAGE_SIZE);
@@ -6235,6 +6262,10 @@ mod tests {
 
     fn token_resale_metered_context(credential_class: CredentialClass) -> MeteredProxyContext {
         let billing = ServiceBilling {
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             platform_billable: false,
             platform_metric: None,
             platform_pricing: None,

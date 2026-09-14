@@ -27,6 +27,8 @@ pub enum ConnectLinkWebhookStatus {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ConnectLink {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_platform_key: Option<bool>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
@@ -145,6 +147,7 @@ mod tests {
     fn fixture() -> ConnectLink {
         let now = Utc::now();
         ConnectLink {
+            use_platform_key: None,
             scopes: Vec::new(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),

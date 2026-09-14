@@ -87,7 +87,7 @@ pub(crate) fn enforce_llm_billing_classification(
 }
 
 fn supports_stream_options_include_usage(provider_slug: &str) -> bool {
-    matches!(provider_slug, "openai" | "deepseek")
+    matches!(provider_slug, "openai" | "deepseek" | "xai")
 }
 
 fn should_force_stream_usage(provider_slug: &str, path: &str, body: &serde_json::Value) -> bool {
@@ -1047,6 +1047,25 @@ async fn resolve_provider_slug_with_fallback(
     use crate::models::user_provider_token::{
         COLLECTION_NAME as USER_PROVIDER_TOKENS, UserProviderToken,
     };
+
+    if let Ok((service, _)) =
+        llm_gateway_service::resolve_llm_service_by_slug(db, primary_slug).await
+    {
+        if crate::services::platform_key_service::available(db, &service, user_id).await? {
+            return Ok(primary_slug.to_string());
+        }
+        // A new-path BYOK connection may not have a legacy provider token.
+        if crate::services::user_service_service::find_by_catalog_service_id(
+            db,
+            user_id,
+            &service.id,
+        )
+        .await?
+        .is_some()
+        {
+            return Ok(primary_slug.to_string());
+        }
+    }
 
     // Find the primary provider
     let primary_provider = db

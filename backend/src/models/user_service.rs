@@ -20,6 +20,9 @@ pub struct UserService {
     /// FK to UserApiKey (None for no-auth auto-connected services)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key_id: Option<String>,
+    /// Selected credential source. Absent preserves legacy resolution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_binding: Option<String>,
     /// "bearer" | "header" | "query" | "basic" | "none"
     pub auth_method: String,
     /// Header name or query param name (e.g., "Authorization", "x-api-key", "key")
@@ -145,6 +148,7 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let svc = UserService {
+            credential_binding: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             slug: "llm-openai".to_string(),
@@ -195,6 +199,7 @@ mod tests {
     #[test]
     fn bson_defaults() {
         let svc = UserService {
+            credential_binding: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "test".to_string(),
@@ -246,6 +251,7 @@ mod tests {
     #[test]
     fn bson_identity_defaults() {
         let svc = UserService {
+            credential_binding: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "test".to_string(),
@@ -304,6 +310,7 @@ mod tests {
     #[test]
     fn bson_roundtrip_no_api_key() {
         let svc = UserService {
+            credential_binding: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "auto-svc".to_string(),
@@ -352,6 +359,7 @@ mod tests {
     #[test]
     fn user_service_preexisting_documents_deserialize_missing_state_version_as_zero() {
         let svc = UserService {
+            credential_binding: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "legacy".to_string(),

@@ -3373,6 +3373,7 @@ async fn connect_openclaw_action(
         auth_user,
         TelemetryContext::default(),
         Json(keys::CreateKeyRequest {
+            use_platform_key: false,
             service_slug: Some("llm-openclaw".to_string()),
             credential: Some(credential),
             label: body.label.unwrap_or_else(|| "OpenClaw".to_string()),
@@ -3887,6 +3888,7 @@ mod wave4_effect_tests {
             crate::test_utils::test_auth_user(&actor_id),
             TelemetryContext::default(),
             Json(keys::CreateKeyRequest {
+                use_platform_key: false,
                 service_slug: Some("llm-openclaw".to_string()),
                 credential: Some(body.credential.clone()),
                 label: body.label.clone().unwrap_or_else(|| "OpenClaw".to_string()),

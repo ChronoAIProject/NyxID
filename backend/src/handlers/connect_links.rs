@@ -18,6 +18,7 @@ use crate::services::{
 
 #[derive(Deserialize, ToSchema)]
 pub struct CreateConnectLinkRequest {
+    pub use_platform_key: Option<bool>,
     pub service_slug: String,
     /// Additional OAuth scopes requested on top of the provider defaults.
     #[serde(default)]
@@ -54,6 +55,7 @@ impl std::fmt::Debug for PreviewConnectLinkRequest {
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct PreviewConnectLinkResponse {
+    pub use_platform_key: Option<bool>,
     pub service_name: String,
     pub service_slug: String,
     pub scopes: Vec<String>,
@@ -118,6 +120,7 @@ impl std::fmt::Debug for CancelHostedConnectLinkRequest {
 
 #[derive(Deserialize, ToSchema)]
 pub struct CompleteConnectLinkRequest {
+    pub use_platform_key: Option<bool>,
     pub token: String,
     #[serde(default)]
     pub credential: Option<String>,
@@ -210,6 +213,7 @@ pub async fn create_connect_link(
     let created = connect_link_service::create(
         &state.db,
         connect_link_service::CreateInput {
+            use_platform_key: body.use_platform_key,
             user_id: actor_id,
             service_slug: body.service_slug,
             scopes: body.scopes,
@@ -349,6 +353,7 @@ pub async fn preview_connect_link(
     let callback_url = connect_link_service::terminal_callback_url(&view.link)?;
     let connect_method = view.service.connect_method().to_string();
     Ok(Json(PreviewConnectLinkResponse {
+        use_platform_key: view.link.use_platform_key,
         service_name: view.service.service_name,
         service_slug: view.service.service_slug,
         scopes: view.link.scopes,
@@ -467,6 +472,7 @@ pub async fn complete_connect_link(
         &actor_id,
         &body.token,
         connect_link_service::CompleteInput {
+            use_platform_key: body.use_platform_key,
             credential: body.credential.as_deref(),
             endpoint_url: body.endpoint_url.as_deref(),
             oauth_client_id: body.oauth_client_id.as_deref(),
@@ -725,6 +731,7 @@ mod tests {
     #[test]
     fn completion_request_debug_redacts_all_secret_inputs() {
         let request = CompleteConnectLinkRequest {
+            use_platform_key: None,
             token: "nyx_clk_secret".to_string(),
             credential: Some("api-secret".to_string()),
             endpoint_url: Some("https://gateway.example.test".to_string()),
@@ -789,6 +796,7 @@ mod tests {
             State(state.clone()),
             test_auth_user(&actor_id),
             Json(CreateConnectLinkRequest {
+                use_platform_key: None,
                 scopes: Vec::new(),
                 service_slug: service.slug.clone(),
                 label: Some("Agent setup".to_string()),
@@ -883,6 +891,7 @@ mod tests {
             State(state.clone()),
             auth,
             Json(CreateConnectLinkRequest {
+                use_platform_key: None,
                 scopes: Vec::new(),
                 service_slug: service.slug,
                 label: None,
@@ -915,6 +924,7 @@ mod tests {
             ConnectInfo("127.0.0.1:43129".parse().unwrap()),
             HeaderMap::new(),
             Json(CompleteConnectLinkRequest {
+                use_platform_key: None,
                 token: raw_token,
                 credential: Some("test-secret".to_string()),
                 endpoint_url: None,
@@ -954,6 +964,7 @@ mod tests {
         let created = connect_link_service::create(
             &db,
             connect_link_service::CreateInput {
+                use_platform_key: None,
                 scopes: Vec::new(),
                 user_id: actor_id.clone(),
                 service_slug: service.slug,
@@ -1021,6 +1032,7 @@ mod tests {
         let created = connect_link_service::create(
             &db,
             connect_link_service::CreateInput {
+                use_platform_key: None,
                 scopes: Vec::new(),
                 user_id: actor_id.clone(),
                 service_slug: service.slug.clone(),
@@ -1040,6 +1052,7 @@ mod tests {
             ConnectInfo("127.0.0.1:43124".parse().unwrap()),
             HeaderMap::new(),
             Json(CompleteConnectLinkRequest {
+                use_platform_key: None,
                 token: created.raw_token.clone(),
                 credential: Some("test-secret".to_string()),
                 endpoint_url: None,
@@ -1057,6 +1070,7 @@ mod tests {
             ConnectInfo("127.0.0.1:43125".parse().unwrap()),
             HeaderMap::new(),
             Json(CompleteConnectLinkRequest {
+                use_platform_key: None,
                 token: created.raw_token.clone(),
                 credential: Some("test-secret".to_string()),
                 endpoint_url: None,
@@ -1076,6 +1090,7 @@ mod tests {
             ConnectInfo("127.0.0.1:43126".parse().unwrap()),
             HeaderMap::new(),
             Json(CompleteConnectLinkRequest {
+                use_platform_key: None,
                 token: created.raw_token,
                 credential: Some("test-secret".to_string()),
                 endpoint_url: None,

@@ -2362,7 +2362,7 @@ async fn handle_meta_connect(
         }
     }
 
-    match mcp_service::connect_service(
+    match mcp_service::connect_service_with_binding(
         &state.db,
         &state.encryption_keys,
         state.node_ws_manager.as_ref(),
@@ -2373,6 +2373,10 @@ async fn handle_meta_connect(
         &state.config.frontend_url,
         auth.api_key_name.as_deref(),
         &scopes,
+        arguments
+            .get("use_platform_key")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
     )
     .await
     {

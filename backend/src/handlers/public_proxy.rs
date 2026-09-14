@@ -277,6 +277,8 @@ mod tests {
 
     fn service() -> DownstreamService {
         DownstreamService {
+            inference: None,
+            platform_key: None,
             id: "svc-1".to_string(),
             name: "Public".to_string(),
             slug: "public".to_string(),
@@ -407,6 +409,8 @@ mod tests {
         /// single enabled `GET /public/**` anonymous rule with `daily_quota`.
         fn public_service(slug: &str, base_url: &str, daily_quota: u32) -> DownstreamService {
             DownstreamService {
+                inference: None,
+                platform_key: None,
                 id: Uuid::new_v4().to_string(),
                 name: "Public".to_string(),
                 slug: slug.to_string(),
@@ -758,6 +762,10 @@ mod tests {
             };
             let mut service = public_service("pub", "https://example.test", 100);
             service.billing = Some(ServiceBilling {
+                byok_pricing: None,
+                platform_key_pricing: None,
+                byok_pricing_cleanup_metric_code: None,
+                platform_key_pricing_cleanup_metric_code: None,
                 platform_billable: false,
                 platform_metric: None,
                 platform_pricing: None,

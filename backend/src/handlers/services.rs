@@ -58,6 +58,8 @@ pub struct CreateServiceRequest {
     pub issues_url: Option<String>,
     pub capabilities: Option<ServiceCapabilities>,
     pub billing: Option<ServiceBilling>,
+    pub inference: Option<crate::models::downstream_service::ServiceInference>,
+    pub platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
     pub auth_notes: Option<String>,
     pub known_limitations: Option<String>,
     pub required_permissions: Option<Vec<String>>,
@@ -176,6 +178,8 @@ pub struct ServiceResponse {
     pub capabilities: Option<ServiceCapabilities>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub billing: Option<ServiceBilling>,
+    pub inference: Option<crate::models::downstream_service::ServiceInference>,
+    pub platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
     /// Resolved allowance and platform metering unit after applying the
     /// service's explicit billing override or protocol/slug heuristic.
     pub effective_platform_metric: BillingMetric,
@@ -247,6 +251,75 @@ pub struct ResyncIdentityResponse {
     pub affected_count: u64,
 }
 
+/// Preserve additive lane settings when deployed clients send the legacy billing
+/// block. Explicit null clears a lane; omission leaves that lane unchanged.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct BillingUpdate {
+    #[serde(flatten)]
+    pub value: ServiceBilling,
+    #[serde(skip)]
+    byok_present: bool,
+    #[serde(skip)]
+    platform_present: bool,
+    #[serde(skip)]
+    present_fields: std::collections::HashSet<String>,
+}
+impl<'de> Deserialize<'de> for BillingUpdate {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        Ok(Self {
+            present_fields: raw
+                .as_object()
+                .map(|fields| fields.keys().cloned().collect())
+                .unwrap_or_default(),
+            byok_present: raw.get("byok_pricing").is_some(),
+            platform_present: raw.get("platform_key_pricing").is_some(),
+            value: serde_json::from_value(raw).map_err(serde::de::Error::custom)?,
+        })
+    }
+}
+impl BillingUpdate {
+    fn preserve_omitted_fields(&mut self, current: Option<&ServiceBilling>) {
+        let Some(current) = current else {
+            return;
+        };
+        if !self.byok_present {
+            self.value.byok_pricing = current.byok_pricing.clone();
+        }
+        if !self.platform_present {
+            self.value.platform_key_pricing = current.platform_key_pricing.clone();
+        }
+        // A new lane-only payload must retain its rollout fallback and resale.
+        // Legacy payloads keep the historical full-block update semantics.
+        if self.byok_present || self.platform_present {
+            macro_rules! retain { ($($field:ident),+) => { $(
+                if !self.present_fields.contains(stringify!($field)) { self.value.$field = current.$field.clone(); }
+            )+ }; }
+            retain!(
+                platform_billable,
+                platform_metric,
+                platform_pricing,
+                platform_pricing_cleanup_metric_code,
+                resale_billable,
+                resale_metric,
+                lago_resale_metric_code
+            );
+        }
+    }
+}
+
+impl std::ops::Deref for BillingUpdate {
+    type Target = ServiceBilling;
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
+impl std::ops::DerefMut for BillingUpdate {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.value
+    }
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateServiceRequest {
     pub name: Option<String>,
@@ -272,7 +345,13 @@ pub struct UpdateServiceRequest {
     pub repository_url: Option<String>,
     pub issues_url: Option<String>,
     pub capabilities: Option<ServiceCapabilities>,
-    pub billing: Option<ServiceBilling>,
+    pub billing: Option<BillingUpdate>,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::nullable_field::deserialize"
+    )]
+    pub inference: Option<Option<crate::models::downstream_service::ServiceInference>>,
+    pub platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
     pub auth_notes: Option<String>,
     pub known_limitations: Option<String>,
     pub required_permissions: Option<Vec<String>>,
@@ -1107,10 +1186,17 @@ pub async fn create_service(
         .transpose()?;
     if let Some(billing) = body.billing.as_mut() {
         crate::services::billing::pricing::normalize_platform_pricing(&slug, None, billing)?;
+        crate::services::billing::pricing::normalize_lane_pricing(&slug, None, billing)?;
+    }
+    if let Some(config) = body.platform_key.as_mut() {
+        require_admin(&state, &auth_user).await?;
+        crate::services::platform_key_service::validate_config(&state.db, config).await?;
     }
     validate_service_billing(body.billing.as_ref())?;
 
     let new_service = DownstreamService {
+        inference: body.inference.clone(),
+        platform_key: body.platform_key.clone(),
         id: id.clone(),
         name: body.name.clone(),
         slug: slug.clone(),
@@ -1168,12 +1254,11 @@ pub async fn create_service(
         .insert_one(&new_service)
         .await?;
 
-    if new_service
-        .billing
-        .as_ref()
-        .and_then(|billing| billing.platform_pricing.as_ref())
-        .is_some()
-    {
+    if new_service.billing.as_ref().is_some_and(|billing| {
+        billing.platform_pricing.is_some()
+            || billing.byok_pricing.is_some()
+            || billing.platform_key_pricing.is_some()
+    }) {
         state.billing.sync_service_price(&new_service).await?;
         audit_service::log_for_user(
             state.db.clone(),
@@ -1390,8 +1475,35 @@ pub async fn update_service(
             "Platform vendor rows cannot configure OpenAPI or AsyncAPI specs".to_string(),
         ));
     }
+    if body.inference.is_some() || body.platform_key.is_some() {
+        require_admin(&state, &auth_user).await?;
+    }
+    if let Some(config) = body.platform_key.as_mut() {
+        crate::services::platform_key_service::validate_config(&state.db, config).await?;
+    }
+    let mut lane_price_changed = false;
     let mut platform_price_changed = false;
     if let Some(billing) = body.billing.as_mut() {
+        billing.preserve_omitted_fields(service.billing.as_ref());
+        if billing.byok_present || billing.platform_present {
+            require_admin(&state, &auth_user).await?;
+        }
+        crate::services::billing::pricing::normalize_lane_pricing(
+            &service.slug,
+            service.billing.as_ref(),
+            billing,
+        )?;
+        lane_price_changed = billing.byok_pricing
+            != service
+                .billing
+                .as_ref()
+                .and_then(|b| b.byok_pricing.clone())
+            || billing.platform_key_pricing
+                != service
+                    .billing
+                    .as_ref()
+                    .and_then(|b| b.platform_key_pricing.clone());
+
         let current_pricing = service
             .billing
             .as_ref()
@@ -1421,6 +1533,18 @@ pub async fn update_service(
 
     // Build the $set document with only provided fields
     let mut set_doc = doc! {};
+    if let Some(inference) = &body.inference {
+        set_doc.insert(
+            "inference",
+            bson::to_bson(inference).map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+    }
+    if let Some(platform_key) = &body.platform_key {
+        set_doc.insert(
+            "platform_key",
+            bson::to_bson(platform_key).map_err(|e| AppError::Internal(e.to_string()))?,
+        );
+    }
     let mut http_docs_refresh: Option<api_docs_service::ServiceDocumentationMetadata> = None;
     let mut explicit_openapi_spec_url: Option<Option<String>> = None;
     let mut explicit_asyncapi_spec_url: Option<Option<String>> = None;
@@ -1732,12 +1856,16 @@ pub async fn update_service(
     }
     let mut next_resale_billable: Option<bool> = None;
     if body.billing.is_some() {
-        validate_service_billing(body.billing.as_ref())?;
+        validate_service_billing(body.billing.as_deref())?;
         let next_billing = body.billing.clone().filter(|billing| {
             billing.platform_billable
                 || billing.platform_metric.is_some()
                 || billing.platform_pricing.is_some()
                 || billing.platform_pricing_cleanup_metric_code.is_some()
+                || billing.byok_pricing.is_some()
+                || billing.platform_key_pricing.is_some()
+                || billing.byok_pricing_cleanup_metric_code.is_some()
+                || billing.platform_key_pricing_cleanup_metric_code.is_some()
                 || billing.resale_billable
                 || billing.lago_resale_metric_code.is_some()
         });
@@ -2033,6 +2161,23 @@ pub async fn update_service(
             }
         })?;
 
+    if lane_price_changed {
+        state.billing.sync_service_price(&committed_service).await?;
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "service_lane_prices_changed",
+            Some(serde_json::json!({ "service_id": &service_id })),
+        );
+    }
+    if body.platform_key.is_some() {
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "service_platform_key_changed",
+            Some(serde_json::json!({ "service_id": &service_id })),
+        );
+    }
     if platform_price_changed {
         let has_price = committed_service
             .billing
@@ -2625,6 +2770,8 @@ mod tests {
         base_url: String,
     ) -> CreateServiceRequest {
         CreateServiceRequest {
+            inference: None,
+            platform_key: None,
             name: name.to_string(),
             slug: Some(slug.to_string()),
             description: None,
@@ -3493,5 +3640,82 @@ mod tests {
         }];
         let err = validate_token_exchange_config(&config).unwrap_err();
         assert!(err.to_string().contains("missing"));
+    }
+}
+
+#[cfg(test)]
+mod platform_key_request_tests {
+    use super::*;
+    #[test]
+    fn old_admin_payloads_leave_new_metadata_and_lanes_absent() {
+        let request: UpdateServiceRequest =
+            serde_json::from_value(serde_json::json!({"billing": {"platform_billable": true}}))
+                .unwrap();
+        assert!(request.inference.is_none());
+        assert!(request.platform_key.is_none());
+        let billing = request.billing.unwrap();
+        assert!(!billing.byok_present);
+        assert!(!billing.platform_present);
+        let request: UpdateServiceRequest = serde_json::from_value(serde_json::json!({"inference": null, "billing": {"byok_pricing": null, "platform_key_pricing": {"metric":"tokens", "credits_per_unit":"0.01"}}})).unwrap();
+        assert_eq!(request.inference, Some(None));
+        let billing = request.billing.unwrap();
+        assert!(billing.byok_present && billing.platform_present);
+        assert!(billing.byok_pricing.is_none());
+        assert_eq!(
+            billing.platform_key_pricing.as_ref().unwrap().metric,
+            BillingMetric::Tokens
+        );
+    }
+    #[test]
+    fn lane_only_update_preserves_legacy_fallback_and_resale() {
+        let current = ServiceBilling {
+            platform_billable: true,
+            platform_metric: Some(BillingMetric::Tokens),
+            resale_billable: true,
+            lago_resale_metric_code: Some("resale_tokens".into()),
+            ..Default::default()
+        };
+        let mut request: UpdateServiceRequest = serde_json::from_value(serde_json::json!({"billing": {"byok_pricing": {"metric":"requests", "credits_per_unit":"0.1"}}})).unwrap();
+        let billing = request.billing.as_mut().unwrap();
+        billing.preserve_omitted_fields(Some(&current));
+        assert!(billing.platform_billable && billing.resale_billable);
+        assert_eq!(billing.platform_metric, Some(BillingMetric::Tokens));
+        assert_eq!(
+            billing.lago_resale_metric_code.as_deref(),
+            Some("resale_tokens")
+        );
+        let mut request: UpdateServiceRequest = serde_json::from_value(
+            serde_json::json!({"billing": {"byok_pricing": null, "platform_billable": false}}),
+        )
+        .unwrap();
+        let billing = request.billing.as_mut().unwrap();
+        billing.preserve_omitted_fields(Some(&current));
+        assert!(!billing.platform_billable);
+        assert!(billing.resale_billable);
+        let mut request: UpdateServiceRequest =
+            serde_json::from_value(serde_json::json!({"billing": {"platform_billable": false}}))
+                .unwrap();
+        let billing = request.billing.as_mut().unwrap();
+        billing.preserve_omitted_fields(Some(&current));
+        assert!(
+            !billing.resale_billable,
+            "old payload retains full-block semantics"
+        );
+    }
+
+    #[test]
+    fn invalid_platform_audience_and_inference_protocol_are_rejected() {
+        assert!(
+            serde_json::from_value::<UpdateServiceRequest>(
+                serde_json::json!({"inference":{"wire_protocol":"cohere"}})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<UpdateServiceRequest>(
+                serde_json::json!({"platform_key":{"audience":"anyone"}})
+            )
+            .is_err()
+        );
     }
 }

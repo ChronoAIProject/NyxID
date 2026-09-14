@@ -247,13 +247,28 @@ impl LagoApi for FakeLago {
     }
 }
 
-#[tokio::test]
-async fn billing_route_coverage_smoke() {
-    // Poll the large route matrix as its own heap-allocated task, so mounted
-    // handler futures do not share a stack with the test wrapper's first poll.
-    tokio::spawn(Box::pin(run_billing_route_coverage_smoke()))
-        .await
-        .expect("billing route coverage task");
+#[test]
+fn billing_route_coverage_smoke() {
+    // This single matrix constructs all ingress fixtures and handler futures.
+    // Give its debug-build construction stack room as additive model fields grow;
+    // the cases and assertions still run unchanged on the normal Tokio runtime.
+    std::thread::Builder::new()
+        .name("billing-route-matrix".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    tokio::spawn(Box::pin(run_billing_route_coverage_smoke()))
+                        .await
+                        .expect("billing route coverage task");
+                });
+        })
+        .expect("billing route coverage thread")
+        .join()
+        .expect("billing route coverage result");
 }
 
 async fn run_billing_route_coverage_smoke() {

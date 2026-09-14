@@ -280,6 +280,8 @@ pub fn service_to_response_with_viewer(
         issues_url: s.issues_url,
         capabilities: s.capabilities,
         billing: s.billing,
+        inference: s.inference,
+        platform_key: s.platform_key,
         effective_platform_metric,
         auth_notes: s.auth_notes,
         known_limitations: s.known_limitations,

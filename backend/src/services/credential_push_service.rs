@@ -952,6 +952,7 @@ mod tests {
     #[test]
     fn build_params_from_user_service_delegates_correctly() {
         let svc = UserService {
+            credential_binding: None,
             id: "svc-1".to_string(),
             user_id: "user-1".to_string(),
             slug: "openai".to_string(),
