@@ -7931,11 +7931,11 @@ App requirements are advisory, immutable versions describing which catalog servi
 }
 ```
 
-A manifest has at most 25 requirements with unique stable IDs matching `[a-z0-9_-]{1,32}`. Each resolves to 1–25 active, user-connectable catalog slugs. `any_of_catalog_prefix` expands active seeded slugs at publication and freezes that membership; later seeds enter only on republish. Unknown slugs, catalog tags, provider-category rows, inactive rows, unknown profiles, and profiles applying to none of a requirement's slugs are rejected with `12000 AppRequirementsInvalid` (400). `gate` is rejected until phase 2; the error explains that only `advise` is available. An empty manifest clears the current requirements by publishing a new version.
+A manifest has at most 25 requirements with unique stable IDs matching `[a-z0-9_-]{1,32}`. Each resolves to 1–25 active, user-connectable catalog slugs. `any_of_catalog_prefix` (at most 128 characters) expands active seeded, non-provider slugs at publication and freezes that membership; later seeds enter only on republish. Unknown slugs, catalog tags, explicitly listed provider-category or inactive rows, unknown profiles, and profiles applying to none of a requirement's slugs are rejected with `12000 AppRequirementsInvalid` (400). `gate` is rejected until phase 2; the error explains that only `advise` is available. An empty manifest clears the current requirements by publishing a new version.
 
 `owner_policy` is `personal_only` or `personal_or_org_allowed`; org candidates require the person's live proxy permission. Empty `accepted_credential_types` accepts any user credential, while the master/no-credential flags independently allow platform credentials or credential-free services. OAuth scope checks use the stored `token_scopes`. `{"kind":"stored_only"}` uses local credential readiness; a profile uses the connection-validation evidence and proves only that profile's documented claim.
 
-`GET /api/v1/app-requirements/status` accepts an ordinary developer-app user access token. Its verified client ID selects the manifest; there is no client selector in the request. Session-only, API-key, delegated, relay, service-account, and non-person callers are rejected. The response is:
+`GET /api/v1/app-requirements/status` accepts an ordinary developer-app user access token. Its verified client ID selects the manifest; there is no client selector in the request. Session-only, API-key, delegated, relay, service-account, and non-person callers are rejected. Status reads are limited to 30 per user per minute (HTTP 429, `1005 rate_limited`). An app with no published manifest returns HTTP 404 with "No published requirements for this app". The response is:
 
 ```json
 {
@@ -7956,7 +7956,7 @@ A manifest has at most 25 requirements with unique stable IDs matching `[a-z0-9_
 }
 ```
 
-Only manifest services may be disclosed. Optional selection/evidence fields are `null` when absent. `granted_to_caller` uses the token's own service allowlist: a requirement may be `met` while this token cannot use its selected service. Evaluation persists a result bound to the person, app, and manifest version, expiring after one hour; the result grants no access.
+Only manifest services may be disclosed. Optional selection/evidence fields are `null` when absent. `granted_to_caller` uses the token's own service allowlist: a requirement may be `met` while this token cannot use its selected service. Evaluation persists a result bound to the person, app, and manifest version, expiring after one hour; the result grants no access. Each read evaluates readiness afresh but reuses the newest unexpired result when its selections are identical, without extending its expiry.
 
 | State | Meaning |
 |-------|---------|
@@ -7964,11 +7964,11 @@ Only manifest services may be disclosed. Optional selection/evidence fields are 
 | `included` | An eligible credential-free or platform-credentialed service is provisioned and ready. |
 | `unmet` | No eligible connection is available. |
 | `unknown` | Evidence is absent, expired, changed, or inconclusive. |
-| `broken` | The selected credential is expired, revoked, or freshly rejected, with no ready alternative. |
+| `broken` | The selected credential is expired, revoked, or freshly rejected. An explicit selection remains selected even when broken. |
 | `needs_reauth` | A candidate lacks required downstream OAuth scopes. |
 | `unsatisfiable` | No active catalog alternative remains. |
 | `disabled` | Disabled, enable to use. Evaluation never enables the service. |
 
-The evaluator performs no provider I/O, decryption, or token refresh. It reuses phase-0 freshness checks, including the profile version, credential revision, and execution-authority digest. Transport failures and other zero-window observations are not reusable evidence. No check runs merely because an app reads status. Credential-free services use the existing local auto-provision path. Prior explicit eligible selections win, followed by freshest authenticated evidence and most recent use; a rejected selection falls back to a ready eligible alternative.
+The evaluator performs no provider I/O, decryption, or token refresh. It reuses phase-0 freshness checks, including the profile version, credential revision, and execution-authority digest. Transport failures and other zero-window observations are not reusable evidence. No check runs merely because an app reads status. **GET `/api/v1/app-requirements/status` may auto-provision eligible no-credential services** through the existing local auto-provision path. Prior explicit eligible selections win even when broken. Otherwise candidates rank Met/Included, Unknown, NeedsReauth, then Broken, followed by freshest authenticated evidence, most recent use, and service ID for deterministic ties.
 
 Platform admins use `PATCH /api/v1/admin/oauth-clients/{client_id}/app-connect-capability` with `{"enabled":true|false}`. `GET/PATCH /api/v1/admin/settings/app-connect` reads/updates rollout with `{"rollout":"disabled"|"allowlist"|null}`; `null` restores the deployment default. The response reports `effective`, `env_default`, `override_value`, and `allowed_org_ids`. Public mode is a reserved configuration value requiring a separate rollout review and is not offered in the UI. Capability changes emit `app_connect_capability_granted`/`app_connect_capability_revoked`; mode changes emit `app_connect_rollout_changed`.

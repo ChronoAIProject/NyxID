@@ -47,11 +47,11 @@ pub async fn current(
 ) -> AppResult<AppRequirementManifest> {
     let version = client
         .current_manifest_version
-        .ok_or(AppError::AppConnectLinkNotFound)?;
+        .ok_or_else(|| AppError::NotFound("No published requirements for this app".into()))?;
     db.collection::<AppRequirementManifest>(COLLECTION_NAME)
         .find_one(doc! { "oauth_client_id": &client.id, "version": i64::from(version) })
         .await?
-        .ok_or(AppError::AppConnectLinkNotFound)
+        .ok_or_else(|| AppError::NotFound("No published requirements for this app".into()))
 }
 
 pub async fn compile(
@@ -77,7 +77,8 @@ pub async fn compile(
             // System is the durable provenance used by the catalog seed service.
             let seeded: Vec<DownstreamService> = db
                 .collection::<DownstreamService>(CATALOG)
-                .find(doc! { "created_by": "system", "is_active": true })
+                .find(doc! { "created_by": "system", "is_active": true,
+                "service_category": { "$ne": "provider" } })
                 .await?
                 .try_collect()
                 .await?;
@@ -240,7 +241,9 @@ pub async fn publish(
                     })
                     .session(&mut *session)
                     .await?
-                    .ok_or(AppError::AppConnectLinkNotFound)?;
+                    .ok_or_else(|| {
+                        AppError::NotFound("No published requirements for this app".into())
+                    })?;
                 let version = live
                     .current_manifest_version
                     .unwrap_or(0)

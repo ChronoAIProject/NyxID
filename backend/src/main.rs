@@ -144,6 +144,8 @@ pub struct AppState {
     pub auth_agent_key_approve_limiter: mw::rate_limit::SharedPerIpRateLimiter,
     pub auth_agent_key_approve_per_user_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
     pub auth_agent_key_preview_limiter: mw::rate_limit::SharedPerIpRateLimiter,
+    /// Per-user limiter for `GET /api/v1/app-requirements/status` (30/min).
+    pub app_requirements_status_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
     /// Per-user limiter for `POST /api/v1/keys/{id}/validate` (10/min).
     pub service_validation_limiter: mw::rate_limit::SharedPerKeyRateLimiter,
     /// Per-creator limiter for `POST /api/v1/connect-links` (10/min).
@@ -905,6 +907,12 @@ async fn main() {
         auth_agent_key_preview_limiter: mw::rate_limit::create_per_ip_rate_limiter(
             db.clone(),
             "auth_agent_key_preview",
+            30,
+            60,
+        ),
+        app_requirements_status_limiter: mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "app_requirements_status",
             30,
             60,
         ),

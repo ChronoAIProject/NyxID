@@ -354,6 +354,18 @@ async fn app_requirements_db_publish_freezes_prefix_and_versions_are_atomic() {
         return;
     };
     let id = catalog(&f, "llm-first", "bearer").await;
+    for (slug, patch) in [
+        ("llm-provider", doc! { "service_category": "provider" }),
+        ("llm-inactive", doc! { "is_active": false }),
+    ] {
+        let excluded = catalog(&f, slug, "bearer").await;
+        f.state
+            .db
+            .collection::<Document>("downstream_services")
+            .update_one(doc! { "_id": excluded }, doc! { "$set": patch })
+            .await
+            .unwrap();
+    }
     let mut req = requirement("llm-first");
     req.any_of_catalog_slugs.clear();
     req.any_of_catalog_prefix = Some("llm-".into());
@@ -769,7 +781,7 @@ async fn app_requirements_db_evidence_freshness_and_authority_binding() {
 }
 
 #[tokio::test]
-async fn app_requirements_db_explicit_selection_and_rejected_candidate_fallback() {
+async fn app_requirements_db_explicit_broken_selection_stays_selected() {
     let Some(f) = fixture("requirements_selection").await else {
         return;
     };
@@ -807,14 +819,16 @@ async fn app_requirements_db_explicit_selection_and_rejected_candidate_fallback(
         .db
         .collection::<Document>("service_validation_records")
         .update_one(
-            doc! { "user_service_id": a.id },
+            doc! { "user_service_id": &a.id },
             doc! { "$set": { "outcome": { "kind": "credential_rejected" } } },
         )
         .await
         .unwrap();
+    let broken = report(&f).await;
+    assert_eq!(broken.requirements[0].state, "broken");
     assert_eq!(
-        report(&f).await.requirements[0].user_service_id.as_deref(),
-        Some(b.id.as_str())
+        broken.requirements[0].user_service_id.as_deref(),
+        Some(a.id.as_str())
     );
 }
 
@@ -1077,4 +1091,154 @@ async fn app_requirements_db_node_stored_only_reads_dispatchability_without_send
         outbound.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
+}
+
+#[tokio::test]
+async fn app_requirements_db_unknown_candidate_outranks_broken_without_explicit_choice() {
+    let Some(f) = fixture("requirements_unknown_choice").await else {
+        return;
+    };
+    let id = catalog(&f, "api-github", "bearer").await;
+    let (dead, key) = service(&f, &f.auth.user_id.to_string(), &id, "github-dead").await;
+    let (untested, _) = service(&f, &f.auth.user_id.to_string(), &id, "github-untested").await;
+    f.state
+        .db
+        .collection::<Document>("user_api_keys")
+        .update_one(
+            doc! { "_id": &key.id },
+            doc! { "$set": { "last_used_at": bson::DateTime::now() } },
+        )
+        .await
+        .unwrap();
+    let mut r = requirement("api-github");
+    r.validator = ValidatorSelection::Profile {
+        id: "github_user_v1".into(),
+    };
+    publish(&f, r).await;
+    evidence(&f, &dead, &key, ValidationOutcome::CredentialRejected).await;
+    let result = report(&f).await;
+    assert_eq!(result.requirements[0].state, "unknown");
+    assert_eq!(
+        result.requirements[0].user_service_id.as_deref(),
+        Some(untested.id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn app_requirements_db_status_without_manifest_is_not_found_with_relevant_message() {
+    let Some(f) = fixture("requirements_no_manifest").await else {
+        return;
+    };
+    let error = status(State(f.state.clone()), f.auth.clone())
+        .await
+        .unwrap_err();
+    assert_eq!(error.status_code(), axum::http::StatusCode::NOT_FOUND);
+    assert!(
+        matches!(error, AppError::NotFound(message) if message == "No published requirements for this app")
+    );
+}
+
+#[tokio::test]
+async fn app_requirements_db_status_limits_per_user_before_evaluation() {
+    let Some(f) = fixture("requirements_status_limit").await else {
+        return;
+    };
+    catalog(&f, "api-github", "bearer").await;
+    publish(&f, requirement("api-github")).await;
+    for _ in 0..30 {
+        report(&f).await;
+    }
+    assert!(matches!(
+        status(State(f.state.clone()), f.auth.clone()).await,
+        Err(AppError::RateLimited)
+    ));
+    assert_eq!(
+        f.state
+            .db
+            .collection::<Document>(RESULTS)
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+        1
+    );
+    let another = Uuid::new_v4();
+    f.state
+        .db
+        .collection::<User>(USERS)
+        .insert_one(test_user(&another.to_string(), UserType::Person))
+        .await
+        .unwrap();
+    let mut auth = f.auth.clone();
+    auth.user_id = another;
+    assert!(status(State(f.state.clone()), auth).await.is_ok());
+    // A spent user bucket must not reveal an app behind a disabled rollout.
+    app_connect_rollout::set_client_capability(&f.state.db, &f.app.id, false)
+        .await
+        .unwrap();
+    assert!(matches!(
+        status(State(f.state.clone()), f.auth.clone()).await,
+        Err(AppError::AppConnectLinkNotFound)
+    ));
+}
+
+#[tokio::test]
+async fn app_requirements_db_reuses_identical_selections_with_fresh_status_and_fixed_expiry() {
+    let Some(f) = fixture("requirements_result_reuse").await else {
+        return;
+    };
+    let id = catalog(&f, "api-github", "bearer").await;
+    let (service, key) = service(&f, &f.auth.user_id.to_string(), &id, "api-github").await;
+    let mut r = requirement("api-github");
+    r.validator = ValidatorSelection::Profile {
+        id: "github_user_v1".into(),
+    };
+    publish(&f, r.clone()).await;
+    let first = report(&f).await;
+    assert_eq!(first.requirements[0].state, "unknown");
+    let results = f.state.db.collection::<AppRequirementResult>(RESULTS);
+    let stored = results
+        .find_one(doc! { "_id": &first.result_id })
+        .await
+        .unwrap()
+        .unwrap();
+    evidence(&f, &service, &key, ValidationOutcome::Authenticated).await;
+    let second = report(&f).await;
+    assert_eq!(second.requirements[0].state, "met");
+    assert_eq!(second.result_id, first.result_id);
+    assert_eq!(results.count_documents(doc! {}).await.unwrap(), 1);
+    assert_eq!(
+        results
+            .find_one(doc! { "_id": &first.result_id })
+            .await
+            .unwrap()
+            .unwrap()
+            .expires_at,
+        stored.expires_at
+    );
+    let expired = bson::DateTime::from_chrono(Utc::now() - chrono::Duration::seconds(1));
+    results
+        .update_one(
+            doc! { "_id": &first.result_id },
+            doc! { "$set": { "expires_at": expired } },
+        )
+        .await
+        .unwrap();
+    let renewed = report(&f).await;
+    assert_ne!(renewed.result_id, first.result_id);
+    // Even identical selections must not cross an immutable manifest version.
+    publish(&f, r).await;
+    let versioned = report(&f).await;
+    assert_ne!(versioned.result_id, renewed.result_id);
+    f.state
+        .db
+        .collection::<Document>("user_services")
+        .update_one(
+            doc! { "_id": &service.id },
+            doc! { "$set": { "catalog_service_id": bson::Bson::Null } },
+        )
+        .await
+        .unwrap();
+    let changed = report(&f).await;
+    assert_eq!(changed.requirements[0].state, "unmet");
+    assert_ne!(changed.result_id, versioned.result_id);
 }

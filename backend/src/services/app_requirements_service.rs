@@ -88,7 +88,6 @@ struct Candidate {
     status: RequirementStatus,
     last_used_at: Option<DateTime<Utc>>,
     authenticated_at: Option<DateTime<Utc>>,
-    scope_shortfall: bool,
 }
 
 impl RequirementStatus {
@@ -190,16 +189,17 @@ pub async fn evaluate_local(
             }
         }
         let preferred = caller.explicit_selections.get(&requirement.id);
-        if candidates
-            .iter()
-            .any(|candidate| !candidate.scope_shortfall)
-        {
-            candidates.retain(|candidate| !candidate.scope_shortfall);
-        }
         candidates.sort_by(|left, right| {
             let rank = |candidate: &Candidate| {
                 (
                     candidate.status.user_service_id.as_ref() == preferred && preferred.is_some(),
+                    match candidate.status.state {
+                        RequirementState::Met | RequirementState::Included => 4,
+                        RequirementState::Unknown => 3,
+                        RequirementState::NeedsReauth => 2,
+                        RequirementState::Broken => 1,
+                        _ => 0,
+                    },
                     candidate.authenticated_at,
                     candidate.last_used_at,
                 )
@@ -210,18 +210,6 @@ pub async fn evaluate_local(
                     .cmp(&right.status.user_service_id)
             })
         });
-        if candidates
-            .first()
-            .is_some_and(|candidate| candidate.status.state == RequirementState::Broken)
-            && let Some(index) = candidates.iter().position(|candidate| {
-                matches!(
-                    candidate.status.state,
-                    RequirementState::Met | RequirementState::Included
-                )
-            })
-        {
-            candidates.swap(0, index);
-        }
         if let Some(candidate) = candidates.into_iter().next() {
             requirements.push(candidate.status);
         } else {
@@ -266,14 +254,26 @@ pub async fn evaluate_local(
         created_at: now,
         expires_at: now + chrono::Duration::hours(1),
     };
-    state
-        .db
-        .collection::<AppRequirementResult>(RESULTS)
-        .insert_one(&result)
+    let results = state.db.collection::<AppRequirementResult>(RESULTS);
+    let previous = results
+        .find_one(doc! {
+            "user_id": user_id, "oauth_client_id": caller.client_id,
+            "manifest_id": &manifest.id, "manifest_version": i64::from(manifest.version),
+            "expires_at": { "$gt": bson::DateTime::from_chrono(now) },
+        })
+        .sort(doc! { "created_at": -1, "_id": 1 })
         .await?;
+    // Re-evaluate readiness on every read, but keep a stable result identity while
+    // the selections are unchanged. Reuse never extends the original expiry.
+    let result_id = if let Some(previous) = previous.filter(|r| r.selections == result.selections) {
+        previous.id
+    } else {
+        results.insert_one(&result).await?;
+        result.id
+    };
     Ok(RequirementsReport {
         requirements_version: manifest.version,
-        result_id: result.id,
+        result_id,
         requirements,
     })
 }
@@ -498,6 +498,5 @@ async fn evaluate_candidate(
         status,
         last_used_at: key.as_ref().and_then(|key| key.last_used_at),
         authenticated_at,
-        scope_shortfall,
     }))
 }

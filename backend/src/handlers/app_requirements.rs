@@ -191,6 +191,13 @@ pub async fn status(
     let client = enabled_client(&state, &client_id).await?;
     let manifest = manifests::current(&state.db, &client).await?;
     let actor = auth.user_id.to_string();
+    if !state
+        .app_requirements_status_limiter
+        .check_shared(&actor)
+        .await?
+    {
+        return Err(AppError::RateLimited);
+    }
     let caller = requirements::EvaluationCaller {
         client_id: &client_id,
         allow_all_services: auth.allow_all_services,

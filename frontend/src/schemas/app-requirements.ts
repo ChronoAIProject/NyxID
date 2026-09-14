@@ -15,7 +15,7 @@ export const serviceRequirementSchema = z
       ),
     label: z.string().trim().min(1).max(160),
     any_of_catalog_slugs: z.array(z.string().min(1)).max(25),
-    any_of_catalog_prefix: z.string().max(64).nullable(),
+    any_of_catalog_prefix: z.string().max(128).nullable(),
     owner_policy: z.enum(["personal_only", "personal_or_org_allowed"]),
     accepted_credential_types: z.array(z.string()),
     allow_master_credential: z.boolean(),
