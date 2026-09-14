@@ -67,7 +67,9 @@ final credential classification; they do not bypass a revoked connection grant.
 
 Public platform services auto-provision through the existing idempotent lifecycle.
 Restricted services provision only eligible personal owners and granted org owners.
-Org access is inherited through the existing membership traversal. Stale automatic
+Org access is inherited through the existing membership traversal. This new org
+walk provisions explicit platform configurations only; legacy no-auth provisioning
+remains personal unless an existing caller explicitly provisions an org owner. Stale automatic
 rows are removed with orphan endpoint cleanup, allowing re-provisioning after a
 grant returns. User-selected bindings retain their connection and any inactive
 personal credential when access is revoked, so management can switch back to BYOK.
@@ -79,8 +81,12 @@ platform-bound rows as well as historical automatic rows.
 `POST /keys` accepts `use_platform_key` (default false for existing callers). It is
 exclusive with credential/OAuth inputs, custom destination/auth, and node routing.
 The unified key service owns provisioning for normal, hosted, and assistant callers.
+Assistant schema revision v9 opts into `catalogService.use_platform_key`; default
+and revisions v4-v8 remain byte-compatible with deployed Aevatar pins.
+
 Key updates accept `use_platform_key`: true selects an available platform key; false
-requires a fresh credential or the existing OAuth setup path. Switching to platform
+requires a fresh credential or the existing OAuth setup path, including the existing
+raw/copy custom-app credential inputs. Switching to platform
 retains the personal `UserApiKey`; it does not silently delete credentials or their
 other consumers. Actual user credential replacement retains the pipeline-based
 credential-epoch bump. Automatic rows may be adopted into a user-managed connection
@@ -92,7 +98,7 @@ single-use unified provisioning path. Public previews expose no owner authorizat
 decision or secret. MCP/assistant connection parameters accept the same choice.
 
 The CLI offers `service add --platform-key`, interactive choice, binding in service
-list/show, and `service update --use-platform-key|--use-own-key`. Admin update/add
+list/show (`nyxid keys` also lists connections), and `service update --use-platform-key|--use-own-key`. Admin update/add
 accept inference protocol/model-list/realtime controls, platform enable/audience/
 owner grants, the existing write-only credential environment input, and lane metric/
 price controls. Owner resolution reuses UUID/org slug/display-name resolution.
@@ -138,7 +144,12 @@ allowances, expiring grants, wallet funding, settlement, Lago outbox, and dashbo
 queries consume the selected metric. Provider-reported token usage remains the
 authoritative token input. Ledger canonical fields, order, hash derivation, dedupe
 keys, and verification are unchanged; lane charges use the existing platform layer
-and distinguish themselves by metric code and credential class.
+and reference usage rows that distinguish lanes by metric code and credential class.
+
+
+Lane-only admin updates preserve omitted legacy platform and resale fields, including
+the pending-sync fallback. Legacy billing-only updates retain their existing full-block
+semantics; omitted new lanes are always preserved, and explicit null clears a lane.
 
 ## Inference defaults and transports
 
@@ -185,3 +196,30 @@ verification, CLI parsing/rendering, and frontend schemas/components. Required f
 Rust tests/clippy/format and frontend lint/test/build run before final commits; wizard
 assets are rebuilt when their inputs change. Release versions and lockfiles move
 together to 0.20.0.
+
+### Operator examples
+
+```sh
+nyxid service update <catalog-id> --catalog-admin --platform-key-enabled true \
+  --platform-key-audience restricted --platform-key-allow <owner-uuid> \
+  --credential-env UPSTREAM_KEY --platform-key-metric tokens --platform-key-price 0.00001 --byok-free
+nyxid service add llm-xai --platform-key
+nyxid service update <connection-id> --use-own-key --credential-env MY_XAI_KEY
+nyxid service update <connection-id> --use-platform-key
+```
+
+Admin catalog flags select catalog administration; `--catalog-admin` also permits
+credential-only or name/URL edits. Without catalog flags, add/update retain their
+existing user-connection routes. Owner arguments accept person/org UUIDs and the
+existing org slug/display-name resolver; the admin UI reuses the people/org picker.
+Admin inference flags are `--inference-protocol`, `--inference-model-list`, and
+`--inference-realtime`; `--inference-protocol none` clears metadata. Lane flags are
+`--byok-metric`, `--byok-price`, `--byok-free`, `--platform-key-metric`,
+`--platform-key-price`, and `--platform-key-free`. Catalog create uses `service add
+<slug> --catalog-admin --endpoint-url <url> --label <name>` with the same controls.
+
+### Upstream capability evidence
+
+- xAI [Models REST API](https://docs.x.ai/developers/rest-api-reference/inference/models.md): `GET /v1/models`, OpenAI-style `data`/model objects.
+- xAI [Voice agent guide](https://docs.x.ai/docs/guides/voice/agent): bearer-authenticated `wss://api.x.ai/v1/realtime`.
+- OpenAI [Models](https://developers.openai.com/api/reference/resources/models/methods/list), [DeepSeek models](https://api-docs.deepseek.com/api/list-models), [Mistral models](https://docs.mistral.ai/api/endpoint/models), [Anthropic models](https://docs.anthropic.com/en/api/models-list), and [OpenRouter models](https://openrouter.ai/api/v1/models) establish model-list capability. Transport construction tests cover OpenAI and xAI realtime; no paid upstream session is required for the local test suite.

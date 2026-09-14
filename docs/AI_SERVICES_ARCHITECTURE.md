@@ -469,3 +469,30 @@ sequenceDiagram
     API->>API: Audit log { api_key_id, api_key_name }
     API-->>Agent: Response + X-NyxID-Agent-Id header
 ```
+
+## Platform credential binding (0.20)
+
+`UserService.credential_binding` is optional (`platform` or `user`). Absent keeps
+legacy resolution: no `api_key_id` plus `source=auto_provision` selects the historical
+platform path; other rows use the user path. Catalog `platform_key` grants are live,
+owner-scoped, and independent of catalog provider linkage. Person UUIDs grant that
+person; org UUIDs grant proxy-capable active members and org-owned connections.
+Public grants auto-connect everyone. Restricted grants auto-connect eligible people
+and granted org owners; reconciliation removes stale automatic rows and orphan
+endpoints. Explicit connections remain manageable after revocation but cannot execute.
+
+`POST /keys {service_slug, label, use_platform_key:true}` creates a server-held
+connection without credential, OAuth, destination override or node inputs.
+`PUT /keys/{id} {use_platform_key:true}` switches an existing row after live ACL
+validation. `false` requires a fresh credential or the existing OAuth-provider flow.
+The previous personal key row is retained when switching to platform. Disable/Enable
+and Delete keep their existing meanings. Platform-bound connections use the live
+catalog URL/auth, never a user-controlled destination or credential node. Normal
+routing edits require switching back to BYOK.
+
+`GET /keys` adds `credential_binding`, `platform_key_available`,
+`platform_key_pricing`, and `byok_pricing`. Agent keys with
+`allow_auto_connected_services` include active same-owner platform-bound rows in
+their effective service union, including explicit selections. Grants do not override
+normal org membership, operation policy or delegated execution checks. See
+[the design](PLATFORM_KEYS_AND_INFERENCE.md) for complete pricing and upgrade rules.
