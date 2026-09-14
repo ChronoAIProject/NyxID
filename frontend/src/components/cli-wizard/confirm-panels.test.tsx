@@ -186,7 +186,9 @@ describe("ApiKeyCreateConfirm", () => {
   it("derives expires_at from a positive expires_in_days and includes target_org_id when an org is chosen", async () => {
     const user = userEvent.setup();
     mockUseOrgs.mockReturnValue({
-      data: [{ id: "org-uuid-1", display_name: "ChronoAI" }],
+      data: [
+        { id: "org-uuid-1", display_name: "ChronoAI", your_role: "admin" },
+      ],
     });
     mockPost.mockResolvedValue({ id: "key-id-2", full_key: "nyxid_ag_xyz" });
 
@@ -452,7 +454,9 @@ describe("ServiceAccountCreateConfirm", () => {
   it("assembles the body (trimmed name/scopes, role_ids list, description, org) and POSTs /admin/service-accounts", async () => {
     const user = userEvent.setup();
     mockUseOrgs.mockReturnValue({
-      data: [{ id: "org-uuid-1", display_name: "ChronoAI" }],
+      data: [
+        { id: "org-uuid-1", display_name: "ChronoAI", your_role: "admin" },
+      ],
     });
     mockPost.mockResolvedValue({
       id: "sa-id-1",
@@ -571,7 +575,9 @@ describe("DeveloperAppCreateConfirm", () => {
   it("POSTs /developer/oauth-clients with confidential client_type, scopes array, broker + org, then fires onSuccess", async () => {
     const user = userEvent.setup();
     mockUseOrgs.mockReturnValue({
-      data: [{ id: "org-uuid-1", display_name: "ChronoAI" }],
+      data: [
+        { id: "org-uuid-1", display_name: "ChronoAI", your_role: "admin" },
+      ],
     });
     mockPost.mockResolvedValue({ id: "app-id-1", client_secret: "app-secret-1" });
     const onSuccess = vi.fn();
@@ -833,4 +839,27 @@ describe("MfaSetupConfirm", () => {
     });
     expect(button).not.toBeDisabled();
   });
+});
+
+it("submits a durable platform grant prefilled by the CLI without widening to all services", async () => {
+  mockPost.mockResolvedValue({ id: "new-key", full_key: "secret" });
+  render(
+    <ApiKeyCreateConfirm
+      prefill={{ name: "Platform Agent", allow_auto_connected_services: true }}
+      pairingId={pairingId}
+      onSuccess={vi.fn()}
+    />,
+    { wrapper: createWrapper() },
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Create Key" }));
+  await waitFor(() =>
+    expect(mockPost).toHaveBeenCalledWith(
+      "/api-keys",
+      expect.objectContaining({
+        allow_all_services: false,
+        allow_auto_connected_services: true,
+        allowed_service_ids: [],
+      }),
+    ),
+  );
 });

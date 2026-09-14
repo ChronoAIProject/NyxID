@@ -17,6 +17,8 @@ pub struct CreateAssistantKeyRequest {
     pub name: String,
     pub platform: String,
     pub allowed_service_ids: Vec<String>,
+    #[serde(default)]
+    pub allow_auto_connected_services: bool,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -67,6 +69,7 @@ pub async fn create_key(
             name: body.name,
             platform: body.platform,
             allowed_service_ids: body.allowed_service_ids,
+            allow_auto_connected_services: body.allow_auto_connected_services,
         },
     )
     .await?;
@@ -280,6 +283,7 @@ mod tests {
             allowed_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             rate_limit_per_second: Some(10),
             rate_limit_burst: Some(20),
@@ -703,5 +707,39 @@ mod tests {
                 .expect("other predecessor exists")
                 .is_active
         );
+    }
+    #[tokio::test]
+    async fn auto_connected_assistant_create_exposes_flag_and_explicit_platform_marker() {
+        let (db, actor, service, _) = prepare_database("auto_connected_assistant_create")
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": { "source": crate::models::user_service::AUTO_PROVISION_SOURCE } },
+            )
+            .await
+            .unwrap();
+        let state = test_app_state(db.clone());
+        let token = access_token(&state, &actor);
+        let mut body = create_body("platform-create", json!([service.id]));
+        body["allowAutoConnectedServices"] = json!(true);
+        let (status, created) = request(
+            app(state.clone()),
+            &token,
+            "POST",
+            "/assistant/actions/key-create",
+            Some(body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let id = created["resource"]["keyId"].as_str().unwrap();
+        let (status, read_back) =
+            request(app(state), &token, "GET", &format!("/api-keys/{id}"), None).await;
+        assert_eq!(status, StatusCode::OK, "{read_back}");
+        assert_eq!(read_back["allow_auto_connected_services"], true);
+        assert_eq!(read_back["allowed_services"][0]["auto_connected"], true);
+        assert_eq!(read_back["allowed_service_ids"], json!([service.id]));
+        db.drop().await.unwrap();
     }
 }

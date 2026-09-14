@@ -14,6 +14,8 @@ pub struct NewKeyInput {
     #[serde(default)]
     pub allow_all_services: bool,
     #[serde(default)]
+    pub allow_auto_connected_services: bool,
+    #[serde(default)]
     pub allow_all_nodes: bool,
     pub expires_at: Option<String>,
     pub rate_limit_per_second: Option<u32>,

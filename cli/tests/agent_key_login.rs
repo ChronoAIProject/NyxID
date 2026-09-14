@@ -9,7 +9,7 @@ use wiremock::{
 const SECRET: &str = "nyxid_ag_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
 fn identity() -> Value {
-    json!({"api_key": {"id": "key-id", "name": "Home Agent", "key_prefix": "nyxid_ag_01234567", "owner_type": "personal", "owner_id": "owner-id", "owner_name": "Human", "scopes": "read proxy", "allow_all_services": false, "allow_all_nodes": false, "allowed_service_ids": ["service-id"], "allowed_node_ids": [], "expires_at": null, "rate_limit_per_second": 10, "rate_limit_burst": 20, "platform": "generic", "created_now": false}, "credential_id": "credential-id", "credential_expires_at": null, "label": "workstation \u{00b7} home-agent"})
+    json!({"api_key": {"id": "key-id", "name": "Home Agent", "key_prefix": "nyxid_ag_01234567", "owner_type": "personal", "owner_id": "owner-id", "owner_name": "Human", "scopes": "read proxy", "allow_all_services": false, "allow_auto_connected_services": false, "allow_all_nodes": false, "allowed_service_ids": ["service-id"], "allowed_node_ids": [], "expires_at": null, "rate_limit_per_second": 10, "rate_limit_burst": 20, "platform": "generic", "created_now": false}, "credential_id": "credential-id", "credential_expires_at": null, "label": "workstation \u{00b7} home-agent"})
 }
 
 fn command(home: &Path) -> Command {
@@ -81,7 +81,9 @@ async fn full_login_stores_only_restricted_credential_and_safe_metadata() {
         std::fs::write(dir.join(file), "stale-human-session").unwrap();
     }
     mount_request(&server).await;
-    let mut delivery = identity();
+    let mut expected_identity = identity();
+    expected_identity["api_key"]["allow_auto_connected_services"] = json!(true);
+    let mut delivery = expected_identity.clone();
     delivery["credential"] = json!(SECRET);
     Mock::given(method("POST"))
         .and(path("/api/v1/auth/agent-key/poll"))
@@ -107,6 +109,9 @@ async fn full_login_stores_only_restricted_credential_and_safe_metadata() {
     assert!(output.status.success(), "{}", output_text(&output));
     let text = output_text(&output);
     assert!(text.contains("Authentication: Agent Key"));
+    assert!(text.contains(
+        "Services: 1 explicit + all auto-connected platform services (allow all: false)"
+    ));
     assert!(text.contains("ABCD-EFGH"));
     assert!(!text.contains("user_code="));
     assert!(!text.contains(SECRET));
@@ -120,7 +125,7 @@ async fn full_login_stores_only_restricted_credential_and_safe_metadata() {
     assert!(!metadata.contains(SECRET));
     assert_eq!(
         serde_json::from_str::<Value>(&metadata).unwrap(),
-        identity()
+        expected_identity
     );
     for file in ["access_token", "refresh_token", "user_id"] {
         assert!(!dir.join(file).exists());

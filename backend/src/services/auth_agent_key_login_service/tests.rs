@@ -995,3 +995,38 @@ fn credential_expiry_cannot_outlive_parent() {
     assert!(credentials::credential_expiry(None, Some(Utc::now() - Duration::seconds(1))).is_err());
     assert_eq!(credentials::credential_expiry(None, None).unwrap(), None);
 }
+
+#[tokio::test]
+async fn auto_connected_login_options_provision_and_mark_platform_services() {
+    let (db, actor, _, _) = fixture("auto_connected_login_options").await;
+    let catalog = crate::test_utils::test_auto_connected_catalog_service();
+    db.collection::<crate::models::downstream_service::DownstreamService>(
+        crate::models::downstream_service::COLLECTION_NAME,
+    )
+    .insert_one(&catalog)
+    .await
+    .unwrap();
+    let options = options_for_actor(&db, &actor).await.unwrap();
+    assert_eq!(options.personal_owner_id, actor);
+    let service = options
+        .services
+        .iter()
+        .find(|service| service.name == catalog.slug)
+        .unwrap();
+    assert!(service.auto_connected);
+    assert_eq!(service.owner_id, actor);
+    assert_eq!(
+        serde_json::to_value(service).unwrap()["auto_connected"],
+        true
+    );
+    let again = options_for_actor(&db, &actor).await.unwrap();
+    assert_eq!(
+        again
+            .services
+            .iter()
+            .filter(|row| row.id == service.id)
+            .count(),
+        1
+    );
+    db.drop().await.unwrap();
+}

@@ -9640,6 +9640,104 @@ mod proxy_resolution_integration_tests {
     }
 
     #[tokio::test]
+    async fn auto_connected_proxy_scope_tracks_live_flag_through_both_auth_headers() {
+        use axum::extract::FromRequestParts;
+        let db = crate::test_utils::connect_transaction_test_database("auto_connected_proxy").await;
+        let (base_url, server) = start_downstream().await;
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(USERS)
+            .insert_one(test_user(&owner, UserType::Person))
+            .await
+            .unwrap();
+        let mut catalog = crate::test_utils::test_auto_connected_catalog_service();
+        catalog.base_url = base_url.clone();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+        let service = insert_user_service(&db, &owner, "autoplatform", &base_url, None).await;
+        db.collection::<bson::Document>(crate::models::user_service::COLLECTION_NAME)
+            .update_one(
+                doc! { "_id": &service.id },
+                doc! { "$set": { "source": crate::models::user_service::AUTO_PROVISION_SOURCE, "catalog_service_id": &catalog.id } },
+            )
+            .await
+            .unwrap();
+        let key = crate::services::key_service::create_api_key(
+            &db,
+            &owner,
+            "platform agent",
+            "proxy",
+            None,
+            None,
+            None,
+            None,
+            Some(false),
+            Some(false),
+            Some(true),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let state = test_app_state(db.clone());
+        for (flag, header) in [
+            (false, "x-api-key"),
+            (true, "x-api-key"),
+            (true, "authorization"),
+            (false, "authorization"),
+        ] {
+            let body = serde_json::from_value(
+                serde_json::json!({ "allow_auto_connected_services": flag }),
+            )
+            .unwrap();
+            let _ = crate::handlers::api_keys::update_key(
+                State(state.clone()),
+                crate::test_utils::test_auth_user(&owner),
+                axum::extract::Path(key.id.clone()),
+                axum::Json(body),
+            )
+            .await
+            .unwrap();
+            let value = if header == "authorization" {
+                format!("Bearer {}", key.full_key)
+            } else {
+                key.full_key.clone()
+            };
+            let (mut parts, _) = axum::http::Request::builder()
+                .uri("/api/v1/proxy/s/autoplatform/status")
+                .header(header, value)
+                .body(())
+                .unwrap()
+                .into_parts();
+            let auth = AuthUser::from_request_parts(&mut parts, &state)
+                .await
+                .unwrap();
+            assert_eq!(auth.allowed_service_ids.contains(&service.id), flag);
+            let result = proxy_request_by_slug_inner(
+                &state,
+                &auth,
+                &service.slug,
+                "status",
+                proxy_request("/proxy/s/autoplatform/status"),
+                &mut String::new(),
+            )
+            .await;
+            if flag {
+                assert_eq!(result.unwrap().status(), StatusCode::OK);
+            } else {
+                assert!(matches!(result, Err(AppError::ApiKeyScopeForbidden(_))));
+            }
+        }
+        server.abort();
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn created_scope_admits_listed_service_and_node_and_rejects_others() {
         let Some(db) = connect_test_database("proxy_created_scope_enforcement").await else {
             eprintln!("skipping proxy integration test: no local MongoDB available");
@@ -9671,6 +9769,7 @@ mod proxy_resolution_integration_tests {
                 allowed_service_ids: vec![allowed_service.id.clone()],
                 allowed_node_ids: vec![allowed_node.id.clone()],
                 allow_all_services: None,
+                allow_auto_connected_services: None,
                 allow_all_nodes: None,
                 rate_limit_per_second: None,
                 rate_limit_burst: None,

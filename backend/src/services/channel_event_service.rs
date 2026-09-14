@@ -776,6 +776,7 @@ mod tests {
             last_used_at: None,
             expires_at: None,
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             allowed_service_ids: Vec::new(),
             allowed_node_ids: Vec::new(),

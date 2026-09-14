@@ -61,6 +61,7 @@ frontend/src/components/service-icons/llm-openrouter.tsx
 frontend/src/components/shared/copyable-url-callout.tsx
 frontend/src/components/shared/not-found-page.tsx
 frontend/src/components/shared/org-scope-select.tsx
+frontend/src/components/shared/platform-service-scope.tsx
 frontend/src/components/shared/twitter-oauth-guidance.tsx
 frontend/src/components/shared/upstream-scope-picker.tsx
 frontend/src/components/ui/button.tsx

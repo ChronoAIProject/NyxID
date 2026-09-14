@@ -46,6 +46,10 @@ function parseScopesString(scopes: string): readonly string[] {
 function servicesSummary(key: ApiKey): string {
   if (key.allow_all_services) return "All services";
   const count = key.allowed_service_ids?.length ?? 0;
+  if (key.allow_auto_connected_services)
+    return count
+      ? `${String(count)} selected + all platform services`
+      : "All platform services";
   if (count === 0) return "—";
   return `${String(count)} service${count === 1 ? "" : "s"}`;
 }

@@ -47,6 +47,7 @@ export const createApiKeySchema = z.object({
     ),
   description: z.string().nullable().optional(),
   allow_all_services: z.boolean().optional(),
+  allow_auto_connected_services: z.boolean().optional(),
   allow_all_nodes: z.boolean().optional(),
   allowed_service_ids: z.array(z.string()).optional(),
   allowed_node_ids: z.array(z.string()).optional(),

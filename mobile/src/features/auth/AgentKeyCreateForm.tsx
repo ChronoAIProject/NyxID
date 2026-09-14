@@ -38,17 +38,23 @@ export function AgentKeyCreateForm({
     selected: boolean,
     onPress: () => void,
     radio = false,
+    implied = false,
   ) => (
     <Pressable
       key={label}
       accessibilityRole={radio ? "radio" : "checkbox"}
       accessibilityLabel={label}
-      accessibilityState={{ checked: selected, disabled }}
-      disabled={disabled}
+      accessibilityState={{ checked: selected, disabled: disabled || implied }}
+      disabled={disabled || implied}
       onPress={onPress}
       style={[
         styles.detailRow,
-        { flexDirection: "row", alignItems: "center", gap: 12 },
+        {
+          flexDirection: "row",
+          alignItems: "center",
+          gap: 12,
+          opacity: implied ? 0.5 : 1,
+        },
       ]}
     >
       {selected ? (
@@ -81,6 +87,7 @@ export function AgentKeyCreateForm({
             allowed_service_ids: [],
             allowed_node_ids: [],
             allow_all_services: false,
+            allow_auto_connected_services: false,
             allow_all_nodes: false,
           }),
         true,
@@ -96,6 +103,7 @@ export function AgentKeyCreateForm({
               allowed_service_ids: [],
               allowed_node_ids: [],
               allow_all_services: false,
+              allow_auto_connected_services: false,
               allow_all_nodes: false,
             }),
           true,
@@ -146,16 +154,65 @@ export function AgentKeyCreateForm({
               />
             </View>
             {!draft[allField] &&
-              resources.map((item) =>
-                check(item.name, draft[idsField].includes(item.id), () =>
-                  update(
-                    idsField,
-                    draft[idsField].includes(item.id)
-                      ? draft[idsField].filter((id) => id !== item.id)
-                      : [...draft[idsField], item.id],
+              resources
+                .filter((item) => kind !== "services" || !item.auto_connected)
+                .map((item) =>
+                  check(item.name, draft[idsField].includes(item.id), () =>
+                    update(
+                      idsField,
+                      draft[idsField].includes(item.id)
+                        ? draft[idsField].filter((id) => id !== item.id)
+                        : [...draft[idsField], item.id],
+                    ),
                   ),
-                ),
-              )}
+                )}
+            {kind === "services" &&
+              !draft[allField] &&
+              (draft.target_org_id &&
+              !resources.some((item) => item.auto_connected) ? (
+                <Text style={styles.signInText}>
+                  This org-owned key cannot use platform services from your personal account.
+                </Text>
+              ) : (
+                <View>
+                  <Text style={styles.inputLabel}>
+                    Auto-connected platform services
+                  </Text>
+                  {check(
+                    "Allow all auto-connected platform services (includes ones added later)",
+                    draft.allow_auto_connected_services,
+                    () =>
+                      update(
+                        "allow_auto_connected_services",
+                        !draft.allow_auto_connected_services,
+                      ),
+                  )}
+                  {resources
+                    .filter((item) => item.auto_connected)
+                    .map((item) => {
+                      const sameOwner =
+                        item.owner_id ===
+                        (draft.target_org_id || options.personal_owner_id);
+                      const implied =
+                        draft.allow_auto_connected_services && sameOwner;
+                      return check(
+                        `${item.name}${sameOwner ? "" : " (Organization; select individually)"}`,
+                        implied || draft.allowed_service_ids.includes(item.id),
+                        () =>
+                          update(
+                            "allowed_service_ids",
+                            draft.allowed_service_ids.includes(item.id)
+                              ? draft.allowed_service_ids.filter(
+                                  (id) => id !== item.id,
+                                )
+                              : [...draft.allowed_service_ids, item.id],
+                          ),
+                        false,
+                        implied,
+                      );
+                    })}
+                </View>
+              ))}
             {!draft[allField] && resources.length === 0 && (
               <Text style={styles.signInText}>No {kind} available.</Text>
             )}

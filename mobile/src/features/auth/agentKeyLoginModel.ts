@@ -13,6 +13,7 @@ export function defaultNewAgentKey(now = Date.now()): NewAgentKey {
     allowed_service_ids: [],
     allowed_node_ids: [],
     allow_all_services: false,
+    allow_auto_connected_services: false,
     allow_all_nodes: false,
     expires_at: new Date(now + 90 * 86400000).toISOString(),
     platform: "generic",
@@ -31,8 +32,12 @@ export function newKeySummary(
     owner_type: org ? "org" : "personal",
     owner_id: org?.id ?? "",
     owner_name: org?.name ?? "Your personal account",
-    allowed_services: options.services.filter((item) =>
-      input.allowed_service_ids.includes(item.id),
+    allowed_services: options.services.filter(
+      (item) =>
+        input.allowed_service_ids.includes(item.id) ||
+        (!!input.allow_auto_connected_services &&
+          !!item.auto_connected &&
+          item.owner_id === (input.target_org_id || options.personal_owner_id)),
     ),
     allowed_nodes: options.nodes.filter((item) =>
       input.allowed_node_ids.includes(item.id),
@@ -66,7 +71,17 @@ export function permissionRows(
       label: "Services",
       value: key.allow_all_services
         ? "All services, including future services"
-        : key.allowed_services.map((item) => item.name).join(", ") || "None",
+        : [
+            key.allow_auto_connected_services
+              ? "All auto-connected platform services (including future additions)"
+              : "",
+            ...key.allowed_services.map(
+              (item) =>
+                `${item.name}${item.auto_connected ? " (Platform)" : ""}`,
+            ),
+          ]
+            .filter(Boolean)
+            .join(", ") || "None",
       warning: key.allow_all_services,
     },
     {

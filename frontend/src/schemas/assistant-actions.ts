@@ -30,7 +30,6 @@ const requiredActionIdentitySchema = z
 
 const allowedServiceIdsSchema = z
   .array(requiredActionIdentitySchema)
-  .min(1)
   .max(64)
   .superRefine((values, context) => {
     const seen = new Set<string>();
@@ -140,8 +139,15 @@ export const keyCreateActionParamsSchema = z
       .transform((value) => value.trim())
       .pipe(z.string().min(1)),
     allowedServiceIds: allowedServiceIdsSchema,
+    allowAutoConnectedServices: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      value.allowedServiceIds.length > 0 ||
+      value.allowAutoConnectedServices === true,
+    { message: "Select a service or allow platform services" },
+  );
 
 export const keyRotateActionParamsSchema = z
   .object({
@@ -162,6 +168,8 @@ export const keyUpdateActionParamsSchema = z
     name: optionalUpdateTextSchema,
     platform: optionalUpdateTextSchema,
     description: optionalUpdateTextSchema,
+    allowedServiceIds: allowedServiceIdsSchema.optional(),
+    allowAutoConnectedServices: z.boolean().optional(),
   })
   .strict();
 
@@ -175,8 +183,15 @@ export const keyExtendScopeActionParamsSchema = z
   .object({
     keyId: requiredActionIdentitySchema,
     addServiceIds: allowedServiceIdsSchema,
+    allowAutoConnectedServices: z.boolean().optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) =>
+      value.addServiceIds.length > 0 ||
+      value.allowAutoConnectedServices === true,
+    { message: "Select a service or allow platform services" },
+  );
 
 export const keyBindCredentialActionParamsSchema = z
   .object({
@@ -308,6 +323,7 @@ export const deviceOnboardActionParamsSchema = z
     label: z.string().trim().min(1).max(128),
     targetOrgId: optionalActionIdentitySchema,
     defaultServiceIds: actionIdentityListSchema.optional(),
+    allowAutoConnectedServices: z.boolean().optional(),
   })
   .strict();
 
@@ -593,6 +609,7 @@ export type ActionCardParams =
       readonly name: string;
       readonly platform: string;
       readonly allowed_service_ids: readonly string[];
+      readonly allow_auto_connected_services?: boolean;
     }
   | {
       readonly variant: "key_rotate";
@@ -604,6 +621,8 @@ export type ActionCardParams =
       readonly name?: string;
       readonly platform?: string;
       readonly description?: string;
+      readonly allowed_service_ids?: readonly string[];
+      readonly allow_auto_connected_services?: boolean;
     }
   | {
       readonly variant: "key_delete";
@@ -613,6 +632,7 @@ export type ActionCardParams =
       readonly variant: "key_extend_scope";
       readonly key_id: string;
       readonly add_service_ids: readonly string[];
+      readonly allow_auto_connected_services?: boolean;
     }
   | {
       readonly variant: "key_bind_credential";
@@ -706,6 +726,7 @@ export type ActionCardParams =
       readonly label: string;
       readonly target_org_id?: string;
       readonly default_service_ids?: readonly string[];
+      readonly allow_auto_connected_services?: boolean;
     }
   | {
       readonly variant: "org_create";

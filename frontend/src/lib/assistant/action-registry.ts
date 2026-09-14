@@ -228,6 +228,7 @@ function normalizeKeyCreate(raw: unknown): ActionCardParams | null {
     name: parsed.data.name,
     platform: parsed.data.platform,
     allowed_service_ids: parsed.data.allowedServiceIds,
+    allow_auto_connected_services: parsed.data.allowAutoConnectedServices,
   };
 }
 
@@ -249,6 +250,8 @@ function normalizeKeyUpdate(raw: unknown): ActionCardParams | null {
     name: parsed.data.name,
     platform: parsed.data.platform,
     description: parsed.data.description,
+    allowed_service_ids: parsed.data.allowedServiceIds,
+    allow_auto_connected_services: parsed.data.allowAutoConnectedServices,
   };
 }
 
@@ -268,6 +271,7 @@ function normalizeKeyExtendScope(raw: unknown): ActionCardParams | null {
     variant: "key_extend_scope",
     key_id: parsed.data.keyId,
     add_service_ids: parsed.data.addServiceIds,
+    allow_auto_connected_services: parsed.data.allowAutoConnectedServices,
   };
 }
 
@@ -469,6 +473,7 @@ function normalizeDeviceOnboard(raw: unknown): ActionCardParams | null {
     label: parsed.data.label,
     target_org_id: parsed.data.targetOrgId,
     default_service_ids: parsed.data.defaultServiceIds,
+    allow_auto_connected_services: parsed.data.allowAutoConnectedServices,
   };
 }
 
@@ -897,6 +902,16 @@ const keyCreateDescriptor: ActionDescriptor = {
   summary: (params) =>
     params.variant === "key_create"
       ? [
+          ...(params.allow_auto_connected_services === undefined
+            ? []
+            : [
+                {
+                  label: "Platform services",
+                  value: params.allow_auto_connected_services
+                    ? "All auto-connected, including future additions"
+                    : "Only explicitly selected services",
+                },
+              ]),
           { label: "Key", value: params.name },
           { label: "Key", value: params.platform },
           ...params.allowed_service_ids.map((serviceId) => ({
@@ -940,13 +955,23 @@ const keyRotateDescriptor: ActionDescriptor = {
 const keyUpdateDescriptor: ActionDescriptor = {
   title: () => "Update API key",
   body: () =>
-    "NyxID will update the display metadata for this API key without changing its access.",
+    "NyxID will update the reviewed settings and service access for this API key.",
   cta: () => "Update key",
   risk: "credential_access",
   normalize: normalizeKeyUpdate,
   summary: (params) =>
     params.variant === "key_update"
       ? [
+          ...(params.allow_auto_connected_services === undefined
+            ? []
+            : [
+                {
+                  label: "Platform services",
+                  value: params.allow_auto_connected_services
+                    ? "All auto-connected, including future additions"
+                    : "Only explicitly selected services",
+                },
+              ]),
           { label: "Key", value: params.key_id, mono: true },
           ...(params.name ? [{ label: "Name", value: params.name }] : []),
           ...(params.platform
@@ -996,6 +1021,16 @@ const keyExtendScopeDescriptor: ActionDescriptor = {
   summary: (params) =>
     params.variant === "key_extend_scope"
       ? [
+          ...(params.allow_auto_connected_services === undefined
+            ? []
+            : [
+                {
+                  label: "Platform services",
+                  value: params.allow_auto_connected_services
+                    ? "All auto-connected, including future additions"
+                    : "Only explicitly selected services",
+                },
+              ]),
           { label: "Key", value: params.key_id, mono: true },
           ...params.add_service_ids.map((serviceId) => ({
             label: "Add service",
@@ -1319,6 +1354,7 @@ interface DialogSummaryField {
   readonly label: string;
   readonly key: string;
   readonly mono?: boolean;
+  readonly formatBoolean?: (value: boolean) => string;
 }
 
 interface DialogDescriptorConfig {
@@ -1380,6 +1416,9 @@ function dialogSummary(
   const values = params as unknown as Readonly<Record<string, unknown>>;
   return (config.fields ?? []).flatMap((field) => {
     const value = values[field.key];
+    if (typeof value === "boolean" && field.formatBoolean) {
+      return [{ label: field.label, value: field.formatBoolean(value) }];
+    }
     if (typeof value === "string" && value) {
       return [{ label: field.label, value, mono: field.mono }];
     }
@@ -1529,6 +1568,14 @@ const deviceOnboardDescriptor = createDialogDescriptor({
     { label: "Device", key: "label" },
     { label: "Organization", key: "target_org_id", mono: true },
     { label: "Default service", key: "default_service_ids", mono: true },
+    {
+      label: "Platform services",
+      key: "allow_auto_connected_services",
+      formatBoolean: (value) =>
+        value
+          ? "All auto-connected, including future additions"
+          : "Only explicitly selected services",
+    },
   ],
 });
 

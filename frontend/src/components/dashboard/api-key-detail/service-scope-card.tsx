@@ -1,3 +1,4 @@
+import { PlatformServiceScope } from "@/components/shared/platform-service-scope";
 import { useMemo, useState } from "react";
 import { useUpdateApiKey } from "@/hooks/use-api-keys";
 import { useKeys } from "@/hooks/use-keys";
@@ -44,21 +45,29 @@ function canScopeServiceToApiKey(
 export function ServiceScopeCard({
   keyId,
   allowAllServices,
+  allowAutoConnectedServices = false,
   allowedServiceIds,
   allowedServices,
   apiKeySource,
+  canWrite = true,
 }: {
   readonly keyId: string;
   readonly allowAllServices: boolean;
+  readonly allowAutoConnectedServices?: boolean;
   readonly allowedServiceIds: readonly string[];
   readonly allowedServices: readonly {
     readonly id: string;
     readonly slug: string;
     readonly label: string;
     readonly catalog_service_name: string | null;
+    readonly auto_connected?: boolean;
   }[];
   readonly apiKeySource?: CredentialSource;
+  readonly canWrite?: boolean;
 }) {
+  const [allowPlatform, setAllowPlatform] = useState(
+    allowAutoConnectedServices,
+  );
   const [editing, setEditing] = useState(false);
   const [allowAll, setAllowAll] = useState(allowAllServices);
   const [selectedIds, setSelectedIds] =
@@ -70,7 +79,6 @@ export function ServiceScopeCard({
     () =>
       (allKeys ?? []).filter(
         (k) =>
-          !k.auto_connected &&
           k.is_active &&
           canScopeServiceToApiKey(k.credential_source, apiKeySource),
       ),
@@ -83,6 +91,7 @@ export function ServiceScopeCard({
       {
         keyId,
         allow_all_services: allowAll,
+        allow_auto_connected_services: allowPlatform,
         allowed_service_ids: allowAll ? [] : [...selectedIds],
       },
       {
@@ -101,6 +110,7 @@ export function ServiceScopeCard({
 
   function handleCancel() {
     setAllowAll(allowAllServices);
+    setAllowPlatform(allowAutoConnectedServices);
     setSelectedIds(allowedServiceIds);
     setEditing(false);
   }
@@ -144,23 +154,25 @@ export function ServiceScopeCard({
                   Select allowed services:
                 </p>
                 {personalKeys.length > 0 ? (
-                  personalKeys.map((k) => (
-                    <div key={k.id} className="flex items-center gap-2">
-                      <Checkbox
-                        id={`svc-${k.id}`}
-                        checked={selectedIds.includes(k.id)}
-                        onCheckedChange={() => toggleService(k.id)}
-                      />
-                      <ServiceIcon slug={k.catalog_service_slug} size="2xs" />
-                      <Label htmlFor={`svc-${k.id}`} className="text-xs">
-                        {k.label}
-                        <span className="text-muted-foreground">
-                          {" "}
-                          ({k.slug})
-                        </span>
-                      </Label>
-                    </div>
-                  ))
+                  personalKeys
+                    .filter((k) => !k.auto_connected)
+                    .map((k) => (
+                      <div key={k.id} className="flex items-center gap-2">
+                        <Checkbox
+                          id={`svc-${k.id}`}
+                          checked={selectedIds.includes(k.id)}
+                          onCheckedChange={() => toggleService(k.id)}
+                        />
+                        <ServiceIcon slug={k.catalog_service_slug} size="2xs" />
+                        <Label htmlFor={`svc-${k.id}`} className="text-xs">
+                          {k.label}
+                          <span className="text-muted-foreground">
+                            {" "}
+                            ({k.slug})
+                          </span>
+                        </Label>
+                      </div>
+                    ))
                 ) : (
                   <p className="text-xs text-muted-foreground">
                     No external services configured yet.
@@ -169,11 +181,33 @@ export function ServiceScopeCard({
               </div>
             )}
 
+            {!allowAll && (
+              <PlatformServiceScope
+                services={personalKeys.map((service) => ({
+                  ...service,
+                  platform_grant_eligible: sameOwner(
+                    service.credential_source,
+                    apiKeySource,
+                  ),
+                }))}
+                selectedIds={selectedIds}
+                allowAll={allowPlatform}
+                onAllowAllChange={setAllowPlatform}
+                onToggle={toggleService}
+                orgOwned={apiKeySource?.type === "org"}
+              />
+            )}
             <div className="flex justify-end gap-2">
               <Button
                 variant="primary"
                 onClick={handleSave}
-                disabled={updateApiKey.isPending}
+                disabled={
+                  updateApiKey.isPending ||
+                  (allowAll === allowAllServices &&
+                    allowPlatform === allowAutoConnectedServices &&
+                    selectedIds.length === allowedServiceIds.length &&
+                    selectedIds.every((id) => allowedServiceIds.includes(id)))
+                }
               >
                 Save
               </Button>
@@ -185,28 +219,43 @@ export function ServiceScopeCard({
         ) : (
           <div className="flex items-center justify-between">
             <div>
+              {!allowAllServices && allowAutoConnectedServices && (
+                <Badge variant="secondary">
+                  All auto-connected platform services (including future
+                  additions)
+                </Badge>
+              )}
               {allowAllServices ? (
                 <Badge variant="secondary">All services</Badge>
               ) : allowedServices.length > 0 ? (
                 <div className="flex flex-wrap gap-1">
                   {allowedServices.map((s) => (
                     <Badge key={s.id} variant="secondary" className="text-xs">
-                      {s.label} ({s.slug})
+                      {s.label} ({s.slug}) {s.auto_connected && "· Platform"}
                     </Badge>
                   ))}
                 </div>
               ) : (
-                <Badge variant="destructive">No services (auth-only)</Badge>
+                !allowAutoConnectedServices && (
+                  <Badge variant="destructive">No services (auth-only)</Badge>
+                )
               )}
             </div>
-            <Button
-              size="icon"
-              variant="ghost"
-              className="h-6 w-6 shrink-0"
-              onClick={() => setEditing(true)}
-            >
-              <Pencil className="h-3 w-3" />
-            </Button>
+            {canWrite && (
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-6 w-6 shrink-0"
+                onClick={() => {
+                  setAllowAll(allowAllServices);
+                  setAllowPlatform(allowAutoConnectedServices);
+                  setSelectedIds(allowedServiceIds);
+                  setEditing(true);
+                }}
+              >
+                <Pencil className="h-3 w-3" />
+              </Button>
+            )}
           </div>
         )}
       </CardContent>
