@@ -9,7 +9,7 @@ This is a channel configuration capability. The wider onboarding wizard, onboard
 1. Open **Channel Bots → Add Channel Bot**, choose **Telegram New**, select the personal or organization destination, and enter a label.
 2. Click **Prepare Telegram bot**, then **Open Telegram**. Preparing saves the request before the external link becomes available.
 3. In the platform's manager chat, tap **Start** if Telegram asks. The chat identifies the NyxID website, destination account, and initiating account by stable identifiers.
-4. Tap **Create bot**. Telegram opens its native form for the bot's name and username.
+4. Tap **Create bot**. Telegram opens its native form with a suggested name and username derived from the NyxID label. Both remain editable; Telegram checks username availability. For example, `nyx_test_123456` suggests the username `nyx_test_123456_bot`. Username suggestions use ASCII letters, digits, and underscores, fit within 32 characters, and end in `bot`.
 5. In the manager chat, review the exact bot username, numeric bot ID, and destination. Tap **Approve this bot**.
 6. Use **Return to NyxID**, or reopen the existing browser page. Choose **Connect bot**. NyxID fetches the token, saves the connection, and registers the bot's message webhook.
 7. Assign an agent using the existing channel-bot configuration and send a test message to the new bot.

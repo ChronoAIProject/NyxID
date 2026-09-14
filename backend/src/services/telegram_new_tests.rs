@@ -218,6 +218,20 @@ async fn provider_connection(server: &MockServer, request_id: &str, webhook_stat
 async fn telegram_new_requires_named_consent_and_never_exposes_tokens() {
     let (state, actor, server) = fixture().await;
     let pending = waiting_consent(&state, &actor, &server).await;
+    let creation = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter_map(|request| request.body_json::<Value>().ok())
+        .find_map(|body| {
+            body["reply_markup"]["keyboard"][0][0]
+                .get("request_managed_bot")
+                .cloned()
+        })
+        .unwrap();
+    assert_eq!(creation["suggested_name"], "Support");
+    assert_eq!(creation["suggested_username"], "support_bot");
     assert_eq!(pending.status, Status::WaitingConsent);
     let view = serde_json::to_value(crate::handlers::telegram_new::RequestResponse::from(
         pending.clone(),

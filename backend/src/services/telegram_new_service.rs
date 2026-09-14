@@ -34,6 +34,25 @@ pub fn hash(value: &str) -> String {
 }
 const CREATION_RECOVERY_MINUTES: i64 = 60;
 
+fn suggested_bot_username(label: &str) -> String {
+    let mut stem = label
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+        .to_ascii_lowercase();
+    if stem.is_empty() {
+        stem.push_str("nyx");
+    } else if !stem.starts_with(|ch: char| ch.is_ascii_alphabetic()) {
+        stem.insert_str(0, "nyx_");
+    }
+    if stem.ends_with("bot") && (5..=32).contains(&stem.len()) {
+        return stem;
+    }
+    stem.truncate(28);
+    format!("{}_bot", stem.trim_end_matches('_'))
+}
+
 fn nonce() -> Zeroizing<String> {
     Zeroizing::new(hex::encode(rand::random::<[u8; 24]>()))
 }
@@ -468,7 +487,7 @@ impl TelegramNewService<'_> {
                             doc! {"$set": {"status": "waiting_bot"}},
                         )
                         .await?;
-                    self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": format!("Create a Telegram bot to connect to:\n{}\n\nOnly continue if you started this setup and recognize these identifiers. You own the bot; NyxID will manage its connection. You will approve the exact bot after creation.\n\nTo recover a bot created in an earlier attempt, send /recover @YourBotUsername here.", request.destination), "reply_markup": {"keyboard": [[{"text": "Create bot", "request_managed_bot": {"request_id": 1, "suggested_name": request.label.chars().take(64).collect::<String>()}}]], "resize_keyboard": true, "one_time_keyboard": true}})).await?;
+                    self.api.call(token, "sendMessage", json!({"chat_id": user_id, "text": format!("Create a Telegram bot to connect to:\n{}\n\nOnly continue if you started this setup and recognize these identifiers. You own the bot; NyxID will manage its connection. You will approve the exact bot after creation.\n\nTo recover a bot created in an earlier attempt, send /recover @YourBotUsername here.", request.destination), "reply_markup": {"keyboard": [[{"text": "Create bot", "request_managed_bot": {"request_id": 1, "suggested_name": request.label.chars().take(64).collect::<String>(), "suggested_username": suggested_bot_username(&request.label)}}]], "resize_keyboard": true, "one_time_keyboard": true}})).await?;
                 }
             }
             return Ok(());
@@ -734,4 +753,42 @@ pub fn bot_identity(value: &Value) -> Option<(i64, String)> {
         return None;
     }
     Some((id, username.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::suggested_bot_username;
+
+    #[test]
+    fn telegram_new_username_suggestions_follow_telegram_constraints() {
+        for (label, expected) in [
+            ("nyx_test_123456", "nyx_test_123456_bot"),
+            ("Support Team!", "support_team_bot"),
+            ("CustomerBot", "customerbot"),
+            ("Customer_bot", "customer_bot"),
+            ("123 Support", "nyx_123_support_bot"),
+            ("x", "x_bot"),
+            ("客服 🤖", "nyx_bot"),
+            ("---", "nyx_bot"),
+        ] {
+            assert_eq!(suggested_bot_username(label), expected);
+        }
+        for label in [
+            "a".repeat(128),
+            format!("{}bot", "a".repeat(32)),
+            format!("{} extra", "a".repeat(27)),
+            "🤖".repeat(32),
+            "9".repeat(128),
+        ] {
+            let username = suggested_bot_username(&label);
+            assert!((5..=32).contains(&username.len()), "{username}");
+            assert!(username.starts_with(|ch: char| ch.is_ascii_alphabetic()));
+            assert!(username.ends_with("bot"));
+            assert!(
+                username
+                    .bytes()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
+            );
+        }
+    }
 }
