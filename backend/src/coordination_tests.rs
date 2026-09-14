@@ -281,17 +281,21 @@ async fn fixed_window_counter_never_admits_above_the_global_limit() {
             RateWindowStore::admit(&db, "auth", "198.51.100.7", 5, Duration::from_secs(30))
                 .await
                 .expect("rate admission")
-                .allowed
         })
     });
     let results = futures::future::join_all(attempts).await;
-    assert_eq!(
-        results
-            .into_iter()
-            .filter(|result| *result.as_ref().expect("task joined"))
-            .count(),
-        5
-    );
+    // Concurrent calls may straddle a wall-clock window boundary. Enforce the
+    // cap within each returned window, rather than across different windows.
+    let mut windows = std::collections::BTreeMap::new();
+    for result in results {
+        let admission = result.expect("task joined");
+        let (attempted, allowed) = windows.entry(admission.reset_at).or_insert((0, 0));
+        *attempted += 1;
+        *allowed += usize::from(admission.allowed);
+    }
+    for (reset_at, (attempted, allowed)) in windows {
+        assert_eq!(allowed, attempted.min(5), "window ending at {reset_at}");
+    }
     let separate = RateWindowStore::admit(&db, "auth", "203.0.113.9", 5, Duration::from_secs(30))
         .await
         .expect("separate rate admission");
