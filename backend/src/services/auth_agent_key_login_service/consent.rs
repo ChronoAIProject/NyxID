@@ -155,17 +155,19 @@ pub(super) async fn connection(
     };
     let platform_ready = if platform {
         match &catalog {
-            Some(catalog) if service.node_id.is_none() => {
-                if crate::services::platform_key_service::available(db, catalog, &service.user_id)
-                    .await?
-                {
-                    match crate::services::platform_key_service::effective_auth(db, catalog).await {
-                        Ok(_) => true,
-                        Err(AppError::ValidationError(_)) => false,
-                        Err(error) => return Err(error),
-                    }
-                } else {
-                    false
+            Some(catalog)
+                if service.node_id.is_none()
+                    && crate::services::platform_key_service::available(
+                        db,
+                        catalog,
+                        &service.user_id,
+                    )
+                    .await? =>
+            {
+                match crate::services::platform_key_service::effective_auth(db, catalog).await {
+                    Ok(_) => true,
+                    Err(AppError::ValidationError(_)) => false,
+                    Err(error) => return Err(error),
                 }
             }
             _ => false,

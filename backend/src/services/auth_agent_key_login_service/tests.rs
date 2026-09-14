@@ -1196,7 +1196,6 @@ async fn new_client_consent_rejects_broadened_existing_and_new_connection_grants
             selection,
             None,
             None,
-            None,
         )
         .await;
         assert!(matches!(result, Err(AppError::Conflict(_))), "{result:?}");
@@ -1247,20 +1246,12 @@ async fn new_client_unchanged_consent_issues_real_existing_and_new_credentials()
             selection,
             None,
             None,
-            None,
         )
         .await
         .unwrap();
-        let delivery = poll(
-            &db,
-            &test_encryption_keys(),
-            HMAC_KEY,
-            &request.device_code,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
+        let delivery = poll(&db, &test_encryption_keys(), HMAC_KEY, &request.device_code)
+            .await
+            .unwrap();
         assert!(delivery.credential.starts_with("nyxid_ag_"));
         assert_eq!(delivery.api_key.allowed_service_ids, [service]);
     }
@@ -1314,7 +1305,6 @@ async fn unchanged_unavailable_extras_do_not_prevent_existing_key_issuance() {
             api_key_id: key.id,
             permission_snapshot: Some(options.keys[0].permission_snapshot.clone()),
         },
-        None,
         None,
         None,
     )
@@ -1439,9 +1429,9 @@ async fn consent_platform_grants_are_owner_bound_and_use_live_platform_readiness
         .unwrap();
     let mut expected = Vec::new();
     for (owner, explicit_binding, active) in [
-        (&actor, false, true),
-        (&actor, true, true),
-        (&actor, true, false),
+        (actor.as_str(), false, true),
+        (actor.as_str(), true, true),
+        (actor.as_str(), true, false),
         ("foreign-owner", true, true),
     ] {
         let id = Uuid::new_v4().to_string();
@@ -1461,7 +1451,7 @@ async fn consent_platform_grants_are_owner_bound_and_use_live_platform_readiness
             .insert_one(service)
             .await
             .unwrap();
-        if owner == actor && active {
+        if owner == actor.as_str() && active {
             expected.push(id);
         }
     }

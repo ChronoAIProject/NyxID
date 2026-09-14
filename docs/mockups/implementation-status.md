@@ -15,10 +15,14 @@ implemented contract and [ADR-015](../ADR-015-auth-device-login.md) for rollout.
 | Normal `/login` | Legacy full-account browser login. Scoped browser sessions and mobile handoff are outside this implementation. |
 | Sharing | Protocol, ADR/API and NyxID skill reference updated. The existing private Ornn skill `nyxid-device-login-protocol` is updated to version 1.1; registry validation and readback passed. |
 
-Verification before main integration: primary reported 3,129 frontend tests,
-48 mobile tests, CLI suites, unchanged installed-scanner byte identity, and eight
-real React browser tests (including short/long social return and MFA) passing.
-These results apply to those tested revisions. Integrated platform-grant changes
-and newest backend tests are undergoing targeted verification; broad final checks
-remain with the primary. Do not interpret the HTML preview or parser fixture as
-physical-iPhone validation.
+Verification on the integrated implementation includes 3,187 frontend unit
+tests, frontend coverage, all nine React browser regressions, mobile tests,
+TypeScript and native dependency sync. The frontend production build passes
+with the corrected fixture type. Two additional mockup browser regressions
+verify icon rendering and prevent icon text from becoming active HTML.
+
+Rust formatting, AWS/GCP feature builds and CLI wizard freshness passed in CI.
+Backend tests, coverage, Clippy and CodeQL are being rerun after the test helper
+and mockup renderer corrections. The installed-scanner fixture matches the
+pre-#1544 parser byte for byte. Physical iPhone acceptance remains a rollout
+check; the HTML preview and parser fixture do not establish it.

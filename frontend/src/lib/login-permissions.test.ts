@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { CreateApiKeyFormData } from "@/schemas/api-keys";
 import {
   compareKey,
   exactConnectionDefaults,
@@ -37,7 +38,7 @@ describe("device login permission comparisons", () => {
       })),
     );
     inventory.catalog.push({ slug: "platform", name: "Platform" });
-    const data = {
+    const data: CreateApiKeyFormData = {
       name: "Draft",
       scopes: ["read", "proxy"],
       allowed_service_ids: ["svc"],

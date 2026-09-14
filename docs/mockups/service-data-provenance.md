@@ -40,7 +40,7 @@ now includes `platform_scope_allowlist`. GitHub `write:org` and `delete_repo`,
 and five scope choices on the generic Google API service, are outside the
 shared-app allowlist and are labelled accordingly in the picker.
 
-This verifies agreement with current NyxID production data. The backend's
+This verifies agreement with NyxID production data on 2026-09-14. The backend's
 `services/scope_catalog.rs` explicitly describes its catalog as curated,
 non-exhaustive and subject to provider consent. It does not independently prove
 every upstream description, account entitlement, or acceptance of every
@@ -72,7 +72,7 @@ the proposed URL format and filtering behavior.
 
 ## Service icons
 
-The standalone mockup embeds static markup rendered from the existing
+The standalone mockup clones static HTML templates rendered from the existing
 `frontend/src/components/service-icons/index.tsx` registry: all 38 service
 glyphs plus its generic globe fallback. Composite glyphs retain the app's
 provider mark and function badge. The NyxID group uses the existing public
