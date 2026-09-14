@@ -40,6 +40,7 @@ const MAX_LAST_ERROR_LEN: usize = 100;
 pub struct CreateInput {
     pub user_id: String,
     pub service_slug: String,
+    pub use_platform_key: Option<bool>,
     pub scopes: Vec<String>,
     pub label: Option<String>,
     pub requested_by: Option<String>,
@@ -100,6 +101,7 @@ pub struct LinkView {
 #[derive(Default)]
 pub struct CompleteInput<'a> {
     pub credential: Option<&'a str>,
+    pub use_platform_key: Option<bool>,
     pub endpoint_url: Option<&'a str>,
     pub oauth_client_id: Option<&'a str>,
     pub oauth_client_secret: Option<&'a str>,
@@ -147,6 +149,19 @@ pub enum CompleteResult {
 
 pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<CreatedLink> {
     let service = load_catalog_info_by_slug(db, &input.service_slug).await?;
+    if input.use_platform_key == Some(true) {
+        if !input.scopes.is_empty() {
+            return Err(AppError::ValidationError(
+                "Platform keys do not accept OAuth scopes".to_string(),
+            ));
+        }
+        let catalog = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! { "_id": &service.service_id })
+            .await?
+            .ok_or(AppError::ConnectLinkNotFound)?;
+        crate::services::platform_key_service::require(db, &catalog, &input.user_id).await?;
+    }
     let scopes = normalize_scopes(&input.scopes)?;
     validate_scopes(db, &service, &scopes).await?;
     if service.service_slug.trim().is_empty() {
@@ -178,6 +193,7 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
         id: Uuid::new_v4().to_string(),
         user_id: input.user_id,
         service_slug: service.service_slug.clone(),
+        use_platform_key: input.use_platform_key,
         service_id: service.service_id.clone(),
         scopes,
         label,
@@ -388,14 +404,34 @@ pub async fn complete(
         return Err(completion_conflict_error(db, &current.id).await?);
     };
 
+    let use_platform_key = input
+        .use_platform_key
+        .or(claimed.use_platform_key)
+        .unwrap_or(false);
+    if use_platform_key
+        && (input.credential.is_some()
+            || input.endpoint_url.is_some()
+            || input.oauth_client_id.is_some()
+            || input.oauth_client_secret.is_some()
+            || !claimed.scopes.is_empty())
+    {
+        release_claim(db, &claimed.id, &claim_id).await;
+        return Err(AppError::ValidationError(
+            "Platform key selection cannot include credentials, OAuth scopes, or a custom endpoint"
+                .to_string(),
+        ));
+    }
     let credential = input.credential.unwrap_or("").trim();
-    if catalog.connect_method() == "api_key" && credential.is_empty() {
+    if !use_platform_key && catalog.connect_method() == "api_key" && credential.is_empty() {
         release_claim(db, &claimed.id, &claim_id).await;
         return Err(AppError::ValidationError(
             "credential must not be empty".to_string(),
         ));
     }
-    if catalog.requires_gateway_url && input.endpoint_url.is_none_or(|url| url.trim().is_empty()) {
+    if !use_platform_key
+        && catalog.requires_gateway_url
+        && input.endpoint_url.is_none_or(|url| url.trim().is_empty())
+    {
         release_claim(db, &claimed.id, &claim_id).await;
         return Err(AppError::ValidationError(
             "endpoint_url is required for this service".to_string(),
@@ -426,28 +462,42 @@ pub async fn complete(
         .as_deref()
         .unwrap_or(&catalog.service_name)
         .to_string();
-    let created = unified_key_service::create_key(
-        db,
-        encryption_keys,
-        &claimed.user_id,
-        actor_user_id,
-        Some(&claimed.service_slug),
-        input.endpoint_url.map(str::trim),
-        credential,
-        &label,
-        None,
-        None,
-        None,
-        None,
-        None,
-        None,
-        unified_key_service::OpenApiSpecUrlInput::Inherit,
-        None,
-        false,
-        oauth_credentials,
-        hosted_mode,
-    )
-    .await;
+    let created = if use_platform_key {
+        unified_key_service::create_platform_key(
+            db,
+            &claimed.user_id,
+            actor_user_id,
+            &claimed.service_slug,
+            &label,
+            None,
+            false,
+            None,
+        )
+        .await
+    } else {
+        unified_key_service::create_key(
+            db,
+            encryption_keys,
+            &claimed.user_id,
+            actor_user_id,
+            Some(&claimed.service_slug),
+            input.endpoint_url.map(str::trim),
+            credential,
+            &label,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            unified_key_service::OpenApiSpecUrlInput::Inherit,
+            None,
+            false,
+            oauth_credentials,
+            hosted_mode,
+        )
+        .await
+    };
 
     let created = match created {
         Ok(created) => created,
@@ -1488,6 +1538,7 @@ mod tests {
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: Some(format!("Connect {suffix}")),
                 requested_by: None,
                 callback_url: None,
@@ -1573,6 +1624,7 @@ mod tests {
         CreateInput {
             user_id: Uuid::new_v4().to_string(),
             service_slug: service.slug.clone(),
+            use_platform_key: None,
             scopes: scopes.iter().map(|scope| (*scope).to_string()).collect(),
             label: None,
             requested_by: None,
@@ -1773,6 +1825,7 @@ mod tests {
                 test_auth_user(&actor),
                 Json(handlers::CreateConnectLinkRequest {
                     service_slug: service.slug.clone(),
+                    use_platform_key: None,
                     scopes: vec!["read:org, public_repo".to_string()],
                     label: None,
                     requested_by: None,
@@ -1811,6 +1864,7 @@ mod tests {
                     Json(handlers::CompleteConnectLinkRequest {
                         token: raw_token.clone(),
                         credential: None,
+                        use_platform_key: None,
                         endpoint_url: None,
                         oauth_client_id: None,
                         oauth_client_secret: None,
@@ -1899,6 +1953,7 @@ mod tests {
                 scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: Some("spoofed request name".to_string()),
                 callback_url: Some(callback.to_string()),
@@ -1935,6 +1990,7 @@ mod tests {
                 scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: None,
                 callback_url: Some(callback.to_string()),
@@ -1965,6 +2021,7 @@ mod tests {
                 scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: None,
                 callback_url: Some("https://other.example.test/return".to_string()),
@@ -2607,6 +2664,7 @@ mod tests {
     fn secret_bearing_service_inputs_redact_debug_output() {
         let input = CompleteInput {
             credential: Some("api-secret"),
+            use_platform_key: None,
             endpoint_url: Some("https://gateway.example.test"),
             oauth_client_id: Some("client-id"),
             oauth_client_secret: Some("client-secret"),
@@ -2630,6 +2688,7 @@ mod tests {
                 scopes: Vec::new(),
                 user_id: owner,
                 service_slug: service.slug.clone(),
+                use_platform_key: None,
                 label: Some("Production".to_string()),
                 requested_by: Some("test-agent".to_string()),
                 callback_url: None,
@@ -2671,6 +2730,7 @@ mod tests {
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: None,
                 callback_url: None,
@@ -2714,6 +2774,7 @@ mod tests {
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: None,
                 callback_url: None,
@@ -2754,6 +2815,7 @@ mod tests {
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: None,
                 callback_url: None,

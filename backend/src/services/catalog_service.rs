@@ -90,6 +90,9 @@ pub struct CatalogEntry {
     pub issues_url: Option<String>,
     pub capabilities: Option<ServiceCapabilities>,
     pub billing: Option<ServiceBilling>,
+    pub inference: Option<super::inference_service::InferenceView>,
+    pub platform_key: super::inference_service::PlatformKeyView,
+    pub byok_pricing: Option<super::inference_service::LanePricingView>,
     pub auth_notes: Option<String>,
     pub known_limitations: Option<String>,
     pub required_permissions: Option<Vec<String>>,
@@ -139,7 +142,29 @@ fn build_catalog_entry(
             entry.required = product.required_scopes().contains(&entry.scope.as_str());
         }
     }
+    let platform_available = super::platform_key_service::has_platform_key(&svc)
+        && svc.platform_key.as_ref().is_none_or(|p| {
+            p.audience == crate::models::downstream_service::PlatformKeyAudience::Public
+        });
+    let inference =
+        super::inference_service::view(&svc, provider.map(|p| p.slug.as_str()), platform_available);
+    let platform_key = super::inference_service::PlatformKeyView {
+        available: platform_available,
+        pricing: svc
+            .billing
+            .as_ref()
+            .and_then(|b| b.platform_key_pricing.as_ref())
+            .map(Into::into),
+    };
+    let byok_pricing = svc
+        .billing
+        .as_ref()
+        .and_then(|b| b.byok_pricing.as_ref())
+        .map(Into::into);
     CatalogEntry {
+        inference,
+        platform_key,
+        byok_pricing,
         service_type: svc.service_type.clone(),
         ssh_host: svc.ssh_config.as_ref().map(|c| c.host.clone()),
         ssh_port: svc.ssh_config.as_ref().map(|c| c.port),
@@ -295,6 +320,7 @@ fn visibility_filter(user_id: &str) -> mongodb::bson::Document {
             { "visibility": { "$ne": "private" } },
             { "visibility": { "$exists": false } },
             { "visibility": "private", "created_by": user_id },
+            { "platform_key.enabled": true },
         ],
     }
 }
@@ -328,6 +354,7 @@ pub async fn list_catalog(
     list_catalog_filtered(
         db,
         encryption_keys,
+        user_id,
         doc! {
             "service_type": "http",
             "is_active": true,
@@ -337,6 +364,7 @@ pub async fn list_catalog(
                         { "requires_user_credential": true },
                         { "requires_user_credential": { "$exists": false } },
                         { "provider_config_id": { "$ne": null } },
+                        { "platform_key.enabled": true },
                     ],
                 },
                 legacy_service_category_filter(&["connection", "internal"]),
@@ -371,12 +399,13 @@ pub async fn list_catalog_all(
             visibility_filter(user_id),
         ],
     };
-    list_catalog_filtered(db, encryption_keys, filter).await
+    list_catalog_filtered(db, encryption_keys, user_id, filter).await
 }
 
 async fn list_catalog_filtered(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
+    user_id: &str,
     filter: mongodb::bson::Document,
 ) -> AppResult<Vec<CatalogEntry>> {
     let services: Vec<DownstreamService> = db
@@ -415,6 +444,7 @@ async fn list_catalog_filtered(
             .await?
     };
 
+    let grants = super::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
     let mut resolved_entries = Vec::with_capacity(services.len());
     for svc in services {
         let provider = svc
@@ -440,13 +470,18 @@ async fn list_catalog_filtered(
             _ => false,
         };
 
-        resolved_entries.push(build_catalog_entry(
-            svc,
-            provider,
-            spr,
-            oauth_client_id,
-            platform_secret_present,
-        ));
+        let available =
+            super::platform_key_service::available_with_grants(&svc, provider, user_id, &grants);
+        if svc.visibility == "private" && svc.created_by != user_id && !available {
+            continue;
+        }
+        let inference =
+            super::inference_service::view(&svc, provider.map(|p| p.slug.as_str()), available);
+        let mut entry =
+            build_catalog_entry(svc, provider, spr, oauth_client_id, platform_secret_present);
+        entry.platform_key.available = available;
+        entry.inference = inference;
+        resolved_entries.push(entry);
     }
 
     Ok(resolved_entries)
@@ -515,7 +550,10 @@ async fn enforce_catalog_read_access(
     user_id: &str,
     svc: &DownstreamService,
 ) -> AppResult<()> {
-    if svc.visibility != "private" || svc.created_by == user_id {
+    if svc.visibility != "private"
+        || svc.created_by == user_id
+        || super::platform_key_service::available(db, svc, user_id).await?
+    {
         return Ok(());
     }
     let is_admin = match db
@@ -631,13 +669,19 @@ pub async fn get_catalog_entry(
         _ => false,
     };
 
-    Ok(build_catalog_entry(
+    let available = super::platform_key_service::available(db, &svc, user_id).await?;
+    let inference =
+        super::inference_service::view(&svc, provider.as_ref().map(|p| p.slug.as_str()), available);
+    let mut entry = build_catalog_entry(
         svc,
         provider.as_ref(),
         spr.as_ref(),
         oauth_client_id,
         platform_secret_present,
-    ))
+    );
+    entry.platform_key.available = available;
+    entry.inference = inference;
+    Ok(entry)
 }
 
 /// Does `user_id` have an active provisioned `UserService` for catalog
@@ -810,6 +854,7 @@ mod tests {
             slug: "test".to_string(),
             endpoint_id: "ep-1".to_string(),
             api_key_id: None,
+            credential_binding: None,
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: Some("cat-1".to_string()),

@@ -971,3 +971,22 @@ describe("KeyDetailPage — Lark permission setup", () => {
     expect(screen.getByText("contact:user.id:readonly")).toBeInTheDocument();
   });
 });
+
+
+describe("explicit platform connection cosmetics", () => {
+  it("offers cosmetic editors while keeping routing and auth platform managed", async () => {
+    hooks.key.data = makeKey({ credential_binding: "platform", auto_connected: false, api_key_id: null });
+    render(<KeyDetailPage />);
+    expect(screen.getByText("Recommended Skills")).toBeInTheDocument();
+    expect(screen.getByText("User-Agent override")).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "Advanced" })).not.toBeInTheDocument();
+    const notSet = screen.getByText("Not set");
+    await userEvent.click(notSet.parentElement!.querySelector("button")!);
+    const input = screen.getByPlaceholderText("nyxid-service-skill-authoring, my-service-skill");
+    await userEvent.type(input, "read-docs");
+    const buttons = within(input.closest("div")!).getAllByRole("button");
+    await userEvent.click(buttons[buttons.length - 1]!);
+    expect(hooks.updateKey).toHaveBeenCalledWith({ keyId: "key-1", recommended_skills: ["read-docs"] }, expect.anything());
+    expect(hooks.updateEndpoint).not.toHaveBeenCalled();
+  });
+});

@@ -67,6 +67,7 @@ pub(crate) struct McpBillingRouteContextBuilder {
     effective_owner_id: String,
     user_service_id: Option<String>,
     is_user_service: bool,
+    credential_class_override: Option<CredentialClass>,
 }
 
 impl McpBillingRouteContextBuilder {
@@ -83,6 +84,9 @@ impl McpBillingRouteContextBuilder {
                 .to_string(),
             user_service_id: Some(resolution.user_service_id.clone()),
             is_user_service: true,
+            credential_class_override: resolution
+                .master_credential
+                .then_some(CredentialClass::NyxidManagedMaster),
         }
     }
 
@@ -91,6 +95,7 @@ impl McpBillingRouteContextBuilder {
             effective_owner_id: billing_principal_user_id.to_string(),
             user_service_id: None,
             is_user_service: false,
+            credential_class_override: None,
         }
     }
 
@@ -128,12 +133,14 @@ impl McpBillingRouteContextBuilder {
             Some(target.service.slug.clone()),
             node_intent,
             target.auth_method.clone(),
-            mcp_credential_class(
-                self.is_user_service,
-                node_route.is_some(),
-                has_server_credential,
-                target,
-            ),
+            self.credential_class_override.unwrap_or_else(|| {
+                mcp_credential_class(
+                    self.is_user_service,
+                    node_route.is_some(),
+                    has_server_credential,
+                    target,
+                )
+            }),
             BillingMetric::Requests,
             target.service.billing.as_ref(),
             billing.resale_enabled(),
@@ -705,7 +712,19 @@ pub async fn load_operation_catalog(
     service_scope: ServiceScope<'_>,
 ) -> AppResult<McpOperationCatalog> {
     let node_scope_restricted = matches!(node_scope, NodeScope::Allowed(_));
-    let mut visible = load_user_tools_inner(db, node_ws_manager, user_id, true, node_scope).await?;
+    let grants =
+        crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
+    let providers = crate::services::platform_key_service::load_providers(db).await?;
+    let mut visible = load_user_tools_with_grants(
+        db,
+        node_ws_manager,
+        user_id,
+        true,
+        node_scope,
+        &grants,
+        &providers,
+    )
+    .await?;
     visible.retain(|service| service_scope.permits(service));
 
     // A boolean reason is safe for services already visible through service
@@ -716,9 +735,16 @@ pub async fn load_operation_catalog(
             .iter()
             .map(|service| (service.service_id.clone(), service.executable))
             .collect();
-        let mut before_node_scope =
-            load_user_tools_inner(db, node_ws_manager, user_id, true, NodeScope::Unrestricted)
-                .await?;
+        let mut before_node_scope = load_user_tools_with_grants(
+            db,
+            node_ws_manager,
+            user_id,
+            true,
+            NodeScope::Unrestricted,
+            &grants,
+            &providers,
+        )
+        .await?;
         before_node_scope.retain(|service| service_scope.permits(service));
         before_node_scope
             .iter()
@@ -900,6 +926,30 @@ async fn load_user_tools_inner(
     include_non_executable: bool,
     scope: NodeScope<'_>,
 ) -> AppResult<Vec<McpToolService>> {
+    let grants =
+        crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
+    let providers = crate::services::platform_key_service::load_providers(db).await?;
+    load_user_tools_with_grants(
+        db,
+        node_ws_manager,
+        user_id,
+        include_non_executable,
+        scope,
+        &grants,
+        &providers,
+    )
+    .await
+}
+
+async fn load_user_tools_with_grants(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+    include_non_executable: bool,
+    scope: NodeScope<'_>,
+    grants: &crate::services::platform_key_service::OwnerGrants,
+    providers: &HashMap<String, crate::models::provider_config::ProviderConfig>,
+) -> AppResult<Vec<McpToolService>> {
     // -----------------------------------------------------------------------
     // Phase 1: Load platform (DownstreamService) services
     // -----------------------------------------------------------------------
@@ -1020,9 +1070,16 @@ async fn load_user_tools_inner(
     // Phase 2: Load UserService tools (personal + org-shared)
     // -----------------------------------------------------------------------
 
-    let all_user_services =
-        load_callable_user_services(db, node_ws_manager, user_id, include_non_executable, scope)
-            .await?;
+    let all_user_services = load_callable_user_services(
+        db,
+        node_ws_manager,
+        user_id,
+        include_non_executable,
+        scope,
+        grants,
+        providers,
+    )
+    .await?;
 
     // Collect catalog IDs and slugs from *executable* user services for dedup
     let executable_catalog_ids: HashSet<&str> = all_user_services
@@ -1085,9 +1142,7 @@ async fn load_user_tools_inner(
         blocked_slugs.insert(svc.slug.clone());
     }
     {
-        use crate::services::org_service;
-        let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
-        for m in &memberships {
+        for m in grants.memberships() {
             if !m.role.can_proxy() {
                 continue;
             }
@@ -1526,9 +1581,9 @@ async fn load_callable_user_services(
     user_id: &str,
     include_non_executable: bool,
     scope: NodeScope<'_>,
+    grants: &crate::services::platform_key_service::OwnerGrants,
+    providers: &HashMap<String, crate::models::provider_config::ProviderConfig>,
 ) -> AppResult<Vec<ResolvedUserService>> {
-    use crate::services::org_service;
-
     // -- Personal services --
     let personal_services: Vec<UserService> = db
         .collection::<UserService>(USER_SERVICES)
@@ -1544,10 +1599,9 @@ async fn load_callable_user_services(
         .collect();
 
     // -- Org-shared services --
-    let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
     let mut org_services: Vec<(UserService, String)> = Vec::new(); // (service, org_user_id)
 
-    for m in &memberships {
+    for m in grants.memberships() {
         if !m.role.can_proxy() {
             continue; // Viewers cannot call MCP tools
         }
@@ -1578,6 +1632,24 @@ async fn load_callable_user_services(
             org_services.push((svc, m.org_user_id.clone()));
         }
     }
+
+    // Resolve catalog-held credentials from one batch shared across all owners.
+    let catalog_ids: Vec<&str> = personal_services
+        .iter()
+        .chain(org_services.iter().map(|(s, _)| s))
+        .filter_map(|s| s.catalog_service_id.as_deref())
+        .collect();
+    let catalogs: Vec<DownstreamService> = if catalog_ids.is_empty() {
+        vec![]
+    } else {
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find(doc! { "_id": { "$in": &catalog_ids } })
+            .await?
+            .try_collect()
+            .await?
+    };
+    let catalog_map: HashMap<&str, &DownstreamService> =
+        catalogs.iter().map(|c| (c.id.as_str(), c)).collect();
 
     // Batch-load active API keys
     all_api_key_ids.sort_unstable();
@@ -1678,7 +1750,11 @@ async fn load_callable_user_services(
             .get(&us.id)
             .copied()
             .unwrap_or(false);
-        let cred_info = classify_credential(&us, &active_key_map, has_route);
+        let cred_info =
+            match platform_credential_classification(&us, &catalog_map, providers, grants) {
+                Some(info) => info,
+                None => classify_credential(&us, &active_key_map, has_route),
+            };
         if !include_non_executable && !cred_info.is_executable {
             continue;
         }
@@ -1718,7 +1794,11 @@ async fn load_callable_user_services(
             .get(&us.id)
             .copied()
             .unwrap_or(false);
-        let cred_info = classify_credential(&us, &active_key_map, has_route);
+        let cred_info =
+            match platform_credential_classification(&us, &catalog_map, providers, grants) {
+                Some(info) => info,
+                None => classify_credential(&us, &active_key_map, has_route),
+            };
         if !include_non_executable && !cred_info.is_executable {
             continue;
         }
@@ -1764,6 +1844,39 @@ struct CredentialClassification {
 /// `node_managed` keys do NOT provide a server-side credential (they decrypt to
 /// None) so they require an online node. Regular active keys provide a server
 /// credential. No-auth services are always executable.
+fn platform_credential_classification(
+    service: &UserService,
+    catalogs: &HashMap<&str, &DownstreamService>,
+    providers: &HashMap<String, crate::models::provider_config::ProviderConfig>,
+    grants: &crate::services::platform_key_service::OwnerGrants,
+) -> Option<CredentialClassification> {
+    if crate::services::platform_key_service::binding(service) != "platform"
+        || (service.auth_method == "none" && service.credential_binding.is_none())
+    {
+        return None;
+    }
+    let available = service
+        .catalog_service_id
+        .as_deref()
+        .and_then(|id| catalogs.get(id))
+        .is_some_and(|catalog| {
+            service.node_id.is_none()
+                && crate::services::platform_key_service::available_with_grants(
+                    catalog,
+                    catalog
+                        .provider_config_id
+                        .as_ref()
+                        .and_then(|id| providers.get(id)),
+                    &service.user_id,
+                    grants,
+                )
+        });
+    Some(CredentialClassification {
+        is_executable: available,
+        has_server_credential: available,
+    })
+}
+
 fn classify_credential(
     us: &UserService,
     active_key_map: &HashMap<&str, &str>,
@@ -1997,6 +2110,7 @@ pub fn generate_tool_definitions(
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
+                "use_platform_key": { "type": "boolean", "default": false, "description": "Use an available NyxID platform key" },
                 "service_id": {
                     "type": "string",
                     "description": "The service ID to connect to (from discover_services results)"
@@ -3590,6 +3704,7 @@ pub async fn execute_tool(
             })?;
             let has_cred = resolution.has_server_credential;
 
+            let mut agent_override = false;
             // Per-agent credential override: when acting as an API key with
             // an agent binding, swap in the override credential before execute.
             // Matches `execute_proxy_inner` in handlers/proxy.rs.
@@ -3605,6 +3720,7 @@ pub async fn execute_tool(
                 .await?
             {
                 resolution.target.credential = override_cred;
+                agent_override = true;
             }
 
             // Build the full NodeRoute (primary + fallbacks) from the resolution.
@@ -3672,11 +3788,15 @@ pub async fn execute_tool(
             // never bypasses the node for user-managed node-routed tools.
             // (Sixth-round Codex review P1.)
             let has_cred_for_fallback = has_cred && nr.is_none();
-            let billing_context_builder =
+            let mut billing_context_builder =
                 McpBillingRouteContextBuilder::from_user_service_resolution(
                     billing_principal_user_id,
                     &resolution,
                 );
+            if agent_override {
+                billing_context_builder.credential_class_override =
+                    Some(CredentialClass::AgentOverrideUserOwned);
+            }
             (
                 resolution.target,
                 nr,
@@ -3742,6 +3862,9 @@ pub async fn execute_tool(
                 .await?;
                 (t, true)
             };
+            if proxy_service::uses_server_held_master(&t) {
+                nr = None;
+            }
             // Platform services resolve their node route through
             // `NodeServiceBinding` rows, which are opt-in routing hints
             // rather than an explicit `UserService.node_id` contract.
@@ -4126,7 +4249,7 @@ pub async fn execute_tool_resolved(
                     billing
                         .settle(
                             &metered,
-                            PlatformUsage::single_request(request_len + resp.body.len() as i64),
+                            mcp_platform_usage(&resp.body, request_len, &target.service),
                             None,
                             None,
                         )
@@ -4144,7 +4267,7 @@ pub async fn execute_tool_resolved(
                     billing
                         .settle(
                             &metered,
-                            PlatformUsage::single_request(request_len + body_buf.len() as i64),
+                            mcp_platform_usage(&body_buf, request_len, &target.service),
                             None,
                             None,
                         )
@@ -4246,13 +4369,43 @@ pub async fn execute_tool_resolved(
     billing
         .settle(
             &metered,
-            PlatformUsage::single_request(request_len + body_text.len() as i64),
+            mcp_platform_usage(body_text.as_bytes(), request_len, &target.service),
             None,
             None,
         )
         .await?;
 
     Ok(McpToolExecutionOutcome::Response((status, body_text)))
+}
+
+fn mcp_platform_usage(body: &[u8], request_len: i64, service: &DownstreamService) -> PlatformUsage {
+    use crate::services::llm_usage_service;
+    let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(usage) = llm_usage_service::extract_reported_usage(&value) {
+            accumulator.observe_snapshot(usage);
+        }
+    } else {
+        let mut buffer = String::from_utf8_lossy(body).into_owned();
+        while let Some(event) = super::sse_parser::parse_next_event(&mut buffer) {
+            if let Some((usage, mode)) = llm_usage_service::extract_reported_usage_from_sse_event(
+                event.event_type.as_deref(),
+                &event.data,
+            ) {
+                accumulator.observe(usage, mode);
+            }
+        }
+    }
+    let usage = accumulator.finalize();
+    let bytes = request_len.saturating_add(body.len() as i64);
+    if usage.is_none() && !crate::services::billing::metric_resolution::captures_tokens(service) {
+        return PlatformUsage::single_request(bytes);
+    }
+    PlatformUsage::llm_completion(
+        bytes,
+        llm_usage_service::token_quantity_or_estimate(usage.as_ref(), bytes),
+    )
+    .with_token_breakdown(usage.as_ref().map(|usage| usage.token_breakdown()))
 }
 
 fn direct_transport_failure_is_pre_dispatch(error: &reqwest::Error) -> bool {
@@ -4506,7 +4659,7 @@ pub async fn discover_services(
         .try_collect()
         .await?;
 
-    let results: Vec<serde_json::Value> = all_services
+    let mut results: Vec<serde_json::Value> = all_services
         .iter()
         .filter(|svc| {
             // Already connected via old model
@@ -4550,6 +4703,41 @@ pub async fn discover_services(
         })
         .collect();
 
+    let grants =
+        crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
+    let providers = crate::services::platform_key_service::load_providers(db).await?;
+    for result in &mut results {
+        let Some(service) = all_services
+            .iter()
+            .find(|s| result["service_id"].as_str() == Some(&s.id))
+        else {
+            continue;
+        };
+        let provider = service
+            .provider_config_id
+            .as_ref()
+            .and_then(|id| providers.get(id));
+        let available = crate::services::platform_key_service::available_with_grants(
+            service, provider, user_id, &grants,
+        );
+        if let Some(inference) = crate::services::inference_service::view(
+            service,
+            provider.map(|p| p.slug.as_str()),
+            available,
+        ) {
+            result["inference"] =
+                serde_json::to_value(inference).map_err(|e| AppError::Internal(e.to_string()))?;
+        }
+        result["platform_key"] = serde_json::json!({ "available": available,
+            "pricing": service.billing.as_ref().and_then(|b| b.platform_key_pricing.as_ref()).map(crate::services::inference_service::LanePricingView::from) });
+        result["byok_pricing"] = serde_json::json!(
+            service
+                .billing
+                .as_ref()
+                .and_then(|b| b.byok_pricing.as_ref())
+                .map(crate::services::inference_service::LanePricingView::from)
+        );
+    }
     let count = results.len();
     Ok(serde_json::json!({ "services": results, "count": count }))
 }
@@ -4579,6 +4767,63 @@ pub(crate) fn parse_connect_scopes(value: Option<&serde_json::Value>) -> AppResu
 }
 
 /// Connect the user to a service from within the MCP client.
+#[allow(clippy::too_many_arguments)]
+pub async fn connect_service_with_binding(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    node_ws_manager: &crate::services::node_ws_manager::NodeWsManager,
+    user_id: &str,
+    service_id: &str,
+    credential: Option<&str>,
+    credential_label: Option<&str>,
+    frontend_url: &str,
+    requested_by: Option<&str>,
+    scopes: &[String],
+    use_platform_key: bool,
+) -> AppResult<serde_json::Value> {
+    if !use_platform_key {
+        return connect_service(
+            db,
+            encryption_keys,
+            node_ws_manager,
+            user_id,
+            service_id,
+            credential,
+            credential_label,
+            frontend_url,
+            requested_by,
+            scopes,
+        )
+        .await;
+    }
+    if credential.is_some() || !scopes.is_empty() {
+        return Err(AppError::ValidationError(
+            "Platform key selection is exclusive with credentials and OAuth scopes".to_string(),
+        ));
+    }
+    let catalog = db
+        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+        .find_one(doc! { "_id": service_id, "is_active": true })
+        .await?
+        .ok_or_else(|| AppError::NotFound("Service not found".to_string()))?;
+    let created = crate::services::unified_key_service::create_platform_key(
+        db,
+        user_id,
+        user_id,
+        &catalog.slug,
+        credential_label.unwrap_or(&catalog.name),
+        None,
+        false,
+        None,
+    )
+    .await?;
+    Ok(
+        serde_json::json!({ "status": "connected", "service_name": catalog.name,
+        "service_id": created.service.id, "service_slug": created.service.slug,
+        "credential_binding": "platform", "connected_at": created.service.created_at.to_rfc3339() }),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn connect_service(
     db: &mongodb::Database,
@@ -4611,6 +4856,7 @@ pub async fn connect_service(
                 scopes: scopes.to_vec(),
                 user_id: user_id.to_string(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: credential_label.map(str::to_string),
                 requested_by: requested_by.map(str::to_string),
                 callback_url: None,
@@ -4657,6 +4903,43 @@ pub async fn connect_service(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mcp_usage_estimates_only_token_services_and_preserves_reported_usage() {
+        use crate::models::downstream_service::test_helpers::dummy_service;
+        use crate::models::service_billing::{BillingMetric, ServiceBilling};
+        let mut service = dummy_service();
+        let body = br#"{"items":[{"name":"repository"}]}"#;
+        let plain = super::mcp_platform_usage(body, 12, &service);
+        assert_eq!(plain.tokens, 0);
+        assert_eq!(plain.requests, 1);
+        assert_eq!(plain.bytes, 12 + body.len() as i64);
+        let reported = super::mcp_platform_usage(
+            br#"{"usage":{"total_tokens":57,"prompt_tokens":50,"completion_tokens":7}}"#,
+            12,
+            &service,
+        );
+        assert_eq!(reported.tokens, 57);
+        service.billing = Some(ServiceBilling {
+            platform_key_pricing: Some(
+                serde_json::from_value(
+                    serde_json::json!({"metric":"tokens","credits_per_unit":"1"}),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        });
+        assert!(super::mcp_platform_usage(body, 12, &service).tokens > 0);
+        service
+            .billing
+            .as_mut()
+            .unwrap()
+            .platform_key_pricing
+            .as_mut()
+            .unwrap()
+            .metric = BillingMetric::Requests;
+        assert_eq!(super::mcp_platform_usage(body, 12, &service).tokens, 0);
+    }
+
     use super::*;
     use crate::models::downstream_service::test_helpers::dummy_service;
     use crate::test_utils::{
@@ -5571,6 +5854,12 @@ mod tests {
             &member_id,
             false,
             NodeScope::Unrestricted,
+            &crate::services::platform_key_service::OwnerGrants::load_for_listing(&db, &member_id)
+                .await
+                .unwrap(),
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
         )
         .await
         .expect("load member-callable services");
@@ -5591,6 +5880,12 @@ mod tests {
             &member_id,
             false,
             NodeScope::Unrestricted,
+            &crate::services::platform_key_service::OwnerGrants::load_for_listing(&db, &member_id)
+                .await
+                .unwrap(),
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
         )
         .await
         .expect("reload member-callable services after enabling policy");
@@ -5614,6 +5909,12 @@ mod tests {
             &member_id,
             false,
             NodeScope::Unrestricted,
+            &crate::services::platform_key_service::OwnerGrants::load_for_listing(&db, &member_id)
+                .await
+                .unwrap(),
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
         )
         .await
         .expect("reload member-callable services after disabling policy");
@@ -8484,7 +8785,13 @@ mod tests {
             db,
             std::sync::Arc::new(crate::test_utils::test_app_config()),
         );
-        let target = mcp_billing_resolution("owner", None).target;
+        let mut target = mcp_billing_resolution("owner", None).target;
+        target.service.slug = "llm-legacy".into();
+        target.service.billing = Some(crate::models::service_billing::ServiceBilling {
+            platform_billable: true,
+            platform_metric: Some(BillingMetric::Tokens),
+            ..Default::default()
+        });
 
         let billing_ctx = McpBillingRouteContextBuilder::for_platform_service("owner")
             .build(
@@ -8499,6 +8806,8 @@ mod tests {
             .await
             .expect("service-account MCP billing context");
 
+        // Without lanes MCP retains its historical request meter.
+        assert_eq!(billing_ctx.platform_metric, BillingMetric::Requests);
         assert_eq!(billing_ctx.billing_owner_id, "owner");
         assert_eq!(billing_ctx.actor_user_id, "service-account");
         assert_ne!(billing_ctx.billing_owner_id, billing_ctx.actor_user_id);
@@ -8646,6 +8955,7 @@ mod tests {
                 auth_method: "none".to_string(),
                 auth_key_name: String::new(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
@@ -8669,6 +8979,8 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,

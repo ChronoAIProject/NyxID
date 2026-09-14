@@ -91,6 +91,7 @@ export const customServiceAuthMethodSchema = z.enum([
 export const catalogServiceActionParamsSchema = z
   .object({
     serviceSlug: requiredWireStringSchema,
+    use_platform_key: z.boolean().optional(),
     requestedScopes: z
       .array(z.string().max(256))
       .max(64)
@@ -585,6 +586,7 @@ export function recoverUnsupportedAssistantActionRequest(
 export type ActionCardParams =
   | {
       readonly variant: "catalog";
+      readonly use_platform_key?: boolean;
       readonly service_slug: string;
       readonly requested_scopes: readonly string[];
       readonly via_node_id: string | null;

@@ -139,7 +139,7 @@ fn validate_recommended_skills(skills: &[String]) -> AppResult<()> {
 }
 
 /// How the caller wants to treat `recommended_skills` on update.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub enum RecommendedSkillsUpdate {
     /// Leave existing value untouched.
     #[default]
@@ -213,7 +213,7 @@ pub async fn update_endpoint_in_session(
     Ok(())
 }
 
-fn build_endpoint_update(
+pub(crate) fn build_endpoint_update(
     url: Option<&str>,
     label: Option<&str>,
     openapi_spec_url: OpenApiSpecUrlUpdate<'_>,

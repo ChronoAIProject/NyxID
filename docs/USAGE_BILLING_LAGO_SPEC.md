@@ -104,36 +104,56 @@ pub struct ResaleUsage   { pub metric: BillingMetric, pub quantity: i64 }
 pub struct ResaleSpec    { pub metric: BillingMetric, pub lago_metric_code: String }
 ```
 
-### 3.1 `ServiceBilling` (resale layer; sub-struct on `DownstreamService`)
+### 3.1 `ServiceBilling` (catalog pricing and resale)
 
-Mirrors the `ServiceCapabilities` pattern (`models/downstream_service.rs:14-30, 266-268`). **There is
-no `billable` field** — resale is `resale_billable`; the platform layer is plan-level (Lago plan), not
-catalog config.
+The stored optional `DownstreamService.billing` retains all legacy fields:
+`platform_billable`, `platform_metric`, `platform_pricing`,
+`platform_pricing_cleanup_metric_code`, `resale_billable`, `resale_metric`, and
+`lago_resale_metric_code`. Absent billing remains free. NyxID-authored legacy
+platform prices use `platform_svc_{slug}`; legacy plan-authored rates remain valid.
 
-```rust
-// models/service_billing.rs
-#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
-pub struct ServiceBilling {
-    /// Resale (downstream value) charges — only honored when the FINAL CredentialClass is
-    /// NyxidManagedMaster (§3.0). Default false.
-    #[serde(default)]
-    pub resale_billable: bool,
-    #[serde(default)]
-    pub resale_metric: BillingMetric,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lago_resale_metric_code: Option<String>,
-}
-```
+Version 0.20 adds defaulted `byok_pricing: Option<LanePricing>` and
+`platform_key_pricing: Option<LanePricing>`, with independent optional cleanup
+markers `byok_pricing_cleanup_metric_code` and
+`platform_key_pricing_cleanup_metric_code`. `LanePricing` contains `metric`, exact
+decimal `credits_per_unit`, server-owned `lago_metric_code`, `sync_status`, and
+`sync_error`. Admin inputs use the same normalization, precision and bounds as
+legacy prices. Omitted lane fields on an update preserve existing lanes, so older
+admin clients cannot silently erase them. Explicit null clears a lane and records
+cleanup intent. The credential remains in the existing encrypted catalog master
+credential; pricing never stores a secret.
 
-On `DownstreamService`, sibling to `capabilities`:
+| Final credential class | Selected lane |
+| --- | --- |
+| `UserOwned`, `AgentOverrideUserOwned`, `NodeManaged` | `byok_pricing` |
+| `NyxidManagedMaster` | `platform_key_pricing` |
+| `NoAuth` | None; meter only |
 
-```rust
-#[serde(default, skip_serializing_if = "Option::is_none")]
-pub billing: Option<ServiceBilling>,
-```
+When either lane is present, lane mode supersedes the legacy platform block. A
+missing matching lane is free. A synced lane selects its configured metric and
+standard charge; a pending/failed matching lane falls back to the prior legacy
+configuration or free. No lanes preserves legacy billing unchanged. Resale remains
+independent with its existing master-credential and rollout gates.
 
-Platform metric codes are global constants: `platform_requests`, `platform_bytes`. `UserService`
-inherits resale config through `catalog_service_id`.
+Stable metric codes are `platform_svc_{slug}_byok` and `platform_svc_{slug}_pk`.
+Synchronization reuses the Lago standard-charge path on `LAGO_PLAN_CODE`, retaining
+the full plan charge array and every existing ID. Reconciliation retries pending,
+failed and removed lanes. Writes fence completion against price, metric and code;
+a stale sync after a clear recreates cleanup intent. Client responses expose the
+unit, decimal price and sync status without new Lago internals.
+
+Lane selection occurs in `BillingRouteContext` after final credential resolution
+and before the §4 meter and §5 wallet gate. Provider-reported tokens stay authoritative
+for JSON, SSE, and supported realtime usage events. Allowances fund actual units,
+then expiring grants fund microcredits, then the wallet funds the remainder. Only
+wallet-funded quantities reach Lago. Existing usage rows record the selected metric
+code and credential class; billing ledger entries reference those rows without any
+change to canonical field encoding, order, hash construction or verification.
+
+
+Lane-only admin updates preserve omitted legacy platform and resale fields, including
+the pending-sync fallback. Legacy billing-only updates retain their existing full-block
+semantics; omitted new lanes are always preserved, and explicit null clears a lane.
 
 **"Billing-active" rollup (R7).** A request is *billing-active* iff `ServiceBilling.resale_billable`
 (and the resolved credential is `NyxidManagedMaster`) **OR** the resolved billing owner is on a
@@ -286,6 +306,18 @@ Today resolution decrypts before returning direct targets (`proxy_service.rs:175
 metadata pass out of it (or compute the context from the already-resolved `pre`/`ProxyTarget` fields
 **after** the agent-credential override at `proxy.rs:1289-1300`, where the final credential is known —
 do **not** read the pre-override `has_server_credential`).
+
+Token capture checks both configured lanes, regardless of catalog slug or price sync
+state. JSON/SSE provider usage is authoritative. MCP keeps zero tokens for non-token
+services unless a response actually reports usage; token-metered responses without
+reported usage retain the existing estimate.
+
+Mixed billing lanes may use different units. Allowances match the actual request's
+selected platform metric at reservation and settlement. Admin allowance create/update
+accepts optional `metric`, validated against configured lane units (plus a legacy
+fallback unit while sync is pending/failed). Omitted `metric` defaults to BYOK's unit,
+otherwise platform key's unit, otherwise the legacy service default. Existing allowance
+rows retain their original unit; the UI offers a unit selector for mixed lanes.
 
 ### 4.1 `MeteredProxyContext`
 

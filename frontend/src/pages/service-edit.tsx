@@ -1,3 +1,4 @@
+import { PlatformServiceFields } from "@/components/services/platform-service-fields";
 import { useEffect } from "react";
 import { useNavigate, useParams } from "@tanstack/react-router";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -111,6 +112,11 @@ export function ServiceEditPage() {
   useEffect(() => {
     if (service) {
       form.reset({
+        inference: service.inference,
+        platform_key: service.platform_key ?? undefined,
+        credential: "",
+        byok_pricing: service.billing?.byok_pricing,
+        platform_key_pricing: service.billing?.platform_key_pricing,
         service_type: service.service_type === "ssh" ? "ssh" : "http",
         visibility: service.visibility === "private" ? "private" : "public",
         name: service.name,
@@ -249,6 +255,7 @@ export function ServiceEditPage() {
                   .map((s) => s.trim())
                   .filter(Boolean),
                 developer_app_ids: data.developer_app_ids ?? [],
+                ...(user?.is_admin ? { inference: data.inference, platform_key: data.platform_key, ...(data.credential?.trim() ? { credential: data.credential.trim() } : {}) } : {}),
                 capabilities: {
                   supports_proxy_read: data.supports_proxy_read ?? false,
                   supports_proxy_write: data.supports_proxy_write ?? false,
@@ -262,6 +269,7 @@ export function ServiceEditPage() {
                 // platform-layer opt-in.
                 billing: {
                   ...(service?.billing ?? {}),
+                  ...(user?.is_admin ? { byok_pricing: data.byok_pricing, platform_key_pricing: data.platform_key_pricing } : {}),
                   platform_billable: data.platform_billable ?? false,
                   platform_metric:
                     data.platform_metric && data.platform_metric !== "auto"
@@ -957,6 +965,7 @@ export function ServiceEditPage() {
                     </div>
 
                     <Separator className="my-2" />
+                    {user?.is_admin && <PlatformServiceFields form={form} service={service} />}
                     <div className="space-y-4">
                       <div className="space-y-1">
                         <h3 className="text-[13px] font-semibold">Billing</h3>

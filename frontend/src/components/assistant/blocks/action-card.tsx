@@ -891,6 +891,7 @@ export function ActionCard({
       !unsupported &&
       (params.variant === "catalog" || params.variant === "custom") ? (
         <AddKeyDialog
+          prefillUsePlatformKey={params.variant === "catalog" ? params.use_platform_key : undefined}
           open={dialogOpen}
           onOpenChange={setOpen}
           prefillSlug={

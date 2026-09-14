@@ -188,6 +188,7 @@ function normalizeServiceConnect(raw: unknown): ActionCardParams | null {
     return {
       variant: "catalog",
       service_slug: serviceSlug,
+      ...(catalog.use_platform_key !== undefined ? { use_platform_key: catalog.use_platform_key } : {}),
       requested_scopes: catalog.requestedScopes.map((scope) => scope.trim()),
       via_node_id: nullableId(catalog.viaNodeId),
       target_org_id: nullableId(catalog.targetOrgId),

@@ -265,6 +265,7 @@ export const usageAllowanceListSchema = z.object({
 
 export const allowanceFormSchema = z
   .object({
+    metric: billingMetricSchema.optional(),
     service_ref: z.string().min(1, "Select a service"),
     quantity: z.number().int().min(1).max(1_000_000_000_000),
     recurrence: allowanceRecurrenceSchema,

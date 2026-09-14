@@ -693,7 +693,7 @@ pub async fn active_auto_connected_service_ids(
     use crate::models::user_service::{AUTO_PROVISION_SOURCE, COLLECTION_NAME};
     let rows: Vec<bson::Document> = db
         .collection::<bson::Document>(COLLECTION_NAME)
-        .find(doc! { "user_id": owner_id, "source": AUTO_PROVISION_SOURCE, "is_active": true })
+        .find(doc! { "user_id": owner_id, "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }], "is_active": true })
         .projection(doc! { "_id": 1 })
         .await?
         .try_collect()

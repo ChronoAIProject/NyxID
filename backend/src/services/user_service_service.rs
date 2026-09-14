@@ -72,12 +72,33 @@ pub struct IdentityConfig {
 }
 
 fn ensure_user_managed_service(service: &UserService) -> AppResult<()> {
-    if service.source.as_deref() == Some(AUTO_PROVISION_SOURCE) {
+    if service.source.as_deref() == Some(AUTO_PROVISION_SOURCE)
+        || service.credential_binding.as_deref() == Some("platform")
+    {
         return Err(AppError::Forbidden(
             "Auto-connected services are platform managed and cannot be modified".to_string(),
         ));
     }
     Ok(())
+}
+
+/// Platform-bound connections retain cosmetic controls; routing inputs are
+/// catalog-owned. Automatic rows remain wholly managed by reconciliation.
+pub fn ensure_service_fields_editable(
+    service: &UserService,
+    routing_fields: &[(&str, bool)],
+) -> AppResult<()> {
+    if service.credential_binding.as_deref() == Some("platform")
+        && service.source.as_deref() != Some(AUTO_PROVISION_SOURCE)
+    {
+        if let Some((field, _)) = routing_fields.iter().find(|(_, present)| *present) {
+            return Err(AppError::ValidationError(format!(
+                "Switch to your own key to change {field}"
+            )));
+        }
+        return Ok(());
+    }
+    ensure_user_managed_service(service)
 }
 
 /// Whether an organization role can execute a service after applying the
@@ -123,7 +144,7 @@ pub async fn auto_connected_endpoint_ids(
         .collection::<bson::Document>(COLLECTION_NAME)
         .find(doc! {
             "user_id": user_id,
-            "source": AUTO_PROVISION_SOURCE,
+            "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }],
         })
         .with_options(
             FindOptions::builder()
@@ -160,7 +181,7 @@ pub async fn ensure_user_managed_endpoint(
         .count_documents(doc! {
             "user_id": user_id,
             "endpoint_id": endpoint_id,
-            "source": AUTO_PROVISION_SOURCE,
+            "$or": [{ "source": AUTO_PROVISION_SOURCE }, { "credential_binding": "platform" }],
         })
         .await?;
     if count > 0 {
@@ -456,8 +477,9 @@ pub async fn list_user_services_with_sources(
 pub async fn list_user_services_with_sources_including_disabled(
     db: &mongodb::Database,
     user_id: &str,
+    memberships: &[crate::models::org_membership::OrgMembership],
 ) -> AppResult<Vec<UserServiceWithSource>> {
-    list_user_services_with_sources_impl(db, user_id, false, true).await
+    list_user_services_with_sources_and_memberships(db, user_id, false, true, memberships).await
 }
 
 /// List services for an internal policy projection, retaining scope-denied
@@ -477,6 +499,24 @@ async fn list_user_services_with_sources_impl(
     include_scope_denied: bool,
     include_disabled: bool,
 ) -> AppResult<Vec<UserServiceWithSource>> {
+    let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
+    list_user_services_with_sources_and_memberships(
+        db,
+        user_id,
+        include_scope_denied,
+        include_disabled,
+        &memberships,
+    )
+    .await
+}
+
+async fn list_user_services_with_sources_and_memberships(
+    db: &mongodb::Database,
+    user_id: &str,
+    include_scope_denied: bool,
+    include_disabled: bool,
+    memberships: &[crate::models::org_membership::OrgMembership],
+) -> AppResult<Vec<UserServiceWithSource>> {
     let mut out: Vec<UserServiceWithSource> =
         list_user_services_inner(db, user_id, include_disabled)
             .await?
@@ -487,8 +527,6 @@ async fn list_user_services_with_sources_impl(
             })
             .collect();
 
-    let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
-
     // Cache org user lookups so we don't re-query the same org twice when
     // the user belongs to multiple memberships pointing at the same org
     // (shouldn't happen due to the unique index, but cheap to be safe).
@@ -497,7 +535,7 @@ async fn list_user_services_with_sources_impl(
 
     for m in memberships {
         let effective_scope =
-            crate::services::org_role_scope_service::effective_scope_for_membership(db, &m).await?;
+            crate::services::org_role_scope_service::effective_scope_for_membership(db, m).await?;
         let (org_name, org_avatar_url) = if let Some(meta) = org_meta_cache.get(&m.org_user_id) {
             meta.clone()
         } else {
@@ -843,7 +881,7 @@ pub async fn create_user_service_with_id(
     let platform_managed_catalog_service = api_key_id.is_none()
         && auth_method != "none"
         && catalog_service_id.is_some()
-        && source == Some(AUTO_PROVISION_SOURCE);
+        && matches!(source, Some(AUTO_PROVISION_SOURCE | "platform_key"));
     if api_key_id.is_none() && auth_method != "none" && !platform_managed_catalog_service {
         return Err(AppError::ValidationError(
             "Services without an API key must use auth_method 'none'".to_string(),
@@ -907,6 +945,7 @@ pub async fn create_user_service_with_id(
         slug: slug.to_string(),
         endpoint_id: endpoint_id.to_string(),
         api_key_id: api_key_id.map(|s| s.to_string()),
+        credential_binding: (source == Some("platform_key")).then(|| "platform".to_string()),
         auth_method: auth_method.to_string(),
         auth_key_name: auth_key_name.to_string(),
         catalog_service_id: catalog_service_id.map(|s| s.to_string()),
@@ -1029,7 +1068,31 @@ pub async fn update_user_service(
     admin_only: Option<bool>,
 ) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
-    ensure_user_managed_service(&current)?;
+    ensure_service_fields_editable(
+        &current,
+        &[
+            ("auth_method", auth_method.is_some()),
+            ("auth_key_name", auth_key_name.is_some()),
+            ("node_id", node_id.is_some()),
+            ("node_priority", node_priority.is_some()),
+            ("identity propagation or delegation", identity.is_some()),
+            ("ws_frame_injections", ws_frame_injections.is_some()),
+        ],
+    )?;
+    if is_active == Some(true) && current.credential_binding.as_deref() == Some("platform") {
+        let catalog_id = current
+            .catalog_service_id
+            .as_deref()
+            .ok_or_else(|| AppError::NotFound("Service is no longer available".into()))?;
+        let catalog = db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": catalog_id })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Service is no longer available".into()))?;
+        crate::services::platform_key_service::require(db, &catalog, user_id).await?;
+    }
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
@@ -1115,6 +1178,7 @@ pub async fn update_user_service(
     }
     if let Some(active) = is_active {
         if active
+            && current.credential_binding.as_deref() != Some("platform")
             && let Some(api_key_id) = current.api_key_id.as_deref()
             && crate::services::user_api_key_service::find_api_key(db, user_id, api_key_id)
                 .await?
@@ -2210,6 +2274,7 @@ mod tests {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             credential_encrypted: Vec::new(),
+            platform_key: None,
             auth_type: Some("ssh".to_string()),
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -2242,6 +2307,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -2901,9 +2968,13 @@ mod tests {
         );
         assert_eq!(enforcement[0].id, enabled_id);
 
-        let management = list_user_services_with_sources_including_disabled(&db, &user_id)
+        let memberships = org_service::list_memberships_for_member(&db, &user_id, false)
             .await
             .unwrap();
+        let management =
+            list_user_services_with_sources_including_disabled(&db, &user_id, &memberships)
+                .await
+                .unwrap();
         let mut listed: Vec<&str> = management
             .iter()
             .map(|tagged| tagged.service.id.as_str())

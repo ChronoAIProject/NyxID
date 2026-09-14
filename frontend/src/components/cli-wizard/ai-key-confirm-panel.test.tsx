@@ -1155,3 +1155,15 @@ describe("AiKeyConfirm — manage-scopes mode (issue #917 CLI --set)", () => {
     ).toHaveAttribute("aria-pressed", "false");
   });
 });
+
+describe("CLI wizard platform-key selection", () => {
+  it("defaults to a server-held key and posts no credential", async () => {
+    mockGet.mockResolvedValue({ slug: "llm-xai", name: "xAI", base_url: "https://api.x.ai/v1", auth_method: "bearer", service_type: "http", requires_credential: true, platform_key: { available: true, pricing: null } });
+    mockPost.mockResolvedValue({ id: "platform-key", slug: "llm-xai", label: "xAI" });
+    render(<AiKeyConfirm {...baseProps} prefill={{ slug: "llm-xai" }} />, { wrapper: createWrapper() });
+    expect(await screen.findByRole("radio", { name: /Use NyxID's key/ })).toBeChecked();
+    expect(screen.queryByLabelText("API key")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /Connect/ }));
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/keys", { service_slug: "llm-xai", label: "xAI", use_platform_key: true }));
+  });
+});

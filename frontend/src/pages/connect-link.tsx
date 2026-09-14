@@ -1,3 +1,5 @@
+import { useCatalogEntry } from "@/hooks/use-keys";
+import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
 import { useEffect, useRef, useState } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useNavigate, useParams } from "@tanstack/react-router";
@@ -66,6 +68,10 @@ export function ConnectLinkPage() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const lastClickAtRef = useRef(0);
   const preview = usePreviewConnectLink();
+  const [platformChoice, setPlatformChoice] = useState<boolean | null>(null);
+  const { data: catalog } = useCatalogEntry(isAuthenticated ? preview.data?.service_slug : undefined);
+  const platformAvailable = Boolean(catalog?.platform_key?.available && !preview.data?.scopes.length);
+  const usePlatformKey = platformAvailable && (platformChoice ?? preview.data?.use_platform_key ?? true);
   const complete = useCompleteConnectLink();
   const cancel = useCancelHostedConnectLink();
   const actionPending =
@@ -109,7 +115,7 @@ export function ConnectLinkPage() {
 
   async function handleConnect() {
     if (!preview.data || actionPending || withinCooldown()) return;
-    if (connectLinkNeedsSetupForm(preview.data)) {
+    if (!usePlatformKey && connectLinkNeedsSetupForm(preview.data)) {
       setShowSetupForm(true);
       return;
     }
@@ -119,7 +125,8 @@ export function ConnectLinkPage() {
   async function submitCompletion(values?: CompleteConnectLinkInput) {
     setSubmitError(null);
     try {
-      const result = await complete.mutateAsync({ token, values });
+      const selected = { use_platform_key: usePlatformKey };
+      const result = await complete.mutateAsync({ token, values: usePlatformKey ? selected : { ...values, ...selected } });
       if (result.status === "oauth_required" && result.authorization_url) {
         sessionStorage.setItem(connectLinkStorageKey(result.id), token);
         window.location.assign(result.authorization_url);
@@ -238,6 +245,9 @@ export function ConnectLinkPage() {
             ) : (
               <>
                 <RequestDetails preview={preview.data} />
+                {platformAvailable && catalog?.platform_key && preview.data.status === "pending" && (
+                  <CredentialBindingChoice value={usePlatformKey} onChange={(value) => { setPlatformChoice(value); setShowSetupForm(false); }} platformPrice={catalog.platform_key.pricing} byokPrice={catalog.byok_pricing} legacyBillable={catalog.billing?.platform_billable} resaleBillable={catalog.billing?.resale_billable} disabled={actionPending} />
+                )}
                 {preview.data.status !== "pending" ? (
                   <ErrorBanner
                     message={`This connection request is ${preview.data.status}.`}

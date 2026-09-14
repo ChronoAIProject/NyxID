@@ -329,6 +329,38 @@ mod tests {
     use utoipa::OpenApi;
 
     #[test]
+    fn platform_key_and_lane_contracts_are_in_generated_openapi() {
+        let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        let schemas = &document["components"]["schemas"];
+        for (schema, fields) in [
+            (
+                "CatalogEntryResponse",
+                vec!["inference", "platform_key", "byok_pricing"],
+            ),
+            (
+                "KeyResponse",
+                vec!["credential_binding", "platform_key_available"],
+            ),
+            ("CreateKeyRequest", vec!["use_platform_key"]),
+            ("UpdateServiceRequest", vec!["credential"]),
+            ("ServiceResponse", vec!["legacy_public_master"]),
+            ("UpdateKeyRequest", vec!["use_platform_key"]),
+            (
+                "ServiceBilling",
+                vec!["byok_pricing", "platform_key_pricing"],
+            ),
+            ("CreateConnectLinkRequest", vec!["use_platform_key"]),
+        ] {
+            for field in fields {
+                assert!(
+                    schemas[schema]["properties"].get(field).is_some(),
+                    "{schema}.{field}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn selectable_login_and_codex_contracts_are_discoverable() {
         let document = serde_json::to_value(ApiDoc::openapi()).unwrap();
         for (path, method, authenticated) in [

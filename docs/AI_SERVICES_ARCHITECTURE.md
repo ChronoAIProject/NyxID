@@ -469,3 +469,70 @@ sequenceDiagram
     API->>API: Audit log { api_key_id, api_key_name }
     API-->>Agent: Response + X-NyxID-Agent-Id header
 ```
+
+## Platform credential binding (0.20)
+
+`UserService.credential_binding` is optional (`platform` or `user`). Absent keeps
+legacy resolution: no `api_key_id` plus `source=auto_provision` selects the historical
+platform path; other rows use the user path. Catalog `platform_key` grants are live,
+owner-scoped, and independent of catalog provider linkage. Person UUIDs grant that
+person; org UUIDs grant proxy-capable active members and org-owned connections.
+Public grants auto-connect everyone. Restricted grants auto-connect eligible people
+and granted org owners; reconciliation removes stale automatic rows and orphan
+endpoints. Explicit connections remain manageable after revocation but cannot execute.
+
+`POST /keys {service_slug, label, use_platform_key:true}` creates a server-held
+connection without credential, OAuth, destination override or node inputs.
+`PUT /keys/{id} {use_platform_key:true}` switches an existing row after live ACL
+validation. `false` requires a fresh credential or the existing OAuth-provider flow.
+The previous personal key row is retained when switching to platform. Disable/Enable
+and Delete keep their existing meanings. Platform-bound connections use the live
+catalog URL/auth, never a user-controlled destination or credential node. Normal
+routing edits require switching back to BYOK.
+
+`GET /keys` adds `credential_binding`, `platform_key_available`,
+`platform_key_pricing`, and `byok_pricing`. Agent keys with
+`allow_auto_connected_services` include active same-owner platform-bound rows in
+their effective service union, including explicit selections. Grants do not override
+normal org membership, operation policy or delegated execution checks. See
+[the design](PLATFORM_KEYS_AND_INFERENCE.md) for complete pricing and upgrade rules.
+
+### Credential replacement and admin catalog editing
+
+Admin catalog `PUT /services/{catalog-id}` accepts a write-only master `credential`
+through envelope encryption and metadata-only auditing; it never returns credential
+bytes or lengths. Absent legacy public master configurations display as “enabled,
+public (implicit)”. See [credential replacement and audit](PLATFORM_KEYS_AND_INFERENCE.md#credential-replacement-and-audit).
+
+### Editing platform connections
+
+Explicit platform connections allow label, admin-only visibility, recommended skills,
+User-Agent and default-header edits, plus Disable/Enable. Endpoint/auth/node/identity/
+delegation settings require switching to a user key; automatic rows stay managed.
+
+### Node transport hardening
+
+Platform master credentials, including legacy internal master rows, always use server
+transport. Existing owner-node bindings for those rows are ignored as intentional
+hardening; nodes inject their own credentials only.
+
+### Org provisioning and reconciliation
+
+Key listing, Agent Key login delivery (login options), and device-code
+approval/onboarding for the acting person's own account invoke shared provisioning,
+which may idempotently create org-owned auto-connected rows only through that
+person's own active Member/Admin memberships with `can_proxy()` and explicit
+platform-key grants. The 0.19.0 guarantee remains: org-targeted device
+approval/onboarding resolves existing org services and never provisions rows for
+the target org as a side effect of targeting. Org views identify
+them as auto-connected. Removing the org grant immediately blocks execution and the
+next owner reconciliation removes automatic rows and orphan endpoints. This side
+effect is limited to explicit platform configurations; inherited legacy no-auth
+provisioning remains personal-only. JWT/API-key authentication itself never provisions rows.
+
+Key listing shares one membership and active-owner grant snapshot across personal/org
+provisioning, stale-row reconciliation, org row loading, and availability rendering.
+Provider eligibility is batch-loaded once for the request. Catalog, MCP and LLM
+listings likewise reuse grants and provider rows rather than issuing ACL queries per
+service. These snapshots last for one request only; the next request rechecks live
+membership, owner activity, provider eligibility and catalog configuration.

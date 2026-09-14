@@ -1,3 +1,5 @@
+import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
+import type { LanePricingView } from "@/schemas/platform-keys";
 // ai-key (service-add) pairing panel.
 //
 // Supports all three provider shapes mirroring
@@ -49,6 +51,9 @@ interface CredentialFieldSpec {
 }
 
 interface CatalogEntryShape {
+  readonly billing?: { readonly platform_billable?: boolean; readonly resale_billable?: boolean };
+  readonly platform_key?: { readonly available: boolean; readonly pricing?: LanePricingView | null };
+  readonly byok_pricing?: LanePricingView | null;
   readonly slug: string;
   readonly name: string;
   readonly description?: string;
@@ -924,7 +929,9 @@ function CatalogConfirmForm({
   pairingId,
   onSuccess,
 }: CatalogConfirmFormProps) {
-  const shape = classifyFlow(entry);
+  const [platformChoice, setPlatformChoice] = useState(true);
+  const usePlatformKey = Boolean(entry.platform_key?.available && !prefill.via_node && platformChoice);
+  const shape = usePlatformKey ? "no-auth" : classifyFlow(entry);
   const [label, setLabel] = useState(prefill.label ?? entry.name);
   const [credential, setCredential] = useState("");
   const [endpointUrl, setEndpointUrl] = useState(prefill.endpoint_url ?? "");
@@ -961,6 +968,7 @@ function CatalogConfirmForm({
         service_slug: entry.slug,
         label,
       };
+      if (usePlatformKey) { body.use_platform_key = true; }
       if (shape === "token-exchange" && !viaNode) {
         // Multi-field credential: validate required-ness and JSON-
         // encode. Mirror wizard.js submit path at wizard.js:723-734.
@@ -982,7 +990,7 @@ function CatalogConfirmForm({
       // `no-auth` / `oauth` / `device-code` skip credential entirely;
       // OAuth / device-code placeholder creation lives in the sub-
       // flow components and doesn't reach this branch.
-      if (entry.requires_gateway_url || endpointUrl) {
+      if (!usePlatformKey && (entry.requires_gateway_url || endpointUrl)) {
         body.endpoint_url = endpointUrl;
       }
       if (viaNode) {
@@ -1205,7 +1213,7 @@ function CatalogConfirmForm({
     loading ||
     !label.trim() ||
     (needsCredentialInput && !viaNode && !credential.trim()) ||
-    (entry.requires_gateway_url && !endpointUrl.trim()) ||
+    (!usePlatformKey && entry.requires_gateway_url && !endpointUrl.trim()) ||
     (!viaNode && !tokenExchangeComplete);
 
   function handleSubmit() {
@@ -1241,6 +1249,7 @@ function CatalogConfirmForm({
         </div>
       </div>
 
+      {entry.platform_key?.available && !viaNode && <CredentialBindingChoice value={usePlatformKey} onChange={setPlatformChoice} platformPrice={entry.platform_key.pricing} byokPrice={entry.byok_pricing} legacyBillable={entry.billing?.platform_billable} resaleBillable={entry.billing?.resale_billable} disabled={loading} />}
       <div className="flex flex-col gap-3">
         <Field label="Label" htmlFor="pair-aikey-label">
           <Input
@@ -1253,7 +1262,7 @@ function CatalogConfirmForm({
           />
         </Field>
 
-        {entry.requires_gateway_url ? (
+        {!usePlatformKey && entry.requires_gateway_url ? (
           <Field label="Instance URL" htmlFor="pair-aikey-url">
             <Input
               id="pair-aikey-url"

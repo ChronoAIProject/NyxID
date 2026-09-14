@@ -2514,6 +2514,7 @@ mod tests {
                 id: link_id.clone(),
                 user_id: user_id.clone(),
                 service_slug: "provider-service".to_string(),
+                use_platform_key: None,
                 service_id: Uuid::new_v4().to_string(),
                 label: None,
                 requested_by: None,
