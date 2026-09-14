@@ -30,7 +30,14 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                     if let Some(items) = items {
                         let mut table = Table::new();
                         table.load_preset(UTF8_FULL_CONDENSED);
-                        table.set_header(["Slug", "Name", "Type", "Auth", "How to Add"]);
+                        table.set_header([
+                            "Slug",
+                            "Name",
+                            "Type",
+                            "Auth",
+                            "How to Add",
+                            "Inference",
+                        ]);
 
                         for item in items {
                             let slug = item["slug"].as_str().unwrap_or("-");
@@ -75,7 +82,14 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                                 format!("nyxid service add {} --credential-env <VAR>", slug)
                             };
 
-                            table.add_row([slug, name, &type_label, provider_type, &how_to_add]);
+                            table.add_row([
+                                slug,
+                                name,
+                                &type_label,
+                                provider_type,
+                                &how_to_add,
+                                &super::service::catalog_admin::inference_summary(item),
+                            ]);
                         }
                         eprintln!("{table}");
                     }
@@ -241,6 +255,17 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                     }
 
                     eprintln!();
+                    eprintln!(
+                        "Inference: {}",
+                        super::service::catalog_admin::inference_summary(&item)
+                    );
+                    if item["platform_key"]["available"] == true {
+                        eprintln!(
+                            "Platform key: available; nyxid service add {item_slug} --platform-key"
+                        );
+                    }
+                    eprintln!("Platform key price: {}", item["platform_key"]["pricing"]);
+                    eprintln!("Your own key price: {}", item["byok_pricing"]);
                     eprintln!("How to add:");
 
                     if svc_type == "ssh" {
