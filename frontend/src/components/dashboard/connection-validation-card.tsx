@@ -42,14 +42,16 @@ export function ConnectionValidationCard({
   const [now, setNow] = useState(Date.now);
   const result = validation.data;
   useEffect(() => {
-    if (!result) return;
+    if (!result || Date.parse(result.valid_until) <= Date.parse(result.checked_at)) return;
     const timer = window.setTimeout(
       () => setNow(Date.now()),
       Math.max(0, Date.parse(result.valid_until) - Date.now()),
     );
     return () => window.clearTimeout(timer);
   }, [result]);
-  const expired = result && Date.parse(result.valid_until) <= now;
+  const hasReuseWindow =
+    result && Date.parse(result.valid_until) > Date.parse(result.checked_at);
+  const expired = hasReuseWindow && Date.parse(result.valid_until) <= now;
 
   return (
     <Card>
@@ -81,7 +83,7 @@ export function ConnectionValidationCard({
                 variant={
                   expired
                     ? "secondary"
-                    : result.outcome === "authenticated"
+                    : hasReuseWindow && result.outcome === "authenticated"
                       ? "success"
                       : "warning"
                 }

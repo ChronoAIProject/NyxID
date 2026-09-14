@@ -85,5 +85,7 @@ it.each([
   mount();
   fireEvent.click(screen.getByRole("button", { name: "Check connection" }));
   expect(await screen.findByText(message)).toBeInTheDocument();
+  expect(screen.getByText("Could not check connection")).toBeInTheDocument();
+  expect(screen.queryByText("Check expired")).not.toBeInTheDocument();
   expect(post).toHaveBeenCalledTimes(1);
 });
