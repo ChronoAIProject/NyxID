@@ -1,0 +1,205 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Google Docs",
+    "version": "v1-nyxid-overlay",
+    "description": "NyxID-hosted Google Docs operations. Served from docs.googleapis.com, a different origin from the Drive, Calendar, and Gmail operations on www.googleapis.com. NyxID injects the connected account's Google OAuth token; the Drive scope already authorizes every operation here."
+  },
+  "servers": [
+    {
+      "url": "https://docs.googleapis.com"
+    }
+  ],
+  "paths": {
+    "/v1/documents": {
+      "post": {
+        "operationId": "docs_create_document",
+        "summary": "Create a Google Doc with a title. Add content with docs_batch_update_document.",
+        "x-aevatar-tool": {
+          "name": "docs_create_document",
+          "description": "Create a Google Doc with a title. Add content with docs_batch_update_document.",
+          "readOnly": false,
+          "destructive": false,
+          "requiresApproval": true
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "description": "Document title shown in Drive. The document is created in the account's root Drive folder; move it with drive_update_file."
+                  }
+                },
+                "required": [
+                  "title"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/documents/{documentId}": {
+      "get": {
+        "operationId": "docs_get_document",
+        "summary": "Read a Google Doc's full structured content, including the character indexes needed to target edits.",
+        "x-aevatar-tool": {
+          "name": "docs_get_document",
+          "description": "Read a Google Doc's full structured content, including the character indexes needed to target edits.",
+          "readOnly": true,
+          "destructive": false,
+          "requiresApproval": false
+        },
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "path",
+            "required": true,
+            "description": "Document id. This is the same id as the Drive file id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "suggestionsViewMode",
+            "in": "query",
+            "required": false,
+            "description": "How suggested edits are rendered in the response.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "DEFAULT_FOR_CURRENT_ACCESS",
+                "SUGGESTIONS_INLINE",
+                "PREVIEW_SUGGESTIONS_ACCEPTED",
+                "PREVIEW_WITHOUT_SUGGESTIONS"
+              ]
+            }
+          },
+          {
+            "name": "includeTabsContent",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "description": "Include all document tabs; set true when editing content outside the first tab."
+          },
+          {
+            "name": "fields",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Optional partial-response field mask."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/documents/{documentId}:batchUpdate": {
+      "post": {
+        "operationId": "docs_batch_update_document",
+        "summary": "Apply structural edits to a Google Doc: insert, delete, or replace text, and change formatting, tables, and lists. Read docs_get_document first to resolve the indexes an edit targets.",
+        "x-aevatar-tool": {
+          "name": "docs_batch_update_document",
+          "description": "Apply structural edits to a Google Doc: insert, delete, or replace text, and change formatting, tables, and lists. Read docs_get_document first to resolve the indexes an edit targets.",
+          "readOnly": false,
+          "destructive": true,
+          "requiresApproval": true
+        },
+        "parameters": [
+          {
+            "name": "documentId",
+            "in": "path",
+            "required": true,
+            "description": "Document id. This is the same id as the Drive file id.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": [
+                  "requests"
+                ],
+                "properties": {
+                  "requests": {
+                    "type": "array",
+                    "description": "Ordered edits applied atomically: the whole batch succeeds or none of it does. Each entry holds exactly one request object, for example insertText, deleteContentRange, replaceAllText, updateTextStyle, updateParagraphStyle, insertTable, or createParagraphBullets. Indexes refer to the document returned by docs_get_document, and each request sees the document as modified by the previous ones.",
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": true
+                    }
+                  },
+                  "writeControl": {
+                    "type": "object",
+                    "additionalProperties": true,
+                    "description": "Optional optimistic concurrency control. Set requiredRevisionId to the revisionId from docs_get_document to reject the batch if the document changed in the meantime.",
+                    "properties": {
+                      "requiredRevisionId": {
+                        "type": "string"
+                      },
+                      "targetRevisionId": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

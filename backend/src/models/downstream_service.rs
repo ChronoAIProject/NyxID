@@ -131,10 +131,20 @@ pub struct ProxyOperationPolicy {
     pub rules: Vec<ProxyOperationRule>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 pub struct ProxyOperationRule {
     pub method: String,
     pub path_template: String,
+    /// Explicit value grammars for parameters that contain path punctuation.
+    /// Omit empty maps to preserve existing policy and approval digest bytes.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub path_parameter_constraints: std::collections::BTreeMap<String, ProxyPathConstraint>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyPathConstraint {
+    SheetsA1Range,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

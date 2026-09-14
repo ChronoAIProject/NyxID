@@ -4038,6 +4038,7 @@ mod tests {
             rules: vec![crate::models::downstream_service::ProxyOperationRule {
                 method: "GET".to_string(),
                 path_template: "/health".to_string(),
+                ..Default::default()
             }],
         }));
         let actor = EffectiveActor::from_user_id(uuid::Uuid::new_v4().to_string());

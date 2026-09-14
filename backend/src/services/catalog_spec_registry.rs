@@ -84,6 +84,18 @@ const HOSTED_SPEC_SOURCES: &[(&str, &str)] = &[
         include_str!("../../specs/catalog/google-drive.openapi.json"),
     ),
     (
+        "google-docs",
+        include_str!("../../specs/catalog/google-docs.openapi.json"),
+    ),
+    (
+        "google-sheets",
+        include_str!("../../specs/catalog/google-sheets.openapi.json"),
+    ),
+    (
+        "google-slides",
+        include_str!("../../specs/catalog/google-slides.openapi.json"),
+    ),
+    (
         "lark",
         include_str!("../../specs/catalog/lark.openapi.json"),
     ),
@@ -154,6 +166,9 @@ const SLUG_TO_SPEC_KEY: &[(&str, &str)] = &[
     ("api-google-calendar", "google-calendar"),
     ("api-google-drive", "google-drive"),
     ("api-google-gmail", "google-gmail"),
+    ("api-google-docs", "google-docs"),
+    ("api-google-sheets", "google-sheets"),
+    ("api-google-slides", "google-slides"),
     ("api-lark", "lark"),
     ("api-lark-bot", "lark-bot"),
     ("api-microsoft", "microsoft-graph"),
@@ -250,9 +265,100 @@ pub fn hydrated_slugs() -> impl Iterator<Item = &'static str> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// Frozen from 28fd2c44, including the original eight api-google operations.
+    /// Additions are allowed; moving or editing any existing operation is not.
+    #[test]
+    fn existing_google_operation_contracts_are_additive() {
+        use sha2::{Digest, Sha256};
+        let frozen: serde_json::Value = serde_json::from_str(include_str!(
+            "../../specs/fixtures/google-existing-operations.json"
+        ))
+        .unwrap();
+        for (slug, operations) in frozen.as_object().unwrap() {
+            let spec = spec_for_slug(slug).unwrap();
+            for pinned in operations.as_array().unwrap() {
+                let path = pinned["path"].as_str().unwrap();
+                let method = pinned["method"].as_str().unwrap().to_ascii_lowercase();
+                let operation = &spec["paths"][path][&method];
+                assert_eq!(
+                    operation["operationId"], pinned["operation_id"],
+                    "{slug} {method} {path}"
+                );
+                let mut canonical = operation.clone();
+                canonical.sort_all_objects();
+                let digest = hex::encode(Sha256::digest(serde_json::to_vec(&canonical).unwrap()));
+                assert_eq!(
+                    digest, pinned["operation_sha256"],
+                    "changed existing contract: {slug} {method} {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn google_editor_operations_have_verified_origins_scopes_and_policies() {
+        use crate::services::google_workspace::{DRIVE, GoogleProduct};
+        let evidence: serde_json::Value = serde_json::from_str(include_str!(
+            "../../specs/fixtures/google-editor-scope-acceptance.json"
+        ))
+        .unwrap();
+        for (slug, proof) in evidence.as_object().unwrap() {
+            let product = GoogleProduct::from_slug(slug).unwrap();
+            let spec = spec_for_slug(slug).unwrap();
+            assert_eq!(
+                spec["servers"],
+                serde_json::json!([{ "url": proof["origin"] }])
+            );
+            let policy = product.operation_policy().unwrap();
+            let operations = proof["operations"].as_object().unwrap();
+            assert_eq!(policy.rules.len(), operations.len());
+            let defaults = product.default_scopes();
+            let allowed = product.allowed_scopes();
+            assert!(defaults.iter().any(|scope| scope == DRIVE));
+            for (id, operation) in operations {
+                let path = operation["path"].as_str().unwrap();
+                let method = operation["method"].as_str().unwrap();
+                assert_eq!(
+                    spec["paths"][path][method.to_ascii_lowercase()]["operationId"],
+                    *id
+                );
+                let scopes = operation["accepted_scopes"].as_array().unwrap();
+                assert!(
+                    scopes.iter().any(|scope| scope == DRIVE),
+                    "{id} does not accept Drive"
+                );
+                assert!(
+                    scopes
+                        .iter()
+                        .any(|scope| defaults.iter().any(|s| scope == s))
+                );
+                assert!(
+                    scopes
+                        .iter()
+                        .any(|scope| allowed.iter().any(|s| scope == s))
+                );
+                let rule = policy
+                    .rules
+                    .iter()
+                    .find(|rule| rule.method == method && rule.path_template == path)
+                    .unwrap();
+                if path.contains("{range}") {
+                    assert_eq!(
+                        rule.path_parameter_constraints.get("range"),
+                        Some(
+                            &crate::models::downstream_service::ProxyPathConstraint::SheetsA1Range
+                        )
+                    );
+                } else {
+                    assert!(rule.path_parameter_constraints.is_empty());
+                }
+            }
+        }
+    }
     use std::collections::HashSet;
 
-    use super::*;
     use crate::services::openapi_parser;
 
     #[test]

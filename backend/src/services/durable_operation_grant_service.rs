@@ -76,18 +76,25 @@ fn normalize_path(value: &str) -> AppResult<String> {
 }
 
 fn path_variable_names(path: &str) -> AppResult<Vec<String>> {
+    crate::services::proxy_authorization::validate_template(path)?;
     let mut names = Vec::new();
     for segment in path.trim_matches('/').split('/') {
         let has_brace = segment.contains('{') || segment.contains('}');
         if !has_brace {
             continue;
         }
-        if !(segment.starts_with('{') && segment.ends_with('}') && segment.len() > 2) {
+        // A variable occupies the whole segment, or the resource part of an AIP
+        // custom method (`{documentId}:batchUpdate`). The grammar is shared with
+        // proxy authorization so a grant cannot describe a path the proxy
+        // allowlist would read differently.
+        let (resource, _verb) =
+            crate::services::proxy_authorization::split_template_segment(segment);
+        if !(resource.starts_with('{') && resource.ends_with('}') && resource.len() > 2) {
             return Err(validation(
                 "durable operation path variables must occupy a complete path segment",
             ));
         }
-        let name = &segment[1..segment.len() - 1];
+        let name = &resource[1..resource.len() - 1];
         if name.contains('{') || name.contains('}') || !names.iter().all(|entry| entry != name) {
             return Err(validation(
                 "durable operation path variables must be unique and well formed",
@@ -606,31 +613,31 @@ fn validate_parameter_constraints(
     Ok(())
 }
 
-fn resolve_path_arguments(template: &str, actual_path: &str) -> AppResult<BTreeMap<String, Value>> {
-    let actual = normalize_path(actual_path)
-        .map_err(|_| AppError::DurableGrantMismatch("request path is not canonical".to_string()))?;
-    let template_segments: Vec<&str> = template.trim_matches('/').split('/').collect();
-    let actual_segments: Vec<&str> = actual.trim_matches('/').split('/').collect();
-    if template_segments.len() != actual_segments.len() {
-        return Err(AppError::DurableGrantMismatch(
+fn resolve_path_arguments(
+    template: &str,
+    actual_path: &str,
+    parameters: Option<&Value>,
+) -> AppResult<BTreeMap<String, Value>> {
+    use crate::services::proxy_authorization::{
+        CanonicalPath, match_path_arguments, rule_from_endpoint,
+    };
+    let mismatch = || {
+        AppError::DurableGrantMismatch(
             "request path does not match the granted endpoint template".to_string(),
-        ));
-    }
-    let mut arguments = BTreeMap::new();
-    for (template_segment, actual_segment) in template_segments.iter().zip(actual_segments) {
-        if template_segment.starts_with('{') && template_segment.ends_with('}') {
-            let name = &template_segment[1..template_segment.len() - 1];
-            let decoded = urlencoding::decode(actual_segment).map_err(|_| {
-                AppError::DurableGrantMismatch("path argument is not valid UTF-8".to_string())
-            })?;
-            arguments.insert(name.to_string(), Value::String(decoded.into_owned()));
-        } else if *template_segment != actual_segment {
-            return Err(AppError::DurableGrantMismatch(
-                "request path does not match the granted endpoint template".to_string(),
-            ));
-        }
-    }
-    Ok(arguments)
+        )
+    };
+    // Execution supplies the encoded forwarding path. Decode once, before
+    // matching the verb and constrained captures, and reject residual escapes.
+    let path = CanonicalPath::from_mcp_built(actual_path).map_err(|_| mismatch())?;
+    let rule = rule_from_endpoint("POST", template, parameters).map_err(|_| mismatch())?;
+    match_path_arguments(&rule, &path)
+        .ok_or_else(mismatch)
+        .map(|arguments| {
+            arguments
+                .into_iter()
+                .map(|(name, value)| (name, Value::String(value)))
+                .collect()
+        })
 }
 
 fn parse_query(query: Option<&str>) -> AppResult<BTreeMap<String, Value>> {
@@ -1034,7 +1041,11 @@ pub async fn authorize_and_reserve(
         ));
     }
 
-    let path_arguments = resolve_path_arguments(&grant.normalized_path_template, path)?;
+    let path_arguments = resolve_path_arguments(
+        &grant.normalized_path_template,
+        path,
+        endpoint.parameters.as_ref(),
+    )?;
     validate_parameter_constraints(&grant.constraints.path, &path_arguments, "path")?;
     let query_arguments = parse_query(query)?;
     validate_parameter_constraints(&grant.constraints.query, &query_arguments, "query")?;
@@ -1508,6 +1519,63 @@ pub async fn reauthorize_scheduled_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durable_custom_methods_bind_only_the_resource_capture() {
+        let template = "/v1/documents/{documentId}:batchUpdate";
+        assert_eq!(path_variable_names(template).unwrap(), vec!["documentId"]);
+        let args = resolve_path_arguments(template, "v1/documents/id:batchUpdate", None).unwrap();
+        assert_eq!(args["documentId"], serde_json::json!("id"));
+        for path in [
+            "v1/documents/id:other",
+            "v1/documents/:batchUpdate",
+            "v1/documents/id:x:batchUpdate",
+            "v1/documents/id%2Fx:batchUpdate",
+            "v1/documents/id%253Ax:batchUpdate",
+            "v1/documents/id%25253Ax:batchUpdate",
+        ] {
+            assert!(
+                resolve_path_arguments(template, path, None).is_err(),
+                "{path}"
+            );
+        }
+        assert!(
+            resolve_path_arguments(
+                "/v1/documents/{documentId}",
+                "v1/documents/id%3AbatchUpdate",
+                None
+            )
+            .is_err()
+        );
+        for template in [
+            "/v1/documents/{id}:",
+            "/v1/documents/{id}:batch:update",
+            "/v1/documents/{id}:{verb}",
+            "/v1/documents/{bad-name}:batchUpdate",
+        ] {
+            assert!(path_variable_names(template).is_err(), "{template}");
+        }
+    }
+
+    #[test]
+    fn durable_sheets_ranges_share_the_policy_value_grammar() {
+        let parameters = serde_json::json!([{"name":"range", "in":"path", "x-nyxid-path-constraint":"sheets_a1_range"}]);
+        let template = "/v4/spreadsheets/{id}/values/{range}:append";
+        let path = "v4/spreadsheets/id/values/Sheet1%21A1:B2:append";
+        let args = resolve_path_arguments(template, path, Some(&parameters)).unwrap();
+        assert_eq!(args["range"], serde_json::json!("Sheet1!A1:B2"));
+        assert!(resolve_path_arguments(template, path, None).is_err());
+        for path in [
+            "v4/spreadsheets/id/values/A1:B2:clear",
+            "v4/spreadsheets/id/values/A1:B2:clear:append",
+            "v4/spreadsheets/id/values/A1%253AB2:append",
+        ] {
+            assert!(
+                resolve_path_arguments(template, path, Some(&parameters)).is_err(),
+                "{path}"
+            );
+        }
+    }
     use crate::models::downstream_service::{
         COLLECTION_NAME as DOWNSTREAM_SERVICES, test_helpers::dummy_service,
     };

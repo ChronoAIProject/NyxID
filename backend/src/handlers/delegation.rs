@@ -3911,6 +3911,7 @@ mod tests {
             rules: vec![ProxyOperationRule {
                 method: "GET".to_string(),
                 path_template: "/items".to_string(),
+                ..Default::default()
             }],
         };
         fixture

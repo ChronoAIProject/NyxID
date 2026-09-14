@@ -3134,14 +3134,34 @@ pub fn prepare_proxy_tool_call(
         } else {
             crate::services::proxy_authorization::CanonicalPath::from_mcp_built(&path)?
         };
-        crate::services::proxy_authorization::authorize_proxy_operation_fields(
-            &service.service_id,
-            &service.service_slug,
-            service.proxy_operation_policy.as_ref(),
-            method.as_str(),
-            &canonical_path,
-        )?;
-        canonical_path.forwarding_path()
+        let forwarding_path =
+            crate::services::proxy_authorization::authorize_proxy_operation_fields(
+                &service.service_id,
+                &service.service_slug,
+                service.proxy_operation_policy.as_ref(),
+                method.as_str(),
+                &canonical_path,
+            )?;
+        if !is_generic_proxy_endpoint {
+            let selected = crate::services::proxy_authorization::rule_from_endpoint(
+                &endpoint.method,
+                &endpoint.path,
+                endpoint.parameters.as_ref(),
+            )?;
+            if crate::services::proxy_authorization::rule_forwarding_path(
+                &selected,
+                method.as_str(),
+                &canonical_path,
+            )
+            .as_deref()
+                != Some(forwarding_path.as_str())
+            {
+                return Err(AppError::NotFound(
+                    "Service operation not found".to_string(),
+                ));
+            }
+        }
+        forwarding_path
     } else {
         path
     };
@@ -4622,6 +4642,556 @@ pub async fn connect_service(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn google_custom_methods_reach_the_same_upstream_over_rest_and_mcp() {
+        use crate::services::billing::route_inventory::{
+            BillingIngress, BillingRoutePolicy, enforce_billing_egress_classification,
+        };
+        use crate::services::google_workspace::GoogleProduct;
+        use axum::{
+            Router,
+            body::{Body, to_bytes},
+            extract::{Path, State},
+            http::{Method, Request, Uri},
+            routing::any,
+        };
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tower::ServiceExt;
+
+        async fn rest(
+            State((state, user_id)): State<(crate::AppState, String)>,
+            Path((service_id, path)): Path<(String, String)>,
+            request: Request<Body>,
+        ) -> AppResult<axum::response::Response> {
+            crate::handlers::proxy::proxy_request(
+                State(state),
+                crate::test_utils::test_auth_user(&user_id),
+                Default::default(),
+                Path((service_id, path)),
+                request,
+            )
+            .await
+        }
+        let count = Arc::new(AtomicUsize::new(0));
+        let upstream = Router::new().route(
+            "/{*path}",
+            any({
+                let count = count.clone();
+                move |method: Method, uri: Uri| {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    async move {
+                        axum::Json(serde_json::json!({"method":method.as_str(), "path":uri.path()}))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+        let db = connect_test_database("google_editor_transports")
+            .await
+            .expect("MongoDB required");
+        let user_id = uuid::Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &user_id,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        let state = crate::test_utils::test_app_state(db.clone());
+        let router = Router::new()
+            .route("/proxy/{service_id}/{*path}", any(rest))
+            .layer(axum::Extension(BillingRoutePolicy::Metered(
+                BillingIngress::Proxy,
+            )))
+            .with_state((state.clone(), user_id.clone()));
+        for (slug, operation, parameter) in [
+            (
+                "api-google-docs",
+                "docs_batch_update_document",
+                "documentId",
+            ),
+            (
+                "api-google-sheets",
+                "sheets_batch_update_spreadsheet",
+                "spreadsheetId",
+            ),
+            (
+                "api-google-slides",
+                "slides_batch_update_presentation",
+                "presentationId",
+            ),
+        ] {
+            let endpoint = google_editor_endpoint(slug, operation);
+            let path = endpoint.path.replace(&format!("{{{parameter}}}"), "doc");
+            let mut catalog = crate::models::downstream_service::test_helpers::dummy_service();
+            catalog.id = uuid::Uuid::new_v4().to_string();
+            catalog.slug = slug.into();
+            catalog.base_url = base_url.clone();
+            catalog.service_category = "internal".into();
+            catalog.requires_user_credential = false;
+            catalog.proxy_operation_policy = Some(
+                GoogleProduct::from_slug(slug)
+                    .unwrap()
+                    .operation_policy()
+                    .unwrap(),
+            );
+            db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .insert_one(&catalog)
+                .await
+                .unwrap();
+            for raw in [path.clone(), path.replace(':', "%3A")] {
+                let request = Request::builder()
+                    .method("POST")
+                    .uri(format!("/proxy/{}{raw}", catalog.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"requests":[]}"#))
+                    .unwrap();
+                let response = router.clone().oneshot(request).await.unwrap();
+                assert_eq!(
+                    response.status(),
+                    axum::http::StatusCode::OK,
+                    "{slug}: {raw}"
+                );
+                let echo: serde_json::Value =
+                    serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap())
+                        .unwrap();
+                assert_eq!(echo, serde_json::json!({"method":"POST","path":path}));
+            }
+            let mut service = make_service(&catalog.id, slug, slug, vec![]);
+            service.proxy_operation_policy = catalog.proxy_operation_policy.clone();
+            for generic in [false, true] {
+                service.is_generic_proxy = generic;
+                let generic_endpoint = build_generic_proxy_endpoint(slug);
+                let selected = if generic {
+                    &generic_endpoint
+                } else {
+                    &endpoint
+                };
+                let arguments = if generic {
+                    serde_json::json!({"method":"POST","path":path,"body":{"requests":[]}})
+                } else {
+                    serde_json::json!({parameter:"doc","requests":[]})
+                };
+                let prepared = prepare_proxy_tool_call(&service, selected, &arguments).unwrap();
+                let permit = enforce_billing_egress_classification(
+                    Some(BillingRoutePolicy::Metered(BillingIngress::Mcp)),
+                    BillingIngress::Mcp,
+                )
+                .unwrap();
+                let (status, body) = execute_tool(
+                    &state.http_client,
+                    &db,
+                    &state.encryption_keys,
+                    &state.node_ws_manager,
+                    &state.billing,
+                    &user_id,
+                    &user_id,
+                    &service,
+                    selected,
+                    prepared,
+                    &state.jwt_keys,
+                    &state.config,
+                    &state.connection_expiry_notifier,
+                    &state.token_exchange_cache,
+                    &state.cloud_response_cache,
+                    &McpExecContext {
+                        api_key_id: None,
+                        allow_all_nodes: true,
+                        allowed_node_ids: &[],
+                    },
+                    permit,
+                )
+                .await
+                .unwrap();
+                assert_eq!(status, 200);
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                    serde_json::json!({"method":"POST","path":path})
+                );
+            }
+            let before = count.load(Ordering::SeqCst);
+            for invalid in [
+                path.replace(":batchUpdate", ":other"),
+                path.replace("doc:batchUpdate", ":batchUpdate"),
+                path.replace(":", "%253A"),
+                path.replace("doc:", "doc%2Fother:"),
+                path.replace("doc:", "doc%252Fother:"),
+            ] {
+                let response = router
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(format!("/proxy/{}{invalid}", catalog.id))
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(response.status().is_client_error(), "{invalid}");
+            }
+            assert_eq!(
+                count.load(Ordering::SeqCst),
+                before,
+                "denials must precede upstream dispatch"
+            );
+        }
+        let sheets = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! {"slug": "api-google-sheets"})
+            .await
+            .unwrap()
+            .unwrap();
+        let range_path = "/v4/spreadsheets/doc/values/Sheet1%21A1%3AB2";
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/proxy/{}{range_path}", sheets.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let echo: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(echo["path"], range_path);
+
+        let mut legacy = crate::models::downstream_service::test_helpers::dummy_service();
+        legacy.id = uuid::Uuid::new_v4().to_string();
+        legacy.slug = "llm-google-ai".into();
+        legacy.base_url = format!("{base_url}/v1beta");
+        legacy.service_category = "internal".into();
+        legacy.requires_user_credential = false;
+        assert!(legacy.proxy_operation_policy.is_none());
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&legacy)
+            .await
+            .unwrap();
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/proxy/{}/models/gemini:generateContent",
+                        legacy.id
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let echo: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 4096).await.unwrap()).unwrap();
+        assert_eq!(echo["path"], "/v1beta/models/gemini:generateContent");
+        assert_eq!(count.load(Ordering::SeqCst), 14);
+        server.abort();
+    }
+    fn google_editor_endpoint(slug: &str, name: &str) -> McpToolEndpoint {
+        let spec = crate::services::catalog_spec_registry::spec_for_slug(slug).unwrap();
+        let endpoint = crate::services::openapi_parser::parse_openapi_spec_value(&spec)
+            .unwrap()
+            .into_iter()
+            .find(|endpoint| endpoint.name == name)
+            .unwrap();
+        McpToolEndpoint {
+            endpoint_id: name.to_string(),
+            name: endpoint.name,
+            method: endpoint.method,
+            path: endpoint.path,
+            parameters: endpoint.parameters,
+            request_body_schema: endpoint.request_body_schema,
+            request_content_type: endpoint.request_content_type,
+            request_body_required: endpoint.request_body_required,
+            response: endpoint.response,
+            ..make_endpoint(name, "Google editor")
+        }
+    }
+
+    #[test]
+    fn google_editor_batch_update_rest_generic_and_typed_paths_agree() {
+        use crate::services::google_workspace::GoogleProduct;
+        use crate::services::proxy_authorization::{
+            CanonicalPath, authorize_proxy_operation_fields,
+        };
+        for (slug, name, parameter, path, origin) in [
+            (
+                "api-google-docs",
+                "docs_batch_update_document",
+                "documentId",
+                "/v1/documents/id:batchUpdate",
+                "https://docs.googleapis.com",
+            ),
+            (
+                "api-google-sheets",
+                "sheets_batch_update_spreadsheet",
+                "spreadsheetId",
+                "/v4/spreadsheets/id:batchUpdate",
+                "https://sheets.googleapis.com",
+            ),
+            (
+                "api-google-slides",
+                "slides_batch_update_presentation",
+                "presentationId",
+                "/v1/presentations/id:batchUpdate",
+                "https://slides.googleapis.com",
+            ),
+        ] {
+            let endpoint = google_editor_endpoint(slug, name);
+            let mut service = make_service(slug, slug, slug, vec![]);
+            service.proxy_operation_policy = Some(
+                GoogleProduct::from_slug(slug)
+                    .unwrap()
+                    .operation_policy()
+                    .unwrap(),
+            );
+            let args = serde_json::json!({parameter: "id", "requests": []});
+            let typed = prepare_exact_proxy_tool_call(&service, &endpoint, &args, None).unwrap();
+            service.is_generic_proxy = true;
+            let generic = prepare_proxy_tool_call(
+                &service,
+                &build_generic_proxy_endpoint(slug),
+                &serde_json::json!({"method":"POST", "path":path, "body":{"requests":[]}}),
+            )
+            .unwrap();
+            let rest = CanonicalPath::from_rest_decoded(path).unwrap();
+            authorize_proxy_operation_fields(
+                slug,
+                slug,
+                service.proxy_operation_policy.as_ref(),
+                "POST",
+                &rest,
+            )
+            .unwrap();
+            assert_eq!(
+                typed.path,
+                crate::services::proxy_authorization::authorize_proxy_operation_fields(
+                    slug,
+                    slug,
+                    service.proxy_operation_policy.as_ref(),
+                    "POST",
+                    &rest
+                )
+                .unwrap()
+            );
+            assert_eq!(generic.path, typed.path);
+            assert_eq!(typed.body, generic.body);
+            let url = reqwest::Client::new()
+                .post(format!("{origin}/{}", typed.path))
+                .build()
+                .unwrap()
+                .url()
+                .clone();
+            assert_eq!(url.origin().ascii_serialization(), origin);
+            assert_eq!(url.path(), path);
+            assert!(url.username().is_empty());
+            assert!(url.query().is_none());
+            assert!(url.fragment().is_none());
+        }
+    }
+
+    #[test]
+    fn google_editor_mcp_rejects_custom_method_smuggling_before_approval() {
+        use crate::services::google_workspace::GoogleProduct;
+        let mut service = make_service("docs", "Docs", "api-google-docs", vec![]);
+        service.proxy_operation_policy = Some(GoogleProduct::Docs.operation_policy().unwrap());
+        let endpoint = google_editor_endpoint("api-google-docs", "docs_batch_update_document");
+        for id in [
+            "",
+            "id:other",
+            "id%3Aother",
+            "id%253Aother",
+            "id/other",
+            "id%2Fother",
+            "id\\other",
+            "..",
+            "id?query",
+            "id#fragment",
+        ] {
+            assert!(
+                prepare_exact_proxy_tool_call(
+                    &service,
+                    &endpoint,
+                    &serde_json::json!({"documentId":id,"requests":[]}),
+                    None
+                )
+                .is_err(),
+                "{id}"
+            );
+        }
+        service.is_generic_proxy = true;
+        let generic = build_generic_proxy_endpoint("Docs");
+        for path in [
+            "/v1/documents/id:other",
+            "/v1/documents/:batchUpdate",
+            "/v1/documents/id%3AbatchUpdate",
+            "/v1/documents/id%253AbatchUpdate",
+            "/v1/documents/id%2Fx:batchUpdate",
+        ] {
+            assert!(
+                prepare_proxy_tool_call(
+                    &service,
+                    &generic,
+                    &serde_json::json!({"method":"POST","path":path,"body":{"requests":[]}})
+                )
+                .is_err(),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_typed_operation_cannot_shift_to_another_allowlisted_custom_method() {
+        use crate::models::downstream_service::ProxyOperationRule;
+        let endpoint = McpToolEndpoint {
+            method: "POST".into(),
+            path: "/v1/items/{id}".into(),
+            parameters: Some(serde_json::json!([{"name":"id","in":"path","required":true}])),
+            ..make_endpoint("plain_write", "Write item")
+        };
+        let mut service = make_service("s", "S", "s", vec![]);
+        service.proxy_operation_policy = Some(ProxyOperationPolicy {
+            rules: vec![
+                ProxyOperationRule {
+                    method: "POST".into(),
+                    path_template: "/v1/items/{id}".into(),
+                    ..Default::default()
+                },
+                ProxyOperationRule {
+                    method: "POST".into(),
+                    path_template: "/v1/items/{id}:other".into(),
+                    ..Default::default()
+                },
+            ],
+        });
+        let shifted = crate::services::proxy_authorization::CanonicalPath::from_mcp_literal(
+            "/v1/items/id:other",
+        )
+        .unwrap();
+        crate::services::proxy_authorization::authorize_proxy_operation_fields(
+            "s",
+            "s",
+            service.proxy_operation_policy.as_ref(),
+            "POST",
+            &shifted,
+        )
+        .unwrap();
+        assert!(
+            prepare_exact_proxy_tool_call(
+                &service,
+                &endpoint,
+                &serde_json::json!({"id":"id:other"}),
+                None
+            )
+            .is_err()
+        );
+        let other = McpToolEndpoint {
+            path: "/v1/items/{id}:other".into(),
+            ..endpoint
+        };
+        prepare_exact_proxy_tool_call(&service, &other, &serde_json::json!({"id":"id"}), None)
+            .unwrap();
+    }
+
+    #[test]
+    fn sheets_mcp_validates_a1_values_on_the_server() {
+        use crate::services::google_workspace::GoogleProduct;
+        for (name, method, suffix) in [
+            ("sheets_get_values", "GET", ""),
+            ("sheets_update_values", "PUT", ""),
+            ("sheets_append_values", "POST", ":append"),
+            ("sheets_clear_values", "POST", ":clear"),
+        ] {
+            let endpoint = google_editor_endpoint("api-google-sheets", name);
+            let mut service = make_service("s", "Sheets", "api-google-sheets", vec![]);
+            service.proxy_operation_policy =
+                Some(GoogleProduct::Sheets.operation_policy().unwrap());
+            for range in ["Sheet1!A1:B2", "'Quarter 1'!A1:B2"] {
+                let args = match name {
+                    "sheets_get_values" => serde_json::json!({"spreadsheetId":"id","range":range}),
+                    "sheets_clear_values" => {
+                        serde_json::json!({"spreadsheetId":"id","range":range,"body":{}})
+                    }
+                    _ => {
+                        serde_json::json!({"spreadsheetId":"id","range":range,"valueInputOption":"RAW","body":{"values":[["x"]]}})
+                    }
+                };
+                let typed =
+                    prepare_exact_proxy_tool_call(&service, &endpoint, &args, None).unwrap();
+                let expected = format!("/v4/spreadsheets/id/values/{range}{suffix}");
+                let rest = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
+                    &expected,
+                )
+                .unwrap();
+                assert_eq!(
+                    typed.path,
+                    crate::services::proxy_authorization::authorize_proxy_operation_fields(
+                        "s",
+                        "s",
+                        service.proxy_operation_policy.as_ref(),
+                        method,
+                        &rest
+                    )
+                    .unwrap()
+                );
+                service.is_generic_proxy = true;
+                let generic = prepare_proxy_tool_call(
+                    &service,
+                    &build_generic_proxy_endpoint("Sheets"),
+                    &serde_json::json!({"method":method,"path":expected}),
+                )
+                .unwrap();
+                assert_eq!(generic.path, typed.path);
+                service.is_generic_proxy = false;
+            }
+            let mut args = serde_json::json!({"spreadsheetId":"id","range":"A1:B2:clear","valueInputOption":"RAW","body":{"values":[["x"]]}});
+            if name == "sheets_get_values" {
+                args = serde_json::json!({"spreadsheetId":"id","range":"A1:B2:clear"});
+            } else if name == "sheets_clear_values" {
+                args = serde_json::json!({"spreadsheetId":"id","range":"A1:B2:clear","body":{}});
+            }
+            assert!(matches!(
+                prepare_exact_proxy_tool_call(&service, &endpoint, &args, None),
+                Err(AppError::NotFound(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn google_ai_no_policy_keeps_generate_content_path_bytes() {
+        let endpoint = McpToolEndpoint {
+            method: "POST".into(),
+            path: "/models/{model}:generateContent".into(),
+            parameters: Some(serde_json::json!([{"name":"model","in":"path","required":true}])),
+            ..make_endpoint("generate_content", "Generate content")
+        };
+        let mut service = make_service("google-ai", "Gemini", "llm-google-ai", vec![]);
+        let typed = prepare_proxy_tool_call(
+            &service,
+            &endpoint,
+            &serde_json::json!({"model":"gemini:legacy"}),
+        )
+        .unwrap();
+        assert_eq!(typed.path, "models/gemini%3Alegacy:generateContent");
+        service.is_generic_proxy = true;
+        let path = "models/gemini:generateContent";
+        let generic = prepare_proxy_tool_call(
+            &service,
+            &build_generic_proxy_endpoint("Gemini"),
+            &serde_json::json!({"method":"POST","path":path}),
+        )
+        .unwrap();
+        assert_eq!(generic.path, path);
+    }
     use crate::models::downstream_service::test_helpers::dummy_service;
     use crate::test_utils::{
         connect_test_database, test_encryption_keys, test_user_endpoint, test_user_service,
@@ -4943,10 +5513,12 @@ mod tests {
                 crate::models::downstream_service::ProxyOperationRule {
                     method: "POST".to_string(),
                     path_template: "/air/order_cancellations".to_string(),
+                    ..Default::default()
                 },
                 crate::models::downstream_service::ProxyOperationRule {
                     method: "POST".to_string(),
                     path_template: "/air/order_cancellations/{id}/actions/confirm".to_string(),
+                    ..Default::default()
                 },
             ],
         })

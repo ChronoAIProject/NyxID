@@ -1,11 +1,11 @@
 # Managed Google Workspace Connections
 
-NyxID exposes four catalog services backed by the existing `google` OAuth
+NyxID exposes seven catalog services backed by the existing `google` OAuth
 provider. Configure one Google web client on that provider; users choose a
 product in **AI Services > Connect Service**, select **NyxID managed**, and approve
 Google's consent screen. Each connection has its own encrypted tokens and
 refresh lifecycle. Adding Workspace does not automatically create Calendar,
-Drive, or Gmail connections.
+Drive, Gmail, Docs, Sheets, or Slides connections.
 
 | Service | Catalog slug | Default API scopes |
 | --- | --- | --- |
@@ -13,14 +13,18 @@ Drive, or Gmail connections.
 | Google Calendar | `api-google-calendar` | `calendar` |
 | Google Drive | `api-google-drive` | `drive` |
 | Gmail | `api-google-gmail` | `gmail.readonly` and `gmail.send` |
+| Google Docs | `api-google-docs` | `drive` |
+| Google Sheets | `api-google-sheets` | `drive` |
+| Google Slides | `api-google-slides` | `drive` |
 
-The full API scope prefix is `https://www.googleapis.com/auth/`. All four also
+The full API scope prefix is `https://www.googleapis.com/auth/`. All seven also
 request `openid email profile`. Workspace bundles Drive, Calendar,
 and Gmail; Google does not have a single Workspace OAuth scope. Workspace and
 Gmail require `gmail.send` for sending and replying. It is selected and locked in
 the permission picker. Both custom and managed OAuth requests must include it,
 and Google must return it in the granted scopes before authorization completes.
-Native Docs/Sheets editing and Workspace administration are outside this bundle.
+Native Docs/Sheets/Slides editing uses the three separate services below.
+Workspace administration remains outside this bundle.
 
 Gmail access is limited to `gmail.readonly` and `gmail.send`. NyxID does not
 request `gmail.modify`, `gmail.compose`, or `https://mail.google.com/` for these
@@ -40,7 +44,8 @@ provider; creating a sign-in client alone does not provision managed services.
    the intended project in the top project selector. Check its **Project ID**
    in **IAM & Admin > Settings**.
 2. Go to **APIs & Services > Library**. Search for **Google Drive API**, open
-   it, and click **Enable**. Repeat for **Google Calendar API** and **Gmail API**.
+   it, and click **Enable**. Repeat for **Google Calendar API**, **Gmail API**,
+   **Google Docs API**, **Google Sheets API**, and **Google Slides API** as needed.
 3. Open **Google Auth Platform > Branding**. Set the NyxID app name, support
    email, homepage, privacy policy, and terms URLs. Authorized domains are
    registrable domains you control (for example `example.com`), without a
@@ -78,7 +83,7 @@ provider; creating a sign-in client alone does not provision managed services.
    ```
 
    The host, scheme, port, and path must match the backend's `BASE_URL`.
-   All four products use the same callback. This server authorization-code
+   All seven products use the same callback. This server authorization-code
    flow does not require an Authorized JavaScript origin. Add frontend
    origins only if you separately use Google's browser JavaScript SDK.
 7. Retain the client ID and secret for the NyxID provider configuration.
@@ -90,24 +95,29 @@ provider; creating a sign-in client alone does not provision managed services.
 
 ## NyxID Setup
 
-1. Deploy the backend and frontend changes. Startup creates the four service
-   rows and their operation catalogs. Existing Google services and credentials
-   remain in place, and repeated startup does not duplicate the new entries.
-   Startup replaces the unique service-provider index with a nonunique lookup
-   index. Rolling back to an older backend requires removing the new product
-   rows first, because the older version recreates the one-service constraint.
+1. Startup seeds the seven service rows and their operation catalogs. This
+   addition creates Docs, Sheets, and Slides catalog entries only. Existing
+   Google service IDs, slugs, endpoints, credentials, agent bindings, node
+   configuration, resource URIs, grants, and audit/billing identities stay in
+   place. Repeated startup does not duplicate entries. Legacy Google token
+   migration targets only `api-google`; it never chooses a product by the shared
+   provider ID and waits if the original catalog target is absent.
+   The earlier product rollout replaced the unique service-provider index with
+   a nonunique lookup index. Versions predating that rollout recreate the
+   one-service constraint and cannot start with multiple product rows present;
+   account for that constraint when planning a rollback to those versions.
 2. As a NyxID administrator, open **Providers > Manage Providers**, edit the
    existing **Google** provider (slug `google`), and enter the Google
    **Client ID** and **Client Secret**. Set **Credential Mode** to
    **Admin or User** (`both`) for managed and custom-app options, or
    **Admin Only** (`admin`) for managed credentials only. Keep **Active**
-   enabled and click **Save Changes**. All four catalog entries use these
+   enabled and click **Save Changes**. All seven catalog entries use these
    credentials; users supply only their consent through Google.
 3. Retain the seeded OAuth configuration: Google's v2 authorization endpoint,
    `https://oauth2.googleapis.com/token`, PKCE enabled, and extra authorization
    parameters `access_type=offline` and `prompt=consent`. Product scopes are
    resolved per connection; the generic Google provider can keep its identity
-   defaults. Keep a single Google provider; all four products resolve its
+   defaults. Keep a single Google provider; all seven products resolve its
    current client credentials, including secret rotations.
 4. Open **AI Services > Connect Service** and connect each desired product with
    a Google test account. The managed option appears only when the provider
@@ -118,8 +128,10 @@ The authorization endpoint derives the product from the connection's catalog
 link, including renamed services, reconnects, and org-owned connections.
 Calendar, Drive, and Gmail each reject scopes from the other products. Both
 the REST and MCP proxy enforce the product's published operation policy, even if Google returns
-a token carrying broader permissions from an existing grant. Batch APIs are
-not exposed. A NyxID API key must also be authorized for the chosen service.
+a token carrying broader permissions from an existing grant. Google multipart
+batch endpoints are not exposed. The new editor services expose their explicit
+JSON `:batchUpdate` operations. A NyxID API key must also be authorized for the
+chosen service.
 
 Existing Workspace catalog defaults are upgraded at startup to publish Gmail
 operations and offer Gmail scopes. The migration updates the original seeded
@@ -129,6 +141,69 @@ configured scopes and customized metadata. Existing tokens keep their grants:
 reconnect existing Workspace and Gmail connections and approve Gmail sending
 access. Adding scopes to Google Cloud's consent configuration alone does not
 upgrade an existing token.
+
+## Docs, Sheets, and Slides operations
+
+Each service has one origin. Existing `api-google`, Drive, Calendar, Gmail, and
+Workspace operations retain their original paths and request contracts; none
+are retargeted to these hosts. Connect each desired editor product explicitly.
+Native `documents`, `spreadsheets`, and `presentations` OAuth scopes are not added:
+full `drive` already authorizes every published operation, subject to the user's
+file permissions. The permission picker also allows `drive.file` (app-authorized
+files) and `drive.readonly` (read access); narrower grants do not confer the
+full write capability of the default `drive` scope.
+
+| Service and origin | Published operations | Reason for coverage |
+| --- | --- | --- |
+| Docs — `https://docs.googleapis.com` | `POST /v1/documents`, `GET /v1/documents/{documentId}`, `POST /v1/documents/{documentId}:batchUpdate` | Create, inspect, and edit document content and formatting. Use `includeTabsContent=true` to read all tabs before editing them. |
+| Sheets — `https://sheets.googleapis.com` | `POST /v4/spreadsheets`, `GET /v4/spreadsheets/{spreadsheetId}`, `POST /v4/spreadsheets/{spreadsheetId}:batchUpdate`; values `GET`/`PUT /v4/spreadsheets/{spreadsheetId}/values/{range}`, `POST .../{range}:append`, `POST .../{range}:clear` | Structural edits plus the four common cell-value workflows, without requiring agents to construct grid-update batches for simple reads or writes. |
+| Slides — `https://slides.googleapis.com` | `POST /v1/presentations`, `GET /v1/presentations/{presentationId}`, `POST /v1/presentations/{presentationId}:batchUpdate` | Create, inspect object IDs, and edit slides, shapes, text, and formatting. |
+
+Every operation's accepted scopes were checked against Google's live discovery
+documents on **2026-09-14**, revisions **20260904** for Docs and Slides and
+**20260909** for Sheets:
+[Docs](https://docs.googleapis.com/$discovery/rest?version=v1),
+[Sheets](https://sheets.googleapis.com/$discovery/rest?version=v4), and
+[Slides](https://slides.googleapis.com/$discovery/rest?version=v1).
+The per-operation scope evidence is committed in
+`backend/specs/fixtures/google-editor-scope-acceptance.json`. Recheck it with
+`python3 scripts/check-google-editor-scopes.py`. This reads public metadata and
+does not perform account operations. The published schemas inline only the
+Aevatar admission subset, with no references or union types.
+
+For policy-controlled paths, REST decodes one URI layer; typed MCP encodes each
+argument and decodes that layer once; generic MCP takes literal values. A
+remaining `%` is rejected, so callers cannot request a second decoding pass.
+Only a custom-method suffix declared by the matched template, such as
+`:batchUpdate`, remains literal in the forwarded URL. Colons inside A1 values
+are percent-encoded as data, matching Google's generated client behavior. A different
+verb, empty ID, separator injection, or custom method supplied to an ordinary
+wildcard is rejected. Typed calls also match their selected endpoint template
+before approval, even if another operation is in the service's allowlist.
+Services without an operation policy retain their existing passthrough behavior.
+
+Sheets' `range` parameters carry `x-nyxid-path-constraint: sheets_a1_range` on the
+OpenAPI **parameter**, outside its JSON Schema. The backend enforces this grammar
+in REST, generic MCP, typed MCP, and durable-grant matching. It accepts A1 cells,
+cell/row/column ranges, named ranges, and quoted sheet names, including
+`Sheet1!A1:B2`, `'Quarter 1'!$A$1:$B$2`, `A:A`, and `1:10`. Columns stop at `ZZZ`,
+Google Sheets' column limit. Spaces in quoted names are encoded on forwarding.
+Range punctuation does not grant colon permission to `spreadsheetId` or any
+other parameter. Append and clear suffixes match outside the captured range.
+
+The batch request arrays intentionally accept Google's individual request
+objects without embedding the entire discovery schema. Google validates those
+objects and applies its API-specific batch semantics. All mutations carry
+approval annotations; batches and value writes that can replace/delete content
+are marked destructive. The value-write MCP tools use a `body` object for the
+ValueRange payload because it also has a `range` field; pass path `range` and
+query `valueInputOption` separately. The clear tool accepts an empty `body: {}`.
+
+These APIs have no account-level credential probe. The UI therefore hides the
+automatic Test Agent Key action for the three editor products. Verify with a
+read using an existing document ID, or create a temporary document with the
+user's authorization and edit it through the published operations. Drive file
+listing, moving, exporting, and deleting remain on the existing Drive service.
 
 ## Verify the Connection
 

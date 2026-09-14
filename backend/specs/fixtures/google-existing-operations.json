@@ -1,0 +1,468 @@
+{
+  "api-google": [
+    {
+      "operation_id": "calendar_create_calendar",
+      "method": "POST",
+      "path": "/calendar/v3/calendars",
+      "operation_sha256": "7f1452fadaa9c60aaa3c233d2edb5ae42efc9bbc7d09a17b8bd58e9ad0798592"
+    },
+    {
+      "operation_id": "calendar_list_events",
+      "method": "GET",
+      "path": "/calendar/v3/calendars/primary/events",
+      "operation_sha256": "9aa47830c6cfc96d9d0a7c9ade71d8dec9f08cc42f2ff6dd25c621af347b22ed"
+    },
+    {
+      "operation_id": "calendar_create_event",
+      "method": "POST",
+      "path": "/calendar/v3/calendars/primary/events",
+      "operation_sha256": "7484e361d2bcf9a800f3a0139f7eb4c2edbdeacc796dc7f3205bae448cd3576a"
+    },
+    {
+      "operation_id": "calendar_delete_calendar",
+      "method": "DELETE",
+      "path": "/calendar/v3/calendars/{calendarId}",
+      "operation_sha256": "3ffb9e97ecb721a843391507c94ece7870e6462b7cd8645eda85c0534150cdc5"
+    },
+    {
+      "operation_id": "calendar_get_calendar",
+      "method": "GET",
+      "path": "/calendar/v3/calendars/{calendarId}",
+      "operation_sha256": "16ef7710d002e774d37cd830d7f4c7f72d311337bfd448fd31340238c58a0fb8"
+    },
+    {
+      "operation_id": "calendar_update_calendar",
+      "method": "PATCH",
+      "path": "/calendar/v3/calendars/{calendarId}",
+      "operation_sha256": "f7f07498591fc7161954dd30fa3b51c5641d3dfbbbce07e312accf437664bef2"
+    },
+    {
+      "operation_id": "calendar_delete_event",
+      "method": "DELETE",
+      "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "operation_sha256": "5c94854938c2975d30128c243fb732c01eed9f3089731ff6f68b56d1b4cb300e"
+    },
+    {
+      "operation_id": "calendar_get_event",
+      "method": "GET",
+      "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "operation_sha256": "79fa548518440d37d67e2e8f5a975fe355d578c8b2ff313a801a0aa0930f2424"
+    },
+    {
+      "operation_id": "calendar_update_event",
+      "method": "PATCH",
+      "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "operation_sha256": "feb648e42ec6bcdfe3e9084f707081530beb20e66760e9c4f7d67aedb51dba2d"
+    },
+    {
+      "operation_id": "calendar_free_busy",
+      "method": "POST",
+      "path": "/calendar/v3/freeBusy",
+      "operation_sha256": "3a115d4feb462c9919869fe77becdf3d36c92604e49f433a9cd6f778c757581e"
+    },
+    {
+      "operation_id": "calendar_list_calendars",
+      "method": "GET",
+      "path": "/calendar/v3/users/me/calendarList",
+      "operation_sha256": "f68135e6ca0e519511693fac3c3fb3f2414039ab4bc6eb24f74bdb0a14f100fb"
+    },
+    {
+      "operation_id": "calendar_add_to_list",
+      "method": "POST",
+      "path": "/calendar/v3/users/me/calendarList",
+      "operation_sha256": "cb5ef518b1478c4c8e87ba050953a475881956d392aff4efc9a0ab2d113a14ec"
+    },
+    {
+      "operation_id": "calendar_remove_from_list",
+      "method": "DELETE",
+      "path": "/calendar/v3/users/me/calendarList/{calendarId}",
+      "operation_sha256": "2786a4a158e11ac88cce62388b0b5804f52737b626c912a5e749f5fe18bea205"
+    },
+    {
+      "operation_id": "drive_list_files",
+      "method": "GET",
+      "path": "/drive/v3/files",
+      "operation_sha256": "548bfe0f58af36385952db37f3c51d46807f522a31e3370635dfe22577f082e8"
+    },
+    {
+      "operation_id": "drive_create_file",
+      "method": "POST",
+      "path": "/drive/v3/files",
+      "operation_sha256": "f2833fcc505c7cb0f3390a9fcb3a86fd0a6bd8a3ccf9c28294b0803f1c540755"
+    },
+    {
+      "operation_id": "drive_delete_file",
+      "method": "DELETE",
+      "path": "/drive/v3/files/{fileId}",
+      "operation_sha256": "8b2d4fa2ff43d0ba9ac77aa11f13555a6251d3143b11e8d6a04a364569f57a59"
+    },
+    {
+      "operation_id": "drive_get_file",
+      "method": "GET",
+      "path": "/drive/v3/files/{fileId}",
+      "operation_sha256": "6c048b29c524ed64e80e98c8c46ccae2af321c75ceedc8c9020725a157f326eb"
+    },
+    {
+      "operation_id": "drive_update_file",
+      "method": "PATCH",
+      "path": "/drive/v3/files/{fileId}",
+      "operation_sha256": "4c1f120ebcf1ef5cd63764f99679b61b3612b9a4371e99435464329b6f4657f2"
+    },
+    {
+      "operation_id": "drive_copy_file",
+      "method": "POST",
+      "path": "/drive/v3/files/{fileId}/copy",
+      "operation_sha256": "ff3373d6b5186b0d5e501f67a668330d9f9418a48a0b2387b3b474fab909f095"
+    },
+    {
+      "operation_id": "drive_export_file",
+      "method": "GET",
+      "path": "/drive/v3/files/{fileId}/export",
+      "operation_sha256": "3fe9cd69bdbf5702af3f07d9cfd1ee575e291bcf2faeaa85f6ecd0662555955c"
+    },
+    {
+      "operation_id": "gmail_list_messages",
+      "method": "GET",
+      "path": "/gmail/v1/users/me/messages",
+      "operation_sha256": "b7f4f55ea3418037a36c5bb4f316d485b84cbd028aafd8cec9293023e791eba0"
+    },
+    {
+      "operation_id": "gmail_send_message",
+      "method": "POST",
+      "path": "/gmail/v1/users/me/messages/send",
+      "operation_sha256": "265954291b73d1f4b70747a1f6a387cf18cce7971df8f07a31479d0f46dcf290"
+    },
+    {
+      "operation_id": "gmail_get_message",
+      "method": "GET",
+      "path": "/gmail/v1/users/me/messages/{id}",
+      "operation_sha256": "a2ecb2e94d5d754e98e45a693daf0cd54d0333d5b2ea1a3da140fd9c3045d781"
+    },
+    {
+      "operation_id": "get_userinfo",
+      "method": "GET",
+      "path": "/oauth2/v2/userinfo",
+      "operation_sha256": "70ae2af39c2c1c480920955a5b805971e1edb11963e003ce0f4317f8f1a6bc50"
+    },
+    {
+      "operation_id": "drive_upload_file",
+      "method": "POST",
+      "path": "/upload/drive/v3/files",
+      "operation_sha256": "c9d765a1b74a9ffc7171b0d5d91cf568676baa42d2404f2464b33fdda2f679bc"
+    },
+    {
+      "operation_id": "drive_upload_file_content",
+      "method": "PATCH",
+      "path": "/upload/drive/v3/files/{fileId}",
+      "operation_sha256": "1c0392b33b4591c3073e0510bd5ebf9743ec20bf5f8cbda3e2ee1bc448ec5a47"
+    }
+  ],
+  "api-google-drive": [
+    {
+      "operation_id": "drive_list_files",
+      "method": "GET",
+      "path": "/drive/v3/files",
+      "operation_sha256": "d5857be85596d2686b67134a7fee46ba1f79f179abf22d5178dd7d05764b5710"
+    },
+    {
+      "operation_id": "drive_create_file",
+      "method": "POST",
+      "path": "/drive/v3/files",
+      "operation_sha256": "9ac6dc85030521a4f117134aea8f52235e4070daea0bd5a525b248af559e6bf1"
+    },
+    {
+      "operation_id": "drive_delete_file",
+      "method": "DELETE",
+      "path": "/drive/v3/files/{fileId}",
+      "operation_sha256": "8b2d4fa2ff43d0ba9ac77aa11f13555a6251d3143b11e8d6a04a364569f57a59"
+    },
+    {
+      "operation_id": "drive_get_file",
+      "method": "GET",
+      "path": "/drive/v3/files/{fileId}",
+      "operation_sha256": "844bb478f20c997f3b0dcf5adaf99dad3b1606d65fa5a300d72354c60f56f25c"
+    },
+    {
+      "operation_id": "drive_update_file",
+      "method": "PATCH",
+      "path": "/drive/v3/files/{fileId}",
+      "operation_sha256": "9818be2641f9dc910c0fd3c7a847fecc9ac2600571e115b1241fe11d16457694"
+    },
+    {
+      "operation_id": "drive_copy_file",
+      "method": "POST",
+      "path": "/drive/v3/files/{fileId}/copy",
+      "operation_sha256": "ff3373d6b5186b0d5e501f67a668330d9f9418a48a0b2387b3b474fab909f095"
+    },
+    {
+      "operation_id": "drive_export_file",
+      "method": "GET",
+      "path": "/drive/v3/files/{fileId}/export",
+      "operation_sha256": "863cb1be01f69b995cc7406e258a5e44670d5ad4090092d2ac13931dd3576152"
+    },
+    {
+      "operation_id": "drive_upload_file",
+      "method": "POST",
+      "path": "/upload/drive/v3/files",
+      "operation_sha256": "179c0569ea1b0e55c67c58a7bc613755d678db878d5f8fc2dace731c028628a9"
+    },
+    {
+      "operation_id": "drive_upload_file_content",
+      "method": "PATCH",
+      "path": "/upload/drive/v3/files/{fileId}",
+      "operation_sha256": "79605e23d48148aa44448ccf5d1fbcb5e86607222d1c7110cc5d76f929f16544"
+    }
+  ],
+  "api-google-calendar": [
+    {
+      "operation_id": "calendar_create_calendar",
+      "method": "POST",
+      "path": "/calendar/v3/calendars",
+      "operation_sha256": "7f1452fadaa9c60aaa3c233d2edb5ae42efc9bbc7d09a17b8bd58e9ad0798592"
+    },
+    {
+      "operation_id": "calendar_delete_calendar",
+      "method": "DELETE",
+      "path": "/calendar/v3/calendars/{calendarId}",
+      "operation_sha256": "3ffb9e97ecb721a843391507c94ece7870e6462b7cd8645eda85c0534150cdc5"
+    },
+    {
+      "operation_id": "calendar_get_calendar",
+      "method": "GET",
+      "path": "/calendar/v3/calendars/{calendarId}",
+      "operation_sha256": "16ef7710d002e774d37cd830d7f4c7f72d311337bfd448fd31340238c58a0fb8"
+    },
+    {
+      "operation_id": "calendar_update_calendar",
+      "method": "PATCH",
+      "path": "/calendar/v3/calendars/{calendarId}",
+      "operation_sha256": "f7f07498591fc7161954dd30fa3b51c5641d3dfbbbce07e312accf437664bef2"
+    },
+    {
+      "operation_id": "calendar_list_events",
+      "method": "GET",
+      "path": "/calendar/v3/calendars/{calendarId}/events",
+      "operation_sha256": "984b16f8b474d0cf7f7a4f8c51da30725f50bbd9921ae9ca3b6d5accca38127b"
+    },
+    {
+      "operation_id": "calendar_create_event",
+      "method": "POST",
+      "path": "/calendar/v3/calendars/{calendarId}/events",
+      "operation_sha256": "2c6eb02711eb537ae9ace52c1e93a45cabc7d90928da7fa7bc1dc0684c03c085"
+    },
+    {
+      "operation_id": "calendar_delete_event",
+      "method": "DELETE",
+      "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "operation_sha256": "5c94854938c2975d30128c243fb732c01eed9f3089731ff6f68b56d1b4cb300e"
+    },
+    {
+      "operation_id": "calendar_get_event",
+      "method": "GET",
+      "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "operation_sha256": "79fa548518440d37d67e2e8f5a975fe355d578c8b2ff313a801a0aa0930f2424"
+    },
+    {
+      "operation_id": "calendar_update_event",
+      "method": "PATCH",
+      "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "operation_sha256": "feb648e42ec6bcdfe3e9084f707081530beb20e66760e9c4f7d67aedb51dba2d"
+    },
+    {
+      "operation_id": "calendar_free_busy",
+      "method": "POST",
+      "path": "/calendar/v3/freeBusy",
+      "operation_sha256": "3a115d4feb462c9919869fe77becdf3d36c92604e49f433a9cd6f778c757581e"
+    },
+    {
+      "operation_id": "calendar_list_calendars",
+      "method": "GET",
+      "path": "/calendar/v3/users/me/calendarList",
+      "operation_sha256": "f68135e6ca0e519511693fac3c3fb3f2414039ab4bc6eb24f74bdb0a14f100fb"
+    },
+    {
+      "operation_id": "calendar_add_to_list",
+      "method": "POST",
+      "path": "/calendar/v3/users/me/calendarList",
+      "operation_sha256": "cb5ef518b1478c4c8e87ba050953a475881956d392aff4efc9a0ab2d113a14ec"
+    },
+    {
+      "operation_id": "calendar_remove_from_list",
+      "method": "DELETE",
+      "path": "/calendar/v3/users/me/calendarList/{calendarId}",
+      "operation_sha256": "2786a4a158e11ac88cce62388b0b5804f52737b626c912a5e749f5fe18bea205"
+    }
+  ],
+  "api-google-gmail": [
+    {
+      "operation_id": "gmail_list_messages",
+      "method": "GET",
+      "path": "/gmail/v1/users/me/messages",
+      "operation_sha256": "29a8d680c2533cfadeb16349805541ec9507638370218c8032c7cfcd5bee2e68"
+    },
+    {
+      "operation_id": "gmail_send_message",
+      "method": "POST",
+      "path": "/gmail/v1/users/me/messages/send",
+      "operation_sha256": "62036a30b95176f7dabd59f08f82a5aa65400e8d01b6e40424578d83490aa765"
+    },
+    {
+      "operation_id": "gmail_get_message",
+      "method": "GET",
+      "path": "/gmail/v1/users/me/messages/{id}",
+      "operation_sha256": "f2fb6dce5f7afb52576ea8e591ef55f22d1a285309d717f9a538965ac2bb3f97"
+    }
+  ],
+  "api-google-workspace": [
+    {
+      "operation_id": "calendar_create_calendar",
+      "method": "POST",
+      "path": "/calendar/v3/calendars",
+      "operation_sha256": "7f1452fadaa9c60aaa3c233d2edb5ae42efc9bbc7d09a17b8bd58e9ad0798592"
+    },
+    {
+      "operation_id": "calendar_delete_calendar",
+      "method": "DELETE",
+      "path": "/calendar/v3/calendars/{calendarId}",
+      "operation_sha256": "3ffb9e97ecb721a843391507c94ece7870e6462b7cd8645eda85c0534150cdc5"
+    },
+    {
+      "operation_id": "calendar_get_calendar",
+      "method": "GET",
+      "path": "/calendar/v3/calendars/{calendarId}",
+      "operation_sha256": "16ef7710d002e774d37cd830d7f4c7f72d311337bfd448fd31340238c58a0fb8"
+    },
+    {
+      "operation_id": "calendar_update_calendar",
+      "method": "PATCH",
+      "path": "/calendar/v3/calendars/{calendarId}",
+      "operation_sha256": "f7f07498591fc7161954dd30fa3b51c5641d3dfbbbce07e312accf437664bef2"
+    },
+    {
+      "operation_id": "calendar_list_events",
+      "method": "GET",
+      "path": "/calendar/v3/calendars/{calendarId}/events",
+      "operation_sha256": "984b16f8b474d0cf7f7a4f8c51da30725f50bbd9921ae9ca3b6d5accca38127b"
+    },
+    {
+      "operation_id": "calendar_create_event",
+      "method": "POST",
+      "path": "/calendar/v3/calendars/{calendarId}/events",
+      "operation_sha256": "2c6eb02711eb537ae9ace52c1e93a45cabc7d90928da7fa7bc1dc0684c03c085"
+    },
+    {
+      "operation_id": "calendar_delete_event",
+      "method": "DELETE",
+      "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "operation_sha256": "5c94854938c2975d30128c243fb732c01eed9f3089731ff6f68b56d1b4cb300e"
+    },
+    {
+      "operation_id": "calendar_get_event",
+      "method": "GET",
+      "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "operation_sha256": "79fa548518440d37d67e2e8f5a975fe355d578c8b2ff313a801a0aa0930f2424"
+    },
+    {
+      "operation_id": "calendar_update_event",
+      "method": "PATCH",
+      "path": "/calendar/v3/calendars/{calendarId}/events/{eventId}",
+      "operation_sha256": "feb648e42ec6bcdfe3e9084f707081530beb20e66760e9c4f7d67aedb51dba2d"
+    },
+    {
+      "operation_id": "calendar_free_busy",
+      "method": "POST",
+      "path": "/calendar/v3/freeBusy",
+      "operation_sha256": "3a115d4feb462c9919869fe77becdf3d36c92604e49f433a9cd6f778c757581e"
+    },
+    {
+      "operation_id": "calendar_list_calendars",
+      "method": "GET",
+      "path": "/calendar/v3/users/me/calendarList",
+      "operation_sha256": "f68135e6ca0e519511693fac3c3fb3f2414039ab4bc6eb24f74bdb0a14f100fb"
+    },
+    {
+      "operation_id": "calendar_add_to_list",
+      "method": "POST",
+      "path": "/calendar/v3/users/me/calendarList",
+      "operation_sha256": "cb5ef518b1478c4c8e87ba050953a475881956d392aff4efc9a0ab2d113a14ec"
+    },
+    {
+      "operation_id": "calendar_remove_from_list",
+      "method": "DELETE",
+      "path": "/calendar/v3/users/me/calendarList/{calendarId}",
+      "operation_sha256": "2786a4a158e11ac88cce62388b0b5804f52737b626c912a5e749f5fe18bea205"
+    },
+    {
+      "operation_id": "drive_list_files",
+      "method": "GET",
+      "path": "/drive/v3/files",
+      "operation_sha256": "d5857be85596d2686b67134a7fee46ba1f79f179abf22d5178dd7d05764b5710"
+    },
+    {
+      "operation_id": "drive_create_file",
+      "method": "POST",
+      "path": "/drive/v3/files",
+      "operation_sha256": "9ac6dc85030521a4f117134aea8f52235e4070daea0bd5a525b248af559e6bf1"
+    },
+    {
+      "operation_id": "drive_delete_file",
+      "method": "DELETE",
+      "path": "/drive/v3/files/{fileId}",
+      "operation_sha256": "8b2d4fa2ff43d0ba9ac77aa11f13555a6251d3143b11e8d6a04a364569f57a59"
+    },
+    {
+      "operation_id": "drive_get_file",
+      "method": "GET",
+      "path": "/drive/v3/files/{fileId}",
+      "operation_sha256": "844bb478f20c997f3b0dcf5adaf99dad3b1606d65fa5a300d72354c60f56f25c"
+    },
+    {
+      "operation_id": "drive_update_file",
+      "method": "PATCH",
+      "path": "/drive/v3/files/{fileId}",
+      "operation_sha256": "9818be2641f9dc910c0fd3c7a847fecc9ac2600571e115b1241fe11d16457694"
+    },
+    {
+      "operation_id": "drive_copy_file",
+      "method": "POST",
+      "path": "/drive/v3/files/{fileId}/copy",
+      "operation_sha256": "ff3373d6b5186b0d5e501f67a668330d9f9418a48a0b2387b3b474fab909f095"
+    },
+    {
+      "operation_id": "drive_export_file",
+      "method": "GET",
+      "path": "/drive/v3/files/{fileId}/export",
+      "operation_sha256": "863cb1be01f69b995cc7406e258a5e44670d5ad4090092d2ac13931dd3576152"
+    },
+    {
+      "operation_id": "gmail_list_messages",
+      "method": "GET",
+      "path": "/gmail/v1/users/me/messages",
+      "operation_sha256": "29a8d680c2533cfadeb16349805541ec9507638370218c8032c7cfcd5bee2e68"
+    },
+    {
+      "operation_id": "gmail_send_message",
+      "method": "POST",
+      "path": "/gmail/v1/users/me/messages/send",
+      "operation_sha256": "62036a30b95176f7dabd59f08f82a5aa65400e8d01b6e40424578d83490aa765"
+    },
+    {
+      "operation_id": "gmail_get_message",
+      "method": "GET",
+      "path": "/gmail/v1/users/me/messages/{id}",
+      "operation_sha256": "f2fb6dce5f7afb52576ea8e591ef55f22d1a285309d717f9a538965ac2bb3f97"
+    },
+    {
+      "operation_id": "drive_upload_file",
+      "method": "POST",
+      "path": "/upload/drive/v3/files",
+      "operation_sha256": "179c0569ea1b0e55c67c58a7bc613755d678db878d5f8fc2dace731c028628a9"
+    },
+    {
+      "operation_id": "drive_upload_file_content",
+      "method": "PATCH",
+      "path": "/upload/drive/v3/files/{fileId}",
+      "operation_sha256": "79605e23d48148aa44448ccf5d1fbcb5e86607222d1c7110cc5d76f929f16544"
+    }
+  ]
+}

@@ -2649,7 +2649,9 @@ fn seed_required_permissions(slug: &str) -> Option<&'static [&'static str]> {
             super::google_workspace::GMAIL_SEND,
         ]),
         "api-google-calendar" => Some(&[super::google_workspace::CALENDAR]),
-        "api-google-drive" => Some(&[super::google_workspace::DRIVE]),
+        "api-google-drive" | "api-google-docs" | "api-google-sheets" | "api-google-slides" => {
+            Some(&[super::google_workspace::DRIVE])
+        }
         "api-google-gmail" => Some(&[
             super::google_workspace::GMAIL_READONLY,
             super::google_workspace::GMAIL_SEND,
@@ -2715,7 +2717,10 @@ fn seed_capability_override(slug: &str) -> Option<(ServiceCapabilities, bool)> {
         "api-google-workspace"
         | "api-google-calendar"
         | "api-google-drive"
-        | "api-google-gmail" => Some((
+        | "api-google-gmail"
+        | "api-google-docs"
+        | "api-google-sheets"
+        | "api-google-slides" => Some((
             ServiceCapabilities {
                 supports_proxy_read: true,
                 supports_proxy_write: true,
@@ -3179,6 +3184,75 @@ const DEFAULT_SERVICE_SEEDS: &[DefaultServiceSeed] = &[
         ),
         known_limitations: Some(
             "Only published message list, read, and send operations are available. No deletion, trash, mailbox changes, or draft management. Replies require threadId and matching Subject, In-Reply-To, and References MIME headers. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-docs",
+        service_name: "Google Docs",
+        base_url: "https://docs.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Create, read, and edit Google Docs, including text, formatting, tables, and lists.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://docs.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive scope, which authorizes every published operation. Enable the Google Docs API in the OAuth client's Cloud project.",
+        ),
+        known_limitations: Some(
+            "Only the published operations on docs.googleapis.com are available. Connect this product separately; existing Google, Drive, Calendar, Gmail, and Workspace connections are unchanged. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-sheets",
+        service_name: "Google Sheets",
+        base_url: "https://sheets.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Create and edit spreadsheets; read, write, append, and clear cell values using A1 ranges.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://sheets.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive scope, which authorizes every published operation. Enable the Google Sheets API in the OAuth client's Cloud project.",
+        ),
+        known_limitations: Some(
+            "Only the published operations on sheets.googleapis.com are available. Connect this product separately; existing Google, Drive, Calendar, Gmail, and Workspace connections are unchanged. Google may revoke sibling connections using the same account and client together.",
+        ),
+    },
+    DefaultServiceSeed {
+        provider_slug: "google",
+        service_slug: "api-google-slides",
+        service_name: "Google Slides",
+        base_url: "https://slides.googleapis.com",
+        injection_method: "bearer",
+        injection_key: "Authorization",
+        service_auth_method: None,
+        service_auth_key_name: None,
+        description: Some(
+            "Create, read, and edit Google Slides presentations, pages, shapes, text, and formatting.",
+        ),
+        default_request_headers: None,
+        service_category: "connection",
+        requires_user_credential: true,
+        homepage_url: Some("https://slides.google.com"),
+        auth_notes: Some(
+            "Connect a Google account using the NyxID managed app or your own OAuth client. Requests full Drive scope, which authorizes every published operation. Enable the Google Slides API in the OAuth client's Cloud project.",
+        ),
+        known_limitations: Some(
+            "Only the published operations on slides.googleapis.com are available. Connect this product separately; existing Google, Drive, Calendar, Gmail, and Workspace connections are unchanged. Google may revoke sibling connections using the same account and client together.",
         ),
     },
     DefaultServiceSeed {
@@ -9563,6 +9637,7 @@ mod tests {
     #[tokio::test]
     async fn google_products_share_existing_client_and_survive_reseeding() {
         use crate::services::google_workspace::GoogleProduct;
+        use futures::TryStreamExt;
         let db = connect_test_database("google_product_seed")
             .await
             .expect("local MongoDB");
@@ -9604,10 +9679,27 @@ mod tests {
             .await
             .unwrap();
 
+        let mut previous_rows: Option<Vec<bson::Document>> = None;
         for _ in 0..2 {
             crate::db::ensure_indexes(&db).await.unwrap();
             super::seed_default_providers(&db, &enc).await.unwrap();
             super::seed_default_services(&db, &enc).await.unwrap();
+            let rows: Vec<bson::Document> = db
+                .collection::<bson::Document>(DOWNSTREAM_SERVICES)
+                .find(doc! { "provider_config_id": &provider.id })
+                .sort(doc! { "_id": 1 })
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            if let Some(previous) = &previous_rows {
+                assert_eq!(
+                    &rows, previous,
+                    "reseeding must preserve every Google row and UUID"
+                );
+            }
+            previous_rows = Some(rows);
             let entries = crate::services::catalog_service::list_catalog(&db, &enc, "reader")
                 .await
                 .unwrap();
@@ -9616,6 +9708,9 @@ mod tests {
                 "api-google-calendar",
                 "api-google-drive",
                 "api-google-gmail",
+                "api-google-docs",
+                "api-google-sheets",
+                "api-google-slides",
             ] {
                 let product = GoogleProduct::from_slug(slug).unwrap();
                 let entry = entries.iter().find(|entry| entry.slug == slug).unwrap();
@@ -9679,7 +9774,7 @@ mod tests {
                 .count_documents(doc! { "provider_config_id": &provider.id })
                 .await
                 .unwrap(),
-            5
+            8
         );
     }
 

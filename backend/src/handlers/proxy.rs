@@ -2072,12 +2072,13 @@ async fn execute_proxy_inner(
     let canonical_forward_path = if target.service.proxy_operation_policy.is_some() {
         let canonical_path =
             crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(path)?;
-        crate::services::proxy_authorization::authorize_proxy_operation(
-            &target.service,
-            request.method().as_str(),
-            &canonical_path,
-        )?;
-        Some(canonical_path.forwarding_path())
+        Some(
+            crate::services::proxy_authorization::authorize_proxy_operation(
+                &target.service,
+                request.method().as_str(),
+                &canonical_path,
+            )?,
+        )
     } else {
         None
     };
@@ -8450,6 +8451,7 @@ mod proxy_resolution_integration_tests {
                 rules: vec![crate::models::downstream_service::ProxyOperationRule {
                     method: "GET".to_string(),
                     path_template: "/error".to_string(),
+                    ..Default::default()
                 }],
             });
         service.credential_encrypted = encryption_keys
@@ -9815,6 +9817,7 @@ mod proxy_resolution_integration_tests {
                     rules: vec![crate::models::downstream_service::ProxyOperationRule {
                         method: "POST".to_string(),
                         path_template: "/air/offer_requests".to_string(),
+                        ..Default::default()
                     }],
                 },
             )

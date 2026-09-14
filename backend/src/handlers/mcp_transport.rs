@@ -4169,6 +4169,7 @@ mod tests {
                     rules: vec![crate::models::downstream_service::ProxyOperationRule {
                         method: "POST".to_string(),
                         path_template: "/air/order_cancellations".to_string(),
+                        ..Default::default()
                     }],
                 },
             )
