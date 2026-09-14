@@ -175,6 +175,7 @@ pub async fn claim(
         credential_ack_correlation: false,
         remote_credential_crypto_v1: false,
         proxy_max_body_size: None,
+        no_redirect_proxy: false,
         capabilities_resolved: false,
     };
     let owner_doc = bson::to_document(&owner).map_err(|error| {
@@ -265,6 +266,7 @@ pub async fn record_capabilities(
                     "connection_owner.remote_credential_crypto_v1": capabilities.remote_credential_crypto_v1,
                     "connection_owner.proxy_max_body_size": capabilities.proxy_max_body_size.map(|value| value as i64),
                     "connection_owner.capabilities_resolved": resolved,
+                    "connection_owner.no_redirect_proxy": capabilities.no_redirect_proxy,
                     "updated_at": now,
                 },
             },

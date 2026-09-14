@@ -2753,6 +2753,7 @@ async fn execute_proxy_inner(
 
         // Build base node request (will be cloned for failover retries)
         let node_request = NodeProxyRequest {
+            follow_redirects: true,
             request_id: uuid::Uuid::new_v4().to_string(),
             service_id: service_id.to_string(),
             service_slug: target.service.slug.clone(),

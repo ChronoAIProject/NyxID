@@ -1,3 +1,4 @@
+import { ConnectionValidationCard } from "@/components/dashboard/connection-validation-card";
 import { useEffect, useMemo, useState } from "react";
 import {
   Link,
@@ -2518,6 +2519,7 @@ export function KeyDetailPage() {
           </TabsList>
 
           <TabsContent value="overview" className="space-y-4">
+            <ConnectionValidationCard key={keyInfo.id} serviceId={keyInfo.id} active={keyInfo.is_active} />
             <div className="grid gap-4 lg:grid-cols-2">
               <EndpointSection
                 endpointUrl={keyInfo.endpoint_url ?? ""}

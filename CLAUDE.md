@@ -47,6 +47,8 @@ Strict separation: `handlers/` -> `services/` -> `models/`
 - 11700 `RequestBodyTooLarge` (HTTP 413): a bounded proxy or forwarding ingress exceeded its configured byte limit
 - 11900-11909 Agent Key login: 11900 `AgentKeyLoginNotFound`, 11901 `AgentKeyLoginExpired`, 11902 `AgentKeyLoginPending`, 11903 `AgentKeyLoginSlowDown`, 11904 `AgentKeyLoginDenied`, 11905 `AgentKeyLoginAlreadyDelivered`, 11906 `AgentKeyLoginRateLimited`, 11907 `AgentKeyLoginUserCodeInvalid`, 11908 `AgentKeyLoginKeyIneligible`, 11909 `AgentKeyCredentialNotFound`
 
+- 12000-12010 app requirements and connection validation: 12000 `AppRequirementsInvalid`, 12001 `AppConnectLinkNotFound`, 12002 `AppConnectLinkExpired`, 12003 `AppConnectLinkCompleted`, 12004 `AppConnectLinkCancelled`, 12005 `RequirementNotSatisfiable`, 12006 `RequirementNotMet`, 12007 `ServiceValidationRejected` (422), 12008 `ServiceValidationUnavailable` (503), 12009 `ServiceValidationRateLimited` (429), 12010 `AppConnectResultMismatch`
+
 ### 4. Frontend Patterns
 
 - Zod schemas in `schemas/` (one per domain); React Hook Form + `@hookform/resolvers`

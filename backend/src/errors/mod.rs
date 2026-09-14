@@ -381,6 +381,13 @@ pub enum AppError {
     #[error("Agent Key login credential not found")]
     AgentKeyCredentialNotFound,
 
+    #[error("Connection validation rejected")]
+    ServiceValidationRejected,
+    #[error("Connection validation is temporarily unavailable")]
+    ServiceValidationUnavailable,
+    #[error("Connection validation rate limit exceeded")]
+    ServiceValidationRateLimited,
+
     #[error("Connect link not found")]
     ConnectLinkNotFound,
 
@@ -668,6 +675,9 @@ impl AppError {
             Self::AgentKeyLoginUserCodeInvalid => StatusCode::BAD_REQUEST,
             Self::AgentKeyLoginKeyIneligible => StatusCode::BAD_REQUEST,
             Self::AgentKeyCredentialNotFound => StatusCode::NOT_FOUND,
+            Self::ServiceValidationRejected => StatusCode::UNPROCESSABLE_ENTITY,
+            Self::ServiceValidationUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::ServiceValidationRateLimited => StatusCode::TOO_MANY_REQUESTS,
             Self::ConnectLinkNotFound => StatusCode::NOT_FOUND,
             Self::ConnectLinkExpired => StatusCode::GONE,
             Self::ConnectLinkAlreadyCompleted => StatusCode::CONFLICT,
@@ -843,6 +853,9 @@ impl AppError {
             Self::AgentKeyLoginUserCodeInvalid => 11907,
             Self::AgentKeyLoginKeyIneligible => 11908,
             Self::AgentKeyCredentialNotFound => 11909,
+            Self::ServiceValidationRejected => 12007,
+            Self::ServiceValidationUnavailable => 12008,
+            Self::ServiceValidationRateLimited => 12009,
             Self::ConnectLinkNotFound => 11300,
             Self::ConnectLinkExpired => 11301,
             Self::ConnectLinkAlreadyCompleted => 11302,
@@ -1054,6 +1067,9 @@ impl AppError {
             Self::AgentKeyLoginUserCodeInvalid => "agent_key_login_user_code_invalid",
             Self::AgentKeyLoginKeyIneligible => "agent_key_login_key_ineligible",
             Self::AgentKeyCredentialNotFound => "agent_key_credential_not_found",
+            Self::ServiceValidationRejected => "service_validation_rejected",
+            Self::ServiceValidationUnavailable => "service_validation_unavailable",
+            Self::ServiceValidationRateLimited => "service_validation_rate_limited",
             Self::ConnectLinkNotFound => "connect_link_not_found",
             Self::ConnectLinkExpired => "connect_link_expired",
             Self::ConnectLinkAlreadyCompleted => "connect_link_already_completed",

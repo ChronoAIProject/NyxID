@@ -59,6 +59,7 @@ vi.mock("@tanstack/react-router", () => ({
 
 vi.mock("@/hooks/use-keys", () => ({
   useKey: () => hooks.key,
+  useValidateKey: () => ({ mutate: vi.fn(), isPending: false, data: undefined, error: null }),
   useUpdateKey: () => ({ mutate: hooks.updateKey, isPending: false }),
   useDeleteKey: () => ({ mutate: hooks.deleteKey, isPending: false }),
   useUpdateEndpoint: () => ({ mutate: hooks.updateEndpoint, isPending: false }),

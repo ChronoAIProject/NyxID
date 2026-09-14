@@ -450,3 +450,20 @@ sequenceDiagram
     API->>API: Audit log { api_key_id, api_key_name }
     API-->>Agent: Response + X-NyxID-Agent-Id header
 ```
+
+### Connection validation
+
+The key detail page's **Check connection** action calls `POST /keys/{id}/validate`
+and displays a named provider profile's limited claim and observation. The GET
+lookup controls resource disclosure, while the actual caller must additionally
+have proxy permission. `service_validation_records` holds five-minute evidence
+against a concrete UserService, validator version, execution-authority digest,
+and credential revision; MongoDB leases serialize attempts, enforce shared probe
+budgets, and fence late observations. Probe results never write `UserApiKey.status`;
+OAuth materialization uses the existing coordinated refresh lifecycle. Seven v1
+profiles use bounded non-billable requests, and provider rate limits still apply.
+Custom services and node-managed/SSH-certificate credentials are unsupported;
+node probes require advertised no-redirect support and enforce server response
+bounds within the owner's network boundary. This is observation only, with no
+onboarding or authorization gate. The Agent Key allowed/denied verification UI
+continues to establish its separate scope property.

@@ -3401,6 +3401,30 @@ async fn resolve_gateway_url_override(
     }
 }
 
+pub(crate) fn inject_simple_auth(
+    request: reqwest::RequestBuilder,
+    target: &ProxyTarget,
+) -> AppResult<reqwest::RequestBuilder> {
+    match target.auth_method.as_str() {
+        "none" | "path" => Ok(request),
+        "header" => Ok(request.header(&target.auth_key_name, &target.credential)),
+        "bearer" => Ok(request.bearer_auth(&target.credential)),
+        "bot_bearer" => Ok(request.header("Authorization", format!("Bot {}", target.credential))),
+        "query" => Ok(request.query(&[(&target.auth_key_name, &target.credential)])),
+        "basic" => {
+            let (username, password) = target.credential.split_once(':').ok_or_else(|| {
+                AppError::Internal(
+                    "Basic auth credential must be in 'username:password' format".to_string(),
+                )
+            })?;
+            Ok(request.basic_auth(username, Some(password)))
+        }
+        _ => Err(AppError::BadRequest(
+            "Unsupported validation authentication method".to_string(),
+        )),
+    }
+}
+
 /// Forward a request to the downstream service with credential injection,
 /// identity propagation headers, and delegated provider credentials.
 ///
@@ -3632,36 +3656,8 @@ pub(crate) async fn forward_request_with_extra_outbound_headers(
 
     // Inject credentials based on auth method
     match target.auth_method.as_str() {
-        "none" => {
-            // No credential injection
-        }
-        "header" => {
-            request = request.header(&target.auth_key_name, &target.credential);
-        }
-        "bearer" => {
-            request = request.bearer_auth(&target.credential);
-        }
-        "bot_bearer" => {
-            // Discord bot tokens use `Authorization: Bot <token>` instead of
-            // the standard `Bearer` scheme. Sets the literal header value.
-            request = request.header("Authorization", format!("Bot {}", target.credential));
-        }
-        "query" => {
-            // Use the request builder's query method to properly URL-encode parameters.
-            // This preserves the original HTTP method, headers, and body.
-            request = request.query(&[(&target.auth_key_name, &target.credential)]);
-        }
-        "basic" => {
-            // credential format: "username:password"
-            let parts: Vec<&str> = target.credential.splitn(2, ':').collect();
-            if parts.len() == 2 {
-                request = request.basic_auth(parts[0], Some(parts[1]));
-            } else {
-                return Err(AppError::Internal(
-                    "Basic auth credential must be in 'username:password' format".to_string(),
-                )
-                .into());
-            }
+        "none" | "header" | "bearer" | "bot_bearer" | "query" | "basic" => {
+            request = inject_simple_auth(request, target)?;
         }
         "body" => {
             // Body injection already happened above; nothing to add to headers.

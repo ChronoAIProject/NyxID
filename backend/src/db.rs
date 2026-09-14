@@ -102,6 +102,7 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 /// with the same specification it is a no-op.
 pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> {
     crate::services::coordination_service::ensure_indexes(db).await?;
+    ensure_service_validation_indexes(db).await?;
 
     // ── assistant_wire_logs ──
     db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)
@@ -4469,6 +4470,37 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
             "Migrated node service bindings to unified collections"
         );
     }
+    Ok(())
+}
+
+/// Evidence is retained one day beyond its display freshness window.
+pub(crate) async fn ensure_service_validation_indexes(
+    db: &Database,
+) -> Result<(), mongodb::error::Error> {
+    let records = db
+        .collection::<crate::models::service_validation_record::ServiceValidationRecord>(
+            crate::models::service_validation_record::COLLECTION_NAME,
+        );
+    records
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_service_id": 1, "validator_id": 1 })
+                .options(IndexOptions::builder().unique(true).build())
+                .build(),
+        )
+        .await?;
+    records
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "valid_until": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(86_400))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
     Ok(())
 }
 

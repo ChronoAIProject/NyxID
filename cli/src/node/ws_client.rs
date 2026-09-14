@@ -951,6 +951,7 @@ async fn connect_and_serve(
     // advertise the matching flag. Fire-and-forget — if the channel
     // is full we'll retry on the next status_update / reconnect.
     let mut capabilities = serde_json::Map::new();
+    capabilities.insert("no_redirect_proxy".to_string(), true.into());
     capabilities.insert("credential_ack_correlation".to_string(), true.into());
     capabilities.insert(
         rci_crypto::REMOTE_CREDENTIAL_CRYPTO_CAPABILITY.to_string(),

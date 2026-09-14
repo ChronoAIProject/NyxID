@@ -2781,6 +2781,99 @@ async fn enrich_key_discovery_metadata(
     Ok(())
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ValidateKeyRequest {
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ServiceValidationResponse {
+    pub user_service_id: String,
+    pub validator_id: String,
+    pub validator_version: u32,
+    pub outcome: String,
+    pub claim: String,
+    pub checked_at: String,
+    pub valid_until: String,
+    pub reason_code: String,
+}
+
+/// POST /api/v1/keys/{id}/validate. Read access shows the key; validation
+/// requires proxy permission. Resolve disclosure exactly as GET /keys/{id},
+/// then take the authority snapshot under the actual caller. Org viewers and
+/// members excluded by admin_only receive the proxy's 403 before any evidence,
+/// credential materialization, or provider request. Probe outcomes never change
+/// global credential status; coordinated OAuth refresh retains its own policy.
+pub async fn validate_key(
+    State(state): State<AppState>,
+    auth_user: AuthUser,
+    Path(key_id): Path<String>,
+    axum::Extension(policy): axum::Extension<
+        crate::services::billing::route_inventory::BillingRoutePolicy,
+    >,
+    Json(body): Json<ValidateKeyRequest>,
+) -> AppResult<Json<ServiceValidationResponse>> {
+    use crate::models::service_validation_record::CallerContext;
+    use crate::mw::auth::AuthMethod;
+    use crate::services::{service_validation_service, validator_profiles};
+    if !matches!(
+        auth_user.auth_method,
+        AuthMethod::Session | AuthMethod::AccessToken
+    ) {
+        return Err(AppError::Forbidden(
+            "Connection validation requires human authentication".into(),
+        ));
+    }
+    let actor = auth_user.user_id.to_string();
+    let access = resolve_key_read_owner(&state, &actor, &key_id).await?;
+    crate::services::billing::route_inventory::enforce_billing_exempt_egress_classification(Some(
+        policy,
+    ))?;
+    if !state
+        .service_validation_limiter
+        .check_shared(&actor)
+        .await?
+    {
+        return Err(AppError::ServiceValidationRateLimited);
+    }
+    let caller = service_validation_service::ValidationCaller {
+        user_id: actor.clone(),
+        context: CallerContext::Human {
+            session: auth_user
+                .session_id
+                .map(|id| id.to_string())
+                .or(auth_user.token_jti)
+                .unwrap_or(actor),
+        },
+        allow_all_services: auth_user.allow_all_services,
+        allowed_service_ids: auth_user.allowed_service_ids,
+        allow_all_nodes: auth_user.allow_all_nodes,
+        allowed_node_ids: auth_user.allowed_node_ids,
+    };
+    let record =
+        service_validation_service::validate(&state, caller, &access.service_id, body.force)
+            .await?;
+    let claim = validator_profiles::PROFILES
+        .iter()
+        .find(|profile| profile.id == record.validator_id)
+        .map_or(
+            "Live validation is not supported for this connection.",
+            |profile| profile.claim,
+        );
+    Ok(Json(ServiceValidationResponse {
+        user_service_id: record.user_service_id,
+        validator_id: record.validator_id,
+        validator_version: record.validator_version,
+        outcome: validator_profiles::outcome_code(&record.outcome).into(),
+        claim: claim.into(),
+        checked_at: record.checked_at.to_rfc3339(),
+        valid_until: record.valid_until.to_rfc3339(),
+        reason_code: record.reason_code,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;

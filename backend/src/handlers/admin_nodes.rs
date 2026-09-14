@@ -85,6 +85,7 @@ fn admin_node_info_from_model(
                 credential_ack_correlation: owner.credential_ack_correlation,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
                 proxy_max_body_size: owner.proxy_max_body_size,
+                no_redirect_proxy: owner.no_redirect_proxy,
             },
         }
     } else if node.connection_owner.is_none() {

@@ -89,6 +89,8 @@ pub struct NodeConnectionOwner {
     #[serde(default)]
     pub proxy_max_body_size: Option<usize>,
     #[serde(default)]
+    pub no_redirect_proxy: bool,
+    #[serde(default)]
     pub capabilities_resolved: bool,
 }
 
@@ -293,6 +295,7 @@ mod tests {
             credential_ack_correlation: true,
             remote_credential_crypto_v1: true,
             proxy_max_body_size: Some(1024),
+            no_redirect_proxy: false,
             capabilities_resolved: true,
         };
 

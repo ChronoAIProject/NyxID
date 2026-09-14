@@ -2008,6 +2008,12 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
             30,
             60,
         ),
+        service_validation_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
+            db.clone(),
+            "service_validation",
+            10,
+            60,
+        ),
         connect_link_create_limiter: crate::mw::rate_limit::create_per_key_rate_limiter(
             db.clone(),
             "connect_link_create",

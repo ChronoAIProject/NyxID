@@ -85,7 +85,10 @@ pub fn verify_request_signature(
     let query = request["query"].as_str().unwrap_or("");
     let body = request["body"].as_str().unwrap_or("");
 
-    let message = format!("{timestamp}\n{nonce}\n{method}\n{path}\n{query}\n{body}");
+    let mut message = format!("{timestamp}\n{nonce}\n{method}\n{path}\n{query}\n{body}");
+    if request["follow_redirects"].as_bool() == Some(false) {
+        message.push_str("\nfollow_redirects=false");
+    }
     verify_signature(secret_hex, expected_signature, &message)
 }
 
@@ -759,5 +762,36 @@ mod tests {
     fn verify_invalid_expected_hex_fails() {
         let secret = "ab".repeat(32);
         assert!(!verify_signature(&secret, "not-hex", "msg"));
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn validation_redirect_flag_is_bound_to_signature() {
+        let secret = [0x42; 32];
+        let mut request = serde_json::json!({ "timestamp": "2026-09-14T00:00:00Z", "nonce": "fixture", "method": "GET", "path": "user", "follow_redirects": false });
+        let mut mac = Hmac::<Sha256>::new_from_slice(&secret).unwrap();
+        mac.update(b"2026-09-14T00:00:00Z\nfixture\nGET\nuser\n\n\nfollow_redirects=false");
+        let signature = hex::encode(mac.finalize().into_bytes());
+        assert!(verify_request_signature(
+            &request,
+            &hex::encode(secret),
+            &signature
+        ));
+        request["follow_redirects"] = true.into();
+        assert!(!verify_request_signature(
+            &request,
+            &hex::encode(secret),
+            &signature
+        ));
+        request.as_object_mut().unwrap().remove("follow_redirects");
+        assert!(!verify_request_signature(
+            &request,
+            &hex::encode(secret),
+            &signature
+        ));
     }
 }

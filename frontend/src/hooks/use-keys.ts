@@ -1,3 +1,4 @@
+import { serviceValidationResponseSchema } from "@/schemas/service-validation";
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api-client";
@@ -489,5 +490,19 @@ export function useUpdateExternalApiKey() {
       void queryClient.invalidateQueries({ queryKey: ["keys"] });
       void queryClient.invalidateQueries({ queryKey: ["external-api-keys"] });
     },
+  });
+}
+
+export function useValidateKey(serviceId: string) {
+  return useMutation({
+    mutationKey: ["keys", serviceId, "validate"],
+    mutationFn: async ({ force }: { readonly force: boolean }) => {
+      const response = await api.post<unknown>(
+        `/keys/${encodeURIComponent(serviceId)}/validate`,
+        { force },
+      );
+      return serviceValidationResponseSchema.parse(response);
+    },
+    retry: false,
   });
 }

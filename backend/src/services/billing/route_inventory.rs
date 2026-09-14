@@ -103,6 +103,11 @@ pub struct BillingRouteSpec {
 #[cfg(test)]
 pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
     BillingRouteSpec {
+        handler: "handlers::keys::validate_key",
+        route: "/api/v1/keys/{id}/validate",
+        policy: BillingRoutePolicy::Exempt("service_validation"),
+    },
+    BillingRouteSpec {
         handler: "handlers::llm_gateway::gateway_request",
         route: "/api/v1/llm/gateway/v1/{*path}",
         policy: BillingRoutePolicy::Metered(BillingIngress::LlmGateway),

@@ -4072,6 +4072,7 @@ pub async fn execute_tool_resolved(
         }
 
         let node_request = NodeProxyRequest {
+            follow_redirects: true,
             request_id: uuid::Uuid::new_v4().to_string(),
             service_id: target.service.id.clone(),
             service_slug: target.service.slug.clone(),

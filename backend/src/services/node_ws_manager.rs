@@ -84,9 +84,15 @@ mod optional_base64_bytes {
     }
 }
 
+fn default_follow_redirects() -> bool {
+    true
+}
+
 /// Request sent to a node via WebSocket.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NodeProxyRequest {
+    #[serde(default = "default_follow_redirects")]
+    pub follow_redirects: bool,
     pub request_id: String,
     pub service_id: String,
     pub service_slug: String,
@@ -414,6 +420,7 @@ struct NodeConnection {
 /// haven't been upgraded yet.
 #[derive(Debug, Clone, Copy, Default, Serialize)]
 pub struct NodeCapabilitiesFlags {
+    pub no_redirect_proxy: bool,
     pub credential_ack_correlation: bool,
     pub remote_credential_crypto_v1: bool,
     pub proxy_max_body_size: Option<usize>,
@@ -465,8 +472,9 @@ impl Drop for NodeConnectionReservation {
 }
 
 /// JSON message sent from NyxID to a node for a proxy request.
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 struct WsProxyRequest {
+    follow_redirects: bool,
     #[serde(rename = "type")]
     msg_type: &'static str,
     request_id: String,
@@ -1011,6 +1019,8 @@ pub enum CredentialAckOutcome {
 /// seventh-round Codex P2).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct NodeCapabilitiesMsg {
+    #[serde(default)]
+    pub no_redirect_proxy: bool,
     /// Node echoes the `request_id` from a `credential_update` /
     /// `credential_remove` frame back in the resulting
     /// `credential_update_ack`. Required for strict ack-wait on the
@@ -1135,7 +1145,7 @@ pub fn compute_hmac_signature(
 pub fn sign_proxy_request(secret: &[u8], request: &NodeProxyRequest) -> NodeRequestSignature {
     let timestamp = chrono::Utc::now().to_rfc3339();
     let nonce = uuid::Uuid::new_v4().to_string();
-    let signature = compute_hmac_signature(
+    let mut signature = compute_hmac_signature(
         secret,
         &timestamp,
         &nonce,
@@ -1144,6 +1154,28 @@ pub fn sign_proxy_request(secret: &[u8], request: &NodeProxyRequest) -> NodeRequ
         request.query.as_deref(),
         request.body.as_deref(),
     );
+    if !request.follow_redirects {
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+        let body = request
+            .body
+            .as_deref()
+            .map(|body| base64::engine::general_purpose::STANDARD.encode(body))
+            .unwrap_or_default();
+        let message = format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\nfollow_redirects=false",
+            timestamp,
+            nonce,
+            request.method,
+            request.path,
+            request.query.as_deref().unwrap_or(""),
+            body
+        );
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
+        mac.update(message.as_bytes());
+        signature = hex::encode(mac.finalize().into_bytes());
+    }
     NodeRequestSignature {
         timestamp,
         nonce,
@@ -1759,6 +1791,16 @@ impl NodeWsManager {
                 },
             ));
         }
+        if !request.follow_redirects
+            && !conn
+                .capabilities
+                .lock()
+                .is_ok_and(|caps| caps.no_redirect_proxy)
+        {
+            return Err(NodeProxyFailure::before_dispatch(
+                AppError::ServiceValidationUnavailable,
+            ));
+        }
         let request_id = request.request_id.clone();
         let dispatch_gate = conn.proxy_dispatch_gate.clone();
         let _dispatch_guard = dispatch_gate.lock().map_err(|_| {
@@ -1802,6 +1844,7 @@ impl NodeWsManager {
 
         // Build WS message
         let ws_msg = WsProxyRequest {
+            follow_redirects: request.follow_redirects,
             msg_type: "proxy_request",
             request_id: request_id.clone(),
             service_id: request.service_id,
@@ -2553,6 +2596,7 @@ impl NodeWsManager {
             flags.credential_ack_correlation = caps.credential_ack_correlation;
             flags.remote_credential_crypto_v1 = caps.remote_credential_crypto_v1;
             flags.proxy_max_body_size = caps.proxy_max_body_size;
+            flags.no_redirect_proxy = caps.no_redirect_proxy;
         }
     }
 
@@ -4009,6 +4053,7 @@ mod tests {
             .send_proxy_request_classified_prepared(
                 "node-1",
                 NodeProxyRequest {
+                    follow_redirects: true,
                     request_id: "request-1".to_string(),
                     service_id: "service-1".to_string(),
                     service_slug: "service".to_string(),
@@ -4047,6 +4092,7 @@ mod tests {
             .send_proxy_request_classified_prepared(
                 "node-1",
                 NodeProxyRequest {
+                    follow_redirects: true,
                     request_id: "request-cancelled".to_string(),
                     service_id: "service-1".to_string(),
                     service_slug: "service".to_string(),
@@ -4080,6 +4126,7 @@ mod tests {
         mgr.record_capabilities(
             "node-small",
             &NodeCapabilitiesMsg {
+                no_redirect_proxy: false,
                 proxy_max_body_size: Some(4),
                 ..NodeCapabilitiesMsg::default()
             },
@@ -4089,6 +4136,7 @@ mod tests {
             .send_proxy_request(
                 "node-small",
                 NodeProxyRequest {
+                    follow_redirects: true,
                     request_id: "request-1".to_string(),
                     service_id: "service-1".to_string(),
                     service_slug: "service".to_string(),
@@ -4126,6 +4174,7 @@ mod tests {
             .send_proxy_request(
                 "node-legacy",
                 NodeProxyRequest {
+                    follow_redirects: true,
                     request_id: "request-legacy".to_string(),
                     service_id: "service-1".to_string(),
                     service_slug: "service".to_string(),
@@ -4501,6 +4550,7 @@ mod tests {
             .send_proxy_request(
                 "node-1",
                 NodeProxyRequest {
+                    follow_redirects: true,
                     request_id: "req-1".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),
@@ -4545,6 +4595,7 @@ mod tests {
             .send_proxy_request_classified(
                 "node-timeout",
                 NodeProxyRequest {
+                    follow_redirects: true,
                     request_id: "req-timeout".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),
@@ -4575,6 +4626,7 @@ mod tests {
             .send_proxy_request_classified(
                 "node-missing",
                 NodeProxyRequest {
+                    follow_redirects: true,
                     request_id: "req-not-dispatched".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),
@@ -4629,6 +4681,7 @@ mod tests {
             .send_proxy_request(
                 "node-1",
                 NodeProxyRequest {
+                    follow_redirects: true,
                     request_id: "req-buffer".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),
@@ -4696,6 +4749,7 @@ mod tests {
             .send_proxy_request_classified(
                 "node-1",
                 NodeProxyRequest {
+                    follow_redirects: true,
                     request_id: "req-2".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),
@@ -4753,6 +4807,7 @@ mod tests {
             .send_proxy_request_classified(
                 "node-1",
                 NodeProxyRequest {
+                    follow_redirects: true,
                     request_id: "req-cred-missing".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),
@@ -5143,6 +5198,7 @@ mod tests {
         mgr.record_capabilities(
             "node-cap",
             &NodeCapabilitiesMsg {
+                no_redirect_proxy: false,
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: true,
                 proxy_max_body_size: None,
@@ -5168,6 +5224,7 @@ mod tests {
         mgr.record_capabilities(
             "node-rci",
             &NodeCapabilitiesMsg {
+                no_redirect_proxy: false,
                 remote_credential_crypto_v1: true,
                 ..NodeCapabilitiesMsg::default()
             },

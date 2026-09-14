@@ -7824,3 +7824,69 @@ Content-Type: application/json
 Default limits:
 - **Per-IP:** 30 requests per 1-second window
 - **Global:** 10 requests/second sustained with burst capacity of 30
+
+### Connection validation
+
+`POST /api/v1/keys/{id}/validate` accepts `{ "force": false }`. It requires a
+human session or ordinary user access token; API keys, delegated tokens, relay
+tokens, and service accounts are rejected. Read access shows the key; validation
+requires proxy permission. Resource lookup uses the same not-found-shaped ACL as
+`GET /keys/{id}`, then the actual caller must pass the proxy's service scope,
+organization role, admin-only execution rule, and token restrictions. A read-only
+viewer cannot trigger a probe.
+
+The response is an observation, including unsuccessful checks:
+
+```json
+{
+  "user_service_id": "<uuid>",
+  "validator_id": "github_user_v1",
+  "validator_version": 1,
+  "outcome": "authenticated",
+  "claim": "GitHub accepted this credential for the authenticated user endpoint. Repository access, organization SSO, and write permissions require separate checks.",
+  "checked_at": "2026-09-14T12:00:00Z",
+  "valid_until": "2026-09-14T12:05:00Z",
+  "reason_code": "authenticated"
+}
+```
+
+| Profile | What an authenticated observation proves |
+| --- | --- |
+| `github_user_v1` | GitHub accepted the credential at `/user`; repository access, organization SSO, and write permissions are separate. |
+| `llm_models_v1` | The connection returned a non-empty model list; inference permission, model availability, and sufficient credit are separate. Cohere uses its documented absolute `/v1/models` target while its normal proxy base stays `/v2`. |
+| `openrouter_key_v1` | OpenRouter returned API-key metadata from `/key`; its public `/models` endpoint is not used. |
+| `slack_auth_test_v1` | Slack accepted the token in `auth.test`; channel access and messaging permissions are separate. |
+| `lark_user_info_v1` | Lark or Feishu accepted a user token for user information; other resource permissions are separate. |
+| `telegram_get_me_v1` | Telegram accepted the bot token in `getMe`; access to a particular chat is separate. |
+| `twitch_users_v1` | Twitch accepted the token and Client-Id at `users`; other scopes are separate. |
+
+Outcomes are `authenticated`, `permission_denied`, `credential_rejected`,
+`configuration_error`, `billing_blocked`, `rate_limited`, `transport_unknown`, or
+`unsupported`. Provider bodies, model names, identities, tokens, and provider
+error text are never returned. Unsupported services, custom endpoints,
+`node_managed`, and `ssh_certificate` credentials receive no live probe in v1.
+A node agent without the advertised `no_redirect_proxy` capability receives no
+probe and reports `unsupported` with `reason_code: node_agent_upgrade_required`.
+An offline configured node reports `transport_unknown`.
+
+Fresh evidence is reusable for five minutes for display, bound to the profile
+version, execution authority, and credential revision. Future authorization gates
+must use a maximum age of 60 seconds; this observation never replaces execution
+checks or changes global credential health. The shared OAuth refresh path retains
+its existing credential lifecycle behavior. `force: true` bypasses freshness reuse
+but cannot bypass admission limits. Concurrent requests join the current attempt.
+The limits are one probe per credential/profile/execution digest per 60 seconds,
+two active checks per session, and 32 per deployment, coordinated in MongoDB.
+Provider `Retry-After` delays are honored. Admission failures use error 12009
+(429), unavailable or superseded attempts use 12008 (503), and locally rejected
+validation uses 12007 (422). A foreground request waits at most ten seconds for
+an observation; an already-started coordinated refresh can settle in the background.
+
+All v1 profiles are non-billable in NyxID. **Provider rate limits still apply.**
+Direct probes allow only seeded public provider targets, resolve and pin public
+IP addresses per attempt, disable redirects, and bound the decoded body and
+entire network exchange to four seconds. Node probes disable redirects and have
+the same server-enforced deadline and body cap. DNS pinning does not apply to
+node egress: the node executes inside its owner's network, whose SSRF boundary
+belongs to that owner. Checks run only on an explicit click; the existing Agent
+Key verification UI continues to test allowed/denied scope separately.

@@ -538,6 +538,7 @@ mod tests {
             remote_credential_crypto_v1: false,
             proxy_max_body_size: None,
             capabilities_resolved: false,
+            no_redirect_proxy: false,
         });
 
         assert!(!super::is_node_dispatchable(&node, &manager));

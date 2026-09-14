@@ -270,7 +270,7 @@ fn normalize_host(host: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
+pub(crate) fn is_private_or_internal_ip(ip: std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(ipv4) => {
             ipv4.is_loopback()

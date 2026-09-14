@@ -459,6 +459,7 @@ fn node_session_info(
                 credential_ack_correlation: owner.credential_ack_correlation,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
                 proxy_max_body_size: owner.proxy_max_body_size,
+                no_redirect_proxy: owner.no_redirect_proxy,
             },
         }
     } else if node.connection_owner.is_none() {
@@ -5779,6 +5780,7 @@ mod tests {
                 credential_ack_correlation: true,
                 remote_credential_crypto_v1: true,
                 proxy_max_body_size: Some(100 * 1024 * 1024),
+                no_redirect_proxy: false,
             },
             capabilities_resolved: true,
             dispatch: NodeDispatchInfo {

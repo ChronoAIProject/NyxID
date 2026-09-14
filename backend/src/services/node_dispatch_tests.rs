@@ -152,6 +152,7 @@ fn test_node(id: &str) -> Node {
 
 fn proxy_request(request_id: &str) -> NodeProxyRequest {
     NodeProxyRequest {
+        follow_redirects: true,
         request_id: request_id.to_string(),
         service_id: "service-id".to_string(),
         service_slug: "service-slug".to_string(),

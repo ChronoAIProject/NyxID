@@ -106,6 +106,7 @@ impl NodeDispatch {
                 credential_ack_correlation: owner.credential_ack_correlation,
                 remote_credential_crypto_v1: owner.remote_credential_crypto_v1,
                 proxy_max_body_size: owner.proxy_max_body_size,
+                no_redirect_proxy: owner.no_redirect_proxy,
             },
         }
     }
@@ -2145,6 +2146,7 @@ mod tests {
             remote_credential_crypto_v1: true,
             proxy_max_body_size: Some(1024),
             capabilities_resolved: true,
+            no_redirect_proxy: false,
         }
     }
 

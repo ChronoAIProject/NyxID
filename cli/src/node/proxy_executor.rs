@@ -178,7 +178,29 @@ pub async fn execute_proxy_request(
     }
 
     let method = reqwest::Method::from_bytes(method_str.as_bytes()).unwrap_or(reqwest::Method::GET);
-    let mut req_builder = http_client.request(method.clone(), &url);
+    let no_redirect_client;
+    let client = if follows_redirects(request) {
+        http_client
+    } else {
+        no_redirect_client = match build_no_redirect_client() {
+            Ok(client) => client,
+            Err(_) => {
+                let _ = send_ws_message(
+                    tx,
+                    proxy_error_response(
+                        request_id,
+                        "Validation transport unavailable",
+                        502,
+                        false,
+                    ),
+                )
+                .await;
+                return;
+            }
+        };
+        &no_redirect_client
+    };
+    let mut req_builder = client.request(method.clone(), &url);
 
     // 4. Collect forwarded headers. We accumulate them in `forwarded_headers`
     //    as well as applying them to the builder so SigV4 can sign over the
@@ -285,7 +307,8 @@ pub async fn execute_proxy_request(
     match req_builder.send().await {
         Ok(response) => {
             let status = response.status().as_u16();
-            let is_streaming = should_stream_response(&response, status);
+            let is_streaming =
+                !follows_redirects(request) || should_stream_response(&response, status);
 
             if is_streaming {
                 stream_proxy_response(
@@ -346,6 +369,17 @@ pub async fn execute_proxy_request(
             .await;
         }
     }
+}
+
+fn follows_redirects(request: &serde_json::Value) -> bool {
+    request["follow_redirects"].as_bool().unwrap_or(true)
+}
+
+fn build_no_redirect_client() -> Result<Client> {
+    Ok(Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(4))
+        .build()?)
 }
 
 pub fn build_http_client() -> Result<Client> {
@@ -609,5 +643,75 @@ mod tests {
     fn append_query_param_handles_empty_url() {
         let url = append_query_param("", "k", "v");
         assert_eq!(url, "?k=v");
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::super::{
+        config::{CredentialConfig, NodeConfig},
+        encryption::LocalEncryption,
+    };
+    use super::*;
+    use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+
+    #[tokio::test]
+    async fn validation_follow_redirects_flag_preserves_default_and_blocks_redirect() {
+        let server = MockServer::start().await;
+        Mock::given(path("/redirect"))
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/private", server.uri())),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(path("/private"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("private response"))
+            .mount(&server)
+            .await;
+        let dir = tempfile::tempdir().unwrap();
+        let encryption = LocalEncryption::load_or_generate(dir.path()).unwrap();
+        let mut config = NodeConfig::new(server.uri(), "test-node".into(), "file".into());
+        let credential: CredentialConfig =
+            serde_json::from_value(serde_json::json!({ "injection_method": "none" })).unwrap();
+        config.credentials.insert("fixture".into(), credential);
+        let credentials = CredentialStore::from_config(&config, &encryption).unwrap();
+        for flag in [None, Some(true), Some(false)] {
+            let mut request = serde_json::json!({ "request_id": "00000000-0000-4000-8000-000000000001", "service_slug": "fixture", "base_url": server.uri(), "method": "GET", "path": "/redirect", "headers": [] });
+            if let Some(flag) = flag {
+                request["follow_redirects"] = flag.into();
+            }
+            let (tx, mut rx) = mpsc::channel(16);
+            execute_proxy_request(
+                &request,
+                &credentials,
+                None,
+                &tokio::sync::Mutex::new(ReplayGuard::new()),
+                &NodeMetrics::new(),
+                &tx,
+                false,
+                &build_http_client().unwrap(),
+            )
+            .await;
+            let NodeWsMessage::Text(frame) = rx.recv().await.unwrap() else {
+                panic!("expected response start")
+            };
+            let response: serde_json::Value = serde_json::from_str(&frame).unwrap();
+            assert_eq!(
+                response["status"],
+                if flag == Some(false) { 302 } else { 200 }
+            );
+            if flag == Some(false) {
+                assert_eq!(response["type"], "proxy_response_start");
+            }
+        }
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|request| request.url.path() == "/private")
+                .count(),
+            2
+        );
     }
 }

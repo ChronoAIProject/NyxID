@@ -34,6 +34,16 @@ macro_rules! collect_billing_route_specs {
     }};
 }
 
+macro_rules! service_validation_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            ("/{key_id}/validate", "/api/v1/keys/{id}/validate", "handlers::keys::validate_key",
+            post(handlers::keys::validate_key),
+            crate::services::billing::route_inventory::BillingRoutePolicy::Exempt("service_validation"))
+        )
+    };
+}
+
 macro_rules! llm_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -397,6 +407,10 @@ pub(crate) fn mounted_billing_route_inventory()
     ));
     routes.extend(public_mcp_billing_routes!(collect_billing_route_specs, ()));
     routes.extend(oracle_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(service_validation_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes
 }
 
@@ -1199,24 +1213,25 @@ fn build_router_internal(
             post(handlers::node_agent::decline_pending_credential),
         );
 
-    let unified_key_routes = Router::new()
-        .route(
-            "/",
-            get(handlers::keys::list_keys).post(handlers::keys::create_key),
-        )
-        .route(
-            "/{key_id}",
-            get(handlers::keys::get_key)
-                .put(handlers::keys::update_key)
-                .delete(handlers::keys::delete_key),
-        )
-        // Authorization-evidence projection of `/{key_id}`. Same ACL, strictly
-        // fewer properties: an evidence reader must not be handed the
-        // free-text carriers that its own secret-shape tripwire rejects.
-        .route(
-            "/{key_id}/authorization",
-            get(handlers::keys::get_key_authorization),
-        );
+    let unified_key_routes =
+        service_validation_billing_routes!(register_billing_routes, Router::new())
+            .route(
+                "/",
+                get(handlers::keys::list_keys).post(handlers::keys::create_key),
+            )
+            .route(
+                "/{key_id}",
+                get(handlers::keys::get_key)
+                    .put(handlers::keys::update_key)
+                    .delete(handlers::keys::delete_key),
+            )
+            // Authorization-evidence projection of `/{key_id}`. Same ACL, strictly
+            // fewer properties: an evidence reader must not be handed the
+            // free-text carriers that its own secret-shape tripwire rejects.
+            .route(
+                "/{key_id}/authorization",
+                get(handlers::keys::get_key_authorization),
+            );
 
     let connect_link_routes = Router::new()
         .route("/", post(handlers::connect_links::create_connect_link))

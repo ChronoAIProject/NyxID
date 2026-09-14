@@ -2806,6 +2806,7 @@ mod tests {
             .send_proxy_request(
                 "node-1",
                 NodeProxyRequest {
+                    follow_redirects: true,
                     request_id: "req-stream-invalid".to_string(),
                     service_id: "svc-1".to_string(),
                     service_slug: "demo".to_string(),
