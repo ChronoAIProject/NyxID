@@ -12,7 +12,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
     COLLECTION_NAME as DOWNSTREAM_SERVICES, DownstreamService,
 };
-use crate::models::provider_config::{COLLECTION_NAME as PROVIDER_CONFIGS, ProviderConfig};
+use crate::models::provider_config::ProviderConfig;
 use crate::models::ssh_auth_mode::SshAuthMode;
 use crate::models::user_api_key::UserApiKey;
 use crate::models::user_endpoint::{COLLECTION_NAME as USER_ENDPOINTS, UserEndpoint};
@@ -1232,22 +1232,27 @@ pub async fn list_keys(
 ) -> AppResult<Json<KeyListResponse>> {
     let user_id_str = auth_user.user_id.to_string();
 
-    // Lazily auto-provision platform-managed catalog services for the user.
-    unified_key_service::auto_provision_no_auth_services(&state.db, &user_id_str).await?;
-
+    let providers = crate::services::platform_key_service::load_providers(&state.db).await?;
     let views =
-        unified_key_service::list_keys(&state.db, &state.encryption_keys, &user_id_str).await?;
+        unified_key_service::list_keys(&state.db, &state.encryption_keys, &user_id_str, &providers)
+            .await?;
     let mut keys = views
         .into_iter()
         .map(key_response_from_view)
         .collect::<Vec<_>>();
-    enrich_key_responses(
+    enrich_key_node_metadata(
         &state.db,
         &state.node_ws_manager,
         &user_id_str,
         state.config.node_heartbeat_timeout_secs,
+        &mut keys,
+    )
+    .await?;
+    enrich_key_discovery_metadata(
+        &state.db,
         state.config.base_url.trim_end_matches('/'),
         &mut keys,
+        Some(&providers),
     )
     .await?;
     Ok(Json(KeyListResponse { keys }))
@@ -2766,12 +2771,11 @@ fn key_response_from_view(view: unified_key_service::KeyView) -> KeyResponse {
     }
 }
 
-async fn enrich_key_responses(
+async fn enrich_key_node_metadata(
     db: &mongodb::Database,
     ws_manager: &crate::services::node_ws_manager::NodeWsManager,
     actor_user_id: &str,
     heartbeat_timeout_secs: u64,
-    base_url: &str,
     keys: &mut [KeyResponse],
 ) -> AppResult<()> {
     let mut distinct_node_ids = Vec::new();
@@ -2844,7 +2848,6 @@ async fn enrich_key_responses(
         }
     }
 
-    enrich_key_discovery_metadata(db, base_url, keys).await?;
     Ok(())
 }
 
@@ -2856,21 +2859,22 @@ async fn enrich_key_response(
     base_url: &str,
     key: &mut KeyResponse,
 ) -> AppResult<()> {
-    enrich_key_responses(
+    enrich_key_node_metadata(
         db,
         ws_manager,
         actor_user_id,
         heartbeat_timeout_secs,
-        base_url,
         std::slice::from_mut(key),
     )
-    .await
+    .await?;
+    enrich_key_discovery_metadata(db, base_url, std::slice::from_mut(key), None).await
 }
 
 async fn enrich_key_discovery_metadata(
     db: &mongodb::Database,
     base_url: &str,
     keys: &mut [KeyResponse],
+    providers: Option<&std::collections::HashMap<String, ProviderConfig>>,
 ) -> AppResult<()> {
     let catalog_ids: Vec<&str> = keys
         .iter()
@@ -2890,23 +2894,14 @@ async fn enrich_key_discovery_metadata(
         .map(|service| (service.id.as_str(), service))
         .collect();
 
-    let provider_ids: Vec<&str> = catalog_services
-        .iter()
-        .filter_map(|service| service.provider_config_id.as_deref())
-        .collect();
-    let providers: Vec<ProviderConfig> = if provider_ids.is_empty() {
-        vec![]
-    } else {
-        db.collection::<ProviderConfig>(PROVIDER_CONFIGS)
-            .find(doc! { "_id": { "$in": &provider_ids } })
-            .await?
-            .try_collect()
-            .await?
+    let loaded_providers;
+    let providers = match providers {
+        Some(providers) => providers,
+        None => {
+            loaded_providers = crate::services::platform_key_service::load_providers(db).await?;
+            &loaded_providers
+        }
     };
-    let provider_by_id: std::collections::HashMap<&str, &ProviderConfig> = providers
-        .iter()
-        .map(|provider| (provider.id.as_str(), provider))
-        .collect();
 
     let key_ids: Vec<&str> = keys.iter().map(|key| key.id.as_str()).collect();
     let services: Vec<UserService> = if key_ids.is_empty() {
@@ -2970,8 +2965,8 @@ async fn enrich_key_discovery_metadata(
             .as_deref()
             .and_then(|catalog_id| catalog_by_id.get(catalog_id))
             .and_then(|catalog| catalog.provider_config_id.as_deref())
-            .and_then(|provider_id| provider_by_id.get(provider_id))
-            .and_then(|provider| crate::services::oauth_revocation::effective_revocation(provider))
+            .and_then(|provider_id| providers.get(provider_id))
+            .and_then(crate::services::oauth_revocation::effective_revocation)
             .map(|config| KeyRevocationResponse {
                 revokes_grant: config.revokes_grant,
             });

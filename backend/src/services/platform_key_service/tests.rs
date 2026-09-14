@@ -951,6 +951,7 @@ async fn server_chosen_accepts_implicit_and_explicit_public_only() {
 fn owner_grant_intersection_is_independent_of_allowlist_size() {
     let grants = OwnerGrants {
         actor_id: "person".into(),
+        memberships: vec![],
         active_owner_ids: ["person", "org-1", "org-2", "org-3"]
             .into_iter()
             .map(str::to_string)
@@ -1343,6 +1344,14 @@ async fn llm_status_fetches_memberships_once_for_many_providers_and_owners() {
             .unwrap(),
         1
     );
+    assert_eq!(
+        db.collection::<bson::Document>("system.profile")
+            .count_documents(doc! {"command.find": PROVIDERS})
+            .await
+            .unwrap(),
+        1,
+        "status must reuse its provider batch for every owner",
+    );
     for slug in ["openai", "xai", "deepseek"] {
         assert_eq!(
             statuses
@@ -1380,4 +1389,267 @@ fn legacy_and_explicit_master_credentials_cannot_use_owner_node_routes() {
     target.service.requires_user_credential = false;
     target.auth_method = "none".into();
     assert!(!proxy_service::uses_server_held_master(&target));
+}
+
+/// Profiles only this test's isolated database, never the shared server's
+/// configuration. Counts deltas so multiple requests can test live revocation.
+async fn profile_listing<T>(
+    db: &mongodb::Database,
+    request: impl std::future::Future<Output = AppResult<T>>,
+) -> T {
+    let profile = db.collection::<bson::Document>("system.profile");
+    let before_memberships = profile
+        .count_documents(doc! {"command.find": MEMBERSHIPS})
+        .await
+        .unwrap();
+    let before_providers = profile
+        .count_documents(doc! {"command.find": PROVIDERS})
+        .await
+        .unwrap();
+    db.run_command(doc! {"profile": 2}).await.unwrap();
+    let result = request.await;
+    db.run_command(doc! {"profile": 0}).await.unwrap();
+    let result = result.unwrap();
+    assert_eq!(
+        profile
+            .count_documents(doc! {"command.find": MEMBERSHIPS})
+            .await
+            .unwrap()
+            - before_memberships,
+        1,
+        "each request must fetch memberships once, independent of service/owner count"
+    );
+    assert_eq!(
+        profile
+            .count_documents(doc! {"command.find": PROVIDERS})
+            .await
+            .unwrap()
+            - before_providers,
+        1,
+        "each request must batch providers once"
+    );
+    result
+}
+
+async fn listing_fixture(db: &mongodb::Database) -> (String, Vec<String>, Vec<DownstreamService>) {
+    let person = owner(db, UserType::Person).await;
+    let mut orgs = vec![];
+    for role in [
+        OrgRole::Member,
+        OrgRole::Admin,
+        OrgRole::Member,
+        OrgRole::Viewer,
+    ] {
+        let org = owner(db, UserType::Org).await;
+        db.collection::<OrgMembership>(MEMBERSHIPS)
+            .insert_one(test_membership(&org, &person, role, None))
+            .await
+            .unwrap();
+        orgs.push(org);
+    }
+    let mut services = vec![];
+    for slug in ["openai", "xai", "deepseek"] {
+        let now = bson::DateTime::now();
+        let provider: ProviderConfig = bson::from_document(doc! {
+            "_id": uuid::Uuid::new_v4().to_string(), "slug": slug,
+            "name": slug, "provider_type": "api_key", "is_active": true,
+            "created_by": "test", "created_at": now, "updated_at": now,
+        })
+        .unwrap();
+        db.collection::<ProviderConfig>(PROVIDERS)
+            .insert_one(&provider)
+            .await
+            .unwrap();
+        let mut service = platform_service();
+        service.slug = format!("llm-{slug}");
+        service.name = slug.into();
+        service.provider_config_id = Some(provider.id);
+        service.requires_user_credential = true;
+        service.visibility = "private".into();
+        service.service_category = "connection".into();
+        service.inference = inference_service::default_inference(&service.slug);
+        let config = service.platform_key.as_mut().unwrap();
+        config.audience = PlatformKeyAudience::Restricted;
+        config.allowed_owner_ids = orgs.clone();
+        config.allowed_owner_ids.push(person.clone());
+        db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        services.push(service);
+    }
+    (person, orgs, services)
+}
+
+#[tokio::test]
+async fn catalog_list_fetches_memberships_and_providers_once_for_many_platform_entries() {
+    let db = connect_transaction_test_database("catalog_grant_batch").await;
+    let enc = test_encryption_keys();
+    let (person, orgs, _) = listing_fixture(&db).await;
+    // Only org grants: the actor must inherit these via its membership snapshot.
+    db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_many(
+            doc! {},
+            doc! {"$set": {"platform_key.allowed_owner_ids": &orgs}},
+        )
+        .await
+        .unwrap();
+    let entries = profile_listing(&db, catalog_service::list_catalog(&db, &enc, &person)).await;
+    assert_eq!(entries.len(), 3);
+    assert!(
+        entries.iter().all(
+            |e| e.platform_key.available && e.inference.as_ref().unwrap().binding == "platform"
+        )
+    );
+
+    // Provider eligibility is refreshed on the next request, without a per-row read.
+    db.collection::<ProviderConfig>(PROVIDERS)
+        .update_one(
+            doc! {"slug": "xai"},
+            doc! {"$set": {"requires_gateway_url": true}},
+        )
+        .await
+        .unwrap();
+    let entries = profile_listing(&db, catalog_service::list_catalog_all(&db, &enc, &person)).await;
+    assert_eq!(
+        entries.len(),
+        2,
+        "ineligible private platform entry must stay hidden"
+    );
+
+    // The sole remaining membership is a viewer: it cannot inherit a grant.
+    db.collection::<OrgMembership>(MEMBERSHIPS)
+        .update_many(
+            doc! {"role": {"$ne": "viewer"}},
+            doc! {"$set": {"revoked_at": bson::DateTime::now()}},
+        )
+        .await
+        .unwrap();
+    let entries = profile_listing(&db, catalog_service::list_catalog(&db, &enc, &person)).await;
+    assert!(entries.is_empty());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn list_keys_shares_one_grant_and_provider_batch_with_org_provisioning_and_reconciliation() {
+    use axum::extract::State;
+    let db = connect_transaction_test_database("keys_grant_batch").await;
+    let state = crate::test_utils::test_app_state(db.clone());
+    let (person, orgs, _) = listing_fixture(&db).await;
+    let keys = profile_listing(&db, async {
+        let providers = load_providers(&db).await?;
+        unified_key_service::list_keys(&db, &state.encryption_keys, &person, &providers).await
+    })
+    .await;
+    assert_eq!(
+        keys.len(),
+        12,
+        "three services for the person and each of three proxy-capable orgs"
+    );
+    assert!(keys.iter().all(|k| k.platform_key_available
+        && k.auto_connected
+        && k.credential_binding == "platform"));
+
+    // Exercise the HTTP entry point too, including already-provisioned row reconciliation.
+    let response = profile_listing(
+        &db,
+        crate::handlers::keys::list_keys(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&person),
+        ),
+    )
+    .await;
+    assert_eq!(response.0.keys.len(), 12);
+
+    db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_many(
+            doc! {},
+            doc! {"$pull": {"platform_key.allowed_owner_ids": &orgs[0]}},
+        )
+        .await
+        .unwrap();
+    let response = profile_listing(
+        &db,
+        crate::handlers::keys::list_keys(State(state), crate::test_utils::test_auth_user(&person)),
+    )
+    .await;
+    assert_eq!(
+        response.0.keys.len(),
+        9,
+        "revoked org rows must be reconciled without another membership fetch"
+    );
+    assert_eq!(
+        db.collection::<UserService>(crate::models::user_service::COLLECTION_NAME)
+            .count_documents(doc! {"user_id": &orgs[0]})
+            .await
+            .unwrap(),
+        0
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn mcp_discovery_and_callable_services_share_grants_and_providers_per_request() {
+    use crate::services::{mcp_service, node_ws_manager::NodeWsManager};
+    let db = connect_transaction_test_database("mcp_grant_batch").await;
+    let (person, _, catalogs) = listing_fixture(&db).await;
+    let discovered = profile_listing(
+        &db,
+        mcp_service::discover_services(&db, &person, None, None),
+    )
+    .await;
+    assert_eq!(discovered["count"], 3);
+    assert!(
+        discovered["services"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["platform_key"]["available"] == true
+                && s["inference"]["binding"] == "platform")
+    );
+    for catalog in catalogs {
+        unified_key_service::create_platform_key(
+            &db,
+            &person,
+            &person,
+            &catalog.slug,
+            &catalog.name,
+            None,
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    let manager = NodeWsManager::new(30, 100);
+    let tools = profile_listing(&db, mcp_service::load_user_tools(&db, &manager, &person)).await;
+    assert_eq!(tools.len(), 3);
+    assert!(tools.iter().all(|t| t.executable));
+    // Scoped operation catalog computes both visible and pre-node-scope views;
+    // even those two passes must share a single request snapshot.
+    profile_listing(
+        &db,
+        mcp_service::load_operation_catalog(
+            &db,
+            &manager,
+            &person,
+            mcp_service::NodeScope::Allowed(&[]),
+            mcp_service::ServiceScope::Unrestricted,
+        ),
+    )
+    .await;
+
+    db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME)
+        .update_many(
+            doc! {},
+            doc! {"$set": {"platform_key.allowed_owner_ids": []}},
+        )
+        .await
+        .unwrap();
+    let tools = profile_listing(&db, mcp_service::load_user_tools(&db, &manager, &person)).await;
+    assert!(
+        tools.is_empty(),
+        "a new request must recheck grants for explicit platform rows"
+    );
+    db.drop().await.unwrap();
 }

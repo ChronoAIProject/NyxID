@@ -712,7 +712,19 @@ pub async fn load_operation_catalog(
     service_scope: ServiceScope<'_>,
 ) -> AppResult<McpOperationCatalog> {
     let node_scope_restricted = matches!(node_scope, NodeScope::Allowed(_));
-    let mut visible = load_user_tools_inner(db, node_ws_manager, user_id, true, node_scope).await?;
+    let grants =
+        crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
+    let providers = crate::services::platform_key_service::load_providers(db).await?;
+    let mut visible = load_user_tools_with_grants(
+        db,
+        node_ws_manager,
+        user_id,
+        true,
+        node_scope,
+        &grants,
+        &providers,
+    )
+    .await?;
     visible.retain(|service| service_scope.permits(service));
 
     // A boolean reason is safe for services already visible through service
@@ -723,9 +735,16 @@ pub async fn load_operation_catalog(
             .iter()
             .map(|service| (service.service_id.clone(), service.executable))
             .collect();
-        let mut before_node_scope =
-            load_user_tools_inner(db, node_ws_manager, user_id, true, NodeScope::Unrestricted)
-                .await?;
+        let mut before_node_scope = load_user_tools_with_grants(
+            db,
+            node_ws_manager,
+            user_id,
+            true,
+            NodeScope::Unrestricted,
+            &grants,
+            &providers,
+        )
+        .await?;
         before_node_scope.retain(|service| service_scope.permits(service));
         before_node_scope
             .iter()
@@ -907,6 +926,30 @@ async fn load_user_tools_inner(
     include_non_executable: bool,
     scope: NodeScope<'_>,
 ) -> AppResult<Vec<McpToolService>> {
+    let grants =
+        crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
+    let providers = crate::services::platform_key_service::load_providers(db).await?;
+    load_user_tools_with_grants(
+        db,
+        node_ws_manager,
+        user_id,
+        include_non_executable,
+        scope,
+        &grants,
+        &providers,
+    )
+    .await
+}
+
+async fn load_user_tools_with_grants(
+    db: &mongodb::Database,
+    node_ws_manager: &NodeWsManager,
+    user_id: &str,
+    include_non_executable: bool,
+    scope: NodeScope<'_>,
+    grants: &crate::services::platform_key_service::OwnerGrants,
+    providers: &HashMap<String, crate::models::provider_config::ProviderConfig>,
+) -> AppResult<Vec<McpToolService>> {
     // -----------------------------------------------------------------------
     // Phase 1: Load platform (DownstreamService) services
     // -----------------------------------------------------------------------
@@ -1027,9 +1070,16 @@ async fn load_user_tools_inner(
     // Phase 2: Load UserService tools (personal + org-shared)
     // -----------------------------------------------------------------------
 
-    let all_user_services =
-        load_callable_user_services(db, node_ws_manager, user_id, include_non_executable, scope)
-            .await?;
+    let all_user_services = load_callable_user_services(
+        db,
+        node_ws_manager,
+        user_id,
+        include_non_executable,
+        scope,
+        grants,
+        providers,
+    )
+    .await?;
 
     // Collect catalog IDs and slugs from *executable* user services for dedup
     let executable_catalog_ids: HashSet<&str> = all_user_services
@@ -1092,9 +1142,7 @@ async fn load_user_tools_inner(
         blocked_slugs.insert(svc.slug.clone());
     }
     {
-        use crate::services::org_service;
-        let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
-        for m in &memberships {
+        for m in grants.memberships() {
             if !m.role.can_proxy() {
                 continue;
             }
@@ -1533,9 +1581,9 @@ async fn load_callable_user_services(
     user_id: &str,
     include_non_executable: bool,
     scope: NodeScope<'_>,
+    grants: &crate::services::platform_key_service::OwnerGrants,
+    providers: &HashMap<String, crate::models::provider_config::ProviderConfig>,
 ) -> AppResult<Vec<ResolvedUserService>> {
-    use crate::services::org_service;
-
     // -- Personal services --
     let personal_services: Vec<UserService> = db
         .collection::<UserService>(USER_SERVICES)
@@ -1551,10 +1599,9 @@ async fn load_callable_user_services(
         .collect();
 
     // -- Org-shared services --
-    let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
     let mut org_services: Vec<(UserService, String)> = Vec::new(); // (service, org_user_id)
 
-    for m in &memberships {
+    for m in grants.memberships() {
         if !m.role.can_proxy() {
             continue; // Viewers cannot call MCP tools
         }
@@ -1585,6 +1632,24 @@ async fn load_callable_user_services(
             org_services.push((svc, m.org_user_id.clone()));
         }
     }
+
+    // Resolve catalog-held credentials from one batch shared across all owners.
+    let catalog_ids: Vec<&str> = personal_services
+        .iter()
+        .chain(org_services.iter().map(|(s, _)| s))
+        .filter_map(|s| s.catalog_service_id.as_deref())
+        .collect();
+    let catalogs: Vec<DownstreamService> = if catalog_ids.is_empty() {
+        vec![]
+    } else {
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find(doc! { "_id": { "$in": &catalog_ids } })
+            .await?
+            .try_collect()
+            .await?
+    };
+    let catalog_map: HashMap<&str, &DownstreamService> =
+        catalogs.iter().map(|c| (c.id.as_str(), c)).collect();
 
     // Batch-load active API keys
     all_api_key_ids.sort_unstable();
@@ -1685,10 +1750,11 @@ async fn load_callable_user_services(
             .get(&us.id)
             .copied()
             .unwrap_or(false);
-        let cred_info = match platform_credential_classification(db, &us).await? {
-            Some(info) => info,
-            None => classify_credential(&us, &active_key_map, has_route),
-        };
+        let cred_info =
+            match platform_credential_classification(&us, &catalog_map, providers, grants) {
+                Some(info) => info,
+                None => classify_credential(&us, &active_key_map, has_route),
+            };
         if !include_non_executable && !cred_info.is_executable {
             continue;
         }
@@ -1728,10 +1794,11 @@ async fn load_callable_user_services(
             .get(&us.id)
             .copied()
             .unwrap_or(false);
-        let cred_info = match platform_credential_classification(db, &us).await? {
-            Some(info) => info,
-            None => classify_credential(&us, &active_key_map, has_route),
-        };
+        let cred_info =
+            match platform_credential_classification(&us, &catalog_map, providers, grants) {
+                Some(info) => info,
+                None => classify_credential(&us, &active_key_map, has_route),
+            };
         if !include_non_executable && !cred_info.is_executable {
             continue;
         }
@@ -1777,33 +1844,37 @@ struct CredentialClassification {
 /// `node_managed` keys do NOT provide a server-side credential (they decrypt to
 /// None) so they require an online node. Regular active keys provide a server
 /// credential. No-auth services are always executable.
-async fn platform_credential_classification(
-    db: &mongodb::Database,
+fn platform_credential_classification(
     service: &UserService,
-) -> AppResult<Option<CredentialClassification>> {
+    catalogs: &HashMap<&str, &DownstreamService>,
+    providers: &HashMap<String, crate::models::provider_config::ProviderConfig>,
+    grants: &crate::services::platform_key_service::OwnerGrants,
+) -> Option<CredentialClassification> {
     if crate::services::platform_key_service::binding(service) != "platform"
         || (service.auth_method == "none" && service.credential_binding.is_none())
     {
-        return Ok(None);
+        return None;
     }
-    let available = if let Some(id) = &service.catalog_service_id {
-        if let Some(catalog) = db
-            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .find_one(doc! { "_id": id })
-            .await?
-        {
-            crate::services::platform_key_service::available(db, &catalog, &service.user_id).await?
-                && service.node_id.is_none()
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    Ok(Some(CredentialClassification {
+    let available = service
+        .catalog_service_id
+        .as_deref()
+        .and_then(|id| catalogs.get(id))
+        .is_some_and(|catalog| {
+            service.node_id.is_none()
+                && crate::services::platform_key_service::available_with_grants(
+                    catalog,
+                    catalog
+                        .provider_config_id
+                        .as_ref()
+                        .and_then(|id| providers.get(id)),
+                    &service.user_id,
+                    grants,
+                )
+        });
+    Some(CredentialClassification {
         is_executable: available,
         has_server_credential: available,
-    }))
+    })
 }
 
 fn classify_credential(
@@ -4632,6 +4703,9 @@ pub async fn discover_services(
         })
         .collect();
 
+    let grants =
+        crate::services::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
+    let providers = crate::services::platform_key_service::load_providers(db).await?;
     for result in &mut results {
         let Some(service) = all_services
             .iter()
@@ -4639,20 +4713,16 @@ pub async fn discover_services(
         else {
             continue;
         };
-        let available =
-            crate::services::platform_key_service::available(db, service, user_id).await?;
-        let provider = if let Some(id) = &service.provider_config_id {
-            db.collection::<crate::models::provider_config::ProviderConfig>(
-                crate::models::provider_config::COLLECTION_NAME,
-            )
-            .find_one(doc! { "_id": id })
-            .await?
-        } else {
-            None
-        };
+        let provider = service
+            .provider_config_id
+            .as_ref()
+            .and_then(|id| providers.get(id));
+        let available = crate::services::platform_key_service::available_with_grants(
+            service, provider, user_id, &grants,
+        );
         if let Some(inference) = crate::services::inference_service::view(
             service,
-            provider.as_ref().map(|p| p.slug.as_str()),
+            provider.map(|p| p.slug.as_str()),
             available,
         ) {
             result["inference"] =
@@ -5784,6 +5854,12 @@ mod tests {
             &member_id,
             false,
             NodeScope::Unrestricted,
+            &crate::services::platform_key_service::OwnerGrants::load_for_listing(&db, &member_id)
+                .await
+                .unwrap(),
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
         )
         .await
         .expect("load member-callable services");
@@ -5804,6 +5880,12 @@ mod tests {
             &member_id,
             false,
             NodeScope::Unrestricted,
+            &crate::services::platform_key_service::OwnerGrants::load_for_listing(&db, &member_id)
+                .await
+                .unwrap(),
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
         )
         .await
         .expect("reload member-callable services after enabling policy");
@@ -5827,6 +5909,12 @@ mod tests {
             &member_id,
             false,
             NodeScope::Unrestricted,
+            &crate::services::platform_key_service::OwnerGrants::load_for_listing(&db, &member_id)
+                .await
+                .unwrap(),
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
         )
         .await
         .expect("reload member-callable services after disabling policy");

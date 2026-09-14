@@ -444,6 +444,7 @@ async fn list_catalog_filtered(
             .await?
     };
 
+    let grants = super::platform_key_service::OwnerGrants::load_for_listing(db, user_id).await?;
     let mut resolved_entries = Vec::with_capacity(services.len());
     for svc in services {
         let provider = svc
@@ -469,7 +470,8 @@ async fn list_catalog_filtered(
             _ => false,
         };
 
-        let available = super::platform_key_service::available(db, &svc, user_id).await?;
+        let available =
+            super::platform_key_service::available_with_grants(&svc, provider, user_id, &grants);
         if svc.visibility == "private" && svc.created_by != user_id && !available {
             continue;
         }

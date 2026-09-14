@@ -477,8 +477,9 @@ pub async fn list_user_services_with_sources(
 pub async fn list_user_services_with_sources_including_disabled(
     db: &mongodb::Database,
     user_id: &str,
+    memberships: &[crate::models::org_membership::OrgMembership],
 ) -> AppResult<Vec<UserServiceWithSource>> {
-    list_user_services_with_sources_impl(db, user_id, false, true).await
+    list_user_services_with_sources_and_memberships(db, user_id, false, true, memberships).await
 }
 
 /// List services for an internal policy projection, retaining scope-denied
@@ -498,6 +499,24 @@ async fn list_user_services_with_sources_impl(
     include_scope_denied: bool,
     include_disabled: bool,
 ) -> AppResult<Vec<UserServiceWithSource>> {
+    let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
+    list_user_services_with_sources_and_memberships(
+        db,
+        user_id,
+        include_scope_denied,
+        include_disabled,
+        &memberships,
+    )
+    .await
+}
+
+async fn list_user_services_with_sources_and_memberships(
+    db: &mongodb::Database,
+    user_id: &str,
+    include_scope_denied: bool,
+    include_disabled: bool,
+    memberships: &[crate::models::org_membership::OrgMembership],
+) -> AppResult<Vec<UserServiceWithSource>> {
     let mut out: Vec<UserServiceWithSource> =
         list_user_services_inner(db, user_id, include_disabled)
             .await?
@@ -508,8 +527,6 @@ async fn list_user_services_with_sources_impl(
             })
             .collect();
 
-    let memberships = org_service::list_memberships_for_member(db, user_id, false).await?;
-
     // Cache org user lookups so we don't re-query the same org twice when
     // the user belongs to multiple memberships pointing at the same org
     // (shouldn't happen due to the unique index, but cheap to be safe).
@@ -518,7 +535,7 @@ async fn list_user_services_with_sources_impl(
 
     for m in memberships {
         let effective_scope =
-            crate::services::org_role_scope_service::effective_scope_for_membership(db, &m).await?;
+            crate::services::org_role_scope_service::effective_scope_for_membership(db, m).await?;
         let (org_name, org_avatar_url) = if let Some(meta) = org_meta_cache.get(&m.org_user_id) {
             meta.clone()
         } else {
@@ -2951,9 +2968,13 @@ mod tests {
         );
         assert_eq!(enforcement[0].id, enabled_id);
 
-        let management = list_user_services_with_sources_including_disabled(&db, &user_id)
+        let memberships = org_service::list_memberships_for_member(&db, &user_id, false)
             .await
             .unwrap();
+        let management =
+            list_user_services_with_sources_including_disabled(&db, &user_id, &memberships)
+                .await
+                .unwrap();
         let mut listed: Vec<&str> = management
             .iter()
             .map(|tagged| tagged.service.id.as_str())

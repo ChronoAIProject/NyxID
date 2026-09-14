@@ -4,7 +4,7 @@ use crate::models::org_membership::OrgMembership;
 use crate::models::provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig};
 use futures::TryStreamExt;
 use mongodb::bson::doc;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
@@ -56,12 +56,24 @@ pub fn binding(service: &UserService) -> &str {
 pub struct OwnerGrants {
     actor_id: String,
     active_owner_ids: HashSet<String>,
+    memberships: Vec<OrgMembership>,
 }
 
 impl OwnerGrants {
     pub async fn load(db: &mongodb::Database, owner_id: &str) -> AppResult<Self> {
         let memberships = org_service::find_active_memberships_with_timeout(db, owner_id).await?;
         Self::from_memberships(db, owner_id, &memberships).await
+    }
+
+    /// Listings already need memberships for org rows, including viewers. Keep
+    /// that snapshot with the grants so provisioning and rendering can share it.
+    pub async fn load_for_listing(db: &mongodb::Database, owner_id: &str) -> AppResult<Self> {
+        let memberships = org_service::list_memberships_for_member(db, owner_id, false).await?;
+        Self::from_memberships(db, owner_id, &memberships).await
+    }
+
+    pub fn memberships(&self) -> &[OrgMembership] {
+        &self.memberships
     }
 
     /// Reuse an existing request membership snapshot (e.g. LLM status).
@@ -94,6 +106,7 @@ impl OwnerGrants {
         Ok(Self {
             actor_id: owner_id.to_string(),
             active_owner_ids,
+            memberships: memberships.to_vec(),
         })
     }
 
@@ -140,22 +153,39 @@ pub async fn available(
         .permits(owner_id, &config.allowed_owner_ids))
 }
 
-/// Same live service/provider checks, sharing the caller's already-fetched ACL.
-pub async fn available_with_grants(
-    db: &mongodb::Database,
+/// Load provider configuration once for a listing/provisioning request, shared
+/// across its personal and org owners. Never retain this snapshot across requests.
+/// Catalog/status callers reuse their existing targeted provider batch instead.
+pub async fn load_providers(db: &mongodb::Database) -> AppResult<HashMap<String, ProviderConfig>> {
+    let providers: Vec<ProviderConfig> = db
+        .collection::<ProviderConfig>(PROVIDERS)
+        .find(doc! {})
+        .await?
+        .try_collect()
+        .await?;
+    Ok(providers.into_iter().map(|p| (p.id.clone(), p)).collect())
+}
+
+/// Pure authorization against this request's catalog, provider and owner
+/// snapshots. A missing/mismatched provider fails closed for linked services.
+pub fn available_with_grants(
     service: &DownstreamService,
+    provider: Option<&ProviderConfig>,
     owner_id: &str,
     grants: &OwnerGrants,
-) -> AppResult<bool> {
+) -> bool {
     if !has_platform_key(service)
-        || !provider_supports_platform_key(db, service.provider_config_id.as_deref()).await?
+        || service
+            .provider_config_id
+            .as_deref()
+            .is_some_and(|id| !provider.is_some_and(|p| p.id == id && !p.requires_gateway_url))
     {
-        return Ok(false);
+        return false;
     }
-    Ok(service.platform_key.as_ref().is_none_or(|config| {
+    service.platform_key.as_ref().is_none_or(|config| {
         config.audience == PlatformKeyAudience::Public
             || grants.permits(owner_id, &config.allowed_owner_ids)
-    }))
+    })
 }
 
 pub async fn require(

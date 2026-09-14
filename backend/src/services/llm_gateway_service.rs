@@ -51,15 +51,21 @@ pub async fn resolve_llm_service_by_slug(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("LLM provider '{provider_slug}' not found")))?;
 
-    let service = db
-        .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+    let service = resolve_llm_service_for_provider(db, &provider).await?;
+    Ok((service, provider))
+}
+
+/// Reuse a provider from the request's batch when choosing a gateway route.
+pub async fn resolve_llm_service_for_provider(
+    db: &mongodb::Database,
+    provider: &ProviderConfig,
+) -> AppResult<DownstreamService> {
+    db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .find_one(build_llm_service_filter(Some(&provider.id)))
         .await?
         .ok_or_else(|| {
-            AppError::NotFound(format!("LLM provider '{provider_slug}' is not available"))
-        })?;
-
-    Ok((service, provider))
+            AppError::NotFound(format!("LLM provider '{}' is not available", provider.slug))
+        })
 }
 
 /// Get the LLM gateway status for a user.
@@ -168,7 +174,7 @@ pub async fn get_llm_status(
         let mut best = LlmStatusRank::NotConnected;
         for owner in &credential_owners {
             let candidate =
-                lookup_user_service_status(db, owner, service, &platform_grants).await?;
+                lookup_user_service_status(db, owner, service, provider, &platform_grants).await?;
             if candidate > best {
                 best = candidate;
             }
@@ -194,13 +200,11 @@ pub async fn get_llm_status(
         }
 
         if crate::services::platform_key_service::available_with_grants(
-            db,
             service,
+            Some(provider),
             user_id,
             &platform_grants,
-        )
-        .await?
-        {
+        ) {
             best = LlmStatusRank::Ready;
         }
 
@@ -307,6 +311,7 @@ async fn lookup_user_service_status(
     db: &mongodb::Database,
     owner: &CredentialOwner,
     catalog: &DownstreamService,
+    provider: &ProviderConfig,
     platform_grants: &crate::services::platform_key_service::OwnerGrants,
 ) -> AppResult<LlmStatusRank> {
     let Some(us) =
@@ -322,13 +327,11 @@ async fn lookup_user_service_status(
     {
         return Ok(
             if crate::services::platform_key_service::available_with_grants(
-                db,
                 catalog,
+                Some(provider),
                 owner.user_id(),
                 platform_grants,
-            )
-            .await?
-            {
+            ) {
                 LlmStatusRank::Ready
             } else {
                 LlmStatusRank::NotConnected

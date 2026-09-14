@@ -29,9 +29,10 @@ use crate::models::user_service::{AUTO_PROVISION_SOURCE, UserService};
 use crate::models::ws_frame_injection::WsFrameInjection;
 use crate::services::{
     audit_service::{self, AuditActor},
-    catalog_spec_sync, node_service, oauth_revocation, ssh_service, user_api_key_service,
-    user_credentials_service, user_endpoint_service, user_service_service, user_token_service,
-    ws_frame_injector,
+    catalog_spec_sync, node_service, oauth_revocation,
+    platform_key_service::{self, OwnerGrants},
+    ssh_service, user_api_key_service, user_credentials_service, user_endpoint_service,
+    user_service_service, user_token_service, ws_frame_injector,
 };
 
 const MAX_SERVICE_SLUG_LEN: usize = 80;
@@ -1763,20 +1764,30 @@ pub async fn auto_provision_no_auth_services(
     db: &mongodb::Database,
     user_id: &str,
 ) -> AppResult<()> {
-    Box::pin(auto_provision_owner_services(db, user_id, false)).await?;
-    match crate::services::org_service::find_active_memberships_with_timeout(db, user_id).await {
-        Ok(memberships) => {
-            for membership in memberships.into_iter().filter(|m| m.role.can_proxy()) {
-                Box::pin(auto_provision_owner_services(
-                    db,
-                    &membership.org_user_id,
-                    true,
-                ))
-                .await?;
-            }
-        }
-        Err(AppError::NotFound(_)) => {}
-        Err(error) => return Err(error),
+    let grants = OwnerGrants::load_for_listing(db, user_id).await?;
+    let providers = platform_key_service::load_providers(db).await?;
+    auto_provision_with_grants(db, user_id, &grants, &providers).await
+}
+
+async fn auto_provision_with_grants(
+    db: &mongodb::Database,
+    user_id: &str,
+    grants: &OwnerGrants,
+    providers: &HashMap<String, ProviderConfig>,
+) -> AppResult<()> {
+    Box::pin(auto_provision_owner_services(
+        db, user_id, false, grants, providers,
+    ))
+    .await?;
+    for membership in grants.memberships().iter().filter(|m| m.role.can_proxy()) {
+        Box::pin(auto_provision_owner_services(
+            db,
+            &membership.org_user_id,
+            true,
+            grants,
+            providers,
+        ))
+        .await?;
     }
     Ok(())
 }
@@ -1785,6 +1796,8 @@ async fn auto_provision_owner_services(
     db: &mongodb::Database,
     user_id: &str,
     explicit_platform_only: bool,
+    grants: &OwnerGrants,
+    providers: &HashMap<String, ProviderConfig>,
 ) -> AppResult<()> {
     use crate::models::service_provider_requirement::{
         COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
@@ -1794,7 +1807,7 @@ async fn auto_provision_owner_services(
     // catalog entry is no longer eligible (deleted, deactivated, changed auth
     // method, gained an SPR, went private without consent, etc). This is
     // fully independent of the provisioning pipeline below.
-    reconcile_stale_auto_provisions(db, user_id).await;
+    reconcile_stale_auto_provisions(db, user_id, grants, providers).await;
 
     // Find all active catalog services that could be user-callable without a
     // user-owned credential. The finer auth/provider-requirement predicate is
@@ -1819,7 +1832,11 @@ async fn auto_provision_owner_services(
             {
                 continue;
             }
-            if !super::platform_key_service::available(db, &candidate, user_id).await? {
+            let provider = candidate
+                .provider_config_id
+                .as_ref()
+                .and_then(|id| providers.get(id));
+            if !platform_key_service::available_with_grants(&candidate, provider, user_id, grants) {
                 continue;
             }
         }
@@ -2084,7 +2101,12 @@ pub async fn load_valid_app_consents(
 ///   requires user credential, etc.)
 /// - Is now private without `developer_app_ids`
 /// - Is now private with `developer_app_ids` but the user has no valid consent
-async fn reconcile_stale_auto_provisions(db: &mongodb::Database, user_id: &str) {
+async fn reconcile_stale_auto_provisions(
+    db: &mongodb::Database,
+    user_id: &str,
+    grants: &OwnerGrants,
+    providers: &HashMap<String, ProviderConfig>,
+) {
     use crate::models::service_provider_requirement::{
         COLLECTION_NAME as SERVICE_PROVIDER_REQUIREMENTS, ServiceProviderRequirement,
     };
@@ -2188,19 +2210,21 @@ async fn reconcile_stale_auto_provisions(db: &mongodb::Database, user_id: &str) 
         }
     };
 
-    let mut platform_valid = std::collections::HashSet::new();
-    for catalog in catalog_map.values().filter(|c| c.platform_key.is_some()) {
-        match super::platform_key_service::available(db, catalog, user_id).await {
-            Ok(true) => {
-                platform_valid.insert(catalog.id.clone());
-            }
-            Ok(false) => {}
-            Err(error) => {
-                tracing::warn!(error = %error, "Platform grant reconciliation failed");
-                return;
-            }
-        }
-    }
+    let platform_valid: HashSet<&str> = catalog_map
+        .values()
+        .filter(|catalog| {
+            platform_key_service::available_with_grants(
+                catalog,
+                catalog
+                    .provider_config_id
+                    .as_ref()
+                    .and_then(|id| providers.get(id)),
+                user_id,
+                grants,
+            )
+        })
+        .map(|catalog| catalog.id.as_str())
+        .collect();
 
     // Determine which auto-provisioned services are now stale.
     // A service is valid only if its catalog entry still satisfies the full
@@ -2217,7 +2241,7 @@ async fn reconcile_stale_auto_provisions(db: &mongodb::Database, user_id: &str) 
                 None => true, // catalog entry deleted
                 Some(ds) => {
                     if ds.platform_key.is_some() {
-                        return !platform_valid.contains(&ds.id);
+                        return !platform_valid.contains(ds.id.as_str());
                     }
                     if !is_auto_provisionable_catalog_service(ds, spr_set.contains(&ds.id)) {
                         return true; // catalog changed -- stale
@@ -2346,15 +2370,33 @@ pub async fn list_keys(
     db: &mongodb::Database,
     encryption_keys: &EncryptionKeys,
     user_id: &str,
+    providers: &HashMap<String, ProviderConfig>,
+) -> AppResult<Vec<KeyView>> {
+    // Reconciliation and rendering share the request's ACL/provider snapshot.
+    // The handler also reuses providers to render revocation capabilities.
+    let grants = OwnerGrants::load_for_listing(db, user_id).await?;
+    auto_provision_with_grants(db, user_id, &grants, providers).await?;
+    list_keys_with_grants(db, encryption_keys, user_id, &grants, providers).await
+}
+
+async fn list_keys_with_grants(
+    db: &mongodb::Database,
+    encryption_keys: &EncryptionKeys,
+    user_id: &str,
+    grants: &OwnerGrants,
+    providers: &HashMap<String, ProviderConfig>,
 ) -> AppResult<Vec<KeyView>> {
     // Disabled services are included here and nowhere else: `/keys` is the
     // management surface that owns the Enable control, so a paused row has to
     // stay visible for the pause to be reversible. Each `KeyView` carries
     // `is_active` for the UI to badge them. Enforcement consumers keep using
     // the active-only `list_user_services_with_sources`.
-    let tagged =
-        user_service_service::list_user_services_with_sources_including_disabled(db, user_id)
-            .await?;
+    let tagged = user_service_service::list_user_services_with_sources_including_disabled(
+        db,
+        user_id,
+        grants.memberships(),
+    )
+    .await?;
     if tagged.is_empty() {
         return Ok(vec![]);
     }
@@ -2460,8 +2502,15 @@ pub async fn list_keys(
                 .get(view.endpoint_id.as_str())
                 .map(|ep| ep.user_id.as_str())
                 .unwrap_or(user_id);
-            view.platform_key_available =
-                super::platform_key_service::available(db, catalog, owner).await?;
+            view.platform_key_available = platform_key_service::available_with_grants(
+                catalog,
+                catalog
+                    .provider_config_id
+                    .as_ref()
+                    .and_then(|id| providers.get(id)),
+                owner,
+                grants,
+            );
         }
         let enc = view
             .api_key_id
@@ -8829,7 +8878,16 @@ mod tests {
         .await
         .unwrap();
 
-        let keys = list_keys(&db, &enc, &user_id).await.unwrap();
+        let keys = list_keys(
+            &db,
+            &enc,
+            &user_id,
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(keys.len(), 2);
         let slugs: Vec<&str> = keys.iter().map(|k| k.slug.as_str()).collect();
         assert!(slugs.contains(&"svc-a"));
@@ -8853,7 +8911,16 @@ mod tests {
         let enc = test_encryption_keys();
         let user_id = uuid::Uuid::new_v4().to_string();
 
-        let keys = list_keys(&db, &enc, &user_id).await.unwrap();
+        let keys = list_keys(
+            &db,
+            &enc,
+            &user_id,
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert!(keys.is_empty());
     }
 
@@ -9070,7 +9137,16 @@ mod tests {
             .await
             .unwrap();
 
-        let keys = list_keys(&db, &enc, &user_id).await.unwrap();
+        let keys = list_keys(
+            &db,
+            &enc,
+            &user_id,
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         // Revoked services have is_active=false. list_keys calls
         // list_user_services_with_sources which filters by is_active.
         let active_slugs: Vec<&str> = keys
@@ -10508,7 +10584,16 @@ mod tests {
         .await
         .unwrap();
 
-        let keys = list_keys(&db, &enc, &user_id).await.unwrap();
+        let keys = list_keys(
+            &db,
+            &enc,
+            &user_id,
+            &crate::services::platform_key_service::load_providers(&db)
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(
             keys[0].catalog_service_name.as_deref(),
