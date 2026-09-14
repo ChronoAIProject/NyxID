@@ -1924,3 +1924,23 @@ describe("AddKeyDialog — catalog service icons", () => {
     expect(document.querySelector(`[data-slug="${unknownSlug}"]`)).toBeNull();
   });
 });
+
+describe("platform key connection choice", () => {
+  it("defaults to platform and submits no user secret or destination", async () => {
+    catalog.entries = [{ ...OPENAI_ENTRY, platform_key: { available: true, pricing: { metric: "tokens", credits_per_unit: "0.25", sync_status: "synced" } } }];
+    createKeyMutateAsync.mockResolvedValue(buildReconnectKey({ id: "platform-service", credential_binding: "platform", status: "active", slug: OPENAI_ENTRY.slug }));
+    render(<AddKeyDialog open onOpenChange={vi.fn()} prefillSlug={OPENAI_ENTRY.slug} />);
+    const platform = await screen.findByRole("radio", { name: /Use NyxID's key/ });
+    expect(platform).toBeChecked();
+    await userEvent.click(screen.getByRole("button", { name: "Connect" }));
+    expect(createKeyMutateAsync).toHaveBeenCalledWith({ service_slug: OPENAI_ENTRY.slug, label: OPENAI_ENTRY.name, use_platform_key: true });
+  });
+  it("keeps the existing own-key route selectable", async () => {
+    catalog.entries = [{ ...OPENAI_ENTRY, platform_key: { available: true, pricing: null } }];
+    render(<AddKeyDialog open onOpenChange={vi.fn()} prefillSlug={OPENAI_ENTRY.slug} />);
+    await userEvent.click(await screen.findByRole("radio", { name: /Use your own key/ }));
+    await userEvent.click(screen.getByRole("button", { name: "Continue" }));
+    expect(screen.queryByRole("radio", { name: /Use NyxID's key/ })).not.toBeInTheDocument();
+    expect(createKeyMutateAsync).not.toHaveBeenCalled();
+  });
+});

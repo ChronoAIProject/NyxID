@@ -1,3 +1,4 @@
+import { CredentialBindingChoice } from "@/components/shared/credential-binding-choice";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   KEY_AUTH_ACTIVE,
@@ -72,6 +73,7 @@ import type { OAuthFlowKind } from "@/types/oauth-popup";
 const POPUP_CLOSED_POLL_MS = 1_000;
 
 type WizardStep =
+  | "binding"
   | "catalog"
   | "routing"
   | "form"
@@ -2856,6 +2858,7 @@ export function AddKeyDialog({
   open,
   onOpenChange,
   prefillSlug,
+  prefillUsePlatformKey,
   prefillIncludeAllCatalog = false,
   prefillNodeId,
   prefillTargetOrgId,
@@ -2879,6 +2882,7 @@ export function AddKeyDialog({
    * generic catalog grid and have to hunt for the right entry.
    */
   readonly prefillSlug?: string;
+  readonly prefillUsePlatformKey?: boolean;
   /** Action cards use the unfiltered catalog for exact slug resolution. */
   readonly prefillIncludeAllCatalog?: boolean;
   /** Optional routing defaults supplied by an assistant browser action. */
@@ -2915,6 +2919,7 @@ export function AddKeyDialog({
     includeAll: prefillIncludeAllCatalog,
   });
   const [step, setStep] = useState<WizardStep>("catalog");
+  const [usePlatformKey, setUsePlatformKey] = useState(true);
   const [selectedEntry, setSelectedEntry] = useState<CatalogEntry | null>(null);
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
   const [authKey, setAuthKey] = useState<KeyInfo | null>(null);
@@ -2993,7 +2998,8 @@ export function AddKeyDialog({
     if (routing.targetOrgId !== undefined) {
       setTargetOrgId(routing.targetOrgId || null);
     }
-    setStep("routing");
+    setUsePlatformKey(prefillUsePlatformKey ?? true);
+    setStep(entry.platform_key?.available && !routing.nodeId ? "binding" : "routing");
   }
 
   // Auto-select from `prefillSlug` once the catalog resolves. Only
@@ -3078,6 +3084,16 @@ export function AddKeyDialog({
     prefillSlug,
     isReconnect,
   ]);
+
+  async function handlePlatformConnect() {
+    if (!selectedEntry) return;
+    try {
+      const key = await createKey.mutateAsync({ service_slug: selectedEntry.slug, label: form.label.trim() || selectedEntry.name,
+        use_platform_key: true, ...(targetOrgId ? { target_org_id: targetOrgId } : {}) });
+      setCreatedKey({ id: key.id, slug: key.slug, catalogSlug: selectedEntry.slug, serviceName: selectedEntry.name, completionMode: "credential" });
+      setStep("verify");
+    } catch (error) { toast.error(error instanceof Error ? error.message : "Failed to connect service"); }
+  }
 
   function handleSelectCustom() {
     setSelectedEntry(null);
@@ -3442,6 +3458,15 @@ export function AddKeyDialog({
           />
         )}
 
+        {step === "binding" && selectedEntry && (
+          <div className="space-y-4 p-5">
+            <CredentialBindingChoice value={usePlatformKey} onChange={setUsePlatformKey} platformPrice={selectedEntry.platform_key?.pricing} byokPrice={selectedEntry.byok_pricing} legacyBillable={selectedEntry.billing?.platform_billable} resaleBillable={selectedEntry.billing?.resale_billable} disabled={createKey.isPending} />
+            <div className="flex justify-end gap-2">
+              <Button onClick={() => setStep("catalog")}>Back</Button>
+              <Button variant="primary" isLoading={createKey.isPending} onClick={() => usePlatformKey ? void handlePlatformConnect() : setStep("routing")}>{usePlatformKey ? "Connect" : "Continue"}</Button>
+            </div>
+          </div>
+        )}
         {step === "routing" && (
           <RoutingStep
             catalogEntry={selectedEntry}

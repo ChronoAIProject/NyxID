@@ -1,3 +1,4 @@
+import { CredentialBindingCard } from "@/components/dashboard/credential-binding-card";
 import { useEffect, useMemo, useState } from "react";
 import {
   Link,
@@ -2307,7 +2308,7 @@ export function KeyDetailPage() {
           <div className="flex items-center gap-3">
             <ServiceIcon slug={keyInfo.catalog_service_slug} size="md" />
             <div className="flex flex-col gap-2">
-              {keyInfo.auto_connected ? (
+              {(keyInfo.auto_connected || keyInfo.credential_binding === "platform") ? (
                 <h2
                   className="text-[28px] font-bold leading-none tracking-tight"
                   style={{ letterSpacing: "-0.03em" }}
@@ -2421,7 +2422,9 @@ export function KeyDetailPage() {
         )}
       </div>
 
-      {keyInfo.auto_connected ? (
+      {keyInfo.catalog_service_id && <CredentialBindingCard service={keyInfo} catalog={catalogEntry} readOnly={readOnly} />}
+
+      {(keyInfo.auto_connected || keyInfo.credential_binding === "platform") ? (
         <>
           <Card>
             <CardHeader>

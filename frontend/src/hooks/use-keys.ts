@@ -297,6 +297,7 @@ export function useExternalApiKeys() {
 // -- Mutations --
 
 interface CreateKeyParams {
+  readonly use_platform_key?: boolean;
   readonly service_slug?: string;
   readonly credential?: string;
   readonly label: string;
@@ -370,6 +371,8 @@ export interface DeleteKeyResponse {
 }
 
 interface UpdateKeyParams {
+  readonly use_platform_key?: boolean;
+  readonly credential?: string;
   readonly keyId: string;
   readonly label?: string;
   readonly endpoint_url?: string;
