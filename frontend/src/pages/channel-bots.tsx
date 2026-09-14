@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useManagedOnboarding } from "@/hooks/use-channel-managed";
 import { MANAGED_FLOW_COMPONENTS } from "@/components/channels/managed-flows";
+import { TelegramNew } from "@/components/channels/telegram-new";
 import { useWatch } from "react-hook-form";
 import { useAppForm } from "@/components/ui/form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -443,6 +444,10 @@ function CreateBotDialog({
             )}
           </div>
 
+          {platform === "telegram-new" && <TelegramNew label={label} orgId={targetOrgId} onConnected={(id) => {
+            onOpenChange(false);
+            void navigate({ to: "/channel-bots/$botId", params: { botId: id } });
+          }} />}
           {CHANNEL_PLATFORMS[platform].managedOnly && !managedAvailable && (
             <p role="status" className="text-xs text-muted-foreground">{managed.isLoading ? "Loading account connection..." : managed.isError ? "Unable to load account connection settings. Retry shortly." : `Not available until an admin configures ${platformLabel(platform)}.`}</p>
           )}
@@ -453,7 +458,7 @@ function CreateBotDialog({
             }} />
             {!CHANNEL_PLATFORMS[platform].managedOnly && <details open={advanced} onToggle={(event) => setAdvanced(event.currentTarget.open)} className="border-t border-border pt-4"><summary className="cursor-pointer text-xs text-muted-foreground">{CHANNEL_PLATFORMS[platform].advancedLabel}</summary></details>}
           </>}
-          {!CHANNEL_PLATFORMS[platform].managedOnly && (!managedAvailable || advanced) && <>
+          {platform !== "telegram-new" && !CHANNEL_PLATFORMS[platform].managedOnly && (!managedAvailable || advanced) && <>
           {setupNote && (
             <div className="space-y-1 rounded-lg border border-border/70 bg-muted/30 p-4">
               <p className="text-[12px] font-medium">{setupNote.title}</p>
@@ -520,8 +525,9 @@ function DeleteBotDialog({
         <DialogHeader>
           <DialogTitle>Delete Channel Bot</DialogTitle>
           <DialogDescription>
-            This will permanently delete this bot and all its conversation
-            routes. This action cannot be undone.
+            This deletes the NyxID connection and its conversation routes.
+            The bot remains on the messaging platform. Reconnecting requires
+            assigning its agents again.
             {deletionNote && ` ${deletionNote}`}
           </DialogDescription>
         </DialogHeader>

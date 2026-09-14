@@ -339,10 +339,10 @@ pub async fn ensure_can_manage_worker(
         return Ok(());
     }
     enrollment_membership(db, actor, pool).await?;
-    if !worker
+    if worker
         .enrollment
         .as_ref()
-        .is_some_and(|enrollment| enrollment.owner_user_id == actor)
+        .is_none_or(|enrollment| enrollment.owner_user_id != actor)
     {
         return Err(AppError::Forbidden(
             "members may manage only their own contributed workers".into(),

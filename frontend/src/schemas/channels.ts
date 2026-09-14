@@ -3,6 +3,7 @@ import { CHANNEL_PLATFORMS } from "@/lib/channel-platforms";
 
 const channelPlatformSchema = z.enum([
   "telegram",
+  "telegram-new",
   "discord",
   "lark",
   "feishu",
@@ -18,6 +19,7 @@ const channelPlatformSchema = z.enum([
  */
 export const conversationPlatformSchema = z.enum([
   "telegram",
+  "telegram-new",
   "discord",
   "lark",
   "feishu",
