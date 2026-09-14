@@ -80,8 +80,6 @@ pub struct ServiceBilling {
     /// removes this metric's charge from Lago before clearing the marker.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_pricing_cleanup_metric_code: Option<String>,
-    #[serde(default)]
-    pub resale_billable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub byok_pricing: Option<LanePricing>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -91,6 +89,8 @@ pub struct ServiceBilling {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub platform_key_pricing_cleanup_metric_code: Option<String>,
     #[serde(default)]
+    pub resale_billable: bool,
+    #[serde(default)]
     pub resale_metric: BillingMetric,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lago_resale_metric_code: Option<String>,
@@ -99,14 +99,14 @@ pub struct ServiceBilling {
 impl Default for ServiceBilling {
     fn default() -> Self {
         Self {
-            byok_pricing: None,
-            platform_key_pricing: None,
-            byok_pricing_cleanup_metric_code: None,
-            platform_key_pricing_cleanup_metric_code: None,
             platform_billable: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             resale_billable: false,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: None,
@@ -229,14 +229,14 @@ mod tests {
     #[test]
     fn active_resale_spec_requires_metric_code() {
         let mut billing = ServiceBilling {
-            byok_pricing: None,
-            platform_key_pricing: None,
-            byok_pricing_cleanup_metric_code: None,
-            platform_key_pricing_cleanup_metric_code: None,
             platform_billable: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Requests,
             lago_resale_metric_code: None,

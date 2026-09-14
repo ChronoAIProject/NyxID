@@ -233,8 +233,6 @@ mod tests {
     /// (identity_propagation_mode != "none" or token forwarding/delegation on).
     fn catalog_service(created_by: &str, identity_propagating: bool) -> DownstreamService {
         DownstreamService {
-            inference: None,
-            platform_key: None,
             id: Uuid::new_v4().to_string(),
             name: "Catalog".to_string(),
             slug: format!("svc-{}", Uuid::new_v4().simple()),
@@ -254,6 +252,7 @@ mod tests {
                 String::new()
             },
             credential_encrypted: vec![],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -282,6 +281,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

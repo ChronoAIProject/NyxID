@@ -1,6 +1,7 @@
 mod platform;
+pub use platform::set_platform_connection_active;
 pub use platform::{
-    create_platform_key, set_platform_connection_active, switch_credential_binding,
+    create_platform_key, switch_credential_binding, update_platform_connection_cosmetics,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -125,12 +126,12 @@ pub(crate) async fn provision_imported_api_key_in_transaction(
     }
     let identity = identity_config_from_downstream_service(catalog);
     let service = UserService {
-        credential_binding: None,
         id: service_id.into(),
         user_id: token.user_id.clone(),
         slug,
         endpoint_id: endpoint.id.clone(),
         api_key_id: Some(key.id),
+        credential_binding: None,
         auth_method,
         auth_key_name,
         catalog_service_id: Some(catalog.id.clone()),
@@ -1388,8 +1389,6 @@ async fn create_key_inner(
         let empty_credential = encryption_keys.encrypt(b"").await?;
         let internal_ds_slug = format!("_ssh_{ds_id}");
         let ds = DownstreamService {
-            inference: None,
-            platform_key: None,
             id: ds_id.clone(),
             name: label.to_string(),
             // New SSH rows keep an internal UUID-derived backing slug so the
@@ -1405,6 +1404,7 @@ async fn create_key_inner(
             auth_type: Some("ssh".to_string()),
             auth_key_name: String::new(),
             credential_encrypted: empty_credential.clone(),
+            platform_key: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
             streaming_supported: false,
@@ -1427,6 +1427,8 @@ async fn create_key_inner(
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -4212,7 +4214,6 @@ fn build_key_view(
         .and_then(|id| app_name_map.get(id).cloned());
 
     KeyView {
-        credential_binding: credential_binding.clone(),
         platform_key_available: false,
         platform_key_pricing: catalog_ds
             .and_then(|c| c.billing.as_ref())
@@ -4228,6 +4229,7 @@ fn build_key_view(
         endpoint_url: ep.url.clone(),
         endpoint_id: ep.id.clone(),
         api_key_id: ak.map(|k| k.id.clone()),
+        credential_binding: credential_binding.clone(),
         credential_missing: credential_binding != "platform"
             && svc.api_key_id.is_some()
             && ak.is_none(),
@@ -4527,12 +4529,12 @@ mod tests {
 
     fn sample_service(auth_method: &str) -> UserService {
         UserService {
-            credential_binding: None,
             id: "svc-1".to_string(),
             user_id: "user-1".to_string(),
             slug: "test".to_string(),
             endpoint_id: "ep-1".to_string(),
             api_key_id: Some("key-1".to_string()),
+            credential_binding: None,
             auth_method: auth_method.to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: None,
@@ -4655,8 +4657,6 @@ mod tests {
 
     fn sample_catalog_service() -> DownstreamService {
         DownstreamService {
-            inference: None,
-            platform_key: None,
             id: "cat-1".to_string(),
             name: "Catalog".to_string(),
             slug: "catalog".to_string(),
@@ -4667,6 +4667,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -4690,6 +4691,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

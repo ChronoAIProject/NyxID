@@ -391,14 +391,14 @@ mod tests {
         insert_wallet(&db, owner_id).await;
         let service = BillingService::new(db.clone(), std::sync::Arc::new(test_app_config()));
         let billing = ServiceBilling {
-            byok_pricing: None,
-            platform_key_pricing: None,
-            byok_pricing_cleanup_metric_code: None,
-            platform_key_pricing_cleanup_metric_code: None,
             platform_billable: true,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Requests,
             lago_resale_metric_code: Some("resale_requests".to_string()),
@@ -1062,6 +1062,169 @@ mod tests {
         assert_eq!(lago.price_removals.load(Ordering::SeqCst), 4);
         assert_eq!(db.collection::<BillingRateCache>(crate::models::billing_rate_cache::COLLECTION_NAME)
             .count_documents(doc! { "lago_metric_code": { "$in": ["platform_svc_service-one_byok", "platform_svc_service-one_pk"] } }).await.unwrap(), 0);
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn mixed_lane_allowances_fund_only_the_charged_metric() {
+        use crate::models::billing_target::BillingTargetKind;
+        use crate::models::downstream_service::{
+            COLLECTION_NAME as CATALOG, DownstreamService, test_helpers::dummy_service,
+        };
+        use crate::models::service_billing::{LanePricing, PlatformUsage, PricingSyncStatus};
+        use crate::models::usage_allowance::{AllowanceRecurrence, UsageAllowance};
+        use crate::services::billing::{allowances, metric_resolution, pricing};
+        let db =
+            crate::test_utils::connect_transaction_test_database("review_mixed_lane_allowances")
+                .await;
+        let owner = Uuid::new_v4().to_string();
+        db.collection::<crate::models::user::User>(crate::models::user::COLLECTION_NAME)
+            .insert_one(crate::test_utils::test_user(
+                &owner,
+                crate::models::user::UserType::Person,
+            ))
+            .await
+            .unwrap();
+        insert_wallet(&db, &owner).await;
+        let mut catalog = dummy_service();
+        catalog.id = Uuid::new_v4().to_string();
+        catalog.slug = "service-one".into();
+        let lane = |metric| LanePricing {
+            metric,
+            credits_per_unit: "0.01".into(),
+            lago_metric_code: String::new(),
+            sync_status: PricingSyncStatus::Pending,
+            sync_error: None,
+        };
+        let mut prices = ServiceBilling {
+            byok_pricing: Some(lane(BillingMetric::Requests)),
+            platform_key_pricing: Some(lane(BillingMetric::Tokens)),
+            platform_metric: Some(BillingMetric::Bytes),
+            ..Default::default()
+        };
+        pricing::normalize_lane_pricing(&catalog.slug, None, &mut prices).unwrap();
+        catalog.billing = Some(prices);
+        db.collection::<DownstreamService>(CATALOG)
+            .insert_one(&catalog)
+            .await
+            .unwrap();
+        let lago = Arc::new(FakeLago::default());
+        pricing::sync_service_price(&db, lago.as_ref(), "standard", &catalog)
+            .await
+            .unwrap();
+        catalog = db
+            .collection::<DownstreamService>(CATALOG)
+            .find_one(doc! {"_id": &catalog.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            metric_resolution::effective_platform_metric(&catalog),
+            BillingMetric::Requests
+        );
+        assert!(metric_resolution::allowance_metric(&catalog, Some(BillingMetric::Bytes)).is_err());
+        for metric in [None, Some(BillingMetric::Tokens)] {
+            let allowance = allowances::create_allowance(
+                &db,
+                allowances::CreateAllowanceInput {
+                    service_ref: catalog.id.clone(),
+                    metric,
+                    quantity: 3,
+                    recurrence: AllowanceRecurrence::Monthly,
+                    target_kind: BillingTargetKind::AllUsers,
+                    target_user_ids: vec![],
+                    created_by: owner.clone(),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(allowance.metric, metric.unwrap_or(BillingMetric::Requests));
+            let updated = allowances::update_allowance(
+                &db,
+                &allowance.id,
+                allowances::UpdateAllowanceInput {
+                    service_ref: Some(catalog.id.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(updated.metric, allowance.metric);
+        }
+        let definitions: Vec<UsageAllowance> =
+            allowances::list_allowances(&db, false).await.unwrap();
+        assert_eq!(definitions.len(), 2);
+        let mut config = test_app_config();
+        config.billing_enabled = true;
+        let billing = BillingService::new_with_lago(db.clone(), Arc::new(config), lago);
+        for credential in [
+            CredentialClass::UserOwned,
+            CredentialClass::NyxidManagedMaster,
+        ] {
+            let ctx = BillingRouteContext::new(
+                BillingIngress::Proxy,
+                Uuid::new_v4().to_string(),
+                owner.clone(),
+                owner.clone(),
+                None,
+                None,
+                Some(catalog.id.clone()),
+                Some(catalog.slug.clone()),
+                NodeIntent::Direct,
+                "bearer".into(),
+                credential,
+                BillingMetric::Bytes,
+                catalog.billing.as_ref(),
+                false,
+            );
+            let expected = if credential == CredentialClass::UserOwned {
+                BillingMetric::Requests
+            } else {
+                BillingMetric::Tokens
+            };
+            assert_eq!(ctx.platform_metric, expected);
+            let metered = billing.open(&ctx).await.unwrap();
+            billing.mark_forwarded(&metered).await.unwrap();
+            billing
+                .settle(
+                    &metered,
+                    PlatformUsage {
+                        requests: 5,
+                        bytes: 100,
+                        tokens: 7,
+                        token_breakdown: None,
+                    },
+                    None,
+                    None,
+                )
+                .await
+                .unwrap();
+            let row = db
+                .collection::<UsageMeterRow>(crate::models::usage_meter::COLLECTION_NAME)
+                .find_one(doc! {"billing_request_id": &ctx.billing_request_id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(row.metric, expected);
+            assert_eq!(
+                row.funding
+                    .as_ref()
+                    .unwrap()
+                    .allowance_consumptions
+                    .iter()
+                    .map(|a| a.quantity)
+                    .sum::<i64>(),
+                3
+            );
+            assert_eq!(
+                row.quantity,
+                Some(if expected == BillingMetric::Requests {
+                    5
+                } else {
+                    7
+                })
+            );
+        }
         db.drop().await.unwrap();
     }
 

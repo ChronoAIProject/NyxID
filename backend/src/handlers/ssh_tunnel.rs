@@ -1408,8 +1408,6 @@ mod tests {
 
     fn ssh_service_row(id: &str, created_by: &str, visibility: &str) -> DownstreamService {
         DownstreamService {
-            inference: None,
-            platform_key: None,
             id: id.to_string(),
             name: "Bastion".to_string(),
             slug: format!("ssh-{id}"),
@@ -1420,6 +1418,7 @@ mod tests {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             credential_encrypted: vec![],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -1452,6 +1451,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

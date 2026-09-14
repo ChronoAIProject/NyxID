@@ -139,6 +139,12 @@ async fn decrypt_master_credential_string(
     })
 }
 
+/// Catalog master credentials stay on NyxID, including legacy internal rows.
+/// Owner nodes may inject their own keys but must never receive this key.
+pub fn uses_server_held_master(target: &ProxyTarget) -> bool {
+    !target.service.requires_user_credential && target.auth_method != "none"
+}
+
 fn master_credential_required(service: &DownstreamService) -> bool {
     // Identity propagation is additive to the service's own auth method. A
     // bearer row may inject both its catalog credential and a delegation token.
@@ -216,9 +222,15 @@ pub async fn authorize_master_credential_server_chosen(
     _db: &mongodb::Database,
     service: &DownstreamService,
 ) -> AppResult<AuthorizedMasterCredential> {
-    if service.platform_key.is_some() {
+    if let Some(config) = &service.platform_key
+        && (!config.enabled
+            || config.audience != crate::models::downstream_service::PlatformKeyAudience::Public
+            || !crate::services::platform_key_service::has_platform_key(service))
+    {
         return Err(AppError::NotFound("Service not found".to_string()));
     }
+    // The remaining legacy server-selected gates (public visibility,
+    // internal master shape) still apply; no anonymous grants are added.
     if !master_credential_required(service) {
         tracing::error!(
             service_id = %service.id,
@@ -3402,8 +3414,6 @@ fn build_minimal_downstream_service(
         && user_service.catalog_service_id.is_some();
 
     DownstreamService {
-        inference: None,
-        platform_key: None,
         id: user_service
             .catalog_service_id
             .clone()
@@ -3417,6 +3427,7 @@ fn build_minimal_downstream_service(
         auth_method: user_service.auth_method.clone(),
         auth_key_name: user_service.auth_key_name.clone(),
         credential_encrypted: vec![],
+        platform_key: None,
         auth_type: None,
         openapi_spec_url: None,
         asyncapi_spec_url: None,
@@ -3444,6 +3455,8 @@ fn build_minimal_downstream_service(
         repository_url: None,
         issues_url: None,
         capabilities: None,
+        inference: None,
+        inference_admin_modified: false,
         billing,
         auth_notes: None,
         known_limitations: None,
@@ -5470,8 +5483,6 @@ mod tests {
             auth_key_name: "Authorization".to_string(),
             credential: String::new(),
             service: DownstreamService {
-                inference: None,
-                platform_key: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Upload Service".to_string(),
                 slug: "upload-service".to_string(),
@@ -5480,6 +5491,7 @@ mod tests {
                 auth_method: "none".to_string(),
                 auth_key_name: "Authorization".to_string(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
@@ -5505,6 +5517,8 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -6497,8 +6511,6 @@ mod tests {
             auth_key_name: String::new(),
             credential: r#"{"app_id":"cli_test","app_secret":"super-secret"}"#.to_string(),
             service: DownstreamService {
-                inference: None,
-                platform_key: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Lark Bot".to_string(),
                 slug: "api-lark-bot".to_string(),
@@ -6507,6 +6519,7 @@ mod tests {
                 auth_method: "token_exchange".to_string(),
                 auth_key_name: String::new(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
@@ -6532,6 +6545,8 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -6694,12 +6709,12 @@ mod tests {
 
     fn make_user_service_token_exchange() -> crate::models::user_service::UserService {
         crate::models::user_service::UserService {
-            credential_binding: None,
             id: "us-1".to_string(),
             user_id: "user-1".to_string(),
             slug: "api-lark-bot".to_string(),
             endpoint_id: "ep-1".to_string(),
             api_key_id: Some("ak-1".to_string()),
+            credential_binding: None,
             auth_method: "token_exchange".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: Some("cat-1".to_string()),
@@ -6830,8 +6845,6 @@ mod tests {
             auth_key_name: "app_secret".to_string(),
             credential: "super-secret".to_string(),
             service: DownstreamService {
-                inference: None,
-                platform_key: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Body Auth Service".to_string(),
                 slug: "body-auth-service".to_string(),
@@ -6840,6 +6853,7 @@ mod tests {
                 auth_method: "body".to_string(),
                 auth_key_name: "app_secret".to_string(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
@@ -6865,6 +6879,8 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -7053,8 +7069,6 @@ mod tests {
             auth_key_name: String::new(),
             credential,
             service: DownstreamService {
-                inference: None,
-                platform_key: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 name: "Cloud Billing Test".to_string(),
                 slug: "test-cloud-billing".to_string(),
@@ -7063,6 +7077,7 @@ mod tests {
                 auth_method: auth_method.to_string(),
                 auth_key_name: String::new(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
@@ -7088,6 +7103,8 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -7295,8 +7312,6 @@ mod tests {
 
     fn test_minimal_downstream() -> DownstreamService {
         DownstreamService {
-            inference: None,
-            platform_key: None,
             id: "ds-test".into(),
             name: "Test".into(),
             slug: "test".into(),
@@ -7307,6 +7322,7 @@ mod tests {
             auth_method: "bearer".into(),
             auth_key_name: String::new(),
             credential_encrypted: vec![],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -7330,6 +7346,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

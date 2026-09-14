@@ -82,6 +82,25 @@ fn ensure_user_managed_service(service: &UserService) -> AppResult<()> {
     Ok(())
 }
 
+/// Platform-bound connections retain cosmetic controls; routing inputs are
+/// catalog-owned. Automatic rows remain wholly managed by reconciliation.
+pub fn ensure_service_fields_editable(
+    service: &UserService,
+    routing_fields: &[(&str, bool)],
+) -> AppResult<()> {
+    if service.credential_binding.as_deref() == Some("platform")
+        && service.source.as_deref() != Some(AUTO_PROVISION_SOURCE)
+    {
+        if let Some((field, _)) = routing_fields.iter().find(|(_, present)| *present) {
+            return Err(AppError::ValidationError(format!(
+                "Switch to your own key to change {field}"
+            )));
+        }
+        return Ok(());
+    }
+    ensure_user_managed_service(service)
+}
+
 /// Whether an organization role can execute a service after applying the
 /// service's admin-only policy. Personal service access does not use this
 /// predicate because admin-only applies only to organization membership.
@@ -902,7 +921,6 @@ pub async fn create_user_service_with_id(
 
     let now = Utc::now();
     let service = UserService {
-        credential_binding: (source == Some("platform_key")).then(|| "platform".to_string()),
         id: reserved_id
             .map(str::to_string)
             .unwrap_or_else(|| Uuid::new_v4().to_string()),
@@ -910,6 +928,7 @@ pub async fn create_user_service_with_id(
         slug: slug.to_string(),
         endpoint_id: endpoint_id.to_string(),
         api_key_id: api_key_id.map(|s| s.to_string()),
+        credential_binding: (source == Some("platform_key")).then(|| "platform".to_string()),
         auth_method: auth_method.to_string(),
         auth_key_name: auth_key_name.to_string(),
         catalog_service_id: catalog_service_id.map(|s| s.to_string()),
@@ -1032,7 +1051,31 @@ pub async fn update_user_service(
     admin_only: Option<bool>,
 ) -> AppResult<()> {
     let current = get_user_service(db, user_id, service_id).await?;
-    ensure_user_managed_service(&current)?;
+    ensure_service_fields_editable(
+        &current,
+        &[
+            ("auth_method", auth_method.is_some()),
+            ("auth_key_name", auth_key_name.is_some()),
+            ("node_id", node_id.is_some()),
+            ("node_priority", node_priority.is_some()),
+            ("identity propagation or delegation", identity.is_some()),
+            ("ws_frame_injections", ws_frame_injections.is_some()),
+        ],
+    )?;
+    if is_active == Some(true) && current.credential_binding.as_deref() == Some("platform") {
+        let catalog_id = current
+            .catalog_service_id
+            .as_deref()
+            .ok_or_else(|| AppError::NotFound("Service is no longer available".into()))?;
+        let catalog = db
+            .collection::<crate::models::downstream_service::DownstreamService>(
+                crate::models::downstream_service::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": catalog_id })
+            .await?
+            .ok_or_else(|| AppError::NotFound("Service is no longer available".into()))?;
+        crate::services::platform_key_service::require(db, &catalog, user_id).await?;
+    }
     let mut set_doc = doc! {
         "updated_at": bson::DateTime::from_chrono(Utc::now()),
     };
@@ -1118,6 +1161,7 @@ pub async fn update_user_service(
     }
     if let Some(active) = is_active {
         if active
+            && current.credential_binding.as_deref() != Some("platform")
             && let Some(api_key_id) = current.api_key_id.as_deref()
             && crate::services::user_api_key_service::find_api_key(db, user_id, api_key_id)
                 .await?
@@ -2203,8 +2247,6 @@ mod tests {
     ) -> DownstreamService {
         let now = Utc::now();
         DownstreamService {
-            inference: None,
-            platform_key: None,
             id: service_id.to_string(),
             name: slug.to_string(),
             slug: slug.to_string(),
@@ -2215,6 +2257,7 @@ mod tests {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             credential_encrypted: Vec::new(),
+            platform_key: None,
             auth_type: Some("ssh".to_string()),
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -2247,6 +2290,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

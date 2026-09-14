@@ -257,7 +257,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 3. Anthropic (API Key)
+    // 4. Anthropic (API Key)
     if !slug_exists!("anthropic") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -304,7 +304,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 4. Google AI Studio (API Key)
+    // 5. Google AI Studio (API Key)
     if !slug_exists!("google-ai") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -354,7 +354,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 5. Mistral AI (API Key)
+    // 6. Mistral AI (API Key)
     if !slug_exists!("mistral") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -401,7 +401,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 6. Cohere (API Key)
+    // 7. Cohere (API Key)
     if !slug_exists!("cohere") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -448,7 +448,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 7. DeepSeek (API Key)
+    // 8. DeepSeek (API Key)
     if !slug_exists!("deepseek") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -650,7 +650,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 8. Twitter / X (OAuth 2.0 with PKCE)
+    // 9. Twitter / X (OAuth 2.0 with PKCE)
     if !slug_exists!("twitter") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -779,7 +779,7 @@ pub async fn seed_default_providers(
         );
     }
 
-    // 9. Google (OAuth2)
+    // 10. Google (OAuth2)
     if !slug_exists!("google") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -842,7 +842,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 10. GitHub (OAuth2)
+    // 11. GitHub (OAuth2)
     if !slug_exists!("github") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -954,7 +954,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 11. Facebook (OAuth2)
+    // 12. Facebook (OAuth2)
     if !slug_exists!("facebook") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1007,7 +1007,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 12. Discord (OAuth2)
+    // 13. Discord (OAuth2)
     if !slug_exists!("discord") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1060,7 +1060,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 13. Spotify (OAuth2)
+    // 14. Spotify (OAuth2)
     if !slug_exists!("spotify") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1110,7 +1110,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 14. LinkedIn (OAuth2)
+    // 15. LinkedIn (OAuth2)
     if !slug_exists!("linkedin") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1169,7 +1169,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 15. Slack (OAuth2)
+    // 16. Slack (OAuth2)
     if !slug_exists!("slack") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1223,7 +1223,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 16. Microsoft (OAuth2)
+    // 17. Microsoft (OAuth2)
     if !slug_exists!("microsoft") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1279,7 +1279,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 17. TikTok (OAuth2)
+    // 18. TikTok (OAuth2)
     if !slug_exists!("tiktok") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1332,7 +1332,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 18. Twitch (OAuth2)
+    // 19. Twitch (OAuth2)
     if !slug_exists!("twitch") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1383,7 +1383,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 19. Reddit (OAuth2)
+    // 20. Reddit (OAuth2)
     if !slug_exists!("reddit") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1477,7 +1477,7 @@ pub async fn seed_default_providers(
         );
     }
 
-    // 20. Lark / Larksuite (OAuth2)
+    // 21. Lark / Larksuite (OAuth2)
     if !slug_exists!("lark") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1585,7 +1585,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 21. Telegram Login Widget (telegram_widget)
+    // 22. Telegram Login Widget (telegram_widget)
     if !slug_exists!("telegram") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1633,7 +1633,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 22. Telegram Bot API (API Key)
+    // 23. Telegram Bot API (API Key)
     if !slug_exists!("telegram-bot") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -1973,7 +1973,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 23. OpenClaw (API Key + self-hosted gateway URL)
+    // 24. OpenClaw (API Key + self-hosted gateway URL)
     if !slug_exists!("openclaw") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -2025,7 +2025,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 24. OpenRouter (API Key)
+    // 25. OpenRouter (API Key)
     if !slug_exists!("openrouter") {
         let provider = ProviderConfig {
             id: Uuid::new_v4().to_string(),
@@ -2076,7 +2076,7 @@ pub async fn seed_default_providers(
         seeded_count += 1;
     }
 
-    // 25. Notion (OAuth2)
+    // 26. Notion (OAuth2)
     // Capabilities and page access are chosen in Notion, not via scopes.
     // OAuth uses JSON + Basic auth and rotates refresh tokens. Notion does
     // not document expires_in; persist it only when actually returned.
@@ -4560,8 +4560,6 @@ pub async fn seed_default_services(
             .map(|entries| entries.iter().map(seeded_header_to_model).collect());
 
         let service = DownstreamService {
-            inference: None,
-            platform_key: None,
             id: service_id.clone(),
             name: seed.service_name.to_string(),
             slug: seed.service_slug.to_string(),
@@ -4572,6 +4570,7 @@ pub async fn seed_default_services(
             auth_method: service_auth_method,
             auth_key_name: service_auth_key_name,
             credential_encrypted: empty_credential,
+            platform_key: None,
             auth_type: None,
             openapi_spec_url,
             asyncapi_spec_url: None,
@@ -4596,6 +4595,8 @@ pub async fn seed_default_services(
             issues_url: None,
             capabilities,
             billing: None,
+            inference: None,
+            inference_admin_modified: false,
             auth_notes: seed.auth_notes.map(String::from),
             known_limitations: seed.known_limitations.map(String::from),
             required_permissions: seed_required_permissions(seed.service_slug).map(|permissions| {

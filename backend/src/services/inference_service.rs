@@ -83,7 +83,7 @@ pub async fn backfill(db: &mongodb::Database) -> AppResult<()> {
         "chrono-llm-public",
     ] {
         db.collection::<DownstreamService>(COLLECTION_NAME).update_many(
-            doc! { "slug": slug, "inference": bson::Bson::Null },
+            doc! { "slug": slug, "inference": bson::Bson::Null, "inference_admin_modified": { "$ne": true } },
             doc! { "$set": { "inference": bson::to_bson(&default_inference(slug)).expect("inference serialization") } },
         ).await?;
     }

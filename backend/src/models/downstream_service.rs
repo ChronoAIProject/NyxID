@@ -233,6 +233,8 @@ pub struct DownstreamService {
     /// Encrypted master credential for this service
     #[serde(with = "crate::models::bson_bytes::required")]
     pub credential_encrypted: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_key: Option<PlatformKeyConfig>,
     /// Original auth type as selected by the admin (e.g., "api_key", "oauth2", "oidc", "basic", "bearer").
     /// Preserves the user's intent, while `auth_method` is the resolved injection method.
     #[serde(default)]
@@ -318,14 +320,14 @@ pub struct DownstreamService {
     /// Structured capability flags for proxy interaction patterns
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<ServiceCapabilities>,
-    /// Resale-layer usage billing metadata. Platform billing is plan-level
-    /// and is not configured on catalog services.
+    /// Legacy platform/resale billing and optional credential-class lane prices.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub billing: Option<ServiceBilling>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inference: Option<ServiceInference>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub platform_key: Option<PlatformKeyConfig>,
+    /// Explicit admin edits, including clearing metadata, suppress startup defaults.
+    #[serde(default)]
+    pub inference_admin_modified: bool,
     /// Freeform notes on downstream auth expectations
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
@@ -458,8 +460,6 @@ pub mod test_helpers {
     /// valid struct but don't care about specific field values.
     pub fn dummy_service() -> DownstreamService {
         DownstreamService {
-            inference: None,
-            platform_key: None,
             id: "test-id".to_string(),
             name: "Test".to_string(),
             slug: "test".to_string(),
@@ -470,6 +470,7 @@ pub mod test_helpers {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             credential_encrypted: Vec::new(),
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -493,6 +494,8 @@ pub mod test_helpers {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -558,8 +561,6 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let svc = DownstreamService {
-            inference: None,
-            platform_key: None,
             id: uuid::Uuid::new_v4().to_string(),
             name: "Test Service".to_string(),
             slug: "test-service".to_string(),
@@ -570,6 +571,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1, 2, 3],
+            platform_key: None,
             auth_type: Some("bearer".to_string()),
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -598,6 +600,8 @@ mod tests {
                 ..Default::default()
             }),
             billing: None,
+            inference: None,
+            inference_admin_modified: false,
             auth_notes: Some("Bearer token required".to_string()),
             known_limitations: None,
             required_permissions: Some(vec!["read:api".to_string()]),
@@ -641,8 +645,6 @@ mod tests {
         // Serialize a full struct, then remove default fields from the doc,
         // and verify they get their defaults on deserialization.
         let svc = DownstreamService {
-            inference: None,
-            platform_key: None,
             id: "test-id".to_string(),
             name: "Svc".to_string(),
             slug: "svc".to_string(),
@@ -653,6 +655,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -676,6 +679,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

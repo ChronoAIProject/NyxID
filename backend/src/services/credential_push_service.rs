@@ -952,12 +952,12 @@ mod tests {
     #[test]
     fn build_params_from_user_service_delegates_correctly() {
         let svc = UserService {
-            credential_binding: None,
             id: "svc-1".to_string(),
             user_id: "user-1".to_string(),
             slug: "openai".to_string(),
             endpoint_id: "ep-1".to_string(),
             api_key_id: Some("ak-1".to_string()),
+            credential_binding: None,
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: None,

@@ -1,6 +1,10 @@
 //! Live authorization for catalog-held credentials. No credential material leaves
 //! this module's callers except through the authorized proxy transport.
+use crate::models::org_membership::OrgMembership;
+use crate::models::provider_config::{COLLECTION_NAME as PROVIDERS, ProviderConfig};
+use futures::TryStreamExt;
 use mongodb::bson::doc;
+use std::collections::HashSet;
 
 use crate::errors::{AppError, AppResult};
 use crate::models::downstream_service::{
@@ -11,7 +15,7 @@ use crate::models::service_provider_requirement::{
 };
 use crate::models::user::{COLLECTION_NAME as USERS, User};
 use crate::models::user_service::{AUTO_PROVISION_SOURCE, UserService};
-use crate::services::org_service::{self, OwnerAccess};
+use crate::services::org_service;
 
 pub fn legacy_public_master(service: &DownstreamService) -> bool {
     service.visibility == "public"
@@ -47,15 +51,82 @@ pub fn binding(service: &UserService) -> &str {
     })
 }
 
-/// `owner_id` is already selected through the normal personal/org resource ACL.
-/// An org grant can also authorize a person's own connection, but never another
-/// unrelated owner's connection. Membership lookups validate both users' activity.
+/// One request's active personal/org grants. Never cache across requests: access
+/// removal must take effect at the next credential resolution.
+pub struct OwnerGrants {
+    actor_id: String,
+    active_owner_ids: HashSet<String>,
+}
+
+impl OwnerGrants {
+    pub async fn load(db: &mongodb::Database, owner_id: &str) -> AppResult<Self> {
+        let memberships = org_service::find_active_memberships_with_timeout(db, owner_id).await?;
+        Self::from_memberships(db, owner_id, &memberships).await
+    }
+
+    /// Reuse an existing request membership snapshot (e.g. LLM status).
+    pub async fn from_memberships(
+        db: &mongodb::Database,
+        owner_id: &str,
+        memberships: &[OrgMembership],
+    ) -> AppResult<Self> {
+        let mut ids = vec![owner_id.to_string()];
+        ids.extend(
+            memberships
+                .iter()
+                .filter(|m| {
+                    m.revoked_at.is_none() && m.role.can_proxy() && m.member_user_id == owner_id
+                })
+                .map(|m| m.org_user_id.clone()),
+        );
+        let owners: Vec<User> = db
+            .collection::<User>(USERS)
+            .find(doc! { "_id": { "$in": &ids }, "is_active": true })
+            .await?
+            .try_collect()
+            .await?;
+        let actor_active = owners.iter().any(|u| u.id == owner_id);
+        let active_owner_ids = owners
+            .into_iter()
+            .filter(|u| actor_active && (u.id == owner_id || u.user_type.is_org()))
+            .map(|u| u.id)
+            .collect();
+        Ok(Self {
+            actor_id: owner_id.to_string(),
+            active_owner_ids,
+        })
+    }
+
+    fn permits(&self, owner_id: &str, allowed: &[String]) -> bool {
+        self.active_owner_ids.contains(owner_id)
+            && allowed.iter().any(|id| {
+                id == owner_id || (owner_id == self.actor_id && self.active_owner_ids.contains(id))
+            })
+    }
+}
+
+async fn provider_supports_platform_key(
+    db: &mongodb::Database,
+    provider_id: Option<&str>,
+) -> AppResult<bool> {
+    let Some(id) = provider_id else {
+        return Ok(true);
+    };
+    Ok(db
+        .collection::<ProviderConfig>(PROVIDERS)
+        .find_one(doc! { "_id": id })
+        .await?
+        .is_some_and(|p| !p.requires_gateway_url))
+}
+
 pub async fn available(
     db: &mongodb::Database,
     service: &DownstreamService,
     owner_id: &str,
 ) -> AppResult<bool> {
-    if !has_platform_key(service) {
+    if !has_platform_key(service)
+        || !provider_supports_platform_key(db, service.provider_config_id.as_deref()).await?
+    {
         return Ok(false);
     }
     let Some(config) = &service.platform_key else {
@@ -64,21 +135,27 @@ pub async fn available(
     if config.audience == PlatformKeyAudience::Public {
         return Ok(true);
     }
-    if config.allowed_owner_ids.iter().any(|id| id == owner_id) {
-        return Ok(db
-            .collection::<User>(USERS)
-            .find_one(doc! { "_id": owner_id, "is_active": true })
-            .await?
-            .is_some());
+    Ok(OwnerGrants::load(db, owner_id)
+        .await?
+        .permits(owner_id, &config.allowed_owner_ids))
+}
+
+/// Same live service/provider checks, sharing the caller's already-fetched ACL.
+pub async fn available_with_grants(
+    db: &mongodb::Database,
+    service: &DownstreamService,
+    owner_id: &str,
+    grants: &OwnerGrants,
+) -> AppResult<bool> {
+    if !has_platform_key(service)
+        || !provider_supports_platform_key(db, service.provider_config_id.as_deref()).await?
+    {
+        return Ok(false);
     }
-    for allowed in &config.allowed_owner_ids {
-        match org_service::resolve_owner_access(db, owner_id, allowed).await? {
-            OwnerAccess::AsOrgAdmin { .. } => return Ok(true),
-            OwnerAccess::AsOrgMember { role, .. } if role.can_proxy() => return Ok(true),
-            _ => {}
-        }
-    }
-    Ok(false)
+    Ok(service.platform_key.as_ref().is_none_or(|config| {
+        config.audience == PlatformKeyAudience::Public
+            || grants.permits(owner_id, &config.allowed_owner_ids)
+    }))
 }
 
 pub async fn require(
@@ -115,6 +192,7 @@ pub async fn effective_auth(
 pub async fn validate_config(
     db: &mongodb::Database,
     config: &mut PlatformKeyConfig,
+    provider_id: Option<&str>,
 ) -> AppResult<()> {
     if config.allowed_owner_ids.len() > 1000 {
         return Err(AppError::ValidationError(
@@ -123,18 +201,28 @@ pub async fn validate_config(
     }
     config.allowed_owner_ids.sort();
     config.allowed_owner_ids.dedup();
-    for id in &config.allowed_owner_ids {
-        if uuid::Uuid::parse_str(id).is_err()
-            || db
-                .collection::<User>(USERS)
-                .find_one(doc! { "_id": id, "is_active": true })
-                .await?
-                .is_none()
-        {
-            return Err(AppError::ValidationError(
-                "platform_key owner must identify an active person or organization".to_string(),
-            ));
-        }
+    if config.enabled && !provider_supports_platform_key(db, provider_id).await? {
+        return Err(AppError::ValidationError(
+            "Platform keys are unavailable for providers that require a user gateway URL".into(),
+        ));
+    }
+    let invalid_id = config
+        .allowed_owner_ids
+        .iter()
+        .any(|id| uuid::Uuid::parse_str(id).is_err());
+    let owners = if config.allowed_owner_ids.is_empty() {
+        0
+    } else {
+        db.collection::<User>(USERS)
+            .count_documents(
+                doc! { "_id": { "$in": &config.allowed_owner_ids }, "is_active": true },
+            )
+            .await?
+    };
+    if invalid_id || owners as usize != config.allowed_owner_ids.len() {
+        return Err(AppError::ValidationError(
+            "platform_key owner must identify an active person or organization".into(),
+        ));
     }
     Ok(())
 }

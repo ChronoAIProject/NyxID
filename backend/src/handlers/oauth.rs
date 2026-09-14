@@ -3423,12 +3423,12 @@ mod tests {
     async fn insert_user_service(db: &mongodb::Database, user_id: &str, slug: &str) -> UserService {
         let now = Utc::now();
         let service = UserService {
-            credential_binding: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             slug: slug.to_string(),
             endpoint_id: Uuid::new_v4().to_string(),
             api_key_id: None,
+            credential_binding: None,
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: None,

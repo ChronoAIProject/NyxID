@@ -2386,12 +2386,12 @@ pub(crate) fn test_user_service(
     node_id: Option<&str>,
 ) -> UserService {
     UserService {
-        credential_binding: None,
         id: service_id.to_string(),
         user_id: user_id.to_string(),
         slug: slug.to_string(),
         endpoint_id: endpoint_id.to_string(),
         api_key_id: None,
+        credential_binding: None,
         auth_method: "none".to_string(),
         auth_key_name: String::new(),
         catalog_service_id: catalog_service_id.map(str::to_string),
@@ -2491,8 +2491,6 @@ pub(crate) fn test_auto_connected_catalog_service()
 -> crate::models::downstream_service::DownstreamService {
     use crate::models::downstream_service::DownstreamService;
     DownstreamService {
-        inference: None,
-        platform_key: None,
         id: uuid::Uuid::new_v4().to_string(),
         name: "Catalog".to_string(),
         slug: "autoplatform".to_string(),
@@ -2503,6 +2501,7 @@ pub(crate) fn test_auto_connected_catalog_service()
         auth_method: "none".to_string(),
         auth_key_name: "Authorization".to_string(),
         credential_encrypted: vec![],
+        platform_key: None,
         auth_type: None,
         openapi_spec_url: None,
         asyncapi_spec_url: None,
@@ -2526,6 +2525,8 @@ pub(crate) fn test_auto_connected_catalog_service()
         repository_url: None,
         issues_url: None,
         capabilities: None,
+        inference: None,
+        inference_admin_modified: false,
         billing: None,
         auth_notes: None,
         known_limitations: None,

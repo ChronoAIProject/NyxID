@@ -414,9 +414,9 @@ async fn platform_auto_connections_reconcile_and_hosted_links_complete_once() {
     let link = connect_link_service::create(
         &db,
         connect_link_service::CreateInput {
-            use_platform_key: Some(true),
             user_id: user.clone(),
             service_slug: catalog.slug.clone(),
+            use_platform_key: Some(true),
             scopes: vec![],
             label: None,
             requested_by: None,
@@ -697,7 +697,7 @@ async fn org_auto_platform_rows_inherit_acl_and_agent_union_tracks_binding() {
     let user = owner(&db, UserType::Person).await;
     let org = owner(&db, UserType::Org).await;
     db.collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
-        .insert_one(test_membership(&org, &user, OrgRole::Admin, None))
+        .insert_one(test_membership(&org, &user, OrgRole::Member, None))
         .await
         .unwrap();
     let mut service = platform_service();
@@ -715,6 +715,12 @@ async fn org_auto_platform_rows_inherit_acl_and_agent_union_tracks_binding() {
         .await
         .unwrap();
     assert_eq!(rows.len(), 1);
+    let org_view = unified_key_service::get_key(&db, &enc, &org, &rows[0])
+        .await
+        .unwrap();
+    assert!(org_view.auto_connected);
+    assert_eq!(org_view.credential_binding, "platform");
+
     assert!(
         crate::services::key_service::active_auto_connected_service_ids(&db, &user)
             .await
@@ -908,4 +914,470 @@ async fn inherited_org_provisioning_preserves_legacy_personal_only_rows() {
         0
     );
     db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn server_chosen_accepts_implicit_and_explicit_public_only() {
+    let db = connect_transaction_test_database("review_server_selected").await;
+    let mut service = platform_service();
+    service.requires_user_credential = false;
+    service.service_category = "internal".into();
+    service.visibility = "public".into();
+    for config in [
+        None,
+        service.platform_key.clone(),
+        Some(PlatformKeyConfig {
+            enabled: true,
+            audience: PlatformKeyAudience::Restricted,
+            allowed_owner_ids: vec![],
+        }),
+        Some(PlatformKeyConfig::default()),
+    ] {
+        let expected = config
+            .as_ref()
+            .is_none_or(|c| c.enabled && c.audience == PlatformKeyAudience::Public);
+        service.platform_key = config;
+        assert_eq!(
+            proxy_service::authorize_master_credential_server_chosen(&db, &service)
+                .await
+                .is_ok(),
+            expected
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn owner_grant_intersection_is_independent_of_allowlist_size() {
+    let grants = OwnerGrants {
+        actor_id: "person".into(),
+        active_owner_ids: ["person", "org-1", "org-2", "org-3"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+    };
+    let mut allowed: Vec<String> = (0..1000).map(|i| format!("unrelated-{i}")).collect();
+    assert!(!grants.permits("person", &allowed));
+    for org in ["org-1", "org-2", "org-3"] {
+        allowed.push(org.into());
+        assert!(grants.permits("person", &allowed));
+        assert!(grants.permits(org, &allowed));
+        allowed.pop();
+    }
+    assert!(!grants.permits("inactive-org", &["inactive-org".into()]));
+    assert!(!grants.permits("org-1", &["person".into(), "org-2".into()]));
+}
+
+#[tokio::test]
+async fn gateway_url_providers_reject_platform_enable_and_runtime_resolution() {
+    let db = connect_transaction_test_database("review_platform_gateway_url").await;
+    let enc = test_encryption_keys();
+    let user = owner(&db, UserType::Person).await;
+    provider_service::seed_default_providers(&db, &enc)
+        .await
+        .unwrap();
+    provider_service::seed_default_services(&db, &enc)
+        .await
+        .unwrap();
+    let provider = db
+        .collection::<ProviderConfig>(PROVIDERS)
+        .find_one(doc! {"slug":"openclaw"})
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(provider.requires_gateway_url);
+    let mut service = platform_service();
+    service.provider_config_id = Some(provider.id.clone());
+    assert!(
+        validate_config(
+            &db,
+            service.platform_key.as_mut().unwrap(),
+            Some(&provider.id)
+        )
+        .await
+        .is_err()
+    );
+    assert!(!available(&db, &service, &user).await.unwrap());
+    service.platform_key.as_mut().unwrap().enabled = false;
+    validate_config(
+        &db,
+        service.platform_key.as_mut().unwrap(),
+        Some(&provider.id),
+    )
+    .await
+    .unwrap();
+    let mut config = PlatformKeyConfig {
+        allowed_owner_ids: vec![user.clone(), user],
+        ..Default::default()
+    };
+    validate_config(&db, &mut config, None).await.unwrap();
+    assert_eq!(config.allowed_owner_ids.len(), 1);
+    config
+        .allowed_owner_ids
+        .push(uuid::Uuid::new_v4().to_string());
+    assert!(validate_config(&db, &mut config, None).await.is_err());
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn explicit_platform_connections_allow_cosmetics_and_name_locked_fields() {
+    use axum::{
+        Json,
+        extract::{Path, State},
+    };
+    let db = connect_transaction_test_database("review_platform_cosmetics").await;
+    let user = owner(&db, UserType::Person).await;
+    let state = crate::test_utils::test_app_state(db.clone());
+    let mut catalog = platform_service();
+    catalog.credential_encrypted = state
+        .encryption_keys
+        .encrypt(b"platform-secret")
+        .await
+        .unwrap();
+    db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let connection = unified_key_service::create_platform_key(
+        &db,
+        &user,
+        &user,
+        &catalog.slug,
+        "Initial",
+        None,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    let auth = crate::test_utils::test_auth_user(&user);
+    let request = serde_json::json!({"label":"My platform connection", "admin_only":true, "recommended_skills":["read-docs"], "custom_user_agent":"MyAgent/1", "default_request_headers":[{"name":"X-Project", "value":"test"}]});
+    let Json(response) = crate::handlers::keys::update_key(
+        State(state.clone()),
+        auth.clone(),
+        Path(connection.service.id.clone()),
+        Json(serde_json::from_value(request).unwrap()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.label, "My platform connection");
+    let stored =
+        crate::services::user_service_service::get_user_service(&db, &user, &connection.service.id)
+            .await
+            .unwrap();
+    assert!(stored.admin_only);
+    assert_eq!(stored.custom_user_agent.as_deref(), Some("MyAgent/1"));
+    assert_eq!(stored.default_request_headers.unwrap()[0].name, "X-Project");
+    let ep = db
+        .collection::<crate::models::user_endpoint::UserEndpoint>(
+            crate::models::user_endpoint::COLLECTION_NAME,
+        )
+        .find_one(doc! {"_id": &connection.endpoint.id})
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(ep.recommended_skills.unwrap(), vec!["read-docs"]);
+    assert_eq!(ep.url, connection.endpoint.url);
+    for (field, value) in [
+        (
+            "endpoint_url",
+            serde_json::json!("https://elsewhere.example"),
+        ),
+        ("auth_method", serde_json::json!("none")),
+        ("auth_key_name", serde_json::json!("X-Key")),
+        ("node_id", serde_json::json!("")),
+        ("credential", serde_json::json!("own")),
+        ("openapi_spec_url", serde_json::json!("")),
+        ("identity_propagation_mode", serde_json::json!("none")),
+        ("identity_include_user_id", serde_json::json!(false)),
+        ("identity_include_email", serde_json::json!(false)),
+        ("identity_include_name", serde_json::json!(false)),
+        ("identity_jwt_audience", serde_json::json!("other")),
+        ("forward_access_token", serde_json::json!(false)),
+        ("inject_delegation_token", serde_json::json!(false)),
+        ("delegation_token_scope", serde_json::json!("proxy")),
+        ("oauth_client_id", serde_json::json!("app")),
+        ("oauth_client_secret", serde_json::json!("secret")),
+        ("copy_oauth_client_from", serde_json::json!("source")),
+    ] {
+        let body = serde_json::from_value(serde_json::json!({field: value})).unwrap();
+        let err = crate::handlers::keys::update_key(
+            State(state.clone()),
+            auth.clone(),
+            Path(connection.service.id.clone()),
+            Json(body),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, AppError::ValidationError(ref message) if message == &format!("Switch to your own key to change {field}")),
+            "{field}: {err}"
+        );
+    }
+    // The lower-level service route enforces the same boundary.
+    let err = crate::services::user_service_service::update_user_service(
+        &db,
+        &user,
+        &user,
+        &connection.service.id,
+        None,
+        None,
+        Some(""),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("Switch to your own key to change node_id")
+    );
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn byok_create_response_reports_available_platform_key_for_both_create_paths() {
+    use axum::{Json, extract::State};
+    let db = connect_transaction_test_database("review_byok_create_availability").await;
+    let user = owner(&db, UserType::Person).await;
+    let state = crate::test_utils::test_app_state(db.clone());
+    let mut catalog = platform_service();
+    catalog.credential_encrypted = state
+        .encryption_keys
+        .encrypt(b"platform-secret")
+        .await
+        .unwrap();
+    db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    for reserved in [None, Some(uuid::Uuid::new_v4().to_string())] {
+        let body = serde_json::from_value(serde_json::json!({"service_slug": &catalog.slug, "label":"BYOK", "credential":"own-secret"})).unwrap();
+        let Json(created) = crate::handlers::keys::create_key_with_service_id(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&user),
+            Default::default(),
+            Json(body),
+            reserved.as_deref(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.credential_binding, "user");
+        assert!(created.platform_key_available);
+        assert!(
+            !serde_json::to_string(&created)
+                .unwrap()
+                .contains("own-secret")
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn non_llm_slug_token_lane_settles_reported_json_and_sse_usage() {
+    use crate::models::service_billing::{
+        BillingMetric, LanePricing, PricingSyncStatus, ServiceBilling,
+    };
+    use crate::models::usage_meter::{COLLECTION_NAME as METER, UsageMeterRow};
+    use axum::{
+        body::{Body, to_bytes},
+        extract::{Path, State},
+    };
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
+    let db = connect_transaction_test_database("review_non_llm_token_lane").await;
+    let user = owner(&db, UserType::Person).await;
+    let mut config = crate::test_utils::test_app_config();
+    config.billing_enabled = true;
+    let state = crate::test_utils::test_app_state_with_config(db.clone(), config);
+    let upstream = MockServer::start().await;
+    let mut catalog = platform_service();
+    catalog.slug = "chrono-llm-public".into();
+    catalog.base_url = upstream.uri();
+    catalog.credential_encrypted = state
+        .encryption_keys
+        .encrypt(b"platform-secret")
+        .await
+        .unwrap();
+    catalog.billing = Some(ServiceBilling {
+        platform_key_pricing: Some(LanePricing {
+            metric: BillingMetric::Tokens,
+            credits_per_unit: "0.01".into(),
+            lago_metric_code: "platform_svc_chrono-llm-public_pk".into(),
+            sync_status: PricingSyncStatus::Synced,
+            sync_error: None,
+        }),
+        ..Default::default()
+    });
+    db.collection::<DownstreamService>(crate::models::downstream_service::COLLECTION_NAME)
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+    let connection = unified_key_service::create_platform_key(
+        &db,
+        &user,
+        &user,
+        &catalog.slug,
+        "Chrono",
+        None,
+        false,
+        None,
+    )
+    .await
+    .unwrap();
+    for (route, content_type, response_body) in [
+        (
+            "json",
+            "application/json",
+            r#"{"choices":[],"usage":{"prompt_tokens":1234,"completion_tokens":321,"total_tokens":1555}}"#,
+        ),
+        (
+            "sse",
+            "text/event-stream",
+            "data: {\"usage\":{\"prompt_tokens\":1234,\"completion_tokens\":321,\"total_tokens\":1555}}\n\ndata: [DONE]\n\n",
+        ),
+    ] {
+        Mock::given(method("POST"))
+            .and(path(format!("/{route}")))
+            .and(header("authorization", "Bearer platform-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(response_body, content_type))
+            .expect(1)
+            .mount(&upstream)
+            .await;
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri(format!(
+                "/api/v1/proxy/s/{}/{route}",
+                connection.service.slug
+            ))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"model":"test","messages":[]}"#))
+            .unwrap();
+        request.extensions_mut().insert(
+            crate::services::billing::route_inventory::BillingRoutePolicy::Metered(
+                crate::services::billing::BillingIngress::Proxy,
+            ),
+        );
+        let response = Box::pin(crate::handlers::proxy::proxy_request_by_slug(
+            State(state.clone()),
+            crate::test_utils::test_auth_user(&user),
+            Default::default(),
+            Path((connection.service.slug.clone(), route.into())),
+            request,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(response.status(), 200);
+        to_bytes(response.into_body(), 10_000).await.unwrap();
+    }
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let rows: Vec<UsageMeterRow> = db
+                .collection::<UsageMeterRow>(METER)
+                .find(doc! {"status":"finalized"})
+                .await
+                .unwrap()
+                .try_collect()
+                .await
+                .unwrap();
+            if rows.len() == 2 {
+                for row in rows {
+                    assert_eq!(row.quantity, Some(1555));
+                    assert_eq!(row.metric, BillingMetric::Tokens);
+                    assert_eq!(row.lago_metric_code, "platform_svc_chrono-llm-public_pk");
+                    assert_eq!(
+                        row.credential_class,
+                        crate::models::usage_meter::CredentialClass::NyxidManagedMaster
+                    );
+                }
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    db.drop().await.unwrap();
+}
+
+#[tokio::test]
+async fn llm_status_fetches_memberships_once_for_many_providers_and_owners() {
+    let db = connect_transaction_test_database("review_status_membership_bound").await;
+    let enc = test_encryption_keys();
+    let person = owner(&db, UserType::Person).await;
+    let mut orgs = vec![];
+    for _ in 0..3 {
+        let org = owner(&db, UserType::Org).await;
+        db.collection::<crate::models::org_membership::OrgMembership>(MEMBERSHIPS)
+            .insert_one(test_membership(&org, &person, OrgRole::Member, None))
+            .await
+            .unwrap();
+        orgs.push(org);
+    }
+    provider_service::seed_default_providers(&db, &enc)
+        .await
+        .unwrap();
+    provider_service::seed_default_services(&db, &enc)
+        .await
+        .unwrap();
+    db.collection::<bson::Document>(crate::models::downstream_service::COLLECTION_NAME).update_many(doc! {"slug":{"$in":["llm-openai","llm-xai","llm-deepseek"]}}, doc! {"$set": {
+        "platform_key": {"enabled":true,"audience":"restricted","allowed_owner_ids": &orgs},
+        "credential_encrypted": bson::Binary { subtype: bson::spec::BinarySubtype::Generic, bytes: enc.encrypt(b"secret").await.unwrap() },
+    }}).await.unwrap();
+    db.run_command(doc! {"profile":2}).await.unwrap();
+    let statuses = llm_gateway_service::get_llm_status(&db, &person, "https://nyx.example")
+        .await
+        .unwrap();
+    db.run_command(doc! {"profile":0}).await.unwrap();
+    assert_eq!(
+        db.collection::<bson::Document>("system.profile")
+            .count_documents(doc! {"command.find": MEMBERSHIPS})
+            .await
+            .unwrap(),
+        1
+    );
+    for slug in ["openai", "xai", "deepseek"] {
+        assert_eq!(
+            statuses
+                .providers
+                .iter()
+                .find(|s| s.provider_slug == slug)
+                .unwrap()
+                .status,
+            "ready"
+        );
+    }
+    db.drop().await.unwrap();
+}
+
+#[test]
+fn legacy_and_explicit_master_credentials_cannot_use_owner_node_routes() {
+    let mut service = platform_service();
+    service.requires_user_credential = false;
+    let mut target = proxy_service::ProxyTarget {
+        base_url: service.base_url.clone(),
+        auth_method: "bearer".into(),
+        auth_key_name: "Authorization".into(),
+        credential: "server-secret".into(),
+        service,
+        catalog_default_headers: vec![],
+        user_service_default_headers: vec![],
+        ws_frame_injections: vec![],
+        connection_id: None,
+    };
+    assert!(proxy_service::uses_server_held_master(&target));
+    target.service.platform_key = None;
+    assert!(proxy_service::uses_server_held_master(&target));
+    target.service.requires_user_credential = true;
+    assert!(!proxy_service::uses_server_held_master(&target));
+    target.service.requires_user_credential = false;
+    target.auth_method = "none".into();
+    assert!(!proxy_service::uses_server_held_master(&target));
 }

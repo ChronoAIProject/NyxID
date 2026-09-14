@@ -27,13 +27,13 @@ pub enum ConnectLinkWebhookStatus {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ConnectLink {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub use_platform_key: Option<bool>,
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
     pub service_slug: String,
     pub service_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub use_platform_key: Option<bool>,
     #[serde(default)]
     pub scopes: Vec<String>,
     pub label: Option<String>,
@@ -147,11 +147,11 @@ mod tests {
     fn fixture() -> ConnectLink {
         let now = Utc::now();
         ConnectLink {
-            use_platform_key: None,
             scopes: Vec::new(),
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             service_slug: "api-github-pat".to_string(),
+            use_platform_key: None,
             service_id: uuid::Uuid::new_v4().to_string(),
             label: Some("Release automation".to_string()),
             requested_by: Some("codex-release".to_string()),

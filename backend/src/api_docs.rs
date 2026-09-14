@@ -342,6 +342,8 @@ mod tests {
                 vec!["credential_binding", "platform_key_available"],
             ),
             ("CreateKeyRequest", vec!["use_platform_key"]),
+            ("UpdateServiceRequest", vec!["credential"]),
+            ("ServiceResponse", vec!["legacy_public_master"]),
             ("UpdateKeyRequest", vec!["use_platform_key"]),
             (
                 "ServiceBilling",

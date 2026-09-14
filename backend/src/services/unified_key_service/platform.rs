@@ -202,3 +202,57 @@ pub async fn set_platform_connection_active(
             doc! { "$set": { "is_active": active, "updated_at": bson::DateTime::from_chrono(Utc::now()) }, "$inc": { "state_version": 1_i64 } }).await?;
     Ok(())
 }
+
+/// Only presentation and per-user header settings can be changed with a
+/// platform binding. Endpoint/auth/routing remain catalog-owned.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_platform_connection_cosmetics(
+    db: &mongodb::Database,
+    owner_id: &str,
+    actor_id: &str,
+    service_id: &str,
+    label: Option<&str>,
+    skills: Option<Vec<String>>,
+    active: Option<bool>,
+    admin_only: Option<bool>,
+    user_agent: Option<&str>,
+    headers: Option<&Option<Vec<crate::models::default_request_header::DefaultRequestHeader>>>,
+) -> AppResult<()> {
+    let service = user_service_service::get_user_service(db, owner_id, service_id).await?;
+    user_service_service::ensure_service_fields_editable(&service, &[])?;
+    if let Some(active) = active
+        && label.is_none()
+        && skills.is_none()
+        && admin_only.is_none()
+        && user_agent.is_none()
+        && headers.is_none()
+    {
+        return super::set_platform_connection_active(db, owner_id, service_id, active).await;
+    }
+    let skills = match skills {
+        None => user_endpoint_service::RecommendedSkillsUpdate::Leave,
+        Some(skills) => user_endpoint_service::RecommendedSkillsUpdate::Set(skills),
+    };
+    // Validate endpoint presentation before any service write.
+    user_endpoint_service::build_endpoint_update(
+        None,
+        label,
+        user_endpoint_service::OpenApiSpecUrlUpdate::Leave,
+        skills.clone(),
+    )?;
+    user_service_service::update_user_service(
+        db, owner_id, actor_id, service_id, None, None, None, None, active, None, user_agent,
+        headers, None, admin_only,
+    )
+    .await?;
+    user_endpoint_service::update_endpoint(
+        db,
+        owner_id,
+        &service.endpoint_id,
+        None,
+        label,
+        user_endpoint_service::OpenApiSpecUrlUpdate::Leave,
+        skills,
+    )
+    .await
+}

@@ -872,9 +872,6 @@ mod tests {
 
     fn minimal_catalog_entry() -> crate::services::catalog_service::CatalogEntry {
         crate::services::catalog_service::CatalogEntry {
-            inference: None,
-            platform_key: Default::default(),
-            byok_pricing: None,
             slug: "openai".to_string(),
             name: "OpenAI".to_string(),
             description: Some("AI API".to_string()),
@@ -922,7 +919,10 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
             billing: None,
+            platform_key: Default::default(),
+            byok_pricing: None,
             auth_notes: None,
             known_limitations: None,
             required_permissions: None,

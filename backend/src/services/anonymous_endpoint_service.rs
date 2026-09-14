@@ -496,8 +496,6 @@ mod tests {
 
     fn compatible_service() -> DownstreamService {
         DownstreamService {
-            inference: None,
-            platform_key: None,
             id: "svc-1".to_string(),
             name: "Service".to_string(),
             slug: "svc".to_string(),
@@ -508,6 +506,7 @@ mod tests {
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             credential_encrypted: vec![],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -531,6 +530,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -593,14 +594,14 @@ mod tests {
     fn enabled_rules_reject_resale_billing() {
         let mut service = compatible_service();
         service.billing = Some(crate::models::service_billing::ServiceBilling {
-            byok_pricing: None,
-            platform_key_pricing: None,
-            byok_pricing_cleanup_metric_code: None,
-            platform_key_pricing_cleanup_metric_code: None,
             platform_billable: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: crate::models::service_billing::BillingMetric::Requests,
             lago_resale_metric_code: Some("resale_requests".to_string()),

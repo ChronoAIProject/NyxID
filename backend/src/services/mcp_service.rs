@@ -3791,7 +3791,7 @@ pub async fn execute_tool(
                 .await?;
                 (t, true)
             };
-            if !t.service.requires_user_credential && t.auth_method != "none" {
+            if proxy_service::uses_server_held_master(&t) {
                 nr = None;
             }
             // Platform services resolve their node route through
@@ -4178,7 +4178,7 @@ pub async fn execute_tool_resolved(
                     billing
                         .settle(
                             &metered,
-                            mcp_platform_usage(&resp.body, request_len),
+                            mcp_platform_usage(&resp.body, request_len, &target.service),
                             None,
                             None,
                         )
@@ -4196,7 +4196,7 @@ pub async fn execute_tool_resolved(
                     billing
                         .settle(
                             &metered,
-                            mcp_platform_usage(&body_buf, request_len),
+                            mcp_platform_usage(&body_buf, request_len, &target.service),
                             None,
                             None,
                         )
@@ -4298,7 +4298,7 @@ pub async fn execute_tool_resolved(
     billing
         .settle(
             &metered,
-            mcp_platform_usage(body_text.as_bytes(), request_len),
+            mcp_platform_usage(body_text.as_bytes(), request_len, &target.service),
             None,
             None,
         )
@@ -4307,7 +4307,7 @@ pub async fn execute_tool_resolved(
     Ok(McpToolExecutionOutcome::Response((status, body_text)))
 }
 
-fn mcp_platform_usage(body: &[u8], request_len: i64) -> PlatformUsage {
+fn mcp_platform_usage(body: &[u8], request_len: i64, service: &DownstreamService) -> PlatformUsage {
     use crate::services::llm_usage_service;
     let mut accumulator = llm_usage_service::ReportedLlmUsageAccumulator::default();
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
@@ -4327,6 +4327,9 @@ fn mcp_platform_usage(body: &[u8], request_len: i64) -> PlatformUsage {
     }
     let usage = accumulator.finalize();
     let bytes = request_len.saturating_add(body.len() as i64);
+    if usage.is_none() && !crate::services::billing::metric_resolution::captures_tokens(service) {
+        return PlatformUsage::single_request(bytes);
+    }
     PlatformUsage::llm_completion(
         bytes,
         llm_usage_service::token_quantity_or_estimate(usage.as_ref(), bytes),
@@ -4780,10 +4783,10 @@ pub async fn connect_service(
         let created = connect_link_service::create(
             db,
             connect_link_service::CreateInput {
-                use_platform_key: None,
                 scopes: scopes.to_vec(),
                 user_id: user_id.to_string(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: credential_label.map(str::to_string),
                 requested_by: requested_by.map(str::to_string),
                 callback_url: None,
@@ -4830,6 +4833,43 @@ pub async fn connect_service(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mcp_usage_estimates_only_token_services_and_preserves_reported_usage() {
+        use crate::models::downstream_service::test_helpers::dummy_service;
+        use crate::models::service_billing::{BillingMetric, ServiceBilling};
+        let mut service = dummy_service();
+        let body = br#"{"items":[{"name":"repository"}]}"#;
+        let plain = super::mcp_platform_usage(body, 12, &service);
+        assert_eq!(plain.tokens, 0);
+        assert_eq!(plain.requests, 1);
+        assert_eq!(plain.bytes, 12 + body.len() as i64);
+        let reported = super::mcp_platform_usage(
+            br#"{"usage":{"total_tokens":57,"prompt_tokens":50,"completion_tokens":7}}"#,
+            12,
+            &service,
+        );
+        assert_eq!(reported.tokens, 57);
+        service.billing = Some(ServiceBilling {
+            platform_key_pricing: Some(
+                serde_json::from_value(
+                    serde_json::json!({"metric":"tokens","credits_per_unit":"1"}),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        });
+        assert!(super::mcp_platform_usage(body, 12, &service).tokens > 0);
+        service
+            .billing
+            .as_mut()
+            .unwrap()
+            .platform_key_pricing
+            .as_mut()
+            .unwrap()
+            .metric = BillingMetric::Requests;
+        assert_eq!(super::mcp_platform_usage(body, 12, &service).tokens, 0);
+    }
+
     use super::*;
     use crate::models::downstream_service::test_helpers::dummy_service;
     use crate::test_utils::{
@@ -8817,8 +8857,6 @@ mod tests {
         /// supplied by the caller.
         fn safe_service(slug: &str, rules: Vec<AnonymousEndpointRule>) -> DownstreamService {
             DownstreamService {
-                inference: None,
-                platform_key: None,
                 id: Uuid::new_v4().to_string(),
                 name: format!("Service {slug}"),
                 slug: slug.to_string(),
@@ -8829,6 +8867,7 @@ mod tests {
                 auth_method: "none".to_string(),
                 auth_key_name: String::new(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
@@ -8852,6 +8891,8 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,

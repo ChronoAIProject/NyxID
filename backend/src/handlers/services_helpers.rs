@@ -237,6 +237,8 @@ pub fn service_to_response_with_viewer(
     s: DownstreamService,
     viewer: Option<&ViewerRouting>,
 ) -> ServiceResponse {
+    let legacy_public_master =
+        s.platform_key.is_none() && crate::services::platform_key_service::legacy_public_master(&s);
     let effective_platform_metric =
         crate::services::billing::metric_resolution::effective_platform_metric(&s);
     ServiceResponse {
@@ -283,6 +285,7 @@ pub fn service_to_response_with_viewer(
         inference: s.inference,
         platform_key: s.platform_key,
         effective_platform_metric,
+        legacy_public_master,
         auth_notes: s.auth_notes,
         known_limitations: s.known_limitations,
         required_permissions: s.required_permissions,

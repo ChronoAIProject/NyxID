@@ -277,8 +277,6 @@ mod tests {
 
     fn service() -> DownstreamService {
         DownstreamService {
-            inference: None,
-            platform_key: None,
             id: "svc-1".to_string(),
             name: "Public".to_string(),
             slug: "public".to_string(),
@@ -289,6 +287,7 @@ mod tests {
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![1, 2, 3],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -312,6 +311,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -409,8 +410,6 @@ mod tests {
         /// single enabled `GET /public/**` anonymous rule with `daily_quota`.
         fn public_service(slug: &str, base_url: &str, daily_quota: u32) -> DownstreamService {
             DownstreamService {
-                inference: None,
-                platform_key: None,
                 id: Uuid::new_v4().to_string(),
                 name: "Public".to_string(),
                 slug: slug.to_string(),
@@ -421,6 +420,7 @@ mod tests {
                 auth_method: "none".to_string(),
                 auth_key_name: String::new(),
                 credential_encrypted: vec![],
+                platform_key: None,
                 auth_type: None,
                 openapi_spec_url: None,
                 asyncapi_spec_url: None,
@@ -444,6 +444,8 @@ mod tests {
                 repository_url: None,
                 issues_url: None,
                 capabilities: None,
+                inference: None,
+                inference_admin_modified: false,
                 billing: None,
                 auth_notes: None,
                 known_limitations: None,
@@ -762,14 +764,14 @@ mod tests {
             };
             let mut service = public_service("pub", "https://example.test", 100);
             service.billing = Some(ServiceBilling {
-                byok_pricing: None,
-                platform_key_pricing: None,
-                byok_pricing_cleanup_metric_code: None,
-                platform_key_pricing_cleanup_metric_code: None,
                 platform_billable: false,
                 platform_metric: None,
                 platform_pricing: None,
                 platform_pricing_cleanup_metric_code: None,
+                byok_pricing: None,
+                platform_key_pricing: None,
+                byok_pricing_cleanup_metric_code: None,
+                platform_key_pricing_cleanup_metric_code: None,
                 resale_billable: true,
                 resale_metric: BillingMetric::Tokens,
                 lago_resale_metric_code: Some("resale_tokens".to_string()),

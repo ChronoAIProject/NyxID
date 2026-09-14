@@ -96,33 +96,31 @@ pub async fn get_llm_status(
     // effective scope so we can apply role + service filters.
     let mut credential_owners: Vec<CredentialOwner> =
         vec![CredentialOwner::Personal(user_id.to_string())];
-    match org_service::find_active_memberships_with_timeout(db, user_id).await {
-        Ok(memberships) => {
-            for m in memberships {
-                if !m.role.can_proxy() {
-                    continue; // viewers cannot use org credentials
-                }
-                let effective_scope =
-                    crate::services::org_role_scope_service::effective_scope_for_membership(db, &m)
-                        .await?;
-                credential_owners.push(CredentialOwner::Org {
-                    org_user_id: m.org_user_id,
-                    effective_scope,
-                    role: m.role,
-                });
-            }
-        }
+    let memberships = match org_service::find_active_memberships_with_timeout(db, user_id).await {
+        Ok(rows) => rows,
         Err(AppError::OrgQueryTimeout) => {
-            // Degrade gracefully: an informational endpoint should not 503
-            // because the org-fallback query was slow. Personal credentials
-            // are still reported.
-            tracing::warn!(
-                user_id = %user_id,
-                "Org membership query timed out while computing LLM status; \
-                 reporting personal credentials only"
-            );
+            tracing::warn!(user_id = %user_id, "Org membership query timed out while computing LLM status; reporting personal credentials only");
+            vec![]
         }
         Err(e) => return Err(e),
+    };
+    let platform_grants = crate::services::platform_key_service::OwnerGrants::from_memberships(
+        db,
+        user_id,
+        &memberships,
+    )
+    .await?;
+    for m in memberships {
+        if !m.role.can_proxy() {
+            continue;
+        }
+        let effective_scope =
+            crate::services::org_role_scope_service::effective_scope_for_membership(db, &m).await?;
+        credential_owners.push(CredentialOwner::Org {
+            org_user_id: m.org_user_id,
+            effective_scope,
+            role: m.role,
+        });
     }
 
     // Pre-fetch the legacy provider tokens for the actor in one round-trip.
@@ -169,7 +167,8 @@ pub async fn get_llm_status(
         // to the legacy provider token. Stop at the first `Ready`.
         let mut best = LlmStatusRank::NotConnected;
         for owner in &credential_owners {
-            let candidate = lookup_user_service_status(db, owner, &service.id).await?;
+            let candidate =
+                lookup_user_service_status(db, owner, service, &platform_grants).await?;
             if candidate > best {
                 best = candidate;
             }
@@ -194,7 +193,14 @@ pub async fn get_llm_status(
             }
         }
 
-        if crate::services::platform_key_service::available(db, service, user_id).await? {
+        if crate::services::platform_key_service::available_with_grants(
+            db,
+            service,
+            user_id,
+            &platform_grants,
+        )
+        .await?
+        {
             best = LlmStatusRank::Ready;
         }
 
@@ -300,11 +306,11 @@ impl LlmStatusRank {
 async fn lookup_user_service_status(
     db: &mongodb::Database,
     owner: &CredentialOwner,
-    catalog_service_id: &str,
+    catalog: &DownstreamService,
+    platform_grants: &crate::services::platform_key_service::OwnerGrants,
 ) -> AppResult<LlmStatusRank> {
     let Some(us) =
-        user_service_service::find_by_catalog_service_id(db, owner.user_id(), catalog_service_id)
-            .await?
+        user_service_service::find_by_catalog_service_id(db, owner.user_id(), &catalog.id).await?
     else {
         return Ok(LlmStatusRank::NotConnected);
     };
@@ -312,15 +318,16 @@ async fn lookup_user_service_status(
         return Ok(LlmStatusRank::NotConnected);
     }
     if crate::services::platform_key_service::binding(&us) == "platform"
-        && let Some(catalog) = db
-            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
-            .find_one(doc! { "_id": catalog_service_id })
-            .await?
         && (catalog.platform_key.is_some() || us.auth_method != "none")
     {
         return Ok(
-            if crate::services::platform_key_service::available(db, &catalog, owner.user_id())
-                .await?
+            if crate::services::platform_key_service::available_with_grants(
+                db,
+                catalog,
+                owner.user_id(),
+                platform_grants,
+            )
+            .await?
             {
                 LlmStatusRank::Ready
             } else {

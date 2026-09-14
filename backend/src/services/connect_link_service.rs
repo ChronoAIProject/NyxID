@@ -38,9 +38,9 @@ const MAX_CALLBACK_URL_LEN: usize = 2048;
 const MAX_LAST_ERROR_LEN: usize = 100;
 
 pub struct CreateInput {
-    pub use_platform_key: Option<bool>,
     pub user_id: String,
     pub service_slug: String,
+    pub use_platform_key: Option<bool>,
     pub scopes: Vec<String>,
     pub label: Option<String>,
     pub requested_by: Option<String>,
@@ -100,8 +100,8 @@ pub struct LinkView {
 
 #[derive(Default)]
 pub struct CompleteInput<'a> {
-    pub use_platform_key: Option<bool>,
     pub credential: Option<&'a str>,
+    pub use_platform_key: Option<bool>,
     pub endpoint_url: Option<&'a str>,
     pub oauth_client_id: Option<&'a str>,
     pub oauth_client_secret: Option<&'a str>,
@@ -190,10 +190,10 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
     let raw_token = format!("{CONNECT_LINK_PREFIX}{}", generate_random_token());
     let now = Utc::now();
     let link = ConnectLink {
-        use_platform_key: input.use_platform_key,
         id: Uuid::new_v4().to_string(),
         user_id: input.user_id,
         service_slug: service.service_slug.clone(),
+        use_platform_key: input.use_platform_key,
         service_id: service.service_id.clone(),
         scopes,
         label,
@@ -1535,10 +1535,10 @@ mod tests {
         let created = create(
             db,
             CreateInput {
-                use_platform_key: None,
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: Some(format!("Connect {suffix}")),
                 requested_by: None,
                 callback_url: None,
@@ -1622,9 +1622,9 @@ mod tests {
 
     fn scope_create_input(service: &DownstreamService, scopes: &[&str]) -> CreateInput {
         CreateInput {
-            use_platform_key: None,
             user_id: Uuid::new_v4().to_string(),
             service_slug: service.slug.clone(),
+            use_platform_key: None,
             scopes: scopes.iter().map(|scope| (*scope).to_string()).collect(),
             label: None,
             requested_by: None,
@@ -1824,8 +1824,8 @@ mod tests {
                 State(state.clone()),
                 test_auth_user(&actor),
                 Json(handlers::CreateConnectLinkRequest {
-                    use_platform_key: None,
                     service_slug: service.slug.clone(),
+                    use_platform_key: None,
                     scopes: vec!["read:org, public_repo".to_string()],
                     label: None,
                     requested_by: None,
@@ -1862,9 +1862,9 @@ mod tests {
                     ConnectInfo("127.0.0.1:43210".parse().unwrap()),
                     HeaderMap::new(),
                     Json(handlers::CompleteConnectLinkRequest {
-                        use_platform_key: None,
                         token: raw_token.clone(),
                         credential: None,
+                        use_platform_key: None,
                         endpoint_url: None,
                         oauth_client_id: None,
                         oauth_client_secret: None,
@@ -1950,10 +1950,10 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
-                use_platform_key: None,
                 scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: Some("spoofed request name".to_string()),
                 callback_url: Some(callback.to_string()),
@@ -1987,10 +1987,10 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
-                use_platform_key: None,
                 scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: None,
                 callback_url: Some(callback.to_string()),
@@ -2018,10 +2018,10 @@ mod tests {
         let result = create(
             &db,
             CreateInput {
-                use_platform_key: None,
                 scopes: Vec::new(),
                 user_id: Uuid::new_v4().to_string(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: None,
                 callback_url: Some("https://other.example.test/return".to_string()),
@@ -2663,8 +2663,8 @@ mod tests {
     #[test]
     fn secret_bearing_service_inputs_redact_debug_output() {
         let input = CompleteInput {
-            use_platform_key: None,
             credential: Some("api-secret"),
+            use_platform_key: None,
             endpoint_url: Some("https://gateway.example.test"),
             oauth_client_id: Some("client-id"),
             oauth_client_secret: Some("client-secret"),
@@ -2685,10 +2685,10 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
-                use_platform_key: None,
                 scopes: Vec::new(),
                 user_id: owner,
                 service_slug: service.slug.clone(),
+                use_platform_key: None,
                 label: Some("Production".to_string()),
                 requested_by: Some("test-agent".to_string()),
                 callback_url: None,
@@ -2727,10 +2727,10 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
-                use_platform_key: None,
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: None,
                 callback_url: None,
@@ -2771,10 +2771,10 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
-                use_platform_key: None,
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: None,
                 callback_url: None,
@@ -2812,10 +2812,10 @@ mod tests {
         let created = create(
             &db,
             CreateInput {
-                use_platform_key: None,
                 scopes: Vec::new(),
                 user_id: owner.clone(),
                 service_slug: service.slug,
+                use_platform_key: None,
                 label: None,
                 requested_by: None,
                 callback_url: None,

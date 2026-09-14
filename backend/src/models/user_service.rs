@@ -148,12 +148,12 @@ mod tests {
     #[test]
     fn bson_roundtrip() {
         let svc = UserService {
-            credential_binding: None,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             slug: "llm-openai".to_string(),
             endpoint_id: uuid::Uuid::new_v4().to_string(),
             api_key_id: Some(uuid::Uuid::new_v4().to_string()),
+            credential_binding: None,
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: Some("svc-id".to_string()),
@@ -199,12 +199,12 @@ mod tests {
     #[test]
     fn bson_defaults() {
         let svc = UserService {
-            credential_binding: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "test".to_string(),
             endpoint_id: "ep".to_string(),
             api_key_id: Some("ak".to_string()),
+            credential_binding: None,
             auth_method: "header".to_string(),
             auth_key_name: "X-API-Key".to_string(),
             catalog_service_id: None,
@@ -251,12 +251,12 @@ mod tests {
     #[test]
     fn bson_identity_defaults() {
         let svc = UserService {
-            credential_binding: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "test".to_string(),
             endpoint_id: "ep".to_string(),
             api_key_id: None,
+            credential_binding: None,
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: None,
@@ -310,12 +310,12 @@ mod tests {
     #[test]
     fn bson_roundtrip_no_api_key() {
         let svc = UserService {
-            credential_binding: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "auto-svc".to_string(),
             endpoint_id: "ep".to_string(),
             api_key_id: None,
+            credential_binding: None,
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: Some("cat-1".to_string()),
@@ -359,12 +359,12 @@ mod tests {
     #[test]
     fn user_service_preexisting_documents_deserialize_missing_state_version_as_zero() {
         let svc = UserService {
-            credential_binding: None,
             id: "id".to_string(),
             user_id: "uid".to_string(),
             slug: "legacy".to_string(),
             endpoint_id: "ep".to_string(),
             api_key_id: Some("ak".to_string()),
+            credential_binding: None,
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: None,

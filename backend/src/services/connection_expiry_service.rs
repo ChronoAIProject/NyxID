@@ -381,12 +381,12 @@ mod tests {
     fn user_service(user_id: &str, api_key_id: &str) -> UserService {
         let now = Utc::now();
         UserService {
-            credential_binding: None,
             id: Uuid::new_v4().to_string(),
             user_id: user_id.to_string(),
             slug: "github-work".to_string(),
             endpoint_id: Uuid::new_v4().to_string(),
             api_key_id: Some(api_key_id.to_string()),
+            credential_binding: None,
             auth_method: "bearer".to_string(),
             auth_key_name: "Authorization".to_string(),
             catalog_service_id: Some("github-catalog".to_string()),

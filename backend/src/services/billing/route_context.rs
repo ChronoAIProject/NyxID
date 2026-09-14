@@ -139,14 +139,14 @@ mod tests {
 
     fn context_for(credential_class: CredentialClass) -> BillingRouteContext {
         let billing = ServiceBilling {
-            byok_pricing: None,
-            platform_key_pricing: None,
-            byok_pricing_cleanup_metric_code: None,
-            platform_key_pricing_cleanup_metric_code: None,
             platform_billable: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),
@@ -281,14 +281,14 @@ mod tests {
     #[test]
     fn resale_requires_operator_flag() {
         let billing = ServiceBilling {
-            byok_pricing: None,
-            platform_key_pricing: None,
-            byok_pricing_cleanup_metric_code: None,
-            platform_key_pricing_cleanup_metric_code: None,
             platform_billable: false,
             platform_metric: None,
             platform_pricing: None,
             platform_pricing_cleanup_metric_code: None,
+            byok_pricing: None,
+            platform_key_pricing: None,
+            byok_pricing_cleanup_metric_code: None,
+            platform_key_pricing_cleanup_metric_code: None,
             resale_billable: true,
             resale_metric: BillingMetric::Tokens,
             lago_resale_metric_code: Some("resale_tokens".to_string()),

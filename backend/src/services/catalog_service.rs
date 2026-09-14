@@ -847,12 +847,12 @@ mod tests {
 
     fn user_service(id: &str, user_id: &str) -> UserService {
         UserService {
-            credential_binding: None,
             id: id.to_string(),
             user_id: user_id.to_string(),
             slug: "test".to_string(),
             endpoint_id: "ep-1".to_string(),
             api_key_id: None,
+            credential_binding: None,
             auth_method: "none".to_string(),
             auth_key_name: String::new(),
             catalog_service_id: Some("cat-1".to_string()),

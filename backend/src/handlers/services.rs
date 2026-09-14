@@ -180,8 +180,10 @@ pub struct ServiceResponse {
     pub billing: Option<ServiceBilling>,
     pub inference: Option<crate::models::downstream_service::ServiceInference>,
     pub platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
-    /// Resolved allowance and platform metering unit after applying the
-    /// service's explicit billing override or protocol/slug heuristic.
+    /// Absent configuration currently grants a public internal master credential.
+    pub legacy_public_master: bool,
+    /// Default allowance/display unit: BYOK lane, then platform-key lane,
+    /// then legacy override or protocol/slug heuristic. Requests use their lane.
     pub effective_platform_metric: BillingMetric,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_notes: Option<String>,
@@ -320,7 +322,7 @@ impl std::ops::DerefMut for BillingUpdate {
     }
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpdateServiceRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -352,6 +354,9 @@ pub struct UpdateServiceRequest {
     )]
     pub inference: Option<Option<crate::models::downstream_service::ServiceInference>>,
     pub platform_key: Option<crate::models::downstream_service::PlatformKeyConfig>,
+    /// Write-only replacement of the catalog master credential (admin only).
+    #[schema(value_type = Option<String>)]
+    pub credential: Option<zeroize::Zeroizing<String>>,
     pub auth_notes: Option<String>,
     pub known_limitations: Option<String>,
     pub required_permissions: Option<Vec<String>>,
@@ -389,6 +394,17 @@ pub struct UpdateServiceRequest {
     pub anonymous_endpoints: Option<Vec<AnonymousEndpointRule>>,
     /// Replace the data-plane operation allowlist. Empty rules deny all.
     pub proxy_operation_policy: Option<ProxyOperationPolicy>,
+}
+
+impl std::fmt::Debug for UpdateServiceRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateServiceRequest")
+            .field(
+                "credential",
+                &self.credential.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 fn identity_update_fields(body: &UpdateServiceRequest) -> Vec<&'static str> {
@@ -1190,13 +1206,11 @@ pub async fn create_service(
     }
     if let Some(config) = body.platform_key.as_mut() {
         require_admin(&state, &auth_user).await?;
-        crate::services::platform_key_service::validate_config(&state.db, config).await?;
+        crate::services::platform_key_service::validate_config(&state.db, config, None).await?;
     }
     validate_service_billing(body.billing.as_ref())?;
 
     let new_service = DownstreamService {
-        inference: body.inference.clone(),
-        platform_key: body.platform_key.clone(),
         id: id.clone(),
         name: body.name.clone(),
         slug: slug.clone(),
@@ -1208,6 +1222,7 @@ pub async fn create_service(
         auth_type,
         auth_key_name,
         credential_encrypted: encrypted_cred,
+        platform_key: body.platform_key.clone(),
         openapi_spec_url,
         asyncapi_spec_url,
         streaming_supported,
@@ -1230,6 +1245,8 @@ pub async fn create_service(
         repository_url: body.repository_url.clone(),
         issues_url: body.issues_url.clone(),
         capabilities: body.capabilities.clone(),
+        inference: body.inference.clone(),
+        inference_admin_modified: body.inference.is_some(),
         billing: body.billing.clone(),
         auth_notes: body.auth_notes.clone(),
         known_limitations: body.known_limitations.clone(),
@@ -1253,6 +1270,21 @@ pub async fn create_service(
         .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
         .insert_one(&new_service)
         .await?;
+
+    for (changed, event) in [
+        (body.platform_key.is_some(), "service_platform_key_changed"),
+        (body.inference.is_some(), "service_inference_changed"),
+        (body.credential.is_some(), "service_credential_updated"),
+    ] {
+        if changed {
+            audit_service::log_for_user(
+                state.db.clone(),
+                &auth_user,
+                event,
+                Some(serde_json::json!({ "service_id": &id })),
+            );
+        }
+    }
 
     if new_service.billing.as_ref().is_some_and(|billing| {
         billing.platform_pricing.is_some()
@@ -1475,11 +1507,16 @@ pub async fn update_service(
             "Platform vendor rows cannot configure OpenAPI or AsyncAPI specs".to_string(),
         ));
     }
-    if body.inference.is_some() || body.platform_key.is_some() {
+    if body.inference.is_some() || body.platform_key.is_some() || body.credential.is_some() {
         require_admin(&state, &auth_user).await?;
     }
     if let Some(config) = body.platform_key.as_mut() {
-        crate::services::platform_key_service::validate_config(&state.db, config).await?;
+        crate::services::platform_key_service::validate_config(
+            &state.db,
+            config,
+            service.provider_config_id.as_deref(),
+        )
+        .await?;
     }
     let mut lane_price_changed = false;
     let mut platform_price_changed = false;
@@ -1533,7 +1570,49 @@ pub async fn update_service(
 
     // Build the $set document with only provided fields
     let mut set_doc = doc! {};
+    if let Some(credential) = &body.credential {
+        if credential.trim().is_empty() {
+            return Err(AppError::ValidationError(
+                "credential must not be empty".into(),
+            ));
+        }
+        if service.service_type != "http" || service.auth_method == "oidc" {
+            return Err(AppError::ValidationError(
+                "This service does not accept a downstream master credential".into(),
+            ));
+        }
+        if service.platform_key.is_none() && body.platform_key.is_none() {
+            validate_master_credential_shape(
+                &service.auth_method,
+                true,
+                &service.service_category,
+                service.provider_config_id.as_deref(),
+            )?;
+        }
+        if service.auth_method == "token_exchange" {
+            let config = body
+                .token_exchange_config
+                .as_ref()
+                .or(service.token_exchange_config.as_ref())
+                .ok_or_else(|| {
+                    AppError::ValidationError("token_exchange_config is required".into())
+                })?;
+            crate::services::provider_token_exchange_service::parse_credential(
+                credential,
+                &config.credential_fields,
+            )?;
+        }
+        let encrypted = state.encryption_keys.encrypt(credential.as_bytes()).await?;
+        set_doc.insert(
+            "credential_encrypted",
+            bson::Binary {
+                subtype: bson::spec::BinarySubtype::Generic,
+                bytes: encrypted,
+            },
+        );
+    }
     if let Some(inference) = &body.inference {
+        set_doc.insert("inference_admin_modified", true);
         set_doc.insert(
             "inference",
             bson::to_bson(inference).map_err(|e| AppError::Internal(e.to_string()))?,
@@ -2161,6 +2240,24 @@ pub async fn update_service(
             }
         })?;
 
+    if body.credential.is_some() {
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "service_credential_updated",
+            Some(serde_json::json!({ "service_id": &service_id })),
+        );
+    }
+    if body.inference.is_some() {
+        audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            "service_inference_changed",
+            Some(
+                serde_json::json!({ "service_id": &service_id, "configured": committed_service.inference.is_some() }),
+            ),
+        );
+    }
     if lane_price_changed {
         state.billing.sync_service_price(&committed_service).await?;
         audit_service::log_for_user(
@@ -2770,8 +2867,6 @@ mod tests {
         base_url: String,
     ) -> CreateServiceRequest {
         CreateServiceRequest {
-            inference: None,
-            platform_key: None,
             name: name.to_string(),
             slug: Some(slug.to_string()),
             description: None,
@@ -2780,6 +2875,7 @@ mod tests {
             auth_method: Some("none".to_string()),
             auth_key_name: None,
             credential: None,
+            platform_key: None,
             service_category: None,
             visibility: None,
             ssh_config: None,
@@ -2787,6 +2883,7 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
             billing: None,
             auth_notes: None,
             known_limitations: None,
@@ -3640,6 +3737,145 @@ mod tests {
         }];
         let err = validate_token_exchange_config(&config).unwrap_err();
         assert!(err.to_string().contains("missing"));
+    }
+    #[tokio::test]
+    async fn catalog_put_replaces_master_ciphertext_for_ui_and_cli_without_echo() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("review_catalog_credential").await;
+        let admin = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let mut service = dummy_service();
+        service.id = Uuid::new_v4().to_string();
+        service.created_by = admin.clone();
+        service.auth_method = "bearer".into();
+        service.service_category = "internal".into();
+        service.requires_user_credential = false;
+        service.credential_encrypted = state.encryption_keys.encrypt(b"original").await.unwrap();
+        db.collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(&service)
+            .await
+            .unwrap();
+        let mut previous = service.credential_encrypted.clone();
+        for (secret, payload) in [
+            (
+                "ui-secret",
+                serde_json::json!({"name":"UI save","credential":"ui-secret","platform_key":{"enabled":true,"audience":"public","allowed_owner_ids":[]}}),
+            ),
+            ("cli-secret", serde_json::json!({"credential":"cli-secret"})),
+        ] {
+            let body: UpdateServiceRequest = serde_json::from_value(payload).unwrap();
+            assert!(!format!("{body:?}").contains(secret));
+            let Json(response) = update_service(
+                State(state.clone()),
+                test_auth_user(&admin),
+                Default::default(),
+                Path(service.id.clone()),
+                Json(body),
+            )
+            .await
+            .unwrap();
+            let json = serde_json::to_value(&response).unwrap();
+            assert!(json.get("credential").is_none());
+            assert!(json.get("credential_encrypted").is_none());
+            assert!(!json.to_string().contains(secret));
+            let stored = db
+                .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+                .find_one(doc! {"_id": &service.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_ne!(stored.credential_encrypted, previous);
+            assert_eq!(
+                state
+                    .encryption_keys
+                    .decrypt(&stored.credential_encrypted)
+                    .await
+                    .unwrap(),
+                secret.as_bytes()
+            );
+            previous = stored.credential_encrypted;
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if db
+                    .collection::<bson::Document>(AUDIT_LOGS)
+                    .count_documents(doc! {"event_type":"service_credential_updated"})
+                    .await
+                    .unwrap()
+                    == 2
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let rows: Vec<bson::Document> = db
+            .collection::<bson::Document>(AUDIT_LOGS)
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect()
+            .await
+            .unwrap();
+        for row in rows {
+            let text = format!("{row:?}");
+            assert!(!text.contains("ui-secret") && !text.contains("cli-secret"));
+        }
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inference_admin_clear_survives_backfill_and_metadata_changes_are_audited() {
+        let db =
+            crate::test_utils::connect_transaction_test_database("review_inference_clear").await;
+        let admin = seed_user(&db, true).await;
+        let state = test_app_state(db.clone());
+        let (url, server) = spawn_empty_docs_server().await;
+        let mut body = create_http_service_request("Chrono", "chrono-llm", url);
+        body.inference = crate::services::inference_service::default_inference("chrono-llm");
+        body.platform_key = Some(Default::default());
+        let Json(created) = create_service(
+            State(state.clone()),
+            test_auth_user(&admin),
+            Default::default(),
+            Json(body),
+        )
+        .await
+        .unwrap();
+        server.abort();
+        let Json(cleared) = update_service(
+            State(state.clone()),
+            test_auth_user(&admin),
+            Default::default(),
+            Path(created.id.clone()),
+            Json(serde_json::from_value(serde_json::json!({"inference":null})).unwrap()),
+        )
+        .await
+        .unwrap();
+        assert!(cleared.inference.is_none());
+        crate::services::inference_service::backfill(&db)
+            .await
+            .unwrap();
+        let stored = db
+            .collection::<DownstreamService>(DOWNSTREAM_SERVICES)
+            .find_one(doc! {"_id": &created.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.inference.is_none() && stored.inference_admin_modified);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let events: Vec<bson::Document> = db.collection::<bson::Document>(AUDIT_LOGS).find(doc! {"event_type":{"$in":["service_inference_changed","service_platform_key_changed"]}}).await.unwrap().try_collect().await.unwrap();
+                if events.len() == 3 {
+                    for event in events { let json = format!("{event:?}"); assert!(!json.contains("allowed_owner_ids") && !json.contains("credential")); }
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        }).await.unwrap();
+        db.drop().await.unwrap();
     }
 }
 

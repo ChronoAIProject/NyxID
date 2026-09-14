@@ -4020,12 +4020,12 @@ async fn migrate_provider_tokens(db: &Database) -> Result<(), Box<dyn std::error
             .and_then(|svc| svc.ssh_config.as_ref().map(|ssh| ssh.ssh_auth_mode))
             .unwrap_or(SshAuthMode::ProxyOnly);
         let user_service = UserService {
-            credential_binding: None,
             id: service_id,
             user_id: token.user_id.clone(),
             slug,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
+            credential_binding: None,
             auth_method,
             auth_key_name,
             catalog_service_id,
@@ -4256,12 +4256,12 @@ async fn migrate_service_connections(db: &Database) -> Result<(), Box<dyn std::e
         // Create UserService -- clean up endpoint + api_key on failure
         let inherited_identity = inherited_identity_fields(Some(&service));
         let user_service = UserService {
-            credential_binding: None,
             id: service_id,
             user_id: conn.user_id.clone(),
             slug,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
+            credential_binding: None,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             catalog_service_id: Some(service.id.clone()),
@@ -4518,12 +4518,12 @@ async fn migrate_node_service_bindings(db: &Database) -> Result<(), Box<dyn std:
         // Create UserService with node routing
         let inherited_identity = inherited_identity_fields(Some(&service));
         let user_service = UserService {
-            credential_binding: None,
             id: service_id,
             user_id: binding.user_id.clone(),
             slug,
             endpoint_id: endpoint_id.clone(),
             api_key_id: Some(api_key_id.clone()),
+            credential_binding: None,
             auth_method: service.auth_method.clone(),
             auth_key_name: service.auth_key_name.clone(),
             catalog_service_id: Some(service.id.clone()),
@@ -4646,8 +4646,6 @@ mod tests {
 
     fn sample_downstream_service() -> DownstreamService {
         DownstreamService {
-            inference: None,
-            platform_key: None,
             id: "svc-1".to_string(),
             name: "Test".to_string(),
             slug: "test".to_string(),
@@ -4658,6 +4656,7 @@ mod tests {
             auth_method: "header".to_string(),
             auth_key_name: "Authorization".to_string(),
             credential_encrypted: vec![],
+            platform_key: None,
             auth_type: None,
             openapi_spec_url: None,
             asyncapi_spec_url: None,
@@ -4681,6 +4680,8 @@ mod tests {
             repository_url: None,
             issues_url: None,
             capabilities: None,
+            inference: None,
+            inference_admin_modified: false,
             billing: None,
             auth_notes: None,
             known_limitations: None,

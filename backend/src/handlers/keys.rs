@@ -671,7 +671,6 @@ pub struct KeyListResponse {
 
 #[derive(Deserialize, Serialize, ToSchema)]
 pub struct UpdateKeyRequest {
-    pub use_platform_key: Option<bool>,
     /// New display label
     pub label: Option<String>,
     /// New endpoint URL
@@ -690,6 +689,7 @@ pub struct UpdateKeyRequest {
     /// service is node-routed, the server encrypts the credential and
     /// pushes it to the target node agent on the next WS heartbeat (#418).
     pub credential: Option<String>,
+    pub use_platform_key: Option<bool>,
     /// Activate or deactivate
     pub is_active: Option<bool>,
     /// For org-owned services, restrict proxy execution to org admins.
@@ -1129,18 +1129,21 @@ pub(crate) async fn create_key_with_service_id(
     // created under the actor's personal scope or under an org. This is
     // cosmetic for the immediate response; subsequent `GET /keys/{id}`
     // calls compute the source server-side from `resolve_owner_access`.
+    let view = unified_key_service::get_key(
+        &state.db,
+        &state.encryption_keys,
+        &user_id_str,
+        &result.service.id,
+    )
+    .await?;
     let mut response = if body.use_platform_key {
-        key_response_from_view(
-            unified_key_service::get_key(
-                &state.db,
-                &state.encryption_keys,
-                &user_id_str,
-                &result.service.id,
-            )
-            .await?,
-        )
+        key_response_from_view(view)
     } else {
-        key_response_from_result(&result)
+        let mut response = key_response_from_result(&result);
+        response.platform_key_available = view.platform_key_available;
+        response.platform_key_pricing = view.platform_key_pricing;
+        response.byok_pricing = view.byok_pricing;
+        response
     };
     if let Some(target_org_id) = body.target_org_id.as_deref() {
         use crate::handlers::user_services_handler::{CredentialSourceResponse, OrgRoleResponse};
@@ -1493,36 +1496,78 @@ pub async fn update_key(
         return Ok(Json(resolve_key_response(&state, &actor, &key_id).await?));
     }
     if view.credential_binding == "platform" && !view.auto_connected {
-        let fields = serde_json::to_value(&body).map_err(|e| AppError::Internal(e.to_string()))?;
-        if fields.as_object().is_some_and(|fields| {
-            fields
-                .iter()
-                .all(|(key, value)| key == "is_active" || value.is_null())
-        }) {
-            if let Some(active) = body.is_active {
-                unified_key_service::set_platform_connection_active(
-                    &state.db,
-                    &user_id_str,
-                    &key_id,
-                    active,
-                )
-                .await?;
-                crate::services::audit_service::log_for_user(
-                    state.db.clone(),
-                    &auth_user,
-                    if active {
-                        "service_enabled"
-                    } else {
-                        "service_disabled"
-                    },
-                    Some(serde_json::json!({ "service_id": &key_id })),
-                );
-            }
-            return Ok(Json(resolve_key_response(&state, &actor, &key_id).await?));
-        }
-        return Err(AppError::ValidationError(
-            "Switch to your own key before changing platform-managed routing".to_string(),
-        ));
+        let current =
+            user_service_service::get_user_service(&state.db, &user_id_str, &key_id).await?;
+        user_service_service::ensure_service_fields_editable(
+            &current,
+            &[
+                ("endpoint_url", body.endpoint_url.is_some()),
+                ("auth_method", body.auth_method.is_some()),
+                ("auth_key_name", body.auth_key_name.is_some()),
+                ("node_id", body.node_id.is_some()),
+                ("credential", body.credential.is_some()),
+                ("openapi_spec_url", body.openapi_spec_url.is_some()),
+                (
+                    "identity_propagation_mode",
+                    body.identity_propagation_mode.is_some(),
+                ),
+                (
+                    "identity_include_user_id",
+                    body.identity_include_user_id.is_some(),
+                ),
+                (
+                    "identity_include_email",
+                    body.identity_include_email.is_some(),
+                ),
+                (
+                    "identity_include_name",
+                    body.identity_include_name.is_some(),
+                ),
+                (
+                    "identity_jwt_audience",
+                    body.identity_jwt_audience.is_some(),
+                ),
+                ("forward_access_token", body.forward_access_token.is_some()),
+                (
+                    "inject_delegation_token",
+                    body.inject_delegation_token.is_some(),
+                ),
+                (
+                    "delegation_token_scope",
+                    body.delegation_token_scope.is_some(),
+                ),
+                ("oauth_client_id", body.oauth_client_id.is_some()),
+                ("oauth_client_secret", body.oauth_client_secret.is_some()),
+                (
+                    "copy_oauth_client_from",
+                    body.copy_oauth_client_from.is_some(),
+                ),
+            ],
+        )?;
+        unified_key_service::update_platform_connection_cosmetics(
+            &state.db,
+            &user_id_str,
+            &actor,
+            &key_id,
+            body.label.as_deref(),
+            body.recommended_skills,
+            body.is_active,
+            body.admin_only,
+            body.custom_user_agent.as_deref(),
+            body.default_request_headers.as_ref(),
+        )
+        .await?;
+        crate::services::audit_service::log_for_user(
+            state.db.clone(),
+            &auth_user,
+            match body.is_active {
+                Some(true) => "service_enabled",
+                Some(false) => "service_disabled",
+                None => "service_updated",
+            },
+            Some(serde_json::json!({ "service_id": &key_id })),
+        );
+        return Ok(Json(resolve_key_response(&state, &actor, &key_id).await?));
     }
 
     if view.auto_connected {
@@ -2515,8 +2560,8 @@ fn key_response_from_result(result: &unified_key_service::CreateKeyResult) -> Ke
             .to_string(),
         platform_key_available: crate::services::platform_key_service::binding(&result.service)
             == "platform",
-        platform_key_pricing: None,
         byok_pricing: None,
+        platform_key_pricing: None,
         credential_type: result
             .api_key
             .as_ref()
@@ -3308,13 +3353,13 @@ mod tests {
 
     fn empty_update_request() -> super::UpdateKeyRequest {
         super::UpdateKeyRequest {
-            use_platform_key: None,
             label: None,
             endpoint_url: None,
             auth_method: None,
             auth_key_name: None,
             node_id: None,
             credential: None,
+            use_platform_key: None,
             is_active: None,
             admin_only: None,
             identity_propagation_mode: None,
@@ -3848,8 +3893,8 @@ mod tests {
         let user_id = uuid::Uuid::new_v4().to_string();
 
         let body = super::CreateKeyRequest {
-            use_platform_key: false,
             service_slug: None,
+            use_platform_key: false,
             credential: Some("secret-token".to_string()),
             label: "Header Service".to_string(),
             endpoint_url: Some("https://api.example.com".to_string()),
@@ -4163,8 +4208,8 @@ mod tests {
         auth_method: Option<&str>,
     ) -> super::CreateKeyRequest {
         super::CreateKeyRequest {
-            use_platform_key: false,
             service_slug: None,
+            use_platform_key: false,
             credential: credential.map(str::to_string),
             label: label.to_string(),
             endpoint_url: endpoint_url.map(str::to_string),
