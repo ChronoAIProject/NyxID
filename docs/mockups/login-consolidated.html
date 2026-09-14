@@ -6378,7 +6378,7 @@
           .filter(([, enabled]) => enabled)
           .map(([key]) => capabilityLabels[key])
           .filter(Boolean);
-        return `<article class="service-permission-card ${selected ? "selected" : ""}" data-service-slug="${escapeHtml(item.slug)}" data-catalog-only="${item.catalogOnly}" data-match="${comparison.exact ? "exact" : "extra"}">
+        return `<article class="service-permission-card ${selected ? "selected" : ""}" data-service-slug="${escapeHtml(item.slug)}" data-catalog-only="${item.catalogOnly ? "true" : "false"}" data-match="${comparison.exact ? "exact" : "extra"}">
           <label class="service-card-select"><input type="checkbox" data-resource="${escapeHtml(item.id)}" aria-label="${escapeHtml(item.name + " · " + item.slug)}" ${selected ? "checked" : ""} ${!eligible || all ? "disabled" : ""}>${serviceIcon(item.catalogSlug)}<span class="service-name"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.slug)}</small></span><span class="neutral-badge ${state === "Connected" ? "connected-badge" : ""}">${escapeHtml(state)}</span></label>
           ${
             !item.catalogOnly && comparison.constrained
