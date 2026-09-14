@@ -223,11 +223,18 @@ export function AllowanceDialog({
   const selectedService = services.find(
     (service) => service.id === serviceRef || service.slug === serviceRef,
   );
-  const metric = selectedService
-    ? resolveServiceBillingMetric(selectedService)
-    : editingAllowance?.service_id === serviceRef
-      ? editingAllowance.metric
-      : null;
+  const chosenMetric = form.watch("metric");
+  const laneMetrics = [...new Set([
+    selectedService?.billing?.byok_pricing?.metric,
+    selectedService?.billing?.platform_key_pricing?.metric,
+  ].filter((m) => m !== undefined))];
+  const metric = chosenMetric ?? (
+    selectedService
+      ? resolveServiceBillingMetric(selectedService)
+      : editingAllowance?.service_id === serviceRef
+        ? editingAllowance.metric
+        : null
+  );
   const preview = metric
     ? formatAllowancePreview(quantity, metric, recurrence)
     : null;
@@ -257,7 +264,10 @@ export function AllowanceDialog({
                         <ServicePicker
                           services={services}
                           selected={[field.value].filter(Boolean)}
-                          onChange={(values) => field.onChange(values[0] ?? "")}
+                          onChange={(values) => {
+                            field.onChange(values[0] ?? "");
+                            form.setValue("metric", undefined);
+                          }}
                         />
                       </FormControl>
                       <FormDescription className="text-[11px]">
@@ -268,6 +278,24 @@ export function AllowanceDialog({
                   )}
                 />
                 <div className="grid gap-4 sm:grid-cols-2">
+                  {laneMetrics.length > 1 && (
+                    <FormField
+                      control={form.control}
+                      name="metric"
+                      render={({ field }) => (
+                        <FormItem>
+                          <FormLabel>Allowance unit</FormLabel>
+                          <Select value={field.value ?? metric ?? undefined} onValueChange={field.onChange}>
+                            <FormControl><SelectTrigger><SelectValue /></SelectTrigger></FormControl>
+                            <SelectContent>
+                              {laneMetrics.map((unit) => <SelectItem key={unit} value={unit}>{unit}</SelectItem>)}
+                            </SelectContent>
+                          </Select>
+                          <FormDescription>Applies only to requests charged in this unit.</FormDescription>
+                        </FormItem>
+                      )}
+                    />
+                  )}
                   <FormField
                     control={form.control}
                     name="quantity"

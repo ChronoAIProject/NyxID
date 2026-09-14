@@ -398,10 +398,12 @@ function OpenApiSpecSection({
 
 function RecommendedSkillsSection({
   endpointId,
+  serviceId,
   skills,
   readOnly = false,
 }: {
   readonly endpointId: string;
+  readonly serviceId?: string;
   readonly skills: readonly string[];
   readonly readOnly?: boolean;
 }) {
@@ -409,6 +411,7 @@ function RecommendedSkillsSection({
   // Seeded only when entering edit mode, mirroring OpenApiSpecSection.
   const [draft, setDraft] = useState("");
   const updateEndpoint = useUpdateEndpoint();
+  const updateKey = useUpdateKey();
 
   function handleEdit() {
     setDraft(skills.join(", "));
@@ -420,26 +423,28 @@ function RecommendedSkillsSection({
       .split(",")
       .map((entry) => entry.trim())
       .filter((entry) => entry.length > 0);
-    updateEndpoint.mutate(
-      { endpointId, recommended_skills: list },
-      {
-        onSuccess: () => {
-          toast.success(
-            list.length > 0
-              ? "Recommended skills saved"
-              : "Recommended skills cleared",
-          );
-          setEditing(false);
-        },
-        onError: (err) => {
-          const message =
-            err instanceof ApiError
-              ? err.message
-              : "Failed to update recommended skills";
-          toast.error(message);
-        },
+    const callbacks = {
+      onSuccess: () => {
+        toast.success(
+          list.length > 0
+            ? "Recommended skills saved"
+            : "Recommended skills cleared",
+        );
+        setEditing(false);
       },
-    );
+      onError: (err: unknown) => {
+        const message =
+          err instanceof ApiError
+            ? err.message
+            : "Failed to update recommended skills";
+        toast.error(message);
+      },
+    };
+    if (serviceId) {
+      updateKey.mutate({ keyId: serviceId, recommended_skills: list }, callbacks);
+    } else {
+      updateEndpoint.mutate({ endpointId, recommended_skills: list }, callbacks);
+    }
   }
 
   function handleCancel() {
@@ -474,7 +479,7 @@ function RecommendedSkillsSection({
               size="icon"
               variant="ghost"
               onClick={handleSave}
-              disabled={updateEndpoint.isPending}
+              disabled={updateEndpoint.isPending || updateKey.isPending}
             >
               <Check className="h-4 w-4" />
             </Button>
@@ -2308,7 +2313,7 @@ export function KeyDetailPage() {
           <div className="flex items-center gap-3">
             <ServiceIcon slug={keyInfo.catalog_service_slug} size="md" />
             <div className="flex flex-col gap-2">
-              {(keyInfo.auto_connected || keyInfo.credential_binding === "platform") ? (
+              {keyInfo.auto_connected ? (
                 <h2
                   className="text-[28px] font-bold leading-none tracking-tight"
                   style={{ letterSpacing: "-0.03em" }}
@@ -2493,12 +2498,43 @@ export function KeyDetailPage() {
             />
           )}
 
+          {!keyInfo.auto_connected && (
+            <div className="space-y-4">
+              <div className="grid gap-4 lg:grid-cols-2">
+                <RecommendedSkillsSection
+                  endpointId={keyInfo.endpoint_id}
+                  serviceId={keyInfo.id}
+                  skills={keyInfo.recommended_skills ?? []}
+                  readOnly={readOnly}
+                />
+                <UserAgentOverrideSection
+                  serviceId={keyInfo.id}
+                  customUserAgent={keyInfo.custom_user_agent}
+                  readOnly={readOnly}
+                />
+                {isOrgSource && (
+                  <AccessPolicySection
+                    serviceId={keyInfo.id}
+                    adminOnly={keyInfo.admin_only ?? false}
+                    readOnly={readOnly}
+                  />
+                )}
+              </div>
+              <DefaultHeadersSection
+                serviceId={keyInfo.id}
+                userHeaders={keyInfo.default_request_headers ?? []}
+                catalogHeaders={catalogHeaders}
+                readOnly={readOnly}
+              />
+            </div>
+          )}
+
           {/* Auto-connected keys still have catalog-level default headers
               applied at proxy time (NyxID#356). Surface them read-only so
               users can see why those headers reach the downstream. Keep this
               behind disclosure so verification stays before inherited HTTP
               mechanics. */}
-          {!isSsh && catalogHeaders && catalogHeaders.length > 0 && (
+          {keyInfo.auto_connected && !isSsh && catalogHeaders && catalogHeaders.length > 0 && (
             <details className="rounded-xl border border-border/50 bg-card p-4">
               <summary className="cursor-pointer text-sm font-medium text-foreground">
                 Advanced: inherited request headers

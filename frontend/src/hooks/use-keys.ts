@@ -375,6 +375,7 @@ interface UpdateKeyParams {
   readonly credential?: string;
   readonly keyId: string;
   readonly label?: string;
+  readonly recommended_skills?: readonly string[];
   readonly endpoint_url?: string;
   readonly auth_method?: string;
   readonly auth_key_name?: string;

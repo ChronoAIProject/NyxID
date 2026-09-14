@@ -264,8 +264,16 @@ pub async fn run(command: CatalogCommands) -> Result<()> {
                             "Platform key: available; nyxid service add {item_slug} --platform-key"
                         );
                     }
-                    eprintln!("Platform key price: {}", item["platform_key"]["pricing"]);
-                    eprintln!("Your own key price: {}", item["byok_pricing"]);
+                    eprintln!(
+                        "Platform key price: {}",
+                        super::service::catalog_admin::lane_price_label(
+                            item.get("platform_key").and_then(|p| p.get("pricing"))
+                        )
+                    );
+                    eprintln!(
+                        "Your own key price: {}",
+                        super::service::catalog_admin::lane_price_label(item.get("byok_pricing"))
+                    );
                     eprintln!("How to add:");
 
                     if svc_type == "ssh" {

@@ -66,8 +66,7 @@ impl CatalogServiceArgs {
         {
             let mut block = current["platform_key"].clone();
             if !block.is_object() {
-                block =
-                    json!({ "enabled": false, "audience": "restricted", "allowed_owner_ids": [] });
+                block = json!({ "enabled": current["legacy_public_master"] == true, "audience": if current["legacy_public_master"] == true { "public" } else { "restricted" }, "allowed_owner_ids": [] });
             }
             if let Some(value) = self.platform_key_enabled {
                 block["enabled"] = value.into();
@@ -210,17 +209,6 @@ pub(crate) fn inference_summary(value: &Value) -> String {
 }
 
 pub(crate) fn binding_prompt(entry: &Value) -> String {
-    fn price(value: &Value) -> String {
-        value["credits_per_unit"]
-            .as_str()
-            .map(|amount| {
-                format!(
-                    "{amount} credits / {}",
-                    value["metric"].as_str().unwrap_or("unit")
-                )
-            })
-            .unwrap_or_else(|| "free".into())
-    }
     if entry["platform_key"]["pricing"].is_null()
         && entry["byok_pricing"].is_null()
         && entry["billing"]["platform_billable"] == true
@@ -229,9 +217,85 @@ pub(crate) fn binding_prompt(entry: &Value) -> String {
     }
     format!(
         "Use NyxID's key ({}) instead of your own key ({})? [Y/n]",
-        price(&entry["platform_key"]["pricing"]),
-        price(&entry["byok_pricing"])
+        lane_price_label(Some(&entry["platform_key"]["pricing"])),
+        lane_price_label(Some(&entry["byok_pricing"]))
     )
+}
+
+pub(crate) fn lane_price_label(value: Option<&Value>) -> String {
+    let Some(value) = value else {
+        return "not configured".into();
+    };
+    let Some(amount) = value["credits_per_unit"].as_str() else {
+        return "free".into();
+    };
+    let unit = match value["metric"].as_str() {
+        Some("tokens") => "token",
+        Some("requests") => "request",
+        Some("bytes") => "byte",
+        _ => "unit",
+    };
+    let status = match value["sync_status"].as_str() {
+        Some("synced") | None => "",
+        _ => " (price pending; current billing applies)",
+    };
+    format!("{amount} credits / {unit}{status}")
+}
+
+pub(crate) fn platform_config_label(value: &Value) -> String {
+    if value["platform_key"].is_null() {
+        return if value["legacy_public_master"] == true {
+            "enabled, public (implicit)"
+        } else {
+            "not configured"
+        }
+        .into();
+    }
+    format!(
+        "{}, {}",
+        if value["platform_key"]["enabled"] == true {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        value["platform_key"]["audience"]
+            .as_str()
+            .unwrap_or("restricted")
+    )
+}
+
+pub(crate) fn catalog_error(error: anyhow::Error) -> anyhow::Error {
+    if error
+        .downcast_ref::<crate::api::ApiError>()
+        .is_some_and(|e| e.status() == reqwest::StatusCode::NOT_FOUND)
+    {
+        error.context("--catalog-admin requires a catalog service ID or catalog slug; a connection ID cannot identify the admin catalog row")
+    } else {
+        error
+    }
+}
+
+pub(crate) async fn fetch_catalog_service(api: &mut ApiClient, reference: &str) -> Result<Value> {
+    match api.get(&format!("/services/{reference}")).await {
+        Ok(service) => Ok(service),
+        Err(error)
+            if uuid::Uuid::parse_str(reference).is_err()
+                && error
+                    .downcast_ref::<crate::api::ApiError>()
+                    .is_some_and(|e| e.status() == reqwest::StatusCode::NOT_FOUND) =>
+        {
+            // Discovery entries intentionally omit catalog IDs. Resolve a
+            // listed slug from admin service responses, which carry the ID
+            // required for catalog updates. Unlisted rows can still use IDs.
+            let listing: Value = api.get("/services").await.map_err(catalog_error)?;
+            listing["services"]
+                .as_array()
+                .and_then(|rows| rows.iter().find(|row| row["slug"] == reference))
+                .cloned()
+                .ok_or_else(|| catalog_error(error))
+        }
+        Err(error) => Err(catalog_error(error)),
+    }
 }
 
 #[cfg(test)]
@@ -369,5 +433,115 @@ mod tests {
             "platform"
         );
         assert_eq!(super::super::credential_binding(&json!({})), "user");
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use crate::cli::{Cli, Commands, ServiceCommands};
+    use clap::Parser;
+    #[tokio::test]
+    async fn catalog_slug_resolves_admin_service_list_without_discovery_ids() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/services/chrono-llm-public"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let row =
+            json!({"id":"catalog-id", "slug":"chrono-llm-public", "legacy_public_master":true});
+        Mock::given(method("GET"))
+            .and(path("/api/v1/services"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"services":[row.clone()]})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut api = ApiClient::new(&server.uri(), "token".into()).unwrap();
+        assert_eq!(
+            fetch_catalog_service(&mut api, "chrono-llm-public")
+                .await
+                .unwrap(),
+            row
+        );
+    }
+    #[test]
+    fn price_labels_cover_free_missing_pending_and_synced() {
+        assert_eq!(lane_price_label(None), "not configured");
+        assert_eq!(lane_price_label(Some(&Value::Null)), "free");
+        assert_eq!(
+            lane_price_label(Some(
+                &json!({"metric":"tokens","credits_per_unit":"0.01","sync_status":"synced"})
+            )),
+            "0.01 credits / token"
+        );
+        for status in ["pending", "failed"] {
+            assert_eq!(
+                lane_price_label(Some(
+                    &json!({"metric":"requests","credits_per_unit":"2","sync_status":status})
+                )),
+                "2 credits / request (price pending; current billing applies)"
+            );
+        }
+    }
+    #[test]
+    fn admin_show_parses_and_labels_implicit_public_config() {
+        let cli = Cli::try_parse_from([
+            "nyxid",
+            "service",
+            "show",
+            "chrono-llm-public",
+            "--catalog-admin",
+        ])
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Service {
+                command: ServiceCommands::Show {
+                    catalog_admin: true,
+                    ..
+                }
+            }
+        ));
+        assert_eq!(
+            platform_config_label(&json!({"legacy_public_master":true,"platform_key":null})),
+            "enabled, public (implicit)"
+        );
+        assert_eq!(
+            platform_config_label(&json!({"platform_key":{"enabled":false,"audience":"public"}})),
+            "disabled, public"
+        );
+    }
+    #[tokio::test]
+    async fn catalog_404_explains_catalog_identity_and_implicit_updates_preserve_public() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = MockServer::start().await;
+        let id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/services/{id}")))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let mut api = ApiClient::new(&server.uri(), "token".into()).unwrap();
+        let error = fetch_catalog_service(&mut api, id).await.unwrap_err();
+        assert!(error.to_string().contains("catalog service ID"));
+        let args = CatalogServiceArgs {
+            platform_key_enabled: Some(true),
+            ..Default::default()
+        };
+        let mut body = json!({});
+        args.apply_update(&mut api, &json!({"legacy_public_master":true}), &mut body)
+            .await
+            .unwrap();
+        assert_eq!(body["platform_key"]["audience"], "public");
     }
 }

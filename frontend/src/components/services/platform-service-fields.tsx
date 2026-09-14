@@ -34,8 +34,8 @@ export function PlatformServiceFields({
 }) {
   const inference = form.watch("inference");
   const platform = form.watch("platform_key") ?? {
-    enabled: false,
-    audience: "restricted",
+    enabled: service.legacy_public_master ?? false,
+    audience: service.legacy_public_master ? "public" : "restricted",
     allowed_owner_ids: [],
   };
   function setPlatform(values: Partial<PlatformKeyConfig>) {
@@ -109,6 +109,9 @@ export function PlatformServiceFields({
       </section>
       <section className="space-y-3">
         <h3 className="text-[13px] font-semibold">Platform key</h3>
+        {!form.watch("platform_key") && service.legacy_public_master && (
+          <p className="text-xs text-muted-foreground">Enabled, public (implicit)</p>
+        )}
         <p className="text-xs text-muted-foreground">
           Offer a server-held credential to authorized users. Organization
           grants include members who can proxy services.

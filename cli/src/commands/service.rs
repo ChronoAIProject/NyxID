@@ -1092,15 +1092,29 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
             Ok(())
         }
 
-        ServiceCommands::Show { id, auth } => {
+        ServiceCommands::Show {
+            id,
+            catalog_admin,
+            auth,
+        } => {
             let mut api = ApiClient::from_auth_checked(&auth).await?;
-            let svc: Value = api.get(&format!("/keys/{id}")).await?;
+            let svc: Value = if catalog_admin {
+                catalog_admin::fetch_catalog_service(&mut api, &id).await?
+            } else {
+                api.get(&format!("/keys/{id}")).await?
+            };
 
             match auth.output {
                 OutputFormat::Json => {
                     println!("{}", serde_json::to_string_pretty(&svc)?);
                 }
                 OutputFormat::Table => {
+                    if catalog_admin {
+                        eprintln!(
+                            "Platform key: {}",
+                            catalog_admin::platform_config_label(&svc)
+                        );
+                    }
                     let name = svc["label"]
                         .as_str()
                         .or(svc["name"].as_str())
@@ -1389,7 +1403,8 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                 {
                     bail!("Catalog administration cannot be combined with connection options");
                 }
-                let current: Value = api.get(&format!("/services/{id}")).await?;
+                let current = catalog_admin::fetch_catalog_service(&mut api, &id).await?;
+                let id = current["id"].as_str().unwrap_or(&id);
                 let mut body = serde_json::json!({});
                 if let Some(value) = label {
                     body["name"] = value.into();
@@ -1408,7 +1423,10 @@ pub async fn run(command: ServiceCommands) -> Result<()> {
                     body["credential"] = secret.into();
                 }
                 catalog.apply_update(&mut api, &current, &mut body).await?;
-                let result: Value = api.put(&format!("/services/{id}"), &body).await?;
+                let result: Value = api
+                    .put(&format!("/services/{id}"), &body)
+                    .await
+                    .map_err(catalog_admin::catalog_error)?;
                 catalog_admin::print_result(&result, auth.output)?;
                 return Ok(());
             }
@@ -3530,6 +3548,7 @@ mod command_tests {
             .await;
 
         run(ServiceCommands::Show {
+            catalog_admin: false,
             id: "svc-1".to_string(),
             auth: mock_auth(server.uri()),
         })
@@ -3742,6 +3761,7 @@ mod command_tests {
             .await;
 
         run(ServiceCommands::Show {
+            catalog_admin: false,
             id: "svc-1".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -4259,6 +4279,7 @@ mod branch_tests {
             .await;
 
         run(ServiceCommands::Show {
+            catalog_admin: false,
             id: "svc-ssh".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -4283,6 +4304,7 @@ mod branch_tests {
             .await;
 
         run(ServiceCommands::Show {
+            catalog_admin: false,
             id: "svc-1".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })
@@ -4305,6 +4327,7 @@ mod branch_tests {
             .await;
 
         run(ServiceCommands::Show {
+            catalog_admin: false,
             id: "svc-1".to_string(),
             auth: mock_auth_with_output(server.uri(), OutputFormat::Table),
         })

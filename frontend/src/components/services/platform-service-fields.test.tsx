@@ -8,13 +8,13 @@ import { PlatformServiceFields } from "./platform-service-fields";
 vi.mock("@/components/admin-credits/credit-pickers", () => ({
   UserPicker: () => <span>Owner picker</span>,
 }));
-function Harness() {
+function Harness({ implicit = false }: { readonly implicit?: boolean }) {
   const form = useAppForm<UpdateServiceFormData>({
     defaultValues: { name: "Service", service_type: "http" },
   });
   return (
     <Form {...form}>
-      <PlatformServiceFields form={form} service={{} as DownstreamService} />
+      <PlatformServiceFields form={form} service={{ legacy_public_master: implicit } as DownstreamService} />
       <button disabled={!form.formState.isDirty}>Save settings</button>
     </Form>
   );
@@ -37,4 +37,14 @@ it("enabling a lane shows pricing and marks legacy billing superseded", async ()
   expect(
     screen.getByText(/Billing lanes supersede legacy platform billing/),
   ).toBeInTheDocument();
+});
+
+it("shows legacy platform keys as enabled and public until explicitly changed", async () => {
+  render(<Harness implicit />);
+  expect(screen.getByText("Enabled, public (implicit)")).toBeInTheDocument();
+  expect(screen.getByRole("switch", { name: "Enable platform key" })).toBeChecked();
+  expect(screen.getByRole("button", { name: "Save settings" })).toBeDisabled();
+  await userEvent.click(screen.getByRole("switch", { name: "Enable platform key" }));
+  expect(screen.getByRole("switch", { name: "Enable platform key" })).not.toBeChecked();
+  expect(screen.queryByText("Enabled, public (implicit)")).not.toBeInTheDocument();
 });

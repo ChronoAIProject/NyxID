@@ -2973,13 +2973,13 @@ export function AddKeyDialog({
     onOpenChange(next);
   }
 
-  function handleSelectCatalog(
+  const handleSelectCatalog = useCallback((
     entry: CatalogEntry,
     routing: {
       readonly nodeId?: string;
       readonly targetOrgId?: string;
     } = {},
-  ) {
+  ) => {
     setSelectedEntry(entry);
     setAuthKey(null);
     // Fresh entry → default back to the managed one-click choice so a prior
@@ -3000,7 +3000,7 @@ export function AddKeyDialog({
     }
     setUsePlatformKey(prefillUsePlatformKey ?? true);
     setStep(entry.platform_key?.available && !routing.nodeId ? "binding" : "routing");
-  }
+  }, [prefillUsePlatformKey]);
 
   // Auto-select from `prefillSlug` once the catalog resolves. Only
   // fires on initial open (tracked via `appliedPrefillRef`) so a
@@ -3053,6 +3053,7 @@ export function AddKeyDialog({
     prefillTargetOrgId,
     catalogEntries,
     isReconnect,
+    handleSelectCatalog,
   ]);
 
   useEffect(() => {

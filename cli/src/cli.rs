@@ -850,7 +850,7 @@ pub enum CatalogCommands {
 
 #[derive(Args, Default)]
 pub struct CatalogServiceArgs {
-    /// Manage the admin catalog row instead of a personal connection
+    /// Target the admin catalog row by catalog service ID or slug (not a connection ID)
     #[arg(long)]
     pub catalog_admin: bool,
     /// Inference wire protocol (none clears the block)
@@ -1080,6 +1080,9 @@ pub enum ServiceCommands {
     },
     /// Show service details
     Show {
+        /// Target the admin catalog row by catalog service ID or slug (not a connection ID)
+        #[arg(long)]
+        catalog_admin: bool,
         /// Service ID
         id: String,
         #[command(flatten)]
