@@ -172,6 +172,10 @@ pub async fn create(db: &mongodb::Database, input: CreateInput) -> AppResult<Cre
     let link = ConnectLink {
         id: Uuid::new_v4().to_string(),
         user_id: input.user_id,
+        parent_session_id: None,
+        requirement_id: None,
+        reauthorize_user_service_id: None,
+        required_scopes: Vec::new(),
         service_slug: service.service_slug.clone(),
         service_id: service.service_id.clone(),
         label,
@@ -223,8 +227,18 @@ pub fn build_connect_url(frontend_url: &str, raw_token: &str) -> AppResult<Strin
     Ok(parsed.to_string())
 }
 
+pub(crate) async fn expire_if_due(
+    db: &mongodb::Database,
+    link: ConnectLink,
+) -> AppResult<ConnectLink> {
+    claim_expiry(db, link, None).await
+}
+
 pub async fn preview(db: &mongodb::Database, raw_token: &str) -> AppResult<LinkView> {
     let link = find_by_raw_token(db, raw_token).await?;
+    if link.parent_session_id.is_some() {
+        return Err(AppError::ConnectLinkNotFound);
+    }
     let link = claim_expiry(db, link, None).await?;
     view_for_link(db, link).await
 }
@@ -263,6 +277,9 @@ pub async fn cancel(
         ConnectLinkStatus::Pending => {}
     }
 
+    if current.parent_session_id.is_some() {
+        return cancel_child(db, actor_user_id, &current).await;
+    }
     let mut filter = doc! {
         "_id": link_id,
         "status": "pending",
@@ -315,6 +332,10 @@ pub async fn complete(
     let current = claim_expiry(db, current, Some(actor_user_id)).await?;
     ensure_pending(&current)?;
     let catalog = load_catalog_info_by_id(db, &current.service_id).await?;
+
+    if let Some(service_id) = current.reauthorize_user_service_id.clone() {
+        return begin_reauthorization(db, current, catalog, &service_id).await;
+    }
 
     if let Some(service_id) = current.completed_user_service_id.clone() {
         return resume_existing_completion(db, current, catalog, &service_id).await;
@@ -418,7 +439,20 @@ pub async fn complete(
     };
 
     let service_id = created.service.id.clone();
-    if let Some(app_id) = claimed.requesting_app_id.as_deref()
+    let parent_app = if let Some(parent_id) = &claimed.parent_session_id {
+        db.collection::<crate::models::app_connect_link::AppConnectLink>(
+            crate::models::app_connect_link::COLLECTION_NAME,
+        )
+        .find_one(doc! { "_id": parent_id })
+        .await?
+        .map(|p| p.oauth_client_id)
+    } else {
+        None
+    };
+    if let Some(app_id) = claimed
+        .requesting_app_id
+        .as_deref()
+        .or(parent_app.as_deref())
         && let Err(error) = crate::services::user_service_service::set_source_app_id(
             db,
             &claimed.user_id,
@@ -479,6 +513,21 @@ pub async fn complete_oauth_callback(
     owner_user_id: &str,
     connection_id: &str,
 ) -> AppResult<LinkView> {
+    let pinned = db
+        .collection::<ConnectLink>(CONNECT_LINKS)
+        .find_one(doc! { "_id": connect_link_id, "user_id": owner_user_id })
+        .await?
+        .ok_or(AppError::ConnectLinkNotFound)?;
+    if let Some(parent_id) = &pinned.parent_session_id {
+        let parent = db
+            .collection::<crate::models::app_connect_link::AppConnectLink>(
+                crate::models::app_connect_link::COLLECTION_NAME,
+            )
+            .find_one(doc! { "_id": parent_id })
+            .await?
+            .ok_or(AppError::ConnectLinkNotFound)?;
+        super::app_connect_link_service::ensure_child_subject(db, &pinned, &parent.user_id).await?;
+    }
     let api_key = db
         .collection::<UserApiKey>(USER_API_KEYS)
         .find_one(doc! {
@@ -491,6 +540,7 @@ pub async fn complete_oauth_callback(
     let service = db
         .collection::<UserService>(USER_SERVICES)
         .find_one(doc! {
+            "_id": &pinned.completed_user_service_id,
             "user_id": owner_user_id,
             "api_key_id": &api_key.id,
             "is_active": true,
@@ -582,6 +632,10 @@ pub async fn wait_for_status(
         .find_one(doc! { "_id": link_id })
         .await?
         .ok_or(AppError::ConnectLinkNotFound)?;
+    // MCP/agent waiting is not a human session entrance to a parent checklist.
+    if link.parent_session_id.is_some() {
+        return Err(AppError::ConnectLinkNotFound);
+    }
     ensure_actor_can_manage(db, actor_user_id, &link).await?;
 
     loop {
@@ -731,7 +785,10 @@ async fn release_claim(db: &mongodb::Database, link_id: &str, claim_id: &str) {
     }
 }
 
-async fn find_by_raw_token(db: &mongodb::Database, raw_token: &str) -> AppResult<ConnectLink> {
+pub(crate) async fn find_by_raw_token(
+    db: &mongodb::Database,
+    raw_token: &str,
+) -> AppResult<ConnectLink> {
     validate_raw_token(raw_token)?;
     db.collection::<ConnectLink>(CONNECT_LINKS)
         .find_one(doc! { "token_hash": hash_token(raw_token) })
@@ -744,6 +801,7 @@ async fn ensure_actor_can_manage(
     actor_user_id: &str,
     link: &ConnectLink,
 ) -> AppResult<()> {
+    super::app_connect_link_service::ensure_child_subject(db, link, actor_user_id).await?;
     let access = org_service::resolve_owner_access(db, actor_user_id, &link.user_id).await?;
     if access.can_write() {
         Ok(())
@@ -1186,7 +1244,7 @@ async fn load_catalog_info_by_slug(
     catalog_info(db, service).await
 }
 
-async fn load_catalog_info_by_id(
+pub(crate) async fn load_catalog_info_by_id(
     db: &mongodb::Database,
     service_id: &str,
 ) -> AppResult<CatalogConnectInfo> {
@@ -1382,6 +1440,148 @@ fn validate_raw_token(raw_token: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Parent routing is internal authority. Never run the app redirect allowlist on
+/// this server-derived return URL, and never register child webhook deliveries.
+pub async fn create_child(
+    db: &mongodb::Database,
+    parent: &crate::models::app_connect_link::AppConnectLink,
+    requirement: &crate::models::app_requirement_manifest::ServiceRequirement,
+    client: &OauthClient,
+    slug: &str,
+    reauthorize: Option<&UserService>,
+    return_url: &str,
+) -> AppResult<CreatedLink> {
+    let catalog = load_catalog_info_by_slug(db, slug).await?;
+    let credential_type = match catalog.connect_method() {
+        "oauth" | "device_code" => "oauth2",
+        "api_key" => "api_key",
+        _ => return Err(AppError::RequirementNotSatisfiable),
+    };
+    if !requirement.accepted_credential_types.is_empty()
+        && !requirement
+            .accepted_credential_types
+            .iter()
+            .any(|t| t == credential_type || (credential_type == "api_key" && t == "bearer"))
+    {
+        return Err(AppError::RequirementNotSatisfiable);
+    }
+    if !requirement.required_downstream_scopes.is_empty() && credential_type != "oauth2" {
+        return Err(AppError::RequirementNotSatisfiable);
+    }
+    let raw_token = format!("{CONNECT_LINK_PREFIX}{}", generate_random_token());
+    let now = Utc::now();
+    let link = ConnectLink {
+        id: Uuid::new_v4().to_string(),
+        user_id: reauthorize.map_or_else(|| parent.user_id.clone(), |s| s.user_id.clone()),
+        parent_session_id: Some(parent.id.clone()),
+        requirement_id: Some(requirement.id.clone()),
+        reauthorize_user_service_id: reauthorize.map(|s| s.id.clone()),
+        required_scopes: requirement.required_downstream_scopes.clone(),
+        service_slug: slug.into(),
+        service_id: catalog.service_id,
+        label: Some(requirement.label.clone()),
+        requested_by: Some(client.client_name.clone()),
+        // App provenance is assigned explicitly below; these fields drive the
+        // single-service webhook outbox, which parent children do not use.
+        requesting_app_id: None,
+        requesting_app_name: Some(client.client_name.clone()),
+        token_hash: hash_token(&raw_token),
+        status: ConnectLinkStatus::Pending,
+        callback_url: Some(return_url.into()),
+        created_at: now,
+        completed_at: None,
+        expires_at: parent.expires_at,
+        completed_user_service_id: None,
+        completion_claim_id: None,
+        completion_claim_at: None,
+        last_error: None,
+        last_error_at: None,
+        webhook_event_reserved_at: None,
+        webhook_event_id: None,
+        webhook_event_status: None,
+        webhook_event_attempts: 0,
+        webhook_event_delivered_at: None,
+    };
+    db.collection::<ConnectLink>(CONNECT_LINKS)
+        .insert_one(&link)
+        .await?;
+    Ok(CreatedLink { link, raw_token })
+}
+
+async fn begin_reauthorization(
+    db: &mongodb::Database,
+    mut link: ConnectLink,
+    catalog: CatalogConnectInfo,
+    service_id: &str,
+) -> AppResult<CompleteResult> {
+    let service = db.collection::<UserService>(USER_SERVICES).find_one(doc! {
+        "_id": service_id, "user_id": &link.user_id, "is_active": true, "catalog_service_id": &link.service_id,
+    }).await?.ok_or(AppError::RequirementNotSatisfiable)?;
+    let key = db
+        .collection::<UserApiKey>(USER_API_KEYS)
+        .find_one(doc! {
+            "_id": &service.api_key_id, "user_id": &link.user_id, "credential_type": "oauth2",
+        })
+        .await?
+        .ok_or(AppError::RequirementNotSatisfiable)?;
+    let connection_id = key
+        .connection_id
+        .ok_or(AppError::RequirementNotSatisfiable)?;
+    let provider_id = catalog
+        .provider_id
+        .clone()
+        .ok_or(AppError::RequirementNotSatisfiable)?;
+    link = db.collection::<ConnectLink>(CONNECT_LINKS).find_one_and_update(
+        doc! { "_id": &link.id, "status": "pending", "expires_at": { "$gt": bson::DateTime::now() } },
+        doc! { "$set": { "completed_user_service_id": service_id } },
+    ).return_document(ReturnDocument::After).await?.ok_or(AppError::ConnectLinkNotFound)?;
+    let view = view_for_link(db, link).await?;
+    if catalog.connect_method() == "device_code" {
+        Ok(CompleteResult::DeviceCodeRequired {
+            view,
+            provider_id,
+            connection_id,
+        })
+    } else {
+        Ok(CompleteResult::OauthRequired {
+            view,
+            provider_id,
+            connection_id,
+        })
+    }
+}
+
+async fn cancel_child(
+    db: &mongodb::Database,
+    actor: &str,
+    child: &ConnectLink,
+) -> AppResult<LinkView> {
+    use crate::models::app_connect_link::{AppConnectLink, COLLECTION_NAME as PARENTS};
+    let tx_db = db.clone();
+    let child = child.clone();
+    let actor = actor.to_string();
+    let mut session = db.client().start_session().await?;
+    let updated = session.start_transaction().and_run2(async move |session| {
+        let operation: AppResult<ConnectLink> = async {
+            let mut filter = doc! { "_id": &child.id, "status": "pending" };
+            filter.extend(claim_available_filter(Utc::now()));
+            let updated = tx_db.collection::<ConnectLink>(CONNECT_LINKS).find_one_and_update(
+                filter, doc! { "$set": { "status": "cancelled" }, "$unset": { "completion_claim_id": "", "completion_claim_at": "" } },
+            ).return_document(ReturnDocument::After).session(&mut *session).await?.ok_or(AppError::ConnectLinkCompletionInProgress)?;
+            let parent = tx_db.collection::<AppConnectLink>(PARENTS).update_one(
+                doc! { "_id": &child.parent_session_id, "user_id": &actor, "status": "in_progress",
+                    "items": { "$elemMatch": { "requirement_id": &child.requirement_id, "connect_link_id": &child.id } } },
+                doc! { "$set": { "items.$.attempt_id": null, "items.$.attempt_started_at": null,
+                    "items.$.state": "failed", "items.$.reason_code": "child_cancelled", "items.$.connect_link_id": null }, "$inc": { "revision": 1 } },
+            ).session(&mut *session).await?;
+            if parent.modified_count != 1 { return Err(AppError::ConnectLinkNotFound); }
+            Ok(updated)
+        }.await;
+        super::api_key_mutation_service::transaction_result(operation)
+    }).await.map_err(super::api_key_mutation_service::map_transaction_error)?;
+    view_for_link(db, updated).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1424,6 +1624,7 @@ mod tests {
             broker_capability_enabled: false,
             app_connect_capability_enabled: false,
             current_manifest_version: None,
+            handoff_blurb: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,

@@ -34,6 +34,16 @@ macro_rules! collect_billing_route_specs {
     }};
 }
 
+macro_rules! app_connect_validation_billing_routes {
+    ($apply:ident, $router:expr) => {
+        $apply!($router;
+            ("/app-connect-links/{id}/items/{requirement}/validate", "/api/v1/app-connect-links/{id}/items/{requirement}/validate", "handlers::app_connect_links::validate",
+            post(handlers::app_connect_links::validate),
+            crate::services::billing::route_inventory::BillingRoutePolicy::Exempt("service_validation"))
+        )
+    };
+}
+
 macro_rules! service_validation_billing_routes {
     ($apply:ident, $router:expr) => {
         $apply!($router;
@@ -407,6 +417,10 @@ pub(crate) fn mounted_billing_route_inventory()
     ));
     routes.extend(public_mcp_billing_routes!(collect_billing_route_specs, ()));
     routes.extend(oracle_billing_routes!(collect_billing_route_specs, ()));
+    routes.extend(app_connect_validation_billing_routes!(
+        collect_billing_route_specs,
+        ()
+    ));
     routes.extend(service_validation_billing_routes!(
         collect_billing_route_specs,
         ()
@@ -1519,6 +1533,10 @@ fn build_router_internal(
                 .delete(handlers::developer_apps::delete_my_oauth_client),
         )
         .route(
+            "/oauth-clients/{client_id}/handoff",
+            patch(handlers::app_requirements::update_handoff),
+        )
+        .route(
             "/oauth-clients/{client_id}/requirements",
             get(handlers::app_requirements::list_manifests)
                 .post(handlers::app_requirements::publish_manifest),
@@ -1718,6 +1736,14 @@ fn build_router_internal(
             "/app-requirements/status",
             get(handlers::app_requirements::status),
         )
+        .route(
+            "/app-connect-links",
+            post(handlers::app_connect_links::create),
+        )
+        .route(
+            "/app-connect-links/{id}",
+            get(handlers::app_connect_links::get),
+        )
         .nest("/connect-links", connect_link_routes)
         .nest("/triggers", trigger_routes)
         .layer(middleware::from_fn(reject_delegated_tokens))
@@ -1841,6 +1867,34 @@ fn build_router_internal(
             "/auth/device/deny",
             post(handlers::auth_device::deny_auth_device),
         )
+        .route(
+            "/app-connect-links/{id}/redeem",
+            post(handlers::app_connect_links::redeem),
+        )
+        .route(
+            "/app-connect-links/{id}/ready",
+            post(handlers::app_connect_links::ready),
+        )
+        .route(
+            "/app-connect-links/{id}/cancel",
+            post(handlers::app_connect_links::cancel),
+        )
+        .route(
+            "/app-connect-links/{id}/items/{requirement}/connect",
+            post(handlers::app_connect_links::connect),
+        )
+        .route(
+            "/app-connect-links/{id}/items/{requirement}/reauthorize",
+            post(handlers::app_connect_links::reauthorize),
+        )
+        .route(
+            "/app-connect-links/{id}/items/{requirement}/select",
+            post(handlers::app_connect_links::select),
+        )
+        .merge(app_connect_validation_billing_routes!(
+            register_billing_routes,
+            Router::new()
+        ))
         .route(
             "/connect-links/complete",
             post(handlers::connect_links::complete_connect_link),

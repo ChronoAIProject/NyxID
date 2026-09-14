@@ -467,3 +467,8 @@ node probes require advertised no-redirect support and enforce server response
 bounds within the owner's network boundary. This is observation only, with no
 onboarding or authorization gate. The Agent Key allowed/denied verification UI
 continues to establish its separate scope property.
+
+
+### App Connect Link repair sessions
+
+App Connect Links bind a developer app, the human subject and an immutable requirement manifest. The hosted checklist evaluates local readiness on read; only an explicit check uses server validation with an App caller context under the human's actual execution authority. Parent-bound single-service Connect Links reuse existing credential and OAuth machinery, including connection-specific scope repair. Internal return destinations are server-derived. One-time capability redemption, subject-only Session access, and MongoDB item/terminal fences prevent cross-user access and late completion after cancellation. Completing repair reports whether stored consent needs widening and issues no tokens. Eligible no-credential services appear as Included; disabled services remain disabled. The rollout gate covers all repair routes; authorize and consent are unchanged.

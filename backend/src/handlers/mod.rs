@@ -12,6 +12,7 @@ pub mod admin_sa_providers;
 pub mod admin_service_accounts;
 pub mod agent_bindings;
 pub mod api_keys;
+pub mod app_connect_links;
 pub mod app_requirements;
 pub mod approvals;
 pub mod assistant;

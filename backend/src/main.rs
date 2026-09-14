@@ -1037,6 +1037,12 @@ async fn main() {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 interval.tick().await;
+                if let Err(error) =
+                    services::app_connect_link_service::expire_sessions(&connect_link_expiry_db)
+                        .await
+                {
+                    tracing::error!(%error, "failed to expire app connect links");
+                }
                 if let Err(error) = services::connect_link_service::expire_pending_app_links(
                     &connect_link_expiry_db,
                     &connect_link_expiry_dispatcher,

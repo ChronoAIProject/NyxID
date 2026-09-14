@@ -252,6 +252,15 @@ pub async fn get_connect_link(
     auth_user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<ConnectLinkStatusResponse>> {
+    let child = state
+        .db
+        .collection::<crate::models::connect_link::ConnectLink>(
+            crate::models::connect_link::COLLECTION_NAME,
+        )
+        .find_one(mongodb::bson::doc! { "_id": &id })
+        .await?
+        .ok_or(AppError::ConnectLinkNotFound)?;
+    super::app_connect_links::guard_child(&state, &auth_user, &child).await?;
     let view =
         connect_link_service::get_for_actor(&state.db, &auth_user.user_id.to_string(), &id).await?;
     connect_link_service::dispatch_terminal_webhook_if_needed(
@@ -274,6 +283,15 @@ pub async fn cancel_connect_link(
     auth_user: AuthUser,
     Path(id): Path<String>,
 ) -> AppResult<Json<ConnectLinkStatusResponse>> {
+    let child = state
+        .db
+        .collection::<crate::models::connect_link::ConnectLink>(
+            crate::models::connect_link::COLLECTION_NAME,
+        )
+        .find_one(mongodb::bson::doc! { "_id": &id })
+        .await?
+        .ok_or(AppError::ConnectLinkNotFound)?;
+    super::app_connect_links::guard_child(&state, &auth_user, &child).await?;
     let view =
         match connect_link_service::cancel(&state.db, &auth_user.user_id.to_string(), &id).await {
             Ok(view) => view,
@@ -380,6 +398,8 @@ pub async fn cancel_hosted_connect_link(
     headers: HeaderMap,
     Json(body): Json<CancelHostedConnectLinkRequest>,
 ) -> AppResult<Json<ConnectLinkStatusResponse>> {
+    let child = connect_link_service::find_by_raw_token(&state.db, &body.token).await?;
+    super::app_connect_links::guard_child(&state, &auth_user, &child).await?;
     let client_ip = resolve_client_ip(&headers, addr, &state)?;
     if !state
         .connect_link_complete_limiter
@@ -444,6 +464,8 @@ pub async fn complete_connect_link(
     headers: HeaderMap,
     Json(body): Json<CompleteConnectLinkRequest>,
 ) -> AppResult<Json<CompleteConnectLinkResponse>> {
+    let child = connect_link_service::find_by_raw_token(&state.db, &body.token).await?;
+    super::app_connect_links::guard_child(&state, &auth_user, &child).await?;
     let client_ip = resolve_client_ip(&headers, addr, &state)?;
     if !state
         .connect_link_complete_limiter
@@ -496,7 +518,10 @@ pub async fn complete_connect_link(
             provider_id,
             connection_id,
         } => {
-            let redirect_path = format!("/connect/return/{}", view.link.id);
+            let redirect_path = view.link.parent_session_id.as_ref().map_or_else(
+                || format!("/connect/return/{}", view.link.id),
+                |parent| format!("/connect/app/{parent}"),
+            );
             let on_behalf_of =
                 (view.link.user_id != actor_id).then_some(view.link.user_id.as_str());
             let initiate_result = user_token_service::initiate_oauth_connect(
@@ -507,7 +532,7 @@ pub async fn complete_connect_link(
                 &provider_id,
                 on_behalf_of,
                 Some(&redirect_path),
-                &[],
+                &view.link.required_scopes,
                 None,
                 Some(&connection_id),
                 Some(&view.link.id),
@@ -593,7 +618,7 @@ pub async fn complete_connect_link(
                 &actor_id,
                 &provider_id,
                 on_behalf_of,
-                &[],
+                &view.link.required_scopes,
                 None,
                 Some(&connection_id),
             )
@@ -851,6 +876,7 @@ mod tests {
             broker_capability_enabled: false,
             app_connect_capability_enabled: false,
             current_manifest_version: None,
+            handoff_blurb: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,

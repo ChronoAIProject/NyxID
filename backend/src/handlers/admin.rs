@@ -3065,6 +3065,7 @@ mod operator_route_tests {
             broker_capability_enabled: false,
             app_connect_capability_enabled: false,
             current_manifest_version: None,
+            handoff_blurb: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,

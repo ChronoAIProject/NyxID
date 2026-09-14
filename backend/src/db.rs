@@ -104,6 +104,7 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
     crate::services::coordination_service::ensure_indexes(db).await?;
     ensure_service_validation_indexes(db).await?;
     ensure_app_requirement_indexes(db).await?;
+    ensure_app_connect_link_indexes(db).await?;
 
     // ── assistant_wire_logs ──
     db.collection::<AssistantWireLog>(AssistantWireLog::COLLECTION_NAME)
@@ -4531,6 +4532,40 @@ pub(crate) async fn ensure_app_requirement_indexes(
         .create_index(
             IndexModel::builder()
                 .keys(doc! { "user_id": 1, "oauth_client_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    Ok(())
+}
+
+pub(crate) async fn ensure_app_connect_link_indexes(
+    db: &Database,
+) -> Result<(), mongodb::error::Error> {
+    use crate::models::app_connect_link::COLLECTION_NAME;
+    let links = db.collection::<Document>(COLLECTION_NAME);
+    links
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "expires_at": 1 })
+                .options(
+                    IndexOptions::builder()
+                        .expire_after(Duration::from_secs(86400))
+                        .build(),
+                )
+                .build(),
+        )
+        .await?;
+    links
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "oauth_client_id": 1, "created_at": -1 })
+                .build(),
+        )
+        .await?;
+    db.collection::<Document>(CONNECT_LINKS)
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "parent_session_id": 1, "requirement_id": 1 })
                 .build(),
         )
         .await?;

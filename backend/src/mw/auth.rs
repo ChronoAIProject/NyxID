@@ -422,6 +422,7 @@ fn delegated_read_denied_path(path: &str) -> bool {
                 | "channel-conversations"
                 | "connect-links"
                 | "app-requirements"
+                | "app-connect-links"
                 | "platform-ops"
         )
     ) {
@@ -2457,6 +2458,7 @@ mod tests {
                 broker_capability_enabled: false,
                 app_connect_capability_enabled: false,
                 current_manifest_version: None,
+                handoff_blurb: None,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: Some(vec![19, 20, 21]),
                 connection_webhook_url: None,

@@ -7972,3 +7972,80 @@ Only manifest services may be disclosed. Optional selection/evidence fields are 
 The evaluator performs no provider I/O, decryption, or token refresh. It reuses phase-0 freshness checks, including the profile version, credential revision, and execution-authority digest. Transport failures and other zero-window observations are not reusable evidence. No check runs merely because an app reads status. **GET `/api/v1/app-requirements/status` may auto-provision eligible no-credential services** through the existing local auto-provision path. Prior explicit eligible selections win even when broken. Otherwise candidates rank Met/Included, Unknown, NeedsReauth, then Broken, followed by freshest authenticated evidence, most recent use, and service ID for deterministic ties.
 
 Platform admins use `PATCH /api/v1/admin/oauth-clients/{client_id}/app-connect-capability` with `{"enabled":true|false}`. `GET/PATCH /api/v1/admin/settings/app-connect` reads/updates rollout with `{"rollout":"disabled"|"allowlist"|null}`; `null` restores the deployment default. The response reports `effective`, `env_default`, `override_value`, and `allowed_org_ids`. Public mode is a reserved configuration value requiring a separate rollout review and is not offered in the UI. Capability changes emit `app_connect_capability_granted`/`app_connect_capability_revoked`; mode changes emit `app_connect_rollout_changed`.
+
+### App Connect Links (repair)
+
+`POST /api/v1/app-connect-links` accepts a developer-app **user access token** and
+`{"callback_url":"https://app.example/callback","state":"application-generated-nonce"}`.
+The verified token binds the app and human subject; the callback must pass the
+app's registered redirect policy. `state` is required, nonempty, and at most
+1024 bytes. The response is `{ id, connect_url, expires_at }`; send the user to
+`connect_url`. The URL fragment contains a one-time page capability. The hosted
+page requires login, redeems that capability into a durable subject association,
+and scrubs the fragment. Further reads resume using the bound human's session.
+An app token cannot redeem or operate the hosted checklist.
+
+`GET /api/v1/app-connect-links/{id}` accepts either that app's user token (both
+client and subject must match) or the bound human's session after redemption.
+It returns the app's name, plain-text `handoff_blurb`, fixed destination label,
+manifest version, status, expiry, and checklist items. Items include
+`requirement_id`, `label`, `optional`, `state`, `readiness`, selection/evidence
+fields, `reason_code`, profile `claim`, and `granted_to_caller`. Human reads also
+include eligible connection choices. Disclosure is limited to the frozen
+manifest. Reads reconcile durable child completion and evaluate local readiness;
+they can auto-provision eligible no-credential services, but never run a probe.
+
+The hosted API requires **Session authentication by the bound subject** on every
+operation. Org write access can authorize work on a selected org connection; it
+never authorizes another person's App Connect Link. API keys, delegated, relay,
+service-account, and ordinary app access tokens cannot operate these routes:
+
+| Route under `/api/v1/app-connect-links/{id}` | Body / behavior |
+| --- | --- |
+| `POST /redeem` | `{ capability }`; redeem once. |
+| `POST /items/{requirement_id}/connect` | `{ service_slug }`; create a child for a frozen catalog alternative. |
+| `POST /items/{requirement_id}/reauthorize` | `{ service_slug }`; reuse the selected OAuth connection with required downstream scopes. |
+| `POST /items/{requirement_id}/select` | `{ user_service_id }`; explicitly choose an eligible connection. `null` skips an optional item. |
+| `POST /items/{requirement_id}/validate` | Explicitly check the selected connection through server-side validation. Provider rate limits apply. |
+| `POST /ready` | Complete repair only if every required item is Met/Included with current local authority and evidence. |
+| `POST /cancel` | Cancel the session. |
+
+Connect/reauthorize returns the child ID, one-time child token and safe connection
+form metadata. The existing human Connect Link completion route accepts the
+credential or starts the provider flow. Parent children are hidden from public
+preview. Their return destination is derived by NyxID as `/connect/app/{id}`;
+apps and browsers cannot supply it. Scope repair preserves the connection's
+OAuth app provenance and uses the existing provider scope policy, including the
+shared platform OAuth scope allowlist. It does not create a replacement key.
+
+Checklist states are `unmet`, `connecting`, `reauthorizing`, `validating`, `met`,
+`unknown`, `failed`, and `skipped`. Sessions start `in_progress`; repair can finish
+`completed`, `cancelled`, `expired`, or `failed`. `ready_for_consent` is reserved
+for the later authorize integration. Each session starts with a 30-minute TTL;
+each requirement reaching Met earns one 15-minute extension, capped at two hours
+from creation. Terminal state is retained for a day beyond expiry. Item attempts
+and terminal transitions use MongoDB fences; cancelled work cannot restore an
+item or session. Repair uses the phase-0 five-minute evidence window, with a
+maximum five-minute spread between observations.
+
+A terminal response contains `callback_url` with `status`, `app_connect_link_id`,
+`state`, and `grant_update_required`. **Correlate `state` before interpreting any
+status or error.** Repair completion issues no authorization code or tokens.
+When `grant_update_required=true`, the satisfied connections extend beyond the
+app's stored consent: restart ordinary authorize with `prompt=consent` and the
+required RFC 8707 resource URIs to request access. Existing grants are unchanged.
+
+Creation shares the per-user Connect Link limit (10/min); hosted reads/actions
+use the existing per-IP completion limiter, and app polling shares the 30/min
+requirements status limit. Explicit checks also use the per-user validation
+limiter and phase-0 deployment/provider admission. Every App Connect Link route
+returns a not-found-shaped response when rollout is disabled or the app loses
+its capability/activation. Authorize and consent retain their existing behavior;
+Gate manifests remain rejected. No App Connect Link webhooks are emitted.
+
+App owners can update text with
+`PATCH /api/v1/developer/oauth-clients/{client_id}/handoff`, body
+`{"handoff_blurb":"Connect the accounts this app needs."}`. Text is limited to
+160 characters; an empty string clears it. The rollout/capability and existing
+app-write ownership checks apply. App branding consists of the registered name
+and this text; the `Secured by NyxID · destination` footer is fixed.

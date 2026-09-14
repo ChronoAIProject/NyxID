@@ -16,7 +16,7 @@ use crate::errors::{AppError, AppResult};
 use crate::models::app_requirement_manifest::{
     AppRequirementManifest, Enforcement, OwnerPolicy, ValidatorSelection,
 };
-use crate::models::oauth_client::{COLLECTION_NAME as CLIENTS, OauthClient};
+use crate::models::oauth_client::OauthClient;
 use crate::models::platform_settings::AppConnectRollout;
 use crate::models::user::{COLLECTION_NAME as USERS, User, UserType};
 use crate::mw::auth::{AuthMethod, AuthUser};
@@ -107,16 +107,7 @@ pub struct ManifestsResponse {
 }
 
 pub(crate) async fn enabled_client(state: &AppState, id: &str) -> AppResult<OauthClient> {
-    let client = state
-        .db
-        .collection::<OauthClient>(CLIENTS)
-        .find_one(doc! { "_id": id })
-        .await?
-        .ok_or(AppError::AppConnectLinkNotFound)?;
-    if !app_connect_rollout::is_enabled_for(state, &client).await? {
-        return Err(AppError::AppConnectLinkNotFound);
-    }
-    Ok(client)
+    crate::services::app_connect_link_service::enabled_client(state, id).await
 }
 
 pub async fn list_manifests(
@@ -228,7 +219,7 @@ pub async fn status(
     }))
 }
 
-async fn require_app_user(state: &AppState, auth: &AuthUser) -> AppResult<String> {
+pub(crate) async fn require_app_user(state: &AppState, auth: &AuthUser) -> AppResult<String> {
     let denied = || AppError::Forbidden("A developer-app user access token is required".into());
     if auth.auth_method != AuthMethod::AccessToken
         || auth.acting_client_id.is_some()
@@ -351,4 +342,43 @@ pub async fn update_capability(
 
 #[cfg(test)]
 #[path = "app_requirements_tests.rs"]
-mod tests;
+pub(crate) mod tests;
+
+#[cfg(test)]
+use crate::models::oauth_client::COLLECTION_NAME as CLIENTS;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HandoffRequest {
+    pub handoff_blurb: String,
+}
+#[derive(Debug, Serialize)]
+pub struct HandoffResponse {
+    pub handoff_blurb: Option<String>,
+}
+
+pub async fn update_handoff(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Path(id): Path<String>,
+    Json(body): Json<HandoffRequest>,
+) -> AppResult<Json<HandoffResponse>> {
+    enabled_client(&state, &id).await?;
+    let owner = resolve_developer_app_write_owner(&state, &auth.user_id.to_string(), &id).await?;
+    let blurb = crate::services::oauth_client_service::update_handoff_blurb(
+        &state.db,
+        &id,
+        &owner,
+        &body.handoff_blurb,
+    )
+    .await?;
+    audit_service::log_for_user(
+        state.db.clone(),
+        &auth,
+        "app_connect_handoff_updated",
+        Some(serde_json::json!({"client_id":id})),
+    );
+    Ok(Json(HandoffResponse {
+        handoff_blurb: blurb,
+    }))
+}

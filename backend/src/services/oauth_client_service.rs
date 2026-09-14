@@ -262,6 +262,7 @@ pub async fn seed_default_clients(db: &mongodb::Database) -> AppResult<()> {
         broker_capability_enabled: false,
         app_connect_capability_enabled: false,
         current_manifest_version: None,
+        handoff_blurb: None,
         revocation_webhook_url: None,
         revocation_webhook_secret_encrypted: None,
         connection_webhook_url: None,
@@ -437,6 +438,7 @@ pub async fn create_client_with_id(
         broker_capability_enabled,
         app_connect_capability_enabled: false,
         current_manifest_version: None,
+        handoff_blurb: None,
         revocation_webhook_url: revocation_webhook_url.map(str::to_string),
         revocation_webhook_secret_encrypted,
         connection_webhook_url: None,
@@ -1473,6 +1475,29 @@ pub async fn rotate_client_secret_for_creator(
     Ok((updated, new_secret))
 }
 
+pub async fn update_handoff_blurb(
+    db: &mongodb::Database,
+    id: &str,
+    owner: &str,
+    text: &str,
+) -> AppResult<Option<String>> {
+    let text = text.trim();
+    if text.chars().count() > 160 || text.chars().any(char::is_control) {
+        return Err(AppError::ValidationError(
+            "Handoff text must be plain text, at most 160 characters".into(),
+        ));
+    }
+    let blurb = (!text.is_empty()).then(|| text.to_string());
+    let result = db.collection::<OauthClient>(OAUTH_CLIENTS).update_one(
+        doc! { "_id": id, "created_by": owner, "app_connect_capability_enabled": true, "is_active": true },
+        doc! { "$set": { "handoff_blurb": &blurb, "updated_at": bson::DateTime::from_chrono(Utc::now()) } },
+    ).await?;
+    if result.matched_count == 0 {
+        return Err(AppError::AppConnectLinkNotFound);
+    }
+    Ok(blurb)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2491,6 +2516,7 @@ mod tests {
                 broker_capability_enabled,
                 app_connect_capability_enabled: false,
                 current_manifest_version: None,
+                handoff_blurb: None,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
@@ -2564,6 +2590,7 @@ mod tests {
                 broker_capability_enabled: false,
                 app_connect_capability_enabled: false,
                 current_manifest_version: None,
+                handoff_blurb: None,
                 revocation_webhook_url: None,
                 revocation_webhook_secret_encrypted: None,
                 connection_webhook_url: None,
@@ -3096,6 +3123,7 @@ mod tests {
                     broker_capability_enabled: false,
                     app_connect_capability_enabled: false,
                     current_manifest_version: None,
+                    handoff_blurb: None,
                     revocation_webhook_url: None,
                     revocation_webhook_secret_encrypted: None,
                     connection_webhook_url: None,
@@ -3353,6 +3381,7 @@ mod tests {
                     broker_capability_enabled: false,
                     app_connect_capability_enabled: false,
                     current_manifest_version: None,
+                    handoff_blurb: None,
                     revocation_webhook_url: None,
                     revocation_webhook_secret_encrypted: None,
                     connection_webhook_url: None,

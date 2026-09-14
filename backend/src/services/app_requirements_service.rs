@@ -113,6 +113,26 @@ pub async fn evaluate_local(
     user_id: &str,
     caller: &EvaluationCaller<'_>,
 ) -> AppResult<RequirementsReport> {
+    evaluate_local_inner(state, manifest, user_id, caller, true).await
+}
+
+/// Evaluate a proposed selection without persisting a partial-manifest result.
+pub(crate) async fn evaluate_selection(
+    state: &AppState,
+    manifest: &AppRequirementManifest,
+    user_id: &str,
+    caller: &EvaluationCaller<'_>,
+) -> AppResult<RequirementsReport> {
+    evaluate_local_inner(state, manifest, user_id, caller, false).await
+}
+
+async fn evaluate_local_inner(
+    state: &AppState,
+    manifest: &AppRequirementManifest,
+    user_id: &str,
+    caller: &EvaluationCaller<'_>,
+    persist_result: bool,
+) -> AppResult<RequirementsReport> {
     if caller.client_id != manifest.oauth_client_id {
         return Err(AppError::AppConnectResultMismatch);
     }
@@ -233,6 +253,13 @@ pub async fn evaluate_local(
             }
             requirements.push(status);
         }
+    }
+    if !persist_result {
+        return Ok(RequirementsReport {
+            requirements_version: manifest.version,
+            result_id: String::new(),
+            requirements,
+        });
     }
     let now = Utc::now();
     let result = AppRequirementResult {

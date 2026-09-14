@@ -15,14 +15,14 @@ use crate::models::user_service::UserService;
 use crate::services::{execution_authority, proxy_service, service_validation_service};
 use crate::test_utils::*;
 
-struct Fixture {
-    state: AppState,
-    app: OauthClient,
-    auth: AuthUser,
-    owner: String,
+pub(crate) struct Fixture {
+    pub(crate) state: AppState,
+    pub(crate) app: OauthClient,
+    pub(crate) auth: AuthUser,
+    pub(crate) owner: String,
 }
 
-async fn fixture(name: &str) -> Option<Fixture> {
+pub(crate) async fn fixture(name: &str) -> Option<Fixture> {
     let db = connect_test_database(name).await?;
     crate::db::ensure_app_requirement_indexes(&db)
         .await
@@ -86,7 +86,7 @@ async fn fixture(name: &str) -> Option<Fixture> {
     })
 }
 
-async fn catalog(f: &Fixture, slug: &str, auth: &str) -> String {
+pub(crate) async fn catalog(f: &Fixture, slug: &str, auth: &str) -> String {
     let id = Uuid::new_v4().to_string();
     f.state.db.collection::<Document>("downstream_services").insert_one(doc! {
         "_id": &id, "name": slug, "slug": slug, "base_url": "https://api.github.com",
@@ -99,7 +99,7 @@ async fn catalog(f: &Fixture, slug: &str, auth: &str) -> String {
     id
 }
 
-fn requirement(slug: &str) -> ServiceRequirement {
+pub(crate) fn requirement(slug: &str) -> ServiceRequirement {
     ServiceRequirement {
         id: "required".into(),
         label: "Required service".into(),
@@ -115,7 +115,7 @@ fn requirement(slug: &str) -> ServiceRequirement {
     }
 }
 
-async fn publish(f: &Fixture, requirement: ServiceRequirement) -> ManifestResponse {
+pub(crate) async fn publish(f: &Fixture, requirement: ServiceRequirement) -> ManifestResponse {
     publish_manifest(
         State(f.state.clone()),
         f.auth.clone(),
@@ -130,7 +130,7 @@ async fn publish(f: &Fixture, requirement: ServiceRequirement) -> ManifestRespon
     .0
 }
 
-async fn service(
+pub(crate) async fn service(
     f: &Fixture,
     owner: &str,
     catalog_id: &str,

@@ -103,6 +103,11 @@ pub struct BillingRouteSpec {
 #[cfg(test)]
 pub const BILLING_ROUTE_INVENTORY: &[BillingRouteSpec] = &[
     BillingRouteSpec {
+        handler: "handlers::app_connect_links::validate",
+        route: "/api/v1/app-connect-links/{id}/items/{requirement}/validate",
+        policy: BillingRoutePolicy::Exempt("service_validation"),
+    },
+    BillingRouteSpec {
         handler: "handlers::keys::validate_key",
         route: "/api/v1/keys/{id}/validate",
         policy: BillingRoutePolicy::Exempt("service_validation"),

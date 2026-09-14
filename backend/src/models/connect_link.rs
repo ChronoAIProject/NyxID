@@ -30,6 +30,14 @@ pub struct ConnectLink {
     #[serde(rename = "_id")]
     pub id: String,
     pub user_id: String,
+    #[serde(default)]
+    pub parent_session_id: Option<String>,
+    #[serde(default)]
+    pub requirement_id: Option<String>,
+    #[serde(default)]
+    pub reauthorize_user_service_id: Option<String>,
+    #[serde(default)]
+    pub required_scopes: Vec<String>,
     pub service_slug: String,
     pub service_id: String,
     pub label: Option<String>,
@@ -145,6 +153,10 @@ mod tests {
         ConnectLink {
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
+            parent_session_id: None,
+            requirement_id: None,
+            reauthorize_user_service_id: None,
+            required_scopes: Vec::new(),
             service_slug: "api-github-pat".to_string(),
             service_id: uuid::Uuid::new_v4().to_string(),
             label: Some("Release automation".to_string()),

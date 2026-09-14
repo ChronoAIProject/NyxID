@@ -57,6 +57,9 @@ pub struct OauthClient {
     pub app_connect_capability_enabled: bool,
     #[serde(default)]
     pub current_manifest_version: Option<u32>,
+    /// Plain text, at most 160 characters; no developer-controlled branding assets.
+    #[serde(default)]
+    pub handoff_blurb: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation_webhook_url: Option<String>,
     #[serde(default, with = "crate::models::bson_bytes::optional")]
@@ -169,6 +172,7 @@ mod tests {
             broker_capability_enabled: true,
             app_connect_capability_enabled: false,
             current_manifest_version: None,
+            handoff_blurb: None,
             revocation_webhook_url: Some("https://client.example.com/cae".to_string()),
             revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
             connection_webhook_url: Some("https://client.example.com/connections".to_string()),
@@ -249,6 +253,7 @@ mod tests {
             broker_capability_enabled: false,
             app_connect_capability_enabled: false,
             current_manifest_version: None,
+            handoff_blurb: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -288,6 +293,7 @@ mod tests {
             broker_capability_enabled: true,
             app_connect_capability_enabled: false,
             current_manifest_version: None,
+            handoff_blurb: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: None,
             connection_webhook_url: None,
@@ -321,6 +327,7 @@ mod tests {
             broker_capability_enabled: false,
             app_connect_capability_enabled: false,
             current_manifest_version: None,
+            handoff_blurb: None,
             revocation_webhook_url: None,
             revocation_webhook_secret_encrypted: Some(vec![1, 2, 3]),
             connection_webhook_url: None,

@@ -2508,6 +2508,10 @@ mod tests {
             .insert_one(ConnectLink {
                 id: link_id.clone(),
                 user_id: user_id.clone(),
+                parent_session_id: None,
+                requirement_id: None,
+                reauthorize_user_service_id: None,
+                required_scopes: Vec::new(),
                 service_slug: "provider-service".to_string(),
                 service_id: Uuid::new_v4().to_string(),
                 label: None,

@@ -3,6 +3,7 @@ pub mod agent_service_binding;
 pub mod anonymous_endpoint_usage;
 pub mod api_key;
 pub mod api_key_credential;
+pub mod app_connect_link;
 pub mod app_requirement_manifest;
 pub mod app_requirement_result;
 pub mod approval_grant;
