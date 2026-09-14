@@ -1,11 +1,13 @@
-import type { ConnectLinkPreview } from "@/schemas/connect-links";
+import type { ConnectFormMetadata } from "@/schemas/connect-links";
 
 export function connectLinkErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "The connection request failed.";
+  return error instanceof Error
+    ? error.message
+    : "The connection request failed.";
 }
 
 export function connectLinkNeedsOAuthCredentials(
-  preview: ConnectLinkPreview,
+  preview: ConnectFormMetadata,
 ): boolean {
   return (
     (preview.connect_method === "oauth" ||
@@ -16,7 +18,9 @@ export function connectLinkNeedsOAuthCredentials(
   );
 }
 
-export function connectLinkNeedsSetupForm(preview: ConnectLinkPreview): boolean {
+export function connectLinkNeedsSetupForm(
+  preview: ConnectFormMetadata,
+): boolean {
   return (
     preview.connect_method === "api_key" ||
     preview.requires_gateway_url ||

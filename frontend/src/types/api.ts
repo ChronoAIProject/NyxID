@@ -193,6 +193,7 @@ export interface ApiKeyUsageListResponse {
 export interface OAuthClient {
   readonly app_connect_capability_enabled?: boolean;
   readonly app_connect_enabled?: boolean;
+  readonly handoff_blurb?: string | null;
   readonly current_manifest_version?: number | null;
   readonly id: string;
   readonly client_name: string;

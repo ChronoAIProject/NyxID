@@ -26,6 +26,12 @@ export const LoginDevicePage = lazy(() =>
     default: m.LoginDevicePage,
   })),
 );
+export const AppConnectLinkPage = lazy(() =>
+  import("@/pages/app-connect-link").then((m) => ({
+    default: m.AppConnectLinkPage,
+  })),
+);
+
 export const ConnectLinkPage = lazy(() =>
   import("@/pages/connect-link").then((m) => ({ default: m.ConnectLinkPage })),
 );

@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 
 use chrono::{Duration, Utc};
+use futures::TryStreamExt;
 use mongodb::bson::{self, doc};
 use mongodb::options::ReturnDocument;
 use uuid::Uuid;
@@ -376,7 +377,20 @@ pub async fn refresh(
             ) {
                 continue;
             }
-            if item.reason_code.as_deref() == Some("child_cancelled") {
+            if matches!(
+                item.reason_code.as_deref(),
+                Some(
+                    "child_cancelled"
+                        | "provider_authorization_failed"
+                        | "attempt_interrupted"
+                        | "validation_unavailable"
+                        | "credential_unavailable"
+                        | "attempt_superseded"
+                        | "lease_lost"
+                        | "internal_error"
+                        | "node_agent_upgrade_required"
+                )
+            ) {
                 continue;
             }
             item.state = item_state(status.state);
@@ -462,7 +476,9 @@ async fn eligible_selection(
     )
     .await?;
     if !report.requirements.iter().any(|r| {
-        r.user_service_id.as_deref() == Some(service_id) && r.state != RequirementState::Disabled
+        r.candidates
+            .iter()
+            .any(|candidate| candidate.user_service_id == service_id)
     }) {
         return Err(AppError::RequirementNotSatisfiable);
     }
@@ -585,6 +601,12 @@ pub async fn validate_item(
         .ok_or(AppError::RequirementNotMet)?;
     eligible_selection(state, &link, &manifest, required, &service_id).await?;
     let ValidatorSelection::Profile { id: profile_id } = &required.validator else {
+        link.items[index].reason_code = None;
+        link.items[index].connect_link_id = None;
+        link.items[index].state = ItemState::Unknown;
+        if !persist(state, &link).await? {
+            return Err(AppError::AppConnectResultMismatch);
+        }
         return Ok(());
     };
     let profile = validator_profiles::PROFILES
@@ -615,7 +637,12 @@ pub async fn validate_item(
     if link.items[index].state == ItemState::Validating {
         return Ok(());
     }
+    let previous_item = link.items[index].clone();
     let attempt = Uuid::new_v4().to_string();
+    link.items[index].reason_code = None;
+    if previous_item.reason_code.as_deref() == Some("provider_authorization_failed") {
+        link.items[index].connect_link_id = None;
+    }
     link.items[index].attempt_id = Some(attempt.clone());
     link.items[index].attempt_started_at = Some(Utc::now());
     link.items[index].state = ItemState::Validating;
@@ -653,16 +680,20 @@ pub async fn validate_item(
         if item.attempt_id.as_deref() != Some(&attempt) {
             return Ok(());
         }
-        item.state = ItemState::Unknown;
-        item.attempt_id = None;
-        item.attempt_started_at = None;
-        item.validation_record_id = result.as_ref().ok().map(|r| r.id.clone());
-        item.reason_code = Some(
-            result
-                .as_ref()
-                .map_or("validation_unavailable", |r| r.reason_code.as_str())
-                .into(),
-        );
+        if matches!(result, Err(AppError::ServiceValidationRateLimited)) {
+            *item = previous_item.clone();
+        } else {
+            item.state = ItemState::Unknown;
+            item.attempt_id = None;
+            item.attempt_started_at = None;
+            item.validation_record_id = result.as_ref().ok().map(|r| r.id.clone());
+            item.reason_code = Some(
+                result
+                    .as_ref()
+                    .map_or("validation_unavailable", |r| r.reason_code.as_str())
+                    .into(),
+            );
+        }
         if persist(state, &live).await? {
             return result.map(|_| ());
         }
@@ -755,6 +786,7 @@ pub async fn cancel(state: &AppState, id: &str, subject: &str) -> AppResult<AppC
     let mut link = load(state, id, subject).await?;
     ensure_redeemed(&link)?;
     if link.status == AppConnectStatus::Cancelled {
+        cancel_pending_children(&state.db, id).await;
         return Ok(link);
     }
     ensure_open(&link)?;
@@ -768,22 +800,47 @@ pub async fn cancel(state: &AppState, id: &str, subject: &str) -> AppResult<AppC
         return Err(AppError::AppConnectResultMismatch);
     }
     link.revision += 1;
+    cancel_pending_children(&state.db, id).await;
     Ok(link)
 }
 
+async fn cancel_pending_children(db: &mongodb::Database, parent_id: &str) {
+    if let Err(error) = db
+        .collection::<ConnectLink>(CHILDREN)
+        .update_many(
+            doc! { "parent_session_id": parent_id, "status": "pending" },
+            doc! { "$set": { "status": "cancelled", "completed_at": bson::DateTime::now(),
+            "completion_claim_id": null, "completion_claim_at": null } },
+        )
+        .await
+    {
+        tracing::warn!(app_connect_link_id = parent_id, error = %error,
+            "Could not cancel pending app connect children");
+    }
+}
+
 async fn expire(db: &mongodb::Database, id: &str) -> AppResult<()> {
-    db.collection::<AppConnectLink>(COLLECTION_NAME).update_one(
+    let result = db.collection::<AppConnectLink>(COLLECTION_NAME).update_one(
         doc! { "_id": id, "status": { "$in": ["in_progress", "ready_for_consent"] }, "expires_at": { "$lte": bson::DateTime::now() } },
         doc! { "$set": { "status": "expired", "completed_at": bson::DateTime::now(), "items.$[].attempt_id": null }, "$inc": { "revision": 1 } },
     ).await?;
+    if result.modified_count == 1 {
+        cancel_pending_children(db, id).await;
+    }
     Ok(())
 }
 
 pub async fn expire_sessions(db: &mongodb::Database) -> AppResult<()> {
-    db.collection::<AppConnectLink>(COLLECTION_NAME).update_many(
-        doc! { "status": { "$in": ["in_progress", "ready_for_consent"] }, "expires_at": { "$lte": bson::DateTime::now() } },
-        doc! { "$set": { "status": "expired", "completed_at": bson::DateTime::now(), "items.$[].attempt_id": null }, "$inc": { "revision": 1 } },
-    ).await?;
+    let mut due = db
+        .collection::<AppConnectLink>(COLLECTION_NAME)
+        .find(
+            doc! { "status": { "$in": ["in_progress", "ready_for_consent"] },
+            "expires_at": { "$lte": bson::DateTime::now() } },
+        )
+        .await?;
+    while let Some(link) = due.try_next().await? {
+        expire(db, &link.id).await?;
+    }
     Ok(())
 }
 
@@ -852,30 +909,4 @@ pub async fn ensure_child_subject(
     }).await?.ok_or(AppError::ConnectLinkNotFound)?;
     let _ = link;
     Ok(())
-}
-
-pub async fn choices(
-    state: &AppState,
-    link: &AppConnectLink,
-    manifest: &AppRequirementManifest,
-    required: &ServiceRequirement,
-) -> AppResult<Vec<UserService>> {
-    let visible =
-        super::user_service_service::list_user_services_with_sources(&state.db, &link.user_id)
-            .await?;
-    let mut choices = Vec::new();
-    for row in visible {
-        if !required.any_of_catalog_slugs.iter().any(|slug| {
-            manifest.compiled.catalog_service_ids.get(slug)
-                == row.service.catalog_service_id.as_ref()
-        }) {
-            continue;
-        }
-        match eligible_selection(state, link, manifest, required, &row.service.id).await {
-            Ok(service) => choices.push(service),
-            Err(AppError::RequirementNotSatisfiable) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(choices)
 }

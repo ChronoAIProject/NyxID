@@ -7,7 +7,10 @@ import {
   connectLinkProviderError,
 } from "@/lib/connect-link-page";
 import type { ConnectLinkPreview } from "@/schemas/connect-links";
-import { ConnectLinkDetailRow, TerminalPanel } from "@/pages/connect-link";
+import {
+  ConnectLinkDetailRow,
+  TerminalPanel,
+} from "@/components/connect/connection-panels";
 
 function preview(
   overrides: Partial<ConnectLinkPreview> = {},
@@ -93,7 +96,9 @@ describe("connect link page error handling", () => {
       <TerminalPanel status="cancelled" callbackUrl="desktop-app://return" />,
     );
     expect(screen.getByText("Connection cancelled")).toBeInTheDocument();
-    expect(screen.getByText(/Returning to the requesting application/)).toBeInTheDocument();
+    expect(
+      screen.getByText(/Returning to the requesting application/),
+    ).toBeInTheDocument();
 
     rerender(<TerminalPanel status="expired" callbackUrl={null} />);
     expect(screen.getByText("Connection request expired")).toBeInTheDocument();

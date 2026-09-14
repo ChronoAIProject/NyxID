@@ -44,6 +44,10 @@ vi.mock("@/components/shared/client-secret-dialog", () => ({
     open ? <div data-testid="client-secret-dialog" /> : null,
 }));
 
+vi.mock("./handoff-card", () => ({
+  HandoffCard: () => <div data-testid="handoff-card" />,
+}));
+
 vi.mock("./requirements-card", () => ({
   RequirementsCard: ({ clientId }: { readonly clientId: string }) => (
     <div data-testid="requirements-card">{clientId}</div>

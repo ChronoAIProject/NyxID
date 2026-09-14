@@ -65,7 +65,15 @@ pub struct EvaluationCaller<'a> {
     pub explicit_selections: BTreeMap<String, String>,
 }
 
+pub struct RequirementChoice {
+    pub user_service_id: String,
+    pub slug: String,
+    pub catalog_slug: String,
+    pub owner_id: String,
+}
+
 pub struct RequirementStatus {
+    pub candidates: Vec<RequirementChoice>,
     pub requirement_id: String,
     pub state: RequirementState,
     pub user_service_id: Option<String>,
@@ -79,6 +87,8 @@ pub struct RequirementStatus {
 }
 
 pub struct RequirementsReport {
+    #[cfg(test)]
+    pub authority_snapshots: usize,
     pub requirements_version: u32,
     pub result_id: String,
     pub requirements: Vec<RequirementStatus>,
@@ -93,6 +103,7 @@ struct Candidate {
 impl RequirementStatus {
     fn empty(id: &str, state: RequirementState) -> Self {
         Self {
+            candidates: vec![],
             requirement_id: id.into(),
             state,
             user_service_id: None,
@@ -169,6 +180,35 @@ async fn evaluate_local_inner(
         .into_iter()
         .map(|service| (service.id.clone(), service))
         .collect();
+    // Snapshot each relevant service once, even when requirements overlap. These
+    // facts are scoped to this evaluation; every new read rechecks live authority.
+    let mut facts = HashMap::new();
+    #[cfg(test)]
+    let mut authority_snapshots = 0;
+    for item in &visible {
+        if !manifest.requirements.iter().any(|r| {
+            owner_allowed(r.owner_policy, &item.source)
+                && r.any_of_catalog_slugs.iter().any(|slug| {
+                    manifest.compiled.catalog_service_ids.get(slug)
+                        == item.service.catalog_service_id.as_ref()
+                })
+        }) || !item
+            .service
+            .catalog_service_id
+            .as_ref()
+            .is_some_and(|id| catalog.contains_key(id))
+        {
+            continue;
+        }
+        #[cfg(test)]
+        {
+            authority_snapshots += 1;
+        }
+        facts.insert(
+            item.service.id.clone(),
+            candidate_facts(state, user_id, &item.service).await?,
+        );
+    }
     let mut requirements = Vec::with_capacity(manifest.requirements.len());
     for requirement in &manifest.requirements {
         let catalog_ids: HashSet<_> = requirement
@@ -194,17 +234,18 @@ async fn evaluate_local_inner(
             {
                 continue;
             }
+            let Some(Some(facts)) = facts.get(&item.service.id) else {
+                continue;
+            };
             if let Some(candidate) = evaluate_candidate(
                 state,
-                user_id,
+                facts,
                 requirement,
                 manifest,
                 &item.service,
                 &catalog[catalog_id],
                 caller,
-            )
-            .await?
-            {
+            ) {
                 candidates.push(candidate);
             }
         }
@@ -230,7 +271,34 @@ async fn evaluate_local_inner(
                     .cmp(&right.status.user_service_id)
             })
         });
-        if let Some(candidate) = candidates.into_iter().next() {
+        let choices = candidates
+            .iter()
+            .map(|c| {
+                let service_id = c
+                    .status
+                    .user_service_id
+                    .as_ref()
+                    .expect("candidate has a service");
+                let service = visible
+                    .iter()
+                    .find(|i| &i.service.id == service_id)
+                    .expect("visible candidate");
+                RequirementChoice {
+                    user_service_id: service_id.clone(),
+                    slug: service.service.slug.clone(),
+                    catalog_slug: catalog[service
+                        .service
+                        .catalog_service_id
+                        .as_ref()
+                        .expect("catalog candidate")]
+                    .slug
+                    .clone(),
+                    owner_id: service.service.user_id.clone(),
+                }
+            })
+            .collect();
+        if let Some(mut candidate) = candidates.into_iter().next() {
+            candidate.status.candidates = choices;
             requirements.push(candidate.status);
         } else {
             let paused = disabled.iter().find(|item| {
@@ -256,6 +324,8 @@ async fn evaluate_local_inner(
     }
     if !persist_result {
         return Ok(RequirementsReport {
+            #[cfg(test)]
+            authority_snapshots,
             requirements_version: manifest.version,
             result_id: String::new(),
             requirements,
@@ -299,6 +369,8 @@ async fn evaluate_local_inner(
         result.id
     };
     Ok(RequirementsReport {
+        #[cfg(test)]
+        authority_snapshots,
         requirements_version: manifest.version,
         result_id,
         requirements,
@@ -355,16 +427,20 @@ fn set_selection(
         caller.allow_all_services || caller.allowed_service_ids.contains(&service.id);
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn evaluate_candidate(
+struct CandidateFacts {
+    key: Option<UserApiKey>,
+    no_credential: bool,
+    master: bool,
+    connection: ConnectionState,
+    digest: Option<String>,
+    records: Vec<ServiceValidationRecord>,
+}
+
+async fn candidate_facts(
     state: &AppState,
     actor: &str,
-    requirement: &ServiceRequirement,
-    manifest: &AppRequirementManifest,
     service: &UserService,
-    catalog: &DownstreamService,
-    caller: &EvaluationCaller<'_>,
-) -> AppResult<Option<Candidate>> {
+) -> AppResult<Option<CandidateFacts>> {
     let now = Utc::now();
     let resolution = match proxy_service::read_proxy_authority_snapshot_by_user_service_id(
         &state.db,
@@ -402,22 +478,6 @@ async fn evaluate_candidate(
         r.api_key_id.is_none() && !r.master_credential && r.target.auth_method == "none"
     });
     let master = resolution.as_ref().is_some_and(|r| r.master_credential);
-    if (no_credential && !requirement.allow_no_credential)
-        || (master && !requirement.allow_master_credential)
-    {
-        return Ok(None);
-    }
-    if !no_credential
-        && !master
-        && !requirement.accepted_credential_types.is_empty()
-        && key.as_ref().is_none_or(|key| {
-            !requirement
-                .accepted_credential_types
-                .contains(&key.credential_type)
-        })
-    {
-        return Ok(None);
-    }
     let executable = if let Some(node_id) = resolution.as_ref().and_then(|r| r.node_id.as_deref()) {
         Some(
             node_routing_service::is_node_id_dispatchable(
@@ -437,6 +497,70 @@ async fn evaluate_candidate(
     } else {
         ConnectionState::Unknown
     };
+    let digest = if let Some(resolution) = &resolution {
+        let fallback_nodes = node_routing_service::list_configured_binding_node_ids(
+            &state.db,
+            &service.user_id,
+            &resolution.target.service.id,
+        )
+        .await?;
+        Some(execution_authority::digest(
+            &execution_authority::build_projection(resolution, None, fallback_nodes),
+        ))
+    } else {
+        None
+    };
+    let records = state
+        .db
+        .collection::<ServiceValidationRecord>(VALIDATIONS)
+        .find(doc! { "user_service_id": &service.id })
+        .await?
+        .try_collect()
+        .await?;
+    Ok(Some(CandidateFacts {
+        key,
+        no_credential,
+        master,
+        connection,
+        digest,
+        records,
+    }))
+}
+
+fn evaluate_candidate(
+    state: &AppState,
+    facts: &CandidateFacts,
+    requirement: &ServiceRequirement,
+    manifest: &AppRequirementManifest,
+    service: &UserService,
+    catalog: &DownstreamService,
+    caller: &EvaluationCaller<'_>,
+) -> Option<Candidate> {
+    let CandidateFacts {
+        key,
+        no_credential,
+        master,
+        connection,
+        digest,
+        records,
+    } = facts;
+    let (no_credential, master, connection) = (*no_credential, *master, *connection);
+    if (no_credential && !requirement.allow_no_credential)
+        || (master && !requirement.allow_master_credential)
+    {
+        return None;
+    }
+    if !no_credential
+        && !master
+        && !requirement.accepted_credential_types.is_empty()
+        && key.as_ref().is_none_or(|key| {
+            !requirement
+                .accepted_credential_types
+                .contains(&key.credential_type)
+        })
+    {
+        return None;
+    }
     let scope_shortfall = !requirement.required_downstream_scopes.is_empty()
         && key.as_ref().is_none_or(|key| {
             key.credential_type != "oauth2"
@@ -468,38 +592,23 @@ async fn evaluate_candidate(
         let profile = validator_profiles::PROFILES
             .iter()
             .find(|profile| profile.id == id);
-        if let (Some(resolution), Some(profile), Some(version)) = (
-            &resolution,
+        if let (Some(digest), Some(profile), Some(version)) = (
+            digest,
             profile,
             manifest.compiled.validator_versions.get(id),
         ) && profile.version == *version
             && profile.catalog_slugs.contains(&catalog.slug.as_str())
         {
-            let fallback_nodes = node_routing_service::list_configured_binding_node_ids(
-                &state.db,
-                &service.user_id,
-                &resolution.target.service.id,
-            )
-            .await?;
-            let digest = execution_authority::digest(&execution_authority::build_projection(
-                resolution,
-                None,
-                fallback_nodes,
-            ));
             let revision = key
                 .as_ref()
                 .map(service_validation_service::credential_revision);
-            if let Some(record) = state
-                .db
-                .collection::<ServiceValidationRecord>(VALIDATIONS)
-                .find_one(doc! { "user_service_id": &service.id, "validator_id": id })
-                .await?
+            if let Some(record) = records.iter().find(|record| &record.validator_id == id)
                 && service_validation_service::evidence_is_fresh(
-                    &record,
-                    &digest,
+                    record,
+                    digest,
                     revision.as_deref(),
                     *version,
-                    now,
+                    Utc::now(),
                 )
             {
                 status.validated_at = Some(record.checked_at);
@@ -521,9 +630,9 @@ async fn evaluate_candidate(
             RequirementState::Met
         };
     }
-    Ok(Some(Candidate {
+    Some(Candidate {
         status,
         last_used_at: key.as_ref().and_then(|key| key.last_used_at),
         authenticated_at,
-    }))
+    })
 }

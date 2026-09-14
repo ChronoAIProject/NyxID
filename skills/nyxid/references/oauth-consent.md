@@ -148,3 +148,16 @@ Already-issued access tokens can keep working until they expire. The UI warns us
 ### Advisory app requirements
 
 An enabled developer app can publish immutable Advise manifests at `/api/v1/developer/oauth-clients/{client_id}/requirements` and read `/api/v1/app-requirements/status` with its ordinary user access token. The rollout is disabled by default and needs both a platform-admin capability and an allowed org owner. Status is local-only, discloses only manifest services, and never probes or changes consent. Treat `state` and `granted_to_caller` separately: ready services outside the token's grant still need interactive consent using RFC 8707 `resource`. Disabled services are never auto-enabled. SDK `client.requirements.status()` exposes this result; OAuth callback error handling must verify the pending `state` before interpreting `error` or app-connect parameters. Gate enforcement and consent-result binding are phase 2.
+
+App Connect Link repair is available only to rollout-enabled developer apps.
+Create through `POST /api/v1/app-connect-links` with the app user's access token,
+a registered `callback_url`, and a fresh caller-generated `state`. The returned
+hosted link is bound to that person and app; only that human's Session may redeem
+and operate it, including when the selected credential belongs to an org. The
+page runs provider checks only on explicit clicks. The terminal callback carries
+`status`, `app_connect_link_id`, `state`, and `grant_update_required`; correlate
+state before accepting any outcome. Completion satisfies connections and issues
+no code or tokens. A grant update requires normal authorize with `prompt=consent`
+and the desired resource URIs. `@nyxids/oauth-core` exposes
+`client.appConnectLinks.create/get/parseCallback` for this flow. Gate enforcement,
+authorize-origin links, and repair webhooks remain outside this phase.

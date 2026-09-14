@@ -56,6 +56,7 @@ pub struct SelectRequest {
 
 #[derive(Debug, Serialize)]
 pub struct ChoiceResponse {
+    pub catalog_slug: String,
     pub user_service_id: String,
     pub slug: String,
     pub owner_id: String,
@@ -83,6 +84,9 @@ pub struct ItemResponse {
 }
 #[derive(Serialize)]
 pub struct LinkResponse {
+    #[cfg(test)]
+    #[serde(skip)]
+    pub authority_snapshots: usize,
     pub id: String,
     pub oauth_client_id: String,
     pub client_name: String,
@@ -148,7 +152,6 @@ pub async fn create(
     Json(body): Json<CreateRequest>,
 ) -> AppResult<Json<CreateResponse>> {
     let client_id = require_app_user(&state, &auth).await?;
-    links::enabled_client(&state, &client_id).await?;
     let subject = auth.user_id.to_string();
     if !state
         .connect_link_create_limiter
@@ -408,13 +411,13 @@ async fn response(state: &AppState, auth: &AuthUser, id: &str) -> AppResult<Link
             .find(|i| i.requirement_id == r.requirement_id)
             .ok_or(AppError::AppConnectResultMismatch)?;
         let choices = if auth.auth_method == AuthMethod::Session {
-            links::choices(state, &link, &manifest, required)
-                .await?
+            r.candidates
                 .into_iter()
                 .map(|s| ChoiceResponse {
-                    user_service_id: s.id,
+                    catalog_slug: s.catalog_slug,
+                    user_service_id: s.user_service_id,
                     slug: s.slug,
-                    owner_id: s.user_id,
+                    owner_id: s.owner_id,
                 })
                 .collect()
         } else {
@@ -467,6 +470,8 @@ async fn response(state: &AppState, auth: &AuthUser, id: &str) -> AppResult<Link
         _ => return Err(AppError::AppConnectLinkNotFound),
     };
     Ok(LinkResponse {
+        #[cfg(test)]
+        authority_snapshots: report.authority_snapshots,
         id: link.id.clone(),
         oauth_client_id: link.oauth_client_id.clone(),
         client_name: client.client_name,

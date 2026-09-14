@@ -825,63 +825,10 @@ async fn app_connect_links_db_scope_repair_reuses_connection_and_provider_scope_
 
 #[tokio::test]
 async fn app_connect_links_db_real_late_probe_cannot_restore_cancelled_child() {
-    use crate::models::node::Node;
-    use crate::services::node_ws_manager::{
-        NodeCapabilitiesMsg, NodeOutboundMessage, NodeProxyResponse,
-    };
-    let Some(mut f) = fixture("app_link_real_probe").await else {
+    use crate::services::node_ws_manager::{NodeOutboundMessage, NodeProxyResponse};
+    let Some((f, node_id, mut rx, service)) = probe_fixture("app_link_real_probe").await else {
         return;
     };
-    crate::services::coordination_service::ensure_indexes(&f.state.db)
-        .await
-        .unwrap();
-    crate::db::ensure_service_validation_indexes(&f.state.db)
-        .await
-        .unwrap();
-    f.state.config.node_hmac_signing_enabled = false;
-    let catalog_id = catalog(&f, "api-github", "bearer").await;
-    let mut r = requirement("api-github");
-    r.validator = crate::models::app_requirement_manifest::ValidatorSelection::Profile {
-        id: "github_user_v1".into(),
-    };
-    publish(&f, r).await;
-    let (service, key) = service(
-        &f,
-        &f.auth.user_id.to_string(),
-        &catalog_id,
-        "validation-github",
-    )
-    .await;
-    let node_id = Uuid::new_v4().to_string();
-    let node:Node=bson::from_document(doc! {"_id":&node_id,"user_id":f.auth.user_id.to_string(),"name":"Node","status":"online","auth_token_hash":"test","signing_secret_hash":"test","is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).unwrap();
-    f.state
-        .db
-        .collection::<Node>("nodes")
-        .insert_one(node)
-        .await
-        .unwrap();
-    let encrypted = f
-        .state
-        .encryption_keys
-        .encrypt(b"fixture-token")
-        .await
-        .unwrap();
-    f.state.db.collection::<Document>("user_api_keys").update_one(doc! {"_id":&key.id},doc! {"$set":{"access_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
-    f.state
-        .db
-        .collection::<Document>("user_services")
-        .update_one(doc! {"_id":&service.id}, doc! {"$set":{"node_id":&node_id}})
-        .await
-        .unwrap();
-    let (tx, mut rx) = tokio::sync::mpsc::channel(64);
-    crate::test_utils::register_test_node_connection(&f.state, &node_id, tx).await;
-    f.state.node_ws_manager.record_capabilities(
-        &node_id,
-        &NodeCapabilitiesMsg {
-            no_redirect_proxy: true,
-            ..Default::default()
-        },
-    );
     let link = redeemed(&f).await;
     let child = links::connect_item(
         &f.state,
@@ -1071,5 +1018,283 @@ async fn app_connect_links_db_capability_debug_and_bson_dates_are_safe() {
     assert_eq!(
         url.query_pairs().find(|(k, _)| k == "status").unwrap().1,
         "failed"
+    );
+}
+
+#[tokio::test]
+async fn app_connect_links_db_choices_snapshot_each_service_once() {
+    use crate::handlers::app_requirements::publish_manifest;
+    use crate::services::app_requirement_manifest_service::PublishManifest;
+    let Some(f) = fixture("app_link_choices").await else {
+        return;
+    };
+    let catalog_id = catalog(&f, "api-github-pat", "bearer").await;
+    let requirements = (0..3)
+        .map(|i| {
+            let mut r = requirement("api-github-pat");
+            r.id = format!("requirement-{i}");
+            r
+        })
+        .collect();
+    let _ = publish_manifest(
+        State(f.state.clone()),
+        f.auth.clone(),
+        Path(f.app.id.clone()),
+        Json(PublishManifest {
+            enforcement: crate::models::app_requirement_manifest::Enforcement::Advise,
+            requirements,
+        }),
+    )
+    .await
+    .unwrap();
+    for i in 0..4 {
+        service(
+            &f,
+            &f.auth.user_id.to_string(),
+            &catalog_id,
+            &format!("choice-{i}"),
+        )
+        .await;
+    }
+    let link = redeemed(&f).await;
+    let response = response(&f.state, &human(&f), &link.id).await.unwrap();
+    assert_eq!(response.authority_snapshots, 4);
+    assert_eq!(response.items.len(), 3);
+    for item in response.items {
+        assert_eq!(item.choices.len(), 4);
+        assert!(
+            item.choices
+                .iter()
+                .all(|c| c.catalog_slug == "api-github-pat")
+        );
+    }
+}
+
+#[tokio::test]
+async fn app_connect_links_db_child_failure_reasons_survive_reads_until_action() {
+    let Some(f) = fixture("app_link_failure_reasons").await else {
+        return;
+    };
+    empty(&f).await;
+    let link = redeemed(&f).await;
+    let child = links::connect_item(
+        &f.state,
+        &link.id,
+        &link.user_id,
+        "required",
+        "api-github-pat",
+        false,
+    )
+    .await
+    .unwrap();
+    f.state
+        .db
+        .collection::<Document>("connect_links")
+        .update_one(
+            doc! { "_id": &child.link.id },
+            doc! { "$set": { "last_error": "provider_denied" } },
+        )
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let read = response(&f.state, &human(&f), &link.id).await.unwrap();
+        assert_eq!(read.items[0].state, ItemState::Failed);
+        assert_eq!(
+            read.items[0].reason_code.as_deref(),
+            Some("provider_authorization_failed")
+        );
+    }
+    let _ = links::connect_item(
+        &f.state,
+        &link.id,
+        &link.user_id,
+        "required",
+        "api-github-pat",
+        false,
+    )
+    .await
+    .unwrap();
+    let read = response(&f.state, &human(&f), &link.id).await.unwrap();
+    assert_eq!(read.items[0].state, ItemState::Connecting);
+    assert_eq!(read.items[0].reason_code, None);
+    f.state
+        .db
+        .collection::<Document>(LINKS)
+        .update_one(
+            doc! { "_id": &link.id },
+            doc! { "$set": { "items.0.connect_link_id": null,
+            "items.0.state": "validating", "items.0.attempt_started_at": null } },
+        )
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let read = response(&f.state, &human(&f), &link.id).await.unwrap();
+        assert_eq!(read.items[0].state, ItemState::Unknown);
+        assert_eq!(
+            read.items[0].reason_code.as_deref(),
+            Some("attempt_interrupted")
+        );
+    }
+}
+
+#[tokio::test]
+async fn app_connect_links_db_parent_cancel_and_expiry_cancel_pending_children() {
+    let Some(f) = fixture("app_link_children_cleanup").await else {
+        return;
+    };
+    empty(&f).await;
+    for expire in [false, true] {
+        let link = redeemed(&f).await;
+        let child = links::connect_item(
+            &f.state,
+            &link.id,
+            &link.user_id,
+            "required",
+            "api-github-pat",
+            false,
+        )
+        .await
+        .unwrap();
+        if expire {
+            f.state
+                .db
+                .collection::<Document>(LINKS)
+                .update_one(
+                    doc! { "_id": &link.id },
+                    doc! { "$set": { "expires_at": bson::DateTime::from_millis(0) } },
+                )
+                .await
+                .unwrap();
+            links::expire_sessions(&f.state.db).await.unwrap();
+        } else {
+            links::cancel(&f.state, &link.id, &link.user_id)
+                .await
+                .unwrap();
+        }
+        let child = f
+            .state
+            .db
+            .collection::<crate::models::connect_link::ConnectLink>("connect_links")
+            .find_one(doc! { "_id": child.link.id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            child.status,
+            crate::models::connect_link::ConnectLinkStatus::Cancelled
+        );
+        assert!(child.completed_at.is_some());
+    }
+}
+
+async fn probe_fixture(
+    name: &str,
+) -> Option<(
+    Fixture,
+    String,
+    tokio::sync::mpsc::Receiver<crate::services::node_ws_manager::NodeOutboundMessage>,
+    crate::models::user_service::UserService,
+)> {
+    use crate::models::node::Node;
+    use crate::services::node_ws_manager::NodeCapabilitiesMsg;
+    let mut f = fixture(name).await?;
+    crate::services::coordination_service::ensure_indexes(&f.state.db)
+        .await
+        .unwrap();
+    crate::db::ensure_service_validation_indexes(&f.state.db)
+        .await
+        .unwrap();
+    f.state.config.node_hmac_signing_enabled = false;
+    let catalog_id = catalog(&f, "api-github", "bearer").await;
+    let mut r = requirement("api-github");
+    r.validator = crate::models::app_requirement_manifest::ValidatorSelection::Profile {
+        id: "github_user_v1".into(),
+    };
+    publish(&f, r).await;
+    let (service, key) = service(
+        &f,
+        &f.auth.user_id.to_string(),
+        &catalog_id,
+        "validation-github",
+    )
+    .await;
+    let node_id = Uuid::new_v4().to_string();
+    let node:Node=bson::from_document(doc! {"_id":&node_id,"user_id":f.auth.user_id.to_string(),"name":"Node","status":"online","auth_token_hash":"test","signing_secret_hash":"test","is_active":true,"created_at":bson::DateTime::now(),"updated_at":bson::DateTime::now()}).unwrap();
+    f.state
+        .db
+        .collection::<Node>("nodes")
+        .insert_one(node)
+        .await
+        .unwrap();
+    let encrypted = f
+        .state
+        .encryption_keys
+        .encrypt(b"fixture-token")
+        .await
+        .unwrap();
+    f.state.db.collection::<Document>("user_api_keys").update_one(doc! {"_id":&key.id},doc! {"$set":{"access_token_encrypted":bson::Binary{subtype:bson::spec::BinarySubtype::Generic,bytes:encrypted}}}).await.unwrap();
+    f.state
+        .db
+        .collection::<Document>("user_services")
+        .update_one(doc! {"_id":&service.id}, doc! {"$set":{"node_id":&node_id}})
+        .await
+        .unwrap();
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    crate::test_utils::register_test_node_connection(&f.state, &node_id, tx).await;
+    f.state.node_ws_manager.record_capabilities(
+        &node_id,
+        &NodeCapabilitiesMsg {
+            no_redirect_proxy: true,
+            ..Default::default()
+        },
+    );
+    Some((f, node_id, rx, service))
+}
+
+#[tokio::test]
+async fn app_connect_links_db_probe_cooldown_preserves_prior_item() {
+    use crate::services::node_ws_manager::{NodeOutboundMessage, NodeProxyResponse};
+    let Some((f, node_id, mut rx, _)) = probe_fixture("app_link_probe_cooldown").await else {
+        return;
+    };
+    let link = redeemed(&f).await;
+    let state = f.state.clone();
+    let id = link.id.clone();
+    let subject = link.user_id.clone();
+    let running =
+        tokio::spawn(async move { links::validate_item(&state, &id, &subject, "required").await });
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let NodeOutboundMessage::Text(frame) = frame else {
+        panic!("expected request");
+    };
+    let frame: serde_json::Value = serde_json::from_str(&frame).unwrap();
+    f.state.node_ws_manager.deliver_proxy_response(
+        &node_id,
+        NodeProxyResponse {
+            request_id: frame["request_id"].as_str().unwrap().into(),
+            status: 200,
+            headers: vec![],
+            body: br#"{"login":"fixture"}"#.to_vec(),
+        },
+    );
+    running.await.unwrap().unwrap();
+    let (before, _) = links::refresh(&f.state, &link.id, &link.user_id)
+        .await
+        .unwrap();
+    assert_eq!(before.items[0].state, ItemState::Met);
+    assert!(matches!(
+        links::validate_item(&f.state, &link.id, &link.user_id, "required").await,
+        Err(AppError::ServiceValidationRateLimited)
+    ));
+    let after = links::load(&f.state, &link.id, &link.user_id)
+        .await
+        .unwrap();
+    assert_eq!(after.items, before.items);
+    assert!(
+        rx.try_recv().is_err(),
+        "cooldown must not dispatch another probe"
     );
 }

@@ -71,7 +71,7 @@ export class NyxAppConnectError extends Error {
     super(params.get("error_description") ?? `OAuth error: ${error}`);
     this.name = "NyxAppConnectError";
     this.error = error;
-    this.status = params.get("nyx_connect_status");
+    this.status = params.get("nyx_connect_status") ?? params.get("status");
     this.reason = params.get("nyx_connect_reason");
     this.appConnectLinkId = params.get("app_connect_link_id");
   }

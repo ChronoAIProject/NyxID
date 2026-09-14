@@ -8040,7 +8040,17 @@ use the existing per-IP completion limiter, and app polling shares the 30/min
 requirements status limit. Explicit checks also use the per-user validation
 limiter and phase-0 deployment/provider admission. Every App Connect Link route
 returns a not-found-shaped response when rollout is disabled or the app loses
-its capability/activation. Authorize and consent retain their existing behavior;
+its capability/activation. Authorize and consent retain their existing behavior.
+
+The hosted `/connect/app/{id}` page shows the app name and optional handoff text,
+with a fixed **Secured by NyxID · destination** footer. Unauthenticated visitors
+continue through `/login?return_to=...`. Initial loading only redeems the page
+capability and reads local readiness; it never starts a provider check. Actions
+share a 750 ms click throttle. Disabled connections remain disabled. Check
+failures remain visible until an explicit action; provider cooldown responses
+leave the previous item state and evidence intact. Cancelling or expiring a
+parent also cancels its pending child links.
+
 Gate manifests remain rejected. No App Connect Link webhooks are emitted.
 
 App owners can update text with

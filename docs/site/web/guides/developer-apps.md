@@ -193,3 +193,51 @@ for (const requirement of status.requirements) {
 Status uses the ordinary user access token bound to this app, discloses only its manifest services, and performs no provider calls. Credential-free services appear as Included; disabled services stay disabled. Provider-backed evidence expires and proves only the selected validator's claim. A status result expires after one hour and is not an access grant. `resource` accepts a URI or an array on `buildAuthorizeUrl` and `loginWithRedirect`; the token set reports the resources actually granted by the server.
 
 The SDK verifies the pending OAuth `state` before inspecting callback errors. Correlated errors are `NyxAppConnectError` instances with `error`, `status`, `reason`, and `appConnectLinkId`; never interpret callback parameters before correlation. Repair links and their hosted checklist arrive in the next sub-phase.
+
+### Repair connections with an App Connect Link
+
+For an enabled app, create a repair session using the signed-in user's app access
+token. Save a fresh state value in your application before opening the returned
+URL. NyxID binds the link to that user, your app, and the current manifest version.
+
+```ts
+const state = crypto.randomUUID();
+sessionStorage.setItem("pending-connection-repair", state);
+const repair = await client.appConnectLinks.create({
+  callbackUrl: "https://your-app.example/connections/callback",
+  state,
+});
+window.location.assign(repair.connect_url);
+```
+
+The callback must be registered on your OAuth client. The hosted page asks the
+bound user to connect, reauthorize, select or explicitly re-check each required
+account. No provider request runs just because the page opens. Eligible services
+that need no credential appear as Included. Disabled services stay disabled.
+An unauthenticated visitor enters through the normal NyxID login page, then
+returns to the checklist. Your registered app name and optional handoff text are
+shown alongside the fixed **Secured by NyxID · destination** footer.
+
+On return, correlate state before interpreting the result:
+
+```ts
+const expectedState = sessionStorage.getItem("pending-connection-repair");
+if (!expectedState) throw new Error("No pending connection repair");
+const result = client.appConnectLinks.parseCallback(window.location.href, expectedState);
+sessionStorage.removeItem("pending-connection-repair");
+if (result.status === "completed" && result.grantUpdateRequired) {
+  const readiness = await client.requirements.status();
+  const resource = readiness.requirements
+    .filter((item) => item.state === "met" || item.state === "included")
+    .flatMap((item) => item.resource_uri ? [item.resource_uri] : []);
+  await client.loginWithRedirect({ prompt: "consent", resource });
+}
+```
+
+Repair completion issues no tokens and never widens stored consent. When the
+callback reports `grant_update_required=true`, request the new resources through
+ordinary interactive OAuth consent. `client.appConnectLinks.get(repair.id)` can
+read status using the same app/user token; another app or user cannot read it.
+There are no repair webhooks in this phase. Links start with 30 minutes and can
+extend as requirements are satisfied, up to two hours. App owners can edit a
+plain-text handoff blurb of up to 160 characters on the developer app page.

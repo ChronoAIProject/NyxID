@@ -1,4 +1,7 @@
+import { NyxAppConnectLinksClient } from "./app-connect-links.js";
 import { NyxAppConnectError, NyxRequirementsClient } from "./requirements.js";
+
+export * from "./app-connect-links.js";
 export * from "./requirements.js";
 
 export interface NyxIDClientConfig {
@@ -118,6 +121,7 @@ function normalizeBaseUrl(baseUrl: string): string {
 
 export class NyxIDClient {
   readonly requirements: NyxRequirementsClient;
+  readonly appConnectLinks: NyxAppConnectLinksClient;
   private readonly baseUrl: string;
   private readonly clientId: string;
   private readonly defaultRedirectUri: string;
@@ -136,6 +140,11 @@ export class NyxIDClient {
     this.fetchFn = config.fetchFn ?? globalThis.fetch.bind(globalThis);
     this.pendingKey = `nyxid:pending:${this.clientId}`;
     this.tokensKey = `nyxid:tokens:${this.clientId}`;
+    this.appConnectLinks = new NyxAppConnectLinksClient(
+      this.baseUrl,
+      () => this.getStoredTokens()?.accessToken,
+      this.fetchFn,
+    );
     this.requirements = new NyxRequirementsClient(
       this.baseUrl,
       () => this.getStoredTokens()?.accessToken,
