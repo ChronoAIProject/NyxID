@@ -68,6 +68,60 @@ After a possible dispatch, transport failure is recorded as
 node. Do not retry a non-replayable write with a new operation ID. Reusing the
 same ID returns the stored uncertain classification rather than dispatching.
 
+## Path compatibility and rollout
+
+The Google editor release changes durable path matching for **every service**,
+including non-Google catalog services and operator-published endpoints without
+a `proxy_operation_policy`. Ordinary REST and MCP calls use the new
+canonicalization only when that service has a policy; durable grant validation
+always uses it. Only the seven Google product services receive seeded policies,
+but an administrator can configure a policy on any service through the services
+API. This release therefore has effects outside Google Workspace.
+
+Durable grants can now describe a custom-method template such as
+`/items/{item_id}:publish`. Previously, grant planning rejected a variable next
+to a literal suffix; it now recognizes the declared verb and binds only the
+resource ID. The same improvement makes the shipped `llm-google-ai`
+`generate_content`, `count_tokens`, and `embed_content` operations eligible for
+path matching, subject to the other grant requirements.
+
+For both existing and new grants, the forwarding path is decoded exactly once.
+An ordinary parameter without an explicit path grammar rejects colons,
+whitespace (including encoded spaces), and literal percent signs. For example,
+`urn:example:item`, `item value`, and `100%` now fail with
+`DurableGrantMismatch` (9009), even when an `exact` or `one_of` grant constraint
+explicitly permits that string. The previous resolver accepted these values.
+Encoding them does not bypass the check; double encoding also fails. Rejection
+happens before an execution reservation, quota consumption, or provider effect.
+Sheets A1 ranges have a deliberate parameter-level grammar for range colons and
+quoted spaces; this does not relax other parameters. Literal `%` remains
+unsupported there too.
+
+The shipped catalog was reviewed across all 31 source overlays (244 operations,
+including 41 parameterized POST/PUT/PATCH operations marked as writes). The
+composed Workspace spec and slug aliases reuse those operations:
+
+| Shipped operation | Compatibility impact |
+| --- | --- |
+| Discord Bot `add_reaction`, `PUT /channels/{channel_id}/messages/{message_id}/reactions/{emoji_name}/@me` | A concrete affected durable write: custom emoji use `name:id`, so existing scheduled reactions using them now fail. A Unicode emoji such as `👍` encoded once in the request path still works. A pre-encoded emoji supplied as a literal MCP parameter produces a second encoding layer and is rejected. |
+| GitHub `get_file_contents`, `GET /repos/{owner}/{repo}/contents/{path}` | Filenames can contain spaces, `%`, or `:`. This operation is read-only and cannot receive a durable grant under the current POST/PUT/PATCH write-only contract. Its ordinary proxy behavior is unchanged unless an operator configures a policy. |
+| OpenAI and Mistral `models_get`, `GET /models/{model}` or `/models/{model_id}` | Fine-tuned model IDs can contain colons. These are also read-only operations and currently ineligible for durable grants. A model ID in a request body is unaffected by path validation. |
+| Other pre-existing parameterized writes | The published arguments use provider IDs, repository/account names, or numeric identifiers; no further documented colon/space/percent-bearing value was identified. Most overlay schemas specify only `type: string`, so they do not prove that every provider-returned value is safe. Operator-customized endpoints and existing grant values need their own review. |
+
+The [Discord overlay](../backend/specs/catalog/discord-bot.openapi.json) explicitly
+documents the custom-emoji `name:id` format. Fine-tuned model ID formats are
+illustrated in the providers' [OpenAI fine-tuning guide](https://platform.openai.com/docs/guides/supervised-fine-tuning)
+and [Mistral documentation](https://docs.mistral.ai/llms-full.txt).
+
+Before upgrading a scheduler, review its durable grant path constraints and
+pause or revise schedules that use unsupported values. Reauthorizing the same
+unsupported value will not make it executable. This release intentionally adds
+no generic permission for punctuation in arbitrary IDs and no Discord-specific
+exception. Existing grant, endpoint, key, and service identities are preserved;
+do not rewrite stored rows to bypass validation. During a mixed-version rollout,
+route scheduled invocations to updated replicas for consistent enforcement;
+older replicas can still accept values the updated resolver rejects.
+
 ## Manage and renew
 
 ```bash

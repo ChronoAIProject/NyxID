@@ -11,8 +11,8 @@ pub struct CanonicalPath {
 
 impl CanonicalPath {
     /// Construct from an Axum-decoded REST wildcard after the raw OriginalUri
-    /// has passed `validate_requested_proxy_path`. A remaining percent sign
-    /// represents another decoding layer and is forbidden on policy paths.
+    /// has passed `validate_requested_proxy_path`. Reject every remaining
+    /// percent sign, including literal data, to forbid another decoding layer.
     pub fn from_rest_decoded(path: &str) -> AppResult<Self> {
         Self::from_decoded(path)
     }
@@ -334,18 +334,16 @@ pub(crate) fn rule_forwarding_path(
             .split('/')
             .filter(|segment| !segment.is_empty())
             .zip(&path.segments)
-            .map(
-                |(template, actual)| match split_template_segment(template).1 {
+            .map(|(template, actual)| {
+                Some(match split_template_segment(template).1 {
                     Some(verb) => format!(
                         "{}:{verb}",
-                        urlencoding::encode(
-                            strip_custom_method(actual, verb).expect("matched custom method")
-                        )
+                        urlencoding::encode(strip_custom_method(actual, verb)?)
                     ),
                     None => urlencoding::encode(actual).into_owned(),
-                },
-            )
-            .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Option<Vec<_>>>()?
             .join("/"),
     )
 }
@@ -510,6 +508,58 @@ mod tests {
             "/v1/documents/id%00:batchUpdate",
         ] {
             assert!(CanonicalPath::from_mcp_built(path).is_err(), "typed {path}");
+        }
+    }
+
+    #[test]
+    fn sheets_titles_with_literal_percent_are_deliberately_rejected() {
+        let range = "'Q1 100%'!A1:B2";
+        assert!(!parameter_matches(
+            Some(&ProxyPathConstraint::SheetsA1Range),
+            range
+        ));
+        for suffix in ["", ":append", ":clear"] {
+            let decoded = format!("/v4/spreadsheets/id/values/{range}{suffix}");
+            assert!(matches!(
+                CanonicalPath::from_rest_decoded(&decoded),
+                Err(AppError::BadRequest(_))
+            ));
+            assert!(matches!(
+                CanonicalPath::from_mcp_literal(&decoded),
+                Err(AppError::BadRequest(_))
+            ));
+            let encoded = format!(
+                "/v4/spreadsheets/id/values/{}{suffix}",
+                urlencoding::encode(range)
+            );
+            assert!(matches!(
+                CanonicalPath::from_mcp_built(&encoded),
+                Err(AppError::BadRequest(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn existing_google_policies_keep_spaces_and_percent_out_of_ordinary_ids() {
+        use crate::services::google_workspace::GoogleProduct;
+        for (product, prefix) in [
+            (GoogleProduct::Workspace, "/drive/v3/files"),
+            (GoogleProduct::Drive, "/drive/v3/files"),
+            (GoogleProduct::Calendar, "/calendar/v3/calendars"),
+            (GoogleProduct::Gmail, "/gmail/v1/users/me/messages"),
+        ] {
+            let policy = product.operation_policy().unwrap();
+            let plain = CanonicalPath::from_rest_decoded(&format!("{prefix}/id")).unwrap();
+            authorize_proxy_operation_fields("s", "s", Some(&policy), "GET", &plain).unwrap();
+            let spaced = CanonicalPath::from_rest_decoded(&format!("{prefix}/id value")).unwrap();
+            assert!(matches!(
+                authorize_proxy_operation_fields("s", "s", Some(&policy), "GET", &spaced),
+                Err(AppError::NotFound(_))
+            ));
+            assert!(matches!(
+                CanonicalPath::from_rest_decoded(&format!("{prefix}/id%value")),
+                Err(AppError::BadRequest(_))
+            ));
         }
     }
 

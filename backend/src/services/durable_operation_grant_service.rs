@@ -1935,6 +1935,170 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn non_google_durable_grants_enforce_paths_without_a_service_policy() {
+        let db = connect_test_database("durable_non_google_paths")
+            .await
+            .unwrap();
+        let owner = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let user_service_id = Uuid::new_v4().to_string();
+        let user_endpoint_id = Uuid::new_v4().to_string();
+        let ordinary = endpoint();
+        let custom = ServiceEndpoint {
+            id: Uuid::new_v4().to_string(),
+            name: "publish_item".to_string(),
+            path: "/items/{item_id}:publish".to_string(),
+            ..ordinary.clone()
+        };
+        assert_eq!(path_variable_names(&custom.path).unwrap(), vec!["item_id"]);
+
+        let mut catalog_service = dummy_service();
+        catalog_service.id = ordinary.service_id.clone();
+        catalog_service.slug = "api-example-workflows".to_string();
+        assert!(
+            crate::services::google_workspace::GoogleProduct::from_slug(&catalog_service.slug)
+                .is_none()
+        );
+        assert!(catalog_service.proxy_operation_policy.is_none());
+        db.collection::<crate::models::downstream_service::DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog_service)
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &user_endpoint_id,
+                &owner,
+                "Example workflows",
+                "https://workflows.example.test",
+                None,
+                Some(&ordinary.service_id),
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &user_service_id,
+                &owner,
+                "example-workflows",
+                &user_endpoint_id,
+                Some(&ordinary.service_id),
+                None,
+            ))
+            .await
+            .unwrap();
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(scheduled_key(&key_id, &owner, &user_service_id))
+            .await
+            .unwrap();
+
+        let rejected = [
+            "urn:example:item",
+            "arn:aws:example:item",
+            "item value",
+            "item\u{a0}value",
+            "100%",
+        ];
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", "application/json".parse().unwrap());
+        let manager = NodeWsManager::new(30, 100);
+        for endpoint in [ordinary, custom] {
+            let mut grant = grant(
+                &Uuid::new_v4().to_string(),
+                &owner,
+                &key_id,
+                &user_service_id,
+                &endpoint,
+            );
+            grant.normalized_path_template = endpoint.path.clone();
+            grant.constraints.path.get_mut("item_id").unwrap().rule =
+                DurableValueConstraint::OneOf {
+                    values: std::iter::once("42")
+                        .chain(rejected)
+                        .map(|value| json!(value))
+                        .collect(),
+                };
+            normalize_and_validate_constraints(&endpoint, &grant.constraints).unwrap();
+            db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+                .insert_one(&endpoint)
+                .await
+                .unwrap();
+            db.collection::<DurableOperationGrant>(GRANTS)
+                .insert_one(&grant)
+                .await
+                .unwrap();
+
+            for (index, value) in std::iter::once("42").chain(rejected).enumerate() {
+                let path = endpoint
+                    .path
+                    .replace("{item_id}", &urlencoding::encode(value));
+                let result = authorize_and_reserve(
+                    &db,
+                    &manager,
+                    &owner,
+                    &key_id,
+                    &user_service_id,
+                    "POST",
+                    &path,
+                    Some("mode=sync"),
+                    &headers,
+                    br#"{"name":"alpha"}"#,
+                    &grant.id,
+                    &format!("value-{index}"),
+                    false,
+                )
+                .await;
+                if index == 0 {
+                    result.unwrap();
+                } else {
+                    assert!(
+                        matches!(result, Err(AppError::DurableGrantMismatch(_))),
+                        "{path}: {result:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                db.collection::<DurableOperationExecution>(EXECUTIONS)
+                    .count_documents(doc! { "grant_id": &grant.id })
+                    .await
+                    .unwrap(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn shipped_discord_custom_emoji_is_rejected_by_durable_path_matching() {
+        let spec =
+            serde_json::from_str(include_str!("../../specs/catalog/discord-bot.openapi.json"))
+                .unwrap();
+        let endpoint = crate::services::openapi_parser::parse_openapi_spec_value(&spec)
+            .unwrap()
+            .into_iter()
+            .find(|endpoint| endpoint.source_operation_id.as_deref() == Some("add_reaction"))
+            .unwrap();
+        assert_eq!(endpoint.method, "PUT");
+        assert_eq!(endpoint.risk, Some(EndpointRisk::Write));
+        let prefix = "/channels/123/messages/456/reactions";
+        for emoji in ["party:789", "party%3A789", "%25F0%259F%2591%258D"] {
+            assert!(matches!(
+                resolve_path_arguments(
+                    &endpoint.path,
+                    &format!("{prefix}/{emoji}/@me"),
+                    endpoint.parameters.as_ref()
+                ),
+                Err(AppError::DurableGrantMismatch(_))
+            ));
+        }
+        let arguments = resolve_path_arguments(
+            &endpoint.path,
+            &format!("{prefix}/%F0%9F%91%8D/@me"),
+            endpoint.parameters.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(arguments["emoji_name"], json!("👍"));
+    }
+
+    #[tokio::test]
     async fn exact_key_binding_and_operation_ledger_are_fail_closed() {
         let Some(db) = connect_test_database("durable_operation_ledger").await else {
             return;

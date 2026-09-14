@@ -182,6 +182,25 @@ wildcard is rejected. Typed calls also match their selected endpoint template
 before approval, even if another operation is in the service's allowlist.
 Services without an operation policy retain their existing passthrough behavior.
 
+These canonicalization changes apply to **every service with an operation
+policy**, including the existing Workspace, Drive, Calendar, and Gmail services.
+Previously, REST allowed a percent sign remaining after Axum's URI decode; it
+now rejects it. An ASCII space previously failed canonicalization immediately;
+it now reaches parameter validation so an explicit constraint can permit quoted
+Sheets titles. Spaces in ordinary wildcard IDs remain denied by policy matching.
+Existing operation methods, paths, parameters, and bodies are unchanged, but
+these shared REST input-validation rules change for existing policy-protected
+connections as well as the new editor services.
+
+Only the seven Google product services receive a seeded operation policy.
+Administrators can also set `proxy_operation_policy` on other services through
+the services API; those services inherit the same canonicalization rules.
+Durable/scheduled operation grants use the shared path grammar on **all**
+services, even without an operation policy. This includes newly supported
+custom-method templates and stricter ordinary parameter validation. See
+[Durable grant path compatibility](DURABLE_OPERATION_GRANTS.md#path-compatibility-and-rollout)
+for the cross-service impact, including Discord custom-emoji reactions.
+
 Sheets' `range` parameters carry `x-nyxid-path-constraint: sheets_a1_range` on the
 OpenAPI **parameter**, outside its JSON Schema. The backend enforces this grammar
 in REST, generic MCP, typed MCP, and durable-grant matching. It accepts A1 cells,
@@ -190,6 +209,15 @@ cell/row/column ranges, named ranges, and quoted sheet names, including
 Google Sheets' column limit. Spaces in quoted names are encoded on forwarding.
 Range punctuation does not grant colon permission to `spreadsheetId` or any
 other parameter. Append and clear suffixes match outside the captured range.
+
+Literal percent signs in sheet titles are deliberately unsupported on the
+policy-controlled values routes. For example, `'Q1 100%'!A1:B2` is rejected for
+values get, update, append, and clear over REST and MCP, even though Google
+allows that title. Encoding the percent sign as `%25` does not bypass this
+restriction: after one decode it is rejected just like any other remaining
+percent sign. This keeps range data from opening a second decoding pass. Use a
+named range without `%`, or rename the sheet, to address those cells through
+these routes.
 
 The batch request arrays intentionally accept Google's individual request
 objects without embedding the entire discovery schema. Google validates those
@@ -204,6 +232,37 @@ automatic Test Agent Key action for the three editor products. Verify with a
 read using an existing document ID, or create a temporary document with the
 user's authorization and edit it through the published operations. Drive file
 listing, moving, exporting, and deleting remain on the existing Drive service.
+
+## Mixed-version rollout
+
+Complete the backend rollout before exposing the new editor services to clients,
+or route their connection/OAuth, catalog/discovery, REST, MCP, and approval
+observe/redeem traffic only to updated replicas. A new replica seeds shared
+catalog rows immediately; that does not make an older replica capable of
+enforcing or executing them.
+
+Traffic routing also does not upgrade startup migrations. Before restarting or
+rolling back an older backend against the shared catalog, backport the explicit
+`api-google` provider-token migration guard: the baseline migrator still chooses
+a service using only the shared provider ID.
+
+At baseline `28fd2c44`, older replicas ignore `path_parameter_constraints` when
+deserializing policies. Their whole-segment wildcard matcher accepts colons,
+so a Sheets values GET/PUT range such as `Sheet1!A1:B2` can still pass the old
+policy and be forwarded with its colon encoded. The A1 grammar and the stricter
+REST percent handling are not enforced there. The same older matcher does not
+understand `{id}:batchUpdate` or `{range}:append`/`:clear`, so those operations
+are denied before forwarding. Its forwarder also encodes every colon rather
+than preserving declared custom-method suffixes. Replicas with the intermediate
+colon grammar but without the A1 constraint instead deny colon-bearing ranges.
+These custom-method/range denials fail closed, but the entire mixed-version
+window must not be described as fail-closed: the baseline wildcard still accepts
+values that updated replicas reject. Requests may therefore succeed or fail
+depending on which replica receives them until traffic is confined to updated
+replicas or the rollout completes. An exact approval issued against an older
+policy projection can also fail revalidation on an updated replica; obtain a
+fresh approval if that happens. No stored connections or grants should be
+rewritten to complete the rollout.
 
 ## Verify the Connection
 

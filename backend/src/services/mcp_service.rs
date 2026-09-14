@@ -5127,6 +5127,12 @@ mod tests {
                 };
                 let typed =
                     prepare_exact_proxy_tool_call(&service, &endpoint, &args, None).unwrap();
+                let mut percent_title_args = args.clone();
+                percent_title_args["range"] = serde_json::json!("'Q1 100%'!A1:B2");
+                assert!(matches!(
+                    prepare_exact_proxy_tool_call(&service, &endpoint, &percent_title_args, None),
+                    Err(AppError::BadRequest(_))
+                ));
                 let expected = format!("/v4/spreadsheets/id/values/{range}{suffix}");
                 let rest = crate::services::proxy_authorization::CanonicalPath::from_rest_decoded(
                     &expected,
