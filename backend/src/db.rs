@@ -1933,6 +1933,13 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
         .await?;
 
     // -- user_services --
+    db.collection::<mongodb::bson::Document>("user_services")
+        .create_index(
+            IndexModel::builder()
+                .keys(doc! { "user_id": 1, "source": 1, "is_active": 1, "_id": 1 })
+                .build(),
+        )
+        .await?;
     let user_services = db.collection::<mongodb::bson::Document>("user_services");
     user_services
         .create_index(

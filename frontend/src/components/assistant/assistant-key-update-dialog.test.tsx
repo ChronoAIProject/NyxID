@@ -1,3 +1,11 @@
+vi.mock("@/hooks/use-keys", () => ({
+  useKeys: () => ({ data: [], isLoading: false, isError: false }),
+}));
+vi.mock("@/hooks/use-api-keys", () => ({
+  useApiKey: () => ({
+    data: { allowed_service_ids: [], credential_source: { type: "personal" } },
+  }),
+}));
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";

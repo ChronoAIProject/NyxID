@@ -917,6 +917,7 @@ mod tests {
             allowed_service_ids: vec![],
             allowed_node_ids: vec![],
             allow_all_services: true,
+            allow_auto_connected_services: false,
             allow_all_nodes: true,
             rate_limit_per_second: None,
             rate_limit_burst: None,

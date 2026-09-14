@@ -132,6 +132,7 @@ pub struct ApiKeyCreatePrefill {
     pub scopes: Option<String>,
     pub expires_in_days: Option<u32>,
     pub allow_all_services: bool,
+    pub allow_auto_connected_services: bool,
     pub allow_all_nodes: bool,
     pub allowed_services_csv: Option<String>,
     pub allowed_nodes_csv: Option<String>,

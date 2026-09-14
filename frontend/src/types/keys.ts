@@ -274,6 +274,7 @@ export interface AllowedServiceInfo {
   readonly slug: string;
   readonly label: string;
   readonly catalog_service_name: string | null;
+  readonly auto_connected?: boolean;
 }
 
 export interface AllowedNodeInfo {
@@ -295,6 +296,7 @@ export interface NyxIdApiKeyInfo {
   readonly allowed_service_ids: readonly string[];
   readonly allowed_node_ids: readonly string[];
   readonly allow_all_services: boolean;
+  readonly allow_auto_connected_services?: boolean;
   readonly allow_all_nodes: boolean;
   readonly allowed_services: readonly AllowedServiceInfo[];
   readonly allowed_nodes: readonly AllowedNodeInfo[];

@@ -3,6 +3,7 @@ import test from "node:test";
 import { extractLoginRequestFromQr } from "./deviceUserCode";
 import {
   agentKeyApproveSchema,
+  newAgentKeySchema,
   agentKeyOptionsSchema,
   agentKeyPreviewSchema,
 } from "../../lib/api/agentKeyLoginSchema";
@@ -137,4 +138,75 @@ test("public preview strips credential material and sanitizes requester fields",
   assert.equal(parsed.client_label, "device");
   assert.equal(parsed.client_ip_attribution, "unavailable");
   assert.equal("credential" in parsed, false);
+});
+
+test("platform scope is preserved and described as including future services", () => {
+  const draft = {
+    ...defaultNewAgentKey(),
+    allow_auto_connected_services: true,
+  };
+  const parsed = newAgentKeySchema.parse(draft);
+  assert.equal(parsed.allow_auto_connected_services, true);
+  const summary = newKeySummary(parsed, {
+    keys: [],
+    services: [
+      {
+        id: "platform",
+        name: "Search",
+        owner_id: "person",
+        auto_connected: true,
+      },
+    ],
+    nodes: [],
+    personal_owner_id: "person",
+    orgs: [],
+  });
+  assert.equal(summary.allowed_services[0]?.auto_connected, true);
+  assert.match(
+    permissionRows(summary).find((row) => row.label === "Services")!.value,
+    /including future additions/,
+  );
+});
+
+test("platform summary follows key ownership while retaining explicit org grants", () => {
+  const options = {
+    keys: [],
+    services: [
+      {
+        id: "personal-platform",
+        name: "Search",
+        owner_id: "person",
+        auto_connected: true,
+      },
+      {
+        id: "org-platform",
+        name: "Org search",
+        owner_id: "org",
+        auto_connected: true,
+      },
+    ],
+    nodes: [],
+    personal_owner_id: "person",
+    orgs: [{ id: "org", name: "Org", owner_id: "org" }],
+  };
+  const input = {
+    ...defaultNewAgentKey(),
+    allow_auto_connected_services: true,
+  };
+  assert.deepEqual(
+    newKeySummary(input, options).allowed_services.map((item) => item.id),
+    ["personal-platform"],
+  );
+  assert.deepEqual(
+    newKeySummary(
+      { ...input, target_org_id: "org" },
+      options,
+    ).allowed_services.map((item) => item.id),
+    ["org-platform"],
+  );
+  assert.equal(
+    newKeySummary({ ...input, allowed_service_ids: ["org-platform"] }, options)
+      .allowed_services.length,
+    2,
+  );
 });

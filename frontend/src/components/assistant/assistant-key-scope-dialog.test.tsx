@@ -1,3 +1,11 @@
+vi.mock("@/hooks/use-keys", () => ({
+  useKeys: () => ({ data: [], isLoading: false, isError: false }),
+}));
+vi.mock("@/hooks/use-api-keys", () => ({
+  useApiKey: () => ({
+    data: { allowed_service_ids: [], credential_source: { type: "personal" } },
+  }),
+}));
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -117,7 +125,39 @@ describe("AssistantKeyScopeDialog", () => {
 
   it("does not offer a remember path", () => {
     renderDialog();
-    expect(screen.queryByRole("checkbox")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("checkbox", { name: /remember/i }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText(/never remembered/i)).toBeInTheDocument();
   });
+});
+
+it("submits and verifies a durable platform grant without pinning service ids", async () => {
+  mockGet
+    .mockResolvedValueOnce(evidence())
+    .mockResolvedValueOnce(
+      evidence({ allow_auto_connected_services: true, state_version: 2 }),
+    );
+  mockPost.mockResolvedValue({
+    resource: { keyId: PARAMS.keyId },
+    replayed: false,
+  });
+  renderDialog({
+    keyId: PARAMS.keyId,
+    addServiceIds: [],
+    allowAutoConnectedServices: true,
+  });
+  await userEvent.click(screen.getByRole("button", { name: "Extend scope" }));
+  await waitFor(() =>
+    expect(mockPost).toHaveBeenCalledWith(
+      "/assistant/actions/keys/extend-scope",
+      expect.objectContaining({
+        addServiceIds: [],
+        allowAutoConnectedServices: true,
+      }),
+    ),
+  );
+  expect(
+    await screen.findByText("Exact widened service set verified."),
+  ).toBeInTheDocument();
 });

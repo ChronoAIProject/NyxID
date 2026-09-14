@@ -119,6 +119,7 @@ erDiagram
         string name
         string scopes "proxy read write"
         bool allow_all_services
+        bool allow_auto_connected_services
         bool allow_all_nodes
         string allowed_service_ids "UserService IDs"
         string allowed_node_ids "Node IDs"
@@ -375,6 +376,7 @@ graph TB
     AK -->|"allow_all_services: true"| ALL["Can access ALL services"]
     AK -->|"allow_all_services: false"| SCOPED["Restricted to specific services"]
 
+    SCOPED -->|"allow_auto_connected_services: true"| PLATFORM["Active same-owner auto-connected services<br/>including future additions"]
     SCOPED --> S1["UserService: llm-openai"]
     SCOPED --> S2["UserService: api-github"]
     SCOPED -.-x S3["UserService: llm-anthropic (blocked)"]
@@ -384,6 +386,23 @@ graph TB
 
     style S3 fill:#f66,stroke:#333,stroke-dasharray: 5
 ```
+
+For a restricted key, `allowed_service_ids` stores explicit selections.
+`allow_auto_connected_services` (default false) adds the IDs of active
+`UserService` rows with the same owner and `source = "auto_provision"` whenever
+NyxID constructs its auth scope. This union is evaluated on each key
+request, so reconciliation can replace row UUIDs and new platform services can
+appear without rewriting the key. No provisioning runs on the authentication
+path. `allow_all_services` takes precedence, while both flags may be stored.
+
+Service pickers show platform rows separately and offer both individual
+selection and an “Allow all auto-connected platform services (includes ones
+added later)” control. Turning that control off restores the explicit choices.
+Org keys only see their own rows; personal platform services cannot cross the
+owner boundary. API responses badge explicit selections with
+`allowed_services[].auto_connected`. Scope plans expose the durable flag and
+annotate their current service preview, while preserving the historical digest
+for false/absent flags.
 
 ## Adding a Service: User Flows
 

@@ -1531,7 +1531,7 @@ pub enum ApiKeyCommands {
         /// Expiry in days (0 = no expiry)
         #[arg(long)]
         expires_in_days: Option<u32>,
-        /// Allowed service IDs (comma-separated)
+        /// Allowed service UUIDs or slugs (comma-separated; includes platform services)
         #[arg(long)]
         allowed_services: Option<String>,
         /// Allowed node IDs (comma-separated)
@@ -1540,6 +1540,9 @@ pub enum ApiKeyCommands {
         /// Allow access to all services
         #[arg(long)]
         allow_all_services: bool,
+        /// Allow all auto-connected platform services, including future additions
+        #[arg(long)]
+        allow_auto_connected_services: bool,
         /// Allow access to all nodes
         #[arg(long)]
         allow_all_nodes: bool,
@@ -1622,12 +1625,16 @@ pub enum ApiKeyCommands {
         name: Option<String>,
         #[arg(long)]
         scopes: Option<String>,
+        /// Service UUIDs or slugs (comma-separated)
         #[arg(long)]
         allowed_services: Option<String>,
         #[arg(long)]
         allowed_nodes: Option<String>,
         #[arg(long)]
         allow_all_services: Option<bool>,
+        /// Allow all auto-connected platform services (true or false)
+        #[arg(long)]
+        allow_auto_connected_services: Option<bool>,
         #[arg(long)]
         allow_all_nodes: Option<bool>,
         /// Callback URL for channel bot relay (set empty string to clear)
@@ -2296,6 +2303,9 @@ pub enum DeviceCommands {
         /// Service(s) to grant the device proxy access to at approve time. Repeatable. Accepts slugs or service IDs. Without this, the device gets an api_key with no service access; you'll need to grant scopes separately later.
         #[arg(long = "service", value_name = "SLUG_OR_UUID")]
         service: Vec<String>,
+        /// Grant all auto-connected platform services, including future additions
+        #[arg(long)]
+        allow_auto_connected_services: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },
@@ -2324,6 +2334,9 @@ pub enum DeviceCommands {
         /// Service(s) to grant the device proxy access to at onboard time. Repeatable. Accepts slugs or service IDs.
         #[arg(long = "service", value_name = "SLUG_OR_UUID")]
         service: Vec<String>,
+        /// Grant all auto-connected platform services, including future additions
+        #[arg(long)]
+        allow_auto_connected_services: bool,
         #[command(flatten)]
         auth: AuthArgs,
     },

@@ -29,7 +29,7 @@ graph TD
 
     subgraph NyxID Backend
         AUTH[Auth Middleware<br/>extracts api_key_id]
-        SCOPE[Scope Check<br/>allowed_service_ids]
+        SCOPE[Scope Check<br/>effective allowed_service_ids]
         RATE[Per-Agent Rate Limiter<br/>token bucket per key]
         BIND[Credential Override<br/>agent_service_bindings]
         PROXY[Proxy / LLM Gateway]
@@ -58,9 +58,10 @@ sequenceDiagram
 
     Agent->>Auth: Request with API key
     Auth->>Auth: Load ApiKey from DB
+    Auth->>Auth: Expand same-owner active platform ids when scoped and opted in
     Auth->>Scope: AuthUser { api_key_id, allowed_service_ids, ... }
 
-    alt Service not in allowed_service_ids
+    alt Service not in effective allowed_service_ids
         Scope-->>Agent: 403 ApiKeyScopeForbidden
     end
 
@@ -80,6 +81,44 @@ sequenceDiagram
     Proxy->>Audit: Log with api_key_id + api_key_name
     Proxy-->>Agent: Response + X-NyxID-Agent-Id header
 ```
+
+### Auto-connected platform services
+
+A restricted key can select individual auto-connected `UserService` IDs or set
+`allow_auto_connected_services=true`. The effective allowlist is the explicit
+`allowed_service_ids` union active rows whose `user_id` equals the key owner and
+whose `source` is `auto_provision`. This durable grant follows new services and
+replacement row IDs after reconciliation. Disabling the flag leaves explicit
+selections intact. `allow_all_services=true` takes precedence; storing both flags
+is allowed, and the platform grant becomes effective if the key is later narrowed.
+
+`key_service::effective_allowed_service_ids` expands scope at API-key auth-context
+construction, including MCP and channel relay issuance. Proxy, relay JWT, agent
+binding and exact-approval consumers use the resulting IDs through their existing
+checks. Authentication never auto-provisions; management `/keys`, login options,
+and device approval resolve/provision before listing or selecting services.
+The indexed expansion query only runs for restricted, opted-in keys.
+
+Ownership remains authoritative: a personal platform row cannot be selected for
+an org key, and expansion never includes a different owner's rows. Provisioning
+runs only for the acting person. Org device approval and onboarding skip
+platform provisioning. Org keys have no auto-connected platform rows; the picker explains
+why the personal platform group is unavailable.
+
+```bash
+nyxid api-key create --name research --scopes proxy --allowed-services github,autoplatform --terminal
+nyxid api-key create --name platform-agent --scopes proxy --allow-auto-connected-services --terminal
+nyxid api-key update KEY_ID --allow-auto-connected-services true
+nyxid api-key update KEY_ID --allow-auto-connected-services false
+nyxid device approve USER_CODE --service autoplatform --allow-auto-connected-services
+```
+
+`--allowed-services` accepts UUIDs or active service slugs. Slug resolution reads
+`/keys`, errors on unknown or ambiguous slugs, and preserves UUID pass-through.
+The browser wizard and mobile login approval expose the same individual and
+durable selections. Scope plans retain explicit IDs separately from the current
+implied service preview, so accepting a plan does not pin implied row identities.
+Scheduled-invocation keys continue requiring exact service/operation grants.
 
 ### Credential Override
 
@@ -122,6 +161,7 @@ erDiagram
         array allowed_service_ids "service scope"
         array allowed_node_ids "node scope"
         bool allow_all_services "default: true"
+        bool allow_auto_connected_services "default: false"
         bool allow_all_nodes "default: true"
         int rate_limit_per_second "optional per-key override"
         int rate_limit_burst "optional per-key override"
@@ -140,6 +180,7 @@ erDiagram
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
+| `allow_auto_connected_services` | `bool` | `false` | Adds active same-owner auto-connected platform services to a restricted key, including future additions |
 | `platform` | `Option<String>` | `None` | Display label (claude-code, codex, openclaw, cursor, generic) |
 | `rate_limit_per_second` | `Option<u32>` | `None` | Per-key rate limit (falls back to user-level when `None`) |
 | `rate_limit_burst` | `Option<u32>` | `None` | Per-key burst capacity |
@@ -153,7 +194,7 @@ erDiagram
 | `rate_limit_per_second` | `Option<u32>` | `None` | Copied from ApiKey for middleware |
 | `rate_limit_burst` | `Option<u32>` | `None` | Copied from ApiKey for middleware |
 
-All new fields are `Option` with `serde(default)`. Existing API keys and auth paths are unaffected.
+Optional metadata uses `serde(default)`; the platform-services grant is a defaulted boolean. Legacy keys keep their existing scope.
 
 ## API Endpoints
 
@@ -176,8 +217,8 @@ All new fields are `Option` with `serde(default)`. Existing API keys and auth pa
 
 | Method | Path | Change |
 |---|---|---|
-| `POST` | `/api/v1/api-keys` | Accepts optional `platform` field |
-| `PUT` | `/api/v1/api-keys/{id}` | Accepts `rate_limit_per_second`, `rate_limit_burst`, `platform` |
+| `POST` | `/api/v1/api-keys` | Accepts optional `platform` and `allow_auto_connected_services` fields |
+| `PUT` | `/api/v1/api-keys/{id}` | Accepts `rate_limit_per_second`, `rate_limit_burst`, `platform`, `allow_auto_connected_services` |
 
 ## CLI
 
@@ -186,7 +227,7 @@ All new fields are `Option` with `serde(default)`. Existing API keys and auth pa
 ```bash
 # Create with optional platform label and service scope
 nyxid api-key create --name "coding-agent" --platform claude-code \
-  --allowed-services "svc-1,svc-2" --allow-all-services false
+  --allowed-services "openai,github" --terminal
 
 # Bind a specific credential to a key for a service
 nyxid api-key bind <ID_OR_NAME> --service <SLUG> --credential <LABEL>
@@ -302,11 +343,12 @@ All changes are additive. No breaking changes for existing users:
 
 | Area | Guarantee |
 |---|---|
+| Platform-services grant | Absent `allow_auto_connected_services` means false. Scope-plan digests remain byte-identical when false or absent; true binds the durable grant and previews current platform rows. |
 | Existing API keys | `allow_all_services=true`, `allow_all_nodes=true`, no rate limit override, no bindings. Behavior identical to before. |
 | Existing auth paths (JWT, session, SA) | New `AuthUser` fields are `None`. No scope enforcement, no rate limit override. |
 | No `--profile` flag | Reads from `~/.nyxid/` (unchanged). |
 | No `agent_service_bindings` | Proxy uses default `UserService.api_key_id` (unchanged). |
-| API responses | New optional fields use `skip_serializing_if`. Existing clients see no new fields unless they opt in. |
+| API responses | Additive grant fields and `allowed_services[].auto_connected` identify platform access. Existing clients may ignore the new fields. |
 
 ## Key Files
 

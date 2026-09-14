@@ -2486,6 +2486,61 @@ pub(crate) fn aevatar_secret_free_violation(value: &serde_json::Value) -> Option
     visit(value, &secret_value)
 }
 
+pub(crate) fn test_auto_connected_catalog_service()
+-> crate::models::downstream_service::DownstreamService {
+    use crate::models::downstream_service::DownstreamService;
+    DownstreamService {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: "Catalog".to_string(),
+        slug: "autoplatform".to_string(),
+        description: None,
+        base_url: "https://example.com".to_string(),
+        service_type: "http".to_string(),
+        visibility: "public".to_string(),
+        auth_method: "none".to_string(),
+        auth_key_name: "Authorization".to_string(),
+        credential_encrypted: vec![],
+        auth_type: None,
+        openapi_spec_url: None,
+        asyncapi_spec_url: None,
+        streaming_supported: false,
+        ssh_config: None,
+        oauth_client_id: None,
+        service_category: "connection".to_string(),
+        requires_user_credential: false,
+        is_active: true,
+        created_by: "system".to_string(),
+        identity_propagation_mode: "none".to_string(),
+        identity_include_user_id: true,
+        identity_include_email: true,
+        identity_include_name: false,
+        identity_jwt_audience: Some("https://aud.example.com".to_string()),
+        forward_access_token: false,
+        inject_delegation_token: false,
+        delegation_token_scope: "proxy:* llm:status".to_string(),
+        provider_config_id: None,
+        homepage_url: None,
+        repository_url: None,
+        issues_url: None,
+        capabilities: None,
+        billing: None,
+        auth_notes: None,
+        known_limitations: None,
+        required_permissions: None,
+        examples_url: None,
+        recommended_skills: None,
+        custom_user_agent: None,
+        default_request_headers: None,
+        ws_frame_injections: Vec::new(),
+        developer_app_ids: None,
+        token_exchange_config: None,
+        anonymous_endpoints: Vec::new(),
+        proxy_operation_policy: None,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

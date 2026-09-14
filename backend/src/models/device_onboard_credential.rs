@@ -16,6 +16,8 @@ pub struct DeviceOnboardCredential {
     #[serde(default)]
     pub default_service_ids: Vec<String>,
     #[serde(default)]
+    pub allow_auto_connected_services: bool,
+    #[serde(default)]
     pub used: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redeemed_api_key_id: Option<String>,
@@ -79,6 +81,7 @@ mod tests {
             bootstrap_token_hash: "deadbeef".repeat(8),
             label: "Kitchen Camera".to_string(),
             default_service_ids: vec![uuid::Uuid::new_v4().to_string()],
+            allow_auto_connected_services: false,
             used: false,
             redeemed_api_key_id: None,
             redeemed_node_id: None,

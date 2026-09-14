@@ -54,8 +54,13 @@ pub async fn approve(
     }
 
     let label = choose_device_label(&row, input.label.as_deref())?;
-    let allowed_service_ids =
-        resolve_default_service_ids(db, &owner_user_id, input.default_services.as_deref()).await?;
+    let allowed_service_ids = resolve_default_service_ids(
+        db,
+        actor_user_id,
+        &owner_user_id,
+        input.default_services.as_deref(),
+    )
+    .await?;
     let empty_node_ids: Vec<String> = Vec::new();
     let created_key = key_service::create_api_key(
         db,
@@ -67,6 +72,7 @@ pub async fn approve(
         Some(&allowed_service_ids),
         Some(&empty_node_ids),
         Some(false),
+        Some(input.allow_auto_connected_services),
         Some(false),
         None,
         None,
@@ -216,9 +222,15 @@ async fn ensure_row_approvable(
 
 pub(super) async fn resolve_default_service_ids(
     db: &Database,
+    actor_user_id: &str,
     owner_user_id: &str,
     default_services: Option<&[String]>,
 ) -> AppResult<Vec<String>> {
+    // Platform services belong to people; org approval only resolves existing org services.
+    if owner_user_id == actor_user_id {
+        crate::services::unified_key_service::auto_provision_no_auth_services(db, actor_user_id)
+            .await?;
+    }
     let Some(default_services) = default_services else {
         return Ok(Vec::new());
     };
@@ -335,6 +347,7 @@ mod tests {
                 org_id: None,
                 label: Some("Garage Camera".to_string()),
                 default_services: None,
+                allow_auto_connected_services: false,
             },
         )
         .await
@@ -448,6 +461,151 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn auto_connected_device_approve_provisions_slug_and_persists_grant() {
+        let (db, response, _) = setup_pending_row("auto_connected_device_approve")
+            .await
+            .unwrap();
+        let actor = Uuid::new_v4().to_string();
+        let catalog = crate::test_utils::test_auto_connected_catalog_service();
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+        let approved = approve_for_test(
+            &db,
+            &actor,
+            DeviceCodeApproveInput {
+                user_code: response.user_code,
+                org_id: None,
+                label: None,
+                default_services: Some(vec![catalog.slug.clone()]),
+                allow_auto_connected_services: true,
+            },
+        )
+        .await
+        .unwrap();
+        let key = db
+            .collection::<ApiKey>(API_KEYS)
+            .find_one(doc! { "_id": &approved.api_key_id })
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(key.allow_auto_connected_services);
+        assert!(!key.allow_all_services);
+        assert_eq!(key.allowed_service_ids.len(), 1);
+        let effective = crate::services::key_service::effective_allowed_service_ids(&db, &key)
+            .await
+            .unwrap();
+        assert_eq!(effective, key.allowed_service_ids);
+        db.drop().await.unwrap();
+    }
+
+    async fn org_auto_connected_default_service_is_not_provisioned(onboarding: bool) {
+        use crate::models::org_membership::{
+            COLLECTION_NAME as MEMBERSHIPS, OrgMembership, OrgRole,
+        };
+        use crate::models::user_service::AUTO_PROVISION_SOURCE;
+        use crate::services::device_code_service::{DeviceOnboardInput, onboard};
+
+        let Some((db, response, _)) = setup_pending_row("device_org_auto_connected").await else {
+            return;
+        };
+        let actor = Uuid::new_v4().to_string();
+        let org = Uuid::new_v4().to_string();
+        db.collection::<User>(USERS)
+            .insert_many([
+                test_user(&actor, UserType::Person),
+                test_user(&org, UserType::Org),
+            ])
+            .await
+            .unwrap();
+        db.collection::<OrgMembership>(MEMBERSHIPS)
+            .insert_one(crate::test_utils::test_membership(
+                &org,
+                &actor,
+                OrgRole::Admin,
+                None,
+            ))
+            .await
+            .unwrap();
+        let catalog = crate::test_utils::test_auto_connected_catalog_service();
+        assert_eq!(catalog.slug, "autoplatform");
+        db.collection::<crate::models::downstream_service::DownstreamService>(
+            crate::models::downstream_service::COLLECTION_NAME,
+        )
+        .insert_one(&catalog)
+        .await
+        .unwrap();
+        let error = if onboarding {
+            onboard(
+                &db,
+                &actor,
+                DeviceOnboardInput {
+                    org_id: Some(org.clone()),
+                    label: "Org Camera".into(),
+                    default_services: Some(vec![catalog.slug]),
+                    allow_auto_connected_services: true,
+                    base_url: "https://api.example.com".into(),
+                },
+            )
+            .await
+            .unwrap_err()
+        } else {
+            approve_for_test(
+                &db,
+                &actor,
+                DeviceCodeApproveInput {
+                    user_code: response.user_code,
+                    org_id: Some(org.clone()),
+                    label: None,
+                    default_services: Some(vec![catalog.slug]),
+                    allow_auto_connected_services: true,
+                },
+            )
+            .await
+            .unwrap_err()
+        };
+        assert!(matches!(error, AppError::NotFound(_)), "{error:?}");
+        assert_eq!(
+            db.collection::<UserService>(USER_SERVICES)
+                .count_documents(doc! { "user_id": &org, "source": AUTO_PROVISION_SOURCE })
+                .await
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.collection::<UserService>(USER_SERVICES)
+                .count_documents(doc! { "user_id": &actor, "source": AUTO_PROVISION_SOURCE })
+                .await
+                .unwrap(),
+            0
+        );
+        assert_no_partial_approval(&db).await;
+        assert_eq!(
+            db.collection::<bson::Document>(
+                crate::models::device_onboard_credential::COLLECTION_NAME
+            )
+            .count_documents(doc! {})
+            .await
+            .unwrap(),
+            0
+        );
+        db.drop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auto_connected_device_approve_never_provisions_org_services() {
+        org_auto_connected_default_service_is_not_provisioned(false).await;
+    }
+
+    #[tokio::test]
+    async fn auto_connected_device_onboard_never_provisions_org_services() {
+        org_auto_connected_default_service_is_not_provisioned(true).await;
+    }
+
+    #[tokio::test]
     async fn approve_allows_default_services_by_uuid_and_slug() {
         let Some((db, response, _key)) =
             setup_pending_row("device_code_approve_default_services").await
@@ -469,6 +627,7 @@ mod tests {
                     service_by_id.id.clone(),
                     service_by_slug.slug.clone(),
                 ]),
+                allow_auto_connected_services: false,
             },
         )
         .await
@@ -504,6 +663,7 @@ mod tests {
                 org_id: None,
                 label: None,
                 default_services: Some(vec!["missing-svc".to_string()]),
+                allow_auto_connected_services: false,
             },
         )
         .await
@@ -532,6 +692,7 @@ mod tests {
                 org_id: None,
                 label: None,
                 default_services: Some(vec![other_service.id]),
+                allow_auto_connected_services: false,
             },
         )
         .await
@@ -562,6 +723,7 @@ mod tests {
                 org_id: None,
                 label: None,
                 default_services: Some(vec![valid_service.id, "missing-svc".to_string()]),
+                allow_auto_connected_services: false,
             },
         )
         .await
@@ -598,6 +760,7 @@ mod tests {
                 org_id: None,
                 label: None,
                 default_services: None,
+                allow_auto_connected_services: false,
             },
         )
         .await
@@ -634,6 +797,7 @@ mod tests {
                 org_id: None,
                 label: None,
                 default_services: None,
+                allow_auto_connected_services: false,
             },
         )
         .await
@@ -647,6 +811,7 @@ mod tests {
                 org_id: None,
                 label: None,
                 default_services: None,
+                allow_auto_connected_services: false,
             },
         )
         .await
@@ -681,6 +846,7 @@ mod tests {
                 org_id: None,
                 label: None,
                 default_services: None,
+                allow_auto_connected_services: false,
             },
         )
         .await
@@ -727,6 +893,7 @@ mod tests {
                 org_id: None,
                 label: None,
                 default_services: None,
+                allow_auto_connected_services: false,
             },
         )
         .await
@@ -757,6 +924,7 @@ mod tests {
                 org_id: None,
                 label: None,
                 default_services: None,
+                allow_auto_connected_services: false,
             },
         )
         .await
@@ -794,6 +962,7 @@ mod tests {
                 org_id: Some(org_user_id),
                 label: None,
                 default_services: None,
+                allow_auto_connected_services: false,
             },
         )
         .await
@@ -837,6 +1006,7 @@ mod tests {
             Some(&empty_service_ids),
             Some(&empty_node_ids),
             Some(false),
+            None,
             Some(false),
             None,
             None,

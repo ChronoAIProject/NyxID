@@ -1037,6 +1037,7 @@ mod tests {
             None,
             None,
             Some(false),
+            None,
             Some(true),
             None,
             None,

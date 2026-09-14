@@ -18,6 +18,7 @@ pub struct ApproveDeviceArgs {
     pub org: Option<String>,
     pub label: Option<String>,
     pub service: Vec<String>,
+    pub allow_auto_connected_services: bool,
     pub auth: AuthArgs,
 }
 
@@ -33,6 +34,7 @@ pub struct OnboardDeviceArgs {
     pub password_env: String,
     pub org: Option<String>,
     pub service: Vec<String>,
+    pub allow_auto_connected_services: bool,
     pub auth: AuthArgs,
 }
 
@@ -45,6 +47,8 @@ struct ApproveDeviceRequest {
     label: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     default_services: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub allow_auto_connected_services: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -64,6 +68,8 @@ struct OnboardDeviceRequest {
     org_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     default_services: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub allow_auto_connected_services: bool,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -152,6 +158,7 @@ pub async fn run(command: DeviceCommands) -> Result<()> {
             org,
             label,
             service,
+            allow_auto_connected_services,
             auth,
         } => {
             approve_cmd(ApproveDeviceArgs {
@@ -159,6 +166,7 @@ pub async fn run(command: DeviceCommands) -> Result<()> {
                 org,
                 label,
                 service,
+                allow_auto_connected_services,
                 auth,
             })
             .await
@@ -169,6 +177,7 @@ pub async fn run(command: DeviceCommands) -> Result<()> {
             password_env,
             org,
             service,
+            allow_auto_connected_services,
             auth,
         } => {
             onboard_cmd(OnboardDeviceArgs {
@@ -177,6 +186,7 @@ pub async fn run(command: DeviceCommands) -> Result<()> {
                 password_env,
                 org,
                 service,
+                allow_auto_connected_services,
                 auth,
             })
             .await
@@ -200,6 +210,7 @@ pub async fn approve_cmd(args: ApproveDeviceArgs) -> Result<()> {
         org_id,
         label: normalize_label(args.label)?,
         default_services: normalize_default_services(args.service)?,
+        allow_auto_connected_services: args.allow_auto_connected_services,
     };
     let response: ApproveDeviceResponse = api.post("/devices/code/approve", &request).await?;
 
@@ -228,6 +239,7 @@ pub async fn onboard_cmd(args: OnboardDeviceArgs) -> Result<()> {
         label: normalize_onboard_label(&args.label)?,
         org_id,
         default_services: normalize_default_services(args.service)?,
+        allow_auto_connected_services: args.allow_auto_connected_services,
     };
     let response: OnboardDeviceResponse = api.post("/devices/onboard", &request).await?;
     let qr_payload = build_full_provisioning_payload(
@@ -654,5 +666,32 @@ mod tests {
             std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+    #[tokio::test]
+    async fn auto_connected_device_approve_sends_slug_and_durable_grant() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/devices/code/approve"))
+            .and(body_json(serde_json::json!({
+                "user_code": "ABCD-EFGH-JKLM", "default_services": ["platform-search"],
+                "allow_auto_connected_services": true
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "device_label": "Device", "hw_id": "hardware", "api_key_id": "key", "node_id": "node",
+                "owner_user_id": "owner", "org_id": null
+            })))
+            .expect(1).mount(&server).await;
+        approve_cmd(ApproveDeviceArgs {
+            user_code: "abcd efgh jklm".into(),
+            org: None,
+            label: None,
+            service: vec!["platform-search".into()],
+            allow_auto_connected_services: true,
+            auth: crate::test_support::mock_auth(server.uri()),
+        })
+        .await
+        .unwrap();
     }
 }

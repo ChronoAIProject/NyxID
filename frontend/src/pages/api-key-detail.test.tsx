@@ -1,3 +1,6 @@
+vi.mock("@/components/dashboard/api-key-detail/service-scope-card", () => ({
+  ServiceScopeCard: () => null,
+}));
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApiKeyDetailPage } from "./api-key-detail";
