@@ -48,6 +48,8 @@ function CredentialForm({
     mode: "onChange",
   });
   const { reset } = form;
+  // Subscribe to both before the first edit; short-circuiting skips isValid.
+  const { isDirty, isValid } = form.formState;
   const lastRevision = useRef<string | null>(null);
   useEffect(() => {
     const revision = JSON.stringify([provider.provider, provider.updated_at, provider.fields]);
@@ -168,7 +170,7 @@ function CredentialForm({
             variant="primary"
             type="submit"
             isLoading={pending}
-            disabled={!form.formState.isDirty || !form.formState.isValid}
+            disabled={pending || !isDirty || !isValid}
           >
             <Save className="size-3" />
             Save credentials
