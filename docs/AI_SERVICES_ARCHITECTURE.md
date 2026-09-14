@@ -518,12 +518,17 @@ hardening; nodes inject their own credentials only.
 
 ### Org provisioning and reconciliation
 
-A Member/Admin listing keys may trigger idempotent provisioning of org-owned rows for
-explicit platform-key grants when their role permits proxying. Org views identify
+Key listing, Agent Key login delivery (login options), and device-code
+approval/onboarding for the acting person's own account invoke shared provisioning,
+which may idempotently create org-owned auto-connected rows only through that
+person's own active Member/Admin memberships with `can_proxy()` and explicit
+platform-key grants. The 0.19.0 guarantee remains: org-targeted device
+approval/onboarding resolves existing org services and never provisions rows for
+the target org as a side effect of targeting. Org views identify
 them as auto-connected. Removing the org grant immediately blocks execution and the
 next owner reconciliation removes automatic rows and orphan endpoints. This side
 effect is limited to explicit platform configurations; inherited legacy no-auth
-provisioning remains personal-only. Authentication does not provision rows.
+provisioning remains personal-only. JWT/API-key authentication itself never provisions rows.
 
 Key listing shares one membership and active-owner grant snapshot across personal/org
 provisioning, stale-row reconciliation, org row loading, and availability rendering.

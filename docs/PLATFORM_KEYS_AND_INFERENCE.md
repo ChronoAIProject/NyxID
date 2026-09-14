@@ -92,9 +92,14 @@ final credential classification; they do not bypass a revoked connection grant.
 
 Public platform services auto-provision through the existing idempotent lifecycle.
 Restricted services provision only eligible personal owners and granted org owners.
-Org access is inherited through the existing membership traversal. A Member with
-`can_proxy()` may trigger idempotent creation of the org-owned platform rows when
-listing keys; this limited reconciliation side effect requires no org-admin action.
+Key listing, Agent Key login delivery (login options), and device-code
+approval/onboarding for the acting person's own account invoke shared provisioning,
+which may idempotently create org-owned auto-connected rows only through that
+person's own active Member/Admin memberships with `can_proxy()` and explicit
+platform-key grants. The 0.19.0 guarantee remains: org-targeted device
+approval/onboarding resolves existing org services and never provisions rows for
+the target org as a side effect of targeting. This limited reconciliation side
+effect requires no org-admin action.
 Org views badge these rows `auto_connected=true`. Removing the org grant removes
 the automatic org rows and orphan endpoints on the next owner reconciliation; live
 execution is refused immediately, before that cleanup. This new org
@@ -103,6 +108,7 @@ remains personal unless an existing caller explicitly provisions an org owner. S
 rows are removed with orphan endpoint cleanup, allowing re-provisioning after a
 grant returns. User-selected bindings retain their connection and any inactive
 personal credential when access is revoked, so management can switch back to BYOK.
+JWT/API-key authentication itself never provisions rows.
 Authentication's `allow_auto_connected_services` union includes active same-owner
 platform-bound rows as well as historical automatic rows.
 
