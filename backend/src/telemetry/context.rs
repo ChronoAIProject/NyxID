@@ -73,6 +73,12 @@ pub fn emit_event(
     let Some(client) = client else {
         return;
     };
+    if matches!(
+        &event,
+        TelemetryEvent::ProxySuccess { service_slug, .. } if service_slug == "chrono-sandbox"
+    ) {
+        return;
+    }
     let surface = if api_key_id.is_some() {
         "agent"
     } else {
