@@ -445,6 +445,7 @@
             "name": "emoji_name",
             "in": "path",
             "required": true,
+            "x-nyxid-path-constraint": "discord_emoji",
             "schema": {
               "type": "string"
             },

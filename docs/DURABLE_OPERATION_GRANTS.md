@@ -97,16 +97,61 @@ Sheets A1 ranges have a deliberate parameter-level grammar for range colons and
 quoted spaces; this does not relax other parameters. Literal `%` remains
 unsupported there too.
 
+Discord Bot's `add_reaction` publishes
+`x-nyxid-path-constraint: discord_emoji` on its `emoji_name` path parameter.
+The backend accepts a single Unicode emoji sequence from the Unicode 17 emoji
+registry (including modifiers, flags, and joined sequences), or a custom emoji
+`name:id` with `[A-Za-z0-9_]{2,32}` for the name and a positive unsigned 64-bit
+snowflake written as 1–20 ASCII digits. Colons in custom emoji are encoded as
+parameter data. Other parameters receive no colon permission. Multiple colons,
+empty/invalid names, nonnumeric or overflowing IDs, whitespace, and literal
+percent signs remain rejected. The number-sign keycap `#️⃣` has a **pre-existing**
+transport limitation: `proxy_service::contains_raw_path_breaker` rejects `#`,
+and `contains_percent_encoded_path_breaker` rejects `%23`. Neither guard changes
+in this release. The asterisk keycap `*️⃣` works when its path value is encoded
+once (`%2A%EF%B8%8F%E2%83%A3`), including with an old durable grant. This encoded
+form also worked at baseline `28fd2c44`; raw `*` remains rejected by the durable
+service's `normalize_path`. The two keycaps therefore have different existing
+transport/normalization restrictions.
+
+Unicode validation uses the `emojis` crate's curated sequence registry. Checking
+code-point ranges or grapheme structure would admit invalid modifier/flag/joiner
+combinations; a small inline list would exclude valid existing reactions. The
+manifest permits `0.9.x`, and `Cargo.lock` pins `0.9.0` with its checksum. This
+`no_std` crate ships generated tables and lookup code, with no build script or
+build-time data download. Its licence is `(MIT OR Apache-2.0) AND Unicode-3.0`.
+It adds `phf` and `phf_shared` for lookup and reuses the existing `siphasher`;
+all three new packages require Rust 1.66, below the workspace's Rust 1.93 minimum.
+
+Startup sync adds the annotation to the existing endpoint row. Durable grants
+issued before that annotation continue to validate against their original
+contract digest: for this exact PUT reaction template, validation also compares
+the current endpoint with only the new emoji annotation removed. All remaining
+contract fields and the current emoji grammar are enforced. New grants bind the
+annotated contract. Existing grant and endpoint identities are retained, and no
+grant rows are rewritten to refresh their digests.
+
+Older replicas lack that legacy digest comparison, so after annotation sync
+they can reject pre-annotation Discord grants with contract drift. Route these
+scheduled invocations to updated replicas. Do not rerun an older replica's
+startup sync: its old overlay removes the annotation, which prevents updated
+replicas from validating newly issued annotated grants until the current overlay
+is restored. Complete the backend upgrade before enabling schedules against the
+updated catalog.
+
 The shipped catalog was reviewed across all 31 source overlays (244 operations,
 including 41 parameterized POST/PUT/PATCH operations marked as writes). The
 composed Workspace spec and slug aliases reuse those operations:
 
 | Shipped operation | Compatibility impact |
 | --- | --- |
-| Discord Bot `add_reaction`, `PUT /channels/{channel_id}/messages/{message_id}/reactions/{emoji_name}/@me` | A concrete affected durable write: custom emoji use `name:id`, so existing scheduled reactions using them now fail. A Unicode emoji such as `👍` encoded once in the request path still works. A pre-encoded emoji supplied as a literal MCP parameter produces a second encoding layer and is rejected. |
+| Discord Bot `add_reaction`, `PUT /channels/{channel_id}/messages/{message_id}/reactions/{emoji_name}/@me` | Custom `name:id` emoji and supported Unicode emoji encoded once continue to work with existing and new durable grants through the explicit emoji parameter grammar. Literal MCP arguments are encoded by the tool builder; supplying a pre-encoded value creates a second encoding layer and is rejected. |
 | GitHub `get_file_contents`, `GET /repos/{owner}/{repo}/contents/{path}` | Filenames can contain spaces, `%`, or `:`. This operation is read-only and cannot receive a durable grant under the current POST/PUT/PATCH write-only contract. Its ordinary proxy behavior is unchanged unless an operator configures a policy. |
 | OpenAI and Mistral `models_get`, `GET /models/{model}` or `/models/{model_id}` | Fine-tuned model IDs can contain colons. These are also read-only operations and currently ineligible for durable grants. A model ID in a request body is unaffected by path validation. |
 | Other pre-existing parameterized writes | The published arguments use provider IDs, repository/account names, or numeric identifiers; no further documented colon/space/percent-bearing value was identified. Most overlay schemas specify only `type: string`, so they do not prove that every provider-returned value is safe. Operator-customized endpoints and existing grant values need their own review. |
+
+After the parameter-specific Discord fix, no shipping catalog operation is known
+to regress from these path-validation changes.
 
 The [Discord overlay](../backend/specs/catalog/discord-bot.openapi.json) explicitly
 documents the custom-emoji `name:id` format. Fine-tuned model ID formats are
@@ -115,10 +160,10 @@ and [Mistral documentation](https://docs.mistral.ai/llms-full.txt).
 
 Before upgrading a scheduler, review its durable grant path constraints and
 pause or revise schedules that use unsupported values. Reauthorizing the same
-unsupported value will not make it executable. This release intentionally adds
-no generic permission for punctuation in arbitrary IDs and no Discord-specific
-exception. Existing grant, endpoint, key, and service identities are preserved;
-do not rewrite stored rows to bypass validation. During a mixed-version rollout,
+unsupported value will not make it executable. Punctuation permissions belong
+to the explicit Sheets range and Discord emoji parameter grammars; arbitrary IDs
+remain constrained. Existing grant, endpoint, key, and service identities are
+preserved; do not rewrite stored rows to bypass validation. During a mixed-version rollout,
 route scheduled invocations to updated replicas for consistent enforcement;
 older replicas can still accept values the updated resolver rejects.
 

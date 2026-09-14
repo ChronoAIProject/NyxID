@@ -357,8 +357,25 @@ fn parameter_matches(constraint: Option<&ProxyPathConstraint>, value: &str) -> b
     }
     match constraint {
         Some(ProxyPathConstraint::SheetsA1Range) => sheets_a1_range(value),
+        Some(ProxyPathConstraint::DiscordEmoji) => discord_emoji(value),
         None => !value.contains(':') && !value.chars().any(char::is_whitespace),
     }
+}
+
+fn discord_emoji(value: &str) -> bool {
+    if emojis::get(value).is_some() {
+        return true;
+    }
+    let Some((name, id)) = value.split_once(':') else {
+        return false;
+    };
+    (2..=32).contains(&name.len())
+        && name
+            .bytes()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == b'_')
+        && (1..=20).contains(&id.len())
+        && id.bytes().all(|ch| ch.is_ascii_digit())
+        && id.parse::<u64>().is_ok_and(|id| id > 0)
 }
 
 /// A1 coordinates, named ranges and sheet names. Colons join coordinates and
@@ -466,6 +483,96 @@ pub fn authorize_proxy_operation_fields(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discord_emoji_constraint_is_scoped_and_encodes_colons_as_data() {
+        let parameters = serde_json::json!([{
+            "name":"emoji", "in":"path", "x-nyxid-path-constraint":"discord_emoji"
+        }]);
+        let rule = rule_from_endpoint(
+            "PUT",
+            "/channels/{id}/reactions/{emoji}/@me",
+            Some(&parameters),
+        )
+        .unwrap();
+        for emoji in [
+            "smile:12345",
+            "ab:18446744073709551615",
+            "👍",
+            "👍🏽",
+            "👩‍💻",
+            "🇸🇬",
+            "1️⃣",
+            "*️⃣",
+            "❤️",
+            "❤",
+        ] {
+            let literal = format!("/channels/123/reactions/{emoji}/@me");
+            let encoded = format!("/channels/123/reactions/{}/@me", urlencoding::encode(emoji));
+            for path in [
+                CanonicalPath::from_rest_decoded(&literal).unwrap(),
+                CanonicalPath::from_mcp_literal(&literal).unwrap(),
+                CanonicalPath::from_mcp_built(&encoded).unwrap(),
+            ] {
+                let forward = rule_forwarding_path(&rule, "PUT", &path).unwrap();
+                assert_eq!(
+                    forward,
+                    encoded.trim_start_matches('/').replace("@me", "%40me")
+                );
+                let url =
+                    url::Url::parse(&format!("https://discord.com/api/v10/{forward}")).unwrap();
+                assert_eq!(url.origin().ascii_serialization(), "https://discord.com");
+                assert!(url.query().is_none() && url.fragment().is_none());
+            }
+        }
+        for value in [
+            "a:b:c",
+            ":12345",
+            "ab:",
+            "ab:xyz",
+            "ab:１２",
+            "ab:0",
+            "ab:18446744073709551616",
+            "a:12345",
+            "ab :12345",
+            "100%",
+            "ab%3A12345",
+            "ab%253A12345",
+            "plain",
+            "👍👍",
+            "👍:other",
+            "ab:1/other",
+        ] {
+            assert!(
+                !parameter_matches(Some(&ProxyPathConstraint::DiscordEmoji), value),
+                "{value}"
+            );
+        }
+        assert!(discord_emoji(&format!("{}:1", "a".repeat(32))));
+        assert!(!discord_emoji(&format!("{}:1", "a".repeat(33))));
+        let other_id =
+            CanonicalPath::from_mcp_literal("/channels/ab:123/reactions/smile:12345/@me").unwrap();
+        assert!(!rule_matches(&rule, "PUT", &other_id));
+        let ordinary = ProxyOperationRule {
+            path_parameter_constraints: Default::default(),
+            ..rule
+        };
+        let path =
+            CanonicalPath::from_mcp_literal("/channels/123/reactions/smile:12345/@me").unwrap();
+        assert!(!rule_matches(&ordinary, "PUT", &path));
+    }
+
+    #[test]
+    fn discord_number_sign_keycap_keeps_the_existing_transport_restriction() {
+        assert!(emojis::get("#️⃣").is_some());
+        for path in [
+            "/channels/123/reactions/#️⃣/@me",
+            "/channels/123/reactions/%23%EF%B8%8F%E2%83%A3/@me",
+        ] {
+            assert!(crate::services::proxy_service::validate_requested_proxy_path(path).is_err());
+            assert!(CanonicalPath::from_mcp_built(path).is_err());
+        }
+    }
 
     #[test]
     fn legacy_policy_serialization_preserves_approval_digest_input() {

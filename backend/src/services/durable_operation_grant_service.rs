@@ -144,6 +144,36 @@ pub fn endpoint_contract_digest(endpoint: &ServiceEndpoint) -> AppResult<String>
     })))
 }
 
+/// The Discord annotation narrows a formerly unrestricted parameter. An
+/// existing grant may retain the digest from before that one metadata addition;
+/// every other endpoint field and the current value grammar remain enforced.
+fn discord_emoji_legacy_contract_digest(endpoint: &ServiceEndpoint) -> Option<String> {
+    if endpoint.method != "PUT"
+        || endpoint.path
+            != "/channels/{channel_id}/messages/{message_id}/reactions/{emoji_name}/@me"
+    {
+        return None;
+    }
+    let mut legacy = endpoint.clone();
+    let parameters = legacy.parameters.as_mut()?.as_array_mut()?;
+    if parameters
+        .iter()
+        .filter(|parameter| parameter["name"] == "emoji_name")
+        .count()
+        != 1
+    {
+        return None;
+    }
+    let parameter = parameters
+        .iter_mut()
+        .find(|parameter| parameter["name"] == "emoji_name")?;
+    if parameter["in"] != "path" || parameter["x-nyxid-path-constraint"] != "discord_emoji" {
+        return None;
+    }
+    parameter.as_object_mut()?.remove("x-nyxid-path-constraint");
+    endpoint_contract_digest(&legacy).ok()
+}
+
 async fn load_active_published_endpoint(
     db: &mongodb::Database,
     node_ws_manager: &NodeWsManager,
@@ -1031,7 +1061,9 @@ pub async fn authorize_and_reserve(
     .await?
     .ok_or(AppError::DurableGrantContractDrift)?;
     if endpoint.risk != Some(EndpointRisk::Write)
-        || endpoint_contract_digest(&endpoint)? != grant.contract_digest
+        || (endpoint_contract_digest(&endpoint)? != grant.contract_digest
+            && discord_emoji_legacy_contract_digest(&endpoint).as_deref()
+                != Some(grant.contract_digest.as_str()))
     {
         return Err(AppError::DurableGrantContractDrift);
     }
@@ -2066,36 +2098,319 @@ mod tests {
         }
     }
 
-    #[test]
-    fn shipped_discord_custom_emoji_is_rejected_by_durable_path_matching() {
+    fn discord_reaction_endpoint() -> ServiceEndpoint {
         let spec =
             serde_json::from_str(include_str!("../../specs/catalog/discord-bot.openapi.json"))
                 .unwrap();
-        let endpoint = crate::services::openapi_parser::parse_openapi_spec_value(&spec)
+        let parsed = crate::services::openapi_parser::parse_openapi_spec_value(&spec)
             .unwrap()
             .into_iter()
             .find(|endpoint| endpoint.source_operation_id.as_deref() == Some("add_reaction"))
             .unwrap();
-        assert_eq!(endpoint.method, "PUT");
-        assert_eq!(endpoint.risk, Some(EndpointRisk::Write));
-        let prefix = "/channels/123/messages/456/reactions";
-        for emoji in ["party:789", "party%3A789", "%25F0%259F%2591%258D"] {
-            assert!(matches!(
-                resolve_path_arguments(
-                    &endpoint.path,
-                    &format!("{prefix}/{emoji}/@me"),
-                    endpoint.parameters.as_ref()
-                ),
-                Err(AppError::DurableGrantMismatch(_))
-            ));
+        ServiceEndpoint {
+            name: parsed.name,
+            description: parsed.description,
+            method: parsed.method,
+            path: parsed.path,
+            parameters: parsed.parameters,
+            request_body_schema: parsed.request_body_schema,
+            request_content_type: parsed.request_content_type,
+            request_body_required: parsed.request_body_required,
+            response: parsed.response,
+            risk: parsed.risk,
+            supports_idempotency_key: parsed.supports_idempotency_key,
+            ..endpoint()
         }
-        let arguments = resolve_path_arguments(
-            &endpoint.path,
-            &format!("{prefix}/%F0%9F%91%8D/@me"),
-            endpoint.parameters.as_ref(),
-        )
-        .unwrap();
-        assert_eq!(arguments["emoji_name"], json!("👍"));
+    }
+
+    #[test]
+    fn discord_legacy_digest_preserves_all_other_contract_fences() {
+        let current = discord_reaction_endpoint();
+        let old_digest = discord_emoji_legacy_contract_digest(&current).unwrap();
+        assert_ne!(endpoint_contract_digest(&current).unwrap(), old_digest);
+        let mut changes = Vec::new();
+        let mut changed = current.clone();
+        changed.id = Uuid::new_v4().to_string();
+        changes.push(changed);
+        let mut changed = current.clone();
+        changed.service_id = Uuid::new_v4().to_string();
+        changes.push(changed);
+        let mut changed = current.clone();
+        changed.method = "POST".into();
+        changes.push(changed);
+        let mut changed = current.clone();
+        changed.path.push_str("/other");
+        changes.push(changed);
+        let mut changed = current.clone();
+        changed.parameters.as_mut().unwrap()[0]["schema"] = json!({"type":"integer"});
+        changes.push(changed);
+        let mut changed = current.clone();
+        changed.parameters.as_mut().unwrap()[2]["x-nyxid-path-constraint"] =
+            json!("sheets_a1_range");
+        changes.push(changed);
+        let mut changed = current.clone();
+        changed.request_body_schema = Some(json!({"type":"object"}));
+        changes.push(changed);
+        let mut changed = current.clone();
+        changed.request_content_type = Some("application/json".into());
+        changes.push(changed);
+        let mut changed = current.clone();
+        changed.risk = Some(EndpointRisk::Read);
+        changes.push(changed);
+        let mut changed = current;
+        changed.supports_idempotency_key = true;
+        changes.push(changed);
+        for changed in changes {
+            assert_ne!(
+                discord_emoji_legacy_contract_digest(&changed).as_deref(),
+                Some(old_digest.as_str())
+            );
+        }
+        // The existing digest binds effective body-requiredness. A body-less
+        // endpoint's otherwise unused flag is not a contract change.
+        let mut optional_body = discord_reaction_endpoint();
+        optional_body.request_body_schema = Some(json!({"type":"object"}));
+        optional_body.request_body_required = false;
+        let optional_digest = discord_emoji_legacy_contract_digest(&optional_body).unwrap();
+        optional_body.request_body_required = true;
+        assert_ne!(
+            discord_emoji_legacy_contract_digest(&optional_body).as_deref(),
+            Some(optional_digest.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn existing_discord_grants_survive_annotation_sync_and_enforce_emoji_grammar() {
+        let db = connect_test_database("durable_discord_emoji")
+            .await
+            .unwrap();
+        let owner = Uuid::new_v4().to_string();
+        let key_id = Uuid::new_v4().to_string();
+        let user_service_id = Uuid::new_v4().to_string();
+        let user_endpoint_id = Uuid::new_v4().to_string();
+        let mut old_endpoint = discord_reaction_endpoint();
+        old_endpoint.parameters.as_mut().unwrap()[2]
+            .as_object_mut()
+            .unwrap()
+            .remove("x-nyxid-path-constraint");
+        let mut catalog_service = dummy_service();
+        catalog_service.id = old_endpoint.service_id.clone();
+        catalog_service.slug = "api-discord-bot".into();
+        catalog_service.created_by = "system".into();
+        catalog_service.base_url = "https://discord.com/api/v10".into();
+        assert!(catalog_service.proxy_operation_policy.is_none());
+        db.collection::<crate::models::downstream_service::DownstreamService>(DOWNSTREAM_SERVICES)
+            .insert_one(catalog_service)
+            .await
+            .unwrap();
+        db.collection::<UserEndpoint>(USER_ENDPOINTS)
+            .insert_one(test_user_endpoint(
+                &user_endpoint_id,
+                &owner,
+                "Discord",
+                "https://discord.com/api/v10",
+                None,
+                Some(&old_endpoint.service_id),
+            ))
+            .await
+            .unwrap();
+        db.collection::<UserService>(USER_SERVICES)
+            .insert_one(test_user_service(
+                &user_service_id,
+                &owner,
+                "discord-bot",
+                &user_endpoint_id,
+                Some(&old_endpoint.service_id),
+                None,
+            ))
+            .await
+            .unwrap();
+        db.collection::<ApiKey>(API_KEYS)
+            .insert_one(scheduled_key(&key_id, &owner, &user_service_id))
+            .await
+            .unwrap();
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .insert_one(&old_endpoint)
+            .await
+            .unwrap();
+        let valid = ["smile:12345", "👍", "👍🏽", "👩‍💻", "🇸🇬", "1️⃣", "*️⃣"];
+        let invalid = [
+            "a:b:c",
+            ":12345",
+            "smile:abc",
+            "smile :12345",
+            "100%",
+            "a:12345",
+            "smile:0",
+            "smile:18446744073709551616",
+            "smile:１２",
+            "👍👍",
+            "plain",
+            "👍:other",
+        ];
+        let mut old_grant = grant(
+            &Uuid::new_v4().to_string(),
+            &owner,
+            &key_id,
+            &user_service_id,
+            &old_endpoint,
+        );
+        old_grant.method = "PUT".into();
+        old_grant.normalized_path_template = old_endpoint.path.clone();
+        old_grant.constraints = DurableOperationConstraints {
+            path: BTreeMap::from([
+                ("channel_id".into(), exact(json!("123"))),
+                ("message_id".into(), exact(json!("456"))),
+                (
+                    "emoji_name".into(),
+                    DurableParameterConstraint {
+                        required: true,
+                        rule: DurableValueConstraint::OneOf {
+                            values: valid
+                                .into_iter()
+                                .chain(invalid)
+                                .map(|value| json!(value))
+                                .collect(),
+                        },
+                    },
+                ),
+            ]),
+            query: BTreeMap::new(),
+            headers: BTreeMap::new(),
+            body: None,
+        };
+        normalize_and_validate_constraints(&old_endpoint, &old_grant.constraints).unwrap();
+        db.collection::<DurableOperationGrant>(GRANTS)
+            .insert_one(&old_grant)
+            .await
+            .unwrap();
+
+        crate::services::catalog_spec_sync::sync_seeded_service_endpoints(&db)
+            .await
+            .unwrap();
+        let mut synced = db
+            .collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .find_one(doc! {"_id": &old_endpoint.id})
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            synced.parameters.as_ref().unwrap()[2]["x-nyxid-path-constraint"],
+            "discord_emoji"
+        );
+        assert_eq!(
+            synced.operation_generation,
+            old_endpoint.operation_generation + 1
+        );
+        synced.service_id = user_service_id.clone();
+        assert_ne!(
+            endpoint_contract_digest(&synced).unwrap(),
+            old_grant.contract_digest
+        );
+        assert_eq!(
+            discord_emoji_legacy_contract_digest(&synced).as_deref(),
+            Some(old_grant.contract_digest.as_str())
+        );
+        let mut new_grant = old_grant.clone();
+        new_grant.id = Uuid::new_v4().to_string();
+        new_grant.contract_digest = endpoint_contract_digest(&synced).unwrap();
+        db.collection::<DurableOperationGrant>(GRANTS)
+            .insert_one(&new_grant)
+            .await
+            .unwrap();
+
+        let manager = NodeWsManager::new(30, 100);
+        for grant in [&old_grant, &new_grant] {
+            for (index, emoji) in valid.into_iter().chain(invalid).enumerate() {
+                let path = format!(
+                    "/channels/123/messages/456/reactions/{}/@me",
+                    urlencoding::encode(emoji)
+                );
+                crate::services::proxy_service::validate_requested_proxy_path(&path).unwrap();
+                let result = authorize_and_reserve(
+                    &db,
+                    &manager,
+                    &owner,
+                    &key_id,
+                    &user_service_id,
+                    "PUT",
+                    &path,
+                    None,
+                    &HeaderMap::new(),
+                    &[],
+                    &grant.id,
+                    &format!("emoji-{index}"),
+                    false,
+                )
+                .await;
+                if index < valid.len() {
+                    result.unwrap();
+                } else {
+                    assert!(
+                        matches!(result, Err(AppError::DurableGrantMismatch(_))),
+                        "{emoji}: {result:?}"
+                    );
+                }
+            }
+            let raw_star = authorize_and_reserve(
+                &db,
+                &manager,
+                &owner,
+                &key_id,
+                &user_service_id,
+                "PUT",
+                "/channels/123/messages/456/reactions/*️⃣/@me",
+                None,
+                &HeaderMap::new(),
+                &[],
+                &grant.id,
+                "raw-star",
+                false,
+            )
+            .await;
+            assert!(matches!(raw_star, Err(AppError::DurableGrantMismatch(_))));
+            let stored = db
+                .collection::<DurableOperationGrant>(GRANTS)
+                .find_one(doc! {"_id": &grant.id})
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(stored.contract_digest, grant.contract_digest);
+            assert_eq!(stored.total_used, valid.len() as i64);
+            assert_eq!(
+                db.collection::<DurableOperationExecution>(EXECUTIONS)
+                    .count_documents(doc! {"grant_id": &grant.id})
+                    .await
+                    .unwrap(),
+                valid.len() as u64
+            );
+        }
+        db.collection::<ServiceEndpoint>(SERVICE_ENDPOINTS)
+            .update_one(
+                doc! {"_id": &old_endpoint.id},
+                doc! {"$set": {"request_body_schema": {"type": "object"}}},
+            )
+            .await
+            .unwrap();
+        for grant in [&old_grant, &new_grant] {
+            let result = authorize_and_reserve(
+                &db,
+                &manager,
+                &owner,
+                &key_id,
+                &user_service_id,
+                "PUT",
+                "/channels/123/messages/456/reactions/smile%3A12345/@me",
+                None,
+                &HeaderMap::new(),
+                &[],
+                &grant.id,
+                "drift",
+                false,
+            )
+            .await;
+            assert!(matches!(result, Err(AppError::DurableGrantContractDrift)));
+        }
     }
 
     #[tokio::test]
