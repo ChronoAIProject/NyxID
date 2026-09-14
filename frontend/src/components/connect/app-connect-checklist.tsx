@@ -82,6 +82,8 @@ export function AppConnectChecklistItem({
       : item.state === "failed"
         ? "destructive"
         : "warning";
+  const startingOver =
+    item.state === "connecting" || item.state === "reauthorizing";
   const disabled =
     pending ||
     item.readiness === "disabled" ||
@@ -136,7 +138,7 @@ export function AppConnectChecklistItem({
                       onSelect(id);
                       setShowChoices(false);
                     }}
-                    disabled={pending}
+                    disabled={disabled}
                   >
                     <SelectTrigger
                       aria-label={`Choose an account for ${item.label}`}
@@ -155,7 +157,11 @@ export function AppConnectChecklistItem({
                     </SelectContent>
                   </Select>
                 )}
-                <Select value={slug} onValueChange={setSlug} disabled={pending}>
+                <Select
+                  value={slug}
+                  onValueChange={setSlug}
+                  disabled={disabled}
+                >
                   <SelectTrigger
                     aria-label={`Choose a service for ${item.label}`}
                   >
@@ -180,7 +186,7 @@ export function AppConnectChecklistItem({
             <div className="flex flex-wrap justify-end gap-2">
               <Button
                 variant="ghost"
-                disabled={pending}
+                disabled={disabled}
                 onClick={() => setShowChoices((v) => !v)}
               >
                 Change
@@ -188,7 +194,7 @@ export function AppConnectChecklistItem({
               {item.optional && item.state !== "skipped" && (
                 <Button
                   variant="ghost"
-                  disabled={pending}
+                  disabled={disabled}
                   onClick={() => onSelect(null)}
                 >
                   Skip
@@ -211,12 +217,12 @@ export function AppConnectChecklistItem({
                     selectedCatalogSlug && onConnect(selectedCatalogSlug, true)
                   }
                 >
-                  Reauthorize
+                  {startingOver ? "Start over" : "Reauthorize"}
                 </Button>
               ) : (
                 (item.state === "unmet" ||
                   item.state === "failed" ||
-                  item.state === "connecting" ||
+                  startingOver ||
                   item.state === "skipped") && (
                   <Button
                     variant="primary"
@@ -227,7 +233,7 @@ export function AppConnectChecklistItem({
                         : onConnect(slug, false)
                     }
                   >
-                    Connect
+                    {startingOver ? "Start over" : "Connect"}
                   </Button>
                 )
               )}

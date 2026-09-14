@@ -552,7 +552,7 @@ pub async fn connect_item(
     )
     .await?;
     let item = &mut link.items[index];
-    item.connect_link_id = Some(created.link.id.clone());
+    let previous_child_id = item.connect_link_id.replace(created.link.id.clone());
     item.attempt_id = Some(Uuid::new_v4().to_string());
     item.attempt_started_at = Some(Utc::now());
     item.state = if reauthorize {
@@ -569,6 +569,9 @@ pub async fn connect_item(
             .delete_one(doc! { "_id": &created.link.id })
             .await?;
         return Err(AppError::AppConnectResultMismatch);
+    }
+    if let Some(previous_child_id) = previous_child_id {
+        cancel_pending_children(&state.db, id, Some(&previous_child_id)).await;
     }
     Ok(created)
 }
@@ -786,7 +789,7 @@ pub async fn cancel(state: &AppState, id: &str, subject: &str) -> AppResult<AppC
     let mut link = load(state, id, subject).await?;
     ensure_redeemed(&link)?;
     if link.status == AppConnectStatus::Cancelled {
-        cancel_pending_children(&state.db, id).await;
+        cancel_pending_children(&state.db, id, None).await;
         return Ok(link);
     }
     ensure_open(&link)?;
@@ -800,15 +803,19 @@ pub async fn cancel(state: &AppState, id: &str, subject: &str) -> AppResult<AppC
         return Err(AppError::AppConnectResultMismatch);
     }
     link.revision += 1;
-    cancel_pending_children(&state.db, id).await;
+    cancel_pending_children(&state.db, id, None).await;
     Ok(link)
 }
 
-async fn cancel_pending_children(db: &mongodb::Database, parent_id: &str) {
+async fn cancel_pending_children(db: &mongodb::Database, parent_id: &str, child_id: Option<&str>) {
+    let mut filter = doc! { "parent_session_id": parent_id, "status": "pending" };
+    if let Some(id) = child_id {
+        filter.insert("_id", id);
+    }
     if let Err(error) = db
         .collection::<ConnectLink>(CHILDREN)
         .update_many(
-            doc! { "parent_session_id": parent_id, "status": "pending" },
+            filter,
             doc! { "$set": { "status": "cancelled", "completed_at": bson::DateTime::now(),
             "completion_claim_id": null, "completion_claim_at": null } },
         )
@@ -825,7 +832,7 @@ async fn expire(db: &mongodb::Database, id: &str) -> AppResult<()> {
         doc! { "$set": { "status": "expired", "completed_at": bson::DateTime::now(), "items.$[].attempt_id": null }, "$inc": { "revision": 1 } },
     ).await?;
     if result.modified_count == 1 {
-        cancel_pending_children(db, id).await;
+        cancel_pending_children(db, id, None).await;
     }
     Ok(())
 }

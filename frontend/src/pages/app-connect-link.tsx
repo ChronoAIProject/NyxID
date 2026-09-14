@@ -18,7 +18,10 @@ import {
   useAppConnectLink,
 } from "@/hooks/use-app-connect-links";
 import { useCompleteConnectLink } from "@/hooks/use-connect-links";
-import { requirementsReady } from "@/lib/app-connect-link";
+import {
+  appConnectCapabilityStorageKey,
+  requirementsReady,
+} from "@/lib/app-connect-link";
 import {
   connectLinkErrorMessage,
   connectLinkNeedsSetupForm,
@@ -33,12 +36,20 @@ export function AppConnectLinkPage() {
   const { user, isAuthenticated, isLoading } = useAuthStore();
   useEffect(() => {
     if (!isLoading && !isAuthenticated) {
+      const returnTo = new URL(window.location.href);
+      const capability = new URLSearchParams(returnTo.hash.slice(1)).get("t");
+      if (capability)
+        sessionStorage.setItem(
+          appConnectCapabilityStorageKey(linkId),
+          capability,
+        );
+      returnTo.hash = "";
       void navigate({
         to: "/login",
-        search: { return_to: window.location.href },
+        search: { return_to: returnTo.toString() },
       });
     }
-  }, [isAuthenticated, isLoading, navigate]);
+  }, [isAuthenticated, isLoading, linkId, navigate]);
   if (isLoading || !isAuthenticated || !user) {
     return (
       <ConnectShell>
@@ -62,8 +73,10 @@ function RepairSession({
   readonly subject: string;
   readonly linkId: string;
 }) {
-  const [capability] = useState(() =>
-    new URLSearchParams(window.location.hash.slice(1)).get("t"),
+  const [capability] = useState(
+    () =>
+      new URLSearchParams(window.location.hash.slice(1)).get("t") ??
+      sessionStorage.getItem(appConnectCapabilityStorageKey(linkId)),
   );
   const session = useAppConnectLink(linkId, subject, true, capability);
   const action = useAppConnectAction(linkId, subject);
@@ -89,8 +102,9 @@ function RepairSession({
       const clean = new URL(window.location.href);
       clean.hash = "";
       window.history.replaceState(window.history.state, "", clean);
+      sessionStorage.removeItem(appConnectCapabilityStorageKey(linkId));
     }
-  }, [session.data, capability]);
+  }, [session.data, capability, linkId]);
 
   // Time changes presentation only. Reads and provider checks remain explicit.
   useEffect(() => {
@@ -285,14 +299,17 @@ function RepairSession({
             <Button
               variant="ghost"
               disabled={busy}
-              onClick={() => void run(async () => {
-              if (expired) {
-                const result = await session.refetch();
-                if (result.data?.callback_url) window.location.assign(result.data.callback_url);
-              } else {
-                await post("cancel");
+              onClick={() =>
+                void run(async () => {
+                  if (expired) {
+                    const result = await session.refetch();
+                    if (result.data?.callback_url)
+                      window.location.assign(result.data.callback_url);
+                  } else {
+                    await post("cancel");
+                  }
+                })
               }
-            })}
             >
               Not now
             </Button>

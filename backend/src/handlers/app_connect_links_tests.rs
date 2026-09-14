@@ -1298,3 +1298,64 @@ async fn app_connect_links_db_probe_cooldown_preserves_prior_item() {
         "cooldown must not dispatch another probe"
     );
 }
+
+#[tokio::test]
+async fn app_connect_links_db_start_over_cancels_only_replaced_child() {
+    use crate::models::connect_link::{ConnectLink, ConnectLinkStatus};
+    let Some(f) = fixture("app_link_start_over").await else {
+        return;
+    };
+    empty(&f).await;
+    let link = redeemed(&f).await;
+    let first = links::connect_item(
+        &f.state,
+        &link.id,
+        &link.user_id,
+        "required",
+        "api-github-pat",
+        false,
+    )
+    .await
+    .unwrap();
+    let second = links::connect_item(
+        &f.state,
+        &link.id,
+        &link.user_id,
+        "required",
+        "api-github-pat",
+        false,
+    )
+    .await
+    .unwrap();
+    let children = f.state.db.collection::<ConnectLink>("connect_links");
+    assert_eq!(
+        children
+            .find_one(doc! { "_id": &first.link.id })
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ConnectLinkStatus::Cancelled
+    );
+    assert_eq!(
+        children
+            .find_one(doc! { "_id": &second.link.id })
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        ConnectLinkStatus::Pending
+    );
+    let parent = links::load(&f.state, &link.id, &link.user_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        parent.items[0].connect_link_id.as_deref(),
+        Some(second.link.id.as_str())
+    );
+    assert!(
+        links::ensure_child_subject(&f.state.db, &first.link, &link.user_id)
+            .await
+            .is_err()
+    );
+}

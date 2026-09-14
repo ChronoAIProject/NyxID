@@ -8,3 +8,7 @@ export function requirementsReady(link: AppConnectLink, now: number): boolean {
         (!item.valid_until || new Date(item.valid_until).getTime() > now)),
   );
 }
+
+export function appConnectCapabilityStorageKey(linkId: string): string {
+  return `nyxid:app-connect-capability:${linkId}`;
+}

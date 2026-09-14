@@ -9,6 +9,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { appConnectCapabilityStorageKey } from "@/lib/app-connect-link";
 import { ApiError } from "@/lib/api-client";
 import type {
   AppConnectItem,
@@ -89,10 +90,11 @@ function mount() {
     </StrictMode>
   );
   const view = render(tree());
-  return { ...view, rerenderSession: () => view.rerender(tree()) };
+  return { ...view, client, rerenderSession: () => view.rerender(tree()) };
 }
 beforeEach(() => {
   vi.clearAllMocks();
+  sessionStorage.clear();
   mocks.auth = {
     user: { id: "person" },
     isAuthenticated: true,
@@ -154,21 +156,55 @@ describe("App Connect Link hosted page", () => {
       "/app-connect-links/link/cancel",
     ]);
   });
-  it("unauthenticated visitors go to login with the capability in return_to and make no API calls", async () => {
+  it("keeps the capability out of return_to, redeems the stash after login, and clears it", async () => {
     mocks.auth.isAuthenticated = false;
     window.history.replaceState(
       null,
       "",
       "/connect/app/link#t=page-capability",
     );
-    mount();
+    const view = mount();
     await waitFor(() => expect(mocks.navigate).toHaveBeenCalled());
-    expect(mocks.navigate.mock.calls[0]?.[0]).toEqual({
-      to: "/login",
-      search: { return_to: window.location.href },
-    });
+    const returnTo = mocks.navigate.mock.calls[0]?.[0].search
+      .return_to as string;
+    expect(returnTo).toBe(`${window.location.origin}/connect/app/link`);
+    expect(returnTo).not.toContain("t=");
+    expect(returnTo).not.toContain("page-capability");
+    expect(sessionStorage.getItem(appConnectCapabilityStorageKey("link"))).toBe(
+      "page-capability",
+    );
     expect(mocks.get).not.toHaveBeenCalled();
     expect(mocks.post).not.toHaveBeenCalled();
+    window.history.replaceState(null, "", returnTo);
+    mocks.auth.isAuthenticated = true;
+    await act(async () => view.rerenderSession());
+    await screen.findByText("App A");
+    expect(mocks.post).toHaveBeenCalledExactlyOnceWith(
+      "/app-connect-links/link/redeem",
+      { capability: "page-capability" },
+    );
+    await waitFor(() =>
+      expect(
+        sessionStorage.getItem(appConnectCapabilityStorageKey("link")),
+      ).toBeNull(),
+    );
+    expect(window.location.hash).toBe("");
+    // A refetch must remain a GET even if the fragment is still present in
+    // another render's view of location; redemption is tracked by the hook.
+    window.history.replaceState(
+      null,
+      "",
+      "/connect/app/link#t=page-capability",
+    );
+    await act(async () =>
+      view.client.refetchQueries({
+        queryKey: ["app-connect-links", "person", "link"],
+      }),
+    );
+    expect(mocks.post).toHaveBeenCalledTimes(1);
+    expect(mocks.get).toHaveBeenCalledExactlyOnceWith(
+      "/app-connect-links/link",
+    );
   });
   it("already redeemed capability falls back to a subject-bound read", async () => {
     window.history.replaceState(null, "", "/connect/app/link#t=used");
@@ -204,7 +240,57 @@ describe("App Connect Link hosted page", () => {
     expect(screen.getByText("Included", { exact: true })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Re-check" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Connect" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Change" })).toBeDisabled();
     expect(mocks.post).not.toHaveBeenCalled();
+  });
+  it("offers a new connection after a failed OAuth child and labels pending replacement Start over", async () => {
+    const failed = item({
+      state: "failed",
+      readiness: "unmet",
+      user_service_id: null,
+      connect_link_id: "failed-child",
+      reason_code: "provider_authorization_failed",
+    });
+    mocks.get
+      .mockResolvedValueOnce(link([failed]))
+      .mockResolvedValue(
+        link([
+          {
+            ...failed,
+            state: "connecting",
+            connect_link_id: "new-child",
+            reason_code: null,
+          },
+        ]),
+      );
+    mocks.post.mockResolvedValue({
+      id: "new-child",
+      token: "new-child-token",
+      service_name: "GitHub",
+      service_slug: "api-github",
+      connect_method: "api_key",
+      auth_key_name: "Authorization",
+      credential_mode: null,
+      has_platform_oauth_credentials: false,
+      requires_gateway_url: false,
+      api_key_url: null,
+      api_key_instructions: null,
+    });
+    mount();
+    await screen.findByText(
+      "Provider authorization failed. Connect again to retry.",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Connect" }));
+    await screen.findByRole("button", { name: "Start over" });
+    expect(mocks.post).toHaveBeenCalledExactlyOnceWith(
+      "/app-connect-links/link/items/github/connect",
+      { service_slug: "api-github" },
+    );
+    expect(
+      screen.queryByText(
+        "Provider authorization failed. Connect again to retry.",
+      ),
+    ).not.toBeInTheDocument();
   });
   it("an elapsed check disables Continue and an abort keeps its reason visible", async () => {
     mocks.get.mockResolvedValue(

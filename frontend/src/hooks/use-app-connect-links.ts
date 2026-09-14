@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError } from "@/lib/api-client";
 import {
@@ -13,10 +14,12 @@ export function useAppConnectLink(
   enabled: boolean,
   capability: string | null = null,
 ) {
+  const pendingCapability = useRef(capability);
   return useQuery({
     queryKey: ["app-connect-links", subject, id],
     queryFn: async () => {
-      if (capability && window.location.hash) {
+      const capability = pendingCapability.current;
+      if (capability) {
         try {
           return appConnectLinkSchema.parse(
             await api.post(`/app-connect-links/${id}/redeem`, { capability }),
@@ -26,6 +29,10 @@ export function useAppConnectLink(
           // requires the same bound subject and a redeemed association.
           if (!(error instanceof ApiError) || error.errorCode !== 12001)
             throw error;
+        } finally {
+          // Refetches use the subject association even before the page effect
+          // has scrubbed the fragment and session-storage handoff.
+          pendingCapability.current = null;
         }
       }
       return appConnectLinkSchema.parse(

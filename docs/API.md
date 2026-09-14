@@ -7981,8 +7981,12 @@ The verified token binds the app and human subject; the callback must pass the
 app's registered redirect policy. `state` is required, nonempty, and at most
 1024 bytes. The response is `{ id, connect_url, expires_at }`; send the user to
 `connect_url`. The URL fragment contains a one-time page capability. The hosted
-page requires login, redeems that capability into a durable subject association,
-and scrubs the fragment. Further reads resume using the bound human's session.
+page requires login and redeems that capability once into a durable subject
+association. Before login, the page stashes the capability in tab-local
+`sessionStorage` keyed by link ID and removes the fragment from `return_to`;
+**the capability never enters the login query string**. After login, it reads
+`#t=` or that stash, redeems once, and clears both the fragment and the stash.
+Further reads use GET and resume with the bound human's session.
 An app token cannot redeem or operate the hosted checklist.
 
 `GET /api/v1/app-connect-links/{id}` accepts either that app's user token (both
@@ -8049,7 +8053,8 @@ capability and reads local readiness; it never starts a provider check. Actions
 share a 750 ms click throttle. Disabled connections remain disabled. Check
 failures remain visible until an explicit action; provider cooldown responses
 leave the previous item state and evidence intact. Cancelling or expiring a
-parent also cancels its pending child links.
+parent also cancels its pending child links. Starting over replaces an item's
+child link and cancels the previous pending child.
 
 Gate manifests remain rejected. No App Connect Link webhooks are emitted.
 
