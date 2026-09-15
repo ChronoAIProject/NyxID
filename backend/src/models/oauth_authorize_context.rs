@@ -12,6 +12,8 @@ pub struct OauthAuthorizeContext {
     pub authorize_params: ValidatedAuthorizeParams,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub created_at: DateTime<Utc>,
+    #[serde(default, with = "crate::models::bson_datetime::optional")]
+    pub consumed_at: Option<DateTime<Utc>>,
     #[serde(with = "bson::serde_helpers::chrono_datetime_as_bson_datetime")]
     pub expires_at: DateTime<Utc>,
 }

@@ -260,6 +260,8 @@ destination** footer always identifies NyxID and your validated callback host.
 
 The login shell gets this metadata through a five-minute signed authorize
 context, never a raw client ID. Password, social, device, and MFA login resume
-the original server-stored authorize request. If the context expires, the user
-must restart sign-in from your app. Apps without an enabled Gate manifest keep
+the original server-stored authorize request once. Failed social login leaves
+the context available for retry; a consumed or expired context requires restarting
+sign-in from your app. Replacing a logo or deleting an app removes its previous
+asset on a best-effort basis; each new upload gets a new immutable URL. Apps without an enabled Gate manifest keep
 the generic NyxID login page.

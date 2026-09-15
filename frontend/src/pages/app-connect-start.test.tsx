@@ -113,12 +113,13 @@ describe("app login handoff", () => {
     mount();
     expect(await screen.findByText("Verified")).toBeInTheDocument();
   });
-  it("does not offer login for an expired or tampered context", async () => {
+  it("does not offer login for an expired, tampered, or consumed context", async () => {
     vi.mocked(fetch).mockResolvedValue(new Response("{}", { status: 404 }));
     mount();
     expect(
       await screen.findByText(/unavailable or has expired/),
     ).toBeInTheDocument();
+    expect(screen.getByText(/Restart sign-in from the app/)).toBeInTheDocument();
     expect(mocks.flow).not.toHaveBeenCalled();
     await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
   });

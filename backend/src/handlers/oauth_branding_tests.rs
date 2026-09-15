@@ -261,7 +261,7 @@ async fn app_branding_db_prompt_login_requires_new_human_session() {
 }
 
 #[tokio::test]
-async fn app_branding_db_revisions_verification_and_immutable_assets() {
+async fn app_branding_db_revisions_verification_and_asset_cleanup() {
     let Some(f) = fixture("branding_revision").await else {
         return;
     };
@@ -393,10 +393,17 @@ async fn app_branding_db_revisions_verification_and_immutable_assets() {
         .unwrap();
     assert_eq!(replacement.branding_revision, 5);
     assert_ne!(replacement.logo_asset_id.as_ref().unwrap(), &first_id);
-    assert_eq!(
-        branding::read_logo(&f.state.db, &first_id).await.unwrap(),
-        original
+    assert_eq!(&original[..8], b"\x89PNG\r\n\x1a\n");
+    assert!(matches!(
+        branding::read_logo(&f.state.db, &first_id).await,
+        Err(AppError::NotFound(_))
+    ));
+    assert!(
+        branding::read_logo(&f.state.db, replacement.logo_asset_id.as_ref().unwrap())
+            .await
+            .is_ok()
     );
+    assert_eq!(count(&f, "branding_assets.files").await, 1);
     let verified = branding::verify(&f.state.db, &f.app.id, 5, true)
         .await
         .unwrap();
@@ -431,6 +438,18 @@ async fn app_branding_db_revisions_verification_and_immutable_assets() {
     .0;
     assert_eq!(updated.branding.branding_revision, 6);
     assert!(!updated.branding.verified);
+    let _ = crate::handlers::developer_apps::delete_my_oauth_client(
+        State(f.state.clone()),
+        human(&f),
+        Path(f.app.id.clone()),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        branding::read_logo(&f.state.db, replacement.logo_asset_id.as_ref().unwrap()).await,
+        Err(AppError::NotFound(_))
+    ));
+    assert_eq!(count(&f, "branding_assets.files").await, 0);
 }
 
 #[tokio::test]
@@ -527,4 +546,59 @@ async fn app_branding_db_multipart_owner_acl_limits_and_rollout() {
         .await,
         Err(AppError::NotFound(_))
     ));
+}
+
+#[tokio::test]
+async fn app_branding_db_social_failure_preserves_context_then_resume_consumes_once() {
+    let Some(f) = fixture("branding_consume").await else {
+        return;
+    };
+    gated(&f, false, false).await;
+    let ctx = start(&f, &params(&f)).await;
+    let return_to = format!(
+        "{}/oauth/authorize-context/resume?ctx={ctx}",
+        f.state.config.frontend_url
+    );
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::COOKIE,
+        format!("nyx_social_return_to={}", urlencoding::encode(&return_to))
+            .parse()
+            .unwrap(),
+    );
+    let error = crate::handlers::social_auth::callback(
+        State(f.state.clone()),
+        ConnectInfo("127.0.0.1:5000".parse().unwrap()),
+        Path("google".into()),
+        axum::extract::Query(crate::handlers::social_auth::CallbackQuery {
+            code: None,
+            state: None,
+            error: Some("access_denied".into()),
+            error_description: None,
+        }),
+        headers,
+    )
+    .await
+    .unwrap_err();
+    let error_url = url::Url::parse(error.1[header::LOCATION].to_str().unwrap()).unwrap();
+    assert_eq!(error_url.path(), format!("/connect/app/start/{ctx}"));
+    assert!(contexts::load(&f.state, &ctx).await.is_ok());
+    let response = resume(&f, &ctx, human(&f)).await;
+    assert!(location(&response).contains("/connect/app/"));
+    assert_eq!(count(&f, LINKS).await, 1);
+    assert!(matches!(
+        metadata(&f, &ctx).await,
+        Err(AppError::NotFound(_))
+    ));
+    let replay = context_handler::resume(
+        State(f.state.clone()),
+        OptionalAuthUser(Some(human(&f))),
+        ConnectInfo("127.0.0.1:5000".parse().unwrap()),
+        HeaderMap::new(),
+        Query(ContextQuery { ctx }),
+    )
+    .await;
+    assert!(matches!(replay, Err(AppError::NotFound(_))));
+    assert_eq!(count(&f, LINKS).await, 1);
+    assert_eq!(count(&f, CODES).await, 0);
 }

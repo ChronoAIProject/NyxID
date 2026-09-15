@@ -167,22 +167,32 @@ pub async fn upload_logo(
         .map_err(|_| AppError::Internal("Could not finish storing logo".into()))?;
     let result = db
         .collection::<OauthClient>(COLLECTION_NAME)
-        .update_one(
+        .find_one_and_update(
             doc! { "_id": client_id, "created_by": owner, "is_active": true },
             update_pipeline(doc! { "logo_asset_id": &id, "updated_at": bson::DateTime::now() }),
         )
         .await;
     match result {
-        Ok(result) if result.matched_count == 1 => {
+        Ok(Some(previous)) => {
+            if let Some(id) = previous.logo_asset_id {
+                delete_logo_best_effort(db, &id).await;
+            }
             super::oauth_client_service::get_client(db, client_id).await
         }
         other => {
-            let _ = bucket.delete(Bson::String(id)).await;
+            delete_logo_best_effort(db, &id).await;
             match other {
                 Err(error) => Err(error.into()),
                 _ => Err(AppError::NotFound("OAuth client not found".into())),
             }
         }
+    }
+}
+
+/// Asset cleanup follows the durable client update and cannot roll it back.
+pub async fn delete_logo_best_effort(db: &Database, id: &str) {
+    if let Err(error) = bucket(db).delete(Bson::String(id.into())).await {
+        tracing::warn!(asset_id = id, error = %error, "Could not delete obsolete app logo");
     }
 }
 

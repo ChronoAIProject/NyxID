@@ -8177,7 +8177,11 @@ inactive clients, invalidated redirect URIs, and disabled rollout return 404.
 A raw `client_id` does not authorize this lookup. The hosted page embeds the
 existing password, social, device, and MFA login flows. Successful login resumes
 `/oauth/authorize-context/resume?ctx=<token>` on the same origin. That route
-requires a human session and continues only the stored parameters. For
+requires a human session and continues only the stored parameters. Immediately
+before continuing, it atomically consumes the context. Replays return 404 and
+cannot create another checklist or code. Social-login failure keeps the context
+valid for a retry because authorize has not resumed. The start page tells users
+with an expired or consumed context to restart sign-in from the app. For
 `prompt=login`, the session must have been created since the context was minted.
 Social-login errors return to the same app shell. A lost or expired context
 requires restarting from the app.
@@ -8189,7 +8193,9 @@ NyxID decodes and re-encodes the pixels to PNG, removing metadata and rejecting
 SVG and non-images. It stores immutable UUID-addressed assets in GridFS and
 serves them publicly at `GET /api/v1/branding/assets/{id}` with `image/png`,
 `nosniff`, and `Cache-Control: public, max-age=31536000, immutable`. Replacing a
-logo creates a new asset URL; an old URL continues to serve its original pixels.
+logo creates a new asset URL. After replacement or app deletion, NyxID makes a
+best-effort deletion of the previous asset; old URLs then return 404. Pixels are
+never changed at an existing asset URL.
 The upload response contains `logo_asset_id`, `logo_url`, `homepage_url`,
 `branding_revision`, `branding_verified_revision`, and `verified`.
 

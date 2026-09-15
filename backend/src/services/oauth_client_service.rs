@@ -1418,24 +1418,21 @@ pub async fn delete_client_for_creator(
     client_id: &str,
     created_by: &str,
 ) -> AppResult<()> {
-    let now = Utc::now();
-    let result = db
+    let previous = db
         .collection::<OauthClient>(OAUTH_CLIENTS)
-        .update_one(
+        .find_one_and_update(
             doc! { "_id": client_id, "created_by": created_by },
-            doc! { "$set": {
-                "is_active": false,
-                "updated_at": bson::DateTime::from_chrono(now),
-            }},
+            super::oauth_branding_service::update_pipeline(doc! {
+                "is_active": false, "logo_asset_id": bson::Bson::Null,
+                "updated_at": bson::DateTime::from_chrono(Utc::now()),
+            }),
         )
-        .await?;
-
-    if result.matched_count == 0 {
-        return Err(AppError::NotFound("OAuth client not found".to_string()));
+        .await?
+        .ok_or_else(|| AppError::NotFound("OAuth client not found".into()))?;
+    if let Some(id) = previous.logo_asset_id {
+        super::oauth_branding_service::delete_logo_best_effort(db, &id).await;
     }
-
     cascade_client_deactivation(db, client_id).await?;
-
     Ok(())
 }
 

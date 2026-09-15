@@ -20,7 +20,7 @@ export function useAuthorizeContext(ctx: string) {
       );
       if (!response.ok)
         throw new Error(
-          "This sign-in request is unavailable or has expired. Return to the app and start again.",
+          "This sign-in request is unavailable or has expired. Restart sign-in from the app.",
         );
       return authorizeContextSchema.parse(await response.json());
     },

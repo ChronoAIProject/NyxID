@@ -119,6 +119,7 @@ pub async fn resume(
                 .join(" ")
         })
         .filter(|p| !p.is_empty());
+    contexts::consume(&state.db, &context.id).await?;
     super::oauth::authorize_inner(
         &state,
         OptionalAuthUser(Some(auth)),

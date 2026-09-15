@@ -1,5 +1,6 @@
 //! A five-minute login handoff holds validated authorize parameters in MongoDB.
 //! The browser sees a signed context reference; it cannot replace the request.
+//! Resume consumes the context once, preserving PAR single-use semantics.
 
 use chrono::{Duration, Utc};
 use jsonwebtoken::{Algorithm, Header, Validation, decode, encode};
@@ -33,6 +34,7 @@ pub async fn mint(state: &AppState, params: ValidatedAuthorizeParams) -> AppResu
         id: uuid::Uuid::new_v4().to_string(),
         authorize_params: params,
         created_at: now,
+        consumed_at: None,
         expires_at: now + Duration::minutes(5),
     };
     let claims = ContextClaims {
@@ -79,7 +81,7 @@ pub async fn load(
     let record = state
         .db
         .collection::<OauthAuthorizeContext>(COLLECTION_NAME)
-        .find_one(doc! { "_id": &claims.sub, "expires_at": { "$gt": bson::DateTime::now() } })
+        .find_one(doc! { "_id": &claims.sub, "consumed_at": null, "expires_at": { "$gt": bson::DateTime::now() } })
         .await?
         .ok_or_else(not_found)?;
     let client =
@@ -138,4 +140,20 @@ pub async fn login_completed(
         )
         .await?
         .is_some())
+}
+
+/// Claim the handoff immediately before authorize runs. Login failures never
+/// reach this CAS; a replay or a second tab cannot create another session/code.
+pub async fn consume(db: &mongodb::Database, id: &str) -> AppResult<()> {
+    let result = db
+        .collection::<OauthAuthorizeContext>(COLLECTION_NAME)
+        .update_one(
+            doc! { "_id": id, "consumed_at": null, "expires_at": { "$gt": bson::DateTime::now() } },
+            doc! { "$set": { "consumed_at": bson::DateTime::now() } },
+        )
+        .await?;
+    if result.modified_count != 1 {
+        return Err(AppError::NotFound("Authorization context not found".into()));
+    }
+    Ok(())
 }
