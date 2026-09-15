@@ -18,6 +18,13 @@ use crate::org_resolver::resolve_org_id;
 
 pub async fn run(command: DeveloperAppCommands) -> Result<()> {
     match command {
+        DeveloperAppCommands::Requirements { command } => {
+            super::app_connect::run_requirements(command).await
+        }
+        DeveloperAppCommands::Handoff { command } => super::app_connect::run_handoff(command).await,
+        DeveloperAppCommands::Branding { command } => {
+            super::app_connect::run_branding(command).await
+        }
         DeveloperAppCommands::Create {
             name,
             redirect_uris,

@@ -7,6 +7,7 @@ use crate::cli::{AdminCommands, AdminUserCommands, InviteCodeCommands, OutputFor
 
 pub async fn run(command: AdminCommands) -> Result<()> {
     match command {
+        AdminCommands::AppConnect { command } => super::app_connect::run_admin(command).await,
         AdminCommands::PlatformCredentials { command } => {
             super::admin_platform_credentials::run(command).await
         }

@@ -265,3 +265,34 @@ the context available for retry; a consumed or expired context requires restarti
 sign-in from your app. Replacing a logo or deleting an app removes its previous
 asset on a best-effort basis; each new upload gets a new immutable URL. Apps without an enabled Gate manifest keep
 the generic NyxID login page.
+
+
+## Manage App Connect from the CLI
+
+Use a saved human session with `--profile <name>`. Each command accepts `--output json`; JSON responses go to stdout, while table output goes to stderr. Developer commands accept an app's client UUID or exact name. Name lookup defaults to personal apps; use `--org <UUID|slug|display name>` for an org app. UUIDs can address an org app directly because the server checks its ownership. With `--org`, lookup also verifies that the app belongs to that organization. Duplicate names require an explicit client UUID.
+
+```bash
+nyxid developer-app requirements list <APP> --profile work --output json
+nyxid developer-app requirements publish <APP> --file manifest.json --org <ORG> --profile work
+nyxid developer-app requirements publish <APP> --file manifest.json --enforcement gate --profile work
+nyxid developer-app handoff set <APP> --text "Connect the accounts this app needs." --profile work
+nyxid developer-app branding logo <APP> --file logo.webp --profile work
+nyxid developer-app branding homepage <APP> --url https://app.example --profile work
+```
+
+`manifest.json` is the same JSON body accepted by `POST /api/v1/developer/oauth-clients/{client_id}/requirements`: it contains `enforcement` and `requirements`. The optional `--enforcement` flag replaces only the file's enforcement field. Publication prints the new immutable version, including its compiled catalog IDs and validator versions. The server validates the manifest and requires rollout/capability access. Logo input must be PNG or WebP, at most 256 KiB and 512×512; NyxID re-encodes it without metadata. Passing empty handoff text clears the blurb. These developer commands cannot grant app capability or verify branding.
+
+Platform admins use client UUIDs for the following controls:
+
+```bash
+nyxid admin app-connect rollout get --profile admin --output json
+nyxid admin app-connect rollout set allowlist --profile admin
+nyxid admin app-connect rollout set disabled --profile admin
+nyxid admin app-connect rollout set reset --profile admin
+nyxid admin app-connect capability <CLIENT_ID> --enable --profile admin
+nyxid admin app-connect capability <CLIENT_ID> --disable --profile admin
+nyxid admin app-connect verify-branding <CLIENT_ID> --revision 7 --profile admin
+nyxid admin app-connect verify-branding <CLIENT_ID> --revision 7 --unverify --profile admin
+```
+
+`reset` removes the runtime override and restores the deployment's configured default; it does not change the organization allowlist. Public rollout is unavailable from the CLI. Branding verification binds the exact reviewed revision: later changes to the name, logo, blurb, or homepage remove the Verified chip until an admin reviews the new revision. Verification never gates an active app's name or logo display.

@@ -489,6 +489,45 @@ impl ApiClient {
         Self::handle_response(resp, path).await
     }
 
+    /// Upload one bounded file part using the same auth/refresh contract as JSON POSTs.
+    pub async fn post_file<T: DeserializeOwned>(
+        &mut self,
+        path: &str,
+        field: &str,
+        filename: &str,
+        content_type: &str,
+        bytes: &[u8],
+    ) -> Result<T> {
+        let form = || -> Result<reqwest::multipart::Form> {
+            let part = reqwest::multipart::Part::bytes(bytes.to_vec())
+                .file_name(filename.to_owned())
+                .mime_str(content_type)?;
+            Ok(reqwest::multipart::Form::new().part(field.to_owned(), part))
+        };
+        let url = format!("{}{path}", self.base_url);
+        let mut response = self
+            .client
+            .post(&url)
+            .bearer_auth(&self.access_token)
+            .multipart(form()?)
+            .send()
+            .await
+            .with_context(|| format!("POST {path} failed"))?;
+        self.reject_agent_key_unauthorized(&response)?;
+        if response.status() == reqwest::StatusCode::UNAUTHORIZED && self.try_refresh_token().await
+        {
+            response = self
+                .client
+                .post(&url)
+                .bearer_auth(&self.access_token)
+                .multipart(form()?)
+                .send()
+                .await
+                .with_context(|| format!("POST {path} failed (retry)"))?;
+        }
+        Self::handle_response(response, path).await
+    }
+
     pub async fn put<T: DeserializeOwned, B: Serialize>(
         &mut self,
         path: &str,

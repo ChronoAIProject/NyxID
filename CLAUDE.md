@@ -521,6 +521,17 @@ nyxid channel-bot register --platform lark --label support --token-env LARK_BOT_
 nyxid channel-bot update <BOT_ID> --verification-token ... [--encrypt-key ...]
   # env alternatives: NYXID_LARK_VERIFICATION_TOKEN / NYXID_LARK_ENCRYPT_KEY
 
+# Developer-app requirements and hosted branding (APP = client UUID or exact app name)
+nyxid developer-app requirements list <APP> [--org <ID|SLUG|NAME>] [--profile <name>] [--output json]
+nyxid developer-app requirements publish <APP> --file manifest.json [--enforcement advise|gate] [--org ...]
+nyxid developer-app handoff set <APP> --text "Connect your accounts." [--org ...]
+nyxid developer-app branding logo <APP> --file logo.png [--org ...]
+nyxid developer-app branding homepage <APP> --url https://app.example [--org ...]
+# Platform-admin controls (APP = client UUID; reset restores the deployment default)
+nyxid admin app-connect rollout get | set <disabled|allowlist|reset>
+nyxid admin app-connect capability <APP> --enable|--disable
+nyxid admin app-connect verify-branding <APP> --revision N [--unverify]
+
 # Frontend (from frontend/)
 npm run dev | build | test | test:watch | lint   # dev = port 3000; build = type-check + prod build
 

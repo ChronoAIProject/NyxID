@@ -270,6 +270,11 @@ pub struct RepoArgs {
 
 #[derive(Subcommand)]
 pub enum AdminCommands {
+    /// Manage App Connect rollout, app capability, and branding verification
+    AppConnect {
+        #[command(subcommand)]
+        command: AdminAppConnectCommands,
+    },
     /// Manage NyxID-owned messaging platform credentials
     PlatformCredentials {
         #[command(subcommand)]
@@ -4302,6 +4307,21 @@ pub enum ServiceAccountCommands {
 
 #[derive(Subcommand)]
 pub enum DeveloperAppCommands {
+    /// List or publish immutable service requirement manifests
+    Requirements {
+        #[command(subcommand)]
+        command: AppRequirementsCommands,
+    },
+    /// Set the app's hosted connection handoff text
+    Handoff {
+        #[command(subcommand)]
+        command: AppHandoffCommands,
+    },
+    /// Set the app's hosted logo and homepage
+    Branding {
+        #[command(subcommand)]
+        command: AppBrandingCommands,
+    },
     /// Create a developer OAuth client (OIDC app for downstream integrations)
     Create {
         /// Display name for the OAuth client
@@ -4421,6 +4441,126 @@ pub enum DeveloperAppCommands {
         /// <PAIRING_ID>` once the browser wizard is done.
         #[arg(long)]
         no_wait: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Args)]
+pub struct DeveloperAppTarget {
+    /// OAuth client ID or exact app name
+    #[arg(value_name = "APP")]
+    pub app: String,
+    /// Scope app lookup to an organization (UUID, slug, or display name)
+    #[arg(long, value_name = "ID|SLUG|NAME")]
+    pub org: Option<String>,
+    #[command(flatten)]
+    pub auth: AuthArgs,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum AppRequirementEnforcement {
+    Advise,
+    Gate,
+}
+
+#[derive(Subcommand)]
+pub enum AppRequirementsCommands {
+    /// List published versions, compiled catalog IDs, and validator profiles
+    List {
+        #[command(flatten)]
+        target: DeveloperAppTarget,
+    },
+    /// Publish a manifest JSON body, optionally overriding its enforcement
+    Publish {
+        #[command(flatten)]
+        target: DeveloperAppTarget,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        enforcement: Option<AppRequirementEnforcement>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AppHandoffCommands {
+    /// Set handoff text (empty text clears it)
+    Set {
+        #[command(flatten)]
+        target: DeveloperAppTarget,
+        #[arg(long)]
+        text: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AppBrandingCommands {
+    /// Upload a PNG/WebP logo (at most 256 KiB and 512x512 pixels)
+    Logo {
+        #[command(flatten)]
+        target: DeveloperAppTarget,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    /// Set the public HTTPS homepage URL (validated without fetching it)
+    Homepage {
+        #[command(flatten)]
+        target: DeveloperAppTarget,
+        #[arg(long)]
+        url: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AdminAppConnectCommands {
+    /// Inspect or change the deployment's runtime rollout override
+    Rollout {
+        #[command(subcommand)]
+        command: AppConnectRolloutCommands,
+    },
+    /// Grant or revoke the platform-admin-only app capability
+    Capability {
+        /// OAuth client ID
+        #[arg(value_name = "APP")]
+        app: String,
+        #[arg(long, conflicts_with = "disable", required_unless_present = "disable")]
+        enable: bool,
+        #[arg(long, conflicts_with = "enable")]
+        disable: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Verify or unverify the exact reviewed branding revision
+    VerifyBranding {
+        /// OAuth client ID
+        #[arg(value_name = "APP")]
+        app: String,
+        #[arg(long)]
+        revision: u32,
+        #[arg(long)]
+        unverify: bool,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum AppConnectRolloutMode {
+    Disabled,
+    Allowlist,
+    Reset,
+}
+
+#[derive(Subcommand)]
+pub enum AppConnectRolloutCommands {
+    /// Show the effective mode, deployment default, override, and allowed org IDs
+    Get {
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
+    /// Set disabled/allowlist, or reset the override to the deployment default
+    Set {
+        mode: AppConnectRolloutMode,
         #[command(flatten)]
         auth: AuthArgs,
     },
