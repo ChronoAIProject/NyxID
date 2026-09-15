@@ -795,6 +795,16 @@ test('header target selection verifies family and tier, preferring exact known e
   assert.equal(chooseSwitcherEntry([{text: 'ChatGPT-6 Pro details'}, {text: 'ChatGPT-6 Pro'}], 'chatgpt-6-pro'), 1);
 });
 
+test('compact numeric labels require the composer adapter rather than global model or effort inference', () => {
+  for (const label of ['6\nPro', '5.5 Pro', 'Pro', '6\nPro\nFor complex work']) {
+    assert.equal(switcherMetadata(label), 'unrecognized');
+    assert.equal(switcherMatches(label, 'chatgpt-6-pro'), false);
+  }
+  assert.equal(effortMetadata('6\nPro'), 'unrecognized');
+  assert.equal(effortMetadata('GPT 6 Pro'), 'pro');
+  assert.equal(chooseSwitcherEntry([{ text: '6\nPro' }], 'chatgpt-6-pro'), -1);
+});
+
 test('effort observations are canonical and Standard is explicit', () => {
   assert.equal(effortMetadata('GPT-6 Pro Extended'), 'pro_extended');
   assert.equal(effortMetadata('Pro 扩展'), 'pro_extended');

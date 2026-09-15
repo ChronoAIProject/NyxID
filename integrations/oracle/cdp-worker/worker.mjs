@@ -1426,7 +1426,7 @@ export function effortMetadata(text) {
   return level ? level.toLowerCase().replace(/ /g, '_') : 'unrecognized';
 }
 
-async function readModelSwitcher(page, budget = interactionBudget(1000)) {
+export async function readModelSwitcher(page, budget = interactionBudget(1000)) {
   const snapshot = await boundedRead(budget, timeout => page.locator('body').evaluate((body, { deadline, pickerId }) => {
     if (Date.now() >= deadline) return null;
     const visible = el => el.getBoundingClientRect().width > 0 && el.getBoundingClientRect().height > 0 && getComputedStyle(el).visibility !== 'hidden';
@@ -1434,10 +1434,23 @@ async function readModelSwitcher(page, budget = interactionBudget(1000)) {
     const exact = [...body.querySelectorAll('button[data-testid="model-switcher-dropdown-button"]')].filter(visible);
     const fallback = [...body.querySelectorAll('header button[aria-haspopup="menu"], header button[aria-haspopup="listbox"], [role="banner"] button[aria-haspopup]')]
       .filter(el => visible(el) && /^(chatgpt|gpt)[\s_-]*[0-9]{1,3}(?:[._][0-9]{1,3})?(?=$|[\s_-])/i.test((el.innerText || '').trim()));
-    const candidates = exact.length ? exact : fallback;
+    let candidates = exact.length ? exact : fallback;
+    let source = 'header';
+    // The compact composer trigger exposes its family and tier on separate
+    // lines. Adapt only this whole-label shape inside the discovered form;
+    // numeric labels elsewhere and ambiguous header controls stay untrusted.
+    const compactLabel = el => /^([0-9]{1,3}(?:\.[0-9]{1,3})?)\s+Pro$/i.exec((el.innerText || '').trim());
+    if (!candidates.length) {
+      const form = window.__nyx?.discoverControls().input?.closest('form');
+      candidates = [...(form?.querySelectorAll('button[aria-haspopup="menu"]') || [])]
+        .filter(el => visible(el) && el.getAttribute('data-testid') !== 'composer-plus-btn' && compactLabel(el));
+      source = 'composer';
+    }
     const trigger = candidates.length === 1 ? candidates[0] : null;
     if (trigger) trigger.setAttribute('data-nyx-switcher', '');
-    return { text: trigger ? (trigger.innerText || trigger.getAttribute('aria-label') || '').trim() : null,
+    const rawText = trigger ? (trigger.innerText || trigger.getAttribute('aria-label') || '').trim() : null;
+    return { text: trigger && source === 'composer' ? `GPT ${compactLabel(trigger)[1]} Pro` : rawText,
+      rawText, source,
       found: !!trigger, open: (window.__nyx?.modelPickerMenus(pickerId).length || 0) > 0,
       items: (window.__nyx?.modelPickerItems(pickerId) || []).map(el => ({ text: (el.innerText || el.textContent || '').trim() })) };
   }, { deadline: Date.now() + timeout, pickerId: budget.picker?.id }, interactionOptions(budget, 1000)));
@@ -1453,9 +1466,21 @@ export async function selectModelSwitcher(page, requested) {
     let snapshot = await readModelSwitcher(page, budget);
     result.metadata = snapshot.metadata;
     if (!switcherMatches(snapshot.text, requested) && snapshot.found) {
-      await clearRadixLock(page, budget);
-      await beginModelPicker(page, budget);
-      await page.locator('[data-nyx-switcher]').click(interactionOptions(budget));
+      const trigger = await page.locator('[data-nyx-switcher]').elementHandle(interactionOptions(budget));
+      try {
+        await clearRadixLock(page, budget);
+        await beginModelPicker(page, budget);
+        const current = await readModelSwitcher(page, budget);
+        const unchanged = trigger && current.found && current.source === snapshot.source && current.rawText === snapshot.rawText &&
+          await boundedRead(budget, timeout => trigger.evaluate((el, { deadline, rawText }) =>
+            Date.now() < deadline && el.isConnected && el.hasAttribute('data-nyx-switcher') &&
+            (el.innerText || el.getAttribute('aria-label') || '').trim() === rawText,
+          { deadline: Date.now() + timeout, rawText: snapshot.rawText }));
+        if (!unchanged) throw Object.assign(new Error('picker_changed'), { code: 'picker_changed' });
+        await trigger.click(interactionOptions(budget));
+      } finally {
+        await trigger?.dispose().catch(() => {});
+      }
       const menuDeadline = Math.min(budget.deadline, Date.now() + 3000);
       do {
         await budgetPause(budget, 100);

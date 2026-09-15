@@ -337,8 +337,14 @@ only.
 ### Model family, tier, and reasoning effort
 
 New pools default to `chatgpt-6-pro`. Before typing, the CDP worker discovers
-the header model switcher and verifies **GPT-6 + Pro**, selecting a recognized
-entry when necessary. It then selects the composer effort level. Plain `-pro`
+the model switcher and verifies **GPT-6 + Pro**, selecting a recognized
+entry when necessary. The header test ID and semantic header candidates take
+priority. Only when both yield no candidates, the worker accepts a unique
+visible menu button inside the discovered composer's nearest form whose whole
+label is a numeric major/optional minor version followed by `Pro`, such as
+`6` and `Pro` on separate lines. It excludes the attachment button and rejects
+ambiguity and trailing prose. The compact adapter preserves the raw label for
+click revalidation and supplies family/tier evidence only. It then selects the composer effort level. Plain `-pro`
 and explicit `extended`/`扩展` prefer **Pro Extended** when Pro is split;
 `standard`/`标准` explicitly requests **Pro Standard**. The existing Extra High,
 High, Medium, and Instant effort aliases remain available. Unknown model
@@ -352,9 +358,9 @@ GPT-60 never matches GPT-6, and prose such as “Try GPT-6 Pro” is unrecognize
 A submit may override it; the effective value is frozen on the task and sent
 to workers. CLI `oracle pool create/update` and `oracle ask` accept
 `--require-model-match true|false`. With strict matching, an absent or
-unrecognized header, wrong family/tier, or unverifiable effort pill fails
+unrecognized switcher, wrong family/tier, or unverifiable effort pill fails
 **before Send** with `model_unavailable`. A UI with no effort pill may verify
-through its header. Tools/attach controls whose labels and opened menu items
+through its model switcher. Tools/attach controls whose labels and opened menu items
 contain no recognized effort levels count as absent for verification. Effort
 fails strict verification when an observed recognized level mismatches, or a
 picker exposed recognized levels but selection/read-back could not verify the

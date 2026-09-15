@@ -230,8 +230,13 @@ uses at most three Escape presses per call. Selected entries are revalidated
 by visible text and picker membership, then clicked through their exact
 element handle; hidden hints in an item's text content do not affect matching.
 
-The worker verifies the header family/tier before effort selection and again
-before Send. Families parse generic major/optional minor versions; tier-only
+The worker verifies the model family/tier before effort selection and again
+before Send. When no header switcher candidate exists, it accepts one visible
+menu button in the composer's nearest form whose entire label is a numeric
+major/optional minor version followed by `Pro` (including `6` and `Pro` on
+separate lines). Attachment buttons are excluded; multiple candidates fail
+verification. This compact label establishes family/tier only, without
+claiming Pro Extended effort. Families parse generic major/optional minor versions; tier-only
 Pro entries require matching family context, with at most one exact-family
 submenu. `require_model_match` defaults true. Unrecognized Tools/attach controls
 provide no negative effort evidence; recognized mismatches or an exposed level
