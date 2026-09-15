@@ -46,6 +46,7 @@ pub mod channel_poll_service;
 pub mod channel_registration;
 pub mod channel_relay_service;
 pub mod channel_routing_service;
+pub mod channel_send_service;
 #[cfg(test)]
 mod channel_x_tests;
 pub mod chatgpt_translator;

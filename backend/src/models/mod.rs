@@ -27,6 +27,7 @@ pub mod channel_bot;
 pub mod channel_conversation;
 pub mod channel_event_log;
 pub mod channel_message;
+pub mod channel_send_claim;
 pub mod cli_pairing;
 pub mod connect_link;
 pub mod consent;

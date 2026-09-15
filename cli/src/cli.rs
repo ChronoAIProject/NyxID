@@ -5042,6 +5042,20 @@ pub enum ChannelBotCommands {
         #[command(flatten)]
         auth: AuthArgs,
     },
+    /// Send a message to an opted-in conversation without an inbound reply anchor
+    Send {
+        /// NyxID conversation UUID
+        #[arg(long)]
+        conversation: String,
+        /// Message text
+        #[arg(long)]
+        text: String,
+        /// Reuse this key when retrying the same delivery (1-128 characters)
+        #[arg(long)]
+        idempotency_key: Option<String>,
+        #[command(flatten)]
+        auth: AuthArgs,
+    },
     /// Manage conversation routes
     Route {
         #[command(subcommand)]
@@ -5071,6 +5085,9 @@ pub enum ChannelRouteCommands {
         /// Mark as the default agent for unmatched conversations
         #[arg(long)]
         default_agent: bool,
+        /// Let the assigned agent message this chat unprompted (human opt-in)
+        #[arg(long)]
+        allow_agent_initiated: bool,
         /// Create this route under the given org (you must be an admin
         /// of that org). The bot and agent key must also belong to the
         /// same org. Omit for a personal route.
@@ -5109,6 +5126,9 @@ pub enum ChannelRouteCommands {
         /// Set as default agent
         #[arg(long)]
         default_agent: Option<bool>,
+        /// Allow unprompted agent messages; pass false to disable
+        #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+        allow_agent_initiated: Option<bool>,
         /// Set route active/inactive
         #[arg(long)]
         active: Option<bool>,
@@ -5255,6 +5275,9 @@ pub enum OracleCommands {
         /// Model hint forwarded to the worker (defaults to the pool's)
         #[arg(long)]
         model: Option<String>,
+        /// Require verified model family and tier (defaults to the pool setting)
+        #[arg(long, action = clap::ArgAction::Set)]
+        require_model_match: Option<bool>,
         /// ChatGPT Project URL for this prompt (overrides the pool default)
         #[arg(long)]
         project_url: Option<String>,
@@ -5621,6 +5644,9 @@ pub enum OraclePoolCommands {
         /// Default model hint recorded on tasks
         #[arg(long)]
         model: Option<String>,
+        /// Require verified model family and tier (defaults to the pool setting)
+        #[arg(long, action = clap::ArgAction::Set)]
+        require_model_match: Option<bool>,
         /// Allow this pool to drive worker browsers to extract arbitrary URLs
         #[arg(long)]
         allow_extract: bool,
@@ -5672,6 +5698,9 @@ pub enum OraclePoolCommands {
         project_url: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        /// Require verified model family and tier (defaults to the pool setting)
+        #[arg(long, action = clap::ArgAction::Set)]
+        require_model_match: Option<bool>,
         /// Enable or disable browser URL extraction for this pool
         #[arg(long, action = clap::ArgAction::Set)]
         allow_extract: Option<bool>,

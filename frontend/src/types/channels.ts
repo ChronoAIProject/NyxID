@@ -148,6 +148,13 @@ export interface ManagedBotSetup {
   readonly coexistence_sync?: Record<string, string>;
 }
 
+export interface OutboundCapabilities {
+  readonly initiated_send: boolean;
+  readonly reply_to: boolean;
+  readonly thread: boolean;
+  readonly edit: boolean;
+}
+
 export interface ChannelConversationItem {
   readonly id: string;
   /** `null` or omitted for device channels (platform === "device"). */
@@ -158,6 +165,8 @@ export interface ChannelConversationItem {
   readonly platform_sender_id: string | null;
   readonly agent_api_key_id: string;
   readonly default_agent: boolean;
+  readonly allow_agent_initiated: boolean;
+  readonly capabilities: OutboundCapabilities;
   readonly is_active: boolean;
   readonly last_message_at: string | null;
   readonly created_at: string;
@@ -176,6 +185,7 @@ export interface CreateChannelConversationRequest {
   readonly platform_conversation_type?: ConversationType;
   readonly platform_sender_id?: string;
   readonly default_agent?: boolean;
+  readonly allow_agent_initiated?: boolean;
   /** Create this conversation under the given org (caller must be admin). */
   readonly target_org_id?: string;
 }
@@ -196,6 +206,7 @@ export interface CreateDeviceConversationRequest {
 export interface UpdateChannelConversationRequest {
   readonly agent_api_key_id?: string;
   readonly default_agent?: boolean;
+  readonly allow_agent_initiated?: boolean;
   readonly is_active?: boolean;
 }
 
@@ -239,4 +250,19 @@ export interface ChannelRelayReplyRequest {
     readonly text?: string;
     readonly metadata?: Record<string, unknown>;
   };
+}
+
+export interface SendChannelMessageRequest {
+  readonly conversation_id: string;
+  readonly message: {
+    readonly text: string;
+    readonly metadata?: Record<string, unknown>;
+  };
+  readonly idempotency_key?: string;
+}
+
+export interface SendChannelMessageResponse {
+  readonly message_id: string;
+  /** Platform acceptance receipt, not proof that the recipient saw the message. */
+  readonly platform_message_id?: string;
 }

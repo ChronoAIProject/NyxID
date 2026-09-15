@@ -1,4 +1,23 @@
-import { useState } from "react";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { toast } from "sonner";
+import { useAppForm } from "@/components/ui/form";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { DetailSection } from "@/components/shared/detail-section";
+import { useBreadcrumbLabel } from "@/components/layout/dashboard-layout";
+import {
+  useChannelConversation,
+  useUpdateChannelConversation,
+  useSendChannelMessage,
+} from "@/hooks/use-channel-conversations";
+import {
+  channelInitiatedSettingsSchema,
+  channelTestMessageSchema,
+  type ChannelInitiatedSettingsFormData,
+  type ChannelTestMessageFormData,
+} from "@/schemas/channels";
+import { useRef, useState } from "react";
 import { useParams, useNavigate } from "@tanstack/react-router";
 import { useChannelMessages } from "@/hooks/use-channel-messages";
 import { useChannelBot } from "@/hooks/use-channel-bots";
@@ -17,6 +36,7 @@ import {
 import { MobileNotificationIcon } from "@/components/icons/empty-state";
 import type {
   CallbackStatus,
+  ChannelConversationItem,
   ChannelMessageItem,
   ContentType,
   MessageDirection,
@@ -82,28 +102,21 @@ function directionLabel(dir: MessageDirection): string {
 
 // -- Message Card --
 
-function MessageCard({
-  message,
-}: {
-  readonly message: ChannelMessageItem;
-}) {
+function MessageCard({ message }: { readonly message: ChannelMessageItem }) {
   const isInbound = message.direction === "inbound";
   const senderName =
     message.sender_display_name ?? message.sender_platform_id ?? "Unknown";
 
   return (
     <div
-      className={cn(
-        "flex w-full",
-        isInbound ? "justify-start" : "justify-end",
-      )}
+      className={cn("flex w-full", isInbound ? "justify-start" : "justify-end")}
     >
       <div
         className={cn(
           "max-w-[75%] rounded-xl px-4 py-3 shadow-sm",
           isInbound
             ? "bg-muted text-foreground"
-            : "bg-primary/10 text-foreground",
+            : "bg-white/[0.03] text-foreground",
         )}
       >
         {/* Header */}
@@ -126,7 +139,7 @@ function MessageCard({
 
         {/* Content type only — message bodies are no longer stored per ADR-013 */}
         <div className="mb-1">
-          <Badge variant="secondary" className="text-[9px]">
+          <Badge variant="secondary" className="text-[10px]">
             {contentTypeLabel(message.content_type)}
           </Badge>
         </div>
@@ -140,14 +153,162 @@ function MessageCard({
           {!isInbound && message.callback_status && (
             <Badge
               variant={deliveryBadgeVariant(message.callback_status)}
-              className="text-[9px]"
+              className="text-[10px]"
             >
-              {message.callback_status.charAt(0).toUpperCase() + message.callback_status.slice(1)}
+              {message.callback_status.charAt(0).toUpperCase() +
+                message.callback_status.slice(1)}
             </Badge>
           )}
         </div>
       </div>
     </div>
+  );
+}
+
+export function InitiatedMessageSettings({
+  conversation,
+}: {
+  readonly conversation: ChannelConversationItem;
+}) {
+  const update = useUpdateChannelConversation();
+  const send = useSendChannelMessage();
+  const attempt = useRef<{ text: string; key: string } | null>(null);
+  const settings = useAppForm<ChannelInitiatedSettingsFormData>({
+    resolver: zodResolver(channelInitiatedSettingsSchema),
+    values: {
+      allow_agent_initiated: conversation.allow_agent_initiated ?? false,
+    },
+  });
+  const message = useAppForm<ChannelTestMessageFormData>({
+    resolver: zodResolver(channelTestMessageSchema),
+    defaultValues: { text: "" },
+    mode: "onChange",
+  });
+  const supported = conversation.capabilities?.initiated_send ?? false;
+  const addressable =
+    conversation.platform !== "device" &&
+    Boolean(conversation.platform_conversation_id.trim()) &&
+    conversation.platform_conversation_id !== "*";
+  const unavailable = !supported
+    ? "This platform does not support agent-initiated messages."
+    : !addressable
+      ? "This route has no specific chat address. Create a route for a specific chat to enable messages."
+      : !conversation.is_active
+        ? "Enable this conversation before sending messages."
+        : null;
+
+  return (
+    <DetailSection title="Agent-initiated messages">
+      <form
+        className="space-y-4 p-5"
+        onSubmit={settings.handleSubmit(async (values) => {
+          try {
+            await update.mutateAsync({ id: conversation.id, ...values });
+            settings.reset(values);
+            toast.success("Message settings saved");
+          } catch {
+            /* Mutation error is displayed below. */
+          }
+        })}
+      >
+        <div className="flex items-center justify-between gap-4 rounded-lg border border-border p-4">
+          <div className="space-y-1">
+            <Label htmlFor="allow-agent-initiated">
+              Allow unprompted messages
+            </Label>
+            <p
+              id="initiated-warning"
+              className="text-[12px] text-muted-foreground"
+            >
+              This lets the assigned agent message this chat without anyone
+              asking first, including alerts and scheduled updates.
+            </p>
+          </div>
+          <Switch
+            id="allow-agent-initiated"
+            aria-describedby="initiated-warning"
+            checked={settings.watch("allow_agent_initiated")}
+            disabled={Boolean(unavailable) || update.isPending}
+            onCheckedChange={(checked) =>
+              settings.setValue("allow_agent_initiated", checked)
+            }
+          />
+        </div>
+        {unavailable && (
+          <p className="text-[12px] text-muted-foreground">{unavailable}</p>
+        )}
+        {update.error && <ErrorBanner message={update.error.message} />}
+        <div className="flex justify-end">
+          <Button
+            type="submit"
+            variant="primary"
+            isLoading={update.isPending}
+            disabled={!settings.formState.isDirty || Boolean(unavailable)}
+          >
+            Save
+          </Button>
+        </div>
+      </form>
+      {supported && addressable && (
+        <form
+          className="space-y-3 p-5"
+          onSubmit={(event) => {
+            void message.handleSubmit(async ({ text }) => {
+              if (attempt.current?.text !== text)
+                attempt.current = { text, key: crypto.randomUUID() };
+              try {
+                await send.mutateAsync({
+                  conversation_id: conversation.id,
+                  message: { text },
+                  idempotency_key: attempt.current.key,
+                });
+                message.reset({ text: "" });
+                attempt.current = null;
+                toast.success("Platform accepted the test message");
+              } catch {
+                /* Keep the delivery key for an explicit retry of the same message. */
+              }
+            })(event);
+          }}
+        >
+          <Label htmlFor="channel-test-message">Send test message</Label>
+          <Input
+            id="channel-test-message"
+            {...message.register("text")}
+            disabled={
+              !conversation.allow_agent_initiated ||
+              send.isPending ||
+              !conversation.is_active
+            }
+            placeholder="Your test message"
+          />
+          {!conversation.allow_agent_initiated && (
+            <p className="text-[12px] text-muted-foreground">
+              Save the setting above before sending a test message.
+            </p>
+          )}
+          {message.formState.errors.text && (
+            <p role="alert" className="text-[12px] text-destructive">
+              {message.formState.errors.text.message}
+            </p>
+          )}
+          {send.error && <ErrorBanner message={send.error.message} />}
+          <div className="flex justify-end">
+            <Button
+              type="submit"
+              isLoading={send.isPending}
+              disabled={
+                !conversation.allow_agent_initiated ||
+                !conversation.is_active ||
+                !message.formState.isValid
+              }
+            >
+              Send test message
+            </Button>
+          </div>
+        </form>
+      )}
+    </DetailSection>
   );
 }
 
@@ -164,6 +325,9 @@ export function ChannelConversationDetailPage() {
   const perPage = 50;
 
   const { data: bot } = useChannelBot(botId);
+  const { data: conversation, error: conversationError } =
+    useChannelConversation(conversationId);
+  useBreadcrumbLabel(bot ? `${bot.label} messages` : "Messages");
   const { data, isLoading, error, refetch } = useChannelMessages(
     conversationId,
     page,
@@ -221,14 +385,29 @@ export function ChannelConversationDetailPage() {
         </div>
       )}
 
+      {conversationError && (
+        <ErrorBanner message="Failed to load conversation settings." />
+      )}
+      {conversation && (
+        <InitiatedMessageSettings
+          key={conversation.id}
+          conversation={conversation}
+        />
+      )}
+
       {/* Message list */}
       {error ? (
-        <ErrorBanner message="Failed to load messages. Please try again." onRetry={refetch} />
+        <ErrorBanner
+          message="Failed to load messages. Please try again."
+          onRetry={refetch}
+        />
       ) : messages.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1 py-12 text-center">
           <MobileNotificationIcon className="h-64 w-64 text-muted-foreground" />
           <div className="space-y-1">
-            <p className="text-[12px] font-medium text-muted-foreground">No Messages</p>
+            <p className="text-[12px] font-medium text-muted-foreground">
+              No Messages
+            </p>
             <p className="text-xs text-muted-foreground">
               No messages in this conversation yet.
             </p>

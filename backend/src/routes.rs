@@ -1530,6 +1530,11 @@ fn build_router_internal(
         );
 
     let channel_relay_routes = Router::new()
+        .route("/send", post(handlers::channel_relay::send_message))
+        .route(
+            "/conversations",
+            get(handlers::channel_relay::list_agent_conversations),
+        )
         .route("/reply", post(handlers::channel_relay::async_reply))
         .route("/reply/update", post(handlers::channel_relay::update_reply))
         .route(

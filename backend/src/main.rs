@@ -195,6 +195,8 @@ pub struct AppState {
     /// Per-channel rate limiter keyed by conversation_id, for the HTTP Event
     /// Gateway (NyxID#221). Distinct from `per_agent_limiter`.
     pub per_channel_event_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
+    /// Per-conversation admission for unsolicited channel messages.
+    pub per_conversation_initiate_limiter: mw::rate_limit::SharedPerChannelEventLimiter,
     /// Per-upstream-message edit limiter for progressive channel relay edits.
     pub per_message_edit_limiter: mw::rate_limit::SharedPerMessageEditRateLimiter,
     /// Per-trigger token bucket for public trigger ingress.
@@ -770,6 +772,14 @@ async fn main() {
         config.channel_relay_edit_rate_limit_burst,
     ));
 
+    let per_conversation_initiate_limiter =
+        Arc::new(mw::rate_limit::PerChannelEventLimiter::with_db(
+            db.clone(),
+            "channel_initiate",
+            config.channel_relay_initiate_rate_limit_per_second,
+            config.channel_relay_initiate_rate_limit_burst,
+        ));
+
     // Create shared state
     let billing = Arc::new(services::billing::BillingService::new(
         db.clone(),
@@ -980,6 +990,7 @@ async fn main() {
         billing_ledger_hmac_key,
         per_channel_event_limiter,
         per_message_edit_limiter,
+        per_conversation_initiate_limiter,
         per_trigger_limiter,
         token_exchange_cache: Arc::new(TokenExchangeCache::new()),
         cloud_response_cache: Arc::new(

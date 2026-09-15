@@ -198,6 +198,7 @@ mod tests {
     fn pool() -> OraclePool {
         let now = Utc::now();
         OraclePool {
+            require_model_match: true,
             id: uuid::Uuid::new_v4().to_string(),
             user_id: uuid::Uuid::new_v4().to_string(),
             slug: format!("login-test-{}", uuid::Uuid::new_v4()),

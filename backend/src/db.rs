@@ -90,6 +90,7 @@ pub async fn create_connection(config: &AppConfig) -> Result<DbHandle, mongodb::
 
     backfill_downstream_service_types(&db).await?;
     migrate_legacy_api_spec_url(&db).await?;
+    crate::services::oracle_pool_service::migrate_legacy_default_model_label(&db).await?;
     migrate_remove_org_scoped_feature_flag_overrides(&db).await?;
     backfill_onboarding_state(&db).await?;
 
@@ -2205,6 +2206,22 @@ pub async fn ensure_indexes(db: &Database) -> Result<(), mongodb::error::Error> 
                 .build(),
         )
         .await?;
+
+    // Metadata-only proactive-send claims: completed and in-flight claims expire after 24h.
+    db.collection::<crate::models::channel_send_claim::ChannelSendClaim>(
+        crate::models::channel_send_claim::COLLECTION_NAME,
+    )
+    .create_index(
+        IndexModel::builder()
+            .keys(doc! { "expires_at": 1 })
+            .options(
+                IndexOptions::builder()
+                    .expire_after(Duration::from_secs(0))
+                    .build(),
+            )
+            .build(),
+    )
+    .await?;
 
     // ── channel_event_logs ──
     // ADR-013 metadata-only event forwarding ledger. No payload content is

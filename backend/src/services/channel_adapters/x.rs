@@ -1,5 +1,13 @@
 //! X user-context Direct Messages. All X protocol and product descriptors live here.
 
+const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
+    "recipient cannot receive",
+    "recipient is not able to receive",
+    "cannot send messages to this user",
+    "cannot send a direct message to this user",
+    "not allowed to send a direct message",
+];
+
 use std::time::Duration;
 
 use axum::http::{HeaderMap, StatusCode};
@@ -110,6 +118,33 @@ async fn send(request: reqwest::RequestBuilder) -> AppResult<reqwest::Response> 
         .send()
         .await
         .map_err(|_| protocol_error())
+}
+
+// Only the outbound boundary interprets recipient refusal prose. Poll/identity errors
+// keep their existing locally authored classification.
+async fn send_response_json(response: reqwest::Response) -> AppResult<Value> {
+    if response.status() == StatusCode::FORBIDDEN {
+        let body = response.json::<Value>().await.unwrap_or(Value::Null);
+        let descriptions = body
+            .get("errors")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|error| error.get("message").and_then(Value::as_str))
+            .chain(body.get("detail").and_then(Value::as_str));
+        for description in descriptions {
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "X",
+                description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            if matches!(error, AppError::ChannelConversationNotReachable(_)) {
+                return Err(error);
+            }
+        }
+        return Err(response_error(StatusCode::FORBIDDEN, None));
+    }
+    response_json(response).await
 }
 
 async fn response_json(response: reqwest::Response) -> AppResult<Value> {
@@ -243,6 +278,15 @@ fn reply_bodies(reply: &OutboundReply) -> AppResult<Vec<Value>> {
 
 #[async_trait::async_trait]
 impl PlatformAdapter for XAdapter {
+    fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+        crate::services::channel_platform::OutboundCapabilities {
+            initiated_send: true,
+            reply_to: false,
+            thread: false,
+            edit: false,
+        }
+    }
+
     fn platform_id(&self) -> &str {
         "x"
     }
@@ -484,7 +528,7 @@ impl PlatformAdapter for XAdapter {
         }
         let mut last = None;
         for body in reply_bodies(reply)? {
-            let response = response_json(
+            let response = send_response_json(
                 send(
                     http.post(format!(
                         "{}/2/dm_conversations/{conversation_id}/messages",
@@ -770,5 +814,47 @@ mod tests {
                 assert!(result.is_err());
             }
         }
+    }
+    #[test]
+    fn initiated_request_has_no_reply_or_thread_context() {
+        let reply = OutboundReply {
+            text: Some("hello".into()),
+            reply_to_platform_message_id: None,
+            metadata: None,
+        };
+        assert_eq!(
+            reply_bodies(&reply).unwrap(),
+            vec![json!({ "text": "hello" })]
+        );
+    }
+
+    #[tokio::test]
+    async fn outbound_recipient_refusals_are_non_retryable_and_redacted() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(403).set_body_json(
+                json!({ "detail": "The recipient cannot receive DMs. private message content" }),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = adapter(&server)
+            .send_reply(
+                &reqwest::Client::new(),
+                &credentials(),
+                "10-20",
+                &OutboundReply {
+                    text: Some("hello".into()),
+                    reply_to_platform_message_id: None,
+                    metadata: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AppError::ChannelConversationNotReachable(_)
+        ));
+        assert!(!error.to_string().contains("private message content"));
     }
 }

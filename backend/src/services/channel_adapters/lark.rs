@@ -21,6 +21,19 @@
 //! the proxy's `token_exchange` auth method share one in-memory cache with
 //! per-key single-flight.
 
+const UNREACHABLE_TARGET_MARKERS: &[&str] = &[
+    "bot can not be outside the group",
+    "bot/user can not be out of the chat",
+    "bot is not in the chat",
+    "bot is not a member",
+    "bot is not in the group",
+    "not in the chat",
+    "not a member of the chat",
+    "chat is dissolved",
+    "chat not found",
+    "chat does not exist",
+];
+
 use std::sync::Arc;
 
 use aes::Aes256;
@@ -471,6 +484,11 @@ fn build_message_body(
     ("text", serde_json::json!({ "text": text }).to_string())
 }
 
+fn build_addressed_message_body(conversation_id: &str, reply: &OutboundReply) -> serde_json::Value {
+    let (msg_type, content) = build_send_body(reply);
+    serde_json::json!({ "receive_id": conversation_id, "msg_type": msg_type, "content": content })
+}
+
 fn build_send_body(reply: &OutboundReply) -> (&'static str, String) {
     build_message_body(reply.text.as_deref(), reply.metadata.as_ref())
 }
@@ -750,6 +768,15 @@ pub(crate) fn updated_lark_token(
 
 #[async_trait::async_trait]
 impl PlatformAdapter for LarkFamilyAdapter {
+    fn outbound_capabilities(&self) -> crate::services::channel_platform::OutboundCapabilities {
+        crate::services::channel_platform::OutboundCapabilities {
+            initiated_send: true,
+            reply_to: false,
+            thread: false,
+            edit: true,
+        }
+    }
+
     fn platform_id(&self) -> &str {
         &self.platform
     }
@@ -879,13 +906,7 @@ impl PlatformAdapter for LarkFamilyAdapter {
             .get_tenant_access_token(http, app_id, app_secret)
             .await?;
 
-        let (msg_type, content) = build_send_body(reply);
-
-        let body = serde_json::json!({
-            "receive_id": conversation_id,
-            "msg_type": msg_type,
-            "content": content,
-        });
+        let body = build_addressed_message_body(conversation_id, reply);
 
         let url = format!(
             "{}/open-apis/im/v1/messages?receive_id_type=chat_id",
@@ -900,16 +921,18 @@ impl PlatformAdapter for LarkFamilyAdapter {
             .await
             .map_err(|e| {
                 AppError::ChannelPlatformError(format!(
-                    "{} send message request failed: {e}",
-                    self.platform
+                    "{} send message request failed: {}",
+                    self.platform,
+                    e.without_url()
                 ))
             })?
             .json()
             .await
             .map_err(|e| {
                 AppError::ChannelPlatformError(format!(
-                    "{} send message response parse failed: {e}",
-                    self.platform
+                    "{} send message response parse failed: {}",
+                    self.platform,
+                    e.without_url()
                 ))
             })?;
 
@@ -920,10 +943,20 @@ impl PlatformAdapter for LarkFamilyAdapter {
                 .get("msg")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown error");
-            return Err(AppError::ChannelPlatformError(format!(
-                "{} send message failed (code {code}): {msg}",
-                self.platform
-            )));
+            // 230002 is the documented bot-outside-group refusal. Other
+            // non-zero codes require an explicit chat-membership marker.
+            let description = if code == 230002 {
+                "bot can not be outside the group"
+            } else {
+                msg
+            };
+            return Err(
+                crate::services::channel_platform::classify_upstream_refusal(
+                    &self.platform,
+                    description,
+                    UNREACHABLE_TARGET_MARKERS,
+                ),
+            );
         }
 
         let message_id = resp
@@ -1923,5 +1956,162 @@ mod tests {
         let m = &msgs[0];
         assert_eq!(m.reply_to_platform_message_id.as_deref(), Some("om_parent"));
         assert_eq!(m.thread_id.as_deref(), Some("ot_thread"));
+    }
+    #[test]
+    fn initiated_request_contains_only_target_and_content() {
+        let mut reply = OutboundReply {
+            text: Some("hello".into()),
+            reply_to_platform_message_id: None,
+            metadata: None,
+        };
+        let body = build_addressed_message_body("chat", &reply);
+        assert_eq!(
+            body,
+            serde_json::json!({ "receive_id": "chat", "msg_type": "text", "content": "{\"text\":\"hello\"}" })
+        );
+        reply.reply_to_platform_message_id = Some("ignored".into());
+        reply.metadata = Some(serde_json::json!({ "thread_id": "ignored" }));
+        assert_eq!(build_addressed_message_body("chat", &reply), body);
+    }
+
+    #[tokio::test]
+    async fn native_edit_capability_succeeds_on_platform_acceptance() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        for platform in ["lark", "feishu"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST")).and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "code": 0, "tenant_access_token": "tenant-token", "expire": 7200 })))
+                .mount(&server).await;
+            Mock::given(method("PUT"))
+                .and(path("/open-apis/im/v1/messages/message"))
+                .respond_with(
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({ "code": 0 })),
+                )
+                .expect(1)
+                .mount(&server)
+                .await;
+            let adapter = LarkFamilyAdapter {
+                base_url: server.uri(),
+                platform: platform.into(),
+                token_exchange_cache: Arc::new(TokenExchangeCache::new()),
+            };
+            assert!(adapter.outbound_capabilities().edit);
+            adapter
+                .edit_reply(
+                    &reqwest::Client::new(),
+                    "app:secret",
+                    "message",
+                    &OutboundEdit {
+                        text: Some("updated".into()),
+                        metadata: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn upstream_target_refusals_are_classified_and_other_diagnostics_are_bounded() {
+        for marker in UNREACHABLE_TARGET_MARKERS {
+            let description = format!("{marker}: private message content");
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "lark",
+                &description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            assert!(matches!(
+                error,
+                AppError::ChannelConversationNotReachable(_)
+            ));
+            assert!(!error.to_string().contains("private message content"));
+        }
+        for description in [
+            "message content format incorrect".to_string(),
+            "界".repeat(201),
+        ] {
+            let error = crate::services::channel_platform::classify_upstream_refusal(
+                "lark",
+                &description,
+                UNREACHABLE_TARGET_MARKERS,
+            );
+            let expected: String = description.chars().take(200).collect();
+            assert!(matches!(error, AppError::ChannelPlatformError(detail)
+                if detail == format!("lark send failed: {expected}")));
+        }
+    }
+
+    #[tokio::test]
+    async fn send_classifies_membership_codes_and_messages_for_both_platforms() {
+        use wiremock::{
+            Mock, MockServer, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let oversized = "界".repeat(201);
+        for platform in ["lark", "feishu"] {
+            for (code, description, unreachable) in [
+                (230002, "private upstream detail", true),
+                (
+                    99999,
+                    "bot is not in the chat: private upstream detail",
+                    true,
+                ),
+                (99999, "message content format incorrect", false),
+                (99999, oversized.as_str(), false),
+            ] {
+                let server = MockServer::start().await;
+                Mock::given(method("POST"))
+                    .and(path("/open-apis/auth/v3/tenant_access_token/internal"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "code": 0, "tenant_access_token": "tenant-token", "expire": 7200
+                    })))
+                    .mount(&server)
+                    .await;
+                Mock::given(method("POST"))
+                    .and(path("/open-apis/im/v1/messages"))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "code": code, "msg": description
+                    })))
+                    .expect(1)
+                    .mount(&server)
+                    .await;
+                let adapter = LarkFamilyAdapter {
+                    base_url: server.uri(),
+                    platform: platform.into(),
+                    token_exchange_cache: Arc::new(TokenExchangeCache::new()),
+                };
+                let error = adapter
+                    .send_reply(
+                        &reqwest::Client::new(),
+                        &crate::services::channel_platform::BotCredentials {
+                            token: "app:secret",
+                            platform_bot_id: None,
+                            platform_secrets: None,
+                        },
+                        "chat",
+                        &OutboundReply {
+                            text: Some("hello".into()),
+                            reply_to_platform_message_id: None,
+                            metadata: None,
+                        },
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(
+                    matches!(error, AppError::ChannelConversationNotReachable(_)),
+                    unreachable
+                );
+                if unreachable {
+                    assert!(!error.to_string().contains("private upstream detail"));
+                } else {
+                    let expected: String = description.chars().take(200).collect();
+                    assert!(matches!(error, AppError::ChannelPlatformError(detail)
+                        if detail == format!("{platform} send failed: {expected}")));
+                }
+            }
+        }
     }
 }

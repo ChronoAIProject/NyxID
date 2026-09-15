@@ -3215,6 +3215,8 @@ nyxid channel-bot route delete <ROUTE_ID> --yes
 | DELETE | `/api/v1/channel-conversations/{id}` | Session | Delete route |
 | GET | `/api/v1/channel-conversations/{id}/messages` | Session | Message history (owner) |
 | POST | `/api/v1/channel-relay/reply` | API Key | Agent async reply |
+| POST | `/api/v1/channel-relay/send` | Assigned API Key or human owner | Proactive send to an opted-in concrete conversation; 24h payload-bound idempotency |
+| GET | `/api/v1/channel-relay/conversations` | API Key | Paginated active assignments with opt-in, addressability, and outbound capabilities |
 | GET | `/api/v1/channel-relay/messages/{id}` | API Key | Message history (agent) |
 | GET | `/api/v1/channel-relay/resolve-sender` | API Key | Resolve platform sender |
 | POST | `/api/v1/webhooks/channel/{platform}/{bot_id}` | None | Platform webhook (signature-verified) |
@@ -3270,3 +3272,9 @@ Authorization: Bearer nyxid_ag_xxxxx
 Channel relay uses the same `ApiKey` model as agent isolation. The `callback_url` on the API key is where NyxID sends messages. Proxy scope enforcement (`allowed_service_ids`, `allowed_node_ids`) applies when the agent makes proxy calls, not to the relay itself. Each agent has independent rate limits, audit trails, and credential bindings.
 
 For full design details, see [`docs/CHANNEL_BOT_RELAY.md`](CHANNEL_BOT_RELAY.md).
+
+### Proactive channel messages
+
+Discover your active assignments with `GET /api/v1/channel-relay/conversations?page=1&per_page=50`. Check `addressable`, `allow_agent_initiated`, and `capabilities.initiated_send` before sending. Only a human owner can opt in through `/channel-conversations`; API keys cannot change that permission.
+
+`POST /api/v1/channel-relay/send` accepts `{ "conversation_id": "<uuid>", "message": { "text": "Job finished", "metadata": null }, "idempotency_key": "job-123" }`. Use your assigned agent API key, not a callback reply/relay token. A repeated key with identical text/metadata returns the original acceptance IDs; changed content or an in-flight/uncertain claim returns 409. Claims expire after 24 hours. A known permanent target refusal returns 400 `channel_conversation_not_reachable`; generic upstream failures remain 502. No automatic retries, queues, or content storage. Platform message IDs prove acceptance, not that a person saw the message. See [Channel Bot Relay](CHANNEL_BOT_RELAY.md#agent-initiated-messages) for failure windows and capability contracts.

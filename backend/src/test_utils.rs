@@ -58,6 +58,41 @@ const STALE_TEST_DB_DROP_TIMEOUT: Duration = Duration::from_secs(3);
 const STALE_TEST_DB_DROP_CLAIM_LEASE: Duration = Duration::from_secs(30);
 const STALE_TEST_DB_SWEEP_BUDGET: Duration = Duration::from_secs(45);
 const STALE_TEST_DB_SWEEP_LEASE: Duration = Duration::from_secs(90);
+
+/// Shared DB-backed rate limiters (`RateWindowStore`) bin their windows to
+/// epoch-aligned `$dateTrunc` boundaries. A burst that straddles a boundary
+/// observes a fresh window and gets an extra admission exactly where a test
+/// expects a denial. Tests that burst against such a limiter call this first so
+/// the whole burst runs inside one bin: when fewer than `min_remaining` remain
+/// in the current bin, sleep past the boundary. The wall clock is the same
+/// source the server's `$$NOW` uses, so the bin arithmetic matches.
+pub(crate) async fn ensure_rate_window_headroom(window: Duration, min_remaining: Duration) {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_millis();
+    if let Some(sleep_ms) =
+        rate_window_headroom_sleep_ms(now_ms, window.as_millis(), min_remaining.as_millis())
+    {
+        tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+    }
+}
+
+/// Milliseconds to sleep so that at least `min_remaining_ms` of the current
+/// epoch-aligned bin remain afterwards, or `None` when there is already enough
+/// headroom. Sleeping lands 50 ms into the next bin.
+fn rate_window_headroom_sleep_ms(
+    now_ms: u128,
+    window_ms: u128,
+    min_remaining_ms: u128,
+) -> Option<u64> {
+    let window_ms = window_ms.max(1);
+    let remaining_ms = window_ms - (now_ms % window_ms);
+    if remaining_ms >= min_remaining_ms {
+        return None;
+    }
+    Some(u64::try_from(remaining_ms + 50).expect("window remainder fits u64"))
+}
 const STALE_TEST_DB_SWEEP_COOLDOWN: Duration = Duration::from_secs(30);
 const TEST_DB_EXIT_CLEANUP_BUDGET: Duration = Duration::from_secs(30);
 const TEST_DB_CLEANUP_CLIENT_PARSE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1725,6 +1760,8 @@ pub(crate) fn test_app_config() -> AppConfig {
         channel_relay_message_ttl_days: 30,
         channel_relay_edit_rate_limit_per_second: 10,
         channel_relay_edit_rate_limit_burst: 20,
+        channel_relay_initiate_rate_limit_per_second: 1,
+        channel_relay_initiate_rate_limit_burst: 5,
         channel_event_rate_limit_per_second: 100,
         channel_event_rate_limit_burst: 200,
         channel_event_dedup_ttl_secs: 300,
@@ -2089,6 +2126,14 @@ pub(crate) fn test_app_state_with_config(db: mongodb::Database, config: AppConfi
                 "channel_event",
                 config.channel_event_rate_limit_per_second,
                 config.channel_event_rate_limit_burst,
+            ),
+        ),
+        per_conversation_initiate_limiter: Arc::new(
+            crate::mw::rate_limit::PerChannelEventLimiter::with_db(
+                db.clone(),
+                "channel_initiate",
+                config.channel_relay_initiate_rate_limit_per_second,
+                config.channel_relay_initiate_rate_limit_burst,
             ),
         ),
         per_message_edit_limiter: Arc::new(
@@ -3425,5 +3470,42 @@ mod tests {
     #[tokio::test]
     async fn transaction_test_database_supports_atomic_writes() {
         let _db = connect_transaction_test_database("transaction_topology").await;
+    }
+    #[test]
+    fn rate_window_headroom_sleeps_only_inside_the_tail_of_a_bin() {
+        let window = 60_000;
+        // 12 s into a bin: 48 s remain, no sleep.
+        assert_eq!(rate_window_headroom_sleep_ms(12_000, window, 10_000), None);
+        // Exactly the minimum remaining is enough.
+        assert_eq!(rate_window_headroom_sleep_ms(50_000, window, 10_000), None);
+        // 55 s into a bin: 5 s remain, sleep past the boundary plus 50 ms.
+        assert_eq!(
+            rate_window_headroom_sleep_ms(55_000, window, 10_000),
+            Some(5_050)
+        );
+        // Multi-window timestamps use the bin remainder, not the absolute time.
+        assert_eq!(
+            rate_window_headroom_sleep_ms(7 * window + 59_990, window, 10_000),
+            Some(60)
+        );
+        // A degenerate window never divides by zero.
+        assert_eq!(rate_window_headroom_sleep_ms(123, 0, 10_000), Some(51));
+    }
+
+    #[tokio::test]
+    async fn rate_window_headroom_leaves_the_requested_remainder() {
+        let window = Duration::from_millis(400);
+        let min_remaining = Duration::from_millis(150);
+        ensure_rate_window_headroom(window, min_remaining).await;
+        let into_bin = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock after epoch")
+            .as_millis()
+            % window.as_millis();
+        let remaining = window.as_millis() - into_bin;
+        assert!(
+            remaining >= min_remaining.as_millis() - 50,
+            "expected at least ~{min_remaining:?} left in the bin, got {remaining} ms"
+        );
     }
 }

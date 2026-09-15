@@ -478,6 +478,18 @@ pub enum AppError {
     #[error("Device channel conversations do not support replies")]
     DeviceChannelReplyNotAllowed,
 
+    #[error("Conversation is not reachable: {0}")]
+    ChannelConversationNotReachable(String),
+
+    #[error("Platform does not support initiated messages")]
+    ChannelPlatformSendUnsupported,
+
+    #[error("Conversation has no concrete platform chat address")]
+    ChannelConversationNotAddressable,
+
+    #[error("Agent-initiated messages are not enabled for this conversation")]
+    ChannelAgentInitiateNotAllowed,
+
     #[error("Organization accounts cannot authenticate directly")]
     OrgCannotAuthenticate,
 
@@ -741,6 +753,10 @@ impl AppError {
             Self::ChannelPlatformError(_) => StatusCode::BAD_GATEWAY,
             Self::ChannelPlatformEditUnsupported => StatusCode::NOT_IMPLEMENTED,
             Self::DeviceChannelReplyNotAllowed => StatusCode::BAD_REQUEST,
+            Self::ChannelConversationNotReachable(_) => StatusCode::BAD_REQUEST,
+            Self::ChannelPlatformSendUnsupported => StatusCode::NOT_IMPLEMENTED,
+            Self::ChannelConversationNotAddressable => StatusCode::BAD_REQUEST,
+            Self::ChannelAgentInitiateNotAllowed => StatusCode::FORBIDDEN,
             Self::OrgCannotAuthenticate => StatusCode::FORBIDDEN,
             Self::OrgQueryTimeout => StatusCode::SERVICE_UNAVAILABLE,
             Self::OrgNotFound(_) => StatusCode::NOT_FOUND,
@@ -933,6 +949,10 @@ impl AppError {
             Self::ChannelPlatformError(_) => 10005,
             Self::ChannelPlatformEditUnsupported => 10007,
             Self::DeviceChannelReplyNotAllowed => 10006,
+            Self::ChannelConversationNotReachable(_) => 10011,
+            Self::ChannelPlatformSendUnsupported => 10010,
+            Self::ChannelConversationNotAddressable => 10009,
+            Self::ChannelAgentInitiateNotAllowed => 10008,
             Self::OrgCannotAuthenticate => 1403,
             Self::OrgQueryTimeout => 8100,
             Self::OrgNotFound(_) => 8101,
@@ -1161,6 +1181,10 @@ impl AppError {
             Self::ChannelPlatformError(_) => "channel_platform_error",
             Self::ChannelPlatformEditUnsupported => "edit_unsupported",
             Self::DeviceChannelReplyNotAllowed => "device_channel_reply_not_allowed",
+            Self::ChannelConversationNotReachable(_) => "channel_conversation_not_reachable",
+            Self::ChannelPlatformSendUnsupported => "channel_platform_send_unsupported",
+            Self::ChannelConversationNotAddressable => "channel_conversation_not_addressable",
+            Self::ChannelAgentInitiateNotAllowed => "channel_agent_initiate_not_allowed",
             Self::OrgCannotAuthenticate => "org_cannot_authenticate",
             Self::OrgQueryTimeout => "org_query_timeout",
             Self::OrgNotFound(_) => "org_not_found",
@@ -2435,6 +2459,30 @@ mod tests {
                 StatusCode::NOT_IMPLEMENTED,
                 "edit_unsupported",
                 10007,
+            ),
+            (
+                AppError::ChannelAgentInitiateNotAllowed,
+                StatusCode::FORBIDDEN,
+                "channel_agent_initiate_not_allowed",
+                10008,
+            ),
+            (
+                AppError::ChannelConversationNotAddressable,
+                StatusCode::BAD_REQUEST,
+                "channel_conversation_not_addressable",
+                10009,
+            ),
+            (
+                AppError::ChannelPlatformSendUnsupported,
+                StatusCode::NOT_IMPLEMENTED,
+                "channel_platform_send_unsupported",
+                10010,
+            ),
+            (
+                AppError::ChannelConversationNotReachable("target refused delivery".to_string()),
+                StatusCode::BAD_REQUEST,
+                "channel_conversation_not_reachable",
+                10011,
             ),
             (
                 AppError::DeviceChannelReplyNotAllowed,

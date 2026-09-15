@@ -182,7 +182,7 @@ Device events synthesized by the gateway persist a row here too with `platform: 
 
 ### ChannelConversation (collection: `channel_conversations`)
 
-Unchanged. The gateway fetches by `{_id, is_active, agent_api_key_id}` so unknown, inactive, and foreign conversations all collapse into a single 401 response without leaking existence.
+Conversations now also carry the default-off human `allow_agent_initiated` setting for the bot send interface. Device conversations remain one-way: discovery reports all outbound capabilities as false, and `/channel-relay/send` rejects them. The gateway fetches by `{_id, is_active, agent_api_key_id}` so unknown, inactive, and foreign conversations all collapse into a single 401 response without leaking existence.
 
 ## Backend Services
 

@@ -29,6 +29,7 @@ pub struct SubmitOracleTaskRequest {
     pub prompt: String,
     #[serde(default)]
     pub model: Option<String>,
+    pub require_model_match: Option<bool>,
     #[serde(default)]
     pub project_url: Option<String>,
     #[serde(default)]
@@ -149,6 +150,11 @@ pub struct OracleTaskInfo {
     pub chatgpt_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
+    pub failure_detail: Option<String>,
+    pub observed_model_switcher: Option<String>,
+    pub observed_model_effort: Option<String>,
+    pub require_model_match: bool,
+    pub reroute_count: u32,
     pub created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dispatched_at: Option<String>,
@@ -247,6 +253,11 @@ fn task_info(task: &OracleTask, queue_position: u64) -> OracleTaskInfo {
         }),
         chatgpt_url: task.chatgpt_url.clone(),
         failure_reason: task.failure_reason.clone(),
+        failure_detail: task.failure_detail.clone(),
+        observed_model_switcher: task.observed_model_switcher.clone(),
+        observed_model_effort: task.observed_model_effort.clone(),
+        require_model_match: task.require_model_match,
+        reroute_count: task.reroute_count,
         created_at: task.created_at.to_rfc3339(),
         dispatched_at: task.dispatched_at.map(|t| t.to_rfc3339()),
         completed_at: task.completed_at.map(|t| t.to_rfc3339()),
@@ -292,6 +303,7 @@ pub async fn submit_task(
         oracle_task_service::SubmitTaskInput {
             prompt: body.prompt,
             model_label: body.model,
+            require_model_match: body.require_model_match,
             project_url: body.project_url,
             tag: body.tag,
             conversation_id: body.conversation_id,
@@ -559,6 +571,12 @@ mod tests {
 
     fn sample_task() -> OracleTask {
         OracleTask {
+            failure_detail: None,
+            observed_model_switcher: None,
+            observed_model_effort: None,
+            require_model_match: true,
+            excluded_worker_ids: Vec::new(),
+            reroute_count: 0,
             id: "t1".to_string(),
             pool_id: "p1".to_string(),
             submitter_user_id: "u1".to_string(),

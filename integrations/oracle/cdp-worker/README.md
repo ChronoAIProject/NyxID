@@ -206,7 +206,7 @@ The pool's `--model` (or a task's `model_label`) requests a ChatGPT reasoning
 level: `chatgpt-6-pro` (the pool default) and `chatgpt-5.5-pro` request
 **Pro**; `extra high`, `high`, `medium`, and `instant` request those levels.
 Where a Pro plan splits Pro into `Pro Standard` and `Pro Extended` entries, a
-plain Pro label prefers `Pro Standard` and a label containing `extended` or
+plain Pro label prefers `Pro Extended`; `standard` explicitly selects the lighter tier. A label containing `extended` or
 `扩展` (for example `chatgpt-6-pro-extended`) prefers `Pro Extended`; both
 verify and report the canonical `Pro` level. Existing Chinese aliases remain
 supported. Picker discovery uses the structural composer pill, even
@@ -230,13 +230,16 @@ uses at most three Escape presses per call. Selected entries are revalidated
 by visible text and picker membership, then clicked through their exact
 element handle; hidden hints in an item's text content do not affect matching.
 
-Selection returns `{ level, verified, observed, reason }`. Verification means
-the observed composer pill shows the requested level. The result's `model`
-reports that observed pill text even when unverified; if no pill text could
-be read, it retains the requested model as a fallback, not as evidence of a
-successful selection. Clicked menu text is never reported as the model.
+The worker verifies the header family/tier before effort selection and again
+before Send. Families parse generic major/optional minor versions; tier-only
+Pro entries require matching family context, with at most one exact-family
+submenu. `require_model_match` defaults true. Unrecognized Tools/attach controls
+provide no negative effort evidence; recognized mismatches or an exposed level
+picker that cannot verify fail as `model_unavailable`. Results retain the
+requested model and canonical `observed_model_switcher`/`observed_model_effort`,
+including on failures. See [model selection](../../../docs/ORACLE_RELAY.md#model-family-tier-and-reasoning-effort).
 
-Selection is best-effort, with a shared 25-second deadline (shortenable with
+Each selection has a 25-second cooperative deadline (shortenable with
 `NYXID_MODEL_SELECT_TIMEOUT_MS`). Every step checks the remaining budget.
 Picker clicks and key presses allow up to three seconds, reads one second,
 and menu opening five seconds, each capped by the remaining budget. Actions
@@ -247,7 +250,7 @@ On deadline expiry the worker aborts, allows up to three seconds to drain
 the inner operation, then spends at most two seconds closing menus. No
 background picker loop continues into prompt delivery, and selection errors
 do not consume browser recovery attempts.
-The initial composer visibility wait allows 60 seconds for slow page loads;
+Composer discovery allows 15 seconds for slow page loads;
 click/fill/Send actions remain bounded to five seconds. Before typing and
 before Send, a separate five-second guard scrolls the composer into view,
 checks its hit target and body pointer events, and dismisses obstructions.
@@ -267,9 +270,10 @@ the finished selection's metadata-only `phase_detail`, such as `selected=Pro`,
 `selection_failed`, `interaction_deadline`, or `timeout`. `ready_to_send`
 refreshes the lease after filling the prompt; first-turn uploads acknowledge
 it again before Send. Pre-send cancellation replies stop delivery.
-Acknowledgements include `page_url` for task/worker protocol diagnostics;
-`phase_detail` stays metadata-only. Conversation URLs
-remain excluded from logs and audit, not from the worker protocol.
+Before strict failure, the second ack carries `switcher=<meta> effort=<meta>
+reason=<selection reason>`. Acknowledgements omit `page_url`; legacy incoming
+presence URLs are ignored and removed from stored presence. Conversation URLs
+remain confined to task/session routing and results, never logs or heartbeats.
 
 Selection logs include `model_selection reason=<code>`, pill source
 (`structural`/`fallback`/`none`), detected level or `unrecognized`, pill text
@@ -329,6 +333,7 @@ only. The deployed userscript is unchanged and simply omits generic files.
 | `NYXID_CHROME_EXECUTABLE` | none | Chrome or Chromium executable used for recovery. Without it the worker can reconnect but cannot relaunch Chrome. |
 | `NYXID_CHROME_ARGS_JSON` | none | JSON string array of extra Chrome arguments. |
 | `NYXID_POLL_MS` | `5000` | Idle task-poll interval. |
+| `NYXID_ORACLE_USAGE_COOLDOWN_SECS` | `900` | Usage-cap cooldown in seconds, capped at 86400. Invalid or <1 uses 900 with one metadata-only startup log. Heartbeats continue; task claims pause. |
 | `NYXID_PRESENCE_MS` | `20000` | Presence heartbeat interval. |
 | `NYXID_HTTP_TIMEOUT_MS` | `30000` | Per-request timeout. |
 | `NYXID_MODEL_SELECT_TIMEOUT_MS` | `25000` | Reasoning selection deadline, clamped to 1–25000 ms; abort/drain and menu cleanup follow it. |

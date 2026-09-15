@@ -896,6 +896,13 @@ async fn repair_checks_owner_and_shared_rate_limit() {
         5,
         60,
     );
+    // Shared DB windows are epoch-aligned 60 s bins: the five admissions and
+    // the denied repair must land in the same bin.
+    crate::test_utils::ensure_rate_window_headroom(
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_secs(10),
+    )
+    .await;
     for _ in 0..5 {
         assert!(
             limiter
