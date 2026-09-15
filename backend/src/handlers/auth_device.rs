@@ -2063,6 +2063,14 @@ mod tests {
             return;
         };
         let server = spawn_test_server(state).await;
+        // The production limiter is the shared DB store with epoch-aligned 60 s
+        // bins; keep the six-request burst inside one bin (see
+        // `ensure_rate_window_headroom`).
+        crate::test_utils::ensure_rate_window_headroom(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(10),
+        )
+        .await;
         let mut last = (StatusCode::OK, Value::Null);
         for _ in 0..6 {
             last = post_json(
@@ -2334,19 +2342,11 @@ mod tests {
         // under llvm-cov) can straddle a bin boundary between the first and the
         // sixth request and observe a fresh window, so never start the burst
         // inside the last ten seconds of a bin.
-        let window_ms: u128 = 60_000;
-        let into_bin = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock after epoch")
-            .as_millis()
-            % window_ms;
-        let remaining_ms = window_ms - into_bin;
-        if remaining_ms < 10_000 {
-            tokio::time::sleep(std::time::Duration::from_millis(
-                u64::try_from(remaining_ms).expect("window remainder fits u64") + 50,
-            ))
-            .await;
-        }
+        crate::test_utils::ensure_rate_window_headroom(
+            std::time::Duration::from_secs(60),
+            std::time::Duration::from_secs(10),
+        )
+        .await;
         let mut last = (StatusCode::OK, Value::Null);
         for i in 0..6 {
             let spoofed = format!("198.51.100.{i}");
